@@ -2085,6 +2085,14 @@ pub struct NlTnlp {
     obj_tape_colors: Vec<Vec<u32>>,
     /// Same as `obj_tape_colors` but per constraint × summand.
     con_tape_colors: Vec<Vec<Vec<u32>>>,
+    /// Color of each variable's Hessian column, `u32::MAX` for a column
+    /// that needs no pass of its own. Kept so
+    /// [`NlTnlp::veto_ill_conditioned_peels`] can find a peeled column's
+    /// pass in `compressed`.
+    var_color: Vec<u32>,
+    /// Columns peeled out of the conflict structure and given singleton
+    /// colors. Bounded by `MAX_PEELED_COLS`, usually empty.
+    peeled_cols: Vec<u32>,
     final_x: Option<Vec<Number>>,
     final_obj: Number,
     /// Converged constraint multipliers (length `m`, original `.nl` row
@@ -2581,6 +2589,30 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
 /// a very sparse average from declaring a 10-entry column "dense".
 const DENSE_COL_FACTOR: usize = 16;
 const DENSE_COL_MIN: usize = 32;
+/// Largest relative error a peeled column may inflict on the smallest
+/// entry recovered from its pass before
+/// [`NlTnlp::veto_ill_conditioned_peels`] un-peels it.
+///
+/// The ratio is a worst-case bound — the pass's roundoff floor over the
+/// smallest entry read out of it — and it is a *loose* one, by an amount
+/// that varies per column: `rocket_12800` bounds at 2e-9 and measures 3e-14
+/// against an uncompressed reference, while `orthregd` bounds at 3e-8 and
+/// measures 4e-16. The cut is therefore calibrated on the corpus, not
+/// derived, and the corpus leaves only a narrow gap to sit in: over the 56
+/// models that peel anything, the highest bound on a column that recovers
+/// its entries to machine precision is 2.9e-8 (`orthregd`), and the lowest
+/// bound on one of `cho_parmest`'s harmful columns is 8.3e-8 — a factor of
+/// 2.8 apart, with `cho_parmest`'s worst running to 5e-2.
+///
+/// 1e-8 sits below both, which deliberately buys correctness with speed:
+/// the errors are asymmetric, since a false veto costs one model a coloring
+/// (measured: five sub-second `orth*` models pay 2-3.5x, worst case +0.32s)
+/// while a missed veto costs a solve its certificate. Five of the 56 take a
+/// veto they do not need; none takes a wrong answer. Raising this constant
+/// to buy those five back would put the cut inside a 2.8x window measured
+/// on two model families, which is not a margin worth trading a certificate
+/// for.
+const PEEL_MAX_REL_ERR: f64 = 1e-8;
 /// Hard cap on how many columns get peeled, applied on top of the
 /// pay-for-itself rule in [`select_peeled_cols`].
 const MAX_PEELED_COLS: usize = 256;
@@ -2707,9 +2739,30 @@ fn select_peeled_cols(
 /// other column's color and is dropped from the conflict structure, and
 /// the remaining columns colour on their genuine sparsity. On the
 /// one-dense-row case above this takes `n_colors` from `n` to a handful.
+///
+/// # What peeling costs, and `peel_veto`
+///
+/// Recovering `H[d, j]` from column `d`'s pass is exact in real
+/// arithmetic but not in floating point: the pass is accumulated at the
+/// scale of the whole dense column, so every entry read out of it carries
+/// an absolute roundoff floor of about `eps * ||H(:, d)||`, where the
+/// ordinary path — column `j`'s own pass — would have left a floor of
+/// about `eps * |H[d, j]|`. The two agree to the last bit whenever the
+/// dense column is well scaled, and they do on every peel-firing model in
+/// the benchmark corpus but one. Where a peeled column spans a wide
+/// dynamic range, though, that floor swamps its small entries: a column
+/// holding both 2.8e5 and 5.6e-4 loses about nine digits on the latter.
+///
+/// Structure cannot see this — it is a property of the values — so
+/// [`NlTnlp::veto_ill_conditioned_peels`] probes the peeled columns once
+/// and passes the offenders back here in `peel_veto`, which bars them
+/// from being peeled again. A vetoed column is colored normally, its row
+/// returns to the conflict structure, and its entries go back to the
+/// accurate path.
 fn greedy_hessian_coloring(
     n: usize,
     lower_pairs: &[(usize, usize)],
+    peel_veto: &[bool],
 ) -> (Vec<u32>, usize, Vec<bool>) {
     if n == 0 {
         return (Vec::new(), 0, Vec::new());
@@ -2730,7 +2783,9 @@ fn greedy_hessian_coloring(
     let total: usize = deg.iter().sum();
     let threshold = DENSE_COL_MIN.max(DENSE_COL_FACTOR.saturating_mul(total / n));
     let mut peeled = vec![false; n];
-    let candidates: Vec<usize> = (0..n).filter(|&j| deg[j] > threshold).collect();
+    let candidates: Vec<usize> = (0..n)
+        .filter(|&j| deg[j] > threshold && !peel_veto.get(j).copied().unwrap_or(false))
+        .collect();
     let dense = select_peeled_cols(n, lower_pairs, &deg, candidates);
     for &j in &dense {
         peeled[j] = true;
@@ -2796,6 +2851,199 @@ fn greedy_hessian_coloring(
     }
 
     (var_color, n_colors as usize, peeled)
+}
+
+/// Everything downstream of the Hessian coloring: seed vectors, the
+/// per-color decode table, the per-tape color sets, and the shared-CSE
+/// per-color summand / prelude-reach tables.
+///
+/// Split out of [`NlTnlp::new`] because
+/// [`NlTnlp::veto_ill_conditioned_peels`] may have to build it a second
+/// time, with a peel veto in hand, once it has seen real Hessian values.
+fn build_color_tables(
+    n: usize,
+    m: usize,
+    lower_pairs: &[(usize, usize)],
+    peel_veto: &[bool],
+    obj_tapes: &[Tape],
+    con_tapes: &[Vec<Tape>],
+    con_hybrid: Option<&mut ConHybrid>,
+) -> ColorTables {
+    // Hessian column coloring. The chromatic number of the
+    // column-intersection graph bounds how many directional
+    // Hessian-vector products we need per `eval_h` call —
+    // typically O(stencil) for PDE-mesh problems.
+    let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, lower_pairs, peel_veto);
+
+    // Per-color seed vectors (dense for O(1) Var lookup in
+    // `Tape::hessian_directional`).
+    let mut seeds: Vec<Vec<f64>> = vec![vec![0.0; n]; n_colors];
+    for (k, &c) in var_color.iter().enumerate() {
+        if c != u32::MAX {
+            seeds[c as usize][k] = 1.0;
+        }
+    }
+
+    // Per-color decoding table. For each lower-tri pair (i, j)
+    // with i >= j, the entry belongs to column j's color: after
+    // computing compressed_{c_j} = (H · s_{c_j}), the value at
+    // row i is exactly H[i, j] (coloring guarantees no other
+    // column in c_j has a nonzero at row i).
+    // Built straight from `lower_pairs`, which is sorted, so each
+    // color's table is in ascending `hess_idx` order and the decode
+    // scatter walks `values` forward instead of hopping (the old
+    // build drained a `HashMap`, whose iteration order is arbitrary).
+    let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
+    for (idx, &(i, j)) in lower_pairs.iter().enumerate() {
+        // Which directional product recovers H[i, j]? Column `j`'s,
+        // read at row `i` — except when `i` is a peeled column and
+        // `j` is not: then `j` may have no color of its own, and the
+        // entry is already in column `i`'s pass at row `j`, since
+        // H[i, j] == H[j, i].
+        let (c, row) = if peeled[i] && !peeled[j] {
+            (var_color[i], j)
+        } else {
+            (var_color[j], i)
+        };
+        debug_assert!(
+            c != u32::MAX,
+            "Hessian pair ({i}, {j}) at index {idx} has no color"
+        );
+        decoding[c as usize].push(ColorWrite {
+            row: row as u32,
+            hess_idx: idx as u32,
+        });
+    }
+
+    // Per-tape distinct color set: for each tape, the colors
+    // its variables fall into. `eval_h` loops over only these
+    // (tape, color) pairs instead of n_tapes × n_colors.
+    let tape_colors = |t: &Tape| -> Vec<u32> {
+        let mut s: Vec<u32> = t
+            .variables()
+            .into_iter()
+            .map(|v| var_color[v])
+            .filter(|&c| c != u32::MAX)
+            .collect();
+        s.sort_unstable();
+        s.dedup();
+        s
+    };
+    let obj_tape_colors: Vec<Vec<u32>> = obj_tapes.iter().map(tape_colors).collect();
+    let con_tape_colors: Vec<Vec<Vec<u32>>> = con_tapes
+        .iter()
+        .map(|row| row.iter().map(tape_colors).collect())
+        .collect();
+
+    // Shared-CSE Hessian tables (issue #557): the per-color summand
+    // lists, row lookup, and packed forward-value arena `eval_h`'s
+    // hybrid path walks. Built whenever the hybrid tape is — not just
+    // above the gate — so flipping `use_for_hess` on (tests, the
+    // force env var) needs no extra setup; the cost is one f64 per
+    // local op plus small index tables.
+    if let Some(h) = con_hybrid {
+        let n_sum = h.tape.n_summands();
+        let mut local_off: Vec<usize> = Vec::with_capacity(n_sum + 1);
+        let mut acc = 0usize;
+        for s in &h.tape.summands {
+            local_off.push(acc);
+            acc += s.ops.len();
+        }
+        local_off.push(acc);
+        h.local_vals_all = vec![0.0; acc];
+        h.local_off = local_off;
+
+        let mut summand_row = vec![0u32; n_sum];
+        for i in 0..m {
+            for si in h.row_start[i]..h.row_start[i + 1] {
+                summand_row[si] = i as u32;
+            }
+        }
+        h.summand_row = summand_row;
+
+        // A summand's variable set (`all_vars`) equals its flat tape's,
+        // so this is `con_tape_colors` inverted to color-major order —
+        // the loop `eval_h` actually runs.
+        let mut by_color: Vec<Vec<u32>> = vec![Vec::new(); n_colors];
+        for (si, s) in h.tape.summands.iter().enumerate() {
+            let mut cs: Vec<u32> = s
+                .all_vars
+                .iter()
+                .map(|&v| var_color[v])
+                .filter(|&c| c != u32::MAX)
+                .collect();
+            cs.sort_unstable();
+            cs.dedup();
+            for c in cs {
+                by_color[c as usize].push(si as u32);
+            }
+        }
+        // Per-color prelude reach: the union of `prelude_reach` over the
+        // color's summands, ascending. A union of operand-closed
+        // ascending sets is itself operand-closed and ascending, which is
+        // exactly what the two prelude sweeps require. Deduped with an
+        // epoch-tagged buffer so the build costs
+        // `Σ_c Σ_{s ∈ c} |prelude_reach_s|` — the same order as the work
+        // it saves — rather than `n_colors × |prelude|`.
+        let np = h.tape.n_prelude_ops();
+        let mut seen: Vec<u32> = vec![0; np];
+        let mut epoch: u32 = 0;
+        let mut reach: Vec<u32> = Vec::new();
+        let mut reach_off: Vec<usize> = Vec::with_capacity(n_colors + 1);
+        for list in &by_color {
+            reach_off.push(reach.len());
+            epoch += 1;
+            let start = reach.len();
+            for &si in list {
+                for &p in &h.tape.summands[si as usize].prelude_reach {
+                    if seen[p] != epoch {
+                        seen[p] = epoch;
+                        reach.push(p as u32);
+                    }
+                }
+            }
+            reach[start..].sort_unstable();
+        }
+        reach_off.push(reach.len());
+        h.hess_color_reach = reach;
+        h.hess_color_reach_off = reach_off;
+
+        h.hess_color_summands = by_color;
+        h.prelude_dot = vec![0.0; h.tape.n_prelude_ops()];
+        h.hess_prelude_adj = vec![0.0; h.tape.n_prelude_ops()];
+        h.prelude_adj_dot = vec![0.0; h.tape.n_prelude_ops()];
+        h.local_dot = vec![0.0; h.tape.max_summand_ops()];
+        h.local_adj_dot = vec![0.0; h.tape.max_summand_ops()];
+    }
+
+    ColorTables {
+        var_color,
+        n_colors,
+        peeled_cols: peeled
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p)
+            .map(|(j, _)| j as u32)
+            .collect(),
+        seeds,
+        decoding,
+        obj_tape_colors,
+        con_tape_colors,
+    }
+}
+
+/// The color-dependent half of an [`NlTnlp`], as built by
+/// [`build_color_tables`].
+struct ColorTables {
+    var_color: Vec<u32>,
+    n_colors: usize,
+    /// Columns given a singleton color and dropped from the conflict
+    /// structure. Small by construction (`MAX_PEELED_COLS`).
+    peeled_cols: Vec<u32>,
+    seeds: Vec<Vec<f64>>,
+    decoding: Vec<Vec<ColorWrite>>,
+    obj_tape_colors: Vec<Vec<u32>>,
+    con_tape_colors: Vec<Vec<Vec<u32>>>,
 }
 
 impl NlTnlp {
@@ -2947,152 +3195,27 @@ impl NlTnlp {
             h_jcol.push(lo as i32);
         }
 
-        // Hessian column coloring. The chromatic number of the
-        // column-intersection graph bounds how many directional
-        // Hessian-vector products we need per `eval_h` call —
-        // typically O(stencil) for PDE-mesh problems.
-        let (var_color, n_colors, peeled) = greedy_hessian_coloring(prob.n, &lower_pairs);
-
-        // Per-color seed vectors (dense for O(1) Var lookup in
-        // `Tape::hessian_directional`).
-        let mut seeds: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
-        for (k, &c) in var_color.iter().enumerate() {
-            if c != u32::MAX {
-                seeds[c as usize][k] = 1.0;
-            }
-        }
-
-        // Per-color decoding table. For each lower-tri pair (i, j)
-        // with i >= j, the entry belongs to column j's color: after
-        // computing compressed_{c_j} = (H · s_{c_j}), the value at
-        // row i is exactly H[i, j] (coloring guarantees no other
-        // column in c_j has a nonzero at row i).
-        // Built straight from `lower_pairs`, which is sorted, so each
-        // color's table is in ascending `hess_idx` order and the decode
-        // scatter walks `values` forward instead of hopping (the old
-        // build drained a `HashMap`, whose iteration order is arbitrary).
-        let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
-        for (idx, &(i, j)) in lower_pairs.iter().enumerate() {
-            // Which directional product recovers H[i, j]? Column `j`'s,
-            // read at row `i` — except when `i` is a peeled column and
-            // `j` is not: then `j` may have no color of its own, and the
-            // entry is already in column `i`'s pass at row `j`, since
-            // H[i, j] == H[j, i].
-            let (c, row) = if peeled[i] && !peeled[j] {
-                (var_color[i], j)
-            } else {
-                (var_color[j], i)
-            };
-            debug_assert!(
-                c != u32::MAX,
-                "Hessian pair ({i}, {j}) at index {idx} has no color"
-            );
-            decoding[c as usize].push(ColorWrite {
-                row: row as u32,
-                hess_idx: idx as u32,
-            });
-        }
-
-        // Per-tape distinct color set: for each tape, the colors
-        // its variables fall into. `eval_h` loops over only these
-        // (tape, color) pairs instead of n_tapes × n_colors.
-        let tape_colors = |t: &Tape| -> Vec<u32> {
-            let mut s: Vec<u32> = t
-                .variables()
-                .into_iter()
-                .map(|v| var_color[v])
-                .filter(|&c| c != u32::MAX)
-                .collect();
-            s.sort_unstable();
-            s.dedup();
-            s
-        };
-        let obj_tape_colors: Vec<Vec<u32>> = obj_tapes.iter().map(tape_colors).collect();
-        let con_tape_colors: Vec<Vec<Vec<u32>>> = con_tapes
-            .iter()
-            .map(|row| row.iter().map(tape_colors).collect())
-            .collect();
-
-        // Shared-CSE Hessian tables (issue #557): the per-color summand
-        // lists, row lookup, and packed forward-value arena `eval_h`'s
-        // hybrid path walks. Built whenever the hybrid tape is — not just
-        // above the gate — so flipping `use_for_hess` on (tests, the
-        // force env var) needs no extra setup; the cost is one f64 per
-        // local op plus small index tables.
-        if let Some(h) = con_hybrid.as_mut() {
-            let n_sum = h.tape.n_summands();
-            let mut local_off: Vec<usize> = Vec::with_capacity(n_sum + 1);
-            let mut acc = 0usize;
-            for s in &h.tape.summands {
-                local_off.push(acc);
-                acc += s.ops.len();
-            }
-            local_off.push(acc);
-            h.local_vals_all = vec![0.0; acc];
-            h.local_off = local_off;
-
-            let mut summand_row = vec![0u32; n_sum];
-            for i in 0..prob.m {
-                for si in h.row_start[i]..h.row_start[i + 1] {
-                    summand_row[si] = i as u32;
-                }
-            }
-            h.summand_row = summand_row;
-
-            // A summand's variable set (`all_vars`) equals its flat tape's,
-            // so this is `con_tape_colors` inverted to color-major order —
-            // the loop `eval_h` actually runs.
-            let mut by_color: Vec<Vec<u32>> = vec![Vec::new(); n_colors];
-            for (si, s) in h.tape.summands.iter().enumerate() {
-                let mut cs: Vec<u32> = s
-                    .all_vars
-                    .iter()
-                    .map(|&v| var_color[v])
-                    .filter(|&c| c != u32::MAX)
-                    .collect();
-                cs.sort_unstable();
-                cs.dedup();
-                for c in cs {
-                    by_color[c as usize].push(si as u32);
-                }
-            }
-            // Per-color prelude reach: the union of `prelude_reach` over the
-            // color's summands, ascending. A union of operand-closed
-            // ascending sets is itself operand-closed and ascending, which is
-            // exactly what the two prelude sweeps require. Deduped with an
-            // epoch-tagged buffer so the build costs
-            // `Σ_c Σ_{s ∈ c} |prelude_reach_s|` — the same order as the work
-            // it saves — rather than `n_colors × |prelude|`.
-            let np = h.tape.n_prelude_ops();
-            let mut seen: Vec<u32> = vec![0; np];
-            let mut epoch: u32 = 0;
-            let mut reach: Vec<u32> = Vec::new();
-            let mut reach_off: Vec<usize> = Vec::with_capacity(n_colors + 1);
-            for list in &by_color {
-                reach_off.push(reach.len());
-                epoch += 1;
-                let start = reach.len();
-                for &si in list {
-                    for &p in &h.tape.summands[si as usize].prelude_reach {
-                        if seen[p] != epoch {
-                            seen[p] = epoch;
-                            reach.push(p as u32);
-                        }
-                    }
-                }
-                reach[start..].sort_unstable();
-            }
-            reach_off.push(reach.len());
-            h.hess_color_reach = reach;
-            h.hess_color_reach_off = reach_off;
-
-            h.hess_color_summands = by_color;
-            h.prelude_dot = vec![0.0; h.tape.n_prelude_ops()];
-            h.hess_prelude_adj = vec![0.0; h.tape.n_prelude_ops()];
-            h.prelude_adj_dot = vec![0.0; h.tape.n_prelude_ops()];
-            h.local_dot = vec![0.0; h.tape.max_summand_ops()];
-            h.local_adj_dot = vec![0.0; h.tape.max_summand_ops()];
-        }
+        // Hessian column coloring and everything keyed off it. The
+        // chromatic number of the column-intersection graph bounds how
+        // many directional Hessian-vector products we need per `eval_h`
+        // call — typically O(stencil) for PDE-mesh problems.
+        let ColorTables {
+            var_color,
+            n_colors,
+            peeled_cols,
+            seeds,
+            decoding,
+            obj_tape_colors,
+            con_tape_colors,
+        } = build_color_tables(
+            prob.n,
+            prob.m,
+            &lower_pairs,
+            &vec![false; prob.n],
+            &obj_tapes,
+            &con_tapes,
+            con_hybrid.as_mut(),
+        );
 
         // Per-row Jacobian sparsity = union of tape vars plus
         // linear-segment vars.
@@ -3169,7 +3292,7 @@ impl NlTnlp {
 
         let compressed: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
 
-        Ok(Self {
+        let mut me = Self {
             prob,
             obj_tapes,
             con_tapes,
@@ -3182,6 +3305,8 @@ impl NlTnlp {
             decoding,
             obj_tape_colors,
             con_tape_colors,
+            var_color,
+            peeled_cols,
             final_x: None,
             final_obj: 0.0,
             final_lambda: None,
@@ -3194,7 +3319,162 @@ impl NlTnlp {
             adj_dot_scratch: vec![0.0; max_tape_n],
             compressed,
             hvp_live: Vec::new(),
-        })
+        };
+        me.veto_ill_conditioned_peels();
+        Ok(me)
+    }
+
+    /// Un-peel any dense column whose own pass is too ill-scaled to read
+    /// its small entries out of, and re-color if that changes anything.
+    ///
+    /// `greedy_hessian_coloring` picks the peel set from structure alone,
+    /// which is the right call for the memory and the color count but
+    /// blind to the one thing that can go wrong: an entry recovered from
+    /// column `d`'s pass inherits that pass's roundoff floor, about
+    /// `eps * ||H(:, d)||`, rather than its own much smaller one. A
+    /// well-scaled dense column loses nothing to that — the recovered
+    /// entries come back bit-identical to the uncompressed reference on
+    /// every peel-firing model in the benchmark corpus but one. A column
+    /// spanning many orders of magnitude, though, hands its small entries
+    /// a relative error of `eps * ||H(:, d)|| / |H[d, j]|`, which on
+    /// `cho_parmest` (a 12-parameter kinetic fit whose peeled columns
+    /// hold both 2.8e5 and 5.6e-4) reaches 1e-5. The primal solution
+    /// survives that, but the multipliers come out of the KKT system the
+    /// Hessian sits in, so `inf_du` picks up a jitter floor near 1e-6 and
+    /// the solve stalls short of `Optimal` on a problem it used to
+    /// certify.
+    ///
+    /// Nothing structural distinguishes the two cases, so measure it: one
+    /// Hessian evaluation at `x0` with unit multipliers leaves each peeled
+    /// column's exact pass sitting in `compressed`, and a column whose
+    /// worst recovered entry would lose more than
+    /// `PEEL_MAX_REL_ERR` is vetoed and colored the ordinary way. Costs
+    /// one `eval_h` — at the peeled color count, so cheap — and only for
+    /// the ~3% of models that peel anything at all.
+    fn veto_ill_conditioned_peels(&mut self) {
+        if self.peeled_cols.is_empty() {
+            return;
+        }
+
+        let mut values = vec![0.0; self.h_irow.len()];
+        let lambda = vec![1.0; self.prob.m];
+        let x0 = self.prob.x0.clone();
+        if !self.eval_h(
+            Some(&x0),
+            true,
+            1.0,
+            Some(&lambda),
+            true,
+            SparsityRequest::Values {
+                values: &mut values,
+            },
+        ) {
+            return;
+        }
+
+        let dbg = std::env::var("POUNCE_DBG_TAPE_STATS").is_ok();
+        // A column whose whole pass is negligible against the Hessian as a
+        // whole cannot move the KKT system no matter how badly its own
+        // entries are rounded, and columns that are identically zero at
+        // `x0` would otherwise veto on a ratio of pure noise.
+        let h_scale = self
+            .compressed
+            .iter()
+            .flat_map(|c| c.iter())
+            .fold(0.0f64, |a, &v| a.max(v.abs()));
+        let mut peel_veto = vec![false; self.prob.n];
+        let mut vetoed = 0usize;
+        for &d in &self.peeled_cols {
+            let c = self.var_color[d as usize];
+            if c == u32::MAX {
+                continue;
+            }
+            let pass = &self.compressed[c as usize];
+            // The floor the pass was accumulated at, against the smallest
+            // entry actually read out of it.
+            let scale = pass.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+            // Entries at or below the pass's own roundoff floor carry no
+            // information to lose: `eps * scale` is the noise the pass was
+            // accumulated at, so such an entry is already indistinguishable
+            // from zero whether or not the column is peeled. Including them
+            // would divide by that noise -- `orthregd` holds entries of
+            // 8e-15 in a pass of norm 6e5, and bounds at 1e4 while measuring
+            // 4e-16 against an uncompressed reference.
+            let noise = f64::EPSILON * scale;
+            let smallest = self.decoding[c as usize]
+                .iter()
+                .map(|w| pass[w.row as usize].abs())
+                .filter(|v| *v > noise)
+                .fold(f64::INFINITY, f64::min);
+            if !smallest.is_finite() || smallest == 0.0 || scale == 0.0 {
+                continue;
+            }
+            if scale <= h_scale * f64::EPSILON {
+                continue;
+            }
+            let rel_err = f64::EPSILON * scale / smallest;
+            if dbg {
+                eprintln!(
+                    "[peel probe] col={d} color={c} ||pass||={scale:.3e} \
+                     min_entry={smallest:.3e} rel_err={rel_err:.3e}{}",
+                    if rel_err > PEEL_MAX_REL_ERR {
+                        " VETO"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            if rel_err > PEEL_MAX_REL_ERR {
+                peel_veto[d as usize] = true;
+                vetoed += 1;
+            }
+        }
+
+        if vetoed == 0 {
+            return;
+        }
+        if dbg {
+            eprintln!(
+                "[peel probe] vetoing {vetoed}/{} peeled columns; re-coloring",
+                self.peeled_cols.len()
+            );
+        }
+        self.recolor(&peel_veto);
+    }
+
+    /// Rebuild the coloring and everything keyed off it, barring
+    /// `peel_veto` from the peel set.
+    fn recolor(&mut self, peel_veto: &[bool]) {
+        let lower_pairs: Vec<(usize, usize)> = self
+            .h_irow
+            .iter()
+            .zip(&self.h_jcol)
+            .map(|(&i, &j)| (i as usize, j as usize))
+            .collect();
+        let ColorTables {
+            var_color,
+            n_colors,
+            peeled_cols,
+            seeds,
+            decoding,
+            obj_tape_colors,
+            con_tape_colors,
+        } = build_color_tables(
+            self.prob.n,
+            self.prob.m,
+            &lower_pairs,
+            peel_veto,
+            &self.obj_tapes,
+            &self.con_tapes,
+            self.con_hybrid.as_mut(),
+        );
+        self.var_color = var_color;
+        self.peeled_cols = peeled_cols;
+        self.seeds = seeds;
+        self.decoding = decoding;
+        self.obj_tape_colors = obj_tape_colors;
+        self.con_tape_colors = con_tape_colors;
+        self.compressed = vec![vec![0.0; self.prob.n]; n_colors];
     }
 
     pub fn final_x(&self) -> Option<&[Number]> {
@@ -4669,6 +4949,163 @@ J0 2
         s
     }
 
+    /// Same shape as [`dense_row_objective_nl`], but the coupling term
+    /// carries per-variable weights: `sum_j (x_j - 1)^2 + x_0 * sum_j w_j
+    /// x_j`, so `H[j, 0] == w_j`. Spreading `w` over `span` orders of
+    /// magnitude makes the dense column ill-scaled — the case where
+    /// reading its entries out of its own pass costs real digits.
+    fn weighted_dense_row_objective_nl(n: usize, span: f64) -> String {
+        let w = |j: usize| 10_f64.powf(span / 2.0 - span * j as f64 / (n - 1) as f64);
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} 0 1 0 0 0\n"));
+        s.push_str(" 0 1\n 0 0\n");
+        s.push_str(&format!(" {n} {n} {n}\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" 0 {n}\n"));
+        s.push_str(" 0 0\n 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str(&format!("o54\n{}\n", n + 1));
+        for j in 0..n {
+            s.push_str(&format!("o5\no1\nv{j}\nn1.0\nn2\n"));
+        }
+        s.push_str(&format!("o2\nv0\no54\n{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("o2\nn{:.17e}\nv{j}\n", w(j)));
+        }
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.5\n"));
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
+    /// A well-scaled dense column is still peeled, and the entries read
+    /// out of its pass are exact — the property the peel guard must not
+    /// cost us.
+    #[test]
+    fn a_well_scaled_dense_column_is_still_peeled() {
+        let n = 200;
+        let p = parse_nl_text(&weighted_dense_row_objective_nl(n, 0.0)).expect("parse");
+        let t = NlTnlp::new(p);
+        assert_eq!(
+            t.peeled_cols,
+            vec![0],
+            "a dense column that costs no accuracy must stay peeled"
+        );
+        assert!(
+            t.seeds.len() <= 4,
+            "peeling should keep the color count at O(1), got {}",
+            t.seeds.len()
+        );
+    }
+
+    /// An ill-scaled dense column must be un-peeled and colored the
+    /// ordinary way, so its small entries come back to full precision.
+    ///
+    /// Regression test for the `cho_parmest` stall: recovering `H[j, 0]`
+    /// from column 0's own pass leaves an absolute error of about
+    /// `eps * ||H(:, 0)||`, which is a relative error of ~1e-4 on the
+    /// smallest weight here. The primal solution tolerates that; the
+    /// multipliers, which come out of the KKT system the Hessian sits in,
+    /// do not, and `inf_du` stalls above `tol`.
+    #[test]
+    fn an_ill_scaled_dense_column_is_not_peeled_and_stays_exact() {
+        let n = 200;
+        let span = 12.0;
+        let w = |j: usize| 10_f64.powf(span / 2.0 - span * j as f64 / (n - 1) as f64);
+        let p = parse_nl_text(&weighted_dense_row_objective_nl(n, span)).expect("parse");
+        let mut t = NlTnlp::new(p);
+
+        assert!(
+            t.peeled_cols.is_empty(),
+            "a dense column spanning {span} orders must not be peeled; got {:?}",
+            t.peeled_cols
+        );
+
+        let info = t.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+        let x: Vec<f64> = (0..n).map(|j| 0.1 * j as f64).collect();
+        let mut vals = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Values { values: &mut vals }
+        ));
+
+        // Every coupling entry must be its weight to full relative
+        // precision. Peeled, the smallest of them came back with a
+        // relative error near 1e-4.
+        let mut checked = 0;
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            if i == j {
+                continue;
+            }
+            assert_eq!(j, 0, "unexpected off-diagonal ({i}, {j})");
+            checked += 1;
+            let want = w(i);
+            assert!(
+                (vals[k] - want).abs() <= 1e-13 * want,
+                "H[{i},0] = {:e}, want {want:e} (relative error {:e})",
+                vals[k],
+                (vals[k] - want).abs() / want
+            );
+        }
+        assert_eq!(checked, n - 1);
+    }
+
+    /// `peel_veto` bars a column from the peel set, and the row it puts
+    /// back into the conflict structure costs the colors it used to save.
+    #[test]
+    fn a_vetoed_column_is_colored_the_ordinary_way() {
+        let n = 300;
+        // One dense row plus a diagonal: column 0 touches every row.
+        let mut pairs: Vec<(usize, usize)> = (0..n).map(|j| (j, j)).collect();
+        pairs.extend((1..n).map(|i| (i, 0)));
+        pairs.sort_unstable();
+
+        let (_, colors_peeled, peeled) = greedy_hessian_coloring(n, &pairs, &vec![false; n]);
+        assert!(peeled[0], "the dense column should peel by default");
+        assert!(
+            colors_peeled <= 4,
+            "peeling should collapse the count, got {colors_peeled}"
+        );
+
+        let mut veto = vec![false; n];
+        veto[0] = true;
+        let (_, colors_vetoed, peeled) = greedy_hessian_coloring(n, &pairs, &veto);
+        assert!(!peeled[0], "a vetoed column must not be peeled");
+        assert!(
+            colors_vetoed > colors_peeled,
+            "un-peeling restores row 0's conflicts, so colors must rise: \
+             {colors_vetoed} vs {colors_peeled}"
+        );
+    }
+
     /// A single dense Hessian row must not blow the coloring up to one
     /// color per variable. It used to: every column shares row 0, so no
     /// two columns could be colored alike, and `seeds` / `compressed`
@@ -4768,7 +5205,7 @@ J0 2
                 v
             })
             .collect();
-        let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+        let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, &pairs, &vec![false; n]);
         assert!(!peeled.iter().any(|&p| p), "nothing in a band is dense");
         assert!(
             n_colors <= 3,
@@ -4809,7 +5246,7 @@ J0 2
     fn thousands_of_medium_degree_cols_are_not_peeled() {
         for (n, blocks, size) in [(200_000, 100, 50), (200_000, 300, 34)] {
             let pairs = disjoint_blocks(n, blocks, size);
-            let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+            let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs, &vec![false; n]);
             let n_peeled = peeled.iter().filter(|&&p| p).count();
             assert_eq!(
                 n_peeled, 0,
@@ -4839,7 +5276,7 @@ J0 2
                 }
             }
         }
-        let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+        let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs, &vec![false; n]);
         let n_peeled = peeled.iter().filter(|&&p| p).count();
         assert_eq!(n_peeled, dense_rows, "every full row should peel");
         assert!(
@@ -4865,7 +5302,7 @@ J0 2
                 }
             }
         }
-        let (_, _, peeled) = greedy_hessian_coloring(n, &pairs);
+        let (_, _, peeled) = greedy_hessian_coloring(n, &pairs, &vec![false; n]);
         let n_peeled = peeled.iter().filter(|&&p| p).count();
         assert_eq!(n_peeled, MAX_PEELED_COLS, "cap binds at {MAX_PEELED_COLS}");
         assert!(

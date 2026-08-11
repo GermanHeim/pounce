@@ -9,6 +9,55 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — an ill-scaled dense Hessian column no longer costs the solve its certificate
+
+Dense-column peeling (0.10.0, "stop a dense Hessian row from costing O(n²)
+in setup and eval_h") gives a dense Hessian column its own singleton color
+and then recovers every entry in that column's *row* from the same pass, by
+symmetry. That is exact in real arithmetic. In floating point the pass is
+accumulated at the scale of the whole dense column, so each entry read out
+of it carries an absolute roundoff floor of about `eps * ||H(:, d)||` where
+the ordinary path — column `j`'s own pass — would have left about
+`eps * |H[d, j]|`.
+
+For a well-scaled dense column the two are the same to the last bit:
+checked against a fully uncompressed reference Hessian, every peel-firing
+model in the benchmark corpus but one recovers bit-identical values. The
+exception is `cho_parmest`, a 12-parameter kinetic fit whose peeled columns
+span from `2.8e5` down to `5.6e-4`; its small entries came back with a
+relative error near `1e-5`. The primal solution absorbs that — `x` stayed
+good to 13 digits — but the multipliers come out of the KKT system the
+Hessian sits in, so `inf_du` picked up a jitter floor near `1e-6` and the
+solve stalled at `Solved To Acceptable Level` on a problem POUNCE had
+certified `Optimal` for its whole history.
+
+Nothing structural separates the two cases — it is a property of the values
+— so POUNCE now measures it. On the models that peel anything at all (56 of
+2,014 in the corpus), one extra `eval_h` at `x0`, at the peeled color count,
+leaves each peeled column's exact pass in hand; a column whose smallest
+recovered entry would take more than a `1e-8` relative hit is dropped from
+the peel set and colored the ordinary way. `cho_parmest` vetoes 7 of its 12
+and is back to `Optimal` in 34 iterations at an overall NLP error of
+`4.0308123324089062e-09` — bit-identical to the last release that had not
+yet grown the optimization.
+
+51 of the 56 veto nothing, so their coloring, seeds and decode tables are
+untouched and their arithmetic is unchanged — including every model the
+optimization was written for (`rocket_12800` 6.9×, `steering_12800` 6.4×,
+`gasoil_3200`, `pinene_3200`, `robot_1600`, `marine_1600`). The remaining
+four are `orth*` models that veto one column each and do not need to: the
+test is a worst-case bound, and it is loose by an amount that varies per
+column, so it is possible to bound high and measure exact. They still solve
+`Optimal`, and pay 2–3.5× on solves of 0.04–0.33 s (worst case +0.32 s
+absolute) for the recolor.
+
+That tradeoff is deliberate rather than tuned away. Over the corpus the
+highest bound on a column that recovers to machine precision is `2.9e-8`
+and the lowest on one of `cho_parmest`'s harmful columns is `8.3e-8` — a
+gap of 2.8×, measured on two model families. `1e-8` sits below both,
+because the errors are asymmetric: a false veto costs one model a coloring,
+a missed veto costs a solve its certificate.
+
 
 ## [0.10.0] - 2026-08-10
 
