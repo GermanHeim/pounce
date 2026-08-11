@@ -344,6 +344,104 @@ def _pin_verdict(threads):
     return 'unpinned', "; ".join(bits)
 
 
+def _timeout_cutoffs(comps):
+    """Per suite, the wall-clock at which POUNCE runs were actually cut off.
+
+    The POUNCE arm gets no time-limit flag — `run_nl_bench.sh` wraps it in
+    `timeout $BENCH_TIMELIMIT` and relabels rc=124 as
+    `Maximum_CpuTime_Exceeded` — so the limit in force is not recorded
+    anywhere in the results. The longest killed run in a suite is therefore
+    the only evidence of it, and it is a tight lower bound: a run cannot be
+    killed before its limit.
+    """
+    cutoffs = {}
+    for c in comps:
+        if 'CpuTime' in c['pounce_status'] or 'Timeout' in c['pounce_status']:
+            s = c['suite']
+            cutoffs[s] = max(cutoffs.get(s, 0.0), c.get('pounce_time') or 0.0)
+    return cutoffs
+
+
+def _followup_for(prov, name):
+    """Any out-of-band result recorded for an instance the limits decide.
+
+    Keyed by instance name under `followups` in the Ipopt provenance file.
+    Such a run is deliberately *not* merged into the results — it was made
+    at a different limit than the sweep — but leaving no trace of it would
+    overstate what is unknown, so the report cites it and says where it
+    lives."""
+    return (prov.get('ipopt_followups') or {}).get(name)
+
+
+def time_limit_note(prov, comps):
+    """Build the Time limits note, disclosing any per-suite Ipopt override.
+
+    The base provenance stamp carries one `timelimit`, but
+    `ipopt_ma57.provenance.json` may override it per suite — mittelmann's
+    reference was regenerated at 1800s after a threading bug truncated it at
+    300s CPU. Printing only the base number states a limit the Ipopt column
+    did not actually run under, and hides that a suite may compare a
+    300s POUNCE arm against a 1800s reference. So: print the base, print
+    every override, and name any instance the asymmetry decides.
+    """
+    base = prov.get('ipopt_timelimit')
+    overrides = prov.get('ipopt_suite_overrides') or {}
+    if base is None and not overrides:
+        return []
+
+    lines = [f"> **Time limits.** The saved Ipopt reference ran at "
+             f"`max_cpu_time` = {base}s unless overridden below. The POUNCE arm "
+             "carries no time-limit flag — it is wrapped in "
+             "`timeout $BENCH_TIMELIMIT` (default 300s) and a kill is recorded "
+             "as `Maximum_CpuTime_Exceeded` — so its limit is not stamped in the "
+             "results and is inferred here from the longest run that was killed."]
+
+    cutoffs = _timeout_cutoffs(comps)
+    by_lower = {s.lower(): s for s in cutoffs}
+
+    affected = []
+    for suite, ov in sorted(overrides.items()):
+        lim = ov.get('timelimit', '?')
+        why = ov.get('why', '')
+        detail = f"regenerated {ov.get('generated', '?')}"
+        if ov.get('threads'):
+            detail += f", threads {ov['threads']}"
+        lines.append(f"> Override — **{suite}**: Ipopt reference at {lim}s "
+                     f"({detail}).")
+        if why:
+            lines.append(f"> Reason given: {why}")
+
+        display = by_lower.get(suite.lower())
+        if display and isinstance(lim, (int, float)):
+            cut = cutoffs[display]
+            lines.append(f"> POUNCE runs in this suite were cut off at "
+                         f"~{cut:.0f}s, so the two columns are **not** held to "
+                         f"the same clock here.")
+            # An instance is decided by the asymmetry only if POUNCE was
+            # killed AND Ipopt needed longer than POUNCE was ever allowed.
+            for c in comps:
+                if (c['suite'] == display
+                        and ('CpuTime' in c['pounce_status']
+                             or 'Timeout' in c['pounce_status'])
+                        and c['ipopt_status'] == 'Optimal'
+                        and (c.get('ipopt_time') or 0.0) > cut):
+                    affected.append((c, cut))
+
+    for c, cut in affected:
+        line = (f"> Decided by that gap: **{c['name']}** — POUNCE cut off "
+                f"at {c['pounce_time']:.0f}s ({c['pounce_iters']} iters), "
+                f"Ipopt Optimal at {c['ipopt_time']:.0f}s "
+                f"({c['ipopt_iters']} iters), i.e. past POUNCE's cutoff. It is "
+                "counted here as an Ipopt-only solve, on a limit POUNCE was "
+                "never given.")
+        followup = _followup_for(prov, c['name'])
+        if followup:
+            line += f" {followup}"
+        lines.append(line)
+
+    return lines
+
+
 def threading_note(stamps, ipopt_threads=None):
     """Build the Threading & timing note from what was actually recorded.
 
@@ -482,6 +580,9 @@ def collect_provenance():
     ipopt_linear_solver = 'ma57 (via ref/Ipopt/install-ma57)'
     ipopt_reference = None
     ipopt_threads = None
+    ipopt_timelimit = None
+    ipopt_suite_overrides = {}
+    ipopt_followups = {}
     prov_path = os.path.join(SCRIPT_DIR, 'ipopt_ma57.provenance.json')
     if os.path.exists(prov_path):
         try:
@@ -490,6 +591,9 @@ def collect_provenance():
             ipopt_version = ref.get('ipopt_version', 'unknown')
             ipopt_linear_solver = ref.get('linear_solver', ipopt_linear_solver)
             ipopt_threads = ref.get('threads')
+            ipopt_timelimit = ref.get('timelimit')
+            ipopt_suite_overrides = ref.get('suite_overrides') or {}
+            ipopt_followups = ref.get('followups') or {}
             ipopt_reference = (f"generated {ref.get('generated', '?')} on "
                                f"{ref.get('host', '?')} ({ref.get('platform', '?')}), "
                                f"git {ref.get('git_sha', '?')}, "
@@ -506,6 +610,9 @@ def collect_provenance():
         'ipopt_linear_solver': ipopt_linear_solver,
         'ipopt_reference': ipopt_reference,
         'ipopt_threads': ipopt_threads,
+        'ipopt_timelimit': ipopt_timelimit,
+        'ipopt_suite_overrides': ipopt_suite_overrides,
+        'ipopt_followups': ipopt_followups,
         'git_sha': git_sha,
         'git_branch': git_branch,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z').strip(),
@@ -813,12 +920,17 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
     lines.append("smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.")
     lines.append("")
     lines.extend(threading_note(env_stamps or {}, prov.get('ipopt_threads')))
-    lines.append("")
 
     # Combined summary
     all_comps = []
     for name, comps in suites:
         all_comps.extend(comps)
+
+    tl_note = time_limit_note(prov, all_comps)
+    if tl_note:
+        lines.append("")
+        lines.extend(tl_note)
+    lines.append("")
 
     combined = suite_summary("Combined", all_comps)
 

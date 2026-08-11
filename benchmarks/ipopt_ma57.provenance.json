@@ -15,5 +15,8 @@
       "threads": "pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)",
       "why": "the 300s max_cpu_time in the base stamp was reached at ~90s wall on unpinned multithreaded BLAS, leaving 6 instances truncated; see dev-notes/research/mittelmann-post-546-sweep.md"
     }
+  },
+  "followups": {
+    "WM_CFy": "Measured out of band on 2026-08-11 at the reference's own 1800s limit (same host, threads pinned, binary from ce41b5bc): POUNCE returns `Optimal Solution Found` in 673s / 239 iterations, vs Ipopt's 1147s / 556. Objectives differ by 0.136% (two local optima; Ipopt's is the better point). Deliberately not merged into the results, which record the sweep as configured \u2014 see dev-notes/research/wm-cfy-timelimit.md."
   }
 }

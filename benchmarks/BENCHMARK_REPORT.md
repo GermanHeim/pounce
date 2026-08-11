@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-08-11 14:04:15
+Generated: 2026-08-11 14:51:51
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.10.0 (main @ ce41b5bc-dirty) |
+| POUNCE | v0.10.0 (main @ 8cba2f81-dirty) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -31,6 +31,12 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 > and should not be compared against multi-threaded runs of this report.
 > The Ipopt reference column carries no thread record of its own; its pinning is asserted by the procedure that
 > generated it, not verified here.
+
+> **Time limits.** The saved Ipopt reference ran at `max_cpu_time` = 300s unless overridden below. The POUNCE arm carries no time-limit flag — it is wrapped in `timeout $BENCH_TIMELIMIT` (default 300s) and a kill is recorded as `Maximum_CpuTime_Exceeded` — so its limit is not stamped in the results and is inferred here from the longest run that was killed.
+> Override — **mittelmann**: Ipopt reference at 1800s (regenerated 2026-08-07, threads pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)).
+> Reason given: the 300s max_cpu_time in the base stamp was reached at ~90s wall on unpinned multithreaded BLAS, leaving 6 instances truncated; see dev-notes/research/mittelmann-post-546-sweep.md
+> POUNCE runs in this suite were cut off at ~300s, so the two columns are **not** held to the same clock here.
+> Decided by that gap: **WM_CFy** — POUNCE cut off at 300s (102 iters), Ipopt Optimal at 1147s (556 iters), i.e. past POUNCE's cutoff. It is counted here as an Ipopt-only solve, on a limit POUNCE was never given. Measured out of band on 2026-08-11 at the reference's own 1800s limit (same host, threads pinned, binary from ce41b5bc): POUNCE returns `Optimal Solution Found` in 673s / 239 iterations, vs Ipopt's 1147s / 556. Objectives differ by 0.136% (two local optima; Ipopt's is the better point). Deliberately not merged into the results, which record the sweep as configured — see dev-notes/research/wm-cfy-timelimit.md.
 
 ## Executive Summary
 
