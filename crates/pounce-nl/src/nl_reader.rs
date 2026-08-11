@@ -2594,13 +2594,24 @@ const DENSE_COL_MIN: usize = 32;
 /// [`NlTnlp::veto_ill_conditioned_peels`] un-peels it.
 ///
 /// The ratio is a worst-case bound — the pass's roundoff floor over the
-/// smallest entry read out of it — so it runs well above the error a
-/// column actually commits (`rocket_12800` bounds at 2e-9 and measures
-/// 3e-14 against an uncompressed reference). The cut is therefore
-/// calibrated on the corpus rather than derived: every peeled column that
-/// recovers its entries bit-identically bounds at or below 2e-9, while
-/// `cho_parmest`'s ill-scaled columns run from 8e-8 to 5e-2. 1e-8 sits in
-/// that gap, a factor of ~40 clear on either side.
+/// smallest entry read out of it — and it is a *loose* one, by an amount
+/// that varies per column: `rocket_12800` bounds at 2e-9 and measures 3e-14
+/// against an uncompressed reference, while `orthregd` bounds at 3e-8 and
+/// measures 4e-16. The cut is therefore calibrated on the corpus, not
+/// derived, and the corpus leaves only a narrow gap to sit in: over the 56
+/// models that peel anything, the highest bound on a column that recovers
+/// its entries to machine precision is 2.9e-8 (`orthregd`), and the lowest
+/// bound on one of `cho_parmest`'s harmful columns is 8.3e-8 — a factor of
+/// 2.8 apart, with `cho_parmest`'s worst running to 5e-2.
+///
+/// 1e-8 sits below both, which deliberately buys correctness with speed:
+/// the errors are asymmetric, since a false veto costs one model a coloring
+/// (measured: five sub-second `orth*` models pay 2-3.5x, worst case +0.32s)
+/// while a missed veto costs a solve its certificate. Five of the 56 take a
+/// veto they do not need; none takes a wrong answer. Raising this constant
+/// to buy those five back would put the cut inside a 2.8x window measured
+/// on two model families, which is not a margin worth trading a certificate
+/// for.
 const PEEL_MAX_REL_ERR: f64 = 1e-8;
 /// Hard cap on how many columns get peeled, applied on top of the
 /// pay-for-itself rule in [`select_peeled_cols`].
@@ -3382,10 +3393,18 @@ impl NlTnlp {
             // The floor the pass was accumulated at, against the smallest
             // entry actually read out of it.
             let scale = pass.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+            // Entries at or below the pass's own roundoff floor carry no
+            // information to lose: `eps * scale` is the noise the pass was
+            // accumulated at, so such an entry is already indistinguishable
+            // from zero whether or not the column is peeled. Including them
+            // would divide by that noise -- `orthregd` holds entries of
+            // 8e-15 in a pass of norm 6e5, and bounds at 1e4 while measuring
+            // 4e-16 against an uncompressed reference.
+            let noise = f64::EPSILON * scale;
             let smallest = self.decoding[c as usize]
                 .iter()
                 .map(|w| pass[w.row as usize].abs())
-                .filter(|v| *v > 0.0)
+                .filter(|v| *v > noise)
                 .fold(f64::INFINITY, f64::min);
             if !smallest.is_finite() || smallest == 0.0 || scale == 0.0 {
                 continue;
