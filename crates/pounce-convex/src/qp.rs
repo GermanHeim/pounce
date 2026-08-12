@@ -357,6 +357,9 @@ pub enum QpStatus {
     DualInfeasible,
     /// Iteration limit reached before convergence.
     IterationLimit,
+    /// The solve-wide wall-clock budget expired. The latest finite iterate is
+    /// returned when one is available.
+    TimeLimit,
     /// The KKT factorization failed (e.g. structurally singular system).
     NumericalFailure,
 }

@@ -28,6 +28,7 @@ pub(crate) mod aggregate;
 pub mod batch;
 pub mod cones;
 pub mod crossover;
+mod deadline;
 pub(crate) mod debug;
 pub(crate) mod equilibrate;
 pub mod hsde;

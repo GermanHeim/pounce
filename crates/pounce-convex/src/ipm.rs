@@ -54,6 +54,7 @@ use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// Tolerance on the **residual** of an infeasibility/unboundedness
 /// certificate's defining equation (`‖Aᵀy+Gᵀz‖` for a Farkas pair,
@@ -118,6 +119,10 @@ fn adaptive_tau(mu: f64, opts: &QpOptions) -> f64 {
 /// Options for the QP interior-point solve.
 #[derive(Debug, Clone, Copy)]
 pub struct QpOptions {
+    /// Solve-wide wall-clock budget. Retries, fallback engines, and crossover
+    /// share one monotonic deadline. An in-flight backend factorization is not
+    /// interrupted, so expiration may overshoot by one such operation.
+    pub time_limit: Option<Duration>,
     /// Convergence tolerance on the max KKT residual and duality measure.
     pub tol: f64,
     /// Maximum iterations.
@@ -246,6 +251,7 @@ pub struct QpOptions {
 impl Default for QpOptions {
     fn default() -> Self {
         QpOptions {
+            time_limit: None,
             tol: 1e-8,
             max_iter: 200,
             tau: 0.95,
@@ -281,7 +287,19 @@ pub fn solve_qp_ipm<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> Q
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    crate::deadline::with_deadline(opts.time_limit, || {
+        solve_qp_ipm_scoped(prob, opts, make_backend)
+    })
+}
+
+fn solve_qp_ipm_scoped<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     let mut make_backend = make_backend;
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     // Screen the variable box before bound expansion (gh #295, gh #491):
     // `expand_bounds` is sign-agnostic, so a *present* `+∞` lower / `−∞` upper
     // bound would be mishandled as an *absent* one and a violating point
@@ -302,6 +320,9 @@ where
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
     let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
+    if crate::deadline::expired() {
+        return mark_timed_out(sol);
+    }
     // LP-crossover refinement: for a pure LP, purify the interior iterate to an
     // exact optimal vertex via the active-set engine. Gated to pure LPs and
     // never-regressing — a no-op for QPs and whenever the vertex is not a
@@ -385,6 +406,9 @@ where
         QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
     );
     if opts.use_hsde && opts.equilibrate && retry_on {
+        if crate::deadline::expired() {
+            return mark_timed_out(sol);
+        }
         let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, &mut make_backend);
         let accept = match sol.status {
             QpStatus::NumericalFailure => retry.status != QpStatus::NumericalFailure,
@@ -423,6 +447,9 @@ where
         && sol.status == QpStatus::DualInfeasible
         && prob.p_lower.iter().any(|t| t.val != 0.0)
     {
+        if crate::deadline::expired() {
+            return mark_timed_out(sol);
+        }
         let verify = equilibrated_solve(prob, opts, /* use_hsde */ false, &mut make_backend);
         if verify.status == QpStatus::Optimal {
             return verify;
@@ -463,6 +490,9 @@ where
     // cannot re-enter this branch: with `c = 0` no direction has `cᵀd < 0`, so
     // `DualInfeasible` is unreachable for it.
     if sol.status == QpStatus::DualInfeasible {
+        if crate::deadline::expired() {
+            return mark_timed_out(sol);
+        }
         let twin = QpProblem {
             p_lower: Vec::new(),
             c: vec![0.0; prob.n],
@@ -699,11 +729,28 @@ pub fn solve_qp_ipm_debug<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     hook: &mut dyn DebugHook,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    crate::deadline::with_deadline(opts.time_limit, || {
+        solve_qp_ipm_debug_scoped(prob, opts, hook, make_backend)
+    })
+}
+
+fn solve_qp_ipm_debug_scoped<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    hook: &mut dyn DebugHook,
     mut make_backend: F,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     // Screen the variable box before bound expansion, as the non-debug path
     // does (gh #295, gh #491).
     let snapped;
@@ -762,11 +809,22 @@ pub fn solve_qp_ipm_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // One gate over every exit of the body below — see [`finite_or_failed`].
-    finite_or_failed(
-        prob,
-        solve_qp_ipm_warm_inner(prob, opts, warm, make_backend),
-    )
+    crate::deadline::with_deadline(opts.time_limit, || {
+        if crate::deadline::expired() {
+            timed_out_solution(prob)
+        } else {
+            // One gate over every exit of the body below — see [`finite_or_failed`].
+            let sol = finite_or_failed(
+                prob,
+                solve_qp_ipm_warm_inner(prob, opts, warm, make_backend),
+            );
+            if crate::deadline::expired() {
+                mark_timed_out(sol)
+            } else {
+                sol
+            }
+        }
+    })
 }
 
 fn solve_qp_ipm_warm_inner<F>(
@@ -848,8 +906,19 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // One gate over every exit of the body below — see [`finite_or_failed`].
-    finite_or_failed(prob, solve_socp_ipm_inner(prob, cones, opts, make_backend))
+    crate::deadline::with_deadline(opts.time_limit, || {
+        if crate::deadline::expired() {
+            timed_out_solution(prob)
+        } else {
+            // One gate over every exit of the body below — see [`finite_or_failed`].
+            let sol = finite_or_failed(prob, solve_socp_ipm_inner(prob, cones, opts, make_backend));
+            if crate::deadline::expired() {
+                mark_timed_out(sol)
+            } else {
+                sol
+            }
+        }
+    })
 }
 
 fn solve_socp_ipm_inner<F>(
@@ -993,11 +1062,29 @@ pub fn solve_socp_ipm_debug<F>(
     cones: &[ConeSpec],
     opts: &QpOptions,
     hook: &mut dyn DebugHook,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    crate::deadline::with_deadline(opts.time_limit, || {
+        solve_socp_ipm_debug_scoped(prob, cones, opts, hook, make_backend)
+    })
+}
+
+fn solve_socp_ipm_debug_scoped<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    hook: &mut dyn DebugHook,
     mut make_backend: F,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     if !cone_dims_cover(cones, prob.m_ineq()) {
         return failed_solution(
             prob,
@@ -1448,6 +1535,24 @@ pub fn solve_socp_ipm_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    crate::deadline::with_deadline(opts.time_limit, || {
+        solve_socp_ipm_warm_scoped(prob, cones, warm, opts, make_backend)
+    })
+}
+
+fn solve_socp_ipm_warm_scoped<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    warm: &QpWarmStart,
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     assert!(
         !prob.has_bounds(),
         "solve_socp_ipm_warm: encode bounds as G/h rows (bound expansion + warm not combined)"
@@ -1758,6 +1863,9 @@ fn solve_qp_core<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     // Opt-in homogeneous self-dual embedding driver. It builds its own
     // factorization and self-starts, so it bypasses the warm-start /
     // factor-reuse plumbing below (warm is ignored — it cannot change the
@@ -1833,6 +1941,9 @@ where
             );
         }
     };
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
     run_ipm(prob, cone, opts, &kkt, &mut fact, warm, None)
 }
 
@@ -2018,6 +2129,10 @@ fn run_ipm(
 
     for it in 0..opts.max_iter {
         iters = it;
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         // --- residuals (unregularized; this is the convergence test) ---
         // r_d = P x + c + Aᵀ y + Gᵀ z
@@ -2267,6 +2382,10 @@ fn run_ipm(
             s[i] += step_p * ds[i];
             z[i] += step_d * dz[i];
         }
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         // Debugger checkpoint: the new iterate is in place.
         if hook.is_some() {
@@ -2307,6 +2426,10 @@ fn run_ipm(
                 alpha_dual: step_d,
             });
         }
+    }
+
+    if crate::deadline::expired() {
+        status = QpStatus::TimeLimit;
     }
 
     // Final verdict from the true KKT error of the point being returned — the
@@ -2447,7 +2570,14 @@ impl QpFactorization {
     /// share the captured structure (see the type docs); otherwise a
     /// `NumericalFailure` solution is returned.
     pub fn solve(&mut self, prob: &QpProblem) -> QpSolution {
-        self.solve_inner(prob, None)
+        crate::deadline::with_deadline(self.opts.time_limit, || {
+            let sol = self.solve_inner(prob, None);
+            if crate::deadline::expired() {
+                mark_timed_out(sol)
+            } else {
+                sol
+            }
+        })
     }
 
     /// Solve `prob` reusing the captured symbolic factor **and** warm
@@ -2456,6 +2586,10 @@ impl QpFactorization {
     /// and the interior-point iteration is seeded from the warm point (see
     /// [`QpWarmStart`]). Same structure requirement as [`Self::solve`].
     pub fn solve_warm(&mut self, prob: &QpProblem, warm: &QpWarmStart) -> QpSolution {
+        crate::deadline::with_deadline(self.opts.time_limit, || self.solve_warm_scoped(prob, warm))
+    }
+
+    fn solve_warm_scoped(&mut self, prob: &QpProblem, warm: &QpWarmStart) -> QpSolution {
         let (expanded_z, _) = if prob.has_bounds() {
             // `merge_bound_duals` needs the bound-row provenance.
             let (_, bound_rows) = expand_bounds(prob);
@@ -2468,7 +2602,12 @@ impl QpFactorization {
             y: warm.y.clone(),
             z: expanded_z,
         };
-        self.solve_inner(prob, Some(&w))
+        let sol = self.solve_inner(prob, Some(&w));
+        if crate::deadline::expired() {
+            mark_timed_out(sol)
+        } else {
+            sol
+        }
     }
 
     fn solve_inner(&mut self, prob: &QpProblem, warm: Option<&WarmStart>) -> QpSolution {
@@ -2526,7 +2665,8 @@ fn cone_dims_cover(cones: &[ConeSpec], m_ineq: usize) -> bool {
 /// keeps the reported dual cone-feasible and consistent across all drivers
 /// (cf. `hsde::failed`, `hsde_nonsym::failed`).
 /// Last gate before a solution leaves the crate: a non-finite entry anywhere
-/// in it is replaced by an honest zero-filled `NumericalFailure`.
+/// in it is replaced by an honest zero-filled `NumericalFailure` (or a
+/// zero-filled `TimeLimit` when the deadline is the authoritative verdict).
 ///
 /// A `NaN` in the returned iterate is never information. It cannot be checked
 /// against a bound, printed into a `.sol`, or fed to a warm start, and every
@@ -2558,6 +2698,11 @@ pub(crate) fn finite_or_failed(prob: &QpProblem, sol: QpSolution) -> QpSolution 
         return sol;
     }
     let iters = sol.iters;
+    if sol.status == QpStatus::TimeLimit {
+        let mut timed_out = timed_out_solution(prob);
+        timed_out.iters = iters;
+        return timed_out;
+    }
     failed_solution(
         prob,
         vec![0.0; prob.n],
@@ -2591,6 +2736,25 @@ fn failed_solution(
         iters,
         iterates: Vec::new(),
     }
+}
+
+fn timed_out_solution(prob: &QpProblem) -> QpSolution {
+    QpSolution {
+        status: QpStatus::TimeLimit,
+        x: vec![0.0; prob.n],
+        y: vec![0.0; prob.m_eq()],
+        z: vec![0.0; prob.m_ineq()],
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    }
+}
+
+fn mark_timed_out(mut sol: QpSolution) -> QpSolution {
+    sol.status = QpStatus::TimeLimit;
+    sol
 }
 
 /// Build a `PrimalInfeasible` solution reported by a **setup-time** screen —

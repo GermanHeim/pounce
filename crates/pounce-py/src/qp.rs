@@ -188,6 +188,7 @@ fn status_str(s: QpStatus) -> &'static str {
         QpStatus::PrimalInfeasible => "primal_infeasible",
         QpStatus::DualInfeasible => "dual_infeasible",
         QpStatus::IterationLimit => "iteration_limit",
+        QpStatus::TimeLimit => "time_limit",
         QpStatus::NumericalFailure => "numerical_failure",
     }
 }

@@ -322,6 +322,14 @@ The fallback is narrow by construction, and does not fire when:
 A tightened `tol` is deliberately **not** in that list: that is an accuracy
 request, so trying the engine that can meet it is the right response.
 
+An explicitly set `max_wall_time` is forwarded to every automatic convex LP,
+QP, active-set QP, and SOCP route. Time spent extracting and presolving the
+convex model is charged to the same budget as all engine retries. Expiration is
+reported as `MaximumWallTimeExceeded`, AMPL `solve_result_num = 400`, with the
+message “Maximum wallclock time exceeded.” A timed-out convex solve is final:
+automatic routing never starts a fresh convex attempt or falls back to the NLP
+engine. `max_cpu_time` remains an NLP-side option and is not forwarded.
+
 ### Infeasible and unbounded problems
 
 The convex solver detects infeasibility and unboundedness directly,

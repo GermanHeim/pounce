@@ -2253,6 +2253,7 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
         QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
     }
 }
@@ -2272,6 +2273,7 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
         QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
         QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
         QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::TimeLimit => ("Maximum wallclock time exceeded.", false, 400),
         // Deliberately not "failure in KKT factorization": both convex engines
         // reach this status by failing the *post-solve* verification — the
         // returned point's true KKT error exceeded the acceptable band — which
@@ -2358,6 +2360,12 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     if let Ok((v, true)) = opt.get_numeric_value("tol", "") {
         o.tol = v;
     }
+    if let Ok((v, true)) = opt.get_numeric_value("max_wall_time", "")
+        && v >= 0.0
+    {
+        o.time_limit =
+            Some(std::time::Duration::try_from_secs_f64(v).unwrap_or(std::time::Duration::MAX));
+    }
     if let Ok((v, true)) = opt.get_numeric_value("qp_tau", "") {
         o.tau = v;
         // A raised floor lifts the default ceiling with it, so `qp_tau` alone
@@ -2383,6 +2391,16 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
         o.crossover = v != "no";
     }
     o
+}
+
+fn convex_opts_with_remaining(
+    mut opts: pounce_convex::QpOptions,
+    started: std::time::Instant,
+) -> pounce_convex::QpOptions {
+    if let Some(limit) = opts.time_limit {
+        opts.time_limit = Some(limit.saturating_sub(started.elapsed()));
+    }
+    opts
 }
 
 /// Resolve the convex LP/QP presolve switch (#139).
@@ -2435,6 +2453,7 @@ fn run_convex_qp(
     // gh #535: may an uncertified LP solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
 ) -> Option<ExitCode> {
+    let t0 = std::time::Instant::now();
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
@@ -2462,7 +2481,6 @@ fn run_convex_qp(
     let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
-    let t0 = std::time::Instant::now();
     // With presolve on, reduce the problem (logging what was removed),
     // solve the reduced problem, then postsolve back to the extracted-QP
     // space — so the `con_map`-based dual recovery below still applies.
@@ -2486,6 +2504,7 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..convex_opts
     };
+    let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
     // What presolve did, held back until we know this solve is the one that
     // reports (gh #535). These lines describe the reduction, not the verdict,
     // but they are the *only* stdout a declined convex attempt would otherwise
@@ -2512,7 +2531,7 @@ fn run_convex_qp(
         // user selected. The caller has already printed the note explaining
         // the debugger does not engage; fall through and solve normally.
         let mut h = hook.borrow_mut();
-        solve_qp_ipm_debug(&qp, &qp_opts, &mut *h, backend)
+        solve_qp_ipm_debug(&qp, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         match presolve(&qp) {
             PresolveOutcome::Reduced(ps) => {
@@ -2565,9 +2584,9 @@ fn run_convex_qp(
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
-                    solve_qp_active_set(&ps.reduced, &qp_opts, &engine_overrides, &mut mk)
+                    solve_qp_active_set(&ps.reduced, &solve_opts(), &engine_overrides, &mut mk)
                 } else {
-                    solve_qp_ipm(&ps.reduced, &qp_opts, backend)
+                    solve_qp_ipm(&ps.reduced, &solve_opts(), backend)
                 };
                 ps.postsolve(&red)
             }
@@ -2582,9 +2601,9 @@ fn run_convex_qp(
         }
     } else if use_active_set {
         let mut mk = backend;
-        solve_qp_active_set(&qp, &qp_opts, &engine_overrides, &mut mk)
+        solve_qp_active_set(&qp, &solve_opts(), &engine_overrides, &mut mk)
     } else {
-        solve_qp_ipm(&qp, &qp_opts, backend)
+        solve_qp_ipm(&qp, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -2792,6 +2811,7 @@ fn run_convex_socp(
     convex_opts: pounce_convex::QpOptions,
     allow_nlp_fallback: bool,
 ) -> Option<ExitCode> {
+    let t0 = std::time::Instant::now();
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
@@ -2820,7 +2840,7 @@ fn run_convex_socp(
         collect_iterates: want_trace,
         ..convex_opts
     };
-    let t0 = std::time::Instant::now();
+    let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
     let sol = if qp_opts.max_iter == 0 {
         // `max_iter=0` cannot reach optimality — stop before any solve, the
         // same zero-iteration contract the QP path enforces (pounce#186).
@@ -2837,9 +2857,9 @@ fn run_convex_socp(
         }
     } else if let Some(hook) = debug_hook {
         let mut h = hook.borrow_mut();
-        solve_socp_ipm_debug(&qp, &cones, &qp_opts, &mut *h, backend)
+        solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
     } else {
-        solve_socp_ipm(&qp, &cones, &qp_opts, backend)
+        solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -3285,6 +3305,18 @@ mod convex_status_tests {
         assert_eq!(
             qp_status_to_ars(QpStatus::Optimal),
             ApplicationReturnStatus::SolveSucceeded
+        );
+    }
+
+    #[test]
+    fn time_limit_maps_to_wall_clock_status() {
+        let (msg, ok, srn) = convex_status_report(QpStatus::TimeLimit);
+        assert_eq!(msg, "Maximum wallclock time exceeded.");
+        assert!(!ok);
+        assert_eq!(srn, 400);
+        assert_eq!(
+            qp_status_to_ars(QpStatus::TimeLimit),
+            ApplicationReturnStatus::MaximumWallTimeExceeded
         );
     }
 }

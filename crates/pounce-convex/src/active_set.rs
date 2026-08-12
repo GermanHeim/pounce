@@ -187,11 +187,24 @@ pub fn solve_qp_active_set<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // One gate over every exit of the body below — see [`finite_or_failed`].
-    finite_or_failed(
-        prob,
-        solve_qp_active_set_inner(prob, opts, engine, make_backend),
-    )
+    crate::deadline::with_deadline(opts.time_limit, || {
+        if crate::deadline::expired() {
+            return empty_solution(prob.n, prob.m_eq(), prob.m_ineq(), QpStatus::TimeLimit);
+        }
+        // One gate over every exit of the body below — see [`finite_or_failed`].
+        let sol = finite_or_failed(
+            prob,
+            solve_qp_active_set_inner(prob, opts, engine, make_backend),
+        );
+        if crate::deadline::expired() {
+            QpSolution {
+                status: QpStatus::TimeLimit,
+                ..sol
+            }
+        } else {
+            sol
+        }
+    })
 }
 
 fn solve_qp_active_set_inner<F>(
@@ -257,6 +270,12 @@ where
     if is_conclusive(sol.status) {
         return sol;
     }
+    if crate::deadline::expired() {
+        return QpSolution {
+            status: QpStatus::TimeLimit,
+            ..sol
+        };
+    }
 
     let mut best = sol;
     if opts.equilibrate {
@@ -286,6 +305,12 @@ where
         if is_conclusive(best.status) {
             return best;
         }
+        if crate::deadline::expired() {
+            return QpSolution {
+                status: QpStatus::TimeLimit,
+                ..best
+            };
+        }
     }
 
     // ---- Last resort: the simplex seed the homotopy displaced (#413) ----
@@ -313,6 +338,12 @@ where
     // needed.) When the caller already asked for `use_homotopy=no`, the first
     // attempt was seeded and there is nothing new to try.
     if engine.use_homotopy != Some(false) {
+        if crate::deadline::expired() {
+            return QpSolution {
+                status: QpStatus::TimeLimit,
+                ..best
+            };
+        }
         let seeded_engine = ActiveSetOverrides {
             use_homotopy: Some(false),
             ..*engine
@@ -351,7 +382,11 @@ fn is_solved(s: QpStatus) -> bool {
 /// from a ray that only exists inside `solve_translated`, so a retry's claim
 /// has no witness left to re-check after unscaling.
 fn is_conclusive(s: QpStatus) -> bool {
-    is_solved(s) || matches!(s, QpStatus::PrimalInfeasible | QpStatus::DualInfeasible)
+    is_solved(s)
+        || matches!(
+            s,
+            QpStatus::PrimalInfeasible | QpStatus::DualInfeasible | QpStatus::TimeLimit
+        )
 }
 
 /// May this attempt spend a second solve on the objective-free feasibility twin
@@ -460,6 +495,7 @@ where
     };
 
     let qopts = ActiveSetOptions {
+        time_limit: crate::deadline::remaining(),
         max_iter: active_set_iter_budget(opts, n, m),
         // Absorb working-set changes as rank-2 Schur updates against a cached
         // factor instead of assembling and factoring a fresh active-set KKT
@@ -898,6 +934,7 @@ fn verify_status(
         // the acceptable tier (the IPM salvages solves this way), but it is
         // never promoted to a clean `Optimal`.
         ActiveSetStatus::MaxIter => solved_to(err).unwrap_or(QpStatus::IterationLimit),
+        ActiveSetStatus::TimeLimit => QpStatus::TimeLimit,
         ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
     }
 }

@@ -472,6 +472,11 @@ impl ParametricActiveSetSolver {
             }
             match first {
                 Ok(s) if s.status == QpStatus::Optimal => s,
+                Ok(mut s) if s.status == QpStatus::TimeLimit => {
+                    s.lambda_g.resize(m, 0.0);
+                    s.working.constraints.resize(m, ConsStatus::Inactive);
+                    return Ok(Some(s));
+                }
                 _ => {
                     let Some(delta) = path_regularization_delta(qp) else {
                         return Ok(None);
@@ -491,6 +496,11 @@ impl ParametricActiveSetSolver {
                         Ok(s) if s.status == QpStatus::Optimal => {
                             h_reg_holder = Some(h_reg);
                             s
+                        }
+                        Ok(mut s) if s.status == QpStatus::TimeLimit => {
+                            s.lambda_g.resize(m, 0.0);
+                            s.working.constraints.resize(m, ConsStatus::Inactive);
+                            return Ok(Some(s));
                         }
                         _ => return Ok(None),
                     }
@@ -618,6 +628,24 @@ impl ParametricActiveSetSolver {
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
         for _step in 0..opts.max_iter {
+            if crate::deadline::expired() {
+                return Ok(Some(QpSolution {
+                    obj: crate::solver::quad_objective(qp, &x),
+                    x,
+                    lambda_g,
+                    lambda_x,
+                    working,
+                    status: QpStatus::TimeLimit,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                    unbounded_ray: None,
+                }));
+            }
             if t >= 1.0 - T_EPS {
                 break;
             }

@@ -248,6 +248,7 @@ fn scaling_corpus_reaches_every_oracle_optimum() {
         QpStatus::NumericalFailure => "NUMF",
         QpStatus::PrimalInfeasible => "PINF",
         QpStatus::DualInfeasible => "DINF",
+        QpStatus::TimeLimit => "TIME",
     };
 
     let cases = corpus();

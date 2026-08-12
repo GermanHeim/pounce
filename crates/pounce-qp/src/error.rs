@@ -17,6 +17,8 @@ pub enum QpStatus {
     Unbounded,
     /// Iteration limit reached before convergence.
     MaxIter,
+    /// Solve-wide wall-clock limit reached before convergence.
+    TimeLimit,
     /// Solver detected numerical breakdown (e.g., factor failure
     /// not recoverable by inertia correction).
     NumericalError,
@@ -29,6 +31,7 @@ impl fmt::Display for QpStatus {
             QpStatus::Infeasible => write!(f, "infeasible"),
             QpStatus::Unbounded => write!(f, "unbounded"),
             QpStatus::MaxIter => write!(f, "max-iter"),
+            QpStatus::TimeLimit => write!(f, "time-limit"),
             QpStatus::NumericalError => write!(f, "numerical-error"),
         }
     }

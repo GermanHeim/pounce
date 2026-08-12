@@ -117,6 +117,12 @@ pub fn maybe_crossover<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return QpSolution {
+            status: QpStatus::TimeLimit,
+            ..sol
+        };
+    }
     // ---- Gate: pure LP, plausibly-optimal status, at least one constraint ----
     if !opts.crossover || !prob.p_lower.is_empty() {
         return sol;
@@ -143,7 +149,14 @@ where
     // degeneracy with Bland's rule — so it resolves the highly-degenerate NETLIB
     // GEN vertices (issue #133) that the active-set bridge below stalls on. On
     // any breakdown it returns `None` and we fall through to the bridge.
-    if let Some(v) = crate::simplex::crossover_simplex(prob, &sol, opts) {
+    let simplex = crate::simplex::crossover_simplex(prob, &sol, opts);
+    if crate::deadline::expired() {
+        return QpSolution {
+            status: QpStatus::TimeLimit,
+            ..sol
+        };
+    }
+    if let Some(v) = simplex {
         let candidate = QpSolution {
             status: QpStatus::Optimal,
             x: v.x,
@@ -243,6 +256,7 @@ where
 
     // ---- Solve (Bland keeps the degenerate pivot loop finite) ----
     let qopts = ActiveSetOptions {
+        time_limit: crate::deadline::remaining(),
         anti_cycling: AntiCyclingChoice::Bland,
         max_iter: CROSSOVER_MAX_ITER,
         ..ActiveSetOptions::default()
@@ -261,7 +275,19 @@ where
     let warm = warm_solver.solve_with_working_set(&qp, &working, &qopts);
     let qsol = match warm {
         Ok(q) if q.status == ActiveSetStatus::Optimal => q,
+        Ok(q) if q.status == ActiveSetStatus::TimeLimit => {
+            return QpSolution {
+                status: QpStatus::TimeLimit,
+                ..sol
+            };
+        }
         _ => {
+            if crate::deadline::expired() {
+                return QpSolution {
+                    status: QpStatus::TimeLimit,
+                    ..sol
+                };
+            }
             let mut cold_solver = ParametricActiveSetSolver::new(make_backend());
             let cold = cold_solver.solve(&qp, None, &qopts);
             match cold {

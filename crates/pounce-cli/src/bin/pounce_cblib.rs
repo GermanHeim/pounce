@@ -32,6 +32,7 @@ fn qp_status_to_ars(s: QpStatus) -> ApplicationReturnStatus {
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
         QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
     }
 }

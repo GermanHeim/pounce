@@ -181,14 +181,8 @@ fn main() {
         QpStatus::PrimalInfeasible => "PrimalInfeasible",
         QpStatus::DualInfeasible => "DualInfeasible",
         QpStatus::IterationLimit => "IterationLimit",
+        QpStatus::TimeLimit => "TimeLimit",
         QpStatus::NumericalFailure => "NumericalFailure",
-        other => {
-            println!(
-                "{{\"status\": \"{other:?}\", \"n\": {n}, \"m_eq\": {m_eq}, \
-                 \"m_ineq\": {m_ineq}, \"time\": {elapsed}}}"
-            );
-            return;
-        }
     };
     println!(
         "{{\"status\": \"{status}\", \"obj\": {}, \"n\": {n}, \"m_eq\": {m_eq}, \

@@ -574,7 +574,7 @@ impl SqpAlgorithm {
                 // non-committal status rather than a hard error, and — the
                 // point of #282 — WITHOUT ever asserting infeasibility on a
                 // problem we have not certified infeasible.
-                QpStatus::MaxIter | QpStatus::NumericalError => {
+                QpStatus::MaxIter | QpStatus::TimeLimit | QpStatus::NumericalError => {
                     let obj = nlp.eval_f(&iter.x);
                     self.iterates = Some(iter.clone());
                     // Report *which* of the two it was. Both are honest
@@ -583,7 +583,7 @@ impl SqpAlgorithm {
                     // user, and merging them hid the dominant Maros-Mészáros
                     // failure mode behind a step-size verdict. See
                     // `SqpStatus::QpIterationLimit`.
-                    let status = if sol.status == QpStatus::MaxIter {
+                    let status = if matches!(sol.status, QpStatus::MaxIter | QpStatus::TimeLimit) {
                         SqpStatus::QpIterationLimit
                     } else {
                         SqpStatus::QpStepFailed

@@ -9,6 +9,14 @@ changes.
 
 ## [Unreleased]
 
+- Added solve-wide convex-engine wall-clock deadlines. Both
+  `pounce_convex::QpOptions` and `pounce_qp::QpOptions` now expose
+  `time_limit: Option<Duration>` and their status enums expose `TimeLimit`.
+  Automatic LP/QP/active-set/SOCP routing forwards an explicitly set
+  `max_wall_time`, shares it across setup and retry stages, reports AMPL result
+  400 / `MaximumWallTimeExceeded`, and never reroutes a timed-out solve to NLP.
+  This is source-breaking for exhaustive option literals and enum matches.
+
 
 ## [0.10.0] - 2026-08-11
 
