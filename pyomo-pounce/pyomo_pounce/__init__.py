@@ -43,12 +43,14 @@ from pyomo_pounce.block_init import (
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
     Covariance,
+    EstimateReport,
     Gradient,
     covariance,
     declare_fitted,
     declare_residual,
     declare_sens_param,
     estimate,
+    estimate_report,
     gradient,
     information,
     Information,
@@ -105,6 +107,8 @@ __all__ = [
     "Covariance",
     "gradient",
     "estimate",
+    "estimate_report",
+    "EstimateReport",
     "Gradient",
     "preflight",
     "PyomoPreflightReport",

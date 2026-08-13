@@ -901,7 +901,8 @@ def _session_for(component):
     if reg is None or reg.session is None:
         raise RuntimeError(
             "no sensitivity session: declare_sens_param() then solve with "
-            "SolverFactory('pounce') first")
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
     return reg.session
 
 
@@ -1005,6 +1006,25 @@ def gradient(target=None, *, wrt):
     return Gradient(session, targets, params)
 
 
+def _perturbation_deltas(session, perturb):
+    """Pin constraints and right-hand-side shifts for a perturbation.
+
+    The shift is measured from the pin constraint's stored right-hand
+    side, which holds the Param's value at the solve, not from the
+    Param's current value on the model.
+    """
+    items = perturb.items() if hasattr(perturb, "items") else perturb
+    pin_idx, deltas = [], []
+    for comp, newval in items:
+        for pd in _iter_data(comp):
+            nv = newval[pd.index()] if comp.is_indexed() and hasattr(
+                newval, "__getitem__") else newval
+            pin = _param_pin(session, pd)
+            pin_idx.append(pin)
+            deltas.append(float(nv) - float(session.nl.g_l[pin]))
+    return pin_idx, deltas
+
+
 def estimate(model, perturb, clamp=True):
     """First-order estimate of the solution at perturbed parameter values.
 
@@ -1031,22 +1051,10 @@ def estimate(model, perturb, clamp=True):
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_sens_param() then solve with "
-            "SolverFactory('pounce') first")
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
 
-    items = perturb.items() if hasattr(perturb, "items") else perturb
-    pin_idx, deltas = [], []
-    for comp, newval in items:
-        for pd in _iter_data(comp):
-            nv = newval[pd.index()] if comp.is_indexed() and hasattr(
-                newval, "__getitem__") else newval
-            pin = _param_pin(session, pd)
-            pin_idx.append(pin)
-            # the step shifts the pin constraint's RHS, and that RHS
-            # holds the Param's solve-time value exactly, so it is the
-            # baseline: a caller that has already written the new value
-            # into the Param (the receding-horizon pattern) gets the
-            # same estimate as one that has not
-            deltas.append(float(nv) - float(session.nl.g_l[pin]))
+    pin_idx, deltas = _perturbation_deltas(session, perturb)
 
     # parametric_step returns the factor's x block (var-x); base_x and
     # everything below it (nl.x_l/x_u, var_names) are full-x
@@ -1073,6 +1081,329 @@ def estimate(model, perturb, clamp=True):
         if ov is not None:
             out[ov] = float(val)
     return out
+
+
+# ── step diagnostics ──────────────────────────────────────────────────────────
+
+class EstimateReport:
+    """What the linear step behind `estimate()` does about the bounds.
+
+    Attributes
+    ----------
+    alpha : float
+        The fraction of the requested perturbation that can be taken
+        before the first bound is reached, from the ratio test along
+        the step. On a solve that kept its bounds, at least 1.0 means
+        the full step stays inside every one of them. That does not
+        follow when `bounds_relaxed` is true, since the solve can leave
+        a coordinate outside a bound before the step starts. Infinity
+        means no bound lies in the step direction.
+    first : str or None
+        Name of the variable or constraint reaching its bound at
+        `alpha`, None when `alpha` is infinite.
+    first_kind : str or None
+        Either "variable" or "constraint", naming what `first` is.
+    crossed : ComponentMap
+        Variable data to the distance by which the full step leaves
+        that variable's bound. These are the variables `estimate()`
+        clamps. Measured at the predicted point against both bounds, so
+        on a relaxed solve an entry can be a coordinate the SOLVE left
+        outside its bound rather than one the step carried past. The
+        step fraction looks only along the step direction, so the two
+        answer different questions there and `alpha` can be at or above
+        one while this is non-empty.
+    crossed_rows : ComponentMap
+        Constraint data to the same distance, for inequality
+        constraints.
+
+    Those two are keyed by model components, because every coordinate
+    that crosses has one. The two classifications below are keyed by
+    solve-space name instead, because they cover every coordinate of
+    the solve, including the ones the declared-parameter surgery
+    created, which have no counterpart on the model.
+    violation : float
+        Largest constraint violation at the predicted point, measured
+        against the perturbed right-hand sides. This is the primal
+        half of the residual. The dual half needs the multipliers at
+        the perturbed point, so it is computed by the corrector, which
+        holds them, rather than assembled here.
+    mu : float
+        Barrier parameter of the held factorization.
+    activity, row_activity : dict
+        Name to activity classification from the core classifier, over
+        variables and over constraints. Both are empty when
+        `bounds_relaxed` is true.
+    perturbations : list
+        The held factor's inertia-correction perturbations. Any
+        non-zero entry means the factor is regularized, so the step is
+        taken against a modified matrix and differs from the exact
+        active-set answer by that much.
+    bounds_relaxed : bool
+        True when the solve ran with a non-zero `bound_relax_factor`,
+        which lets a variable settle outside the bound the model
+        declares. The classifier raises for such a solve, since relaxed
+        bounds shift the slacks it reads, and the ratio test measures
+        distances to bounds the solve did not hold to.
+
+    The last three, with `mu`, are what separate this predictor from
+    the exact value at the perturbed active set. A caller comparing the
+    estimate against a re-solve reads them to tell which one explains
+    the difference.
+    """
+
+    def __init__(self, alpha, first, first_kind, crossed, crossed_rows,
+                 violation, mu, activity, row_activity, perturbations,
+                 bounds_relaxed):
+        self.alpha = alpha
+        self.first = first
+        self.first_kind = first_kind
+        self.crossed = crossed
+        self.crossed_rows = crossed_rows
+        self.violation = violation
+        self.mu = mu
+        self.activity = activity
+        self.row_activity = row_activity
+        self.perturbations = perturbations
+        self.bounds_relaxed = bounds_relaxed
+
+    def __repr__(self):
+        n = len(self.crossed) + len(self.crossed_rows)
+        where = f", first {self.first_kind} {self.first}" if self.first else ""
+        flags = "".join([
+            ", regularized" if any(self.perturbations) else "",
+            ", bounds relaxed" if self.bounds_relaxed else "",
+        ])
+        return (f"EstimateReport(alpha={self.alpha:.6g}{where}, "
+                f"crossed={n}, violation={self.violation:.3e}, "
+                f"mu={self.mu:.3e}{flags})")
+
+
+def _row_step(session, dx):
+    """Jacobian at the base point times the step, in row order."""
+    rows, cols = session.nl.jacobian_structure()
+    vals = np.asarray(session.nl.jacobian(session.base_x))
+    return np.bincount(np.asarray(rows),
+                       weights=vals * dx[np.asarray(cols)],
+                       minlength=len(session.con_names))
+
+
+#: No bound at all reaches here as the reader's sentinel rather than an
+#: infinity: `read_nl` seeds every bound vector with +-1e19, so an
+#: `isfinite` test passes on it and scores a crossing at 1e18 times the
+#: perturbation. The magnitude test is the convention the rest of the
+#: package already uses (`preflight`, `block_init`, gh #401 / #403).
+_NO_BOUND = 1e19
+
+
+def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
+                mu=float("nan")):
+    """Smallest fraction of `step` that reaches a bound, and where.
+
+    Only coordinates strictly inside their bounds take part, because a
+    coordinate already on a bound is not one the step can cross. That
+    exclusion is what makes the answer mean anything: at an active
+    bound the remaining gap is the small slack the barrier leaves, the
+    step component is the same size, and their quotient can take any
+    value. It would then become the minimum on any model carrying an
+    active bound. Activity is reported through the classification
+    instead.
+
+    A coordinate the full step carries past a bound is always scored,
+    whatever the exclusion would otherwise say. That case IS a crossing,
+    at a fraction below one by construction, and the caller reads it in
+    `crossed` off the same predicate and the same tolerance. Deciding it
+    twice is what let the two disagree, reporting that 998 times the
+    perturbation fits while naming a coordinate the single step leaves
+    its bound by 0.25.
+
+    So the exclusion below only ever applies to coordinates that do not
+    cross, and cannot cost a crossing. Two things drive it. `on_bound`
+    carries the classification, which is exact where the classifier
+    commits, applied per SIDE rather than per coordinate, since a
+    coordinate held at one bound can still be carried across its other
+    one.
+
+    The distance test covers the coordinates the classifier declines to
+    rule on, where the label cannot answer the question because
+    `ambiguous` spans both a coordinate near its bound with room left
+    and one already on it. What separates those is the size of the
+    remaining gap, which is O(mu) at a strongly active bound and
+    O(sqrt(mu)) at a weakly active one, against O(1) room in the
+    interior. So the threshold scales with sqrt(mu), measured four
+    orders of magnitude clear of the interior case. It is capped
+    because it is applied relative to the coordinate's own magnitude,
+    and a loose `mu` at termination would otherwise widen it without
+    limit. Without a classification there is no `mu` either, and it
+    falls back to a fixed threshold.
+
+    Coordinates whose step is below the roundoff of their own magnitude
+    also take no part, since dividing by one puts the crossing at an
+    enormous multiple of the perturbation, which is not a finding.
+    """
+    scale = np.maximum(1.0, np.abs(base))
+    toward_hi = step > 0
+    bound = np.where(toward_hi, hi, lo)
+    distance = bound - base
+    present = np.abs(bound) < _NO_BOUND
+    moving = np.abs(step) > 1e-12 * scale
+
+    # the same predicate, and the same tolerance, that fills `crossed`
+    reached = base + step
+    tol = 1e-9 * np.maximum(1.0, np.abs(reached))
+    crosses = present & moving & np.where(
+        toward_hi, reached > bound + tol, reached < bound - tol)
+
+    floor = 1e-9 if not np.isfinite(mu) else min(
+        1e-2, max(1e-9, 10.0 * mu ** 0.5))
+    interior = np.abs(distance) > floor * scale
+    if on_bound is not None:
+        # the nearer bound is the one the coordinate is held at, and it
+        # is only that side the classification rules out
+        at_hi = (hi - base) <= (base - lo)
+        interior &= ~(on_bound & (toward_hi == at_hi))
+
+    ok = present & moving & (crosses | interior)
+    if live is not None:
+        ok &= live
+    if not ok.any():
+        return float("inf"), None
+    fraction = np.full(base.shape, np.inf)
+    # a relaxed solve can settle outside a bound, which leaves no room
+    # to move rather than a negative amount of it
+    fraction[ok] = np.maximum(distance[ok] / step[ok], 0.0)
+    i = int(np.argmin(fraction))
+    return float(fraction[i]), names[i]
+
+
+#: Classifications that put a coordinate ON its bound. Both have the
+#: slack going to zero, so neither can be crossed by a step. Strongly
+#: active leaves an O(mu) gap and weakly active an O(sqrt(mu)) one, and
+#: neither gap is room the step can move through. `ambiguous` and
+#: `unidentified` are absent on purpose: the first spans coordinates on
+#: their bound AND coordinates near it with room left, and the second
+#: says only that the curvature is below scale, so neither label
+#: answers the question. `_ratio_test`'s distance test rules on those.
+_AT_BOUND = ("strongly_active", "weakly_active")
+
+
+def _on_bound(statuses):
+    return np.array([s in _AT_BOUND for s in statuses])
+
+
+def _user_row_names(session):
+    """Row names as the user wrote them.
+
+    The declared-parameter surgery moves every constraint onto its own
+    block, so the solve's constraint names are clone names. `con_alias`
+    records the move in the other direction. A constraint with no entry
+    keeps the clone name, which is what the pin constraints have and
+    what marks them as the solve's own.
+    """
+    back = {clone: orig for orig, clone in session.con_alias.items()}
+    return [back.get(nm, nm) for nm in session.con_names]
+
+
+def estimate_report(model, perturb):
+    """Report what `estimate()`'s linear step does about the bounds.
+
+    Takes the same perturbation argument `estimate()` takes and returns
+    an EstimateReport. Nothing about the estimate changes: this runs
+    the same step and measures it.
+
+    The ratio test divides each bounded coordinate's distance to the
+    bound it moves toward by the size of its step component and keeps
+    the smallest value, over variables and over inequality constraint
+    constraints. Equality constraints do not take part, since the step
+    holds them to first order and they admit no activity change. The
+    constraints pinning the declared Params are excluded on the same
+    grounds, because the perturbation moves their right-hand sides by
+    construction.
+    """
+    reg = model.__dict__.get(_REG)
+    session = reg.session if reg else None
+    if session is None:
+        raise RuntimeError(
+            "no sensitivity session: declare_sens_param() then solve with "
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
+
+    pin_idx, deltas = _perturbation_deltas(session, perturb)
+    dx = session.scatter_x(
+        np.asarray(session.solver.parametric_step(pin_idx, deltas)))
+    base = np.asarray(session.base_x)
+    x_new = base + dx
+
+    lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
+    g_l, g_u = np.asarray(session.nl.g_l), np.asarray(session.nl.g_u)
+
+    row_names = _user_row_names(session)
+
+    # The classifier raises for a solve that relaxed its bounds, since
+    # relaxed bounds shift the slacks it reads. Ask the solve what it
+    # ran under instead of provoking that and reading the message, and
+    # report it as the fact it is. The rest of the report is still
+    # measured, where a diagnostic that raised would give the caller
+    # nothing exactly when they are trying to find out why the estimate
+    # disagrees with a re-solve. `mu` comes from the classifier, so it
+    # is unavailable on that path too.
+    mu, activity, row_status = float("nan"), {}, {}
+    var_on_bound = row_on_bound = None
+    bounds_relaxed = bool(session.solver.bound_relax_factor)
+    if not bounds_relaxed:
+        act = session.solver.classify_activity()
+        mu = float(act["mu"])
+        activity = dict(zip(session.var_names, act["var_status"]))
+        row_status = dict(zip(row_names, act["row_status"]))
+        var_on_bound = _on_bound(act["var_status"])
+        row_on_bound = _on_bound(act["row_status"])
+
+    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names,
+                               on_bound=var_on_bound, mu=mu)
+    first_kind = None if first is None else "variable"
+    dg = _row_step(session, dx)
+    g_base = np.asarray(session.nl.constraints(base))
+    # an equality constraint is held to first order and cannot change
+    # activity, and a pin constraint moves by construction
+    live = g_l < g_u
+    live[list(pin_idx)] = False
+    a_row, f_row = _ratio_test(g_base, dg, g_l, g_u, row_names, live=live,
+                               on_bound=row_on_bound, mu=mu)
+    if a_row < alpha:
+        alpha, first, first_kind = a_row, f_row, "constraint"
+
+    tol = 1e-9 * np.maximum(1.0, np.abs(x_new))
+    crossed = ComponentMap()
+    for i in np.where((x_new < lo - tol) | (x_new > hi + tol))[0]:
+        ov = model.find_component(session.var_names[i])
+        if ov is not None:
+            crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
+    g_pred = g_base + dg
+    gtol = 1e-9 * np.maximum(1.0, np.abs(g_pred))
+    crossed_rows = ComponentMap()
+    out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
+    for j in np.where(live & out_of_bounds)[0]:
+        oc = model.find_component(row_names[j])
+        if oc is not None:
+            crossed_rows[oc] = float(
+                max(g_l[j] - g_pred[j], g_pred[j] - g_u[j]))
+
+    # the perturbation IS the shift of the pin constraints' right-hand
+    # sides, so the violation is measured against the shifted ones
+    gl_p, gu_p = g_l.copy(), g_u.copy()
+    for pin, d in zip(pin_idx, deltas):
+        gl_p[pin] += d
+        gu_p[pin] += d
+    g_at = np.asarray(session.nl.constraints(x_new))
+    violation = float(np.max(np.maximum.reduce(
+        [gl_p - g_at, g_at - gu_p, np.zeros_like(g_at)])))
+
+    return EstimateReport(
+        alpha=alpha, first=first, first_kind=first_kind,
+        crossed=crossed, crossed_rows=crossed_rows, violation=violation,
+        mu=mu, activity=activity, row_activity=row_status,
+        perturbations=np.asarray(session.solver.kkt_perturbations).tolist(),
+        bounds_relaxed=bounds_relaxed,
+    )
 
 
 # ── parameter covariance ──────────────────────────────────────────────────────
@@ -1984,7 +2315,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             "no sensitivity session: declare_fitted() (and optionally "
             "declare_residual()), or retain_kkt() for "
             "wrt= queries with nothing declared, then solve with "
-            "SolverFactory('pounce') first")
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
     # the block: the declared fitted parameters by default, or any
     # block of the solve's variables via wrt= (each call re-reduces
     # onto its own argument, so one solve serves as many blocks as are
@@ -2367,7 +2699,8 @@ def information(model, hessian="lagrangian", wrt=None):
             "no sensitivity session: declare_fitted() (and optionally "
             "declare_residual()), or retain_kkt() for "
             "wrt= queries with nothing declared, then solve with "
-            "SolverFactory('pounce') first")
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
     params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
     wording = "fitted" if wrt is None else "block"
