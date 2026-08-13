@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+- **The convex wall-clock budget is now reachable from Python** (#585).
+  `pounce.qp.solve_qp`, `solve_socp`, `solve_qp_batch`, and
+  `solve_qp_multi_rhs` take `time_limit=` — seconds as a `float`, `None` (the
+  default) meaning unbounded. Until now the deadline machinery below existed
+  only for the CLI's `max_wall_time` and for Rust callers setting
+  `QpOptions::time_limit` directly; no Python caller could ask a convex solve
+  to stop at a budget, even though `QpResult.status` could already come back
+  `"time_limit"`. `max_iter` was never a substitute — one IPM iteration may be
+  a single KKT solve or a factorization plus several inertia-controlled
+  refactorizations (plus a possible simplex crossover on the LP route), so
+  per-iteration cost varies by more than an order of magnitude within a single
+  solve. This is what a receding-horizon controller with a fixed control
+  period, a scenario sweep that must not stall on one pathological instance,
+  or any solve behind a request needs.
+
+  The budget is **per instance, not per batch**: each solve opens its own
+  deadline scope, so `time_limit=10` over 100 problems permits 1000 s of wall
+  clock. That matches the Rust `pounce_convex::batch` semantics and is the only
+  machine-independent reading, since a shared clock would make *which*
+  instances get cancelled depend on rayon's scheduling. A verdict still
+  outranks the clock (see below), so a status of `"time_limit"` always means
+  the solve concluded nothing — never a wrong `"optimal"`. Both
+  `method="ipm"` and `method="active-set"` honour it, as do both conic drivers.
+  A negative, NaN, or infinite budget raises `ValueError` rather than being
+  read as "no limit"; `None` is how that is spelled.
+
+  Deliberately not plumbed: `pounce.jax` (and the torch layer), whose
+  `_check_status` raises on `"time_limit"` because a non-KKT iterate makes the
+  implicit-function gradient meaningless — a differentiable layer returning
+  quietly wrong gradients under load is worse than one that runs long — and
+  the build-once `QpFactorization` / `QpSensitivity` handles, which have no
+  clear per-call budget semantics yet.
+
 - Added solve-wide convex-engine wall-clock deadlines. Both
   `pounce_convex::QpOptions` and `pounce_qp::QpOptions` now expose
   `time_limit: Option<Duration>` and their status enums expose `TimeLimit`.
