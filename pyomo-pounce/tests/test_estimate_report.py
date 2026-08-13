@@ -438,6 +438,13 @@ def test_a_bound_the_step_crosses_is_never_missed():
     Reachable whenever a two-sided coordinate is classified on-bound and
     the step drives it toward the other side, which an exclusion applied
     per coordinate rather than per side would drop.
+
+    It holds on a solve that kept its bounds, which is why the check
+    below is scoped to those. A relaxed solve can settle a coordinate
+    outside a bound, and `crossed` measures both bounds at the predicted
+    point while the step fraction looks only along the step direction,
+    so there the two answer different questions and are not required to
+    agree. The test below this one covers that case.
     """
     cases = [
         (bounded(), 4.0),
@@ -449,11 +456,37 @@ def test_a_bound_the_step_crosses_is_never_missed():
     ]
     for m, newval in cases:
         r = estimate_report(m, [(m.p, newval)])
-        if len(r.crossed) or len(r.crossed_rows):
+        if (len(r.crossed) or len(r.crossed_rows)) and not r.bounds_relaxed:
             assert r.alpha < 1.0, (
                 f"crossed {len(r.crossed)} variables and "
                 f"{len(r.crossed_rows)} constraints, yet reported that "
                 f"{r.alpha} of the perturbation fits")
+
+
+def test_a_relaxed_solve_reports_a_bound_its_own_solve_left():
+    """`bound_relax_factor` lets the solve settle a coordinate outside a
+    declared bound. `crossed` names it, since it measures both bounds at
+    the predicted point, while the step fraction looks only along the
+    step direction and correctly finds nothing reached there. Both are
+    right, so the invariant above is scoped to unrelaxed solves."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=4.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
+    m.y = pyo.Var(bounds=(-5.0, 5.0), initialize=1.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + (m.y - 2 * m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(
+        m, options={"bound_relax_factor": 1e-8})
+    assert pyo.value(m.y) > 5.0, "the solve did not relax the bound"
+
+    # step downward, away from the bound the solve left y outside of
+    r = estimate_report(m, [(m.p, 3.0)])
+    assert r.bounds_relaxed is True
+    assert m.y in r.crossed
+    # the amount is the relaxation itself, not a modelling-scale number
+    assert r.crossed[m.y] < 1e-6
+    assert r.first == "x"
+    assert r.alpha >= 1.0
 
 
 def test_a_coordinate_on_one_bound_can_still_cross_the_other():

@@ -1093,8 +1093,11 @@ class EstimateReport:
     alpha : float
         The fraction of the requested perturbation that can be taken
         before the first bound is reached, from the ratio test along
-        the step. At least 1.0 means the full step stays inside every
-        bound, and infinity means no bound lies in the step direction.
+        the step. On a solve that kept its bounds, at least 1.0 means
+        the full step stays inside every one of them. That does not
+        follow when `bounds_relaxed` is true, since the solve can leave
+        a coordinate outside a bound before the step starts. Infinity
+        means no bound lies in the step direction.
     first : str or None
         Name of the variable or constraint reaching its bound at
         `alpha`, None when `alpha` is infinite.
@@ -1103,7 +1106,12 @@ class EstimateReport:
     crossed : ComponentMap
         Variable data to the distance by which the full step leaves
         that variable's bound. These are the variables `estimate()`
-        clamps.
+        clamps. Measured at the predicted point against both bounds, so
+        on a relaxed solve an entry can be a coordinate the SOLVE left
+        outside its bound rather than one the step carried past. The
+        step fraction looks only along the step direction, so the two
+        answer different questions there and `alpha` can be at or above
+        one while this is non-empty.
     crossed_rows : ComponentMap
         Constraint data to the same distance, for inequality
         constraints.
