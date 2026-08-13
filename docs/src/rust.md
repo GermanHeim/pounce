@@ -172,6 +172,20 @@ let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
 assert_eq!(sol.status, QpStatus::Optimal);
 ```
 
+Both convex engines accept a solve-wide wall-clock budget through
+`QpOptions::time_limit: Option<std::time::Duration>`. `None` (the default)
+preserves the uncapped behavior. A limit creates one monotonic deadline for
+the entire top-level solve: equilibration/HSDE retries, active-set homotopy and
+phase-1, feasibility probes, seeded retries, and LP crossover do not receive a
+fresh budget. Batch entries are separate top-level solves and each receives
+the full duration. Expiration returns `QpStatus::TimeLimit` with the latest
+finite iterate; a linear-system factorization already in flight is not
+interruptible, so the solve may overshoot by one factorization.
+
+These are public API additions. Downstream exhaustive `QpOptions { ... }`
+literals must initialize `time_limit` (or use `..QpOptions::default()`), and
+exhaustive matches on `QpStatus` must handle `TimeLimit`.
+
 `P` is the **lower triangle** of the Hessian in triplet form; an empty `P` is
 an LP. Cone blocks beyond the nonnegative orthant are declared with `ConeSpec`
 and solved by `solve_socp_ipm`. For many instances, `solve_qp_batch_parallel`

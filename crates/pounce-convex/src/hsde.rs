@@ -338,6 +338,9 @@ pub(crate) fn solve_conic_hsde<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return timed_out(prob);
+    }
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -347,6 +350,9 @@ where
         Ok(pair) => pair,
         Err(()) => return failed(prob),
     };
+    if crate::deadline::expired() {
+        return timed_out(prob);
+    }
 
     // Constant border data: −b, −h (so `build_rhs` yields the `(−c, b, h)`
     // right-hand side of the constant direction `p`).
@@ -424,6 +430,10 @@ where
 
     for it in 0..opts.max_iter {
         iters = it;
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         // --- quadratic-objective coupling: Px and xᵀPx (zero for an LP) ---
         for v in px_vec.iter_mut() {
@@ -998,6 +1008,10 @@ where
         }
         tau += alpha * dtau;
         kappa += alpha * dkappa;
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         // Debugger checkpoint: the new homogeneous iterate is in place.
         if hook.is_some() {
@@ -1030,6 +1044,14 @@ where
                 break;
             }
         }
+    }
+
+    // `!is_verdict`: the loop breaks with `Optimal` as soon as its convergence
+    // test passes, and the deadline can cross during the un-homogenization and
+    // verdict work below. A conclusion this solve actually reached outranks the
+    // clock — see [`crate::ipm::mark_timed_out`].
+    if crate::deadline::expired() && !crate::ipm::is_verdict(status) {
+        status = QpStatus::TimeLimit;
     }
 
     // Un-homogenize: divide by τ to recover the original-space solution.
@@ -1072,11 +1094,13 @@ where
     // would otherwise have no answer.
     if matches!(
         status,
-        QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::TimeLimit
     ) {
         // `x`/`y`/`z` are already un-homogenized above, hence `τ = 1`. Strictly
         // an upgrade: a point that fails both bands leaves the loop's own
-        // verdict (breakdown *or* iteration limit) untouched.
+        // verdict (breakdown, iteration limit, *or* cancellation) untouched.
+        // `TimeLimit` qualifies for the same reason the other two do — it says
+        // the loop stopped, not that the point it stopped on is unusable.
         status = match true_kkt_error(prob, cone, &x, &y, &z, 1.0) {
             Some(e) if e < opts.tol => QpStatus::Optimal,
             Some(e) if e < 1e3 * opts.tol => QpStatus::OptimalInaccurate,
@@ -1144,6 +1168,20 @@ fn failed(prob: &QpProblem) -> QpSolution {
     }
 }
 
+fn timed_out(prob: &QpProblem) -> QpSolution {
+    QpSolution {
+        status: QpStatus::TimeLimit,
+        x: vec![0.0; prob.n],
+        y: vec![0.0; prob.m_eq()],
+        z: vec![0.0; prob.m_ineq()],
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1162,6 +1200,28 @@ mod tests {
             max_iter: 200,
             ..QpOptions::default()
         }
+    }
+
+    #[test]
+    fn zero_duration_is_authoritative_in_symmetric_hsde() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = CompositeCone::single_nonneg(0);
+        let mut o = opts();
+        o.time_limit = Some(std::time::Duration::ZERO);
+        let sol = crate::deadline::with_deadline(o.time_limit, || {
+            solve_conic_hsde(&prob, &cone, &o, backend, None)
+        });
+        assert_eq!(sol.status, QpStatus::TimeLimit);
     }
 
     /// Solve the same (P=0) problem with the HSDE driver and the direct

@@ -213,47 +213,62 @@ def _big_convex_qp(n, seed):
 
 
 def test_qp_solve_releases_the_gil():
-    import os
+    """Observe GIL availability directly, rather than inferring it from speedup.
+
+    A daemon thread increments a counter in a tight pure-Python loop. While
+    another thread holds the GIL that counter cannot advance *at all* — a
+    Python thread executes no bytecode without the GIL — so comparing the
+    counter's rate during the solve against its rate while the main thread
+    sleeps (GIL fully free) separates the two regimes definitionally.
+
+    This replaces a wall-clock speedup assertion (threaded < 0.75 × serial)
+    that measured whether the machine had idle cores as much as whether the
+    GIL was released, and failed on loaded CI runners at ratio 0.77. The rate
+    ratio is robust to CPU contention because both windows are measured under
+    the same load, and it needs no minimum core count: even on one core the
+    spinner merely shares the core with the solver (ratio ≈ 0.5) instead of
+    being frozen out entirely (ratio ≈ 0).
+    """
     import threading
     import time
 
-    if (os.cpu_count() or 1) < 4:
-        pytest.skip("need ≥4 cores to observe parallel speedup")
+    stop = threading.Event()
+    counter = 0
 
-    n, k = 180, 8
-    args = [_big_convex_qp(n, s) for s in range(k)]
+    def spin():
+        nonlocal counter
+        while not stop.is_set():
+            counter += 1
 
-    def run_all():
-        for a in args:
-            QpSensitivity(**a)
+    def rate(fn):
+        """Spinner iterations per second observed while fn() runs."""
+        c0, t0 = counter, time.perf_counter()
+        fn()
+        return (counter - c0) / (time.perf_counter() - t0)
 
-    def run_all_threaded():
-        ths = [threading.Thread(target=lambda a=a: QpSensitivity(**a)) for a in args]
-        for t in ths:
-            t.start()
-        for t in ths:
-            t.join()
+    args = [_big_convex_qp(180, s) for s in range(8)]
+    spinner = threading.Thread(target=spin, daemon=True)
+    spinner.start()
+    try:
+        time.sleep(0.2)  # let the spinner reach a steady rate
+        free = rate(lambda: time.sleep(0.3))
 
-    # Best-of-2 for each to damp scheduling noise.
-    serial = min(_timed(run_all) for _ in range(2))
-    threaded = min(_timed(run_all_threaded) for _ in range(2))
+        def solves():
+            for a in args:
+                QpSensitivity(**a)
 
-    # With the GIL released the k solves overlap across cores; pre-fix they
-    # serialize (ratio ≈ 1). A generous 0.75 threshold separates the regimes
-    # (measured ≈ 0.4 released vs ≈ 0.97 held) while tolerating a busy CI box.
-    assert threaded < 0.75 * serial, (
-        f"threaded solves did not overlap (threaded={threaded:.3f}s, "
-        f"serial={serial:.3f}s, ratio={threaded / serial:.2f}); the GIL was "
-        f"not released during the QP solve"
+        during = rate(solves)
+    finally:
+        stop.set()
+        spinner.join(timeout=5)
+
+    # Measured ≈ 0.95 with the GIL released; ≈ 0 if it were held for the
+    # duration of the Rust solve. 0.25 sits far from both.
+    assert during > 0.25 * free, (
+        f"a pure-Python thread made little progress during the solve "
+        f"(during={during:.3g} it/s, free={free:.3g} it/s, "
+        f"ratio={during / free:.2f}); the GIL was not released"
     )
-
-
-def _timed(fn):
-    import time
-
-    t0 = time.perf_counter()
-    fn()
-    return time.perf_counter() - t0
 
 
 # --- weak activity / non-strict complementarity (gh #219) -------------------
@@ -335,8 +350,13 @@ def test_weakly_active_matches_the_one_sided_branches():
 
     def at(b):
         return solve_qp(
-            P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[b],
-            G=[[1.0, -2.0]], h=[-0.5], tol=1e-12,
+            P=np.eye(2),
+            c=[0.0, 0.0],
+            A=[[1.0, 1.0]],
+            b=[b],
+            G=[[1.0, -2.0]],
+            h=[-0.5],
+            tol=1e-12,
         ).x
 
     fwd = (at(1.0 + delta) - s.x) / delta

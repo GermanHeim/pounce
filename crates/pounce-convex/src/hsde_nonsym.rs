@@ -1255,6 +1255,9 @@ fn run_nonsym<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    if crate::deadline::expired() {
+        return timed_out(prob);
+    }
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -1285,6 +1288,9 @@ where
         Ok(f) => f,
         Err(_) => return failed(prob),
     };
+    if crate::deadline::expired() {
+        return timed_out(prob);
+    }
 
     let neg_b: Vec<f64> = prob.b.iter().map(|v| -v).collect();
     let neg_h: Vec<f64> = prob.h.iter().map(|v| -v).collect();
@@ -1341,6 +1347,10 @@ where
 
     for it in 0..opts.max_iter {
         iters = it;
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         for v in px_vec.iter_mut() {
             *v = 0.0;
@@ -1618,6 +1628,10 @@ where
         }
         tau += alpha * dtau;
         kappa += alpha * dkappa;
+        if crate::deadline::expired() {
+            status = QpStatus::TimeLimit;
+            break;
+        }
 
         // Debugger checkpoint: the new homogeneous iterate is in place.
         if hook.is_some() {
@@ -1649,6 +1663,14 @@ where
                 break;
             }
         }
+    }
+
+    // `!is_verdict`: the loop breaks with `Optimal` the moment its convergence
+    // test passes, and the deadline can cross in the adjudication work below.
+    // A conclusion this solve actually reached outranks the clock — see
+    // [`crate::ipm::mark_timed_out`].
+    if crate::deadline::expired() && !crate::ipm::is_verdict(status) {
+        status = QpStatus::TimeLimit;
     }
 
     // Reduced-accuracy acceptance. If the driver broke down or hit the cap
@@ -1687,9 +1709,15 @@ where
     // terminate with a certificate status (`PrimalInfeasible` / `DualInfeasible`)
     // and never reach here; a τ → 0 ray or an out-of-`K*` dual returns `None`
     // from the certificate and is never promoted.
+    // `TimeLimit` joins the set for the same reason `IterationLimit` is in it:
+    // both say the loop stopped, neither says the point it stopped on is
+    // unusable, and the adjudication below only ever upgrades.
     if matches!(
         status,
-        QpStatus::OptimalInaccurate | QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::OptimalInaccurate
+            | QpStatus::NumericalFailure
+            | QpStatus::IterationLimit
+            | QpStatus::TimeLimit
     ) {
         let reduced_acc = opts.tol.sqrt();
 
@@ -1812,7 +1840,9 @@ pub fn solve_conic_hsde_nonsym<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    run_nonsym(prob, specs, opts, None, make_backend, None)
+    crate::deadline::with_deadline(opts.time_limit, || {
+        run_nonsym(prob, specs, opts, None, make_backend, None)
+    })
 }
 
 /// Debug-enabled [`solve_conic_hsde_nonsym`]: fires the interactive
@@ -1830,7 +1860,9 @@ pub fn solve_conic_hsde_nonsym_debug<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    run_nonsym(prob, specs, opts, None, make_backend, Some(hook))
+    crate::deadline::with_deadline(opts.time_limit, || {
+        run_nonsym(prob, specs, opts, None, make_backend, Some(hook))
+    })
 }
 
 /// Warm-started [`solve_conic_hsde_nonsym`]: seed the primal `x` from `warm_x`
@@ -1848,7 +1880,9 @@ pub fn solve_conic_hsde_nonsym_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    run_nonsym(prob, specs, opts, Some(warm_x), make_backend, None)
+    crate::deadline::with_deadline(opts.time_limit, || {
+        run_nonsym(prob, specs, opts, Some(warm_x), make_backend, None)
+    })
 }
 
 fn failed(prob: &QpProblem) -> QpSolution {
@@ -1859,6 +1893,20 @@ fn failed(prob: &QpProblem) -> QpSolution {
         // Trivial dual: `z = 0` (the cone apex) is valid in every dual cone,
         // unlike the all-ones vector, which is not a member of an SOC of
         // dimension ≥ 3. Matches `ipm::failed_solution`.
+        z: vec![0.0; prob.m_ineq()],
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    }
+}
+
+fn timed_out(prob: &QpProblem) -> QpSolution {
+    QpSolution {
+        status: QpStatus::TimeLimit,
+        x: vec![0.0; prob.n],
+        y: vec![0.0; prob.m_eq()],
         z: vec![0.0; prob.m_ineq()],
         z_lb: vec![0.0; prob.n],
         z_ub: vec![0.0; prob.n],
@@ -1883,6 +1931,25 @@ mod tests {
             max_iter: 200,
             ..QpOptions::default()
         }
+    }
+
+    #[test]
+    fn zero_duration_is_authoritative_in_nonsymmetric_hsde() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![0.0; 3],
+            lb: vec![],
+            ub: vec![],
+        };
+        let mut o = opts();
+        o.time_limit = Some(std::time::Duration::ZERO);
+        let sol = solve_conic_hsde_nonsym(&prob, &[NsBlock::exp()], &o, backend);
+        assert_eq!(sol.status, QpStatus::TimeLimit);
     }
 
     /// An exponential cone is always 3 rows. Declaring it over a `G` with

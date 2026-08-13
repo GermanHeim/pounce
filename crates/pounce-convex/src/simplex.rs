@@ -122,9 +122,15 @@ pub(crate) fn crossover_simplex(
     sol: &QpSolution,
     _opts: &QpOptions,
 ) -> Option<VertexSolution> {
+    if crate::deadline::expired() {
+        return None;
+    }
     let mut s = Simplex::new(prob);
     s.warm_start(sol);
     s.factor_basis()?;
+    if crate::deadline::expired() {
+        return None;
+    }
     s.recompute_basics()?; // slacks absorb the residual ⇒ feasible start
     s.push_superbasics()?; // drive interior structurals to bounds / into the basis
     s.run_phase1()?; // clean the residual bound infeasibility (e.g. eq artificials)
@@ -706,6 +712,9 @@ impl Simplex {
         let mut best_infeas = self.primal_infeasibility();
         let mut no_progress: u32 = 0;
         for _it in 0..max_iter {
+            if crate::deadline::expired() {
+                return None;
+            }
             if dbg && _it % 100 == 0 {
                 eprintln!(
                     "[simplex p1] it={_it} infeas={:.3e} bland={}",
@@ -777,6 +786,9 @@ impl Simplex {
         self.stall = 0;
         let cost = self.cost.clone();
         for _ in 0..max_iter {
+            if crate::deadline::expired() {
+                return None;
+            }
             let cb: Vec<f64> = (0..self.m).map(|slot| cost[self.basis[slot]]).collect();
             let pi = self.btran(&cb)?;
             let entering = self.price(&pi, &cost)?;

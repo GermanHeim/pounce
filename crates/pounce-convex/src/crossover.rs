@@ -117,6 +117,15 @@ pub fn maybe_crossover<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // Out of budget: skip the refinement, exactly as every other abandonment
+    // path here does (`_ => return sol`). Crossover only ever *improves* the
+    // IPM's answer — restamping its status would turn "we declined to polish
+    // this optimum" into "this problem was not solved", discarding a result the
+    // IPM already produced. The entry point re-labels afterwards, and only when
+    // there is no verdict to lose (see [`crate::ipm::mark_timed_out`]).
+    if crate::deadline::expired() {
+        return sol;
+    }
     // ---- Gate: pure LP, plausibly-optimal status, at least one constraint ----
     if !opts.crossover || !prob.p_lower.is_empty() {
         return sol;
@@ -143,7 +152,11 @@ where
     // degeneracy with Bland's rule — so it resolves the highly-degenerate NETLIB
     // GEN vertices (issue #133) that the active-set bridge below stalls on. On
     // any breakdown it returns `None` and we fall through to the bridge.
-    if let Some(v) = crate::simplex::crossover_simplex(prob, &sol, opts) {
+    let simplex = crate::simplex::crossover_simplex(prob, &sol, opts);
+    if crate::deadline::expired() {
+        return sol;
+    }
+    if let Some(v) = simplex {
         let candidate = QpSolution {
             status: QpStatus::Optimal,
             x: v.x,
@@ -243,6 +256,7 @@ where
 
     // ---- Solve (Bland keeps the degenerate pivot loop finite) ----
     let qopts = ActiveSetOptions {
+        time_limit: crate::deadline::remaining(),
         anti_cycling: AntiCyclingChoice::Bland,
         max_iter: CROSSOVER_MAX_ITER,
         ..ActiveSetOptions::default()
@@ -261,7 +275,13 @@ where
     let warm = warm_solver.solve_with_working_set(&qp, &working, &qopts);
     let qsol = match warm {
         Ok(q) if q.status == ActiveSetStatus::Optimal => q,
+        // The purification ran out of budget mid-flight; `sol` is untouched and
+        // still the IPM's answer.
+        Ok(q) if q.status == ActiveSetStatus::TimeLimit => return sol,
         _ => {
+            if crate::deadline::expired() {
+                return sol;
+            }
             let mut cold_solver = ParametricActiveSetSolver::new(make_backend());
             let cold = cold_solver.solve(&qp, None, &qopts);
             match cold {
@@ -326,6 +346,33 @@ mod tests {
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
+    }
+
+    /// An expired budget makes crossover *decline to refine*; it must not cost
+    /// the caller the optimum the IPM already computed.
+    ///
+    /// Deterministic: the solve runs to `Optimal` with no limit, and only then
+    /// is `maybe_crossover` entered inside an already-expired deadline scope —
+    /// reproducing on demand the race the guard exists for (the deadline
+    /// crossing between the IPM converging and crossover starting).
+    #[test]
+    fn expired_budget_declines_crossover_without_losing_the_verdict() {
+        let prob = unique_vertex_lp();
+        let sol = solve_qp_ipm(&prob, &opts_on(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal, "precondition");
+        let x = sol.x.clone();
+        let obj = sol.obj;
+
+        let out = crate::deadline::with_deadline(Some(std::time::Duration::ZERO), || {
+            maybe_crossover(&prob, sol, &opts_on(), &mut backend)
+        });
+        assert_eq!(
+            out.status,
+            QpStatus::Optimal,
+            "an expired budget restamped a solved LP as unsolved"
+        );
+        assert_eq!(out.x, x, "declining to refine must not disturb the iterate");
+        assert_eq!(out.obj, obj);
     }
 
     /// LP used across the sign/round-trip tests:

@@ -9,6 +9,59 @@ changes.
 
 ## [Unreleased]
 
+- Added solve-wide convex-engine wall-clock deadlines. Both
+  `pounce_convex::QpOptions` and `pounce_qp::QpOptions` now expose
+  `time_limit: Option<Duration>` and their status enums expose `TimeLimit`.
+  Automatic LP/QP/active-set/SOCP routing forwards an explicitly set
+  `max_wall_time`, shares it across setup and retry stages, reports AMPL result
+  400 / `MaximumWallTimeExceeded`, and never reroutes a timed-out solve to NLP.
+  This is source-breaking for exhaustive option literals and enum matches.
+
+  A deadline changes when a solve stops, never what it answers. Two rules
+  carry that:
+
+  * **Cancellation is an error, not a value.** In `pounce-qp` it travels as
+    the internal `QpError::DeadlineExpired`, so `?` propagation forces every
+    caller to handle it, and only the `QpSolver` entry points turn it back
+    into the soft `QpStatus::TimeLimit`. Without this,
+    `factorize_with_inertia_control` — whose "success" is a right-hand side
+    solved in place — could return `Ok` on a timeout, and
+    `solve_equality_only` would read the *un-solved* `[-g; b]` back as
+    `[x*; λ*]`, skip the guards a zero shift makes moot, and report a
+    feasible-but-wrong point as `Optimal`. Covered by a regression test that
+    reproduces the window deterministically.
+  * **A verdict outranks the clock.** Every deadline check in `pounce-convex`
+    runs after some inner solve has already returned, so the crossing can land
+    between convergence and the check. `Optimal`, `OptimalInaccurate`, and the
+    two infeasibility certificates now survive it; only `IterationLimit` /
+    `NumericalFailure`, which conclude nothing, are relabelled. A problem that
+    converges a millisecond past its budget hands back the optimum it computed
+    instead of a report that nothing was solved. `TimeLimit` also joins each
+    driver's reduced-accuracy salvage, so a cancelled solve whose last iterate
+    satisfies the KKT conditions is still allowed to say so.
+
+  Both rules apply on the LP / convex-QP **active-set** route as well as the
+  IPM one: `solve_qp_active_set` shares the IPM's relabelling policy rather
+  than stamping `TimeLimit` over whatever the inner solve returned, and a
+  cancelled engine result now goes through the same verified KKT check as an
+  iteration-limited one — reaching the answer and then running out of seconds
+  used to be reported as reaching nothing, while running out of *iterations*
+  at the identical point reported `Optimal`.
+
+  A cancelled active-set solve also reports the wall-clock time it actually
+  spent rather than zero. `pounce_convex::batch`'s `time_limit` is documented
+  as per-instance, which is what it has always been.
+
+- **`max_wall_time` now bounds the whole CLI solve, not each engine that gets
+  a turn at it.** When a convex attempt declines the problem and hands it to
+  the NLP path (the gh #535 LP→NLP reroute, or `socp_nlp_fallback`), the NLP
+  solve built its `Deadline` from the option value — which still named the
+  full budget — so a run that spent most of its seconds convex-side was
+  granted them all again and the cap could buy nearly twice the wall clock it
+  promises. The declined attempt is now charged against the option before the
+  handover, the same deduction the convex path already applies internally for
+  extraction and presolve.
+
 
 ## [0.10.0] - 2026-08-11
 

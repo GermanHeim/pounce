@@ -98,7 +98,8 @@ class QpResult:
     status:
         One of ``"optimal"``, ``"primal_infeasible"``,
         ``"dual_infeasible"`` (unbounded), ``"iteration_limit"``,
-        ``"numerical_failure"``.
+        ``"time_limit"`` (the ``max_wall_time`` budget ran out; ``x`` is the
+        best iterate reached), ``"numerical_failure"``.
     x:
         Primal solution, shape ``(n,)``.
     y:

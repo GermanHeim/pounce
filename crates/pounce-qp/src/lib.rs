@@ -39,6 +39,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod deadline;
 pub mod elastic;
 pub mod error;
 pub mod factor;

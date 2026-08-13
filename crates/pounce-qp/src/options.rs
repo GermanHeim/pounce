@@ -3,6 +3,7 @@
 //! `OptionsList` entries straight through without translation.
 
 use pounce_common::Number;
+use std::time::Duration;
 
 /// Active-set QP algorithm variant. Phase 5a ships only the sparse
 /// parametric active-set method; other entries are placeholders to
@@ -31,6 +32,9 @@ pub enum AntiCyclingChoice {
 
 #[derive(Debug, Clone)]
 pub struct QpOptions {
+    /// Solve-wide wall-clock budget shared by homotopy, elastic phase-1,
+    /// feasibility/recovery solves, and seeded retries.
+    pub time_limit: Option<Duration>,
     pub algorithm: QpAlgorithm,
     pub max_iter: u32,
     pub feas_tol: Number,
@@ -173,6 +177,7 @@ pub struct QpOptions {
 impl Default for QpOptions {
     fn default() -> Self {
         Self {
+            time_limit: None,
             algorithm: QpAlgorithm::default(),
             max_iter: 200,
             feas_tol: 1e-9,

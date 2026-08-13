@@ -983,6 +983,14 @@ pub fn main() -> ExitCode {
                 // particular must not be silently raised to the (far larger)
                 // Ipopt default, so it too is forwarded only when set.
                 let convex_opts = convex_cli_opts(&app);
+                // When the convex attempt declines (gh #535 / `socp_nlp_fallback`)
+                // the NLP solve below opens its own `Deadline` from the *option
+                // value*, which still names the full budget — so a run that spent
+                // most of `max_wall_time` here would be granted it again there,
+                // and the user's cap would buy up to twice the wall clock they
+                // asked for. Charge the declined attempt against the budget; see
+                // the deduction below the block.
+                let convex_t0 = std::time::Instant::now();
                 if matches!(choice, SolverChoice::SocpIpm) {
                     // `None` means the conic solve came back without a verified
                     // KKT point and declined the problem (only possible under
@@ -1050,6 +1058,9 @@ pub fn main() -> ExitCode {
                         return code;
                     }
                 }
+                // Reaching here means the convex attempt declined and the NLP
+                // path below owns the verdict; charge it for the time it spent.
+                charge_wall_budget(app.options_mut(), convex_t0.elapsed());
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -2197,7 +2208,9 @@ fn resolve_scaling_retry_outcome(
 ///   *verified*, which a second solve must not be allowed to overwrite.
 ///   `NumericalFailure` is left alone here for the same reason the QP path has
 ///   always reported it: it is the post-solve verification refusing a point,
-///   and the LP corpus has no case of it that the NLP path recovers.
+///   and the LP corpus has no case of it that the NLP path recovers. Nor does
+///   `TimeLimit`, which is a spent budget rather than a stall — rerouting it
+///   would answer "stop after `max_wall_time`" with a second solve.
 ///
 /// Note what this deliberately is **not**: the issue's "never-regress" variant,
 /// which would keep whichever of the two results certifies at the lower KKT
@@ -2253,6 +2266,7 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
         QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
     }
 }
@@ -2272,6 +2286,7 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
         QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
         QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
         QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::TimeLimit => ("Maximum wallclock time exceeded.", false, 400),
         // Deliberately not "failure in KKT factorization": both convex engines
         // reach this status by failing the *post-solve* verification — the
         // returned point's true KKT error exceeded the acceptable band — which
@@ -2358,6 +2373,23 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     if let Ok((v, true)) = opt.get_numeric_value("tol", "") {
         o.tol = v;
     }
+    // `max_wall_time`, honoured only when the user set it explicitly (the `true`
+    // flag) — Ipopt's default is 1e20, i.e. "no limit", and turning that into a
+    // `Duration` would put a nonsensical deadline on every solve.
+    //
+    // A value `Duration` cannot represent is *not* clamped to something huge:
+    // it means no limit, and it says so. `try_from_secs_f64` rejects exactly
+    // the values with no honest deadline — NaN, and anything past ~5.8e11
+    // years including `f64::INFINITY` and Ipopt's own 1e20 sentinel should a
+    // user type it out. Negative is invalid and likewise ignored. `0.0` is
+    // kept as a real (immediate) deadline: "take no time" is the wall-clock
+    // twin of `max_iter=0`, which pounce#186 requires to stop before solving.
+    if let Ok((v, true)) = opt.get_numeric_value("max_wall_time", "")
+        && v >= 0.0
+        && let Ok(d) = std::time::Duration::try_from_secs_f64(v)
+    {
+        o.time_limit = Some(d);
+    }
     if let Ok((v, true)) = opt.get_numeric_value("qp_tau", "") {
         o.tau = v;
         // A raised floor lifts the default ceiling with it, so `qp_tau` alone
@@ -2383,6 +2415,51 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
         o.crossover = v != "no";
     }
     o
+}
+
+fn convex_opts_with_remaining(
+    mut opts: pounce_convex::QpOptions,
+    started: std::time::Instant,
+) -> pounce_convex::QpOptions {
+    if let Some(limit) = opts.time_limit {
+        opts.time_limit = Some(limit.saturating_sub(started.elapsed()));
+    }
+    opts
+}
+
+/// Charge `spent` against `max_wall_time`, so a solve that gets handed from one
+/// engine to another spends **one** budget rather than one per engine.
+///
+/// The convex driver already deducts its own extraction and presolve from the
+/// budget it passes down (`convex_opts_with_remaining`). The gap this closes is
+/// one level up: when a convex attempt declines the problem (gh #535's LP→NLP
+/// reroute, or the conic path's `socp_nlp_fallback`) the NLP solve that takes
+/// over builds its `Deadline` from the *option value*, which still names the
+/// whole budget. A run that spent 55 of its 60 seconds convex-side would then be
+/// granted 60 more, and `max_wall_time` would buy nearly twice the wall clock it
+/// promises.
+///
+/// Applies only when the user actually set the option. Unset it is `1e6` — the
+/// effectively-unbounded default — and rewriting that as `1e6 - 3.2` states
+/// nothing the default did not, while making the option read as explicitly
+/// chosen to everything downstream that tests the `explicitly_set` flag.
+///
+/// A budget that is entirely gone floors at [`WALL_BUDGET_FLOOR`] rather than
+/// zero: the option is registered with a *strict* lower bound of 0, so `0.0` is
+/// rejected as invalid and the write would silently do nothing — leaving the
+/// full budget in place, which is the failure this exists to prevent. The floor
+/// is small enough that the NLP path's first deadline check trips on it.
+fn charge_wall_budget(
+    opts: &mut pounce_common::options_list::OptionsList,
+    spent: std::time::Duration,
+) {
+    /// Smallest budget that can be *stored* — see [`charge_wall_budget`].
+    const WALL_BUDGET_FLOOR: f64 = 1e-9;
+
+    if let Ok((limit, true)) = opts.get_numeric_value("max_wall_time", "") {
+        let left = (limit - spent.as_secs_f64()).max(WALL_BUDGET_FLOOR);
+        let _ = opts.set_numeric_value("max_wall_time", left, true, false);
+    }
 }
 
 /// Resolve the convex LP/QP presolve switch (#139).
@@ -2435,6 +2512,7 @@ fn run_convex_qp(
     // gh #535: may an uncertified LP solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
 ) -> Option<ExitCode> {
+    let t0 = std::time::Instant::now();
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
@@ -2462,7 +2540,6 @@ fn run_convex_qp(
     let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
-    let t0 = std::time::Instant::now();
     // With presolve on, reduce the problem (logging what was removed),
     // solve the reduced problem, then postsolve back to the extracted-QP
     // space — so the `con_map`-based dual recovery below still applies.
@@ -2486,6 +2563,7 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..convex_opts
     };
+    let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
     // What presolve did, held back until we know this solve is the one that
     // reports (gh #535). These lines describe the reduction, not the verdict,
     // but they are the *only* stdout a declined convex attempt would otherwise
@@ -2512,7 +2590,7 @@ fn run_convex_qp(
         // user selected. The caller has already printed the note explaining
         // the debugger does not engage; fall through and solve normally.
         let mut h = hook.borrow_mut();
-        solve_qp_ipm_debug(&qp, &qp_opts, &mut *h, backend)
+        solve_qp_ipm_debug(&qp, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         match presolve(&qp) {
             PresolveOutcome::Reduced(ps) => {
@@ -2565,9 +2643,9 @@ fn run_convex_qp(
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
-                    solve_qp_active_set(&ps.reduced, &qp_opts, &engine_overrides, &mut mk)
+                    solve_qp_active_set(&ps.reduced, &solve_opts(), &engine_overrides, &mut mk)
                 } else {
-                    solve_qp_ipm(&ps.reduced, &qp_opts, backend)
+                    solve_qp_ipm(&ps.reduced, &solve_opts(), backend)
                 };
                 ps.postsolve(&red)
             }
@@ -2582,9 +2660,9 @@ fn run_convex_qp(
         }
     } else if use_active_set {
         let mut mk = backend;
-        solve_qp_active_set(&qp, &qp_opts, &engine_overrides, &mut mk)
+        solve_qp_active_set(&qp, &solve_opts(), &engine_overrides, &mut mk)
     } else {
-        solve_qp_ipm(&qp, &qp_opts, backend)
+        solve_qp_ipm(&qp, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -2792,6 +2870,7 @@ fn run_convex_socp(
     convex_opts: pounce_convex::QpOptions,
     allow_nlp_fallback: bool,
 ) -> Option<ExitCode> {
+    let t0 = std::time::Instant::now();
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
@@ -2820,7 +2899,7 @@ fn run_convex_socp(
         collect_iterates: want_trace,
         ..convex_opts
     };
-    let t0 = std::time::Instant::now();
+    let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
     let sol = if qp_opts.max_iter == 0 {
         // `max_iter=0` cannot reach optimality — stop before any solve, the
         // same zero-iteration contract the QP path enforces (pounce#186).
@@ -2837,9 +2916,9 @@ fn run_convex_socp(
         }
     } else if let Some(hook) = debug_hook {
         let mut h = hook.borrow_mut();
-        solve_socp_ipm_debug(&qp, &cones, &qp_opts, &mut *h, backend)
+        solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
     } else {
-        solve_socp_ipm(&qp, &cones, &qp_opts, backend)
+        solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -3287,6 +3366,85 @@ mod convex_status_tests {
             ApplicationReturnStatus::SolveSucceeded
         );
     }
+
+    /// A declined convex attempt is charged against the wall-clock budget, so
+    /// the NLP solve that takes over cannot start a second full one.
+    ///
+    /// Built on a real `IpoptApplication` rather than a bare `OptionsList`
+    /// because the two ways this write can silently do nothing — the option's
+    /// *strict* lower bound of zero, and the clobber flag on the stored value —
+    /// both live in the registration that only the real one carries.
+    #[test]
+    fn a_declined_convex_attempt_is_charged_against_the_wall_budget() {
+        use std::time::Duration;
+
+        let mut app = super::IpoptApplication::new();
+        app.options_mut()
+            .set_numeric_value("max_wall_time", 60.0, true, false)
+            .unwrap();
+
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(55.0));
+        let (left, set) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(set, "the option must still read as explicitly set");
+        assert!(
+            (left - 5.0).abs() < 1e-9,
+            "60s budget minus a 55s attempt must leave 5s, got {left}"
+        );
+
+        // A budget spent outright must not silently write back as the full
+        // budget: `max_wall_time` is registered with a strict lower bound, so a
+        // literal 0.0 would be rejected and leave 5s standing.
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(600.0));
+        let (gone, _) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(
+            gone > 0.0 && gone < 1e-6,
+            "an exhausted budget must store as positive-but-spent, got {gone}"
+        );
+    }
+
+    /// The other half: an *unset* budget is left alone. `1e6` is the
+    /// effectively-unbounded default, and rewriting it would both say nothing
+    /// new and make the option read as user-chosen downstream.
+    #[test]
+    fn an_unset_wall_budget_is_not_rewritten() {
+        use std::time::Duration;
+
+        let mut app = super::IpoptApplication::new();
+        let (before, set_before) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(!set_before, "precondition: the option starts unset");
+
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(3.2));
+        let (after, set_after) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(
+            !set_after,
+            "an untouched budget must not read as explicitly set"
+        );
+    }
+
+    #[test]
+    fn time_limit_maps_to_wall_clock_status() {
+        let (msg, ok, srn) = convex_status_report(QpStatus::TimeLimit);
+        assert_eq!(msg, "Maximum wallclock time exceeded.");
+        assert!(!ok);
+        assert_eq!(srn, 400);
+        assert_eq!(
+            qp_status_to_ars(QpStatus::TimeLimit),
+            ApplicationReturnStatus::MaximumWallTimeExceeded
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3295,12 +3453,13 @@ mod lp_nlp_fallback_tests {
     use pounce_cli::dispatch::ProblemClass;
     use pounce_convex::QpStatus;
 
-    const ALL_STATUSES: [QpStatus; 6] = [
+    const ALL_STATUSES: [QpStatus; 7] = [
         QpStatus::Optimal,
         QpStatus::OptimalInaccurate,
         QpStatus::PrimalInfeasible,
         QpStatus::DualInfeasible,
         QpStatus::IterationLimit,
+        QpStatus::TimeLimit,
         QpStatus::NumericalFailure,
     ];
 
@@ -3348,6 +3507,19 @@ mod lp_nlp_fallback_tests {
                 "{status:?} must not reroute"
             );
         }
+    }
+
+    /// A wall-clock budget is a budget, exactly as `max_iter` is: `TimeLimit`
+    /// is the answer to the question the user asked. Rerouting it would launch
+    /// a *second*, unbudgeted solve on a problem whose whole point was to stop
+    /// — the fallback would double the time limit it was told to respect.
+    #[test]
+    fn a_spent_time_budget_is_not_a_reason_to_solve_again() {
+        assert!(!lp_declines_to_nlp(
+            ProblemClass::Lp,
+            QpStatus::TimeLimit,
+            true
+        ));
     }
 
     /// The issue scopes the fallback to `P = 0`. A convex QP that stalls is a

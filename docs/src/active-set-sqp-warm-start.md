@@ -388,7 +388,7 @@ pub struct QpSolution {
     pub lambda_x: Vec<f64>,
     pub working:  WorkingSet,
     pub obj:      f64,
-    pub status:   QpStatus,              // Optimal | Infeasible | Unbounded | MaxIter | …
+    pub status:   QpStatus,              // Optimal | Infeasible | Unbounded | MaxIter | TimeLimit | …
     pub stats:    QpStats,               // n_active_set_changes, n_refactor, time …
 }
 ```
@@ -423,6 +423,7 @@ pub trait QpSolver {
 }
 
 pub struct QpOptions {
+    pub time_limit: Option<std::time::Duration>, // whole solve; default None
     pub algorithm: QpAlgorithm,          // ParametricActiveSet | …
     pub linear_solver_factory: …,        // injected from pounce-algorithm
     pub max_iter: usize,
@@ -434,6 +435,12 @@ pub struct QpOptions {
     pub print_level: i32,
 }
 ```
+
+The wall-clock limit covers the complete top-level active-set solve, including
+homotopy, elastic phase-1, feasibility/recovery solves, and seeded retries.
+Those nested stages share one monotonic deadline rather than restarting the
+duration. Expiration returns `QpStatus::TimeLimit`; an in-flight backend
+factorization completes before the next check.
 
 The `linear_solver_factory` injection mirrors
 `alg_builder.rs::LinearBackendFactory` (line 50) so `pounce-qp`

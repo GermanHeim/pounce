@@ -574,7 +574,7 @@ impl SqpAlgorithm {
                 // non-committal status rather than a hard error, and — the
                 // point of #282 — WITHOUT ever asserting infeasibility on a
                 // problem we have not certified infeasible.
-                QpStatus::MaxIter | QpStatus::NumericalError => {
+                QpStatus::MaxIter | QpStatus::TimeLimit | QpStatus::NumericalError => {
                     let obj = nlp.eval_f(&iter.x);
                     self.iterates = Some(iter.clone());
                     // Report *which* of the two it was. Both are honest
@@ -583,7 +583,16 @@ impl SqpAlgorithm {
                     // user, and merging them hid the dominant Maros-Mészáros
                     // failure mode behind a step-size verdict. See
                     // `SqpStatus::QpIterationLimit`.
-                    let status = if sol.status == QpStatus::MaxIter {
+                    // `TimeLimit` rides with `MaxIter`: it is the same kind of
+                    // outcome (a budget ran out, no claim about the problem),
+                    // and it is the closest honest report `SqpStatus` can make
+                    // today. Nothing here reaches it yet — the SQP never sets
+                    // `QpOptions::time_limit` on a step subproblem, so the
+                    // active-set solver has no deadline to cross — but leaving
+                    // the arm unhandled would make the first caller that does
+                    // set one land in `QpStepFailed`, i.e. "the step broke
+                    // down", which would be false.
+                    let status = if matches!(sol.status, QpStatus::MaxIter | QpStatus::TimeLimit) {
                         SqpStatus::QpIterationLimit
                     } else {
                         SqpStatus::QpStepFailed
