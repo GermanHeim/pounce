@@ -262,6 +262,61 @@ impl PySolver {
         Ok(dx.into_pyarray_bound(py))
     }
 
+    /// Parametric step with the bounds respected by pinning rather than
+    /// clamping, as `(dx, pinned)`.
+    ///
+    /// `parametric_step` points where the linear predictor points,
+    /// which can be outside the box. Clamping a coordinate back to its
+    /// bound leaves every other coordinate at its predictor value, so
+    /// the answer is feasible but no longer consistent with the KKT
+    /// relations. This adds a row pinning the offending coordinate at
+    /// the bound and re-solves, so the others move with it, which is
+    /// the refinement upstream runs under `sens_boundcheck`.
+    ///
+    /// `pinned` lists the variables pinned to reach the returned step,
+    /// worst violator first, in **user-space** indices. It is empty
+    /// when the plain step already respects every bound, and the step
+    /// is then the plain one.
+    ///
+    /// Each pass costs one dense `k × k` solve and a backsolve, with
+    /// `k` the number of pins so far. The factorization is never
+    /// rebuilt. Pinning stops when no coordinate is outside its bound
+    /// by more than `eps`, at `max_passes`, or when the pins exhaust
+    /// the problem's degrees of freedom, which makes the augmented
+    /// system singular. Reaching any of those is not an error, and
+    /// `pinned` says how far the refinement got.
+    #[pyo3(signature = (pin_constraint_indices, deltas, eps=1e-9, max_passes=16))]
+    fn parametric_step_bounded<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        eps: Number,
+        max_passes: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_bounded: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (dx, pinned) = s
+            .inner
+            .parametric_step_bounded(&pins, &deltas, eps, max_passes)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            pinned.into_iter().map(|p| p as i64).collect(),
+        ))
+    }
+
     /// Full KKT-space parametric step: like `parametric_step` but
     /// returns the whole compound vector `(x, s, y_c, y_d, z_l, z_u,
     /// v_l, v_u)` so multiplier sensitivities are available. Use

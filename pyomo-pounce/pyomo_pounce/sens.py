@@ -1025,13 +1025,23 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
-def estimate(model, perturb, clamp=True):
+def estimate(model, perturb, clamp=True, mode="linear"):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
     ComponentMap (plain dicts don't work: Pyomo components are unhashable).
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
+
+    mode selects what happens when the step leaves a variable bound.
+    "linear" (the default) takes the step and clamps, which truncates the
+    crossing variable and leaves every other one at its predictor value.
+    "fix_relax" instead pins the crossing variable at its bound and
+    re-solves, so the others move to stay consistent under the pin, which
+    is what `estimate_report`'s step fraction says the step needs. It
+    costs a dense solve and a backsolve per crossing, tracks a full
+    re-solve far more closely, and needs no clamp afterwards. Where
+    nothing crosses the two agree exactly.
 
     The perturbation is measured from the SOLVE point (the pin
     constraint's stored right-hand side, which is the value the Param
@@ -1054,16 +1064,27 @@ def estimate(model, perturb, clamp=True):
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    if mode not in ("linear", "fix_relax"):
+        raise ValueError(
+            f"estimate: mode must be 'linear' or 'fix_relax', got {mode!r}")
+
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
     # parametric_step returns the factor's x block (var-x); base_x and
     # everything below it (nl.x_l/x_u, var_names) are full-x
-    dx = session.scatter_x(
-        np.asarray(session.solver.parametric_step(pin_idx, deltas)))
+    if mode == "fix_relax":
+        step, _ = session.solver.parametric_step_bounded(pin_idx, deltas)
+    else:
+        step = session.solver.parametric_step(pin_idx, deltas)
+    dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
 
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    if clamp:
+    # fix_relax already holds every crossing coordinate at its bound, so
+    # there is nothing left to clip and no active-set change to warn
+    # about. Clipping anyway would only fire on the roundoff the pin
+    # leaves behind.
+    if clamp and mode == "linear":
         # scale-aware tolerance: 1e-9 relative to the variable's magnitude
         tol = 1e-9 * np.maximum(1.0, np.abs(x_new))
         clipped = (x_new < lo - tol) | (x_new > hi + tol)
