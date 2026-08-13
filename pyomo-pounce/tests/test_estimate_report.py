@@ -7,6 +7,80 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import declare_sens_param, estimate, estimate_report
+from pyomo_pounce.sens import _NO_BOUND, _ratio_test
+
+
+# ── the ratio test on its own ────────────────────────────────────────────────
+#
+# Three of its cases cannot be reached reliably by solving a model: the
+# no-bound sentinel needs a model with no bound in the step direction AND
+# a solve that leaves one, a relaxed solve settles outside its bound by an
+# amount the solver chooses, and the per-side exclusion needs a coordinate
+# the classifier calls on-bound while the step drives it the other way.
+# All three are ordinary arguments here.
+
+def test_ratio_test_reads_the_no_bound_sentinel_as_no_bound():
+    """`read_nl` seeds absent bounds with +-1e19, which is finite. An
+    `isfinite` test scores a crossing at 1e18 times the perturbation."""
+    base = np.array([0.0])
+    step = np.array([1.2])
+    lo = np.array([-_NO_BOUND])
+    hi = np.array([_NO_BOUND])
+    alpha, first = _ratio_test(base, step, lo, hi, ["z"])
+    assert alpha == float("inf")
+    assert first is None
+
+
+def test_ratio_test_clamps_a_coordinate_already_outside_its_bound():
+    """A relaxed solve settles outside a declared bound, so the distance
+    is negative. No room to move is 0.0, not a negative fraction."""
+    base = np.array([5.000000049582308])
+    step = np.array([0.5])
+    lo = np.array([-5.0])
+    hi = np.array([5.0])
+    alpha, first = _ratio_test(base, step, lo, hi, ["y"])
+    assert alpha == 0.0
+    assert first == "y"
+
+
+def test_ratio_test_excludes_only_the_side_a_coordinate_is_held_on():
+    """x is on ub = 1 and the step drives it to -2, past lb = -1. The
+    crossing is at 2/3 and belongs to the bound x is NOT held at."""
+    base = np.array([1.0, 0.0])
+    step = np.array([-3.0, 0.4])
+    lo = np.array([-1.0, -5.0])
+    hi = np.array([1.0, 5.0])
+    on_bound = np.array([True, False])
+    alpha, first = _ratio_test(base, step, lo, hi, ["x", "z"],
+                               on_bound=on_bound, mu=1e-9)
+    assert first == "x"
+    assert alpha == pytest.approx(2.0 / 3.0, rel=1e-12)
+
+    # and the side it IS held on stays excluded: driven up instead, the
+    # gap at ub is barrier residue and x must not set the fraction
+    alpha2, first2 = _ratio_test(base, np.array([3.0, 0.4]), lo, hi,
+                                 ["x", "z"], on_bound=on_bound, mu=1e-9)
+    assert first2 == "z"
+
+
+def test_ratio_test_scales_its_distance_floor_with_the_barrier():
+    """A coordinate the classifier declines to rule on is judged by the
+    size of its gap. At mu = 1e-9 a weakly active one sits O(sqrt(mu))
+    from its bound, four orders inside the interior case."""
+    lo, hi = np.array([-5.0]), np.array([1.0])
+    step = np.array([0.5])
+    weak = np.array([1.0 - 4.4e-5])       # O(sqrt(mu)) gap: on its bound
+    alpha, first = _ratio_test(weak, step, lo, hi, ["x"], mu=1e-9)
+    assert alpha == float("inf") and first is None
+
+    interior = np.array([1.0 - 1e-2])     # real room left
+    alpha, first = _ratio_test(interior, step, lo, hi, ["x"], mu=1e-9)
+    assert first == "x"
+    assert alpha == pytest.approx(2e-2, rel=1e-9)
+
+    # with no classification there is no mu, and the fixed floor applies
+    alpha, first = _ratio_test(weak, step, lo, hi, ["x"])
+    assert first == "x"
 
 
 def bounded(ub_y=5.0, fixed=False):
@@ -49,22 +123,32 @@ def brute_force(model, param, newval):
 
 
 def brute_force_multi(model, perturb):
-    base = {id(v): pyo.value(v)
-            for v in model.component_data_objects(pyo.Var, active=True)}
+    """Reference scan, deliberately reading the same arrays the code
+    under test reads.
+
+    An earlier version took bounds off the Pyomo model and clamped at
+    zero, so it silently disagreed with the production path in exactly
+    the two places that path was wrong (the +-1e19 sentinel and a
+    negative distance) and the suite could not see either.
+    """
+    session = model.__dict__["_pounce_sens"].session
+    lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
+    base = np.asarray(session.base_x)
     est = estimate(model, perturb, clamp=False)
     alpha, who = float("inf"), None
-    for v, x1 in est.items():
-        x0 = base[id(v)]
-        d = x1 - x0
+    for i, nm in enumerate(session.var_names):
+        v = model.find_component(nm)
+        if v is None or v not in est:
+            continue
+        d = est[v] - base[i]
         if abs(d) < 1e-14:
             continue
-        b = (v.ub if v.ub is not None else np.inf) if d > 0 else (
-            v.lb if v.lb is not None else -np.inf)
-        if not np.isfinite(b):
+        b = hi[i] if d > 0 else lo[i]
+        if abs(b) >= _NO_BOUND:
             continue
-        a = max((b - x0) / d, 0.0)
+        a = max((b - base[i]) / d, 0.0)
         if a < alpha:
-            alpha, who = a, v.name
+            alpha, who = a, nm
     return alpha, who
 
 
@@ -125,7 +209,8 @@ def test_rows_are_named_as_the_model_names_them():
     m = with_row()
     r = estimate_report(m, [(m.p, 3.0)])
     assert r.first == "c"
-    assert set(r.crossed_rows) == {"c"}
+    assert len(r.crossed_rows) == 1
+    assert m.c in r.crossed_rows
     assert "c" in r.row_activity
 
 
@@ -322,6 +407,97 @@ def test_every_solver_route_reports_the_same():
         assert other.alpha == pytest.approx(legacy.alpha, rel=1e-12)
         assert other.mu == pytest.approx(legacy.mu, rel=1e-12)
         assert other.activity == legacy.activity
+
+
+def test_a_bound_the_step_crosses_is_never_missed():
+    """The report must not contradict itself: anything in `crossed` was
+    reached by the full step, so the fraction that fits is below one.
+
+    Reachable whenever a two-sided coordinate is classified on-bound and
+    the step drives it toward the other side, which an exclusion applied
+    per coordinate rather than per side would drop.
+    """
+    cases = [
+        (bounded(), 4.0),
+        (bounded(fixed=True), 4.0),
+        (with_row(), 3.0),
+        (bounded(), 1.2),
+    ]
+    for m, newval in cases:
+        r = estimate_report(m, [(m.p, newval)])
+        if len(r.crossed) or len(r.crossed_rows):
+            assert r.alpha < 1.0, (
+                f"crossed {len(r.crossed)} variables and "
+                f"{len(r.crossed_rows)} constraints, yet reported that "
+                f"{r.alpha} of the perturbation fits")
+
+
+def test_a_coordinate_on_one_bound_can_still_cross_the_other():
+    """x is weakly active at its upper bound while the step drives it
+    down past its lower one. Excluding the coordinate rather than the
+    side it is held on loses that crossing."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1.0, mutable=True)
+    m.x = pyo.Var(bounds=(-1.0, 1.0), initialize=0.0)
+    m.z = pyo.Var(bounds=(-5.0, 5.0), initialize=0.0)
+    # minimized at x = p, so at p = 1 the upper bound is weakly active
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + 0.1 * (m.z - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert m.x.value == pytest.approx(1.0, abs=1e-3)
+    assert estimate_report(m, [(m.p, 1.1)]).activity["x"] == "weakly_active"
+
+    # drive x down, away from the bound it is held at and toward the
+    # other one. x must be scored: the exclusion covers its upper side
+    # only. (Its step is the two-sided derivative at a degenerate base
+    # point, half the interior value, so the crossing lands where the
+    # scan says rather than where dx/dp = 1 would put it.)
+    r = estimate_report(m, [(m.p, -2.0)])
+    assert r.first == "x"
+    alpha, who = brute_force_multi(m, [(m.p, -2.0)])
+    assert who == "x"
+    assert r.alpha == pytest.approx(alpha, rel=1e-12)
+
+
+def test_no_bound_in_the_step_direction_reports_no_crossing():
+    """Unbounded variables reach the ratio test as the reader's +-1e19
+    sentinel, which is finite."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1.0, mutable=True)
+    m.x = pyo.Var(initialize=0.0)
+    m.z = pyo.Var(initialize=0.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + (m.z - 2 * m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+
+    r = estimate_report(m, [(m.p, 4.0)])
+    assert r.alpha == float("inf")
+    assert r.first is None and r.first_kind is None
+    assert len(r.crossed) == 0
+
+
+def test_a_relaxed_solve_never_reports_a_negative_fraction():
+    """Relaxed bounds let a variable settle outside its declared bound,
+    which is no room to move rather than a negative amount of it."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=4.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
+    m.y = pyo.Var(bounds=(-5.0, 5.0), initialize=1.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + (m.y - 2 * m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(
+        m, options={"bound_relax_factor": 1e-8})
+
+    r = estimate_report(m, [(m.p, 5.0)])
+    assert r.bounds_relaxed is True
+    assert r.alpha >= 0.0
+
+    # read off the solve, not off the classifier's error message: the
+    # report says the bounds were relaxed because the solve says so
+    session = m.__dict__["_pounce_sens"].session
+    assert session.solver.bound_relax_factor == 1e-8
+    with pytest.raises(Exception, match="bound_relax_factor"):
+        session.solver.classify_activity()
 
 
 def test_no_session_is_a_clean_error():

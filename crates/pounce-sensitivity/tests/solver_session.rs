@@ -384,6 +384,23 @@ fn classify_activity_refuses_a_solve_that_relaxed_its_bounds() {
         Err(pounce_sensitivity::SolverError::BadOptions(_)),
     ));
 
+    // The option name is load-bearing in the message, not decoration:
+    // pyomo-pounce's `estimate_report` tells this refusal apart from
+    // every other BadOptions by matching that token, and reports the
+    // solve as having relaxed its bounds instead of raising. Rewording
+    // the message without updating that check turns the branch back
+    // into a re-raise, silently.
+    let msg = match solver.classify_activity() {
+        Err(pounce_sensitivity::SolverError::BadOptions(m)) => m,
+        Err(other) => panic!("expected BadOptions, got {other:?}"),
+        Ok(_) => panic!("expected BadOptions, got a report"),
+    };
+    assert!(
+        msg.contains("bound_relax_factor"),
+        "the message must name the option: pyomo-pounce matches it to \
+         report a relaxed solve rather than raise (got {msg:?})",
+    );
+
     // Clearing the option afterwards must NOT unlock the stale state:
     // its slacks were measured against relaxed bounds and still are.
     solver

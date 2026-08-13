@@ -1104,9 +1104,15 @@ class EstimateReport:
         Variable data to the distance by which the full step leaves
         that variable's bound. These are the variables `estimate()`
         clamps.
-    crossed_rows : dict
-        Constraint name to the same distance, for inequality
+    crossed_rows : ComponentMap
+        Constraint data to the same distance, for inequality
         constraints.
+
+    Those two are keyed by model components, because every coordinate
+    that crosses has one. The two classifications below are keyed by
+    solve-space name instead, because they cover every coordinate of
+    the solve, including the ones the declared-parameter surgery
+    created, which have no counterpart on the model.
     violation : float
         Largest constraint violation at the predicted point, measured
         against the perturbed right-hand sides. This is the primal
@@ -1168,12 +1174,21 @@ def _row_step(session, dx):
     """Jacobian at the base point times the step, in row order."""
     rows, cols = session.nl.jacobian_structure()
     vals = np.asarray(session.nl.jacobian(session.base_x))
-    dg = np.zeros(len(session.con_names))
-    np.add.at(dg, np.asarray(rows), vals * dx[np.asarray(cols)])
-    return dg
+    return np.bincount(np.asarray(rows),
+                       weights=vals * dx[np.asarray(cols)],
+                       minlength=len(session.con_names))
 
 
-def _ratio_test(base, step, lo, hi, names, live=None):
+#: No bound at all reaches here as the reader's sentinel rather than an
+#: infinity: `read_nl` seeds every bound vector with +-1e19, so an
+#: `isfinite` test passes on it and scores a crossing at 1e18 times the
+#: perturbation. The magnitude test is the convention the rest of the
+#: package already uses (`preflight`, `block_init`, gh #401 / #403).
+_NO_BOUND = 1e19
+
+
+def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
+                mu=float("nan")):
     """Smallest fraction of `step` that reaches a bound, and where.
 
     Only coordinates strictly inside their bounds take part, because a
@@ -1185,28 +1200,47 @@ def _ratio_test(base, step, lo, hi, names, live=None):
     active bound. Activity is reported through the classification
     instead.
 
-    The caller passes the exclusion in `live`, built from that same
-    classification, since that slack is O(mu) at a strongly active
-    bound but O(sqrt(mu)) at a weakly active one and no single distance
-    threshold separates the second from a coordinate genuinely close to
-    its bound. The threshold below is the backstop for when no
-    classification is available.
+    Two things decide that a coordinate is on a bound, and both are
+    needed. `on_bound` carries the classification, which is exact where
+    the classifier commits. It is applied per SIDE, not per coordinate:
+    a coordinate held at one bound can still be carried across its
+    other one, so excluding it outright drops a real crossing.
+
+    The distance test below covers the coordinates the classifier
+    declines to rule on, where the label cannot answer the question
+    because `ambiguous` spans both a coordinate near its bound with
+    room left and one already on it. What separates those is the size
+    of the remaining gap, which is O(mu) at a strongly active bound and
+    O(sqrt(mu)) at a weakly active one, against O(1) room in the
+    interior. So the threshold scales with sqrt(mu), measured four
+    orders of magnitude clear of the interior case. Without a
+    classification there is no `mu` either, and it falls back to a
+    fixed threshold.
 
     Coordinates whose step is below the roundoff of their own magnitude
     also take no part, since dividing by one puts the crossing at an
     enormous multiple of the perturbation, which is not a finding.
     """
     scale = np.maximum(1.0, np.abs(base))
-    bound = np.where(step > 0, hi, lo)
+    toward_hi = step > 0
+    bound = np.where(toward_hi, hi, lo)
     distance = bound - base
-    ok = (np.abs(step) > 1e-12 * scale) & np.isfinite(bound) & (
-        np.abs(distance) > 1e-9 * scale)
+    on_bound_gap = 1e-9 if not np.isfinite(mu) else max(1e-9, 10.0 * mu ** 0.5)
+    ok = (np.abs(step) > 1e-12 * scale) & (np.abs(bound) < _NO_BOUND) & (
+        np.abs(distance) > on_bound_gap * scale)
     if live is not None:
         ok &= live
+    if on_bound is not None:
+        # the nearer bound is the one the coordinate is held at, and it
+        # is only that side the classification rules out
+        at_hi = (hi - base) <= (base - lo)
+        ok &= ~(on_bound & (toward_hi == at_hi))
     if not ok.any():
         return float("inf"), None
     fraction = np.full(base.shape, np.inf)
-    fraction[ok] = distance[ok] / step[ok]
+    # a relaxed solve can settle outside a bound, which leaves no room
+    # to move rather than a negative amount of it
+    fraction[ok] = np.maximum(distance[ok] / step[ok], 0.0)
     i = int(np.argmin(fraction))
     return float(fraction[i]), names[i]
 
@@ -1214,7 +1248,11 @@ def _ratio_test(base, step, lo, hi, names, live=None):
 #: Classifications that put a coordinate ON its bound. Both have the
 #: slack going to zero, so neither can be crossed by a step. Strongly
 #: active leaves an O(mu) gap and weakly active an O(sqrt(mu)) one, and
-#: neither gap is room the step can move through.
+#: neither gap is room the step can move through. `ambiguous` and
+#: `unidentified` are absent on purpose: the first spans coordinates on
+#: their bound AND coordinates near it with room left, and the second
+#: says only that the curvature is below scale, so neither label
+#: answers the question. `_ratio_test`'s distance test rules on those.
 _AT_BOUND = ("strongly_active", "weakly_active")
 
 
@@ -1270,23 +1308,19 @@ def estimate_report(model, perturb):
 
     row_names = _user_row_names(session)
 
-    # The classifier raises for a solve that relaxed its bounds,
-    # because relaxed bounds shift the slacks it reads. Report that as
-    # the fact it is: the rest of the report is still measured, and a
-    # diagnostic that raised here would give the caller nothing
-    # exactly when they are trying to find out why the estimate
-    # disagrees with a re-solve. `mu` comes from the classifier, so it is unavailable
-    # too.
+    # The classifier raises for a solve that relaxed its bounds, since
+    # relaxed bounds shift the slacks it reads. Ask the solve what it
+    # ran under instead of provoking that and reading the message, and
+    # report it as the fact it is. The rest of the report is still
+    # measured, where a diagnostic that raised would give the caller
+    # nothing exactly when they are trying to find out why the estimate
+    # disagrees with a re-solve. `mu` comes from the classifier, so it
+    # is unavailable on that path too.
     mu, activity, row_status = float("nan"), {}, {}
-    bounds_relaxed = False
     var_on_bound = row_on_bound = None
-    try:
+    bounds_relaxed = bool(session.solver.bound_relax_factor)
+    if not bounds_relaxed:
         act = session.solver.classify_activity()
-    except Exception as err:                       # noqa: BLE001
-        if "bound_relax_factor" not in str(err):
-            raise
-        bounds_relaxed = True
-    else:
         mu = float(act["mu"])
         activity = dict(zip(session.var_names, act["var_status"]))
         row_status = dict(zip(row_names, act["row_status"]))
@@ -1294,8 +1328,7 @@ def estimate_report(model, perturb):
         row_on_bound = _on_bound(act["row_status"])
 
     alpha, first = _ratio_test(base, dx, lo, hi, session.var_names,
-                               live=None if var_on_bound is None
-                               else ~var_on_bound)
+                               on_bound=var_on_bound, mu=mu)
     first_kind = None if first is None else "variable"
     dg = _row_step(session, dx)
     g_base = np.asarray(session.nl.constraints(base))
@@ -1303,9 +1336,8 @@ def estimate_report(model, perturb):
     # activity, and a pin constraint moves by construction
     live = g_l < g_u
     live[list(pin_idx)] = False
-    a_row, f_row = _ratio_test(
-        g_base, dg, g_l, g_u, row_names,
-        live=live if row_on_bound is None else live & ~row_on_bound)
+    a_row, f_row = _ratio_test(g_base, dg, g_l, g_u, row_names, live=live,
+                               on_bound=row_on_bound, mu=mu)
     if a_row < alpha:
         alpha, first, first_kind = a_row, f_row, "constraint"
 
@@ -1317,11 +1349,13 @@ def estimate_report(model, perturb):
             crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
     g_pred = g_base + dg
     gtol = 1e-9 * np.maximum(1.0, np.abs(g_pred))
-    crossed_rows = {}
+    crossed_rows = ComponentMap()
     out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
     for j in np.where(live & out_of_bounds)[0]:
-        crossed_rows[row_names[j]] = float(
-            max(g_l[j] - g_pred[j], g_pred[j] - g_u[j]))
+        oc = model.find_component(row_names[j])
+        if oc is not None:
+            crossed_rows[oc] = float(
+                max(g_l[j] - g_pred[j], g_pred[j] - g_u[j]))
 
     # the perturbation IS the shift of the pin constraints' right-hand
     # sides, so the violation is measured against the shifted ones

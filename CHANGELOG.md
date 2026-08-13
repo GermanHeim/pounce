@@ -95,19 +95,34 @@ set: the barrier parameter `mu`, the factor's inertia-correction
 `perturbations`, and `bounds_relaxed`.
 
 The ratio test behind `alpha` skips coordinates already on a bound,
-which cannot be crossed, and it reads the classification rather than a
-distance to decide that. The remaining slack is `O(mu)` at a strongly
-active bound but `O(sqrt(mu))` at a weakly active one, and no single
-distance threshold separates the second from a coordinate genuinely
-close to its bound. Scored anyway, such a coordinate divides two small
-quantities and becomes the minimum on any model carrying an active
-bound.
+which cannot be crossed. Scored anyway, such a coordinate divides the
+slack the barrier leaves by a step component of the same size, and
+becomes the minimum on any model carrying an active bound.
+
+Two things decide that a coordinate is on a bound. The classification
+rules where the classifier commits, and it is applied per side rather
+than per coordinate, because a coordinate held at one bound can still
+be carried across its other one. For the coordinates the classifier
+declines to rule on, the size of the remaining gap decides: it is
+`O(mu)` at a strongly active bound and `O(sqrt(mu))` at a weakly active
+one against `O(1)` room in the interior, so the threshold scales with
+`sqrt(mu)`, measured four orders of magnitude clear of the interior
+case. The `ambiguous` verdict cannot decide this on its own, since it
+covers both a coordinate on its bound and one near it with room left.
 
 A solve that ran with a non-zero `bound_relax_factor` is reported
 through `bounds_relaxed` rather than raised on. The classifier declines
 such a solve, since relaxed bounds shift the slacks it reads, but
 everything else in the report is still measured, and a caller reaches
 for a diagnostic precisely when the estimate and a re-solve disagree.
+
+Reading that condition needs `Solver.bound_relax_factor`, new on the
+Python solver: the value the held solve actually ran under, or `None`
+with no converged factor. `classify_activity` guards on it and raises,
+so without the getter the only way to tell a relaxed solve from any
+other bad-options failure is to provoke the guard and match the option
+name in the message, which turns back into a re-raise the day that
+message is reworded.
 
 This is item 0 of the sensitivity roadmap (#255).
 
@@ -119,13 +134,18 @@ factor column. The violation is checked against direct evaluation at
 the predicted point to 1e-12, hand-computed crossings to 1e-8 for both
 a variable bound and a constraint, and the report is checked identical
 through `SolverFactory('pounce')`, `SolverFactory('pounce_v2')` and the
-contrib `SolverFactory('pounce')`.
+contrib `SolverFactory('pounce')`. An invariant across every fixture
+holds the two halves of the report consistent: a non-empty crossed set
+means the reported fraction is below one. The ratio test is also tested
+directly on constructed arrays, which is the only way to reach the
+no-bound sentinel, a coordinate left outside its bound by a relaxed
+solve, and the per-side exclusion at chosen values.
 
 ### Fixed — the no-session error named only the legacy solver route (#584)
 
 `estimate`, `gradient`, `covariance` and `information` raise a
 `RuntimeError` naming the declaration to make and the solve to run when
-no sensitivity session exists. All five messages told the reader to
+no sensitivity session exists. All four messages told the reader to
 solve with `SolverFactory('pounce')`, which has been incomplete since
 the v2 interface was added in 0.10.0: `SolverFactory('pounce_v2')` and
 the contrib `SolverFactory('pounce')` build the same session, because

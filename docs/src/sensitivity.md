@@ -134,12 +134,58 @@ warns when the linear step leaves the variable bounds (a single-pass
 projection analogous to the CLI's `--sens-boundcheck`) — with one
 exception, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
-below. Multiplier sensitivities are available for equality constraints.
+below. `estimate_report()` measures the same step and reports where the
+active set changes along it, covered in
+[What the step did about the bounds](#what-the-step-did-about-the-bounds-estimate_report). Multiplier sensitivities are available for equality constraints.
 Models without declarations solve through the ordinary AMPL/CLI path,
 unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### What the step did about the bounds: `estimate_report()`
+
+The clamp warning names the variables it clipped and stops there.
+`estimate_report()` takes the same perturbation argument `estimate()`
+takes and measures the same step, so a caller can see how far along the
+perturbation the active set changes:
+
+```python
+from pyomo_pounce import estimate_report
+
+r = estimate_report(m, [(m.setpoint, 3.0)])
+r.alpha          # fraction of the perturbation that fits before a
+                 # bound is reached; inf when none lies in the way
+r.first          # which variable or constraint is reached there
+r.crossed        # {var data: distance past its bound} for the full
+r.crossed_rows   # step, and the same for inequality constraints
+r.violation      # constraint violation at the predicted point
+r.activity       # per coordinate: inactive / weakly_active /
+r.row_activity   # strongly_active / ambiguous / unidentified / ...
+```
+
+`alpha` comes from a ratio test along the step. Coordinates already on
+a bound take no part in it, on that side: the gap left at an active
+bound is the slack the barrier leaves rather than room to move, so
+scoring it divides two small quantities and would become the minimum on
+any model carrying an active bound. Which coordinates those are comes
+from the same classifier [Activity classification](#activity-classification)
+describes, and for the ones it declines to rule on, from the size of
+the gap measured against `sqrt(mu)`.
+
+Three further fields say what separates this prediction from the exact
+value at the perturbed active set, which is what a caller needs when
+the estimate and a re-solve disagree: `mu`, the barrier parameter the
+factorization sits at; `perturbations`, the factor's inertia
+corrections, non-zero when it was regularized; and `bounds_relaxed`,
+true when the solve ran with a non-zero `bound_relax_factor`. That last
+case is reported rather than raised on, and it empties the two
+classification maps, because relaxed bounds shift the slacks the
+classifier reads.
+
+`violation` is the primal half of the residual. The dual half needs the
+multipliers at the perturbed point and belongs to a corrector step,
+which holds them.
 
 ### Declared Params in variable bounds
 

@@ -438,6 +438,27 @@ impl PySolver {
             .unwrap_or(false)
     }
 
+    /// The `bound_relax_factor` the held solve actually ran under, or
+    /// `None` with no converged factor. Non-zero means a variable may
+    /// have settled outside the bound the model declares.
+    ///
+    /// This is the value `classify_activity` guards on, readable
+    /// without provoking the guard. A caller that wants to report a
+    /// relaxed solve rather than fail on one would otherwise have to
+    /// call `classify_activity`, catch its error, and match the option
+    /// name in the message, which silently becomes a re-raise the day
+    /// that message is reworded.
+    ///
+    /// Reads the solve's own value, not the live option: relaxing (or
+    /// not) happened once, and setting the option afterwards
+    /// re-measures nothing.
+    #[getter]
+    fn bound_relax_factor(&self) -> Option<Number> {
+        self.state
+            .as_ref()
+            .and_then(|s| s.inner.converged().map(|c| c.bound_relax_factor))
+    }
+
     /// Classify every bounded variable and every finite-bounded
     /// inequality row of the held solve by activity, from the ratio of
     /// barrier curvature to the model's own curvature (the exact
