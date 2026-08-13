@@ -1665,7 +1665,11 @@ where
         }
     }
 
-    if crate::deadline::expired() {
+    // `!is_verdict`: the loop breaks with `Optimal` the moment its convergence
+    // test passes, and the deadline can cross in the adjudication work below.
+    // A conclusion this solve actually reached outranks the clock — see
+    // [`crate::ipm::mark_timed_out`].
+    if crate::deadline::expired() && !crate::ipm::is_verdict(status) {
         status = QpStatus::TimeLimit;
     }
 
@@ -1705,9 +1709,15 @@ where
     // terminate with a certificate status (`PrimalInfeasible` / `DualInfeasible`)
     // and never reach here; a τ → 0 ray or an out-of-`K*` dual returns `None`
     // from the certificate and is never promoted.
+    // `TimeLimit` joins the set for the same reason `IterationLimit` is in it:
+    // both say the loop stopped, neither says the point it stopped on is
+    // unusable, and the adjudication below only ever upgrades.
     if matches!(
         status,
-        QpStatus::OptimalInaccurate | QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::OptimalInaccurate
+            | QpStatus::NumericalFailure
+            | QpStatus::IterationLimit
+            | QpStatus::TimeLimit
     ) {
         let reduced_acc = opts.tol.sqrt();
 

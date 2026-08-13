@@ -329,6 +329,14 @@ where
     // strict improvement. Runs against the same un-equilibrated `prob` so the
     // `z`/`s` conventions line up. See [`crate::crossover`].
     let sol = crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend);
+    // Crossover declines rather than restamps when the budget runs out mid-
+    // refinement, so account for a deadline crossed in there here — where
+    // `mark_timed_out`'s verdict rule applies and an `Optimal` cannot be lost.
+    let sol = if crate::deadline::expired() {
+        mark_timed_out(sol)
+    } else {
+        sol
+    };
     finite_or_failed(prob, sol)
 }
 
@@ -2428,7 +2436,11 @@ fn run_ipm(
         }
     }
 
-    if crate::deadline::expired() {
+    // `!is_verdict`: the loop breaks with `Optimal` the moment its convergence
+    // test passes, and the deadline can cross in the residual/objective work
+    // that follows. Stamping `TimeLimit` over that conclusion would throw away
+    // an answer this solve *did* reach — see [`mark_timed_out`].
+    if crate::deadline::expired() && !is_verdict(status) {
         status = QpStatus::TimeLimit;
     }
 
@@ -2436,9 +2448,15 @@ fn run_ipm(
     // same rule the HSDE driver applies (see `VERDICT` in `hsde.rs`), so the two
     // drivers cannot drift apart on whether a solve that ended without its own
     // verdict actually produced an answer. Strictly an upgrade.
+    //
+    // `TimeLimit` belongs in this set for the same reason `IterationLimit`
+    // does: all three are "stopped without concluding", and a cancelled solve
+    // whose last iterate happens to satisfy the KKT conditions to `tol` has an
+    // answer sitting right there. Excluding it would report `TimeLimit` on a
+    // point this very block is about to certify as optimal.
     if matches!(
         status,
-        QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::TimeLimit
     ) {
         let candidate = QpSolution {
             status,
@@ -2752,9 +2770,40 @@ fn timed_out_solution(prob: &QpProblem) -> QpSolution {
     }
 }
 
+/// Label a *finished* solve as cancelled — but never at the cost of a verdict.
+///
+/// Every caller runs this after an inner solve has already returned, so `sol`
+/// may well carry a real answer: the deadline crossing that brought us here can
+/// land in the instant *between* convergence and the check. Overwriting an
+/// `Optimal` (or a verified infeasible/unbounded certificate) with `TimeLimit`
+/// there does not report a timeout, it discards a correct result — the user
+/// whose problem solves in 1.001 s under `time_limit = 1` loses the optimum they
+/// in fact computed, and every consumer downstream (the CLI's status mapping,
+/// the SQP fallback) reads a non-answer.
+///
+/// So only a *non-verdict* status is relabelled. `IterationLimit` and
+/// `NumericalFailure` describe a solve that stopped without concluding
+/// anything, and for those "the clock ran out" is the more useful account of
+/// why; `Optimal`, `OptimalInaccurate`, and the two certificates are
+/// conclusions, and they stand.
 fn mark_timed_out(mut sol: QpSolution) -> QpSolution {
-    sol.status = QpStatus::TimeLimit;
+    if !is_verdict(sol.status) {
+        sol.status = QpStatus::TimeLimit;
+    }
     sol
+}
+
+/// True when the status is a *conclusion about the problem* rather than a
+/// record of the solver giving up — i.e. something a deadline crossing must not
+/// erase. See [`mark_timed_out`].
+pub(crate) fn is_verdict(status: QpStatus) -> bool {
+    matches!(
+        status,
+        QpStatus::Optimal
+            | QpStatus::OptimalInaccurate
+            | QpStatus::PrimalInfeasible
+            | QpStatus::DualInfeasible
+    )
 }
 
 /// Build a `PrimalInfeasible` solution reported by a **setup-time** screen —
@@ -4046,7 +4095,7 @@ mod false_optimum_metric_tests {
 mod finite_guard_tests {
     //! gh #491: a non-finite entry never leaves the crate.
 
-    use super::finite_or_failed;
+    use super::{finite_or_failed, mark_timed_out};
     use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
 
     fn prob() -> QpProblem {
@@ -4120,6 +4169,39 @@ mod finite_guard_tests {
             );
             assert_eq!(out.x, vec![0.0, 0.0], "case {i}");
             assert_eq!(out.iters, 7, "case {i}: the iteration count is kept");
+        }
+    }
+
+    /// A deadline crossing can only ever *land on* a finished solve — every
+    /// caller of [`mark_timed_out`] runs after an inner solve returned. So a
+    /// conclusion the solve actually reached must survive it: the user whose
+    /// problem converges a millisecond past `time_limit` gets the optimum they
+    /// computed, not a report that nothing was solved.
+    #[test]
+    fn a_verdict_outranks_the_clock() {
+        for status in [
+            QpStatus::Optimal,
+            QpStatus::OptimalInaccurate,
+            QpStatus::PrimalInfeasible,
+            QpStatus::DualInfeasible,
+        ] {
+            let s = sol(status, vec![0.25, 0.75], -0.5);
+            let out = mark_timed_out(s.clone());
+            assert_eq!(out.status, status, "a timeout erased a {status:?} verdict");
+            assert_eq!(out.x, s.x, "and it must not disturb the iterate");
+        }
+    }
+
+    /// The other half of the rule: a solve that stopped *without* concluding
+    /// anything is relabelled, because "the clock ran out" is the more useful
+    /// account of why it stopped.
+    #[test]
+    fn a_non_verdict_is_relabelled_as_cancelled() {
+        for status in [QpStatus::IterationLimit, QpStatus::NumericalFailure] {
+            let s = sol(status, vec![0.25, 0.75], -0.5);
+            let out = mark_timed_out(s.clone());
+            assert_eq!(out.status, QpStatus::TimeLimit, "from {status:?}");
+            assert_eq!(out.x, s.x, "the best iterate is still worth returning");
         }
     }
 }

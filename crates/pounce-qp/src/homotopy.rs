@@ -759,6 +759,12 @@ impl ParametricActiveSetSolver {
                     }
                     continue;
                 }
+                // A cancelled factorization is not a path breakdown. Falling
+                // through to `Ok(None)` would report "path could not be
+                // started" and send the caller off to begin a *fresh*
+                // conventional solve with the budget already spent; propagate
+                // so the entry point turns it into `TimeLimit` directly.
+                Err(QpError::DeadlineExpired) => return Err(QpError::DeadlineExpired),
                 Err(e) => {
                     if trace {
                         eprintln!("[hom] KKT factorization failed at t={t:.6e}: {e}");

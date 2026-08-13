@@ -1046,7 +1046,11 @@ where
         }
     }
 
-    if crate::deadline::expired() {
+    // `!is_verdict`: the loop breaks with `Optimal` as soon as its convergence
+    // test passes, and the deadline can cross during the un-homogenization and
+    // verdict work below. A conclusion this solve actually reached outranks the
+    // clock — see [`crate::ipm::mark_timed_out`].
+    if crate::deadline::expired() && !crate::ipm::is_verdict(status) {
         status = QpStatus::TimeLimit;
     }
 
@@ -1090,11 +1094,13 @@ where
     // would otherwise have no answer.
     if matches!(
         status,
-        QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::TimeLimit
     ) {
         // `x`/`y`/`z` are already un-homogenized above, hence `τ = 1`. Strictly
         // an upgrade: a point that fails both bands leaves the loop's own
-        // verdict (breakdown *or* iteration limit) untouched.
+        // verdict (breakdown, iteration limit, *or* cancellation) untouched.
+        // `TimeLimit` qualifies for the same reason the other two do — it says
+        // the loop stopped, not that the point it stopped on is unusable.
         status = match true_kkt_error(prob, cone, &x, &y, &z, 1.0) {
             Some(e) if e < opts.tol => QpStatus::Optimal,
             Some(e) if e < 1e3 * opts.tol => QpStatus::OptimalInaccurate,
