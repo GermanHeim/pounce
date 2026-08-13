@@ -1200,22 +1200,33 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
     active bound. Activity is reported through the classification
     instead.
 
-    Two things decide that a coordinate is on a bound, and both are
-    needed. `on_bound` carries the classification, which is exact where
-    the classifier commits. It is applied per SIDE, not per coordinate:
-    a coordinate held at one bound can still be carried across its
-    other one, so excluding it outright drops a real crossing.
+    A coordinate the full step carries past a bound is always scored,
+    whatever the exclusion would otherwise say. That case IS a crossing,
+    at a fraction below one by construction, and the caller reads it in
+    `crossed` off the same predicate and the same tolerance. Deciding it
+    twice is what let the two disagree, reporting that 998 times the
+    perturbation fits while naming a coordinate the single step leaves
+    its bound by 0.25.
 
-    The distance test below covers the coordinates the classifier
-    declines to rule on, where the label cannot answer the question
-    because `ambiguous` spans both a coordinate near its bound with
-    room left and one already on it. What separates those is the size
-    of the remaining gap, which is O(mu) at a strongly active bound and
+    So the exclusion below only ever applies to coordinates that do not
+    cross, and cannot cost a crossing. Two things drive it. `on_bound`
+    carries the classification, which is exact where the classifier
+    commits, applied per SIDE rather than per coordinate, since a
+    coordinate held at one bound can still be carried across its other
+    one.
+
+    The distance test covers the coordinates the classifier declines to
+    rule on, where the label cannot answer the question because
+    `ambiguous` spans both a coordinate near its bound with room left
+    and one already on it. What separates those is the size of the
+    remaining gap, which is O(mu) at a strongly active bound and
     O(sqrt(mu)) at a weakly active one, against O(1) room in the
     interior. So the threshold scales with sqrt(mu), measured four
-    orders of magnitude clear of the interior case. Without a
-    classification there is no `mu` either, and it falls back to a
-    fixed threshold.
+    orders of magnitude clear of the interior case. It is capped
+    because it is applied relative to the coordinate's own magnitude,
+    and a loose `mu` at termination would otherwise widen it without
+    limit. Without a classification there is no `mu` either, and it
+    falls back to a fixed threshold.
 
     Coordinates whose step is below the roundoff of their own magnitude
     also take no part, since dividing by one puts the crossing at an
@@ -1225,16 +1236,27 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
     toward_hi = step > 0
     bound = np.where(toward_hi, hi, lo)
     distance = bound - base
-    on_bound_gap = 1e-9 if not np.isfinite(mu) else max(1e-9, 10.0 * mu ** 0.5)
-    ok = (np.abs(step) > 1e-12 * scale) & (np.abs(bound) < _NO_BOUND) & (
-        np.abs(distance) > on_bound_gap * scale)
-    if live is not None:
-        ok &= live
+    present = np.abs(bound) < _NO_BOUND
+    moving = np.abs(step) > 1e-12 * scale
+
+    # the same predicate, and the same tolerance, that fills `crossed`
+    reached = base + step
+    tol = 1e-9 * np.maximum(1.0, np.abs(reached))
+    crosses = present & moving & np.where(
+        toward_hi, reached > bound + tol, reached < bound - tol)
+
+    floor = 1e-9 if not np.isfinite(mu) else min(
+        1e-2, max(1e-9, 10.0 * mu ** 0.5))
+    interior = np.abs(distance) > floor * scale
     if on_bound is not None:
         # the nearer bound is the one the coordinate is held at, and it
         # is only that side the classification rules out
         at_hi = (hi - base) <= (base - lo)
-        ok &= ~(on_bound & (toward_hi == at_hi))
+        interior &= ~(on_bound & (toward_hi == at_hi))
+
+    ok = present & moving & (crosses | interior)
+    if live is not None:
+        ok &= live
     if not ok.any():
         return float("inf"), None
     fraction = np.full(base.shape, np.inf)

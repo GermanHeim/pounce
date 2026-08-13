@@ -56,9 +56,11 @@ def test_ratio_test_excludes_only_the_side_a_coordinate_is_held_on():
     assert first == "x"
     assert alpha == pytest.approx(2.0 / 3.0, rel=1e-12)
 
-    # and the side it IS held on stays excluded: driven up instead, the
-    # gap at ub is barrier residue and x must not set the fraction
-    alpha2, first2 = _ratio_test(base, np.array([3.0, 0.4]), lo, hi,
+    # and the side it IS held on stays excluded, for a step that does
+    # not carry it past that bound: the gap left there is barrier
+    # residue and x must not set the fraction
+    near = np.array([1.0 - 1e-6, 0.0])
+    alpha2, first2 = _ratio_test(near, np.array([5e-7, 0.4]), lo, hi,
                                  ["x", "z"], on_bound=on_bound, mu=1e-9)
     assert first2 == "z"
 
@@ -68,18 +70,21 @@ def test_ratio_test_scales_its_distance_floor_with_the_barrier():
     size of its gap. At mu = 1e-9 a weakly active one sits O(sqrt(mu))
     from its bound, four orders inside the interior case."""
     lo, hi = np.array([-5.0]), np.array([1.0])
-    step = np.array([0.5])
+    # steps that stop short of the bound, so the question is the floor
+    # rather than a crossing, which is scored either way
     weak = np.array([1.0 - 4.4e-5])       # O(sqrt(mu)) gap: on its bound
-    alpha, first = _ratio_test(weak, step, lo, hi, ["x"], mu=1e-9)
+    alpha, first = _ratio_test(weak, np.array([2e-5]), lo, hi, ["x"],
+                               mu=1e-9)
     assert alpha == float("inf") and first is None
 
     interior = np.array([1.0 - 1e-2])     # real room left
-    alpha, first = _ratio_test(interior, step, lo, hi, ["x"], mu=1e-9)
+    alpha, first = _ratio_test(interior, np.array([5e-3]), lo, hi, ["x"],
+                               mu=1e-9)
     assert first == "x"
-    assert alpha == pytest.approx(2e-2, rel=1e-9)
+    assert alpha == pytest.approx(2.0, rel=1e-9)
 
     # with no classification there is no mu, and the fixed floor applies
-    alpha, first = _ratio_test(weak, step, lo, hi, ["x"])
+    alpha, first = _ratio_test(weak, np.array([2e-5]), lo, hi, ["x"])
     assert first == "x"
 
 
@@ -98,6 +103,20 @@ def bounded(ub_y=5.0, fixed=False):
         m.f = pyo.Var(bounds=(3.0, 3.0), initialize=3.0)
         expr = expr + (m.f - 3.0) ** 2
     m.obj = pyo.Objective(expr=expr)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def held_at_a_bound():
+    """x is weakly active at ub = 1 after solving at p = 1, and z has
+    far bounds so it cannot be the first crossing at small
+    perturbations."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1.0, mutable=True)
+    m.x = pyo.Var(bounds=(None, 1.0), initialize=0.0)
+    m.z = pyo.Var(bounds=(-500.0, 500.0), initialize=0.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + (m.z - m.p) ** 2)
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
     return m
@@ -353,12 +372,15 @@ def test_a_weakly_active_bound_is_classified_as_such():
     # leaves at a strongly active bound
     assert pyo.value(m.x) == pytest.approx(1.0, abs=1e-3)
 
-    r = estimate_report(m, [(m.p, 1.5)])
+    # perturb away from the bound x is held at, so the question is
+    # whether the gap counts as room rather than whether x crosses
+    r = estimate_report(m, [(m.p, 0.5)])
     assert r.activity["x"] == "weakly_active"
-    # that gap is barrier residue, so it is not room the step can cross:
-    # scoring it would put the first crossing at a fraction of a percent
+    # that gap is barrier residue, not room, so it must not set the
+    # fraction: scoring it would put the crossing at a fraction of a
+    # percent of a perturbation that crosses nothing
+    assert len(r.crossed) == 0
     assert r.first != "x"
-    assert r.first == "z"
 
 
 def test_several_parameters_perturbed_at_once():
@@ -422,6 +444,8 @@ def test_a_bound_the_step_crosses_is_never_missed():
         (bounded(fixed=True), 4.0),
         (with_row(), 3.0),
         (bounded(), 1.2),
+        (held_at_a_bound(), 1.5),   # pushed further past the same side
+        (held_at_a_bound(), 0.5),   # and away from it
     ]
     for m, newval in cases:
         r = estimate_report(m, [(m.p, newval)])
@@ -457,6 +481,69 @@ def test_a_coordinate_on_one_bound_can_still_cross_the_other():
     alpha, who = brute_force_multi(m, [(m.p, -2.0)])
     assert who == "x"
     assert r.alpha == pytest.approx(alpha, rel=1e-12)
+
+
+def test_a_coordinate_pushed_further_past_the_bound_it_is_held_at():
+    """The exclusion covers the side x is held on, which is also the
+    side the step pushes it past. Excluding it there reported that 998
+    times the perturbation fits while naming x as leaving its bound by
+    0.25 in the same object."""
+    m = held_at_a_bound()
+    r = estimate_report(m, [(m.p, 1.5)])
+    assert r.activity["x"] == "weakly_active"
+    assert len(r.crossed) == 1 and m.x in r.crossed
+
+    # x is on its bound and the step drives it outward, so no part of
+    # the perturbation fits before the bound is reached
+    assert r.first == "x"
+    assert r.alpha < 1e-3
+
+    # the classification still keeps it out when nothing crosses, which
+    # is what the exclusion is for
+    r2 = estimate_report(m, [(m.p, 1.0 + 1e-9)])
+    assert len(r2.crossed) == 0
+    assert r2.first != "x"
+
+
+def test_the_distance_floor_is_capped():
+    """The floor is relative to the coordinate's own magnitude, so an
+    uncapped `10 * sqrt(mu)` widens without limit when the solve leaves
+    mu loose, and a dropped coordinate is a missed crossing."""
+    lo = np.array([-1e9])
+    hi = np.array([1000.4])
+    base = np.array([1000.0])         # 0.4 units of genuine room
+    step = np.array([1.0])
+
+    # a loose solve: sqrt(mu) * 10 would be 3e-2 relative, 30 absolute
+    alpha, first = _ratio_test(base, step, lo, hi, ["x"], mu=9.1e-6)
+    assert first == "x"
+    assert alpha == pytest.approx(0.4, rel=1e-9)
+
+    # and the calibration at an ordinary mu is unchanged: a gap at
+    # barrier scale is still read as being on the bound
+    weak = np.array([1.0 - 4.4e-5])
+    alpha, first = _ratio_test(weak, np.array([2e-5]), np.array([-5.0]),
+                               np.array([1.0]), ["x"], mu=1e-9)
+    assert alpha == float("inf") and first is None
+
+
+def test_a_crossing_is_scored_even_where_the_exclusion_applies():
+    """One predicate decides `crossed` and participation, so the two
+    cannot disagree. A coordinate held at its bound and driven outward
+    scores 0.0: no room, rather than no bound."""
+    lo = np.array([-5.0])
+    hi = np.array([1.0])
+    base = np.array([1.0 - 4.4e-5])   # on its bound at barrier scale
+    step = np.array([0.25])           # driven outward, well past it
+    alpha, first = _ratio_test(base, step, lo, hi, ["x"],
+                               on_bound=np.array([True]), mu=1e-9)
+    assert first == "x"
+    assert 0.0 <= alpha < 1.0
+
+    # nothing crosses: the exclusion applies and x drops out
+    alpha, first = _ratio_test(base, np.array([1e-6]), lo, hi, ["x"],
+                               on_bound=np.array([True]), mu=1e-9)
+    assert alpha == float("inf") and first is None
 
 
 def test_no_bound_in_the_step_direction_reports_no_crossing():

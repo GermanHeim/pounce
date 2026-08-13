@@ -94,21 +94,27 @@ separate the predictor from the exact value at the perturbed active
 set: the barrier parameter `mu`, the factor's inertia-correction
 `perturbations`, and `bounds_relaxed`.
 
-The ratio test behind `alpha` skips coordinates already on a bound,
-which cannot be crossed. Scored anyway, such a coordinate divides the
-slack the barrier leaves by a step component of the same size, and
-becomes the minimum on any model carrying an active bound.
+A coordinate the full step carries past a bound always sets `alpha`,
+off the same predicate and the same tolerance that put it in
+`crossed`, so the two halves of the report cannot disagree about what
+the step did.
 
-Two things decide that a coordinate is on a bound. The classification
-rules where the classifier commits, and it is applied per side rather
-than per coordinate, because a coordinate held at one bound can still
-be carried across its other one. For the coordinates the classifier
-declines to rule on, the size of the remaining gap decides: it is
-`O(mu)` at a strongly active bound and `O(sqrt(mu))` at a weakly active
-one against `O(1)` room in the interior, so the threshold scales with
-`sqrt(mu)`, measured four orders of magnitude clear of the interior
-case. The `ambiguous` verdict cannot decide this on its own, since it
-covers both a coordinate on its bound and one near it with room left.
+Everything else on a bound is skipped, since the slack left there is
+what the barrier leaves rather than room to move, and dividing it by a
+step of the same size would become the minimum on any model carrying an
+active bound. Because that exclusion only ever reaches coordinates that
+do not cross, it cannot cost a crossing. The classification drives it
+where the classifier commits, applied per side rather than per
+coordinate, because a coordinate held at one bound can still be carried
+across its other one. For the coordinates the classifier declines to
+rule on, the size of the remaining gap decides: it is `O(mu)` at a
+strongly active bound and `O(sqrt(mu))` at a weakly active one against
+`O(1)` room in the interior, so the threshold scales with `sqrt(mu)`,
+measured four orders of magnitude clear of the interior case, and is
+capped because it is applied relative to the coordinate's own magnitude
+and a loose `mu` at termination would otherwise widen it without limit.
+The `ambiguous` verdict cannot decide this on its own, since it covers
+both a coordinate on its bound and one near it with room left.
 
 A solve that ran with a non-zero `bound_relax_factor` is reported
 through `bounds_relaxed` rather than raised on. The classifier declines
