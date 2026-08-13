@@ -162,8 +162,8 @@ def _check_status(status, where):
     The differentiable layer reads the primal/dual iterate and solves a
     KKT system for the gradient. If the forward solve did not converge
     (``primal_infeasible`` / ``dual_infeasible`` / ``iteration_limit`` /
-    ``numerical_failure``), that iterate is not a KKT point and the
-    implicit-function gradient is meaningless — so fail loudly rather than
+    ``time_limit`` / ``numerical_failure``), that iterate is not a KKT point
+    and the implicit-function gradient is meaningless — so fail loudly rather than
     return silent NaNs/garbage into a downstream optimizer. Use the host
     ``pounce.qp`` API (which surfaces ``QpResult.status``) to inspect the
     failure."""

@@ -129,6 +129,10 @@ _QP_STATUS_CODE = {
     "primal_infeasible": 2,
     "dual_infeasible": 3,
     "iteration_limit": 1,
+    # A spent wall-clock budget is the same kind of outcome as a spent
+    # iteration budget — the solve stopped early without converging — and scipy
+    # spells that 1 for both.
+    "time_limit": 1,
     "numerical_failure": 4,
 }
 
@@ -156,6 +160,9 @@ _QP_STATUS_MESSAGE = {
     "unbounded below over the feasible region (the convex solver returned a "
     "dual-infeasibility certificate).",
     "iteration_limit": "Maximum number of iterations reached.",
+    "time_limit": "Maximum wall-clock time reached (``max_wall_time``); the "
+    "returned point is the best iterate the solver had when the budget ran "
+    "out.",
     "numerical_failure": "Numerical difficulties encountered.",
 }
 

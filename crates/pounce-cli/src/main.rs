@@ -2197,7 +2197,9 @@ fn resolve_scaling_retry_outcome(
 ///   *verified*, which a second solve must not be allowed to overwrite.
 ///   `NumericalFailure` is left alone here for the same reason the QP path has
 ///   always reported it: it is the post-solve verification refusing a point,
-///   and the LP corpus has no case of it that the NLP path recovers.
+///   and the LP corpus has no case of it that the NLP path recovers. Nor does
+///   `TimeLimit`, which is a spent budget rather than a stall — rerouting it
+///   would answer "stop after `max_wall_time`" with a second solve.
 ///
 /// Note what this deliberately is **not**: the issue's "never-regress" variant,
 /// which would keep whichever of the two results certifies at the lower KKT
@@ -2360,11 +2362,22 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     if let Ok((v, true)) = opt.get_numeric_value("tol", "") {
         o.tol = v;
     }
+    // `max_wall_time`, honoured only when the user set it explicitly (the `true`
+    // flag) — Ipopt's default is 1e20, i.e. "no limit", and turning that into a
+    // `Duration` would put a nonsensical deadline on every solve.
+    //
+    // A value `Duration` cannot represent is *not* clamped to something huge:
+    // it means no limit, and it says so. `try_from_secs_f64` rejects exactly
+    // the values with no honest deadline — NaN, and anything past ~5.8e11
+    // years including `f64::INFINITY` and Ipopt's own 1e20 sentinel should a
+    // user type it out. Negative is invalid and likewise ignored. `0.0` is
+    // kept as a real (immediate) deadline: "take no time" is the wall-clock
+    // twin of `max_iter=0`, which pounce#186 requires to stop before solving.
     if let Ok((v, true)) = opt.get_numeric_value("max_wall_time", "")
         && v >= 0.0
+        && let Ok(d) = std::time::Duration::try_from_secs_f64(v)
     {
-        o.time_limit =
-            Some(std::time::Duration::try_from_secs_f64(v).unwrap_or(std::time::Duration::MAX));
+        o.time_limit = Some(d);
     }
     if let Ok((v, true)) = opt.get_numeric_value("qp_tau", "") {
         o.tau = v;
@@ -3327,12 +3340,13 @@ mod lp_nlp_fallback_tests {
     use pounce_cli::dispatch::ProblemClass;
     use pounce_convex::QpStatus;
 
-    const ALL_STATUSES: [QpStatus; 6] = [
+    const ALL_STATUSES: [QpStatus; 7] = [
         QpStatus::Optimal,
         QpStatus::OptimalInaccurate,
         QpStatus::PrimalInfeasible,
         QpStatus::DualInfeasible,
         QpStatus::IterationLimit,
+        QpStatus::TimeLimit,
         QpStatus::NumericalFailure,
     ];
 
@@ -3380,6 +3394,19 @@ mod lp_nlp_fallback_tests {
                 "{status:?} must not reroute"
             );
         }
+    }
+
+    /// A wall-clock budget is a budget, exactly as `max_iter` is: `TimeLimit`
+    /// is the answer to the question the user asked. Rerouting it would launch
+    /// a *second*, unbudgeted solve on a problem whose whole point was to stop
+    /// — the fallback would double the time limit it was told to respect.
+    #[test]
+    fn a_spent_time_budget_is_not_a_reason_to_solve_again() {
+        assert!(!lp_declines_to_nlp(
+            ProblemClass::Lp,
+            QpStatus::TimeLimit,
+            true
+        ));
     }
 
     /// The issue scopes the fallback to `P = 0`. A convex QP that stalls is a

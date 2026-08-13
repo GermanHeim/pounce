@@ -17,6 +17,32 @@ changes.
   400 / `MaximumWallTimeExceeded`, and never reroutes a timed-out solve to NLP.
   This is source-breaking for exhaustive option literals and enum matches.
 
+  A deadline changes when a solve stops, never what it answers. Two rules
+  carry that:
+
+  * **Cancellation is an error, not a value.** In `pounce-qp` it travels as
+    the internal `QpError::DeadlineExpired`, so `?` propagation forces every
+    caller to handle it, and only the `QpSolver` entry points turn it back
+    into the soft `QpStatus::TimeLimit`. Without this,
+    `factorize_with_inertia_control` — whose "success" is a right-hand side
+    solved in place — could return `Ok` on a timeout, and
+    `solve_equality_only` would read the *un-solved* `[-g; b]` back as
+    `[x*; λ*]`, skip the guards a zero shift makes moot, and report a
+    feasible-but-wrong point as `Optimal`. Covered by a regression test that
+    reproduces the window deterministically.
+  * **A verdict outranks the clock.** Every deadline check in `pounce-convex`
+    runs after some inner solve has already returned, so the crossing can land
+    between convergence and the check. `Optimal`, `OptimalInaccurate`, and the
+    two infeasibility certificates now survive it; only `IterationLimit` /
+    `NumericalFailure`, which conclude nothing, are relabelled. A problem that
+    converges a millisecond past its budget hands back the optimum it computed
+    instead of a report that nothing was solved. `TimeLimit` also joins each
+    driver's reduced-accuracy salvage, so a cancelled solve whose last iterate
+    satisfies the KKT conditions is still allowed to say so.
+
+  A cancelled active-set solve also reports the wall-clock time it actually
+  spent rather than zero.
+
 
 ## [0.10.0] - 2026-08-11
 
