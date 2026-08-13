@@ -40,8 +40,17 @@ changes.
     driver's reduced-accuracy salvage, so a cancelled solve whose last iterate
     satisfies the KKT conditions is still allowed to say so.
 
+  Both rules apply on the LP / convex-QP **active-set** route as well as the
+  IPM one: `solve_qp_active_set` shares the IPM's relabelling policy rather
+  than stamping `TimeLimit` over whatever the inner solve returned, and a
+  cancelled engine result now goes through the same verified KKT check as an
+  iteration-limited one — reaching the answer and then running out of seconds
+  used to be reported as reaching nothing, while running out of *iterations*
+  at the identical point reported `Optimal`.
+
   A cancelled active-set solve also reports the wall-clock time it actually
-  spent rather than zero.
+  spent rather than zero. `pounce_convex::batch`'s `time_limit` is documented
+  as per-instance, which is what it has always been.
 
 
 ## [0.10.0] - 2026-08-11

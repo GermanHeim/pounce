@@ -2786,7 +2786,7 @@ fn timed_out_solution(prob: &QpProblem) -> QpSolution {
 /// anything, and for those "the clock ran out" is the more useful account of
 /// why; `Optimal`, `OptimalInaccurate`, and the two certificates are
 /// conclusions, and they stand.
-fn mark_timed_out(mut sol: QpSolution) -> QpSolution {
+pub(crate) fn mark_timed_out(mut sol: QpSolution) -> QpSolution {
     if !is_verdict(sol.status) {
         sol.status = QpStatus::TimeLimit;
     }

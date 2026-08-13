@@ -42,6 +42,17 @@
 //! right choice when each individual factor is large enough to parallelize
 //! on its own. The `make_backend` factory is shared by reference and called
 //! once per instance, so it must be `Sync`.
+//!
+//! ## `time_limit` is **per instance**, not per batch
+//!
+//! Every entry point here forwards the same [`QpOptions`] to each solve, and
+//! each solve opens its own deadline scope — so `time_limit = 10s` over 100
+//! problems permits 1000 s of wall clock, not 10. That is the only coherent
+//! reading for [`solve_qp_batch_parallel`], where a shared clock would make
+//! which instances get cancelled depend on rayon's scheduling and so on the
+//! machine; it is kept for the sequential entry points too, so the meaning of
+//! the option does not change when a caller switches between them. A caller
+//! who wants a budget for the *batch* has to enforce it around the call.
 
 use crate::ipm::{QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_warm};
 use crate::qp::{QpProblem, QpSolution};

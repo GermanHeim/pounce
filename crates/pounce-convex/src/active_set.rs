@@ -197,10 +197,10 @@ where
             solve_qp_active_set_inner(prob, opts, engine, make_backend),
         );
         if crate::deadline::expired() {
-            QpSolution {
-                status: QpStatus::TimeLimit,
-                ..sol
-            }
+            // Shared policy with the IPM path: a deadline crossing observed
+            // *after* the inner solve returned relabels a give-up status, but
+            // never overwrites a verdict. See [`crate::ipm::mark_timed_out`].
+            crate::ipm::mark_timed_out(sol)
         } else {
             sol
         }
@@ -271,10 +271,7 @@ where
         return sol;
     }
     if crate::deadline::expired() {
-        return QpSolution {
-            status: QpStatus::TimeLimit,
-            ..sol
-        };
+        return crate::ipm::mark_timed_out(sol);
     }
 
     let mut best = sol;
@@ -306,10 +303,7 @@ where
             return best;
         }
         if crate::deadline::expired() {
-            return QpSolution {
-                status: QpStatus::TimeLimit,
-                ..best
-            };
+            return crate::ipm::mark_timed_out(best);
         }
     }
 
@@ -339,10 +333,7 @@ where
     // attempt was seeded and there is nothing new to try.
     if engine.use_homotopy != Some(false) {
         if crate::deadline::expired() {
-            return QpSolution {
-                status: QpStatus::TimeLimit,
-                ..best
-            };
+            return crate::ipm::mark_timed_out(best);
         }
         let seeded_engine = ActiveSetOverrides {
             use_homotopy: Some(false),
@@ -934,7 +925,14 @@ fn verify_status(
         // the acceptable tier (the IPM salvages solves this way), but it is
         // never promoted to a clean `Optimal`.
         ActiveSetStatus::MaxIter => solved_to(err).unwrap_or(QpStatus::IterationLimit),
-        ActiveSetStatus::TimeLimit => QpStatus::TimeLimit,
+        // The wall clock is a budget like the iteration cap, and is salvaged the
+        // same way: `solved_to` re-derives the KKT error against the original
+        // problem, so a cancelled solve that had in fact already reached the
+        // answer reports it. Discarding the point because of *when* the engine
+        // stopped — while keeping the identical point when it stopped for
+        // running out of iterations — is the same verdict erasure
+        // [`crate::ipm::mark_timed_out`] exists to prevent, one layer down.
+        ActiveSetStatus::TimeLimit => solved_to(err).unwrap_or(QpStatus::TimeLimit),
         ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
     }
 }
@@ -1633,5 +1631,68 @@ mod tests {
             );
             assert_eq!(isol.status, QpStatus::PrimalInfeasible, "ipm");
         }
+    }
+
+    /// The exact optimum of [`projection_qp`], as a solution the engine could
+    /// have been holding when it stopped.
+    fn projection_optimum() -> QpSolution {
+        QpSolution {
+            status: QpStatus::Optimal,
+            x: vec![2.5, 1.5],
+            y: vec![],
+            z: vec![1.0],
+            z_lb: vec![0.0; 2],
+            z_ub: vec![0.0; 2],
+            obj: -12.5,
+            iters: 0,
+            iterates: Vec::new(),
+        }
+    }
+
+    /// A cancelled solve is verified, not discarded.
+    ///
+    /// `verify_status` re-derives the KKT error against the original problem
+    /// for every engine status, so the point an engine happens to be holding
+    /// when it stops decides the verdict. Before this, `TimeLimit` alone
+    /// skipped that check: the identical point was reported `Optimal` when the
+    /// engine ran out of *iterations* and thrown away when it ran out of
+    /// *seconds*. Which budget expired is not a fact about the user's problem.
+    #[test]
+    fn a_cancelled_solve_still_gets_its_kkt_point_verified() {
+        let prob = projection_qp();
+        let opts = QpOptions::default();
+        let sol = projection_optimum();
+
+        assert_eq!(
+            verify_status(ActiveSetStatus::TimeLimit, None, &sol, &prob, &opts),
+            QpStatus::Optimal,
+            "an optimal point does not stop being optimal because the clock ran out"
+        );
+        // The iteration cap has always been salvaged this way; the two budgets
+        // must now reach the same verdict on the same point.
+        assert_eq!(
+            verify_status(ActiveSetStatus::MaxIter, None, &sol, &prob, &opts),
+            verify_status(ActiveSetStatus::TimeLimit, None, &sol, &prob, &opts),
+            "the two budgets must agree on an identical point"
+        );
+    }
+
+    /// The other half: salvage is earned, not assumed. A cancelled solve that
+    /// really was nowhere near the answer still reports `TimeLimit`.
+    #[test]
+    fn a_cancelled_solve_far_from_optimal_is_still_a_time_limit() {
+        let prob = projection_qp();
+        let opts = QpOptions::default();
+        let sol = QpSolution {
+            x: vec![0.0, 0.0],
+            z: vec![0.0],
+            obj: 0.0,
+            ..projection_optimum()
+        };
+
+        assert_eq!(
+            verify_status(ActiveSetStatus::TimeLimit, None, &sol, &prob, &opts),
+            QpStatus::TimeLimit
+        );
     }
 }
