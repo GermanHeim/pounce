@@ -5,8 +5,9 @@ scopes extending pyomo-pounce's `estimate()` to handle active-set changes,
 reaching parity with sIPOPT and then past it, on a clean mechanism/policy
 boundary. That is the pyomo / held-factorization sensitivity path
 specifically; the jax/torch and convex-QP frontends have their own
-sensitivity surfaces (see Related work). Nothing here is implemented yet;
-the intent is to agree the shape before any PR.
+sensitivity surfaces (see Related work). Item 0 is implemented and
+merged. The rest is a proposal, and the intent is to agree the shape
+before any PR.
 
 ## State of the art
 
@@ -184,8 +185,8 @@ the natural-units exports (`var_sigma`, `row_sigma`, `row_normal(j)`,
 `hessian_vec(v)`, `primal_rows`), recorded in
 `covariance-information-design.md`. It is the same classifier rather
 than a second one, and the exposure gate this item and item 3 once
-waited on is cleared; what remains of this item is the breakpoint half
-and the report assembly.
+waited on is cleared. The breakpoint half and the report assembly are
+now implemented as `estimate_report()`.
 
 The report also carries the provenance of the number it returns: the `μ` it
 was evaluated at, whether the solver relaxed the bounds, and whether
