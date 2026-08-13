@@ -527,6 +527,33 @@ def test_the_distance_floor_is_capped():
     assert alpha == float("inf") and first is None
 
 
+@pytest.mark.parametrize("opts, label", [
+    ({}, "ordinary"),
+    ({"tol": 1e-2, "mu_init": 1e-1}, "loose"),
+])
+def test_a_loose_solve_does_not_widen_the_floor_past_a_real_gap(opts, label):
+    """End to end for the cap, since the floor is relative to the
+    coordinate's own magnitude and mu at termination is whatever the
+    solve leaves. Uncapped, `10 * sqrt(mu)` is 0.50 absolute here on an
+    ordinary solve and 13.6 on a loose one, both past the 0.4 units of
+    genuine room, so x would be dropped and its crossing missed."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1000.0, mutable=True)
+    m.x = pyo.Var(bounds=(None, 1000.4), initialize=999.0)
+    m.z = pyo.Var(bounds=(-5000.0, 5000.0), initialize=0.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + (m.z - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m, options=opts)
+
+    r = estimate_report(m, [(m.p, 1002.0)])
+    assert 10.0 * r.mu ** 0.5 * 1000.0 > 0.4, (
+        f"{label}: the uncapped floor no longer exceeds the gap, so this "
+        "no longer tests the cap")
+    # dx/dp is 1 and the gap is 0.4, so a fifth of the move fits
+    assert r.first == "x"
+    assert r.alpha == pytest.approx(0.2, rel=1e-3)
+
+
 def test_a_crossing_is_scored_even_where_the_exclusion_applies():
     """One predicate decides `crossed` and participation, so the two
     cannot disagree. A coordinate held at its bound and driven outward
