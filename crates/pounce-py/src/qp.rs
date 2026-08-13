@@ -28,6 +28,7 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::time::Duration;
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
@@ -347,8 +348,13 @@ fn cone_dim(kind: &str, index: usize, v: f64, min: usize) -> PyResult<usize> {
     Ok(rounded as usize)
 }
 
-fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> QpOptions {
-    opts_tau(tol, max_iter, collect_iterates, None, None)
+fn opts(
+    tol: Option<f64>,
+    max_iter: Option<usize>,
+    collect_iterates: bool,
+    time_limit: Option<Duration>,
+) -> QpOptions {
+    opts_tau(tol, max_iter, collect_iterates, None, None, time_limit)
 }
 
 /// [`opts`] plus the fraction-to-boundary pair. `tau` is the floor of the
@@ -361,8 +367,13 @@ fn opts_tau(
     collect_iterates: bool,
     tau: Option<f64>,
     tau_max: Option<f64>,
+    time_limit: Option<Duration>,
 ) -> QpOptions {
     let mut o = QpOptions::default();
+    // `None` leaves the field at its `None` default: no deadline at all, not a
+    // huge one. Every convex entry point opens its own deadline scope from this
+    // field, so the budget is **per solve** (per instance on the batch paths).
+    o.time_limit = time_limit;
     if let Some(t) = tol {
         o.tol = t;
     }
@@ -400,6 +411,27 @@ fn check_tau(value: Option<f64>, name: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Convert a `time_limit` given in **seconds** into the `Duration` the convex
+/// options carry. `None` means unbounded (the solver default).
+///
+/// `Duration::try_from_secs_f64` rejects exactly the values that have no honest
+/// deadline behind them — negative, NaN, and anything past what a `Duration`
+/// can hold, `f64::INFINITY` included — so a bad budget raises a named
+/// `ValueError` here rather than being clamped to something enormous and
+/// silently behaving like "no limit". `0.0` is a real (immediate) deadline, the
+/// wall-clock twin of `max_iter=0`: stop before doing any work.
+fn time_limit_duration(secs: Option<f64>, func: &str) -> PyResult<Option<Duration>> {
+    match secs {
+        None => Ok(None),
+        Some(v) => Duration::try_from_secs_f64(v).map(Some).map_err(|_| {
+            PyValueError::new_err(format!(
+                "{func}: `time_limit` must be a non-negative, finite number of \
+                 seconds that fits in a duration (pass None for no limit); got {v}"
+            ))
+        }),
+    }
+}
+
 /// Solve one convex QP. Returns a dict with the primal `x`, duals `y`
 /// (equalities), `z` (inequalities), bound duals `z_lb`/`z_ub`, the
 /// objective, iteration count, and a status string.
@@ -421,8 +453,12 @@ fn check_tau(value: Option<f64>, name: &str) -> PyResult<()> {
 /// near-1 default is more aggressive (fewer iterations, especially warm
 /// starting a sequence of nearby QPs); `tau_max=tau` pins τ flat, the most
 /// conservative setting.
+///
+/// `time_limit` (seconds, default `None` = unbounded) caps the wall clock for
+/// this solve; a solve that gives up at the budget reports status
+/// `"time_limit"`, while one that reaches a verdict keeps it.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_qp<'py>(
     py: Python<'py>,
@@ -434,10 +470,12 @@ pub fn solve_qp<'py>(
     method: &str,
     tau: Option<f64>,
     tau_max: Option<f64>,
+    time_limit: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     check_tau(tau, "tau")?;
     check_tau(tau_max, "tau_max")?;
-    let o = opts_tau(tol, max_iter, collect_iterates, tau, tau_max);
+    let limit = time_limit_duration(time_limit, "solve_qp")?;
+    let o = opts_tau(tol, max_iter, collect_iterates, tau, tau_max, limit);
     let warm = warm_start.map(warm_from_dict).transpose()?;
 
     // `method` selects the engine, so that the *same* engine is reachable from
@@ -482,8 +520,11 @@ pub fn solve_qp<'py>(
 /// Problems containing an exponential or power cone route to the
 /// non-symmetric HSDE driver, which also handles second-order cones — so a
 /// SOC may be freely mixed with an exp/power cone.
+///
+/// `time_limit` (seconds, default `None` = unbounded) caps the wall clock for
+/// this solve; see `solve_qp`.
 #[pyfunction]
-#[pyo3(signature = (prob, cones, tol=None, max_iter=None, collect_iterates=false))]
+#[pyo3(signature = (prob, cones, tol=None, max_iter=None, collect_iterates=false, time_limit=None))]
 pub fn solve_socp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
@@ -491,8 +532,14 @@ pub fn solve_socp<'py>(
     tol: Option<f64>,
     max_iter: Option<usize>,
     collect_iterates: bool,
+    time_limit: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let o = opts(tol, max_iter, collect_iterates);
+    let o = opts(
+        tol,
+        max_iter,
+        collect_iterates,
+        time_limit_duration(time_limit, "solve_socp")?,
+    );
     let specs = parse_cones(cones)?;
     // PSD (self-scaled, symmetric driver) cannot be mixed with the
     // exponential/power cones (non-symmetric driver) in one problem.
@@ -531,16 +578,27 @@ pub fn solve_socp<'py>(
 /// problem, same length as `probs`) — e.g. the previous batch's result
 /// dicts for a sequence of nearby batches. Each only affects its
 /// instance's iteration count; a per-instance mismatch is ignored.
+///
+/// `time_limit` (seconds, default `None` = unbounded) is **per instance**, not
+/// per batch: each solve opens its own deadline scope, so `time_limit=10` over
+/// 100 problems permits 1000 s of wall clock. A shared clock would make *which*
+/// instances get cancelled depend on rayon's scheduling, and so on the machine.
 #[pyfunction]
-#[pyo3(signature = (probs, tol=None, max_iter=None, warm_starts=None))]
+#[pyo3(signature = (probs, tol=None, max_iter=None, warm_starts=None, time_limit=None))]
 pub fn solve_qp_batch<'py>(
     py: Python<'py>,
     probs: Vec<PyQpProblem>,
     tol: Option<f64>,
     max_iter: Option<usize>,
     warm_starts: Option<Vec<Bound<'py, PyDict>>>,
+    time_limit: Option<f64>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let o = opts(tol, max_iter, false);
+    let o = opts(
+        tol,
+        max_iter,
+        false,
+        time_limit_duration(time_limit, "solve_qp_batch")?,
+    );
     let inners: Vec<QpProblem> = probs.into_iter().map(|p| p.inner).collect();
     let warms: Option<Vec<QpWarmStart>> = match warm_starts {
         Some(ws) => {
@@ -568,14 +626,18 @@ pub fn solve_qp_batch<'py>(
 /// Solve one QP structure (`base`) against many linear objectives `cs`
 /// (a sequence of length-`n` vectors), in parallel. Returns a list of
 /// result dicts in order.
+///
+/// `time_limit` (seconds, default `None` = unbounded) is **per right-hand
+/// side**, not per call — see `solve_qp_batch`.
 #[pyfunction]
-#[pyo3(signature = (base, cs, tol=None, max_iter=None))]
+#[pyo3(signature = (base, cs, tol=None, max_iter=None, time_limit=None))]
 pub fn solve_qp_multi_rhs<'py>(
     py: Python<'py>,
     base: &PyQpProblem,
     cs: Vec<Vec<f64>>,
     tol: Option<f64>,
     max_iter: Option<usize>,
+    time_limit: Option<f64>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     for (k, c) in cs.iter().enumerate() {
         if c.len() != base.inner.n {
@@ -586,7 +648,12 @@ pub fn solve_qp_multi_rhs<'py>(
             )));
         }
     }
-    let o = opts(tol, max_iter, false);
+    let o = opts(
+        tol,
+        max_iter,
+        false,
+        time_limit_duration(time_limit, "solve_qp_multi_rhs")?,
+    );
     let base_inner = base.inner.clone();
     let sols = py.allow_threads(|| {
         pounce_convex::solve_qp_multi_rhs_parallel(&base_inner, &cs, &o, serial_backend)
@@ -625,7 +692,10 @@ impl PyQpFactorization {
     #[new]
     #[pyo3(signature = (base, tol=None, max_iter=None))]
     fn new(base: &PyQpProblem, tol: Option<f64>, max_iter: Option<usize>) -> PyResult<Self> {
-        let o = opts(tol, max_iter, false);
+        // No `time_limit` here on purpose (gh #585): this is a build-once /
+        // solve-many handle, and a budget captured at build time would apply to
+        // every later `solve()` with no way to say what it means.
+        let o = opts(tol, max_iter, false, None);
         let inner = QpFactorization::build(&base.inner, &o, backend).ok_or_else(|| {
             PyValueError::new_err(
                 "QpFactorization: initial factorization failed (structurally singular KKT system)",
@@ -702,7 +772,9 @@ impl PyQpSensitivity {
         max_iter: Option<usize>,
         active_tol: f64,
     ) -> PyResult<Self> {
-        let o = opts(tol, max_iter, false);
+        // Unbounded on purpose (gh #585): sensitivity is only defined at an
+        // optimum, so a cancelled solve here has nothing to hand back.
+        let o = opts(tol, max_iter, false, None);
         // Both the IPM solve and the sensitivity factorization are pure Rust
         // (no Python callbacks), so run them with the GIL released — other
         // threads make progress during the solve (mirrors `solve_qp`).

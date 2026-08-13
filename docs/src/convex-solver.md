@@ -136,6 +136,49 @@ iterate that close to it breaks the Nesterov–Todd scaling), and **cold**
 solves are unaffected because they run the homogeneous self-dual embedding,
 a different loop.
 
+## Wall-clock budgets
+
+`solve_qp`, `solve_socp`, `solve_qp_batch`, and `solve_qp_multi_rhs` take a
+`time_limit` in **seconds** (`None`, the default, means unbounded). Reach for it
+when an answer is needed on a schedule — a receding-horizon controller with a
+fixed control period, a sweep where one pathological instance must not stall the
+rest, or any solve sitting behind a request:
+
+```python
+r = solve_qp(P=P, c=c, G=G, h=h, warm_start=previous, time_limit=0.005)
+if r.status == "time_limit":
+    ...   # `r.x` is the best iterate reached, not a KKT point
+```
+
+`max_iter` cannot express this. One interior-point iteration may be a single KKT
+solve, or a factorization plus several inertia-controlled refactorizations with
+escalating shifts, and the LP route can add a simplex crossover phase — so
+per-iteration cost varies by more than an order of magnitude *within* one solve,
+before problem size enters into it. No iteration count means "5 ms" across two
+problems.
+
+Three properties are worth knowing:
+
+- **A verdict outranks the clock.** `optimal`, `optimal_inaccurate`,
+  `primal_infeasible`, and `dual_infeasible` survive a deadline that passed
+  while the solve was finishing; only a give-up result is relabelled
+  `time_limit`. So the status is always truthful about what was proved, and a
+  budget can never turn into a wrong `optimal`.
+- **The budget is per solve, not per call.** On the batched entry points each
+  instance opens its own deadline scope, so `time_limit=10` over 100 problems
+  permits 1000 s of wall clock. A shared clock would make *which* instances get
+  cancelled depend on rayon's scheduling, and so on the machine. Bound the whole
+  call around the call.
+- **Results become machine- and load-dependent**, inherently — which is why this
+  is opt-in and absent from the default path. An in-flight factorization is not
+  interrupted, so expiry can overshoot by one such operation.
+
+The differentiable layers (`pounce.jax`, `pounce.torch`) deliberately do not
+take one: they raise on `time_limit` because a non-KKT iterate makes the
+implicit-function gradient meaningless, and silently wrong gradients under load
+are worse than a slow layer. On the CLI the same mechanism is spelled
+`max_wall_time`.
+
 ## Batching and factorization reuse
 
 ```python

@@ -24,6 +24,45 @@ constraint matrices ``A``/``G`` as **scipy-sparse** matrices (e.g.
 heavier on memory at that size, and a large dense matrix triggers a
 one-time :class:`PounceSparsityWarning`.
 
+Wall-clock budgets
+------------------
+:func:`solve_qp`, :func:`solve_socp`, :func:`solve_qp_batch`, and
+:func:`solve_qp_multi_rhs` accept ``time_limit`` — a budget in **seconds**,
+``None`` (the default) meaning unbounded. It is the option to reach for when an
+answer is needed on a schedule: a receding-horizon controller with a fixed
+control period, a scenario sweep where one pathological instance must not stall
+the rest, or any solve behind a request. ``max_iter`` is not a substitute: one
+interior-point iteration may be a single KKT solve or a factorization plus
+several inertia-controlled refactorizations (and the LP route may add a simplex
+crossover phase), so per-iteration cost varies by more than an order of
+magnitude *within* one solve. There is no iteration count that means "half a
+second" across two problems.
+
+Three things to know about the semantics:
+
+- **A verdict outranks the clock.** A solve that reaches ``"optimal"``,
+  ``"optimal_inaccurate"``, ``"primal_infeasible"``, or ``"dual_infeasible"``
+  keeps that status even if the deadline passed while it was finishing. Only a
+  give-up result is relabelled ``"time_limit"``, so the status is always
+  truthful about what was proved.
+- **The budget is per solve, not per call.** On the batched entry points each
+  instance opens its own deadline scope, so ``time_limit=10`` over 100 problems
+  permits 1000 s of wall clock, not 10. That is the only machine-independent
+  reading: a shared clock would make *which* instances get cancelled depend on
+  rayon's scheduling. Enforce a budget for the whole call around the call.
+- **Results become machine- and load-dependent.** Inherent to a wall-clock
+  bound, and the reason this is opt-in and off by default. An in-flight
+  factorization is not interrupted, so expiry can overshoot by one such
+  operation.
+
+Not every convex surface takes one. The differentiable layers
+(:mod:`pounce.jax`, :mod:`pounce.torch`) deliberately do not: they raise on
+``"time_limit"`` because a non-KKT iterate makes the implicit-function gradient
+meaningless, and a layer returning quietly wrong gradients under load is worse
+than one that runs long.
+:class:`QpFactorization` and :class:`QpSensitivity` are build-once /
+solve-many handles with no clear per-call budget semantics yet.
+
 Example
 -------
 >>> import numpy as np
@@ -98,8 +137,12 @@ class QpResult:
     status:
         One of ``"optimal"``, ``"primal_infeasible"``,
         ``"dual_infeasible"`` (unbounded), ``"iteration_limit"``,
-        ``"time_limit"`` (the ``max_wall_time`` budget ran out; ``x`` is the
-        best iterate reached), ``"numerical_failure"``.
+        ``"time_limit"`` (the wall-clock budget ran out — the ``time_limit=``
+        keyword, or the CLI's ``max_wall_time``; ``x`` is the best iterate
+        reached and is **not** a KKT point), ``"numerical_failure"``.
+        Only a give-up result is labelled ``"time_limit"``: a solve that
+        reached a verdict keeps it even if the deadline passed while it was
+        finishing.
     x:
         Primal solution, shape ``(n,)``.
     y:
@@ -528,6 +571,37 @@ def _validate_solver_opts(tol, max_iter, func: str) -> None:
             )
 
 
+def _validate_time_limit(time_limit, func: str) -> None:
+    """Validate the optional wall-clock budget (seconds) accepted by the
+    one-shot and batched convex entry points (gh #585).
+
+    ``None`` means unbounded — that, not ``inf``, is how "no limit" is spelled,
+    so a non-finite value is rejected rather than quietly read as one. Negative
+    is meaningless. ``0.0`` is allowed and is a real, immediate deadline (stop
+    before doing any work), the wall-clock twin of the CLI's ``max_wall_time=0``.
+
+    Checked here — before the value reaches the PyO3 binding — so a bad budget
+    raises a clear named ``ValueError`` rather than a bare conversion error, the
+    same treatment ``max_iter`` gets (gh #277)."""
+    if time_limit is None:
+        return
+    # bool is an int subclass; `time_limit=True` is a mistake, not 1 second.
+    if isinstance(time_limit, bool) or not isinstance(
+        time_limit, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError(
+            f"{func}: `time_limit` must be a number of seconds or None "
+            f"(no limit), got {time_limit!r}"
+        )
+    t = float(time_limit)
+    if not np.isfinite(t) or t < 0.0:
+        raise ValueError(
+            f"{func}: `time_limit` must be a finite, non-negative number of "
+            f"seconds; got {time_limit!r}. Pass None (the default) for an "
+            f"unbounded solve."
+        )
+
+
 def _warm_dict(warm):
     """Coerce a warm start (a :class:`QpResult` or a mapping) into the
     ``{x, y, z, z_lb, z_ub}`` dict the binding expects, or ``None``."""
@@ -563,6 +637,7 @@ def solve_qp(
     *,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    time_limit: Optional[float] = None,
     warm_start=None,
     collect_iterates: bool = False,
     check_psd: Optional[bool] = None,
@@ -609,6 +684,15 @@ def solve_qp(
     ``tau_max=tau`` to pin τ flat — slower, maximally conservative — or raise
     ``tau`` to push the early iterations harder too.
 
+    ``time_limit`` (seconds, ``None`` = unbounded) caps the wall clock for this
+    solve, across retries, fallback engines, and crossover. A solve that gives
+    up at the budget returns ``status == "time_limit"`` with the best iterate
+    reached; one that reaches a verdict keeps it, even if the deadline passed
+    while it was finishing. Use it where an answer is needed on a schedule —
+    ``max_iter`` cannot express a time bound, since per-iteration cost varies
+    by more than an order of magnitude within a single solve. Honored by both
+    ``method="ipm"`` and ``method="active-set"``. See the module docstring.
+
     The returned :class:`QpResult` carries the final KKT ``residuals``;
     pass ``collect_iterates=True`` to also capture the per-iteration
     convergence trace in ``result.iterates``.
@@ -616,6 +700,7 @@ def solve_qp(
     if c is None:
         raise ValueError("solve_qp: `c` is required")
     _validate_solver_opts(tol, max_iter, "solve_qp")
+    _validate_time_limit(time_limit, "solve_qp")
     _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
@@ -628,6 +713,7 @@ def solve_qp(
             method=method,
             tau=tau,
             tau_max=tau_max,
+            time_limit=None if time_limit is None else float(time_limit),
         )
     )
 
@@ -667,6 +753,7 @@ def solve_socp(
     cones,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    time_limit: Optional[float] = None,
     collect_iterates: bool = False,
     check_psd: Optional[bool] = None,
 ) -> QpResult:
@@ -700,6 +787,11 @@ def solve_socp(
     on the symmetric driver, so it **cannot** be combined with exp/power
     cones in one problem (a clear error is raised if you try).
 
+    ``time_limit`` (seconds, ``None`` = unbounded) caps the wall clock for this
+    solve, with the same semantics as :func:`solve_qp`: a give-up result comes
+    back as ``status == "time_limit"``, a verdict outranks the clock. It reaches
+    both conic drivers (symmetric and non-symmetric HSDE).
+
     Examples
     --------
     >>> # min t  s.t.  (t, x − x*) ∈ SOC   (minimize ‖x − x*‖)
@@ -722,12 +814,18 @@ def solve_socp(
     if c is None:
         raise ValueError("solve_socp: `c` is required")
     _validate_solver_opts(tol, max_iter, "solve_socp")
+    _validate_time_limit(time_limit, "solve_socp")
     _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, None, None)
     specs = _normalize_cones(cones)
     return _to_result(
         _pounce.solve_socp(
-            prob, specs, tol=tol, max_iter=max_iter, collect_iterates=collect_iterates
+            prob,
+            specs,
+            tol=tol,
+            max_iter=max_iter,
+            collect_iterates=collect_iterates,
+            time_limit=None if time_limit is None else float(time_limit),
         )
     )
 
@@ -737,6 +835,7 @@ def solve_qp_batch(
     *,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    time_limit: Optional[float] = None,
     warm_starts: Optional[Sequence] = None,
     check_psd: Optional[bool] = None,
 ) -> list[QpResult]:
@@ -754,8 +853,18 @@ def solve_qp_batch(
     (issue #112), with the same ``None``/``True``/``False`` semantics as
     :func:`solve_qp`; an offending problem raises ``ValueError`` before any
     solve runs.
+
+    ``time_limit`` (seconds, ``None`` = unbounded) is **per instance, not per
+    batch**: each solve opens its own deadline scope, so ``time_limit=10`` over
+    100 problems permits 1000 s of wall clock, not 10. That is the only
+    machine-independent reading — the instances run on rayon, and a shared
+    clock would make *which* ones get cancelled depend on the scheduler. To
+    bound the whole call, enforce it around the call. A cancelled instance comes
+    back with ``status == "time_limit"``; its neighbours are unaffected, which
+    is the point: one pathological problem no longer stalls the sweep.
     """
     _validate_solver_opts(tol, max_iter, "solve_qp_batch")
+    _validate_time_limit(time_limit, "solve_qp_batch")
     for pr in problems:
         _maybe_check_psd(pr.get("P"), pr["c"], check_psd)
     built = [
@@ -778,7 +887,13 @@ def solve_qp_batch(
                 f"warm_starts has length {len(warm_starts)}, expected {len(built)}"
             )
         ws = [_warm_dict(w) or {} for w in warm_starts]
-    dicts = _pounce.solve_qp_batch(built, tol=tol, max_iter=max_iter, warm_starts=ws)
+    dicts = _pounce.solve_qp_batch(
+        built,
+        tol=tol,
+        max_iter=max_iter,
+        warm_starts=ws,
+        time_limit=None if time_limit is None else float(time_limit),
+    )
     return [_to_result(d) for d in dicts]
 
 
@@ -795,6 +910,7 @@ def solve_qp_multi_rhs(
     cs: Sequence[Sequence[float]],
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    time_limit: Optional[float] = None,
     check_psd: Optional[bool] = None,
 ) -> list[QpResult]:
     """Solve one QP *structure* against many linear objectives, in parallel.
@@ -809,10 +925,14 @@ def solve_qp_multi_rhs(
     use it when the constraint geometry is fixed and you are sweeping the
     objective (e.g. a family of cost vectors, a parametric linear term, or
     the inner objective of a bilevel sweep).
+
+    ``time_limit`` (seconds, ``None`` = unbounded) is **per right-hand side**,
+    not per call — same reasoning as :func:`solve_qp_batch`.
     """
     if cs is None or len(cs) == 0:
         raise ValueError("solve_qp_multi_rhs: `cs` must be a non-empty sequence")
     _validate_solver_opts(tol, max_iter, "solve_qp_multi_rhs")
+    _validate_time_limit(time_limit, "solve_qp_multi_rhs")
     n = len(np.asarray(cs[0], dtype=np.float64).ravel())
     # `c` only fixes `n` for the base structure; the real objectives are `cs`.
     base_c = c if c is not None else np.zeros(n)
@@ -820,7 +940,13 @@ def solve_qp_multi_rhs(
     _maybe_check_psd(P, base_c, check_psd)
     base = _build(P, base_c, A, b, G, h, lb, ub)
     cs_list = [np.asarray(ci, dtype=np.float64).ravel().tolist() for ci in cs]
-    dicts = _pounce.solve_qp_multi_rhs(base, cs_list, tol=tol, max_iter=max_iter)
+    dicts = _pounce.solve_qp_multi_rhs(
+        base,
+        cs_list,
+        tol=tol,
+        max_iter=max_iter,
+        time_limit=None if time_limit is None else float(time_limit),
+    )
     return [_to_result(d) for d in dicts]
 
 
