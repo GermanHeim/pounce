@@ -514,6 +514,119 @@ impl Solver {
         Ok(dx_full)
     }
 
+    /// Parametric step with the bounds respected by pinning, not by
+    /// clamping. Returns the `n_x`-long primal step and the variables
+    /// pinned to reach it.
+    ///
+    /// [`Self::parametric_step`] answers where the linear predictor
+    /// points, which can be outside the box. Clamping a coordinate
+    /// back to its bound leaves every other coordinate at its
+    /// predictor value, so the answer is feasible but no longer
+    /// consistent with the KKT relations. This instead adds a row
+    /// pinning the offending coordinate at the bound and re-solves, so
+    /// the others move to stay consistent under the pin, which is the
+    /// refinement upstream runs under `sens_boundcheck`.
+    ///
+    /// Each pass augments the held factorization with the pin rows and
+    /// takes the Schur complement over them, so the cost is one dense
+    /// `k × k` solve and a backsolve per pass, with `k` the number of
+    /// pins so far. The factorization itself is never rebuilt.
+    ///
+    /// Passes stop when no coordinate is outside its bound by more than
+    /// `eps`, or at `max_passes`. Reaching the cap is not an error:
+    /// the step returned is the last one computed, and the returned pin
+    /// list says how far the refinement got.
+    pub fn parametric_step_bounded(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        eps: Number,
+        max_passes: usize,
+    ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
+        let mut dx = self.parametric_step(pin_constraint_indices, deltas)?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let n_x = dx.len();
+        let n_full = state.backsolver.dim();
+
+        // Expanded once, before any re-solve: reading the compressed
+        // form means borrowing the NLP, and `run_sens_step` below
+        // re-borrows it.
+        let (lo, hi) = {
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            crate::boundcheck::expand_bounds(n_x, &nl.px_l(), &nl.px_u(), nl.x_l(), nl.x_u())
+        };
+        let x_curr = &state.x[..n_x];
+
+        // Each pass solves the augmented system carrying EVERY pin so
+        // far, against the original factorization, so its correction is
+        // measured from the plain step rather than from the previous
+        // pass. Adding successive corrections instead would count the
+        // earlier pins twice.
+        let dx_plain = dx.clone();
+        let mut pins: Vec<(usize, Number)> = Vec::new();
+        for _ in 0..max_passes {
+            let skip: Vec<usize> = pins.iter().map(|&(i, _)| i).collect();
+            let Some((i, bound)) =
+                crate::boundcheck::worst_violation(x_curr, &dx, &lo, &hi, eps, &skip)
+            else {
+                break;
+            };
+            pins.push((i, bound));
+
+            // A and B are both the pin rows, so the Schur complement is
+            // square, which `DenseGenSchurDriver` requires. The step it
+            // returns at a pinned coordinate is the negative of the
+            // displacement asked for, so the right-hand side is the
+            // overshoot itself rather than its negation.
+            let rows: Vec<Index> = pins.iter().map(|&(i, _)| i as Index).collect();
+            let signs = vec![1; rows.len()];
+            let mk = |r: Vec<Index>| {
+                IndexSchurData::from_parts(r, signs.clone())
+                    .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))
+            };
+            let opts = SensOptions {
+                run_sens: true,
+                ..SensOptions::default()
+            };
+            let mut pin_app =
+                SensApplication::new(mk(rows.clone())?, state.backsolver.clone(), opts);
+            let rhs: Vec<Number> = pins
+                .iter()
+                .map(|&(p, b)| (x_curr[p] + dx_plain[p]) - b)
+                .collect();
+            let mut du = vec![0.0; rows.len()];
+            let mut corr = vec![0.0; n_full];
+            if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
+                return Err(SolverError::SensComputationFailed(
+                    "SensApplication::run_sens_step failed".into(),
+                ));
+            }
+            // The augmented system is singular once the pins exhaust
+            // the problem's degrees of freedom: there is no step that
+            // holds every pinned coordinate at its bound and still
+            // satisfies the constraints. A dense LU does not always
+            // report that, it returns a huge solution instead, so the
+            // check is whether the correction actually achieved the
+            // displacement asked for. If it did not, this pin is not
+            // usable, and the previous pass's step stands.
+            let achieved = pins
+                .iter()
+                .zip(rhs.iter())
+                .all(|(&(p, _), r)| (corr[p] + r).abs() <= 1e-6 * r.abs().max(1.0));
+            if !achieved {
+                pins.pop();
+                break;
+            }
+            for (k, d) in dx.iter_mut().enumerate() {
+                *d = dx_plain[k] + corr[k];
+            }
+        }
+        let pinned: Vec<usize> = pins.into_iter().map(|(i, _)| i).collect();
+        Ok((dx, pinned.into_iter().map(|p| p as Index).collect()))
+    }
+
     /// Full KKT-space parametric step for a set of pinned equality
     /// constraints: the same computation as [`Self::parametric_step`],
     /// returned WITHOUT truncating to the primal block. The layout is

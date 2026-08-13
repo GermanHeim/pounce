@@ -111,6 +111,77 @@ pub fn clamp_step_to_bounds(
     clamped
 }
 
+/// Expand the compressed bound vectors into full var-x arrays, with
+/// infinities where a variable has no bound on that side.
+///
+/// The compressed form pairs an [`ExpansionMatrix`] with a dense vector
+/// holding only the bounded slots. Reading it repeatedly means holding
+/// a borrow of the NLP, which a caller that also re-solves cannot do,
+/// so this copies once.
+pub fn expand_bounds(
+    n_x: usize,
+    px_l: &Rc<dyn pounce_linalg::Matrix>,
+    px_u: &Rc<dyn pounce_linalg::Matrix>,
+    x_l: &dyn Vector,
+    x_u: &dyn Vector,
+) -> (Vec<Number>, Vec<Number>) {
+    let mut lo = vec![Number::NEG_INFINITY; n_x];
+    let mut hi = vec![Number::INFINITY; n_x];
+    for (pm, src, dst) in [(px_l, x_l, &mut lo), (px_u, x_u, &mut hi)] {
+        let Some(em) = pm.as_any().downcast_ref::<ExpansionMatrix>() else {
+            continue;
+        };
+        let vals = compressed_values(src);
+        for (ci, &full_pos) in em.expanded_pos_indices().iter().enumerate() {
+            let i = full_pos as usize;
+            if let (true, Some(&v)) = (i < n_x, vals.get(ci)) {
+                dst[i] = v;
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// The coordinate whose predicted value leaves its bound by the most,
+/// as `(index, the bound it leaves)`.
+///
+/// This is the half of the bound check that fix-relax keeps. The clamp
+/// above answers "put it back", which loses the other coordinates; the
+/// refinement needs "which one, and where does it belong", and then
+/// re-solves with that coordinate pinned so the rest respond.
+///
+/// The worst violator is chosen rather than the first by index, so the
+/// order of the pins does not depend on how the model was written.
+/// `skip` names coordinates already pinned by an earlier pass, which
+/// sit ON their bound and would otherwise be picked again.
+pub fn worst_violation(
+    x_curr: &[Number],
+    dx: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+    eps: Number,
+    skip: &[usize],
+) -> Option<(usize, Number)> {
+    let mut worst: Option<(usize, Number, Number)> = None;
+    for i in 0..x_curr.len().min(dx.len()) {
+        if skip.contains(&i) {
+            continue;
+        }
+        let trial = x_curr[i] + dx[i];
+        let (bound, over) = if trial < lo[i] {
+            (lo[i], lo[i] - trial)
+        } else if trial > hi[i] {
+            (hi[i], trial - hi[i])
+        } else {
+            continue;
+        };
+        if over > eps && worst.is_none_or(|(_, _, w)| over > w) {
+            worst = Some((i, bound, over));
+        }
+    }
+    worst.map(|(i, bound, _)| (i, bound))
+}
+
 /// Extract dense values from a `dyn Vector` that wraps a `DenseVector`.
 /// Returns an empty vector when the downcast fails (and the bound
 /// vector is just treated as having no entries — the boundcheck then
