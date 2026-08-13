@@ -159,10 +159,20 @@ the parity step.
 
 **0. Diagnostics foundation → past sIPOPT.** Breakpoint detection (the
 ratio test to the first crossing) and a report the estimate returns:
-which variables crossed, the residual, the `μ` used, and the activity
-classification, so a caller can tell a derivative from one element of a
-set. Useful on its own — it turns the current silent clamp into "here is
-what happened" (sIPOPT exposes no such report).
+which variables crossed, the constraint violation at the predicted
+point, the `μ` used, and the activity classification, so a caller can
+tell a derivative from one element of a set. Useful on its own — it
+turns the current silent clamp into "here is what happened" (sIPOPT
+exposes no such report).
+
+The violation is the primal half of the residual, and it is the half
+this item can carry. The NL evaluators supply it directly, whereas the
+dual half needs the multipliers at the perturbed point. Only the primal
+block and the equality multipliers have a user-space mapping from the
+compound vector, so assembling the dual half here would mean exposing
+the inequality and bound multiplier steps as well. Item 4 computes the
+full KKT residual instead, inside the corrector that already holds the
+updated multipliers.
 
 The classification is which regime each bounded variable is in, inactive,
 weakly active or strongly active, read off the ratio of its barrier curvature
@@ -240,9 +250,14 @@ break a call that always answers today over a condition most users will not
 recognize.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
-iteration reusing the held factorization, returning the residual. Small
-and general; it composes with path-following (path-following gets the
-active set, the corrector polishes the point). Expose two surfaces: the
+iteration reusing the held factorization, returning the full KKT
+residual, both the constraint violation and stationarity. The
+stationarity half belongs here rather than in item 0 because the
+iteration updates the multipliers and so already holds them, where
+item 0 would have to reach for multiplier steps that have no user-space
+mapping. Small and general; it composes with path-following
+(path-following gets the active set, the corrector polishes the point).
+Expose two surfaces: the
 raw single step, for callers that drive their own loop (e.g. a
 deadline-bounded one in an advanced-step controller), and a convenience
 wrapper that loops to a residual tolerance with an iteration cap and a
