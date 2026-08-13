@@ -63,6 +63,75 @@ changes.
   extraction and presolve.
 
 
+### Added — `pyomo_pounce.estimate_report()` says what the estimate's step did about the bounds (#584)
+
+`estimate()` takes the linear step, clips any variable it carries past a
+bound, warns, and returns. The warning names those variables and stops
+there, so a caller cannot tell how far along the perturbation the active
+set changed, whether a constraint became active before any variable did,
+or whether a gap against a re-solve comes from the barrier parameter,
+from a regularized factor, or from relaxed bounds.
+
+`estimate_report(model, perturb)` takes the same perturbation argument
+and returns an `EstimateReport`:
+
+    import pyomo_pounce
+    pyomo_pounce.declare_sens_param(m.setpoint)
+    pyo.SolverFactory("pounce").solve(m)
+
+    r = pyomo_pounce.estimate_report(m, [(m.setpoint, 3.0)])
+    r.alpha        # 0.0297, the fraction of the move that fits
+    r.first        # 'u[0]', the control that saturates there
+    r.crossed      # {u[0]: 4.22, u[1]: 0.68, ...}, what estimate() clamps
+    r.violation    # 4.4e-16, the constraint violation at the prediction
+    r.activity     # per variable: inactive, weakly_active, strongly_active
+
+`estimate()` is unchanged. The classification is passed through from
+`Solver.classify_activity`, the same classifier the covariance and
+information accessors use, so this adds no second opinion about what is
+active. Alongside it the report carries the three quantities that
+separate the predictor from the exact value at the perturbed active
+set: the barrier parameter `mu`, the factor's inertia-correction
+`perturbations`, and `bounds_relaxed`.
+
+The ratio test behind `alpha` skips coordinates already on a bound,
+which cannot be crossed, and it reads the classification rather than a
+distance to decide that. The remaining slack is `O(mu)` at a strongly
+active bound but `O(sqrt(mu))` at a weakly active one, and no single
+distance threshold separates the second from a coordinate genuinely
+close to its bound. Scored anyway, such a coordinate divides two small
+quantities and becomes the minimum on any model carrying an active
+bound.
+
+A solve that ran with a non-zero `bound_relax_factor` is reported
+through `bounds_relaxed` rather than raised on. The classifier declines
+such a solve, since relaxed bounds shift the slacks it reads, but
+everything else in the report is still measured, and a caller reaches
+for a diagnostic precisely when the estimate and a re-solve disagree.
+
+This is item 0 of the sensitivity roadmap (#255).
+
+**Testing.** `pyomo-pounce/tests/test_estimate_report.py` checks the
+step fraction against a brute-force scan of the unclamped step, on the
+same coordinate exactly and to 1e-12 relative, including with a fixed
+variable present, which the solve removes and which shifts every later
+factor column. The violation is checked against direct evaluation at
+the predicted point to 1e-12, hand-computed crossings to 1e-8 for both
+a variable bound and a constraint, and the report is checked identical
+through `SolverFactory('pounce')`, `SolverFactory('pounce_v2')` and the
+contrib `SolverFactory('pounce')`.
+
+### Fixed — the no-session error named only the legacy solver route (#584)
+
+`estimate`, `gradient`, `covariance` and `information` raise a
+`RuntimeError` naming the declaration to make and the solve to run when
+no sensitivity session exists. All five messages told the reader to
+solve with `SolverFactory('pounce')`, which has been incomplete since
+the v2 interface was added in 0.10.0: `SolverFactory('pounce_v2')` and
+the contrib `SolverFactory('pounce')` build the same session, because
+`Pounce.solve` sends a model carrying declarations down the same
+in-process route. The messages now name all three.
+
 ## [0.10.0] - 2026-08-11
 
 ### Fixed — an ill-scaled dense Hessian column no longer costs the solve its certificate
