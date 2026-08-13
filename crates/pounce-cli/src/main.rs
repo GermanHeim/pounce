@@ -983,6 +983,14 @@ pub fn main() -> ExitCode {
                 // particular must not be silently raised to the (far larger)
                 // Ipopt default, so it too is forwarded only when set.
                 let convex_opts = convex_cli_opts(&app);
+                // When the convex attempt declines (gh #535 / `socp_nlp_fallback`)
+                // the NLP solve below opens its own `Deadline` from the *option
+                // value*, which still names the full budget — so a run that spent
+                // most of `max_wall_time` here would be granted it again there,
+                // and the user's cap would buy up to twice the wall clock they
+                // asked for. Charge the declined attempt against the budget; see
+                // the deduction below the block.
+                let convex_t0 = std::time::Instant::now();
                 if matches!(choice, SolverChoice::SocpIpm) {
                     // `None` means the conic solve came back without a verified
                     // KKT point and declined the problem (only possible under
@@ -1050,6 +1058,9 @@ pub fn main() -> ExitCode {
                         return code;
                     }
                 }
+                // Reaching here means the convex attempt declined and the NLP
+                // path below owns the verdict; charge it for the time it spent.
+                charge_wall_budget(app.options_mut(), convex_t0.elapsed());
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -2416,6 +2427,41 @@ fn convex_opts_with_remaining(
     opts
 }
 
+/// Charge `spent` against `max_wall_time`, so a solve that gets handed from one
+/// engine to another spends **one** budget rather than one per engine.
+///
+/// The convex driver already deducts its own extraction and presolve from the
+/// budget it passes down (`convex_opts_with_remaining`). The gap this closes is
+/// one level up: when a convex attempt declines the problem (gh #535's LP→NLP
+/// reroute, or the conic path's `socp_nlp_fallback`) the NLP solve that takes
+/// over builds its `Deadline` from the *option value*, which still names the
+/// whole budget. A run that spent 55 of its 60 seconds convex-side would then be
+/// granted 60 more, and `max_wall_time` would buy nearly twice the wall clock it
+/// promises.
+///
+/// Applies only when the user actually set the option. Unset it is `1e6` — the
+/// effectively-unbounded default — and rewriting that as `1e6 - 3.2` states
+/// nothing the default did not, while making the option read as explicitly
+/// chosen to everything downstream that tests the `explicitly_set` flag.
+///
+/// A budget that is entirely gone floors at [`WALL_BUDGET_FLOOR`] rather than
+/// zero: the option is registered with a *strict* lower bound of 0, so `0.0` is
+/// rejected as invalid and the write would silently do nothing — leaving the
+/// full budget in place, which is the failure this exists to prevent. The floor
+/// is small enough that the NLP path's first deadline check trips on it.
+fn charge_wall_budget(
+    opts: &mut pounce_common::options_list::OptionsList,
+    spent: std::time::Duration,
+) {
+    /// Smallest budget that can be *stored* — see [`charge_wall_budget`].
+    const WALL_BUDGET_FLOOR: f64 = 1e-9;
+
+    if let Ok((limit, true)) = opts.get_numeric_value("max_wall_time", "") {
+        let left = (limit - spent.as_secs_f64()).max(WALL_BUDGET_FLOOR);
+        let _ = opts.set_numeric_value("max_wall_time", left, true, false);
+    }
+}
+
 /// Resolve the convex LP/QP presolve switch (#139).
 ///
 /// The convex driver is gated by the `qp_presolve` option, but `presolve` is
@@ -3318,6 +3364,73 @@ mod convex_status_tests {
         assert_eq!(
             qp_status_to_ars(QpStatus::Optimal),
             ApplicationReturnStatus::SolveSucceeded
+        );
+    }
+
+    /// A declined convex attempt is charged against the wall-clock budget, so
+    /// the NLP solve that takes over cannot start a second full one.
+    ///
+    /// Built on a real `IpoptApplication` rather than a bare `OptionsList`
+    /// because the two ways this write can silently do nothing — the option's
+    /// *strict* lower bound of zero, and the clobber flag on the stored value —
+    /// both live in the registration that only the real one carries.
+    #[test]
+    fn a_declined_convex_attempt_is_charged_against_the_wall_budget() {
+        use std::time::Duration;
+
+        let mut app = super::IpoptApplication::new();
+        app.options_mut()
+            .set_numeric_value("max_wall_time", 60.0, true, false)
+            .unwrap();
+
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(55.0));
+        let (left, set) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(set, "the option must still read as explicitly set");
+        assert!(
+            (left - 5.0).abs() < 1e-9,
+            "60s budget minus a 55s attempt must leave 5s, got {left}"
+        );
+
+        // A budget spent outright must not silently write back as the full
+        // budget: `max_wall_time` is registered with a strict lower bound, so a
+        // literal 0.0 would be rejected and leave 5s standing.
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(600.0));
+        let (gone, _) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(
+            gone > 0.0 && gone < 1e-6,
+            "an exhausted budget must store as positive-but-spent, got {gone}"
+        );
+    }
+
+    /// The other half: an *unset* budget is left alone. `1e6` is the
+    /// effectively-unbounded default, and rewriting it would both say nothing
+    /// new and make the option read as user-chosen downstream.
+    #[test]
+    fn an_unset_wall_budget_is_not_rewritten() {
+        use std::time::Duration;
+
+        let mut app = super::IpoptApplication::new();
+        let (before, set_before) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert!(!set_before, "precondition: the option starts unset");
+
+        super::charge_wall_budget(app.options_mut(), Duration::from_secs_f64(3.2));
+        let (after, set_after) = app
+            .options()
+            .get_numeric_value("max_wall_time", "")
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(
+            !set_after,
+            "an untouched budget must not read as explicitly set"
         );
     }
 

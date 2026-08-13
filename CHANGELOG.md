@@ -52,6 +52,16 @@ changes.
   spent rather than zero. `pounce_convex::batch`'s `time_limit` is documented
   as per-instance, which is what it has always been.
 
+- **`max_wall_time` now bounds the whole CLI solve, not each engine that gets
+  a turn at it.** When a convex attempt declines the problem and hands it to
+  the NLP path (the gh #535 LP→NLP reroute, or `socp_nlp_fallback`), the NLP
+  solve built its `Deadline` from the option value — which still named the
+  full budget — so a run that spent most of its seconds convex-side was
+  granted them all again and the cap could buy nearly twice the wall clock it
+  promises. The declined attempt is now charged against the option before the
+  handover, the same deduction the convex path already applies internally for
+  extraction and presolve.
+
 
 ## [0.10.0] - 2026-08-11
 
