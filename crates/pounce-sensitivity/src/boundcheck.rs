@@ -14,6 +14,25 @@
 //! coordinate at its bound and re-solves, so the others move with it.
 //! [`worst_violation`] picks which coordinate that is and
 //! [`expand_bounds`] puts the bounds in a form both can read.
+//!
+//! # Why the pin alone is enough
+//!
+//! Upstream describes this as fix-relax: pin the variable at its bound
+//! AND relax the complementarity condition that went with the bound,
+//! giving it a new multiplier. Only the pin is done here, and it gives
+//! the same primal step.
+//!
+//! The barrier contributes `Σ = z_l/s_l + z_u/s_u` to the Hessian
+//! block, and Σ is diagonal, so `Σ_ii` appears only in row `i`. Adding
+//! the pin row fixes `Δx_i`, which turns row `i` from a constraint on
+//! `Δx` into the equation determining the pin's own multiplier. `Σ_ii`
+//! therefore shifts that multiplier and leaves `Δx` unchanged, so
+//! removing it, which is what relaxing the complementarity does, cannot
+//! move the primal step.
+//!
+//! That equivalence covers the primal step only. A caller wanting the
+//! bound multiplier sensitivities at a pinned coordinate would need the
+//! relaxation, since those are exactly what it changes.
 
 use crate::schur_data::IndexSchurData;
 use pounce_common::types::{Index, Number};

@@ -9,6 +9,75 @@ changes.
 
 ## [Unreleased]
 
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#XXX)
+
+`estimate()` takes the linear step, and where that step leaves a
+variable's bound it clips the value and warns. Clipping costs more than
+the one variable. Every other variable keeps the value the step gave it,
+computed on the assumption that the clipped one was free to move where
+the step said, so the result satisfies the bounds and no longer
+satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
+its lower bound, the clipped answer is `y = -5`, which is not on the
+constraint at all.
+
+`mode="fix_relax"` adds a row pinning the crossing variable at its bound
+and re-solves, so the others move with it. The same case returns `y = 1`,
+matching a full re-solve exactly. On upstream sIPOPT's own parametric
+example, at its own perturbation, the two differ from a re-solve by 0.12
+and by 6e-9.
+
+    estimate(m, [(m.p, 3.0)])                       # clips
+    estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves
+
+`mode="linear"` is the default and is unchanged.
+
+Each crossing costs one dense solve against the held factorization plus
+a backsolve, with the solve growing as pins accumulate, and the
+factorization is never rebuilt. `max_passes` bounds that work and is a
+budget rather than a safeguard, since the refinement is only worth
+running while it stays cheaper than the re-solve it replaces.
+
+Two limits stop it short of holding every bound. The pass budget, which
+a caller can raise. And the problem's degrees of freedom, which no
+budget helps: each pin consumes one, and past that no step holds every
+bound at once, so the augmented system is singular. A dense LU does not
+report that, it returns a solution around 1e15, so each pass checks that
+it achieved the displacement it asked for and drops the pin when it did
+not. `estimate()` warns in both cases, names the variables still
+outside, and says which limit was reached, since only the first can be
+fixed by asking for more.
+
+**Testing.** `crates/pounce-sensitivity/tests/parametric_cpp.rs` checks
+the refinement against a full re-solve on upstream's example, on a
+three-degree-of-freedom model where three coordinates cross at once and
+all three pins hold, and for the refusal when the pins would exceed the
+degrees of freedom. `pyomo-pounce/tests/test_fix_relax.py` covers the
+Pyomo surface, including under a `user-scaling` change of variables, and
+that the two modes agree exactly where nothing crosses.
+
+### Changed — `sens_boundcheck` refines instead of clamping (#XXX)
+
+The option is named after upstream sIPOPT's, and upstream's runs an
+iterative Schur refinement. Pounce's ran a single-pass clamp, so the
+behavior under a shared option name differed from the solver it names.
+It now refines, which is the same computation `mode="fix_relax"` uses,
+across `--sens-boundcheck`, `SensSolve::with_boundcheck`, and
+`solve_with_sens(sens_boundcheck=True)`.
+
+This changes what the option guarantees. The clamp always returned a
+point inside the declared box. The refinement does not, because pins are
+limited by the problem's degrees of freedom, and the CLI's help text no
+longer promises it. The message it prints on stderr now reports pinned
+coordinates rather than clamped ones.
+
+What counts as outside a bound is no longer a separate tolerance. Three
+numbers answered that question, disagreeing across surfaces: 1e-3 on the
+CLI flag, 1e-9 in the Python binding, and a third invented inside
+`estimate()`. It now comes from the solve's own `bound_relax_factor`,
+which is the value that says how far outside a bound the solve was
+willing to leave a converged point.
+
+
 - **The convex wall-clock budget is now reachable from Python** (#585).
   `pounce.qp.solve_qp`, `solve_socp`, `solve_qp_batch`, and
   `solve_qp_multi_rhs` take `time_limit=` — seconds as a `float`, `None` (the

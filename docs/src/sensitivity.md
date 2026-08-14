@@ -27,8 +27,9 @@ existing AMPL / solver scripts keep working unchanged.
 
 Related flags:
 
-- `--sens-boundcheck` / `--sens-bound-eps EPS` — clamp the perturbed
-  primal `x* + Δx` onto the declared `[x_l, x_u]` box.
+- `--sens-boundcheck` / `--sens-bound-eps EPS` — hold the perturbed
+  primal `x* + Δx` at the declared bounds by pinning each crossing
+  coordinate there and re-solving, so the others move with it.
 - `--compute-red-hessian` / `--rh-eigendecomp` — compute the reduced
   Hessian (and its eigendecomposition) over the variables tagged by
   the `red_hessian` integer var-suffix.
@@ -56,8 +57,9 @@ let result = SensSolve::new(vec![2, 3])
 // result.dx, result.reduced_hessian, result.status
 ```
 
-`with_reduced_hessian_eigen()` adds the eigendecomposition;
-`with_boundcheck(eps)` enables the bound projection.
+`with_reduced_hessian_eigen()` adds the eigendecomposition, and
+`with_boundcheck(eps)` enables the bound refinement described under
+[Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax).
 
 ### Eigenvector sign convention
 
@@ -91,7 +93,7 @@ x, info = prob.solve_with_sens(x0, pin_constraint_indices=[2, 3],
 
 `compute_reduced_hessian=True` returns the reduced Hessian in
 `info["reduced_hessian"]`; `rh_eigendecomp=True` adds its
-eigendecomposition; `sens_bound_eps=…` tunes the bound projection. See
+eigendecomposition; `sens_bound_eps=…` tunes the bound refinement. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 
@@ -130,9 +132,10 @@ derivative columns for arbitrary perturbed values after the fact. Its
 perturbation is measured from the solve point, not the Param's current
 value, so writing a measurement into the Param before asking (the
 receding-horizon pattern) does not change the answer. It also
-warns when the linear step leaves the variable bounds (a single-pass
-projection analogous to the CLI's `--sens-boundcheck`) — with one
-exception, a bound written on a declared Param, covered in
+warns when the linear step leaves the variable bounds, and
+`mode="fix_relax"` pins those variables and re-solves instead, covered
+in [Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax)
+below. There is one exception to the warning, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `estimate_report()` measures the same step and reports where the
 active set changes along it, covered in
@@ -142,6 +145,53 @@ unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### Bending the estimate around a bound: `mode="fix_relax"`
+
+`estimate()` takes the linear step, and where that step leaves a
+variable's bound it clips the value and warns. Clipping is all the
+linear step can do, and it costs more than the one variable: every
+other variable keeps the value the step gave it, computed on the
+assumption that the clipped one was free to move where the step said.
+The result satisfies the bounds and no longer satisfies the
+constraints.
+
+`mode="fix_relax"` adds a row pinning the crossing variable at its
+bound and re-solves, so the others move with it:
+
+```python
+estimate(m, [(m.setpoint, 3.0)])                      # clips
+estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
+```
+
+On a model where `y = 2x + 1` and `x` hits its lower bound, the linear
+step returns `y = -5`, which does not satisfy the constraint. Pinning
+`x` returns `y = 1`, matching a full re-solve exactly. On upstream
+sIPOPT's own parametric example the two differ from a re-solve by 0.12
+and by 6e-9.
+
+Each crossing costs one dense solve against the held factorization plus
+a backsolve, with the solve growing as pins accumulate. The
+factorization is never rebuilt, which is what keeps this cheaper than
+re-solving. `max_passes` bounds that work and is a budget rather than a
+safeguard: the refinement is only worth running while it stays cheaper
+than the re-solve it replaces.
+
+Two things stop it short of holding every bound. The pass budget, which
+a caller can raise. And the problem's degrees of freedom, which no
+budget helps: pinning uses one degree of freedom each, and past that no
+step holds every bound at once, so the pin is refused rather than
+returned from a singular system. In either case `estimate()` warns,
+names the variables still outside, and says which limit was reached.
+`clamp` then decides what happens to them, exactly as under `linear`.
+
+What counts as outside a bound is not a tolerance you pass. It comes
+from the solve, which was willing to leave a converged point
+`bound_relax_factor` outside its bound, so anything within that is on
+the bound rather than past it.
+
+This is what `sens_boundcheck` turns on for the CLI and the Rust API,
+and it mirrors upstream sIPOPT's option of that name.
 
 ### What the step did about the bounds: `estimate_report()`
 
@@ -722,9 +772,23 @@ the final factor is unregularized and the invariance is exact.
 
 All three entry points are verified against upstream sIPOPT 3.14.19's
 `parametric_cpp` golden output to within roughly 6e-9 per component.
-The bound projection is a single-pass clamp; upstream's iterative
-Schur refinement (re-factorize on each violation) is intentionally not
-ported.
+
+The bound refinement is verified on that same example, which crosses a
+bound under upstream's own perturbation: against a full re-solve the
+refinement lands within 6e-9 where clipping the crossing coordinate is
+off by 0.12. It is also checked on a model with three degrees of
+freedom, where three coordinates cross at once and all three pins hold,
+and for the refusal when the pins would exceed the degrees of freedom.
+
+Upstream describes this as fix-relax, pinning the variable and relaxing
+the complementarity condition attached to its bound. Only the pin is
+implemented, which gives the same primal step: the barrier term is
+diagonal, so the entry for the pinned coordinate appears in one row of
+the KKT system, and once the pin fixes that coordinate the row
+determines the pin's own multiplier rather than constraining the step.
+Relaxing it moves that multiplier and not the step. The equivalence
+covers the primal step only, so bound multiplier sensitivities at a
+pinned coordinate would need the relaxation.
 
 ## Beyond one perturbation
 
