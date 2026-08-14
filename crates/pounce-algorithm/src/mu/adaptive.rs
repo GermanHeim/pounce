@@ -406,8 +406,8 @@ impl AdaptiveMuUpdate {
     /// `|df| ≈ mu_min·(barrier_tol_factor+1)/compl_inf_tol` an uncapped
     /// floor pins the unscaled complementarity above `compl_inf_tol` and
     /// the strict certificate is unreachable — in adaptive mode the solve
-    /// then degrades to `Solved_To_Acceptable_Level` (code 100, outside
-    /// AMPL's 0..99 solved band) on an iterate sitting at the optimum.
+    /// then degrades to `Solved_To_Acceptable_Level` (reduced accuracy, on an
+    /// iterate sitting at the optimum).
     ///
     /// The restoration sub-builder's `mu_min = 100 · outer_mu_min`
     /// safeguard is unaffected for the same reason as in monotone mode:
@@ -1033,7 +1033,7 @@ mod tests {
     /// clamp must yield to `compl_inf_tol·|df|/(barrier_tol_factor+1)` once
     /// |df| drops below `df* = mu_min·(barrier_tol_factor+1)/compl_inf_tol`,
     /// or the strict certificate is unreachable and the solve degrades to
-    /// `Solved_To_Acceptable_Level` (code 100) at the optimum.
+    /// `Solved_To_Acceptable_Level` at the optimum.
     #[test]
     fn adaptive_mu_min_is_capped_so_certificate_stays_reachable() {
         let a = AdaptiveMuUpdate::new();

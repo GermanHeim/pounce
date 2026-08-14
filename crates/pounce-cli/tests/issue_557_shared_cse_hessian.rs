@@ -149,9 +149,12 @@ fn expected_objective() -> f64 {
 }
 
 fn assert_solved_at_optimum(report: &SolveReport, ctx: &str) {
+    // `0` exactly, not the whole `0..=99` solved band: since gh #591 the band
+    // also holds `1` (`Solved_To_Acceptable_Level`), and this fixture must
+    // reach the strict certificate.
     let code = report.solution.solve_result_num;
     assert!(
-        (0..100).contains(&code),
+        code == 0,
         "{ctx}: not solved (solve_result_num={code}, status={:?})",
         report.solution.status,
     );

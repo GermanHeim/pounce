@@ -227,9 +227,12 @@ fn pooling_rt2stp_solves_at_default_settings() {
     // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
     const EXPECTED: f64 = -3_273.954_991_374_754_6;
     let report = solve("pooling_rt2stp.nl", &[HANG_GUARD]);
+    // `0` exactly: since gh #591 the `0..=99` solved band also holds `1`
+    // (`Solved_To_Acceptable_Level`), which is not what this model did before
+    // the guard was defaulted off.
     let code = report.solution.solve_result_num;
     assert!(
-        (0..100).contains(&code),
+        code == 0,
         "pooling_rt2stp did not converge at default settings \
          (solve_result_num={code}, status={:?}) — has dual_diverging_streak been \
          re-enabled by default? At 15 this model returns \
@@ -326,7 +329,7 @@ fn hair_trigger_guard_returns_a_valid_honestly_labelled_point() {
 /// Pre-fix numbers (dev host): guard on returned objective -2307.32 at a
 /// constraint violation of **9.94** — below the true optimum -2304.0 precisely
 /// because the point is infeasible — while guard off returned -2298.57 at
-/// violation 1.06e-4. Both reported `solve_result_num` 100.
+/// violation 1.06e-4. Both terminated `Solved_To_Acceptable_Level`.
 #[test]
 fn best_acceptable_fallback_does_not_trade_feasibility_for_objective() {
     // A widened acceptable band. `acceptable_constr_viol_tol` alone is not
