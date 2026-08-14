@@ -316,11 +316,61 @@ impl OptErrorConvCheck {
         constr_viol: Number,
         compl_inf: Number,
         dual_scale: Number,
+        primal_resolvable: bool,
     ) -> bool {
         overall <= self.tol
             && dual_inf <= self.dual_inf_bound(dual_scale)
-            && constr_viol <= self.constr_viol_tol
+            && self.primal_component_passes(constr_viol, primal_resolvable)
             && compl_inf <= self.compl_inf_tol
+    }
+
+    /// Whether the unscaled constraint violation clears the **strict** gate's
+    /// primal component (gh #590): `constr_viol <= constr_viol_tol`, or the
+    /// iterate placed every constraint row at or below the finest residual that
+    /// row can represent in floating point.
+    ///
+    /// `primal_resolvable` is the caller's answer to
+    /// [`IpoptCalculatedQuantities::curr_primal_infeasibility_above_noise`] —
+    /// `false` only when that accessor returned exactly `0`, meaning *no* row
+    /// rose above its own noise floor. It is a boolean rather than a floored
+    /// magnitude on purpose. The floor is computed on the internally scaled
+    /// residual while `constr_viol` is unscaled, so the two are not comparable
+    /// as numbers, and comparing them anyway is precisely the units error
+    /// `infeasible_status_tol_invariance` exists to pin down. The *abstention
+    /// verdict* is scale-invariant by construction — the floor carries each
+    /// row's `dc_i` exactly as the residual and the declared magnitude do — so
+    /// the boolean transfers between unit systems even though the magnitude
+    /// does not.
+    ///
+    /// gh #528 gave the strict **aggregate** this floor and deliberately left
+    /// the component on the raw residual, reasoning that any realistic quantum
+    /// sits far below the tolerances. gh #590 is the model where that premise
+    /// fails. LyoPRONTO's pseudosteady lyophilisation OCP is written in Landau
+    /// coordinates, so its conduction rows carry `1/(H − S)²` and reach
+    /// magnitudes near `1e8`: one ulp of those rows is `~1e-2`, which is not
+    /// two decades under `acceptable_constr_viol_tol`, it *is*
+    /// `acceptable_constr_viol_tol`. At the converged point the scaled KKT
+    /// error is `4.3e-10` against `tol = 1e-6`, every row's residual is at or
+    /// below its own floor, and the unscaled violation reads `1.62e-2` — pure
+    /// quantisation. Ipopt 3.14.16 lands on the same point with `8.06e-3` and
+    /// calls it `Solved To Acceptable Level`; which side of `1e-2` a run falls
+    /// on there is arithmetic luck, not a property of the iterate.
+    ///
+    /// Leaving the component unfloored while the aggregate is floored is also
+    /// incoherent on its own terms: the component test is a refinement of the
+    /// aggregate, and an unfloored component can veto a certificate the floored
+    /// aggregate has already granted. That is exactly what happened here.
+    ///
+    /// The relaxation is confined to the all-noise case — one resolvable row
+    /// anywhere and the raw comparison stands — and it cannot fabricate a
+    /// success on a genuinely infeasible model: such a model's violation is
+    /// pinned at its infeasibility gap, orders above `eps ·` the row's own
+    /// magnitude, so the accessor returns a positive value and nothing here
+    /// engages. The scale-relative veto below is untouched and still sees the
+    /// raw `rel_viol`. `primal_noise_floor_kappa = 0` opts out, as it does for
+    /// the aggregate.
+    fn primal_component_passes(&self, constr_viol: Number, primal_resolvable: bool) -> bool {
+        constr_viol <= self.constr_viol_tol || !primal_resolvable
     }
 
     /// The bound the **strict** gate judges the unscaled dual infeasibility
@@ -396,13 +446,14 @@ impl OptErrorConvCheck {
     /// (`Search_Direction_Becomes_Too_Small`, on LPs whose optimum POUNCE
     /// already had to 8 significant figures).
     ///
-    /// Only this gate reads the floored value. `constr_viol` is still tested
-    /// against `constr_viol_tol` on the full, unfloored residual, and the
-    /// scale-relative veto still sees it too — so the noise floor can never
-    /// admit a violation the user's own feasibility tolerance would reject, it
-    /// only stops an unrepresentable one from vetoing a certificate. The
-    /// acceptable-level band is deliberately left on the raw `nlp_err`: it sits
-    /// two decades above `tol`, far clear of any realistic quantum.
+    /// The per-component `constr_viol` gate reads the same floor, but as a
+    /// boolean and only in the all-noise case — see `primal_component_passes`,
+    /// which is gh #590's correction to this method's original scope. The
+    /// scale-relative veto still sees the raw `rel_viol`, so a row violated by
+    /// a meaningful fraction of its own magnitude is refused by that arm no
+    /// matter what either floor says. The acceptable-level band is left on the
+    /// raw `nlp_err`: once the strict gate understands the floor, a solve that
+    /// is converged-to-noise takes the strict exit and never reaches the band.
     ///
     /// A non-finite `nlp_err` is passed through untouched — `f64::min` returns
     /// the *other* operand at `NaN`, which would launder exactly the
@@ -734,11 +785,24 @@ impl OptErrorConvCheck {
         constr_viol: Number,
         rel_viol: Number,
         stationarity: Number,
+        primal_resolvable: bool,
     ) -> bool {
         if self.infeas_stationarity_tol <= 0.0 || self.infeas_max_streak <= 0 {
             return false;
         }
-        (constr_viol > self.absolute_viol_threshold() || rel_viol > self.relative_viol_threshold())
+        // gh #590: the absolute arm additionally requires the violation to be
+        // something the model's own arithmetic can resolve. `primal_resolvable`
+        // is `false` only when every constraint row sits at or below its own
+        // floating-point noise floor (see `primal_component_passes`), and a
+        // residual no iterate could place is not evidence of infeasibility — it
+        // is the quantum the row is measured in. Convicting on it is the worst
+        // failure this predicate has: `Infeasible_Problem_Detected` is a
+        // *confident* verdict, and downstream it becomes an AMPL 200 / Pyomo
+        // `infeasible`, indistinguishable from a real proof. The relative arm
+        // is deliberately left alone; it is already a ratio against the row's
+        // own magnitude, so it cannot mistake a quantum for a violation.
+        let absolute_arm = constr_viol > self.absolute_viol_threshold() && primal_resolvable;
+        (absolute_arm || rel_viol > self.relative_viol_threshold())
             && stationarity <= self.infeas_stationarity_tol
     }
 
@@ -768,6 +832,7 @@ impl OptErrorConvCheck {
         constr_viol: Number,
         rel_viol: Number,
         stationarity: Number,
+        primal_resolvable: bool,
     ) -> bool {
         let still_improving = rel_viol < 0.9 * self.prev_rel_viol;
         self.prev_rel_viol = rel_viol;
@@ -775,7 +840,12 @@ impl OptErrorConvCheck {
         // own guard (the direct no-descent confirmation, which is meaningful
         // at absolute violation scales).
         let effective_rel = if still_improving { 0.0 } else { rel_viol };
-        if self.is_infeasible_stationary(constr_viol, effective_rel, stationarity) {
+        if self.is_infeasible_stationary(
+            constr_viol,
+            effective_rel,
+            stationarity,
+            primal_resolvable,
+        ) {
             self.infeas_streak += 1;
             self.infeas_streak >= self.infeas_max_streak
         } else {
@@ -879,8 +949,22 @@ impl ConvCheck for OptErrorConvCheck {
         // complementarity component already blown no floor on the dual makes a
         // certificate. That laziness matters because the accessor repeats
         // `curr_grad_lag_x`'s `∇f` and two transpose products.
-        let primal_compl_pass =
-            constr_viol <= self.constr_viol_tol && compl_inf <= self.compl_inf_tol;
+        // gh #590 — the primal component's noise floor; see
+        // `primal_component_passes`. Computed only where it can change the
+        // verdict: with `constr_viol` already inside its tolerance the raw
+        // comparison has passed, and with complementarity blown no floor on the
+        // primal makes a certificate. That leaves the tail of a solve that is
+        // complementarity-converged but primal-blown, which is the regime this
+        // is for. The accessor is two `compute_row_amax` sweeps — an order
+        // cheaper than the `curr_nlp_error_above_primal_noise` below, which is
+        // a second evaluation of the whole KKT error — so this guard can afford
+        // to be the looser of the two.
+        let primal_resolvable = !(self.noise_floor_enabled()
+            && constr_viol > self.constr_viol_tol
+            && compl_inf <= self.compl_inf_tol
+            && cq_ref.curr_primal_infeasibility_above_noise(self.primal_noise_floor_kappa) == 0.0);
+        let primal_compl_pass = self.primal_component_passes(constr_viol, primal_resolvable)
+            && compl_inf <= self.compl_inf_tol;
         let dual_scale =
             if primal_compl_pass && dual_inf > self.dual_inf_tol && self.dual_inf_scale_kappa > 0.0
             {
@@ -963,7 +1047,14 @@ impl ConvCheck for OptErrorConvCheck {
         // snapshot an arbitrary mid-solve iterate) on runs that were never
         // about to stop.
         let refusing_strict = masked
-            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale);
+            && self.passes_component_tols(
+                strict_err,
+                dual_inf,
+                constr_viol,
+                compl_inf,
+                dual_scale,
+                primal_resolvable,
+            );
         if refusing_strict && !self.veto_fired {
             self.veto_fired = true;
             tracing::info!(
@@ -977,7 +1068,14 @@ impl ConvCheck for OptErrorConvCheck {
         }
 
         if !masked
-            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
+            && self.passes_component_tols(
+                strict_err,
+                dual_inf,
+                constr_viol,
+                compl_inf,
+                dual_scale,
+                primal_resolvable,
+            )
         {
             if rel_veto {
                 rel_veto_blocked = true;
@@ -1060,7 +1158,24 @@ impl ConvCheck for OptErrorConvCheck {
             // that no local move reduces the violation -- is confirmed directly
             // before the verdict is issued.
             let stationarity = cq.borrow().curr_infeasibility_stationarity();
-            if self.note_infeasible_stationary(constr_viol, rel_viol, stationarity) {
+            // gh #590 — evaluated only when the absolute arm is what would
+            // convict: both its own threshold and the stationarity test have to
+            // be armed already, which on a healthy solve is never, and on a
+            // genuinely infeasible one the accessor returns a positive value on
+            // the first call and the verdict proceeds unchanged.
+            let primal_resolvable = !(self.noise_floor_enabled()
+                && constr_viol > self.absolute_viol_threshold()
+                && stationarity <= self.infeas_stationarity_tol
+                && cq
+                    .borrow()
+                    .curr_primal_infeasibility_above_noise(self.primal_noise_floor_kappa)
+                    == 0.0);
+            if self.note_infeasible_stationary(
+                constr_viol,
+                rel_viol,
+                stationarity,
+                primal_resolvable,
+            ) {
                 if cq.borrow().infeasibility_descent_available() {
                     // Descent exists: not a stationary point of the violation,
                     // so the surrogate was wrong here. Drop the streak and keep
@@ -1136,8 +1251,20 @@ impl ConvCheck for OptErrorConvCheck {
         } else {
             0.0
         };
+        // Same primal noise floor the strict gate uses (gh #590), for the same
+        // reason this predicate reuses the floored aggregate.
+        let primal_resolvable = !(self.noise_floor_enabled()
+            && constr_viol > self.constr_viol_tol
+            && cq_ref.curr_primal_infeasibility_above_noise(self.primal_noise_floor_kappa) == 0.0);
         drop(cq_ref);
-        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
+        self.passes_component_tols(
+            strict_err,
+            dual_inf,
+            constr_viol,
+            compl_inf,
+            dual_scale,
+            primal_resolvable,
+        )
     }
 
     fn tol_or_default(&self) -> Number {
@@ -1237,13 +1364,13 @@ mod tests {
         let c = OptErrorConvCheck::new();
         // `x >= 0.7` at row scale 1e-12: absolute violation 1e-13 (invisible
         // to the absolute arm, floor is 1e-2), relative violation 0.14.
-        assert!(c.is_infeasible_stationary(1e-13, 0.14, 1e-9));
+        assert!(c.is_infeasible_stationary(1e-13, 0.14, 1e-9, true));
         // The same iterate without the relative signal must NOT fire — this
         // is exactly the old behaviour.
-        assert!(!c.is_infeasible_stationary(1e-13, 0.0, 1e-9));
+        assert!(!c.is_infeasible_stationary(1e-13, 0.0, 1e-9, true));
         // A converged small-magnitude row (residual 1e-9 on a 1e-6-bound row,
         // 0.1% relative) stays under the 1% threshold.
-        assert!(!c.is_infeasible_stationary(1e-9, 1e-3, 1e-9));
+        assert!(!c.is_infeasible_stationary(1e-9, 1e-3, 1e-9, true));
     }
 
     /// The relative arm's streak resets while the relative violation is still
@@ -1256,16 +1383,16 @@ mod tests {
         let mut c = OptErrorConvCheck::new();
         c.infeas_max_streak = 3;
         // A pinned relative violation (an infeasibility gap) accumulates.
-        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
-        assert!(c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9, true));
+        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9, true));
+        assert!(c.note_infeasible_stationary(1e-13, 0.14, 1e-9, true));
         // A geometrically shrinking one (a converging endgame) never fires.
         let mut c = OptErrorConvCheck::new();
         c.infeas_max_streak = 3;
         let mut rel = 0.5;
         for _ in 0..20 {
             assert!(
-                !c.note_infeasible_stationary(1e-13, rel, 1e-9),
+                !c.note_infeasible_stationary(1e-13, rel, 1e-9, true),
                 "a converging endgame must not be declared infeasible"
             );
             rel *= 0.5;
@@ -1413,7 +1540,7 @@ mod tests {
             ..Default::default()
         };
         // The residuals alone say "converged"; the objective says nothing usable.
-        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0, 0.0, true));
         // The masked predicate itself is unchanged — the finiteness gate lives at
         // the call site, where `curr_f` is in hand.
         assert!(certificate_masked(
@@ -1738,7 +1865,7 @@ mod tests {
             ..Default::default()
         };
         // The gh #200 iterate: passes the strict test in scaled space...
-        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0, 0.0, true));
         // ...and the veto is what withholds it.
         assert!(certificate_masked(
             1e-8,
@@ -1762,13 +1889,63 @@ mod tests {
             ..Default::default()
         };
         // All under threshold → converged.
-        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5, 0.0));
+        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5, 0.0, true));
         // dual_inf above its tolerance blocks even when nlp_err is tiny.
-        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5, 0.0));
+        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5, 0.0, true));
         // compl_inf above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2, 0.0));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2, 0.0, true));
         // constr_viol above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0, 0.0));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0, 0.0, true));
+    }
+
+    /// gh #590: the strict primal component forgives a violation only when
+    /// *no* constraint row rose above its own floating-point noise floor. One
+    /// resolvable row anywhere and `constr_viol_tol` is back in charge.
+    #[test]
+    fn primal_component_passes_only_forgives_an_unresolvable_residual() {
+        let c = OptErrorConvCheck {
+            constr_viol_tol: 1e-6,
+            ..Default::default()
+        };
+        // Inside the tolerance: passes either way, the floor is not consulted.
+        assert!(c.primal_component_passes(1e-9, true));
+        assert!(c.primal_component_passes(1e-9, false));
+        // The reported point: 1.62e-2 of violation, no row above its floor.
+        assert!(c.primal_component_passes(1.620_777e-2, false));
+        // The same violation with one row genuinely above its floor is refused.
+        assert!(!c.primal_component_passes(1.620_777e-2, true));
+        // The forgiveness is not bounded above — that is deliberate. What
+        // bounds it is `primal_resolvable`, which no real violation can clear:
+        // a row short by 1e6 is short by ~1e22 ulps of itself.
+        assert!(c.primal_component_passes(1e6, false));
+    }
+
+    /// gh #590: the rapid-infeasibility detector's **absolute** arm carries the
+    /// same requirement. Convicting on a residual the model's arithmetic cannot
+    /// resolve is the worst failure this predicate has — the verdict is
+    /// confident, and downstream it is indistinguishable from a real proof.
+    /// The **relative** arm is untouched: it is already a ratio against the
+    /// row's own magnitude, so it cannot mistake a quantum for a violation.
+    #[test]
+    fn the_absolute_infeasibility_arm_needs_a_resolvable_violation() {
+        let c = OptErrorConvCheck {
+            constr_viol_tol: 1e-6,
+            infeas_stationarity_tol: 1e-8,
+            infeas_max_streak: 5,
+            ..Default::default()
+        };
+        assert_eq!(c.absolute_viol_threshold(), MIN_INFEAS_VIOL_FLOOR);
+
+        // The reported iterate: violation above the absolute floor, gradient
+        // flat, relative violation negligible — and every row inside its own
+        // noise floor. Before the fix this armed the detector.
+        assert!(!c.is_infeasible_stationary(1.620_777e-2, 1e-8, 1e-9, false));
+        // Identical, except one row is resolvable: the verdict stands.
+        assert!(c.is_infeasible_stationary(1.620_777e-2, 1e-8, 1e-9, true));
+        // The relative arm does not depend on the flag — a row violated by
+        // more than the relative threshold of its own magnitude arms the
+        // detector whatever the absolute floor says.
+        assert!(c.is_infeasible_stationary(0.0, 1.0, 1e-9, false));
     }
 
     #[test]
@@ -1782,13 +1959,13 @@ mod tests {
         };
         // Violation well above 1e-2 and the infeasibility gradient
         // essentially zero → counts as infeasible-stationary.
-        assert!(c.is_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(c.is_infeasible_stationary(1e-1, 0.0, 1e-9, true));
         // Violation above threshold but the gradient is not flat →
         // still making feasibility progress, does not count.
-        assert!(!c.is_infeasible_stationary(1e-1, 0.0, 1e-3));
+        assert!(!c.is_infeasible_stationary(1e-1, 0.0, 1e-3, true));
         // Gradient flat but violation below threshold → nearly
         // feasible, does not count.
-        assert!(!c.is_infeasible_stationary(1e-3, 0.0, 1e-9));
+        assert!(!c.is_infeasible_stationary(1e-3, 0.0, 1e-9, true));
     }
 
     /// gh #519: tightening `constr_viol_tol` must never widen the set of
@@ -1817,7 +1994,7 @@ mod tests {
             // absolute arm on it (the relative signal is 0 here: the row is
             // unit-scale, so only the absolute arm is in play).
             assert!(
-                !c.is_infeasible_stationary(plateau_viol, 0.0, 1e-9),
+                !c.is_infeasible_stationary(plateau_viol, 0.0, 1e-9, true),
                 "constr_viol_tol={cvt} armed the detector on the {plateau_viol} plateau"
             );
         }
@@ -1833,7 +2010,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(strict.absolute_viol_threshold(), 1e-2);
-        assert!(strict.is_infeasible_stationary(0.5, 0.0, 1e-9));
+        assert!(strict.is_infeasible_stationary(0.5, 0.0, 1e-9, true));
         // Raising kappa above the floor still moves the threshold.
         let wide = OptErrorConvCheck {
             constr_viol_tol: 1e-4,
@@ -1841,8 +2018,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(wide.absolute_viol_threshold(), 1.0);
-        assert!(!wide.is_infeasible_stationary(0.5, 0.0, 1e-9));
-        assert!(wide.is_infeasible_stationary(2.0, 0.0, 1e-9));
+        assert!(!wide.is_infeasible_stationary(0.5, 0.0, 1e-9, true));
+        assert!(wide.is_infeasible_stationary(2.0, 0.0, 1e-9, true));
         // Loosening `constr_viol_tol` past the floor moves it too — the floor
         // only binds from below.
         let loose = OptErrorConvCheck {
@@ -1880,13 +2057,13 @@ mod tests {
             infeas_max_streak: 5,
             ..Default::default()
         };
-        assert!(!off_tol.is_infeasible_stationary(1e9, 0.0, 0.0));
+        assert!(!off_tol.is_infeasible_stationary(1e9, 0.0, 0.0, true));
         let off_streak = OptErrorConvCheck {
             infeas_stationarity_tol: 1e-8,
             infeas_max_streak: 0,
             ..Default::default()
         };
-        assert!(!off_streak.is_infeasible_stationary(1e9, 0.0, 0.0));
+        assert!(!off_streak.is_infeasible_stationary(1e9, 0.0, 0.0, true));
     }
 
     #[test]
@@ -1900,9 +2077,9 @@ mod tests {
         };
         // Infeasible-stationary iterate: violation 1e-1 > 1e-2, flat
         // gradient. Streak accrues but does not fire until the third.
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
-        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
+        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
     }
 
     #[test]
@@ -1914,15 +2091,15 @@ mod tests {
             infeas_max_streak: 3,
             ..Default::default()
         };
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
         // A non-stationary iterate (gradient not flat) resets the streak.
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-3));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-3, true));
         assert_eq!(c.infeas_streak, 0);
         // The streak must rebuild from scratch — no carry-over credit.
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
-        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
+        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9, true));
     }
 
     #[test]
@@ -1933,7 +2110,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..20 {
-            assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0));
+            assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0, true));
         }
         assert_eq!(c.infeas_streak, 0);
     }
@@ -1959,7 +2136,8 @@ mod tests {
             orthrds2_dual_inf,
             1.741e-8,
             0.0,
-            orthrds2_scale
+            orthrds2_scale,
+            true
         ));
 
         // `min -exp(x) s.t. x >= 0` running away: `∇f = −8.8e47` with no
@@ -1968,7 +2146,7 @@ mod tests {
         // rejecting.
         let runaway = 8.8e47;
         assert!(runaway > c.dual_inf_bound(runaway));
-        assert!(!c.passes_component_tols(1e-12, runaway, 1.7e-10, 0.0, runaway));
+        assert!(!c.passes_component_tols(1e-12, runaway, 1.7e-10, 0.0, runaway, true));
 
         // The floor is a floor, never a tightening: below `dual_inf_tol` the
         // absolute arm decides, at any scale.
@@ -2006,7 +2184,7 @@ mod tests {
         for off in [0.0, -1.0, Number::NAN] {
             c.dual_inf_scale_kappa = off;
             assert_eq!(c.dual_inf_bound(1e30), c.dual_inf_tol, "kappa {off}");
-            assert!(!c.passes_component_tols(1e-12, 89.7, 0.0, 0.0, 1.6e12));
+            assert!(!c.passes_component_tols(1e-12, 89.7, 0.0, 0.0, 1.6e12, true));
         }
     }
 

@@ -335,6 +335,12 @@ const ROW_NOISE_KAPPA: Number = 64.0;
 /// large `|b|` grows and however loose `64·eps·|b|` gets. The floor only ever
 /// narrows what the aggregate admits *inside* that band.
 ///
+/// gh #590 later gave that component test the floor as well, but only for the
+/// case where *no* row rises above its own — which is the one case this fixture
+/// is built to exclude. Every row here is short by ten times its quantum, so
+/// `curr_primal_infeasibility_above_noise` reports them all, the raw comparison
+/// stays in force, and the refusal is the same one for the same reason.
+///
 /// `bound_relax_factor` is pinned to `0` here, and that is the whole reason
 /// this test needs a knob the others don't. At its default of `1e-8` and
 /// `ub = 1e9` the solver already widens every variable bound by ~10 before the
