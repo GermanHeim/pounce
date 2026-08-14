@@ -9,7 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#XXX)
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
 variable's bound it clips the value and warns. Clipping costs more than
@@ -71,7 +71,7 @@ degrees of freedom. `pyomo-pounce/tests/test_fix_relax.py` covers the
 Pyomo surface, including under a `user-scaling` change of variables, and
 that the two modes agree exactly where nothing crosses.
 
-### Changed — every parametric step now carries the barrier correction (#XXX)
+### Changed — every parametric step now carries the barrier correction (#587)
 
 `estimate()`, `gradient()`, `Solver.parametric_step` and the `SensSolve`
 builder take their step against a factorization held at the solve's
@@ -92,7 +92,7 @@ There is no option for it. The barrier problem's answer is not one a
 caller has a reason to want, and upstream applies the term
 unconditionally as well.
 
-### Changed — `sens_boundcheck` refines instead of clamping (#XXX)
+### Changed — `sens_boundcheck` refines instead of clamping (#587)
 
 The option is named after upstream sIPOPT's, and upstream's runs an
 iterative Schur refinement. Pounce's ran a single-pass clamp, so the
