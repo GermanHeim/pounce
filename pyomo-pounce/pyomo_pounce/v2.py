@@ -282,8 +282,11 @@ _V2_STATUS = {
     # engine's `x` is the zero vector it was initialized with, not an
     # iterate. `unknown` all the same, and deliberately: the ordinary
     # route reports exactly that, because the CLI writes a `.sol` for a
-    # refused solve too (zero-filled, so the primal block still aligns
-    # with the `.nl`), and Pyomo's rule is "a primal vector came back".
+    # refused solve too -- `crates/pounce-cli/src/main.rs` writes it
+    # "unconditionally once a target path is resolved, even on a failed
+    # solve", falling back to zero blocks sized from the pre-solve NLP
+    # dimensions so the primal block still aligns with the `.nl` -- and
+    # Pyomo's rule is "a primal vector came back".
     # Claiming `noSolution` here would buy nothing -- `sens_solve` has
     # already written those values onto the model by the time this route
     # inspects the status, so raising `NoSolutionError` would not spare

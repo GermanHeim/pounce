@@ -464,17 +464,24 @@ _STATUS_RESULT = {
         (TerminationCondition.maxTimeLimit, SolverStatus.warning),
     "User_Requested_Stop":
         (TerminationCondition.userInterrupt, SolverStatus.aborted),
-    # AMPL's 400 "limit" band, like the two above; the legacy enum names
-    # this one exactly, so it does not have to borrow `maxIterations` the
-    # way Pyomo's band-reading `.sol` table does.
+    # AMPL's 400 "limit" band, like the two above. `warning` is the band's
+    # severity, and this is the ONE row whose severity differs from the
+    # `(error, error)` default it used to take -- a stalled solve is a limit
+    # case, not a failure, which is why it sits in the limit band. The
+    # termination condition deviates from what Pyomo's band-reading `.sol`
+    # table gives (`maxIterations`): POUNCE names this exit exactly, and the
+    # legacy enum has the member, so it does not have to borrow the
+    # iteration-limit one. Same deliberate precision as `maxTimeLimit` above.
     "Search_Direction_Becomes_Too_Small":
         (TerminationCondition.minStepLength, SolverStatus.warning),
     # AMPL's 500 failure band. `internalSolverError` + `error` is what the
     # ordinary `.sol` route reports for every code in it, so these agree with
     # it rather than with the coarser `(error, error)` default they used to
-    # take. The two definition errors keep the more specific `invalidProblem`:
-    # the legacy enum has the member, the solve never started, and the
-    # severity -- which is what callers branch on -- is unchanged.
+    # take. The two definition errors deviate on the termination condition,
+    # again for precision: `.sol` can only say `internalSolverError` for the
+    # whole band, while an over-determined or malformed model is not a solver
+    # failure and the legacy enum has `invalidProblem` for exactly that. The
+    # severity -- which is what callers branch on -- stays `error` either way.
     "Restoration_Failed":
         (TerminationCondition.internalSolverError, SolverStatus.error),
     "Error_In_Step_Computation":

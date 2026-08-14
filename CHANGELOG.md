@@ -35,13 +35,20 @@ changes.
   silently reintroduce the asymmetry, and a new test holds both tables to the
   Rust enum.
 
-  Termination conditions get more specific with the added rows, on both
-  routes. On the legacy route the eleven exits reported plain
-  `TerminationCondition.error` and now report what the `.sol` route reports for
-  the same solve — `internalSolverError` for AMPL's 500 failure band,
-  `invalidProblem` for the two definition errors, `minStepLength` for
-  `Search_Direction_Becomes_Too_Small`. `SolverStatus` (`error`, or `warning`
-  for the step-length exit) is unchanged from what the default gave.
+  Termination conditions get more specific with the added rows. On the legacy
+  route the eleven exits reported plain `TerminationCondition.error` and now
+  agree with the severity the `.sol` route gives the same solve, while naming
+  the outcome more precisely than AMPL's bands can. Eight report
+  `internalSolverError` (the 500 failure band verbatim); the two definition
+  errors report `invalidProblem`, which `.sol` cannot distinguish from an
+  internal failure; and `Search_Direction_Becomes_Too_Small` reports
+  `minStepLength` where `.sol` says `maxIterations` for the whole 400 band.
+
+  One of the eleven changes severity. `Search_Direction_Becomes_Too_Small` is
+  now `SolverStatus.warning` rather than the default's `error`, matching the
+  400 limit band — a stalled solve is a limit case, not a failure. A legacy
+  caller branching on `status == error` for that exit will see `warning`. The
+  other ten stay `error`.
 
   Callers on the v2 route were affected on every restoration failure; `drto`
   in particular, since its `dynamic_optimization` transform declares
