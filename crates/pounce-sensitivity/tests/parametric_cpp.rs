@@ -531,7 +531,7 @@ fn run_bounded_step(delta_p: [Number; 2]) -> ([Number; 5], Vec<Index>) {
     );
 
     let (dx, pinned) = solver
-        .parametric_step_bounded(&[2, 3], &delta_p, 1e-9, 8)
+        .parametric_step_bounded(&[2, 3], &delta_p, 8)
         .expect("parametric_step_bounded");
     (std::array::from_fn(|i| dx[i]), pinned)
 }
@@ -793,7 +793,7 @@ fn fix_relax_pins_three_crossings_at_once() {
     let exact = three_free_solve_at(-1.0);
     let plain = solver.parametric_step(&[0], &[-2.0]).expect("plain step");
     let (fixed, pinned) = solver
-        .parametric_step_bounded(&[0], &[-2.0], 1e-9, 8)
+        .parametric_step_bounded(&[0], &[-2.0], 8)
         .expect("bounded step");
 
     // dx/dp is (1, 2, 3), so the step drives all three below zero and

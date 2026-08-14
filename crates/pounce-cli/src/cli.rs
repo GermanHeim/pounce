@@ -97,10 +97,16 @@ pub struct Args {
     pub dump_dir: Option<PathBuf>,
     /// `--dump-format <fmt>`: dump file format. Currently only `jsonl`.
     pub dump_format: Option<String>,
-    /// `--sens-boundcheck` — clamp the perturbed primal `x* + Δx` onto
-    /// the declared `[x_l, x_u]` box after the sensitivity step. Only
-    /// has effect when the `.nl` declares the sIPOPT suffixes. Mirrors
-    /// upstream sIPOPT's `sens_boundcheck`.
+    /// `--sens-boundcheck` — hold the perturbed primal `x* + Δx` at the
+    /// declared bounds by pinning and re-solving: each coordinate the
+    /// step takes past a bound is pinned there and the step recomputed,
+    /// so the others move with it. Only has effect when the `.nl`
+    /// declares the sIPOPT suffixes. Mirrors upstream sIPOPT's
+    /// `sens_boundcheck`.
+    ///
+    /// This does not guarantee the result is inside the box. Pins are
+    /// limited by the problem's degrees of freedom, and past that no
+    /// step holds every bound at once.
     pub sens_boundcheck: bool,
     /// `--sens-bound-eps <eps>` — tolerance for `--sens-boundcheck`
     /// (default `1e-3`). Setting it also enables `--sens-boundcheck`.

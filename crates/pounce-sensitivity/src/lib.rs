@@ -35,14 +35,13 @@
 //!   [`SensSolve::with_reduced_hessian_eigen`], the `pounce_sens
 //!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
 //!   kwarg.
-//! * **`sens_boundcheck` bound projection** ✔ (single-pass clamp) —
-//!   [`boundcheck::clamp_step_to_bounds`] /
-//!   [`boundcheck::clamp_with_nlp`] project the perturbed step onto
-//!   `[x_l, x_u]` after the linear solve. Surfaced via
+//! * **`sens_boundcheck` bound refinement** ✔ —
+//!   [`boundcheck::refine_step_onto_bounds`] pins each coordinate the
+//!   step takes past a bound AT that bound and re-solves, so the others
+//!   move with it, which is what upstream's option does. Surfaced via
 //!   [`SensSolve::with_boundcheck`], `pounce_sens --sens-boundcheck`,
-//!   and the Python `solve_with_sens(sens_boundcheck=True)` kwarg.
-//!   Upstream's iterative Schur refinement (re-factorize on each
-//!   violation) is **not** ported — see [`boundcheck`] module docs.
+//!   the Python `solve_with_sens(sens_boundcheck=True)` kwarg, and
+//!   `estimate(mode="fix_relax")` in pyomo-pounce.
 //!
 //! # Algorithmic reference
 //!

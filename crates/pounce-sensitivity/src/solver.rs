@@ -532,99 +532,75 @@ impl Solver {
     /// `k × k` solve and a backsolve per pass, with `k` the number of
     /// pins so far. The factorization itself is never rebuilt.
     ///
-    /// Passes stop when no coordinate is outside its bound by more than
-    /// `eps`, or at `max_passes`. Reaching the cap is not an error:
-    /// the step returned is the last one computed, and the returned pin
-    /// list says how far the refinement got.
+    /// What counts as outside a bound is taken from the solve rather
+    /// than from the caller: it was willing to leave a converged point
+    /// `bound_relax_factor` outside its bound, so anything within that
+    /// is on the bound. An unrelaxed solve gets a roundoff floor.
+    ///
+    /// Passes stop when nothing is outside its bound by that much, at
+    /// `max_passes`, or when a pin cannot be achieved because the pins
+    /// have exhausted the problem's degrees of freedom. None of those
+    /// is an error: the step returned is the last one computed, and the
+    /// returned pin list says how far the refinement got. `max_passes`
+    /// is a budget, since each pass costs a dense `k × k` solve and the
+    /// point of the refinement is to stay cheaper than a re-solve.
     pub fn parametric_step_bounded(
         &self,
         pin_constraint_indices: &[Index],
         deltas: &[Number],
-        eps: Number,
         max_passes: usize,
     ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
-        let mut dx = self.parametric_step(pin_constraint_indices, deltas)?;
+        let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let n_x = dx.len();
-        let n_full = state.backsolver.dim();
+        let n_x = state.backsolver.block_dims()[0];
 
         // Expanded once, before any re-solve: reading the compressed
         // form means borrowing the NLP, and `run_sens_step` below
         // re-borrows it.
-        let (lo, hi) = {
+        let (mut lo, mut hi) = {
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
             crate::boundcheck::expand_bounds(n_x, &nl.px_l(), &nl.px_u(), nl.x_l(), nl.x_u())
         };
-        let x_curr = &state.x[..n_x];
-
-        // Each pass solves the augmented system carrying EVERY pin so
-        // far, against the original factorization, so its correction is
-        // measured from the plain step rather than from the previous
-        // pass. Adding successive corrections instead would count the
-        // earlier pins twice.
-        let dx_plain = dx.clone();
-        let mut pins: Vec<(usize, Number)> = Vec::new();
-        for _ in 0..max_passes {
-            let skip: Vec<usize> = pins.iter().map(|&(i, _)| i).collect();
-            let Some((i, bound)) =
-                crate::boundcheck::worst_violation(x_curr, &dx, &lo, &hi, eps, &skip)
-            else {
-                break;
-            };
-            pins.push((i, bound));
-
-            // A and B are both the pin rows, so the Schur complement is
-            // square, which `DenseGenSchurDriver` requires. The step it
-            // returns at a pinned coordinate is the negative of the
-            // displacement asked for, so the right-hand side is the
-            // overshoot itself rather than its negation.
-            let rows: Vec<Index> = pins.iter().map(|&(i, _)| i as Index).collect();
-            let signs = vec![1; rows.len()];
-            let mk = |r: Vec<Index>| {
-                IndexSchurData::from_parts(r, signs.clone())
-                    .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))
-            };
-            let opts = SensOptions {
-                run_sens: true,
-                ..SensOptions::default()
-            };
-            let mut pin_app =
-                SensApplication::new(mk(rows.clone())?, state.backsolver.clone(), opts);
-            let rhs: Vec<Number> = pins
-                .iter()
-                .map(|&(p, b)| (x_curr[p] + dx_plain[p]) - b)
-                .collect();
-            let mut du = vec![0.0; rows.len()];
-            let mut corr = vec![0.0; n_full];
-            if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
-                return Err(SolverError::SensComputationFailed(
-                    "SensApplication::run_sens_step failed".into(),
-                ));
-            }
-            // The augmented system is singular once the pins exhaust
-            // the problem's degrees of freedom: there is no step that
-            // holds every pinned coordinate at its bound and still
-            // satisfies the constraints. A dense LU does not always
-            // report that, it returns a huge solution instead, so the
-            // check is whether the correction actually achieved the
-            // displacement asked for. If it did not, this pin is not
-            // usable, and the previous pass's step stands.
-            let achieved = pins
-                .iter()
-                .zip(rhs.iter())
-                .all(|(&(p, _), r)| (corr[p] + r).abs() <= 1e-6 * r.abs().max(1.0));
-            if !achieved {
-                pins.pop();
-                break;
-            }
-            for (k, d) in dx.iter_mut().enumerate() {
-                *d = dx_plain[k] + corr[k];
+        // Those bounds bound the algorithm's `x̃ = d ⊙ x`, while
+        // `state.x` and the step are both in the model's own units
+        // (gh#486 stage 3). Undo the change of variables on the bounds
+        // so all three agree, rather than projecting onto the wrong box.
+        // A negative factor reflects the interval, so the sides swap.
+        if let Some(d) = state.backsolver.variable_scaling_full() {
+            for i in 0..n_x {
+                let di = d[i];
+                if di == 0.0 || di == 1.0 {
+                    continue;
+                }
+                let (a, b) = (lo[i] / di, hi[i] / di);
+                lo[i] = a.min(b);
+                hi[i] = a.max(b);
             }
         }
-        let pinned: Vec<usize> = pins.into_iter().map(|(i, _)| i).collect();
-        Ok((dx, pinned.into_iter().map(|p| p as Index).collect()))
+        let x_curr = &state.x[..n_x];
+
+        // What counts as outside a bound is the solve's own answer: it
+        // was willing to leave a converged point `bound_relax_factor`
+        // outside, so anything within that is on the bound, not past
+        // it. A floor keeps an unrelaxed solve from pinning on
+        // roundoff.
+        let eps = state.bound_relax_factor.abs().max(1e-9);
+        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+            &state.backsolver,
+            &dx_full,
+            x_curr,
+            &lo,
+            &hi,
+            eps,
+            max_passes,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((
+            dx[..n_x].to_vec(),
+            pinned.into_iter().map(|p| p as Index).collect(),
+        ))
     }
 
     /// Full KKT-space parametric step for a set of pinned equality

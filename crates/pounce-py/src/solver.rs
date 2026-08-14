@@ -279,19 +279,20 @@ impl PySolver {
     /// is then the plain one.
     ///
     /// Each pass costs one dense `k × k` solve and a backsolve, with
-    /// `k` the number of pins so far. The factorization is never
-    /// rebuilt. Pinning stops when no coordinate is outside its bound
-    /// by more than `eps`, at `max_passes`, or when the pins exhaust
-    /// the problem's degrees of freedom, which makes the augmented
-    /// system singular. Reaching any of those is not an error, and
+    /// `k` the number of pins so far, so `max_passes` is a budget: the
+    /// refinement is only worth running while it stays cheaper than a
+    /// re-solve. What counts as outside a bound comes from the solve's
+    /// own `bound_relax_factor` rather than from an argument. Pinning
+    /// stops when nothing is outside by that much, at `max_passes`, or
+    /// when the pins exhaust the problem's degrees of freedom, which
+    /// makes the augmented system singular. None is an error, and
     /// `pinned` says how far the refinement got.
-    #[pyo3(signature = (pin_constraint_indices, deltas, eps=1e-9, max_passes=16))]
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_passes=16))]
     fn parametric_step_bounded<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
-        eps: Number,
         max_passes: usize,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
         let s = self.state.as_ref().ok_or_else(|| {
@@ -309,7 +310,7 @@ impl PySolver {
         }
         let (dx, pinned) = s
             .inner
-            .parametric_step_bounded(&pins, &deltas, eps, max_passes)
+            .parametric_step_bounded(&pins, &deltas, max_passes)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
