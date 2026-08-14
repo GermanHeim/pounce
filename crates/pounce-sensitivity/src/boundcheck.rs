@@ -365,9 +365,14 @@ where
             return Err("SensApplication::run_sens_step failed".into());
         }
 
+        // The guard is for the singular case, where the conditions
+        // have exhausted the degrees of freedom and a dense LU returns a
+        // solution around 1e15 rather than reporting it. It is not an
+        // accuracy check: a healthy pass lands within a few parts per
+        // million, so demanding more than that rejects working pins.
         let achieved = pins
             .iter()
-            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-6 * want.abs().max(1.0));
+            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-3 * want.abs().max(1.0));
         if !achieved {
             pins.pop();
             break;

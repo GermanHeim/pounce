@@ -308,23 +308,33 @@ def nonlinear(p=1.0):
     return m
 
 
-@pytest.mark.parametrize("tol, want", [(1e-8, 1.046642776555),
-                                       (1e-3, 1.046643388715)])
-def test_the_step_carries_the_barrier_correction(tol, want):
+def test_the_step_carries_the_barrier_correction():
     """The step is taken against a factorization held at the final mu,
     so it estimates where the BARRIER problem's solution moves, not the
-    original problem's. The paper's equation 11 term closes that gap.
+    original problem's. The paper's equation 11 closes that gap.
 
-    The expected values are sIPOPT 3.14.19's own answers for this model
-    and perturbation, read from its `sens_sol_state_1` suffix through
-    pyomo.contrib.sensitivity_toolbox at the same solver tolerance.
-    Without the correction pounce differs from them by 9e-6 at
-    tol = 1e-3, which is O(mu); with it, by 2.4e-7.
+    The expected value is sIPOPT 3.14.19's own answer for this model and
+    perturbation, read from its `sens_sol_state_1` suffix through
+    pyomo.contrib.sensitivity_toolbox at the same solver tolerance. A
+    loose tolerance is what makes this test able to fail: without the
+    correction pounce differs from sIPOPT by 9e-6 here, and the assert
+    is two orders tighter than that.
     """
     m = nonlinear()
-    pyo.SolverFactory("pounce").solve(m, options={"tol": tol})
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-3})
     got = estimate(m, [(m.p, 1.0 + 1e-3)])[m.x]
-    assert got == pytest.approx(want, abs=1e-6)
+    assert got == pytest.approx(1.046643388715, abs=5e-7)
+
+
+def test_the_correction_is_below_notice_at_a_converged_tolerance():
+    """The same comparison at a tight tolerance, where the term is
+    O(mu) and must not disturb an answer that was already right. This
+    one cannot fail by removing the correction, and is here to pin that
+    it stays small rather than to detect its absence."""
+    m = nonlinear()
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-8})
+    got = estimate(m, [(m.p, 1.0 + 1e-3)])[m.x]
+    assert got == pytest.approx(1.046642776555, abs=1e-8)
 
 
 def test_the_correction_does_not_move_a_converged_answer():
@@ -334,3 +344,53 @@ def test_the_correction_does_not_move_a_converged_answer():
     fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_release_and_a_pin_in_the_same_step():
+    """One bound must release while another activates, so both halves
+    run against the same factorization. x starts on its lower bound and
+    is pulled off, while z is driven onto its upper bound."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=-1.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    m.z = pyo.Var(bounds=(-10.0, 1.0), initialize=0.0)
+    m.obj = pyo.Objective(
+        expr=(m.x - m.p) ** 2 + (m.z - 2 * m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "x on its bound"
+    assert pyo.value(m.z) == pytest.approx(-2.0, abs=1e-6), "z interior"
+
+    # p: -1 -> 2 pulls x up off its bound and drives z past ub = 1
+    exact = pyo.ConcreteModel()
+    exact.p = pyo.Param(initialize=2.0, mutable=True)
+    exact.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    exact.z = pyo.Var(bounds=(-10.0, 1.0), initialize=0.0)
+    exact.obj = pyo.Objective(
+        expr=(exact.x - exact.p) ** 2 + (exact.z - 2 * exact.p) ** 2)
+    pyo.SolverFactory("pounce").solve(exact)
+
+    fix = estimate(m, [(m.p, 2.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(pyo.value(exact.x), abs=1e-5)
+    assert fix[m.z] == pytest.approx(pyo.value(exact.z), abs=1e-5)
+    # and the released bound really moved: the plain step cannot
+    lin = estimate(m, [(m.p, 2.0)], clamp=False)
+    assert abs(lin[m.x] - fix[m.x]) > 1.0
+
+
+def test_a_release_on_an_upper_bound():
+    """The release half must work on either side. Here the variable
+    sits on its UPPER bound and the perturbation pulls it down."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=5.0, mutable=True)
+    m.x = pyo.Var(bounds=(-10.0, 1.0), initialize=0.5)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert pyo.value(m.x) == pytest.approx(1.0, abs=1e-6), "on the upper bound"
+
+    fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
+    lin = estimate(m, [(m.p, -3.0)], clamp=False)
+    # the true answer is x = -3, interior
+    assert fix[m.x] == pytest.approx(-3.0, abs=1e-5)
+    assert lin[m.x] == pytest.approx(1.0, abs=1e-5), "the plain step is stuck"
