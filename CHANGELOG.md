@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+- **A failed solve no longer raises on one Pyomo route and returns on the
+  other** (#589). `pyomo_pounce`'s two status tables — `sens._STATUS_RESULT`
+  for the legacy route and `v2._V2_STATUS` for `pyomo.contrib.solver` — each
+  listed nine of the engine's twenty exits. The other eleven — among them
+  `Restoration_Failed` — took the default, and on the v2 side that default was
+  `SolutionStatus.noSolution`. `noSolution` is not a severity there; it is the
+  switch that turns the solution loader off, so under the default
+  `load_solutions=True` the same failed solve returned a results object from
+  `SolverFactory("pounce")` and raised `NoSolutionError` from
+  `SolverFactory("pounce_v2")`:
+
+  ```text
+  SolverFactory("pounce")     -> results.solver.termination_condition = error
+  SolverFactory("pounce_v2")  -> NoSolutionError
+  ```
+
+  A restoration failure is an ordinary numerical exit: the engine stops at an
+  iterate and reports it, and `sens_solve` captures that iterate before its
+  non-converged early return — so the v2 route was declining to hand over a
+  point it was holding. Both tables now cover every `ApplicationReturnStatus`,
+  and no exit maps to `noSolution`, matching the rule the `.sol` route already
+  follows ("a primal vector came back"). The fallback for an unrecognized
+  status is `unknown` too, so a status added to the engine later cannot
+  silently reintroduce the asymmetry, and a new test holds both tables to the
+  Rust enum.
+
+  Termination conditions get more specific with the added rows, on both
+  routes. On the legacy route the eleven exits reported plain
+  `TerminationCondition.error` and now report what the `.sol` route reports for
+  the same solve — `internalSolverError` for AMPL's 500 failure band,
+  `invalidProblem` for the two definition errors, `minStepLength` for
+  `Search_Direction_Becomes_Too_Small`. `SolverStatus` (`error`, or `warning`
+  for the step-length exit) is unchanged from what the default gave.
+
+  Callers on the v2 route were affected on every restoration failure; `drto`
+  in particular, since its `dynamic_optimization` transform declares
+  sensitivity parameters and so routes every model through `_sens_solve`.
+
 - **An accepted solve no longer loads into Pyomo as a warning** (#591).
   `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
   `solve_result_num = 1` — IPOPT's own code for the same outcome

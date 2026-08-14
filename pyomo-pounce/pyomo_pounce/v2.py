@@ -186,6 +186,17 @@ _VERSION_RE = re.compile(r"^\s*pounce\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
 #: `# this is not always correct` on that line), while POUNCE names the
 #: status exactly. Reporting `maxTimeLimit` for a time limit is strictly
 #: more informative, so that difference is kept.
+#:
+#: The table is **exhaustive** over the engine's exits -- all twenty of
+#: `ApplicationReturnStatus` (`crates/pounce-nlp/src/return_codes.rs`),
+#: whose `upstream_name()` is exactly the `status_msg` this route reads.
+#: It was not, and the gap was invisible: an unlisted exit fell to the
+#: default, and a `noSolution` default is the one value that changes
+#: whether `solve` raises. `Restoration_Failed` -- an ordinary numerical
+#: exit that stops at an iterate -- raised `NoSolutionError` here while
+#: the legacy route returned a results object for the very same solve
+#: (gh #589). `test_issue_589_status_table_coverage.py` holds both
+#: tables to the full enum so a new engine exit cannot repeat it.
 _V2_STATUS = {
     "Solve_Succeeded": (
         TerminationCondition.convergenceCriteriaSatisfied,
@@ -227,7 +238,105 @@ _V2_STATUS = {
         TerminationCondition.interrupted,
         SolutionStatus.unknown,
     ),
+    # The step-length exit AMPL puts in the same 400 "limit" band as the
+    # iteration and time limits; the v2 enum names it exactly.
+    "Search_Direction_Becomes_Too_Small": (
+        TerminationCondition.minStepLength,
+        SolutionStatus.unknown,
+    ),
+    # ---- the failure band (AMPL 500..599) --------------------------------
+    #
+    # `error` is what the ordinary route reports for every one of these
+    # (`asl_solve_code_to_solution_status` maps the whole 500 band to
+    # `TerminationCondition.error`), and the v2 enum has no finer member
+    # to reach for -- unlike the legacy table, which distinguishes
+    # `internalSolverError` from `invalidProblem`.
+    #
+    # `unknown`, not `noSolution`, for the same reason the limit cases
+    # take it: a primal vector came back. These exits stop the algorithm
+    # at an iterate and hand it to `finalize_solution`, so the solve has
+    # a point to report even though it failed -- `sens_solve` captures it
+    # before its non-converged early return, and the legacy route loads
+    # it onto the model. `Restoration_Failed` is the exit that surfaced
+    # this (gh #589); the others are its neighbours on the same path.
+    "Restoration_Failed": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Error_In_Step_Computation": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Invalid_Number_Detected": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Insufficient_Memory": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    # ---- refused before the algorithm ran --------------------------------
+    #
+    # These return from `IpoptApplication::optimize_tnlp` ahead of the
+    # iteration loop, so nothing ever reached `finalize_solution` and the
+    # engine's `x` is the zero vector it was initialized with, not an
+    # iterate. `unknown` all the same, and deliberately: the ordinary
+    # route reports exactly that, because the CLI writes a `.sol` for a
+    # refused solve too (zero-filled, so the primal block still aligns
+    # with the `.nl`), and Pyomo's rule is "a primal vector came back".
+    # Claiming `noSolution` here would buy nothing -- `sens_solve` has
+    # already written those values onto the model by the time this route
+    # inspects the status, so raising `NoSolutionError` would not spare
+    # the caller the zeros, only the results object describing them --
+    # and would cost the route agreement this table exists to keep. The
+    # default `raise_exception_on_nonoptimal_result=True` still raises
+    # `NoOptimalSolutionError` on every status in this block.
+    "Not_Enough_Degrees_Of_Freedom": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Invalid_Problem_Definition": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Invalid_Option": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "Internal_Error": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    # Present for ABI parity with upstream Ipopt's enum; POUNCE itself
+    # never returns either (nothing constructs them outside
+    # `return_codes.rs`). Mapped so the table stays exhaustive over the
+    # enum rather than over what today's engine happens to emit.
+    "Unrecoverable_Exception": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
+    "NonIpopt_Exception_Thrown": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
 }
+
+
+def _v2_status(status_msg):
+    """`(TerminationCondition, SolutionStatus)` for an engine exit.
+
+    The fallback is `unknown`, not `noSolution`. `_V2_STATUS` covers every
+    exit the engine has, so it fires only for a status name POUNCE does not
+    have yet -- and a *new* exit will come back with a primal vector like
+    every existing one does, since the engine returns `x` unconditionally.
+    `noSolution` here would make the next added status raise
+    `NoSolutionError` on this route while the legacy one returned the
+    iterate, which is exactly the asymmetry gh #589 reported. The coverage
+    test keeps the *termination condition* honest; this keeps the
+    raise-or-return decision from ever turning on an oversight.
+    """
+    return _V2_STATUS.get(
+        status_msg, (TerminationCondition.error, SolutionStatus.unknown))
 
 
 class PounceSensSolutionLoader(SolutionLoader):
@@ -589,9 +698,7 @@ class Pounce(Ipopt):
                     vd.set_value(val, skip_validation=True)
                     vd.stale = stale
 
-        tc, ss = _V2_STATUS.get(
-            capture.get("status_msg", ""),
-            (TerminationCondition.error, SolutionStatus.noSolution))
+        tc, ss = _v2_status(capture.get("status_msg", ""))
         results.termination_condition = tc
         results.solution_status = ss
 
@@ -609,6 +716,12 @@ class Pounce(Ipopt):
         # excluded) because no log is parsed.
         results.timing_info.POUNCE = capture.get("solve_secs")
 
+        # Kept as a derived test rather than a literal `True`, even though
+        # `_v2_status` no longer returns `noSolution` for anything (gh #589):
+        # this is the same shape `Ipopt.solve` has, `has_solution` is part of
+        # the loader's constructor contract, and reading it off the status
+        # keeps the two in step if that ever changes. The `NoSolutionError`
+        # branch below is unreachable today for the same reason.
         has_solution = ss is not SolutionStatus.noSolution
         results.solution_loader = PounceSensSolutionLoader(
             model, capture, has_solution=has_solution)

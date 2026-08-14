@@ -435,6 +435,16 @@ def _iter_data(comp):
 # with both the `.sol` route and `v2._V2_STATUS`, and would make Pyomo log a
 # load warning on a result IPOPT loads clean (gh #591). The reduced-accuracy
 # distinction stays in the solver message, not the severity.
+#
+# The table is exhaustive over `ApplicationReturnStatus`
+# (`crates/pounce-nlp/src/return_codes.rs`), whose `upstream_name()` is the
+# `status_msg` read below; `test_issue_589_status_table_coverage.py` holds it
+# and `v2._V2_STATUS` to the full enum. Eleven exits used to be missing,
+# `Restoration_Failed` among them, and they fell to the `(error, error)`
+# default. That default is a defensible severity, but it is less specific than
+# the `.sol` route's answer for the same solve -- Pyomo's reader turns the
+# AMPL 500 failure band into `internalSolverError` -- and on the v2 side the
+# matching gap decided whether the solve raised at all (gh #589).
 _STATUS_RESULT = {
     "Solve_Succeeded":
         (TerminationCondition.optimal, SolverStatus.ok),
@@ -454,6 +464,39 @@ _STATUS_RESULT = {
         (TerminationCondition.maxTimeLimit, SolverStatus.warning),
     "User_Requested_Stop":
         (TerminationCondition.userInterrupt, SolverStatus.aborted),
+    # AMPL's 400 "limit" band, like the two above; the legacy enum names
+    # this one exactly, so it does not have to borrow `maxIterations` the
+    # way Pyomo's band-reading `.sol` table does.
+    "Search_Direction_Becomes_Too_Small":
+        (TerminationCondition.minStepLength, SolverStatus.warning),
+    # AMPL's 500 failure band. `internalSolverError` + `error` is what the
+    # ordinary `.sol` route reports for every code in it, so these agree with
+    # it rather than with the coarser `(error, error)` default they used to
+    # take. The two definition errors keep the more specific `invalidProblem`:
+    # the legacy enum has the member, the solve never started, and the
+    # severity -- which is what callers branch on -- is unchanged.
+    "Restoration_Failed":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Error_In_Step_Computation":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Number_Detected":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Insufficient_Memory":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Internal_Error":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Option":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Not_Enough_Degrees_Of_Freedom":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    "Invalid_Problem_Definition":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    # ABI-parity members of the upstream enum that POUNCE never returns.
+    # Listed so the table covers the enum, not just today's exits.
+    "Unrecoverable_Exception":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "NonIpopt_Exception_Thrown":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
 }
 
 
