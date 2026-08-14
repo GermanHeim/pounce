@@ -44,8 +44,12 @@ the issue reports:
 | IPOPT 3.14.16 from the capture (reporter) | 31785.744272683 | `Optimal Solution Found` |
 
 The fixture is **not vendored**: LyoPRONTO is GPL-3.0 and POUNCE is EPL-2.0, so
-a `.nl` encoding their model equations is not ours to add. See "Regression
-coverage" below for what stands in for it.
+a `.nl` encoding their model equations is not ours to add. The reporter has
+since published it themselves, with provenance and a SHA-256, at
+<https://gist.github.com/bernalde/19ae04607cb953fe92c3077902205dd3> — under
+GPL-3.0-or-later, and explicitly *not* as permission to vendor it here. We
+reference it by link only. See "Regression coverage" below for what stands in
+for it.
 
 ## The returned point, measured
 
@@ -213,10 +217,47 @@ Opt-outs verified: `perturb_delta_c_max_rungs=0` reproduces `0_gdpopt.nl` at
 exactly 19 iterations / 31810.840250, and `feral_inertia_pivot_floor=0` still
 fully disables the #540 trigger.
 
+### The cold GDP path
+
+The table above is measured on the two captured `.nl` files. The reporter
+[pointed out](https://github.com/jkitchin/pounce/issues/592#issuecomment-5298835858)
+that the stricter criterion is the **original cold GDP pipeline** — GDPopt
+driving POUNCE from LyoPRONTO's own starting point — and that every
+*option-level* workaround that repairs the captured restart fails there: with
+`nlp_scaling_method=none` or `nlp_scaling_max_gradient=1e8` the cold solve is
+slightly *worse* than the default, not better.
+
+That is a useful negative result in its own right: it rules out gradient
+scaling as the root cause, which the captured-restart evidence had made look
+plausible. The fix here is not an option setting — it is a default-behaviour
+change in the inertia-correction path — so it acts on the cold solve directly.
+Running the reporter's pipeline in one environment, released 0.10.0 against
+this branch, and reporting the two phase-switch times the downstream model is
+judged on:
+
+| | objective (s) | switch 1 (h) | switch 2 (h) |
+|---|---|---|---|
+| **0.10.0 cold** | 31810.840250047 | 1.925104404813 | 3.924408024351 |
+| 0.10.0 restart 1 | 31803.786223117 | 1.753942060567 | 3.922548330275 |
+| 0.10.0 restart 2 | 31785.744273619 | 1.575762164995 | 3.917595808629 |
+| **this branch, cold** | **31785.744273619** | **1.575762164995** | **3.917595808629** |
+| this branch, restart 1 | 31785.744273619 | 1.575762164995 | 3.917595808629 |
+| this branch, restart 2 | 31785.744273619 | 1.575762164995 | 3.917595808629 |
+| IPOPT reference | 31785.744272683 | 1.575762157937 | 3.917595808370 |
+
+The 0.10.0 row reproduces the reporter's own numbers to every digit they
+quoted, which is what makes the comparison trustworthy. The cold solve now
+reaches the IPOPT switch times on the first attempt, and restarts 1 and 2 are
+identical to it to twelve digits. The residual disagreement with IPOPT is
+7e-9 h in switch 1 — the same order that separates the reporter's `tol=1e-6`
+and `barrier_tol_factor=1000` rows from each other, i.e. inside the
+tolerance-limited band described above. The 0.35 h error is gone.
+
 ## Regression coverage
 
 Because the reproducer cannot be vendored (GPL-3.0 model into an EPL-2.0
-repository), the behaviour is pinned three ways instead:
+repository — the reporter's published gist is explicit that sharing it is not
+permission to vendor), the behaviour is pinned three ways instead:
 
 * `crates/pounce-common/src/pd_perturbation.rs` — four unit tests on the
   walk-back state machine: it fires after the configured rungs, a withdrawn

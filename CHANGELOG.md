@@ -53,8 +53,12 @@ changes.
 
   With both fixed, the reported first solve reaches `31785.744274` in 27
   iterations — the reporter's IPOPT answer — so the restart has nothing left to
-  improve. `pooling_rt2stp`, which #544 had cost 812 iterations against a
-  pre-#544 206, comes back to 298.
+  improve. On the stricter criterion the reporter named — the *original cold
+  GDP pipeline*, where every option-level workaround had failed — the cold
+  solve now lands on IPOPT's phase-switch times (1.575762165 h / 3.917595809 h
+  against 1.925104405 h / 3.924408024 h before) and two successive restarts
+  reproduce it to twelve digits. `pooling_rt2stp`, which #544 had cost 812
+  iterations against a pre-#544 206, comes back to 298.
 
   The reproducer is not vendored: it encodes LyoPRONTO's model equations and
   LyoPRONTO is GPL-3.0 against POUNCE's EPL-2.0. The behaviour is pinned by
