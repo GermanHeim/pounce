@@ -587,12 +587,33 @@ impl Solver {
         // it. A floor keeps an unrelaxed solve from pinning on
         // roundoff.
         let eps = state.bound_relax_factor.abs().max(1e-9);
+        // The bound multipliers at the base point, with the compound
+        // row each one occupies, so the refinement can tell when the
+        // step drives one negative and release that bound.
+        let mults = {
+            let dims = state.backsolver.block_dims();
+            let (z_l_off, z_u_off) = (
+                dims[0] + dims[1] + dims[2] + dims[3],
+                dims[0] + dims[1] + dims[2] + dims[3] + dims[4],
+            );
+            let (data, _, _) = state.backsolver.activity_handles();
+            let d = data.borrow();
+            let curr = d.curr.as_ref().ok_or(SolverError::NotConverged)?;
+            let mut out = Vec::new();
+            for (off, v) in [(z_l_off, &curr.z_l), (z_u_off, &curr.z_u)] {
+                for (k, &base) in crate::vec_util::dense_to_vec(&**v).iter().enumerate() {
+                    out.push(crate::boundcheck::BoundMultiplier { row: off + k, base });
+                }
+            }
+            out
+        };
         let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
             &state.backsolver,
             &dx_full,
             x_curr,
             &lo,
             &hi,
+            &mults,
             eps,
             max_passes,
         )

@@ -490,6 +490,7 @@ impl SensSolve {
                         &x_nat[..n_x],
                         &lo,
                         &hi,
+                        &[],
                         eps,
                         16,
                     ) {

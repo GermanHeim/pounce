@@ -259,12 +259,53 @@ mod tests {
 /// solution instead of reporting it. The check is whether the pass
 /// actually moved the pinned coordinates where it asked, and the step
 /// returned is the last one that did.
+/// A bound multiplier the step can drive negative: where it sits in the
+/// compound KKT vector, and its value at the base point.
+///
+/// A negative multiplier means the bound should no longer be active,
+/// which is the second half of upstream's fix-relax (its equation 18).
+pub struct BoundMultiplier {
+    /// Row of the compound KKT vector holding this multiplier.
+    pub row: usize,
+    /// Its value at the converged point.
+    pub base: Number,
+}
+
+/// Repair the active set the step implies, by pinning and releasing.
+///
+/// Returns the refined step and the compound rows it constrained.
+/// This is upstream's fix-relax, both cases:
+///
+/// * a variable the step carries past a bound is pinned AT that bound,
+///   which activates it (their equation 17);
+/// * a bound multiplier the step drives negative is set to zero, which
+///   deactivates that bound and lets the variable move (equation 18).
+///
+/// Without the second, a variable sitting on a bound at the base point
+/// stays there however hard the perturbation pulls it off, because the
+/// step holds complementarity. Measured on a model whose bound wants to
+/// release, that is the difference between 0.0 and 1.667.
+///
+/// Each pass adds one condition and re-solves the augmented system
+/// carrying all of them, against the original factorization, so its
+/// correction is measured from the plain step rather than the previous
+/// pass. Adding successive corrections counts the earlier ones twice.
+/// The Schur complement over those rows is what upstream's equations 19
+/// through 22 describe, so the cost is one dense `k × k` solve and a
+/// backsolve per pass, and the factorization is never rebuilt.
+///
+/// Passes stop when nothing is violated, at `max_passes`, or when a
+/// condition cannot be achieved, which is how an over-determined set is
+/// caught: once the conditions exhaust the problem's degrees of freedom
+/// no step satisfies them all, the augmented system is singular, and a
+/// dense LU returns a large solution rather than reporting it.
 pub fn refine_step_onto_bounds<B>(
     backsolver: &B,
     dx_plain: &[Number],
     x_curr: &[Number],
     lo: &[Number],
     hi: &[Number],
+    multipliers: &[BoundMultiplier],
     eps: Number,
     max_passes: usize,
 ) -> Result<(Vec<Number>, Vec<usize>), String>
@@ -275,26 +316,38 @@ where
 
     let n_full = dx_plain.len();
     let mut dx = dx_plain.to_vec();
+    // (compound row, right-hand side), the rhs fixed at creation since
+    // it is measured from the plain step
     let mut pins: Vec<(usize, Number)> = Vec::new();
 
     for _ in 0..max_passes {
-        let Some((i, bound)) = worst_violation(
-            x_curr,
-            &dx,
-            lo,
-            hi,
-            eps,
-            &pins.iter().map(|&(p, _)| p).collect::<Vec<_>>(),
-        ) else {
-            break;
-        };
-        pins.push((i, bound));
+        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
 
-        // A and B are both the pin rows, so the Schur complement is
-        // square, which the dense driver requires. The right-hand side
-        // is negated: the step returned at a pinned coordinate is the
-        // negative of the displacement asked for.
-        let rows: Vec<Index> = pins.iter().map(|&(p, _)| p as Index).collect();
+        // one condition per pass, primal first: a variable outside its
+        // bound is the more direct violation, and releasing a bound can
+        // only matter once the variables it constrains have settled
+        let next = match worst_violation(x_curr, &dx, lo, hi, eps, &taken) {
+            Some((i, bound)) => Some((i, (x_curr[i] + dx_plain[i]) - bound)),
+            None => multipliers
+                .iter()
+                .filter(|m| !taken.contains(&m.row))
+                .map(|m| (m.row, m.base + dx[m.row]))
+                .filter(|&(_, v)| v < -eps)
+                // most negative first
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(row, _)| {
+                    let base = multipliers
+                        .iter()
+                        .find(|m| m.row == row)
+                        .map_or(0.0, |m| m.base);
+                    // drive it to zero: the bound stops being active
+                    (row, base + dx_plain[row])
+                }),
+        };
+        let Some((row, rhs_row)) = next else { break };
+        pins.push((row, rhs_row));
+
+        let rows: Vec<Index> = pins.iter().map(|&(r, _)| r as Index).collect();
         let signs = vec![1; rows.len()];
         let mk = |r: Vec<Index>| {
             IndexSchurData::from_parts(r, signs.clone()).map_err(|e| format!("{e:?}"))
@@ -304,14 +357,7 @@ where
             ..SensOptions::default()
         };
         let mut pin_app = SensApplication::new(mk(rows.clone())?, backsolver.clone(), opts);
-
-        // measured from the PLAIN step, since this pass carries every
-        // pin at once; adding successive corrections counts the earlier
-        // pins twice
-        let rhs: Vec<Number> = pins
-            .iter()
-            .map(|&(p, b)| (x_curr[p] + dx_plain[p]) - b)
-            .collect();
+        let rhs: Vec<Number> = pins.iter().map(|&(_, r)| r).collect();
         let mut du = vec![0.0; rows.len()];
         let mut corr = vec![0.0; n_full];
         if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
@@ -320,8 +366,7 @@ where
 
         let achieved = pins
             .iter()
-            .zip(rhs.iter())
-            .all(|(&(p, _), r)| (corr[p] + r).abs() <= 1e-6 * r.abs().max(1.0));
+            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-6 * want.abs().max(1.0));
         if !achieved {
             pins.pop();
             break;
@@ -330,5 +375,5 @@ where
             *d = dx_plain[k] + corr[k];
         }
     }
-    Ok((dx, pins.into_iter().map(|(p, _)| p).collect()))
+    Ok((dx, pins.into_iter().map(|(r, _)| r).collect()))
 }

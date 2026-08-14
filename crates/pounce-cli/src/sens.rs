@@ -422,12 +422,36 @@ fn try_compute_sens_step(
                 }
             }
         }
+        // base bound multipliers with their compound rows, so a bound
+        // the step wants to release can be released
+        let mults = {
+            let dims = backsolver.block_dims();
+            let base = dims[0] + dims[1] + dims[2] + dims[3];
+            let d = data.borrow();
+            let curr = d.curr.as_ref()?;
+            let mut out = Vec::new();
+            for (off, v) in [(base, &curr.z_l), (base + dims[4], &curr.z_u)] {
+                let vals = v
+                    .as_any()
+                    .downcast_ref::<DenseVector>()
+                    .map(|d| d.expanded_values())
+                    .unwrap_or_default();
+                for (k, &b) in vals.iter().enumerate() {
+                    out.push(pounce_sensitivity::boundcheck::BoundMultiplier {
+                        row: off + k,
+                        base: b,
+                    });
+                }
+            }
+            out
+        };
         match pounce_sensitivity::boundcheck::refine_step_onto_bounds(
             &backsolver,
             &dx_full,
             &x_nat[..n_x.min(x_nat.len())],
             &lo,
             &hi,
+            &mults,
             eps,
             16,
         ) {

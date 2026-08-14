@@ -20,11 +20,27 @@ satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
 its lower bound, the clipped answer is `y = -5`, which is not on the
 constraint at all.
 
-`mode="fix_relax"` adds a row pinning the crossing variable at its bound
-and re-solves, so the others move with it. The same case returns `y = 1`,
-matching a full re-solve exactly. On upstream sIPOPT's own parametric
-example, at its own perturbation, the two differ from a re-solve by 0.12
-and by 6e-9.
+`mode="fix_relax"` repairs the active set the step implies, which is
+upstream sIPOPT's strategy of that name (Pirnay, Lopez-Negrete and
+Biegler 2012, section 2.5) and both of its cases. A variable the step
+carries past a bound is pinned there, activating it. A bound multiplier
+the step drives negative is set to zero, deactivating that bound so the
+variable can move. Each adds a row to the held factorization and
+re-solves through the Schur complement, so the others move with it.
+
+Both halves matter and they fail differently. On the model above,
+pinning returns `y = 1` against the clamp's `y = -5`. On a model whose
+bound wants to release, the plain step is stuck at `x = 0` where the
+answer is `x = 1.667`, because the step preserves complementarity and
+nothing but the release lets the variable off the bound.
+
+Checked against sIPOPT 3.14.19 itself, driven through
+`pyomo.contrib.sensitivity_toolbox`, on cases built to separate the two:
+pounce and sIPOPT agree to 2e-8 on the pin case and to 1e-6 on the
+release case, and both match a full re-solve. On upstream's own
+parametric example, at its own perturbation, the refinement lands within
+6e-9 of a re-solve where clipping the crossing coordinate is off by
+0.12.
 
     estimate(m, [(m.p, 3.0)])                       # clips
     estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves

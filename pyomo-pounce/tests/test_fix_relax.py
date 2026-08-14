@@ -243,3 +243,52 @@ def test_an_absent_bound_does_not_widen_the_tolerance():
     fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
+
+
+def active_at_base(p=-1.0):
+    """x wants to be negative, so its lower bound is active at the base
+    point and carries a positive multiplier. A large enough upward
+    perturbation should release it."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    m.y = pyo.Var(bounds=(-50.0, 50.0), initialize=1.0)
+    m.link = pyo.Constraint(expr=m.y == 2 * m.x + 1)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + 0.5 * (m.y - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_fix_relax_releases_a_bound_the_step_wants_to_leave():
+    """The second half of upstream's fix-relax, its equation 18. A bound
+    active at the base point holds the variable there under the plain
+    step, because the step preserves complementarity. Releasing it lets
+    the variable move.
+
+    Verified against sIPOPT 3.14.19 driven through
+    pyomo.contrib.sensitivity_toolbox on this model: with
+    sens_boundcheck=no it reports x = 0, with sens_boundcheck=yes
+    x = 1.666666, and a full re-solve gives 1.666667.
+    """
+    m = active_at_base()
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
+
+    lin = estimate(m, [(m.p, 3.0)])
+    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+
+    # the plain step cannot leave the bound
+    assert lin[m.x] == pytest.approx(0.0, abs=1e-6)
+    # releasing it reaches the re-solve
+    assert fix[m.x] == pytest.approx(1.666667, abs=1e-5)
+    assert fix[m.y] == pytest.approx(4.333333, abs=1e-5)
+    assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
+
+
+def test_a_release_is_not_triggered_when_the_bound_should_stay():
+    """A perturbation that pushes further INTO the bound must not
+    release it: the multiplier grows rather than going negative."""
+    m = active_at_base()
+    fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
+    assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
