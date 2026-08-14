@@ -183,26 +183,44 @@ def test_solve_with_sens_rh_eigendecomp_diagonalizes_hr():
         assert col[np.abs(col).argmax()] > 0
 
 
-def test_solve_with_sens_boundcheck_clamps_violating_step():
-    """sens_boundcheck=True projects dx so x_curr+dx stays in [lb, ub].
+# Upstream sIPOPT's reported x after the step WITH bound checking, for
+# the same Δeta. Read from the `sens_sol_state_1` suffix of sIPOPT
+# 3.14.19 run on this model through pyomo.contrib.sensitivity_toolbox
+# with `sens_boundcheck=yes`. The residual ~1e-8 spread on these digits
+# is sIPOPT's own, and sets the tolerance the asserts can carry.
+UPSTREAM_X_BOUNDCHECK = np.array([
+    0.5000000167,
+    0.4999999733,
+    -0.0000000100,
+    4.5,
+    1.0,
+])
 
-    With deltas=[-0.5, 0.0] the unconstrained linear step drives x[2] to
-    ~-0.046, below its lower bound of 0. The clamp should zero that
-    coordinate exactly while leaving non-violating slots untouched.
+
+def test_solve_with_sens_boundcheck_matches_upstream_fix_relax():
+    """sens_boundcheck=True is upstream's fix-relax, not a projection.
+
+    With deltas=[-0.5, 0.0] the plain linear step drives x[2] to ~-0.046,
+    below its lower bound of 0. Fix-relax adds that bound as an active
+    constraint and re-solves the sensitivity system, so x[2] lands on the
+    bound and the REMAINING coordinates move to stay feasible in the
+    constraints. Clamping x[2] alone and leaving the rest at their plain
+    step would break `6x1+3x2+2x3 = eta1`; upstream does not do that, and
+    the goldens below are upstream's own answer.
     """
     x0 = np.array([0.15, 0.15, 0.0, 0.0, 0.0])
 
-    # Reference: unclamped solve, to confirm x[2]+dx[2] < 0.
-    _, info_unclamped = _make().solve_with_sens(
+    # Reference: unchecked solve, to confirm x[2]+dx[2] < 0.
+    _, info_unchecked = _make().solve_with_sens(
         x0=x0,
         pin_constraint_indices=[2, 3],
         deltas=[-0.5, 0.0],
     )
     x_nominal_2 = UPSTREAM_X_NOMINAL[2]
-    dx_unclamped_2 = info_unclamped["dx"][2]
-    assert x_nominal_2 + dx_unclamped_2 < -1e-6, "precondition: step violates bound"
+    dx_unchecked_2 = info_unchecked["dx"][2]
+    assert x_nominal_2 + dx_unchecked_2 < -1e-6, "precondition: step violates bound"
 
-    # Clamped solve.
+    # Bound-checked solve.
     _, info = _make().solve_with_sens(
         x0=x0,
         pin_constraint_indices=[2, 3],
@@ -213,13 +231,14 @@ def test_solve_with_sens_boundcheck_clamps_violating_step():
     dx = info["dx"]
     assert dx is not None
 
-    # x[2] is clamped to lb=0 → dx[2] = 0 - x_nominal[2].
-    # Use 5e-8 to match the convergence-floor tolerance used elsewhere in
-    # this file (pounce's converged x[2] vs the upstream-captured golden).
-    assert dx[2] == pytest.approx(-x_nominal_2, abs=5e-8)
-    # Non-violating coordinates (x[0], x[1], pinned x[3], x[4]) unchanged.
-    np.testing.assert_allclose(dx[0], UPSTREAM_DX[0], atol=5e-8)
-    np.testing.assert_allclose(dx[1], UPSTREAM_DX[1], atol=5e-8)
+    # Every coordinate, against upstream's bound-checked answer. 5e-7 is
+    # an order looser than sIPOPT's own spread on these digits and two
+    # orders tighter than the 7.7e-2 that separates x[0] here from its
+    # unchecked value, so a step that merely clamps x[2] fails this.
+    np.testing.assert_allclose(
+        UPSTREAM_X_NOMINAL + dx, UPSTREAM_X_BOUNDCHECK, atol=5e-7)
+    # x[2] is driven onto its bound, and the pins are still honoured.
+    assert dx[2] == pytest.approx(-x_nominal_2, abs=5e-7)
     np.testing.assert_allclose(dx[3], UPSTREAM_DX[3], atol=5e-8)
     np.testing.assert_allclose(dx[4], UPSTREAM_DX[4], atol=5e-8)
 

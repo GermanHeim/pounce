@@ -140,7 +140,6 @@ pub fn _index_to_usize(i: Index) -> usize {
 mod tests {
     use super::*;
     use pounce_linalg::Vector;
-    use pounce_linalg::compound_vector::{CompoundVector, CompoundVectorSpace};
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
     use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
 

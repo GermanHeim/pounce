@@ -268,7 +268,6 @@ pub fn try_compute_red_hessian(
 /// required suffix is missing — typical for `.nl` files that aren't
 /// sensitivity inputs.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn try_compute_sens_step(
     data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
     cq: &pounce_algorithm::ipopt_cq::IpoptCqHandle,
