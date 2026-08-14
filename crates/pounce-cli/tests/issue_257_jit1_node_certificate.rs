@@ -77,13 +77,15 @@ fn solve(fixture_name: &str, extra_opts: &[&str]) -> SolveReport {
 /// evaluator, starting point, and box: `173345.37683089852`.
 const NODE_OPTIMUM: f64 = 173_345.376_830_898_52;
 
-/// `solve_result_num` 0..100 is AMPL's "solved" band. A driver that maps
-/// anything else onto its own status enum is what turned this into a spurious
-/// UNBOUNDED downstream, so assert on the band, not on one code.
+/// `solve_result_num` 0 is the strict termination certificate. A driver that
+/// maps anything else onto its own status enum is what turned this into a
+/// spurious UNBOUNDED downstream. The wider `0..=99` solved band would also
+/// admit `1` (`Solved_To_Acceptable_Level`) since gh #591; this node has a
+/// certifiable optimum and must reach it.
 fn assert_solved_at_optimum(report: &SolveReport, ctx: &str) {
     let code = report.solution.solve_result_num;
     assert!(
-        (0..100).contains(&code),
+        code == 0,
         "{ctx}: did not converge (solve_result_num={code}, status={:?}); \
          this node has a finite optimum ~{NODE_OPTIMUM} (issue #257)",
         report.solution.status,

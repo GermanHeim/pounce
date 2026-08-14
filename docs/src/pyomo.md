@@ -149,6 +149,36 @@ two solvers, and attributing the remainder to either solver's file
 handling will mislead you. Use the same interface on both sides, or
 compare the solvers' own reported times.
 
+### How an accepted solve is reported
+
+POUNCE reports the AMPL solve codes IPOPT's own driver reports, so a model
+that swaps `ipopt` for `pounce` gets the same `SolverResults` shape. In
+particular a solve that stops at the
+[acceptable level](options.md#solved_to_acceptable_level-and-acceptable_progress_kappa)
+— the strict tolerances were missed, `acceptable_tol` was met — is an
+*accepted* solve on every route:
+
+| interface | reported as |
+|---|---|
+| legacy `SolverFactory('pounce')` | `status=ok`, `termination_condition=optimal` |
+| v2 | `TerminationCondition.convergenceCriteriaSatisfied`, `SolutionStatus.optimal` |
+| declared-parameter (in-process) | `status=ok`, `termination_condition=optimal` |
+
+Which convergence you got is in the solver message
+(`POUNCE X.Y.Z: SolvedToAcceptableLevel` against
+`POUNCE X.Y.Z: SolveSucceeded`) and, on the legacy `.sol` route, in
+`results.solver.id` — the AMPL code, `1` against `0`.
+
+Up to and including 0.10.0 the acceptable-level solve was written as AMPL
+code `100`, which put it in the "solved, with a warning" band
+([#591](https://github.com/jkitchin/pounce/issues/591)). The legacy route
+then reported `status=warning` and Pyomo logged a load warning that IPOPT
+does not; the v2 route, whose reader maps that band to
+`TerminationCondition.error`, went further and raised
+`NoOptimalSolutionError` under the default
+`raise_exception_on_nonoptimal_result=True`. If your code special-cased
+POUNCE for either, it no longer needs to.
+
 ## User scaling with the `scaling_factor` Suffix
 
 A badly conditioned model converges poorly, and often you know its

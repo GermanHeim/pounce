@@ -168,8 +168,11 @@ fn the_tiny_step_exit_lands_on_a_converged_point() {
 #[test]
 fn adaptive_does_not_grind_at_a_frozen_iterate_at_default_tolerances() {
     let r = solve("hs71_obj1e8.nl", &["mu_strategy=adaptive"]);
+    // `0` exactly — the strict certificate. Since gh #591 the `0..=99` solved
+    // band also holds `1` (`Solved_To_Acceptable_Level`), which is the
+    // fallback this fixture must not need.
     assert!(
-        (0..100).contains(&r.solution.solve_result_num),
+        r.solution.solve_result_num == 0,
         "expected the known optimum to be certified, got \
          solve_result_num={} ({:?})",
         r.solution.solve_result_num,
@@ -192,7 +195,7 @@ fn adaptive_does_not_grind_at_a_frozen_iterate_at_default_tolerances() {
 fn the_monotone_route_is_untouched() {
     let r = solve("hs71_obj1e8.nl", &[]);
     assert!(
-        (0..100).contains(&r.solution.solve_result_num),
+        r.solution.solve_result_num == 0,
         "default (monotone) solve regressed: solve_result_num={} ({:?})",
         r.solution.solve_result_num,
         r.solution.status,

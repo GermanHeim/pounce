@@ -36,6 +36,34 @@ Solver to AMPL* §5). Consumers key on the **band**, not the exact number:
 Pyomo maps each band to a `TerminationCondition`, so anything in `200`–`299`
 arrives as `TerminationCondition.infeasible`.
 
+### Solved: strict vs. acceptable
+
+POUNCE writes the same codes IPOPT's AMPL driver writes, so a model can be
+moved between the two solvers without a reader change:
+
+| Code | Verdict | What it means |
+|---|---|---|
+| `0` | `Solve_Succeeded` | The convergence criteria (`tol` and friends) were met. |
+| `1` | `Solved_To_Acceptable_Level` | The [acceptable-level fallback](options.md#solved_to_acceptable_level-and-acceptable_progress_kappa): the strict tolerances were not met, but `acceptable_tol` was, for `acceptable_iter` consecutive iterations. |
+
+Both are accepted solves and both sit in the `0`–`99` band. That matters
+beyond tidiness: Pyomo's legacy `.sol` reader loads the `0`–`99` band as
+`SolverStatus.ok` and the `100`–`199` band as `SolverStatus.warning`, with
+`TerminationCondition.optimal` either way. POUNCE reported acceptable-level
+solves as `100` up to and including 0.10.0, so Pyomo logged
+
+```text
+WARNING: Loading a SolverResults object with a warning status into model...
+    - termination condition: optimal
+    - message from solver: POUNCE 0.10.0: SolvedToAcceptableLevel
+```
+
+on a solve IPOPT loads clean
+([#591](https://github.com/jkitchin/pounce/issues/591)). The distinction
+between strict and acceptable convergence is still there — in the code itself
+(`1`, not `0`), in the `.sol` message line, and in the JSON report's `status`
+field — it simply no longer reads as a warning.
+
 ### Infeasible: proved vs. local
 
 Within the infeasible band POUNCE distinguishes *how* it knows:

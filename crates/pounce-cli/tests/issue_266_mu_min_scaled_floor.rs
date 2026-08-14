@@ -84,13 +84,15 @@ fn solve(fixture_name: &str, extra_opts: &[&str]) -> SolveReport {
 const HS71_OPTIMUM: f64 = 17.014_017_140_2;
 const OBJ_MULTIPLIER: f64 = 1e8;
 
-/// `solve_result_num` 0..100 is AMPL's "solved" band; anything else is what a
-/// B&B driver turns into a spurious UNBOUNDED. Assert on the band, not one
-/// code.
+/// `solve_result_num` 0 is the strict termination certificate; anything else
+/// is what a B&B driver turns into a spurious UNBOUNDED. The wider `0..=99`
+/// solved band would also admit `1` (`Solved_To_Acceptable_Level`) since
+/// gh #591 — that is the acceptable-level *fallback* this issue is about
+/// escaping, so it is not enough here.
 fn assert_solved_at_optimum(report: &SolveReport, ctx: &str) {
     let code = report.solution.solve_result_num;
     assert!(
-        (0..100).contains(&code),
+        code == 0,
         "{ctx}: did not converge (solve_result_num={code}, status={:?}); \
          this problem has a finite optimum ~{HS71_OPTIMUM}·{OBJ_MULTIPLIER:e} \
          that Ipopt certifies (issue #266)",
@@ -175,8 +177,8 @@ fn hs71_obj1e8_certifies_with_loosened_compl_inf_tol() {
 /// (`adaptive.rs`: the fixed-mode reduction, the fixed-mode re-seed, the
 /// oracles' internal `[mu_min, mu_max]` bands, and the final band clamp).
 /// The consequence there is milder — the acceptable-level fallback rescues
-/// the solve into `Solved_To_Acceptable_Level` — but code 100 is still
-/// outside AMPL's 0..99 solved band. Post-fix the strict certificate must be
+/// the solve into `Solved_To_Acceptable_Level` — but that is reduced
+/// accuracy, not the certificate. Post-fix the strict certificate must be
 /// issued.
 #[test]
 fn hs71_obj1e8_certifies_under_adaptive_mu_strategy() {

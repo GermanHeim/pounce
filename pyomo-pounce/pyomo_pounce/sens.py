@@ -427,11 +427,19 @@ def _iter_data(comp):
 # Engine status -> (termination condition, solver status), mirroring the
 # semantics Pyomo's .sol reader gives the ordinary path via the AMPL
 # exit-code ranges (optimal / infeasible / unbounded / limit / error).
+#
+# `Solved_To_Acceptable_Level` is `ok`, not `warning`: the solve is an
+# accepted one, and the AMPL code POUNCE emits for it (1, Ipopt's own) puts
+# the ordinary `.sol` route in the 0..99 band that Pyomo's reader loads as
+# `ok`. Reporting `warning` here would make the sensitivity route disagree
+# with both the `.sol` route and `v2._V2_STATUS`, and would make Pyomo log a
+# load warning on a result IPOPT loads clean (gh #591). The reduced-accuracy
+# distinction stays in the solver message, not the severity.
 _STATUS_RESULT = {
     "Solve_Succeeded":
         (TerminationCondition.optimal, SolverStatus.ok),
     "Solved_To_Acceptable_Level":
-        (TerminationCondition.optimal, SolverStatus.warning),
+        (TerminationCondition.optimal, SolverStatus.ok),
     "Feasible_Point_Found":
         (TerminationCondition.feasible, SolverStatus.warning),
     "Infeasible_Problem_Detected":
