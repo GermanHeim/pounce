@@ -47,6 +47,36 @@ changes.
   in particular, since its `dynamic_optimization` transform declares
   sensitivity parameters and so routes every model through `_sens_solve`.
 
+- **The GAMS links report the same thing as each other, on every exit**
+  (#589). Both links carry the same table, and checking them against the
+  engine's enum turned up the same class of gap plus one of its own.
+
+  Three exits — `Insufficient_Memory`, `Unrecoverable_Exception`,
+  `NonIpopt_Exception_Thrown` — were in neither link's table and took the
+  `default` arm, so a solve killed for memory was reported to GAMS as an
+  internal POUNCE error. All three are mapped now, and both tables cover the
+  enum, so `default` is reserved for a status POUNCE does not have yet.
+
+  `Restoration_Failed` and `Invalid_Number_Detected` now set the objective
+  row. `gmoSetSolution2` publishes the iterate as `x.l` for every exit, so
+  leaving these two out of the has-a-solution set did not hide the point — it
+  showed the point with an objective of `0` beside it. The report is guarded
+  on `isfinite(obj_val)` in both links, which is what makes it safe: POUNCE
+  leaves the objective at NaN when it refused the solve, and
+  `Invalid_Number_Detected` is by definition an exit where something went
+  non-finite. `Diverging_Iterates` and `Insufficient_Memory` stay out
+  deliberately.
+
+  The pip link's `gmoSolveStat_*` constants were wrong in three places:
+  `SOLVESTAT_EVAL_ERR` was `11` (`gmoSolveStat_InternalErr`) and
+  `SOLVESTAT_INTERNAL_ERR` was `12` (`gmoSolveStat_Skipped`), and four exits
+  used `gmoSolveStat_SolverErr` where the C link uses `gmoSolveStat_Solver`.
+  So the two links disagreed on four statuses and the pip link reported two
+  more under names it did not mean. A wrong integer there is invisible without
+  GAMS in the loop, so the values are now checked against GAMS's own
+  `gams.core.gmo` — `gamsapi[core]` is pure Python and needs no license, and
+  CI installs it for exactly this test.
+
 - **An accepted solve no longer loads into Pyomo as a warning** (#591).
   `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
   `solve_result_num = 1` — IPOPT's own code for the same outcome

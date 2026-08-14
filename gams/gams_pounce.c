@@ -588,6 +588,14 @@ DllExport int STDCALL pouReadyAPI(void *Cptr, gmoHandle_t gmo)
  * terminal codes that still carry a usable primal iterate map to
  * gmoModelStat_Feasible (7) so GAMS sees the point rather than treating
  * it as an internal failure.
+ *
+ * The switch is exhaustive over the enum, deliberately: an exit that is
+ * merely absent takes `default:` silently, with no build warning and no
+ * failing test, and reports the same "internal error" as a genuine
+ * crash. That is how gh #589 hid on the Pyomo side — `Restoration_Failed`
+ * unlisted, so an ordinary numerical exit was reported as a hard failure
+ * on one interface and not the other. `default:` here is now reserved for
+ * a status POUNCE does not have yet.
  */
 static void map_status_to_gams(int status, int *model_stat, int *solve_stat)
 {
@@ -647,6 +655,19 @@ static void map_status_to_gams(int status, int *model_stat, int *solve_stat)
         *model_stat = gmoModelStat_InfeasibleIntermed;
         *solve_stat = gmoSolveStat_EvalError;
         break;
+    case Insufficient_Memory:
+        /* The solve ran and was killed by the machine, not by a defect in
+         * the model or in POUNCE. gmoSolveStat_SolverErr (10, "Solver
+         * Failure") says that; gmoSolveStat_InternalErr (11) would blame
+         * POUNCE's own logic. */
+        *model_stat = gmoModelStat_ErrorNoSolution;
+        *solve_stat = gmoSolveStat_SolverErr;
+        break;
+    case Unrecoverable_Exception:
+    case NonIpopt_Exception_Thrown:
+        /* Present for ABI parity with upstream Ipopt's enum; POUNCE never
+         * returns either. Listed so the switch covers the enum rather than
+         * covering what today's engine happens to emit. */
     case Internal_Error:
     default:
         *model_stat = gmoModelStat_ErrorNoSolution;
@@ -655,7 +676,28 @@ static void map_status_to_gams(int status, int *model_stat, int *solve_stat)
     }
 }
 
-/** True when POUNCE's return status leaves a usable primal point in x. */
+/** True when POUNCE's return status leaves a usable primal point in x.
+ *
+ * This gates the objective report only — `gmoSetSolution2` below hands
+ * GAMS the primal vector and the marginals for every status, because the
+ * engine always fills them. So a status left out here does not hide the
+ * point; it publishes the point with an objective of zero beside it,
+ * which is worse than either alternative.
+ *
+ * `Restoration_Failed` and `Invalid_Number_Detected` were left out, and
+ * both belong: each stops the algorithm at an iterate and hands it to
+ * `finalize_solution`, exactly as the limit exits already listed here do.
+ * That is the same oversight gh #589 reported against the Pyomo
+ * interfaces, in the one place a GAMS user would see it — a `.lst` whose
+ * variable levels sit at the restoration failure's iterate under an
+ * objective row reading 0.
+ *
+ * `Diverging_Iterates` stays out on purpose: the point exists, but the
+ * objective there is a step along a ray, not a value worth putting in a
+ * trace row, and gmoModelStat_Unbounded already carries the finding.
+ * `Insufficient_Memory` stays out because the link should not vouch for
+ * the state of a solve the machine killed.
+ */
 static int pounce_status_has_solution(int status)
 {
     switch (status) {
@@ -666,7 +708,9 @@ static int pounce_status_has_solution(int status)
     case Search_Direction_Becomes_Too_Small:
     case User_Requested_Stop:
     case Maximum_Iterations_Exceeded:
+    case Restoration_Failed:                /* iterate it gave up at */
     case Error_In_Step_Computation:
+    case Invalid_Number_Detected:           /* guarded by isfinite below */
     case Maximum_CpuTime_Exceeded:
     case Maximum_WallTime_Exceeded:
         return 1;
@@ -1076,8 +1120,16 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
         /* Objective in GAMS convention (undo our sign flip for max).
          * Report for any status that carries a usable primal iterate, so
          * GAMS trace rows for MaxIter / timeout / numerical-error returns
-         * show the best-so-far objective instead of zero. */
-        if (pounce_status_has_solution(status)) {
+         * show the best-so-far objective instead of zero.
+         *
+         * The isfinite() test is what makes that safe to widen. POUNCE
+         * leaves obj_val at NaN when the solve was refused before anything
+         * was evaluated, and Invalid_Number_Detected is by definition an
+         * exit where a value went non-finite — possibly this one. Writing
+         * a NaN into gmoHobjval is worse than leaving the row at zero, so
+         * the status set says "there is a point here" and this says "and
+         * its objective is a number". */
+        if (pounce_status_has_solution(status) && isfinite(obj_val)) {
             double gams_obj = (data->obj_sign < 0.0) ? -obj_val : obj_val;
             gmoSetHeadnTail(gmo, gmoHobjval, gams_obj);
         }

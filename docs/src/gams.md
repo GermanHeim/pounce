@@ -110,6 +110,26 @@ Variable marginals (`.M` on variables, i.e. reduced costs) are
 > never affected. Both the pip link and the native C link were affected
 > identically, so the install method made no difference.
 
+### Status mapping
+
+Both links map POUNCE's exit status onto GAMS's `modelStat` / `solveStat`
+from the same table, and both report `x.l` and the marginals for every exit —
+the engine always fills them. The objective row is set only where the exit
+leaves a point whose objective is a finite number.
+
+> Before v0.10.1 a restoration failure (`Restoration_Failed`) published its
+> iterate as `x.l` with the objective row left at `0`, and three exits
+> (`Insufficient_Memory`, `Unrecoverable_Exception`, `NonIpopt_Exception_Thrown`)
+> were reported as internal errors because they were missing from the table
+> ([#589](https://github.com/jkitchin/pounce/issues/589)). Separately, the pip
+> link's `solveStat` constants were wrong in three places, so it disagreed
+> with the C link on four exits: an evaluation error arrived as "Internal
+> Solver Failure", an internal error as "Solve Processing Skipped", and
+> `Infeasible_Problem_Detected` / `Search_Direction_Becomes_Too_Small` /
+> `Diverging_Iterates` / `Restoration_Failed` as "Solver Failure" rather than
+> "Terminated By Solver". Only the pip link had the constant bug; the exit
+> coverage and the objective row were wrong in both.
+
 ## Option files
 
 If a model sets `mymodel.optfile = 1`, POUNCE reads `pounce.opt` (`.op2`,

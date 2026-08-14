@@ -8,6 +8,9 @@ POUNCE-status -> GAMS-status mapping, the sign conventions, and the
 
 from __future__ import annotations
 
+import os
+import re
+
 import numpy as np
 import pytest
 
@@ -16,6 +19,67 @@ from pounce.gams import (
     register,
 )
 from pounce.gams.gmo_translate import POUNCE_INF, problem_from_gmo
+
+
+#: Every exit of the engine's `ApplicationReturnStatus`, spelled as
+#: `upstream_name()` spells it -- which is what `pounce.Solver.solve` reports in
+#: `info["status_msg"]`, and so what the link's tables are keyed by. Pinned here
+#: rather than only derived from the Rust source so this still means something
+#: from an installed wheel, where `crates/` is not shipped; `engine_statuses`
+#: cross-checks the pin against the source in a checkout.
+ENGINE_STATUSES = (
+    "Solve_Succeeded",
+    "Solved_To_Acceptable_Level",
+    "Infeasible_Problem_Detected",
+    "Search_Direction_Becomes_Too_Small",
+    "Diverging_Iterates",
+    "User_Requested_Stop",
+    "Feasible_Point_Found",
+    "Maximum_Iterations_Exceeded",
+    "Restoration_Failed",
+    "Error_In_Step_Computation",
+    "Maximum_CpuTime_Exceeded",
+    "Maximum_WallTime_Exceeded",
+    "Not_Enough_Degrees_Of_Freedom",
+    "Invalid_Problem_Definition",
+    "Invalid_Option",
+    "Invalid_Number_Detected",
+    "Unrecoverable_Exception",
+    "NonIpopt_Exception_Thrown",
+    "Insufficient_Memory",
+    "Internal_Error",
+)
+
+_RETURN_CODES_RS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "crates", "pounce-nlp", "src", "return_codes.rs")
+
+
+@pytest.fixture(scope="session")
+def engine_statuses():
+    """`ENGINE_STATUSES`, checked against `return_codes.rs` when in a checkout.
+
+    The Rust enum is the source of truth: `upstream_name()` is literally the
+    string the link matches on. Adding a status there fails this fixture until
+    the pin and both links are updated, which is the point -- an exit nobody
+    listed is reported to GAMS as an internal error.
+    """
+    try:
+        with open(_RETURN_CODES_RS, encoding="utf-8") as fh:
+            src = fh.read()
+    except OSError:
+        return ENGINE_STATUSES
+    start = src.find("fn upstream_name")
+    if start < 0:
+        return ENGINE_STATUSES
+    # Arm bodies only; the file's own tests repeat the names in assertions.
+    end = src.find("#[cfg(test)]", start)
+    body = src[start:end if end > 0 else len(src)]
+    names = re.findall(r'Self::\w+\s*=>\s*"([A-Za-z_]+)"', body)
+    assert sorted(names) == sorted(ENGINE_STATUSES), (
+        "ENGINE_STATUSES has drifted from ApplicationReturnStatus in "
+        f"{_RETURN_CODES_RS}")
+    return ENGINE_STATUSES
 
 
 class HS071View:
@@ -273,8 +337,8 @@ def test_hessian_callback_applies_sign_and_conweight():
         ("Solve_Succeeded", link.MODELSTAT_LOCALLY_OPTIMAL, link.SOLVESTAT_NORMAL),
         ("Solved_To_Acceptable_Level", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_NORMAL),
         ("Feasible_Point_Found", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_NORMAL),
-        ("Infeasible_Problem_Detected", link.MODELSTAT_INFEASIBLE_LOCAL, link.SOLVESTAT_SOLVER_ERR),
-        ("Diverging_Iterates", link.MODELSTAT_UNBOUNDED, link.SOLVESTAT_SOLVER_ERR),
+        ("Infeasible_Problem_Detected", link.MODELSTAT_INFEASIBLE_LOCAL, link.SOLVESTAT_SOLVER),
+        ("Diverging_Iterates", link.MODELSTAT_UNBOUNDED, link.SOLVESTAT_SOLVER),
         ("Maximum_Iterations_Exceeded", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_ITERATION),
         ("Maximum_WallTime_Exceeded", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_RESOURCE),
         ("Invalid_Option", link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_SETUP_ERR),
@@ -290,6 +354,124 @@ def test_status_to_gams_unknown_is_error():
         link.MODELSTAT_ERROR_NO_SOLUTION,
         link.SOLVESTAT_INTERNAL_ERR,
     )
+
+
+# ── status mapping: agreement with the C link (gh #589) ───────────────────────
+#
+# The two links are supposed to report identically -- this one is a port of
+# `map_status_to_gams()` / `pounce_status_has_solution()` in
+# `gams/gams_pounce.c`. Nothing checked that, and three things had drifted: the
+# `gmoSolveStat_*` constants below were wrong, four statuses used the wrong one
+# of them, and three exits were missing from the table entirely. The tests here
+# pin each of those against a source that cannot drift with us -- GAMS's own
+# `gams.core.gmo` for the constants, the Rust enum for the status names.
+
+#: `gmoSolveStat_*` / `gmoModelStat_*` spellings for the constants this module
+#: defines, so gamsapi can be asked what they should be.
+_GMO_CONSTANTS = {
+    "MODELSTAT_OPTIMAL": "gmoModelStat_OptimalGlobal",
+    "MODELSTAT_LOCALLY_OPTIMAL": "gmoModelStat_OptimalLocal",
+    "MODELSTAT_UNBOUNDED": "gmoModelStat_Unbounded",
+    "MODELSTAT_INFEASIBLE_LOCAL": "gmoModelStat_InfeasibleLocal",
+    "MODELSTAT_INFEASIBLE_INTERMED": "gmoModelStat_InfeasibleIntermed",
+    "MODELSTAT_FEASIBLE": "gmoModelStat_Feasible",
+    "MODELSTAT_ERROR_NO_SOLUTION": "gmoModelStat_ErrorNoSolution",
+    "MODELSTAT_NO_SOLUTION_RETURNED": "gmoModelStat_NoSolutionReturned",
+    "SOLVESTAT_NORMAL": "gmoSolveStat_Normal",
+    "SOLVESTAT_ITERATION": "gmoSolveStat_Iteration",
+    "SOLVESTAT_RESOURCE": "gmoSolveStat_Resource",
+    "SOLVESTAT_SOLVER": "gmoSolveStat_Solver",
+    "SOLVESTAT_EVAL_ERR": "gmoSolveStat_EvalError",
+    "SOLVESTAT_USER": "gmoSolveStat_User",
+    "SOLVESTAT_SETUP_ERR": "gmoSolveStat_SetupErr",
+    "SOLVESTAT_SOLVER_ERR": "gmoSolveStat_SolverErr",
+    "SOLVESTAT_INTERNAL_ERR": "gmoSolveStat_InternalErr",
+}
+
+
+def test_status_constants_match_gamsapi():
+    """Every status constant against GAMS's own definition.
+
+    `SOLVESTAT_EVAL_ERR` was 11 (`gmoSolveStat_InternalErr`) and
+    `SOLVESTAT_INTERNAL_ERR` was 12 (`gmoSolveStat_Skipped`), so this link told
+    GAMS something different from what `gams_pounce.c` tells it, and something
+    different from what it meant. A wrong integer here is invisible without
+    GAMS in the loop, which is why it survived: the link ran, the value was in
+    range, and the `.lst` just said the wrong thing.
+    """
+    gmo = pytest.importorskip(
+        "gams.core.gmo",
+        reason="needs gamsapi[core] (pure Python, no GAMS license) to read "
+               "the authoritative constants")
+    for ours, theirs in _GMO_CONSTANTS.items():
+        assert getattr(link, ours) == getattr(gmo, theirs), (
+            f"link.{ours} disagrees with GAMS's {theirs}")
+
+
+def test_status_map_covers_every_engine_exit(engine_statuses):
+    """An exit missing from the table takes the default silently and is
+    reported to GAMS as an internal error — the gh #589 failure mode, here."""
+    missing = [s for s in engine_statuses if s not in link._STATUS_MAP]
+    assert not missing, f"{missing} fall to the `status_to_gams` default"
+
+
+def test_has_solution_set_only_names_real_exits(engine_statuses):
+    assert not (link._STATUS_HAS_SOLUTION - set(engine_statuses))
+
+
+@pytest.mark.parametrize(
+    "status_msg, model_stat, solve_stat",
+    [
+        # The four the C link terminates "by solver" (4), not "solver failure"
+        # (10) — a verdict, not a crash. This link said 10 for all four.
+        ("Infeasible_Problem_Detected",
+         link.MODELSTAT_INFEASIBLE_LOCAL, link.SOLVESTAT_SOLVER),
+        ("Search_Direction_Becomes_Too_Small",
+         link.MODELSTAT_FEASIBLE, link.SOLVESTAT_SOLVER),
+        ("Diverging_Iterates",
+         link.MODELSTAT_UNBOUNDED, link.SOLVESTAT_SOLVER),
+        ("Restoration_Failed",
+         link.MODELSTAT_INFEASIBLE_INTERMED, link.SOLVESTAT_SOLVER),
+        # ...and the one that really is a solver failure.
+        ("Error_In_Step_Computation",
+         link.MODELSTAT_FEASIBLE, link.SOLVESTAT_SOLVER_ERR),
+        # The three that were missing from the table.
+        ("Insufficient_Memory",
+         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_SOLVER_ERR),
+        ("Unrecoverable_Exception",
+         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_INTERNAL_ERR),
+        ("NonIpopt_Exception_Thrown",
+         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_INTERNAL_ERR),
+    ],
+)
+def test_status_to_gams_matches_the_c_link(status_msg, model_stat, solve_stat):
+    assert link.status_to_gams(status_msg) == (model_stat, solve_stat)
+
+
+def test_restoration_failure_reports_its_objective():
+    """gh #589 as a GAMS user sees it: `gmoSetSolution2` publishes the
+    restoration failure's iterate as `x.l` unconditionally, so withholding the
+    objective left the listing showing that point under an objective of 0."""
+    assert link.reports_objective("Restoration_Failed", 17.014)
+
+
+@pytest.mark.parametrize(
+    "status_msg", ["Solve_Succeeded", "Restoration_Failed",
+                   "Invalid_Number_Detected", "Maximum_Iterations_Exceeded"])
+def test_a_non_finite_objective_is_never_reported(status_msg):
+    """The finiteness half of the guard. POUNCE leaves `obj_val` at NaN when it
+    refused the solve before evaluating anything, and `Invalid_Number_Detected`
+    is by definition an exit where something went non-finite."""
+    assert not link.reports_objective(status_msg, float("nan"))
+    assert not link.reports_objective(status_msg, float("inf"))
+
+
+@pytest.mark.parametrize(
+    "status_msg", ["Invalid_Option", "Not_Enough_Degrees_Of_Freedom",
+                   "Insufficient_Memory", "Diverging_Iterates",
+                   "Something_New"])
+def test_objective_withheld_where_the_c_link_withholds_it(status_msg):
+    assert not link.reports_objective(status_msg, 1.0)
 
 
 # ── option file parsing ───────────────────────────────────────────────────────

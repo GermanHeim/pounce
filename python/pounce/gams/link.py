@@ -24,6 +24,7 @@ GAMS libraries, so their versions must match.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -45,28 +46,43 @@ MODELSTAT_FEASIBLE = 7  # intermediate non-optimal, feasible point available
 MODELSTAT_ERROR_NO_SOLUTION = 13
 MODELSTAT_NO_SOLUTION_RETURNED = 14
 
-SOLVESTAT_NORMAL = 1
-SOLVESTAT_ITERATION = 2
-SOLVESTAT_RESOURCE = 3  # time / resource interrupt
-SOLVESTAT_USER = 8
-SOLVESTAT_SETUP_ERR = 9
-SOLVESTAT_SOLVER_ERR = 10
-SOLVESTAT_EVAL_ERR = 11
-SOLVESTAT_INTERNAL_ERR = 12
+# Values are `gmoSolveStat_*` from GAMS's own `gams.core.gmo`, and three of
+# them used to be wrong here: `EVAL_ERR` was 11 (gmoSolveStat_InternalErr) and
+# `INTERNAL_ERR` was 12 (gmoSolveStat_Skipped), so this link reported a
+# different solver status than `gams_pounce.c` for the same solve -- an
+# evaluation error arrived as "Internal Solver Failure" and an internal error
+# as "Solve Processing Skipped". `test_solvestat_constants_match_gamsapi`
+# checks every one of them against `gams.core.gmo` when gamsapi is installed.
+SOLVESTAT_NORMAL = 1  # gmoSolveStat_Normal
+SOLVESTAT_ITERATION = 2  # gmoSolveStat_Iteration
+SOLVESTAT_RESOURCE = 3  # gmoSolveStat_Resource -- time / resource interrupt
+SOLVESTAT_SOLVER = 4  # gmoSolveStat_Solver -- terminated by solver, with a verdict
+SOLVESTAT_EVAL_ERR = 5  # gmoSolveStat_EvalError
+SOLVESTAT_USER = 8  # gmoSolveStat_User
+SOLVESTAT_SETUP_ERR = 9  # gmoSolveStat_SetupErr
+SOLVESTAT_SOLVER_ERR = 10  # gmoSolveStat_SolverErr -- the solver failed
+SOLVESTAT_INTERNAL_ERR = 11  # gmoSolveStat_InternalErr
 
 # POUNCE (== Ipopt 3.14) ApplicationReturnStatus names -> (modelStat, solveStat).
-# Ported verbatim from map_status_to_gams() in gams/gams_pounce.c so the two
-# links report identically.  `status_msg` from POUNCE is the enum *name*.
+# Ported from map_status_to_gams() in gams/gams_pounce.c so the two links
+# report identically.  `status_msg` from POUNCE is the enum *name*.
+#
+# Exhaustive over the enum (`crates/pounce-nlp/src/return_codes.rs`), and the
+# C switch is too. An exit that is merely absent takes the default silently and
+# is reported as an internal failure -- which is how gh #589 hid on the Pyomo
+# side, where `Restoration_Failed` went unlisted and an ordinary numerical exit
+# came back as a hard failure on one interface only. The coverage test in
+# `python/tests/test_gams_link.py` keeps both links honest.
 _STATUS_MAP: dict[str, tuple[int, int]] = {
     "Solve_Succeeded": (MODELSTAT_LOCALLY_OPTIMAL, SOLVESTAT_NORMAL),
     "Solved_To_Acceptable_Level": (MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL),
     "Feasible_Point_Found": (MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL),
-    "Infeasible_Problem_Detected": (MODELSTAT_INFEASIBLE_LOCAL, SOLVESTAT_SOLVER_ERR),
-    "Search_Direction_Becomes_Too_Small": (MODELSTAT_FEASIBLE, SOLVESTAT_SOLVER_ERR),
-    "Diverging_Iterates": (MODELSTAT_UNBOUNDED, SOLVESTAT_SOLVER_ERR),
+    "Infeasible_Problem_Detected": (MODELSTAT_INFEASIBLE_LOCAL, SOLVESTAT_SOLVER),
+    "Search_Direction_Becomes_Too_Small": (MODELSTAT_FEASIBLE, SOLVESTAT_SOLVER),
+    "Diverging_Iterates": (MODELSTAT_UNBOUNDED, SOLVESTAT_SOLVER),
     "User_Requested_Stop": (MODELSTAT_FEASIBLE, SOLVESTAT_USER),
     "Maximum_Iterations_Exceeded": (MODELSTAT_FEASIBLE, SOLVESTAT_ITERATION),
-    "Restoration_Failed": (MODELSTAT_INFEASIBLE_INTERMED, SOLVESTAT_SOLVER_ERR),
+    "Restoration_Failed": (MODELSTAT_INFEASIBLE_INTERMED, SOLVESTAT_SOLVER),
     "Error_In_Step_Computation": (MODELSTAT_FEASIBLE, SOLVESTAT_SOLVER_ERR),
     "Maximum_CpuTime_Exceeded": (MODELSTAT_FEASIBLE, SOLVESTAT_RESOURCE),
     "Maximum_WallTime_Exceeded": (MODELSTAT_FEASIBLE, SOLVESTAT_RESOURCE),
@@ -74,11 +90,35 @@ _STATUS_MAP: dict[str, tuple[int, int]] = {
     "Invalid_Problem_Definition": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_SETUP_ERR),
     "Invalid_Option": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_SETUP_ERR),
     "Invalid_Number_Detected": (MODELSTAT_INFEASIBLE_INTERMED, SOLVESTAT_EVAL_ERR),
+    # The solve ran and was killed by the machine, not by a defect in the model
+    # or in POUNCE: "Solver Failure", not "Internal Solver Failure".
+    "Insufficient_Memory": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_SOLVER_ERR),
+    # ABI-parity members of the upstream enum that POUNCE never returns; listed
+    # so the table covers the enum rather than today's exits.
+    "Unrecoverable_Exception": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
+    "NonIpopt_Exception_Thrown": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
     "Internal_Error": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
 }
 
 # Statuses that still leave a usable primal iterate in `x` (mirrors
 # pounce_status_has_solution() in the C link).
+#
+# This gates the *objective* report only -- `gmoSetSolution2` below hands GAMS
+# the primal vector and the marginals for every status, because the engine
+# always fills them. So a status left out here does not hide the point; it
+# publishes the point with an objective of zero beside it.
+#
+# `Restoration_Failed` and `Invalid_Number_Detected` were left out and belong:
+# each stops the algorithm at an iterate and hands it to `finalize_solution`,
+# exactly as the limit exits already here do. Same oversight as gh #589, in the
+# one place a GAMS user would see it -- a `.lst` whose variable levels sit at
+# the restoration failure's iterate under an objective row reading 0.
+#
+# `Diverging_Iterates` stays out on purpose: the point exists, but the
+# objective there is a step along a ray rather than a value worth putting in a
+# trace row, and MODELSTAT_UNBOUNDED already carries the finding.
+# `Insufficient_Memory` stays out because the link should not vouch for the
+# state of a solve the machine killed.
 _STATUS_HAS_SOLUTION = frozenset(
     {
         "Solve_Succeeded",
@@ -88,7 +128,9 @@ _STATUS_HAS_SOLUTION = frozenset(
         "Search_Direction_Becomes_Too_Small",
         "User_Requested_Stop",
         "Maximum_Iterations_Exceeded",
+        "Restoration_Failed",
         "Error_In_Step_Computation",
+        "Invalid_Number_Detected",
         "Maximum_CpuTime_Exceeded",
         "Maximum_WallTime_Exceeded",
     }
@@ -108,6 +150,21 @@ def is_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def reports_objective(status_msg: str, obj_val: float) -> bool:
+    """Should GAMS's objective row be set from this solve?
+
+    Two conditions, mirroring the `pounce_status_has_solution(status) &&
+    isfinite(obj_val)` guard in the C link: the status has to leave an iterate,
+    and the objective at it has to be a number. POUNCE leaves `obj_val` at NaN
+    when the solve was refused before anything was evaluated, and
+    `Invalid_Number_Detected` is by definition an exit where a value went
+    non-finite -- possibly this one. Writing a NaN into `gmoHobjval` is worse
+    than leaving the row at zero, so the status set says "there is a point
+    here" and the finiteness test says "and its objective is a number".
+    """
+    return status_msg in _STATUS_HAS_SOLUTION and math.isfinite(obj_val)
 
 
 def status_to_gams(status_msg: str) -> tuple[int, int]:
@@ -371,9 +428,9 @@ def _write_solution(gmo_h, gmo, view, x, info) -> None:  # pragma: no cover - ne
     gmo.gmoModelStatSet(gmo_h, model_stat)
     gmo.gmoSolveStatSet(gmo_h, solve_stat)
 
-    if status_msg in _STATUS_HAS_SOLUTION and x is not None:
-        # Objective in GAMS convention (undo our sign flip for max).
-        obj_val = float(info.get("obj_val", 0.0))
+    # Objective in GAMS convention (undo our sign flip for max).
+    obj_val = float(info.get("obj_val", 0.0))
+    if x is not None and reports_objective(status_msg, obj_val):
         gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjval, obj_sign * obj_val)
 
     iters = info.get("iter_count")
