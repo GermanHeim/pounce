@@ -331,22 +331,12 @@ def test_hessian_callback_applies_sign_and_conweight():
 # ── status mapping ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "status_msg, model_stat, solve_stat",
-    [
-        ("Solve_Succeeded", link.MODELSTAT_LOCALLY_OPTIMAL, link.SOLVESTAT_NORMAL),
-        ("Solved_To_Acceptable_Level", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_NORMAL),
-        ("Feasible_Point_Found", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_NORMAL),
-        ("Infeasible_Problem_Detected", link.MODELSTAT_INFEASIBLE_LOCAL, link.SOLVESTAT_SOLVER),
-        ("Diverging_Iterates", link.MODELSTAT_UNBOUNDED, link.SOLVESTAT_SOLVER),
-        ("Maximum_Iterations_Exceeded", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_ITERATION),
-        ("Maximum_WallTime_Exceeded", link.MODELSTAT_FEASIBLE, link.SOLVESTAT_RESOURCE),
-        ("Invalid_Option", link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_SETUP_ERR),
-        ("Internal_Error", link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_INTERNAL_ERR),
-    ],
-)
-def test_status_to_gams(status_msg, model_stat, solve_stat):
-    assert link.status_to_gams(status_msg) == (model_stat, solve_stat)
+# A nine-row table checking `status_to_gams` against this module's own
+# `SOLVESTAT_*` constants used to live here. It is gone rather than extended:
+# comparing the table to the constants it is built from cannot fail, whatever
+# the constants say, and three of them were wrong. What replaced it --
+# `test_status_to_gams_matches_the_c_link` below -- covers all twenty exits
+# against literal GAMS integers taken from the C link.
 
 
 def test_status_to_gams_unknown_is_error():
@@ -419,33 +409,61 @@ def test_has_solution_set_only_names_real_exits(engine_statuses):
     assert not (link._STATUS_HAS_SOLUTION - set(engine_statuses))
 
 
-@pytest.mark.parametrize(
-    "status_msg, model_stat, solve_stat",
-    [
-        # The four the C link terminates "by solver" (4), not "solver failure"
-        # (10) — a verdict, not a crash. This link said 10 for all four.
-        ("Infeasible_Problem_Detected",
-         link.MODELSTAT_INFEASIBLE_LOCAL, link.SOLVESTAT_SOLVER),
-        ("Search_Direction_Becomes_Too_Small",
-         link.MODELSTAT_FEASIBLE, link.SOLVESTAT_SOLVER),
-        ("Diverging_Iterates",
-         link.MODELSTAT_UNBOUNDED, link.SOLVESTAT_SOLVER),
-        ("Restoration_Failed",
-         link.MODELSTAT_INFEASIBLE_INTERMED, link.SOLVESTAT_SOLVER),
-        # ...and the one that really is a solver failure.
-        ("Error_In_Step_Computation",
-         link.MODELSTAT_FEASIBLE, link.SOLVESTAT_SOLVER_ERR),
-        # The three that were missing from the table.
-        ("Insufficient_Memory",
-         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_SOLVER_ERR),
-        ("Unrecoverable_Exception",
-         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_INTERNAL_ERR),
-        ("NonIpopt_Exception_Thrown",
-         link.MODELSTAT_ERROR_NO_SOLUTION, link.SOLVESTAT_INTERNAL_ERR),
-    ],
-)
-def test_status_to_gams_matches_the_c_link(status_msg, model_stat, solve_stat):
-    assert link.status_to_gams(status_msg) == (model_stat, solve_stat)
+#: What `gams/gams_pounce.c` reports, as **literal** GAMS integers.
+#:
+#: Deliberately not written as `link.SOLVESTAT_*`. Every other assertion in
+#: this file compares the table against the module's own constants, which
+#: cannot catch a constant that is itself wrong -- and three of them were, so
+#: the table "matched" while the two links disagreed. These numbers come from
+#: the C link, which uses GAMS's `gmomcc.h` enumerators directly, so a
+#: disagreement here is a real disagreement between the two links.
+_C_LINK_STATUS = {
+    "Solve_Succeeded": (2, 1),  # OptimalLocal, Normal
+    "Solved_To_Acceptable_Level": (7, 1),  # Feasible, Normal
+    "Feasible_Point_Found": (7, 1),
+    "Infeasible_Problem_Detected": (5, 4),  # InfeasibleLocal, Solver
+    "Search_Direction_Becomes_Too_Small": (7, 4),
+    "Diverging_Iterates": (3, 4),  # Unbounded, Solver
+    "User_Requested_Stop": (7, 8),  # Feasible, User
+    "Maximum_Iterations_Exceeded": (7, 2),  # Feasible, Iteration
+    "Restoration_Failed": (6, 4),  # InfeasibleIntermed, Solver
+    "Error_In_Step_Computation": (7, 10),  # Feasible, SolverErr
+    "Maximum_CpuTime_Exceeded": (7, 3),  # Feasible, Resource
+    "Maximum_WallTime_Exceeded": (7, 3),
+    "Not_Enough_Degrees_Of_Freedom": (13, 9),  # ErrorNoSolution, SetupErr
+    "Invalid_Problem_Definition": (13, 9),
+    "Invalid_Option": (13, 9),
+    "Invalid_Number_Detected": (6, 5),  # InfeasibleIntermed, EvalError
+    "Insufficient_Memory": (13, 10),  # ErrorNoSolution, SolverErr
+    "Unrecoverable_Exception": (13, 11),  # ErrorNoSolution, InternalErr
+    "NonIpopt_Exception_Thrown": (13, 11),
+    "Internal_Error": (13, 11),
+}
+
+#: `pounce_status_has_solution()` in the C link, intersected with the finiteness
+#: guard's "yes" case: the exits whose objective reaches GAMS.
+_C_LINK_REPORTS_OBJECTIVE = frozenset({
+    "Solve_Succeeded", "Solved_To_Acceptable_Level", "Feasible_Point_Found",
+    "Infeasible_Problem_Detected", "Search_Direction_Becomes_Too_Small",
+    "User_Requested_Stop", "Maximum_Iterations_Exceeded", "Restoration_Failed",
+    "Error_In_Step_Computation", "Invalid_Number_Detected",
+    "Maximum_CpuTime_Exceeded", "Maximum_WallTime_Exceeded",
+})
+
+
+@pytest.mark.parametrize("status_msg", sorted(_C_LINK_STATUS))
+def test_status_to_gams_matches_the_c_link(status_msg):
+    """The two links must report identically -- this one is a port of the
+    other. Four statuses disagreed: this link said `gmoSolveStat_SolverErr`
+    (10, "Solver Failure") where the C link says `gmoSolveStat_Solver` (4,
+    "Terminated By Solver"), which is a verdict rather than a crash."""
+    assert link.status_to_gams(status_msg) == _C_LINK_STATUS[status_msg]
+
+
+@pytest.mark.parametrize("status_msg", sorted(_C_LINK_STATUS))
+def test_objective_report_matches_the_c_link(status_msg):
+    assert link.reports_objective(status_msg, 1.0) == (
+        status_msg in _C_LINK_REPORTS_OBJECTIVE)
 
 
 def test_restoration_failure_reports_its_objective():
