@@ -32,6 +32,28 @@ topological order. Run it before tagging.
    `pip install pounce-solver` does not require the crates.io publish — but the
    crates.io publish is still part of a complete release.
 
+## Trajectory changes need the fixture sweep
+
+A change that reroutes **which** correction the solver reaches for, or that
+reorders/rescales the steps it takes, is a *trajectory* change. Run
+`scripts/sweep-fixtures.sh` against a baseline binary and diff, **before
+merge**, and be able to explain every line that moves.
+
+"It cannot produce a wrong answer" is **not** the relevant safety property
+here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
+regression produces the *right* answer, slowly — or a differently-wrong
+tolerance-legal one. gh#544 took `pooling_rt2stp` from 206 to 812 iterations;
+the suite asserts status and objective, not iteration count, so nothing saw it.
+It surfaced as a CI wall-clock timeout, was misattributed, the cap was raised
+for good reasons, and the underlying defect shipped and came back as gh#592.
+
+Related: a measured regression that gets recorded as "an accepted cost of the
+fix" needs an issue and an owner. Without one it is indistinguishable from
+noise to the next reader — which is how 206 → 812 sat in a commit message
+through a release.
+
+Full post-mortem: `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
