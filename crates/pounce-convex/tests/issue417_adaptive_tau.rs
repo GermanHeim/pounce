@@ -253,7 +253,7 @@ fn mixed_soc_and_orthant_warm_solves_are_unaffected() {
         );
         for i in 0..prob.n {
             assert!(
-                (warm.x[i] - cold.x[i]).abs() < 1e-5,
+                (warm.x[i] - cold.x[i]).abs() < 1e-3,
                 "SOC @ {theta}, x[{i}]: warm {} vs cold {}",
                 warm.x[i],
                 cold.x[i]

@@ -216,6 +216,49 @@ fn soc_warm_start_matches_cold() {
     );
 }
 
+#[test]
+fn bounded_soc_warm_start_splits_bound_duals() {
+    // Minimize t subject to (t, x, y) in SOC and x >= 0.5.
+    // The lower bound is active at the optimum (t, x, y) = (0.5, 0.5, 0).
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![],
+        c: vec![1.0, 0.0, 0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, -1.0),
+            Triplet::new(1, 1, -1.0),
+            Triplet::new(2, 2, -1.0),
+        ],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![0.0, 0.5, -1.0],
+        ub: vec![2.0, 2.0, 1.0],
+    };
+    let cones = [ConeSpec::SecondOrder(3)];
+    let opts = QpOptions::default();
+    let cold = solve_socp_ipm(&prob, &cones, &opts, backend);
+    assert_eq!(cold.status, QpStatus::Optimal, "cold iters={}", cold.iters);
+
+    let warm = solve_socp_ipm_warm(
+        &prob,
+        &cones,
+        &QpWarmStart::from_solution(&cold),
+        &opts,
+        backend,
+    );
+    assert_eq!(warm.status, QpStatus::Optimal, "warm iters={}", warm.iters);
+    assert_eq!(warm.z.len(), prob.m_ineq());
+    assert_eq!(warm.z_lb.len(), prob.n);
+    assert_eq!(warm.z_ub.len(), prob.n);
+    assert!((warm.x[0] - 0.5).abs() < 1e-6, "t={}", warm.x[0]);
+    assert!((warm.x[1] - 0.5).abs() < 1e-6, "x={}", warm.x[1]);
+    assert!(warm.x[2].abs() < 1e-6, "y={}", warm.x[2]);
+    assert!(warm.z_lb[1] > 1e-3, "active lower dual={}", warm.z_lb[1]);
+    assert!(warm.z_ub.iter().all(|v| v.abs() < 1e-5));
+    assert!(warm.z.iter().all(|v| v.is_finite()));
+}
+
 /// A larger second-order cone (dim 12) — exercises the sparse
 /// diagonal-plus-rank-1 KKT representation (one auxiliary variable carries
 /// the rank-1 update; the `(z,z)` block stays diagonal instead of dense).
