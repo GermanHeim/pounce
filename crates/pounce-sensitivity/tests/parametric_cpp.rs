@@ -261,8 +261,10 @@ const UPSTREAM_X_NOMINAL: [Number; 5] = [
 /// and return the primal Δx slice (first n_x entries of dx_full).
 /// `delta_p` is the (Δeta1, Δeta2) perturbation.
 fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
-    let dx_full_out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
-    let dx_full_clone = Rc::clone(&dx_full_out);
+    // Through the public method rather than a hand-built
+    // `SensApplication`, so this carries the same barrier correction the
+    // bounded step does and the two remain comparable.
+    use pounce_sensitivity::Solver;
 
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -273,39 +275,8 @@ fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
         .unwrap();
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
-
-    app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
-        // For ParametricTNLP: n_x=5, n_s=0, n_c=4, n_d=0 → y_c block
-        // starts at flat offset 5. Constraints 2 and 3 (the parameter
-        // pins g[2]=eta1, g[3]=eta2) live at flat indices 7 and 8 —
-        // matches upstream `MetadataMeasurement::GetInitialEqConstraints`
-        // (`ref/Ipopt/contrib/sIPOPT/src/SensMetadataMeasurement.cpp:69-83`).
-        let curr = data.borrow().curr.clone().expect("curr at convergence");
-        let n_x = curr.x.dim() as usize;
-        let n_s = curr.s.dim() as usize;
-        let y_c_offset = n_x + n_s;
-        let param_rows = vec![(y_c_offset + 2) as Index, (y_c_offset + 3) as Index];
-
-        let backsolver =
-            PdSensBacksolver::new(data, cq, nlp, pd).expect("PdSensBacksolver construction");
-        let n_full = backsolver.dim();
-
-        let a_data = IndexSchurData::from_parts(param_rows, vec![1, 1]).expect("A SchurData");
-        let opts = SensOptions {
-            run_sens: true,
-            ..SensOptions::default()
-        };
-        let sens_app = SensApplication::new(a_data, backsolver, opts);
-
-        let mut dx_full = vec![0.0; n_full];
-        assert!(
-            sens_app.parametric_step(&delta_p, &mut dx_full),
-            "SensApplication::parametric_step failed"
-        );
-        *dx_full_clone.borrow_mut() = Some(dx_full);
-    }));
-
-    let status = app.optimize_tnlp(tnlp);
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
     assert!(
         matches!(
             status,
@@ -314,12 +285,10 @@ fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
         ),
         "nominal solve failed: {status:?}",
     );
-
-    let dx_full = dx_full_out
-        .borrow()
-        .clone()
-        .expect("on_converged populated dx_full");
-    std::array::from_fn(|i| dx_full[i])
+    let dx = solver
+        .parametric_step(&[2, 3], &delta_p)
+        .expect("parametric_step");
+    std::array::from_fn(|i| dx[i])
 }
 
 #[test]

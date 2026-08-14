@@ -292,3 +292,45 @@ def test_a_release_is_not_triggered_when_the_bound_should_stay():
     fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
+
+
+def nonlinear(p=1.0):
+    """Nonlinear in both the objective and a constraint, so the barrier
+    term actually contributes and mu shows up in the step."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.x = pyo.Var(bounds=(0.1, 10.0), initialize=1.0)
+    m.y = pyo.Var(bounds=(0.1, 50.0), initialize=2.0)
+    m.c = pyo.Constraint(expr=m.y * m.x >= 0.5)
+    m.obj = pyo.Objective(
+        expr=(m.x - m.p) ** 2 + 0.5 * (m.y - 2 * m.p) ** 2 + 0.1 / m.x)
+    declare_sens_param(m.p)
+    return m
+
+
+@pytest.mark.parametrize("tol, want", [(1e-8, 1.046642776555),
+                                       (1e-3, 1.046643388715)])
+def test_the_step_carries_the_barrier_correction(tol, want):
+    """The step is taken against a factorization held at the final mu,
+    so it estimates where the BARRIER problem's solution moves, not the
+    original problem's. The paper's equation 11 term closes that gap.
+
+    The expected values are sIPOPT 3.14.19's own answers for this model
+    and perturbation, read from its `sens_sol_state_1` suffix through
+    pyomo.contrib.sensitivity_toolbox at the same solver tolerance.
+    Without the correction pounce differs from them by 9e-6 at
+    tol = 1e-3, which is O(mu); with it, by 2.4e-7.
+    """
+    m = nonlinear()
+    pyo.SolverFactory("pounce").solve(m, options={"tol": tol})
+    got = estimate(m, [(m.p, 1.0 + 1e-3)])[m.x]
+    assert got == pytest.approx(want, abs=1e-6)
+
+
+def test_the_correction_does_not_move_a_converged_answer():
+    """At a tight tolerance the term is O(mu) and must not disturb a
+    step that was already right."""
+    m = solved()
+    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
+    assert fix[m.y] == pytest.approx(1.0, abs=1e-6)

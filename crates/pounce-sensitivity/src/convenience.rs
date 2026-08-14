@@ -451,6 +451,29 @@ impl SensSolve {
                         Some("SensApplication::parametric_step failed".into());
                     return;
                 }
+                // Carry the step from the barrier problem's solution
+                // toward the original problem's, the paper's equation
+                // 11. `Solver::parametric_step` applies the same term,
+                // and the two are asserted equal.
+                {
+                    let dims = backsolver_for_refine.block_dims();
+                    let start = dims[0] + dims[1] + dims[2] + dims[3];
+                    let end = start + dims[4] + dims[5] + dims[6] + dims[7];
+                    let mu = data.borrow().curr_mu;
+                    let mut rhs = vec![0.0; n_full];
+                    for r in rhs.iter_mut().take(end).skip(start) {
+                        *r = mu;
+                    }
+                    let mut bc = vec![0.0; n_full];
+                    if !backsolver_for_refine.solve(&rhs, &mut bc) {
+                        outbox_cb.borrow_mut().error =
+                            Some("barrier correction backsolve failed".into());
+                        return;
+                    }
+                    for (v, c) in dx_full.iter_mut().zip(bc.iter()) {
+                        *v -= *c;
+                    }
+                }
                 if let Some(eps) = boundcheck_eps {
                     // Hold every crossing coordinate AT its bound by
                     // pinning and re-solving, which is what upstream's
