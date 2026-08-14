@@ -3315,6 +3315,9 @@ impl IpoptApplication {
         if let Ok((v, true)) = self.options.get_bool_value("perturb_always_cd", "") {
             builder.perturbation.perturb_always_cd = v;
         }
+        if let Some(v) = read_int("perturb_delta_c_max_rungs") {
+            builder.perturbation.perturb_delta_c_max_rungs = v;
+        }
 
         // Iterative-refinement constants (#191), consumed by
         // `PdFullSpaceSolver`. Registered but never read.
@@ -3618,8 +3621,11 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
     }
+    // Explicitly set pins an absolute floor for every dimension (`0`
+    // disables the trigger); left unset, `None` keeps the dimension-aware
+    // `n * eps` default (pounce gh#592).
     if let Ok((v, true)) = options.get_numeric_value("feral_inertia_pivot_floor", "") {
-        cfg.inertia_pivot_floor = v;
+        cfg.inertia_pivot_floor = Some(v);
     }
     // Number option (not integer): the gate is a u64 and Index is i32, too
     // narrow for large flop counts or the u64::MAX reject-all sentinel. The

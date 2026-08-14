@@ -480,9 +480,10 @@ impl FeralSchurSolver {
     /// Inertia-trust floor — see [`crate::FeralConfig::inertia_pivot_floor`].
     /// Only consulted once the summed count has already mismatched.
     fn pivot_below_inertia_floor(&self, solver: &Solver) -> bool {
-        if self.cfg.inertia_pivot_floor > 0.0 {
+        let floor = crate::inertia_trust_floor(self.cfg.inertia_pivot_floor, self.dim);
+        if floor > 0.0 {
             if let Some(min_piv) = solver.min_pivot_magnitude() {
-                return min_piv < self.cfg.inertia_pivot_floor;
+                return min_piv < floor;
             }
         }
         false

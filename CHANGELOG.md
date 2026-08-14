@@ -9,6 +9,67 @@ changes.
 
 ## [Unreleased]
 
+- **A premature `Solve_Succeeded` on a badly-scaled model, caused by two
+  defects in the inertia-correction path** (#592). On a fixed-policy NLP from
+  LyoPRONTO's Problem 2 GDP, POUNCE returned `Solve_Succeeded`, and restarting
+  it from the returned primal point improved the objective twice — 25.096 s,
+  0.079 %, in total — landing on the point IPOPT 3.14.16 reaches in one solve.
+
+  The convergence test was not at fault: the certified point clears IPOPT's
+  own unscaled component gates too (dual `9.994e-3 <= 1`, violation
+  `2.844e-6 <= 1e-4`, complementarity `9.091e-7 <= 1e-4`). What differed was
+  the *trajectory*, and two things in the inertia correction were sending it
+  somewhere IPOPT does not go.
+
+  **The inertia-trust floor was dimension-blind.** `feral_inertia_pivot_floor`
+  (#540) decides when a mismatching inertia count is noise, by comparing the
+  smallest equilibrated pivot against a floor. Its rationale is the backward
+  error `n · eps`, but the value shipped was the constant `1e-12` — `n · eps`
+  at `n ≈ 4500`, while these KKT systems are order 165–311, where `n · eps` is
+  3.7e-14 … 6.9e-14. It now defaults to `n · eps` for the system actually being
+  factored. Setting the option explicitly still pins an absolute floor for
+  every dimension, and `0` still disables the trigger, so #540's opt-out is
+  unchanged. Across the 57-fixture CLI corpus exactly two models moved — both
+  the #540 models, both to *fewer* iterations, no status changes.
+
+  **`δ_c` could be spent on a full-rank Jacobian and never withdrawn.** When
+  the noise trigger fires, the handler raises `δ_c`. If the small pivot came
+  from the Hessian block rather than a rank-deficient Jacobian, `δ_c` is the
+  wrong medicine — but the handler kept it and climbed the `δ_x` ladder on top
+  of it, reaching `δ_w = 1e2` on a system IPOPT regularises at `1e-4`. The
+  resulting over-damped step froze the objective for eight iterations, and the
+  loose-tolerance exit then fired at the reported point.
+
+  Which block owns the smallest pivot would settle it directly, but that index
+  is not exposed by the linear-solver backend. What does separate the two
+  populations is how far the `δ_x` ladder climbs while `δ_c` is up: when `δ_c`
+  is right it is right within one rung (#540's models never exceed one), and
+  when it is wrong the ladder climbs without limit (4 rungs here, 14 on
+  `pooling_rt2stp`). So a **`δ_c` walk-back** was added — after
+  `perturb_delta_c_max_rungs` rungs (new option, default `3`) all four deltas
+  are withdrawn, the degeneracy probe is reset, and `δ_c` is latched off for
+  the remainder of that iterate. `w` marks the iteration line when it fires.
+  `perturb_delta_c_max_rungs = 0` restores the previous behaviour exactly.
+
+  With both fixed, the reported first solve reaches `31785.744274` in 27
+  iterations — the reporter's IPOPT answer — so the restart has nothing left to
+  improve. On the stricter criterion the reporter named — the *original cold
+  GDP pipeline*, where every option-level workaround had failed — the cold
+  solve now lands on IPOPT's phase-switch times (1.575762165 h / 3.917595809 h
+  against 1.925104405 h / 3.924408024 h before) and two successive restarts
+  reproduce it to twelve digits. `pooling_rt2stp`, which #544 had cost 812
+  iterations against a pre-#544 206, comes back to 298.
+
+  The reproducer is not vendored: it encodes LyoPRONTO's model equations and
+  LyoPRONTO is GPL-3.0 against POUNCE's EPL-2.0. The behaviour is pinned by
+  unit tests on the walk-back state machine and the dimension-aware floor, plus
+  end-to-end tests on the already-vendored `pooling_rt2stp` fixture, which
+  exhibits the same pattern. Investigation and evidence:
+  `dev-notes/issue-592-restart-non-idempotence.md`.
+
+  *Breaking (Rust API):* `pounce_feral::FeralConfig::inertia_pivot_floor` is
+  now `Option<f64>`, where `None` selects the dimension-aware default.
+
 - **An accepted solve no longer loads into Pyomo as a warning** (#591).
   `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
   `solve_result_num = 1` — IPOPT's own code for the same outcome

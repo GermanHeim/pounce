@@ -103,7 +103,9 @@ therefore takes route 3 on this model and pounce did not.
 
 ## The fix
 
-`feral_inertia_pivot_floor` (default `1e-12`): when the negative-eigenvalue
+`feral_inertia_pivot_floor` (default `1e-12`; **superseded by the
+dimension-aware `n · eps` default in gh#592** — see
+`issue-592-restart-non-idempotence.md`): when the negative-eigenvalue
 count *already disagrees* with what the IPM asked for, and the smallest
 accepted pivot is under this floor, report `Singular` instead of
 `WrongInertia`.
