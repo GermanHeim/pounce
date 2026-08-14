@@ -71,6 +71,27 @@ degrees of freedom. `pyomo-pounce/tests/test_fix_relax.py` covers the
 Pyomo surface, including under a `user-scaling` change of variables, and
 that the two modes agree exactly where nothing crosses.
 
+### Changed — every parametric step now carries the barrier correction (#XXX)
+
+`estimate()`, `gradient()`, `Solver.parametric_step` and the `SensSolve`
+builder take their step against a factorization held at the solve's
+final `mu`. On its own that estimates where the BARRIER problem's
+solution moves, not where the original problem's does, and the two
+differ by `O(mu)`. The paper's equation 11 closes the gap with one more
+term, and it is now applied on every path.
+
+This moves existing answers. At a converged tolerance the shift is
+below anything a caller would notice: measured against sIPOPT on a
+nonlinear model, agreement improves from 2e-9 to 4e-10 at `tol = 1e-8`.
+Where the solve leaves `mu` loose it is the point of the change: at
+`tol = 1e-3` the same comparison improves from 9e-6 to 2.4e-7. A caller
+comparing against a value recorded from a loosely converged solve will
+see a difference, and the new value is the better one.
+
+There is no option for it. The barrier problem's answer is not one a
+caller has a reason to want, and upstream applies the term
+unconditionally as well.
+
 ### Changed — `sens_boundcheck` refines instead of clamping (#XXX)
 
 The option is named after upstream sIPOPT's, and upstream's runs an

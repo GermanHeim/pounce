@@ -156,19 +156,34 @@ assumption that the clipped one was free to move where the step said.
 The result satisfies the bounds and no longer satisfies the
 constraints.
 
-`mode="fix_relax"` adds a row pinning the crossing variable at its
-bound and re-solves, so the others move with it:
+`mode="fix_relax"` repairs the active set the step implies instead,
+which is upstream sIPOPT's strategy of that name and both of its cases.
+A variable the step carries past a bound is pinned there, activating it.
+A bound multiplier the step drives negative is set to zero, deactivating
+that bound so the variable can move. Each adds a row to the held
+factorization and re-solves, so the other variables move with it:
 
 ```python
 estimate(m, [(m.setpoint, 3.0)])                      # clips
 estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
 ```
 
-On a model where `y = 2x + 1` and `x` hits its lower bound, the linear
-step returns `y = -5`, which does not satisfy the constraint. Pinning
-`x` returns `y = 1`, matching a full re-solve exactly. On upstream
-sIPOPT's own parametric example the two differ from a re-solve by 0.12
-and by 6e-9.
+Both halves matter and they fail differently. On a model where
+`y = 2x + 1` and `x` hits its lower bound, the linear step returns
+`y = -5`, which does not satisfy the constraint at all, while pinning
+`x` returns `y = 1`, matching a full re-solve. On a model whose bound
+wants to release, the linear step is stuck at `x = 0` where the answer
+is `x = 1.667`, because the step preserves complementarity and nothing
+but the release lets the variable off its bound.
+
+Both modes also carry a correction for the barrier. The step is taken
+against a factorization held at the solve's final `mu`, so on its own it
+estimates where the BARRIER problem's solution moves rather than the
+original problem's, and the two differ by `O(mu)`. That is invisible at
+a converged tolerance and is not at a loose one: against sIPOPT the
+uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
+`tol = 1e-8`. There is no option for it, since there is no reason to
+want the barrier problem's answer.
 
 Each crossing costs one dense solve against the held factorization plus
 a backsolve, with the solve growing as pins accumulate. The
@@ -780,15 +795,23 @@ off by 0.12. It is also checked on a model with three degrees of
 freedom, where three coordinates cross at once and all three pins hold,
 and for the refusal when the pins would exceed the degrees of freedom.
 
-Upstream describes this as fix-relax, pinning the variable and relaxing
-the complementarity condition attached to its bound. Only the pin is
-implemented, which gives the same primal step: the barrier term is
-diagonal, so the entry for the pinned coordinate appears in one row of
-the KKT system, and once the pin fixes that coordinate the row
-determines the pin's own multiplier rather than constraining the step.
-Relaxing it moves that multiplier and not the step. The equivalence
-covers the primal step only, so bound multiplier sensitivities at a
-pinned coordinate would need the relaxation.
+Both halves of fix-relax and the barrier correction are also checked
+against sIPOPT 3.14.19 itself, driven through
+`pyomo.contrib.sensitivity_toolbox`, on cases built to separate them:
+
+| what it exercises | pounce vs sIPOPT |
+|---|---|
+| pinning a variable the step carries past a bound | 2e-8 |
+| releasing a bound the step drives the multiplier off | 1e-6 |
+| the barrier correction, at `tol = 1e-3` | 2.4e-7 |
+| the barrier correction, at `tol = 1e-8` | 4e-10 |
+
+Each case is one the other two do not reach. The release case returns
+`x = 0` without it where the answer is `1.667`, since the linear step
+preserves complementarity and holds the variable on its bound. The
+barrier case differs by 9e-6 without the correction at `tol = 1e-3`,
+and by 2e-9 at `tol = 1e-8`, which is why it is only visible where the
+solve leaves `mu` loose.
 
 ## Beyond one perturbation
 

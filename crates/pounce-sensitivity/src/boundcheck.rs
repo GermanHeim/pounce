@@ -15,24 +15,25 @@
 //! [`worst_violation`] picks which coordinate that is and
 //! [`expand_bounds`] puts the bounds in a form both can read.
 //!
-//! # Why the pin alone is enough
+//! # Both halves, and why each matters
 //!
-//! Upstream describes this as fix-relax: pin the variable at its bound
-//! AND relax the complementarity condition that went with the bound,
-//! giving it a new multiplier. Only the pin is done here, and it gives
-//! the same primal step.
+//! Upstream's fix-relax is two cases (Pirnay, Lopez-Negrete and Biegler
+//! 2012, section 2.5), and the name refers to both. Its equation 17
+//! pins a variable the step carries past a bound, activating it. Its
+//! equation 18 sets a bound multiplier to zero when the step drives it
+//! negative, deactivating that bound so the variable can move.
 //!
-//! The barrier contributes `Σ = z_l/s_l + z_u/s_u` to the Hessian
-//! block, and Σ is diagonal, so `Σ_ii` appears only in row `i`. Adding
-//! the pin row fixes `Δx_i`, which turns row `i` from a constraint on
-//! `Δx` into the equation determining the pin's own multiplier. `Σ_ii`
-//! therefore shifts that multiplier and leaves `Δx` unchanged, so
-//! removing it, which is what relaxing the complementarity does, cannot
-//! move the primal step.
+//! They fail differently. Without the pin, a crossing variable is
+//! clipped and every other one keeps a value computed as though it had
+//! not been. Without the release, a variable sitting on a bound stays
+//! there however hard the perturbation pulls it off, because the linear
+//! step preserves complementarity. Measured against sIPOPT on a model
+//! whose bound wants to release, that second case is the difference
+//! between returning 0.0 and 1.667.
 //!
-//! That equivalence covers the primal step only. A caller wanting the
-//! bound multiplier sensitivities at a pinned coordinate would need the
-//! relaxation, since those are exactly what it changes.
+//! Both are solved the same way: add the row, re-solve the augmented
+//! system through the Schur complement over the added rows, which is
+//! what the paper's equations 19 through 22 describe.
 
 use crate::schur_data::IndexSchurData;
 use pounce_common::types::{Index, Number};
