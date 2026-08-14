@@ -162,7 +162,7 @@ Problem dimensions reported by the TNLP at `get_nlp_info()`.
 | Field | Type | Notes |
 |---|---|---|
 | `status` | string | `ApplicationReturnStatus` enum variant name verbatim (e.g. `"SolveSucceeded"`, `"MaximumIterationsExceeded"`). |
-| `solve_result_num` | integer | AMPL-style solve-result code (Gay 2005, "Hooking Your Solver to AMPL" §5, p. 23 table): 0 = solved, 100-range = warning, 200-range = infeasible, 400-range = limit reached, 500-range = failure. |
+| `solve_result_num` | integer | AMPL-style solve-result code (Gay 2005, "Hooking Your Solver to AMPL" §5, p. 23 table): 0 = solved, 100-range = warning, 200-range = infeasible, 400-range = limit reached, 500-range = failure. Within the solved range, `0` is `SolveSucceeded` and `1` is `SolvedToAcceptableLevel` — IPOPT's codes ([solution output](../solution-output.md#solved-strict-vs-acceptable)). Identical to the `objno` code in the `.sol`. |
 | `objective` | float | Final unscaled objective value. `0.0` (not NaN) when the solve never completed; check `statistics.iteration_count > 0` to distinguish. |
 | `x` | array of float \| empty | Primal vector, length `problem.n_variables`. Empty when the binary doesn't capture the final iterate (currently: `pounce` on the `newton_driver` fast-path). Omitted from JSON when empty. |
 | `lambda` | array of float \| empty | Constraint multipliers, length `problem.n_constraints`. Same omission convention as `x`. |

@@ -556,11 +556,33 @@ fn empty_stats() -> StatisticsInfo {
 /// upstream Ipopt's ASL driver and the CLI's own convex path, which
 /// reports `QpStatus::DualInfeasible` (unbounded) as 300 (`main.rs`). It
 /// is *not* a limit (400) condition.
+///
+/// `SolvedToAcceptableLevel` is `1`, not the 100 band, matching Ipopt's
+/// ASL driver exactly (`Ipopt/src/Apps/AmplSolver/AmplTNLP.cpp`:
+/// `STOP_AT_ACCEPTABLE_POINT` → `solve_result_num = 1`, message
+/// "Solved To Acceptable Level."). The band is what consumers key on, and
+/// the two bands are not interchangeable here: Pyomo's legacy `.sol`
+/// reader turns `0..=99` into `status=ok` but `100..=199` into
+/// `status=warning` with the same `termination_condition=optimal`, so the
+/// 100 band made Pyomo log a "Loading a SolverResults object with a
+/// warning status" warning on an accepted solve that Ipopt loads clean —
+/// breaking solver-swappable clients whose accepted-solve contract
+/// includes `status == ok` (gh #591). The reduced-accuracy convergence
+/// stays visible in the status name and the `.sol` message line; it just
+/// no longer reads as a warning.
+///
+/// `FeasiblePointFound` deliberately stays in the 100 "solved, with a
+/// warning" band even though Ipopt emits `2` for it. The two statuses do
+/// not mean the same thing: Ipopt returns `FEASIBLE_POINT_FOUND` only for
+/// a square problem, where a feasible point *is* the solution, while
+/// POUNCE uses it for a usable feasible point that did not meet the
+/// convergence criteria — a run its own interfaces do not call a success
+/// (`pyomo_pounce.v2._V2_STATUS`, `pyomo_pounce.sens._STATUS_RESULT`).
 pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
     use ApplicationReturnStatus::*;
     match status {
         SolveSucceeded => 0,
-        SolvedToAcceptableLevel => 100,
+        SolvedToAcceptableLevel => 1,
         FeasiblePointFound => 100,
         InfeasibleProblemDetected => 200,
         DivergingIterates => 300,
@@ -803,6 +825,35 @@ mod tests {
             400,
         );
         assert_eq!(status_to_solve_result_num(RestorationFailed), 500);
+    }
+
+    /// gh #591: an accepted (reduced-accuracy) solve must land in AMPL's
+    /// `0..=99` *solved* band with Ipopt's own code, `1`. In the 100 band
+    /// Pyomo's legacy `.sol` reader loads the result as
+    /// `status=warning, termination_condition=optimal` and logs a warning,
+    /// while the identical Ipopt solve loads as `status=ok` — so a
+    /// solver-swappable client that treats `status == ok` as part of its
+    /// accepted-solve contract had to special-case POUNCE.
+    #[test]
+    fn solved_to_acceptable_level_is_in_the_solved_band_like_ipopt() {
+        use ApplicationReturnStatus::*;
+        let code = status_to_solve_result_num(SolvedToAcceptableLevel);
+        assert_eq!(
+            code, 1,
+            "Ipopt's ASL driver emits 1 for STOP_AT_ACCEPTABLE_POINT",
+        );
+        assert!(
+            (0..=99).contains(&code),
+            "must be in the solved band Pyomo maps to status=ok, got {code}",
+        );
+        // Still distinguishable from a full-accuracy solve: the two codes
+        // differ, and the status name carries the distinction verbatim into
+        // the `.sol` message line.
+        assert_ne!(code, status_to_solve_result_num(SolveSucceeded));
+
+        // A feasible-but-unconverged point is a different claim and keeps
+        // the warning band — see the mapping's doc comment.
+        assert_eq!(status_to_solve_result_num(FeasiblePointFound), 100);
     }
 
     #[test]

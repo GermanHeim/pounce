@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+- **An accepted solve no longer loads into Pyomo as a warning** (#591).
+  `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
+  `solve_result_num = 1` — IPOPT's own code for the same outcome
+  (`STOP_AT_ACCEPTABLE_POINT`) — instead of `100`. Nothing reads that number
+  in isolation; consumers key on the *band*, and the two bands are not
+  interchangeable. Pyomo's legacy `.sol` reader maps `0`–`99` to
+  `SolverStatus.ok` and `100`–`199` to `SolverStatus.warning`, both with
+  `TerminationCondition.optimal`, so an accepted POUNCE solve arrived as
+
+  ```text
+  solver.status          warning
+  termination_condition  optimal
+  message                POUNCE 0.10.0: SolvedToAcceptableLevel
+  ```
+
+  and Pyomo logged "Loading a SolverResults object with a warning status"
+  while the equivalent IPOPT solve ("Solved To Acceptable Level.") loaded
+  clean. Any solver-swappable application whose accepted-solve contract
+  includes `status == ok` had to special-case POUNCE.
+
+  On the **v2** route the same code was worse than a warning: Pyomo's v2
+  `.sol` reader maps `100`–`199` to `TerminationCondition.error`, so an
+  accepted solve raised `NoOptimalSolutionError` under the default
+  `raise_exception_on_nonoptimal_result=True`. That is fixed by the same
+  change.
+
+  The fix is in the emitted code, so it covers both routes into Pyomo: the
+  `SolverFactory("pounce")` plugin and driving the POUNCE binary through
+  Pyomo's generic `ipopt` ASL interface. The in-process sensitivity route
+  (`pyomo_pounce.sens`) does not read a `.sol`, and its own table reported
+  `SolverStatus.warning` for the same status; it now reports `ok`, agreeing
+  with the `.sol` route and with the v2 interface (which already mapped it to
+  `convergenceCriteriaSatisfied` / `SolutionStatus.optimal`). The convex
+  engines' `OptimalInaccurate`, which maps onto the same NLP status, moves
+  from `100` to `1` with it.
+
+  Reduced accuracy is not swept under the rug: the distinction stays in the
+  code (`1`, not `0`), in the `.sol` message line, in the JSON report's
+  `status`, and in the console summary. `Feasible_Point_Found` — a usable
+  point that did *not* meet the convergence criteria, which POUNCE's own
+  interfaces do not call a success — deliberately stays in the `100`
+  "solved, with a warning" band.
+
 - **The convex wall-clock budget is now reachable from Python** (#585).
   `pounce.qp.solve_qp`, `solve_socp`, `solve_qp_batch`, and
   `solve_qp_multi_rhs` take `time_limit=` — seconds as a `float`, `None` (the
