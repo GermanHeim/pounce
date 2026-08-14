@@ -29,6 +29,12 @@ changes.
   clean. Any solver-swappable application whose accepted-solve contract
   includes `status == ok` had to special-case POUNCE.
 
+  On the **v2** route the same code was worse than a warning: Pyomo's v2
+  `.sol` reader maps `100`–`199` to `TerminationCondition.error`, so an
+  accepted solve raised `NoOptimalSolutionError` under the default
+  `raise_exception_on_nonoptimal_result=True`. That is fixed by the same
+  change.
+
   The fix is in the emitted code, so it covers both routes into Pyomo: the
   `SolverFactory("pounce")` plugin and driving the POUNCE binary through
   Pyomo's generic `ipopt` ASL interface. The in-process sensitivity route

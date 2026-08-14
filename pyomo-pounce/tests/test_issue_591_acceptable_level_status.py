@@ -12,7 +12,15 @@ That covers the `SolverFactory("pounce")` plugin and the route where the
 POUNCE binary is driven through Pyomo's generic `ipopt` ASL interface alike,
 since both read the same `.sol`. The in-process sensitivity route does not go
 through a `.sol` at all, so its table is fixed here too.
+
+The v2 route reads the same `.sol` through a *stricter* table
+(`pyomo.contrib.solver.solvers.asl_sol_reader`), which maps `100..199` to
+`TerminationCondition.error` rather than a warning — so with the default
+`raise_exception_on_nonoptimal_result` an accepted solve raised
+`NoOptimalSolutionError` there. That is pinned below too.
 """
+import pytest
+
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
@@ -86,5 +94,30 @@ def test_sol_route_loads_an_accepted_solve_as_ok(pounce_exe):
         "an accepted solve must load without Pyomo's warning-status warning; "
         "IPOPT reports the equivalent solve as ok (gh #591)"
     )
-    # The scientific distinction stays visible where it belongs: the message.
-    assert "SolvedToAcceptableLevel" in message
+    # The scientific distinction stays visible where it belongs: the message,
+    # and the AMPL code itself (`1`, not `0`) which Pyomo keeps as `solver.id`.
+    assert results.solver.id == 1
+
+
+@pytest.mark.skipif(not pyomo_pounce.HAVE_V2_INTERFACE,
+                    reason="the v2 interface needs Pyomo >= 6.10.1")
+def test_v2_route_does_not_reject_an_accepted_solve(pounce_exe):
+    """The v2 route reads the same `.sol` through a stricter table than the
+    legacy one: `pyomo.contrib.solver.solvers.asl_sol_reader` maps `100..199`
+    to `TerminationCondition.error` (not a warning), so with the default
+    `raise_exception_on_nonoptimal_result=True` an accepted solve did not
+    merely log — it raised `NoOptimalSolutionError`."""
+    from pyomo.contrib.solver.common.factory import (
+        SolverFactory as SolverFactoryV2,
+    )
+    from pyomo.contrib.solver.common.results import (
+        SolutionStatus,
+        TerminationCondition,
+    )
+
+    m = build()
+    results = SolverFactoryV2("pounce").solve(
+        m, executable=pounce_exe, solver_options=FORCE_ACCEPTABLE)
+    assert results.termination_condition is \
+        TerminationCondition.convergenceCriteriaSatisfied
+    assert results.solution_status is SolutionStatus.optimal

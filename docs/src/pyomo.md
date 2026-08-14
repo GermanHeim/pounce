@@ -166,12 +166,18 @@ particular a solve that stops at the
 
 Which convergence you got is in the solver message
 (`POUNCE X.Y.Z: SolvedToAcceptableLevel` against
-`POUNCE X.Y.Z: SolveSucceeded`) and, on the `.sol` route, in
-`results.solver.id` — the AMPL code, `1` against `0`. Up to and including
-0.10.0 the legacy route reported the acceptable-level solve as
-`status=warning`, which made Pyomo log a load warning that IPOPT does not
-([#591](https://github.com/jkitchin/pounce/issues/591)); if your code
-special-cased POUNCE there, it no longer needs to.
+`POUNCE X.Y.Z: SolveSucceeded`) and, on the legacy `.sol` route, in
+`results.solver.id` — the AMPL code, `1` against `0`.
+
+Up to and including 0.10.0 the acceptable-level solve was written as AMPL
+code `100`, which put it in the "solved, with a warning" band
+([#591](https://github.com/jkitchin/pounce/issues/591)). The legacy route
+then reported `status=warning` and Pyomo logged a load warning that IPOPT
+does not; the v2 route, whose reader maps that band to
+`TerminationCondition.error`, went further and raised
+`NoOptimalSolutionError` under the default
+`raise_exception_on_nonoptimal_result=True`. If your code special-cased
+POUNCE for either, it no longer needs to.
 
 ## User scaling with the `scaling_factor` Suffix
 
