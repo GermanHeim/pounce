@@ -4,39 +4,48 @@
 from LyoPRONTO's Problem 2 GDP, POUNCE returns `Solve_Succeeded`, and
 restarting POUNCE from the returned primal point improves the objective twice —
 by **25.096 s (0.079 %)** in total — landing on the point IPOPT 3.14.16 reaches
-in one solve. Reported against 0.10.0; reproduces on `main` at the time of
-writing.
+in one solve. Reported against 0.10.0.
 
-This note records the investigation. **No fix landed.** The short version is
-that the exit is legal under every tolerance the run configured, including
-IPOPT's own component gates, so "tighten the convergence test" is a parity
-break rather than a fix; what actually differs from IPOPT is the *trajectory*,
-and localising that needs an IPOPT oracle the investigation did not have.
+**Two defects were found and fixed.** Neither is in the convergence test; both
+are in the inertia-correction path, and together they were sending this model
+down a trajectory IPOPT never takes. With both fixed, the first solve reaches
+`31785.744274` in 27 iterations — the reporter's IPOPT answer — and there is
+nothing left for a restart to improve.
+
+The first half of this note (through "Why the certificate is nonetheless
+legal") records the investigation as it ran, because that analysis is still
+correct and explains why the obvious fix — tightening the exit test — is the
+wrong one. The second half records the two defects.
 
 ---
 
 ## Reproduction, reduced
 
-The issue's recipe needs LyoPRONTO, GDPopt and glpk. It reduces to a single
-`.nl`: capture GDPopt's first subproblem (`call_after_subproblem_solve`), write
-it out, and the whole thing replays in 0.09 s.
+The issue's recipe needs LyoPRONTO, GDPopt and glpk. It reduces to two `.nl`
+captures: hook `call_after_subproblem_solve`, write the model out, and the
+whole thing replays in 0.09 s.
 
-    pounce sub592.nl -AMPL tol=1e-5 acceptable_tol=1e-3 print_level=5
+    pounce 0_gdpopt.nl -AMPL tol=1e-5 acceptable_tol=1e-3 print_level=5
 
-**113 variables, 155 constraints.** The captured model starts at the point
-GDPopt's POUNCE solve left it (objective 31810.840), so solving it *is* the
-issue's "restart 1", and it reproduces every digit the issue reports:
+* `0_gdpopt.nl` — GDPopt's **first** subproblem, from its own starting point.
+  This is the solve that produced the certificate the issue complains about.
+* `8_restart1.nl` — the same model started from the point that solve returned.
+  Solving it *is* the issue's "restart 1".
+
+**113 variables, 155 constraints.** Before the fix, both reproduce every digit
+the issue reports:
 
 | solve | objective | status |
-|---|---:|---|
-| capture (GDPopt's POUNCE result) | 31810.840250047 | `SolveSucceeded` |
-| restart 1 = `sub592.nl` | 31803.787989278 | `SolveSucceeded` |
+|---|---|---|
+| `0_gdpopt.nl` (GDPopt's POUNCE result) | 31810.840250047 | `SolveSucceeded` |
+| restart 1 = `8_restart1.nl` | 31803.787989278 | `SolveSucceeded` |
 | restart 2 | 31785.744273619 | `SolveSucceeded` |
 | restart 3 | 31785.744273619 | `SolveSucceeded` (fixed point) |
 | IPOPT 3.14.16 from the capture (reporter) | 31785.744272683 | `Optimal Solution Found` |
 
 The fixture is **not vendored**: LyoPRONTO is GPL-3.0 and POUNCE is EPL-2.0, so
-a `.nl` encoding their model equations is not ours to add. See "Fixture" below.
+a `.nl` encoding their model equations is not ours to add. See "Regression
+coverage" below for what stands in for it.
 
 ## The returned point, measured
 
@@ -44,7 +53,7 @@ a `.nl` encoding their model equations is not ours to add. See "Fixture" below.
 the `.sol` — rejects the point POUNCE certified:
 
 | | premature exit (`SolveSucceeded`) | true optimum (`tol=1e-8`) |
-|---|---:|---:|
+|---|---|---|
 | objective | 31803.788 | 31785.744 |
 | max constraint violation | 2.844e-6 | 6.925e-7 |
 | KKT stationarity residual | 9.994e-3 | 9.104e-6 |
@@ -79,7 +88,7 @@ verifier recomputes the row value from `x`. They differ by the row residual, and
 at `|λ| ~ 4e6` a residual of 2.8e-6 is worth ~11 s of Lagrangian — the same
 order as the 18 s the restart recovers.
 
-That is the cleanest statement of the whole issue:
+That is the cleanest statement of why the *symptom* is not itself a bug:
 
 > The feasibility and stationarity tolerances are **absolute**, but their
 > consequence for the objective scales with the **multipliers**. At
@@ -89,101 +98,172 @@ That is the cleanest statement of the whole issue:
 > model's answer to better than tens of seconds.
 
 So restart idempotence is not something these tolerances promise at this
-conditioning. What still needs explaining is why IPOPT's trajectory lands on the
-good point and POUNCE's does not.
+conditioning, and changing the convergence test so this point fails would
+diverge parity on every badly-scaled model in the corpus. What needed
+explaining — and what turned out to be broken — is why POUNCE's *trajectory*
+lands on the bad point and IPOPT's does not.
 
-## Where the conditioning comes from
+---
 
-Default gradient-based scaling (`nlp_scaling_max_gradient = 100`) assigns row
-scale factors ~1e-6, which is what inflates the multipliers and `s_d`. Every
-configuration that removes or loosens that reaches the true optimum, and does so
-in *fewer* iterations than the failing run:
+## Defect 1 — the inertia-trust floor was dimension-blind
 
-| configuration | objective | iters |
-|---|---:|---:|
-| default (`tol=1e-5`) | 31803.788 | 30 |
-| `tol=1e-4` | 31802.803 | 68 |
-| `tol=1e-6` | 31785.744 | 43 |
-| `tol=1e-8` | 31785.744 | 29 |
-| `mu_strategy=adaptive` | 31785.744 | 31 |
-| `barrier_tol_factor=1000` | 31785.744 | 14 |
-| `nlp_scaling_method=none` | 31785.744 | **17** |
-| `nlp_scaling_max_gradient=1e8` | 31785.744 | **17** |
+`feral_inertia_pivot_floor` was introduced in
+[#540](https://github.com/jkitchin/pounce/issues/540) (see
+`issue-540-eigena2-inertia-noise.md`). When the factorisation reports an
+inertia count that disagrees with the expected one *and* the smallest pivot of
+the equilibrated matrix is below the floor, the count is treated as noise and
+the system is reported `Singular` rather than `WrongInertia` — which routes to
+the `δ_c` branch of the perturbation handler instead of climbing the `δ_x`
+ladder.
 
-The failing trajectory is visibly pathological from iteration 9: `inf_du` spikes
-to 1.9e9, regularisation climbs to `lg(rg) = 10.6`, and from iteration 25 the
-iterate is frozen (`‖d‖ ≈ 1e-11`, objective constant to 8 digits) while the dual
-infeasibility decays 2.34e6 → 9.99e-3 purely through dual updates. It exits the
-moment that decay crosses `s_d · tol = 1.01e-2`.
+The floor's own rationale is a backward-error argument: an equilibrated pivot
+loses its sign at roughly `n · eps`. But the value shipped was the **constant**
+`1e-12`, which is `n · eps` at `n ≈ 4500`. The KKT systems in this issue are
+order 165–311, where `n · eps` is 3.7e-14 … 6.9e-14 — the constant was two
+decades too generous, convicting pivots that were still measurable at the
+solver's own scale.
 
-## Hypotheses tested and eliminated
+**Fix:** `feral_inertia_pivot_floor` now defaults to `None`, which selects the
+dimension-aware floor `n * f64::EPSILON` (`pounce_feral::inertia_trust_floor`).
+Setting the option explicitly still pins an absolute floor for every dimension,
+and `0` still disables the trigger entirely, so #540's opt-out is unchanged.
+This is a breaking API change on `FeralConfig::inertia_pivot_floor`
+(`f64` → `Option<f64>`).
 
-* **μ collapses 3.5 decades in one iteration** (iteration 17→18, `lg(mu)`
-  −2.5 → −6.0, immediately preceding the blow-up). Legal: upstream's
-  `MonotoneMuUpdate::UpdateBarrierParameter` loops the reduction while
-  `sub_problem_error <= kappa_eps_mu`, and `mu_allow_fast_monotone_decrease`
-  defaults to `yes`. POUNCE implements the cap and the same loop. The floor μ
-  lands on (9.09e-7 = `min(tol, compl_inf_tol)/(barrier_tol_factor+1)`) is
-  upstream's `CalcNewMuAndTau` floor.
-* **`dual_inf_scale_kappa` lets the dual gate through.** It does raise the
-  strict dual bar here (to `kappa·tol·dual_scale`, well above
-  `dual_inf_tol = 1`), but the unscaled dual infeasibility is 9.994e-3 and would
-  clear even the bare `1`. Not what admits the exit. *Worth noting separately:*
-  a user tightening `dual_inf_tol` on this model is silently overridden —
-  `dual_inf_tol=1e-3` and `=1e-2` both changed nothing. That is documented
-  behaviour (`docs/src/options.md`, "the floor is a floor"), but the
-  documentation's inertness argument — "the floor does not rise above
-  `dual_inf_tol` until `dual_scale` exceeds `dual_inf_tol/tol = 1e8`" — is
-  computed at the *default* `tol = 1e-8`. At `tol = 1e-5` the crossover is
-  `dual_scale > 1e5`, a thousand times easier to reach. The docs should say so.
+Sweep over the 57-fixture CLI corpus: exactly two models moved, both the #540
+models, both improved (eigena2 27 → 26 iterations, eigenb2 68 → 67), zero
+status changes, the other 55 byte-identical. `8_restart1.nl` went 41
+iterations / 31803.786 / `Acceptable` → 27 iterations / 31785.744271776 /
+`SolveSucceeded`.
 
-## What is left
+**This alone did not close the issue.** With only the floor fixed, the
+end-to-end symptom was unchanged — the improvement available on restart was
+still 25.096 s in total; the floor fix had merely merged two restarts into one.
 
-The open question is the trajectory: why POUNCE goes through the iteration-9–23
-blow-up on this model when IPOPT does not. Answering it needs a side-by-side
-IPOPT run on the identical evaluator (the `cyipopt`-on-the-same-`.nl` pattern
-used for #257 / #266), which was not available in the investigating
-environment — no IPOPT binary, Ubuntu ships library-only 3.11.9, and `cyipopt`
-will not build without a pkg-config'd Ipopt.
+## Defect 2 — `δ_c` was spent on a full-rank Jacobian and never withdrawn
 
-Two candidate directions for whoever picks this up, in preference order:
+On `0_gdpopt.nl` iteration 11 the #540 trigger fires *legitimately*
+(`min_piv = 3.44e-14 < 6.9e-14`), so the handler raises `δ_c`. And `δ_c`
+works, in the narrow sense: the next factorisation's smallest pivot is a
+healthy 4.9e-10. But the inertia count is *still* wrong — because the Jacobian
+was not rank-deficient in the first place; the small pivot came from the
+Hessian block. `δ_c` was the wrong medicine.
 
-1. **Trajectory parity.** Diff the two iteration logs from the same start.
-   First suspects, in order of how early they act: the gradient-based scaling
-   factors themselves (compare against `IpGradientScaling.cpp`'s
-   `min(1, max_gradient/‖∇g_i‖∞)` row by row — if these already differ, nothing
-   downstream is comparable), then the inertia-correction / regularisation path
-   that reaches `lg(rg) = 10.6`, then the second-order corrections (the `H`
-   flags at iterations 3, 6–10).
-2. **A tolerance-limited diagnostic, not a status change.** POUNCE already has
-   "masked certificate" machinery for the *objective-scale* channel
-   (`obj_scale_certificate_threshold`). The multiplier-magnitude channel is the
-   same phenomenon and is unguarded: when `‖λ‖∞ · max_constr_viol` is a
-   non-trivial fraction of `|f|`, the certificate is tolerance-limited and the
-   run could say so — in the console summary and the JSON report — without
-   changing the status or breaking parity. This would have told the reporter
-   immediately that the answer was determined only to ±10 s.
+The handler then does the one thing it must not: it **keeps** `δ_c` and starts
+climbing the `δ_x` ladder on top of it. Four rungs later `δ_w = 1e2` (IPOPT
+accepts this system at `δ_w = 1e-4`). The resulting step is so over-damped that
+the objective is frozen for eight iterations, after which the loose-tolerance
+exit fires at 31810.840 — the certificate the issue reports.
 
-Changing the convergence test so this point fails is **not** recommended: it
-passes IPOPT's own gates, so it would diverge parity on every badly-scaled model
-in the corpus, not just this one.
+Things that were tried and do not discriminate:
 
-## Fixture
+* **A different floor value.** Sweeping 6.9e-14 / 3e-14 / 1e-14 / 5e-15 /
+  1e-15 / 0 across both instances is wildly non-monotone; only `floor = 0`
+  reaches the optimum on both, and that is just #540 regressed. No floor value
+  separates the two populations.
+* **The inertia count after `δ_c`.** eigena2's post-`δ_c` counts are also
+  wrong (60/61 against an expected 55), so "count still wrong ⇒ `δ_c` was
+  wrong" convicts the case #540 exists to serve.
+* **Which block owns the smallest pivot.** This is the discriminator one
+  actually wants, and it needs a `min_pivot_index` from feral. feral is an
+  external crates.io dependency here, not a path dependency, so its API could
+  not be extended in this change.
 
-The reporter offered the captured `.nl`. Before it can be vendored, the licence
-has to be settled: LyoPRONTO is GPL-3.0, POUNCE is EPL-2.0, and a `.nl` encodes
-the model's equations. Either the reporter contributes it under EPL-2.0-
-compatible terms, or the regression needs a synthetic model.
+What does separate them cleanly is **how many `δ_x` rungs get climbed while
+`δ_c` is up**:
 
-**A synthetic reproducer was attempted and did not work.** The construction
-targeted the mechanism directly: 8-variable NLPs with an objective on the order
-of 1e4 and equality rows carrying a near-cancelling `1e6..1e8` pair alongside
-O(1) nonlinear terms — heterogeneous *within* the row, which row scaling cannot
-repair the way it repairs a uniform row multiplier. 60 randomised instances,
-each solved at `tol=1e-5` and `tol=1e-8`, produced **no** instance where both
-report `Solve_Succeeded` and the loose solve is measurably worse. Ill-
-conditioning alone is evidently not enough; the real model also brings a
-degenerate active set and the frozen-iterate corner (`lg(rg) > 10`, `‖d‖ ~
-1e-11`) that the synthetic instances never entered. A generator aimed at *that*
-corner, rather than at the conditioning that precedes it, is the more promising
-second attempt.
+| model | rungs-under-`δ_c` histogram |
+|---|---|
+| eigena2 (#540) | `{1: 4}` |
+| eigenb2 (#540) | `{0: 5, 1: 1}` |
+| `0_gdpopt.nl` (#592) | `{0: 6, 1: 4, 4: 1}` |
+| `pooling_rt2stp` | `{…, 3: 3, 5: 1, 6: 1, 8: 1, 14: 1}` |
+
+When `δ_c` is the right medicine it is *immediately* right — never more than
+one rung. When it is the wrong medicine the ladder climbs without limit.
+
+**Fix:** a `δ_c` walk-back. If the `δ_x` ladder has climbed
+`perturb_delta_c_max_rungs` rungs (default `3`) while `δ_c` is up, `δ_c` was
+not what this system needed: all four deltas are withdrawn to zero, the
+degeneracy probe is reset to `NoTest`, and `δ_c` is latched off for the rest of
+this iterate so the `Singular` branch cannot raise it again. `w` is appended to
+the iteration line's info string when this fires. The latch clears on the next
+`consider_new_system`. `perturb_delta_c_max_rungs = 0` disables the walk-back
+and restores the previous behaviour exactly.
+
+## Result
+
+| model | before | after |
+|---|---|---|
+| `0_gdpopt.nl` (the reported first solve) | 19 it, 31810.840250, `SolveSucceeded` | **27 it, 31785.744274, `SolveSucceeded`** |
+| `8_restart1.nl` (restart 1) | 41 it, 31803.788, `Acceptable` | **14 it, 31785.744276, `SolveSucceeded`** |
+| IPOPT 3.14.19 reference | 23 it, 31785.744272683 | — |
+| eigena2 (#540) | 27 it, `Optimal` | 26 it, `Optimal` |
+| eigenb2 (#540) | 68 it, `Optimal` | 67 it, `Optimal` |
+| `pooling_rt2stp` | 812 it | **298 it** (pre-#544 was 206) |
+| `unbounded_exp` | 32 it, `ErrorInStepComputation` | 27 it, same status |
+| other 53 CLI fixtures | — | byte-identical |
+
+The first solve now lands on the reporter's IPOPT point, so the restart has
+nothing to improve and the reported non-idempotence is gone. The `pooling`
+number is the incidental one worth flagging: #544 had cost that model 812
+iterations against a pre-#544 206, and the walk-back returns most of it.
+
+Opt-outs verified: `perturb_delta_c_max_rungs=0` reproduces `0_gdpopt.nl` at
+exactly 19 iterations / 31810.840250, and `feral_inertia_pivot_floor=0` still
+fully disables the #540 trigger.
+
+## Regression coverage
+
+Because the reproducer cannot be vendored (GPL-3.0 model into an EPL-2.0
+repository), the behaviour is pinned three ways instead:
+
+* `crates/pounce-common/src/pd_perturbation.rs` — four unit tests on the
+  walk-back state machine: it fires after the configured rungs, a withdrawn
+  `δ_c` is not raised again until the next iterate, one rung leaves `δ_c`
+  alone, and `0` disables it.
+* `crates/pounce-feral/src/lib.rs` — three unit tests on the floor: the
+  dimension-aware default, an explicitly pinned floor, and an N=400 system
+  whose trailing 2×2 block produces a pivot that *is* measurable at `n · eps`
+  and must not be convicted. (Note when writing these: `min_pivot_magnitude`
+  is measured on the **equilibrated** matrix, so a bare small diagonal entry is
+  lifted back to 1 by scaling — only a near-singular *block* survives.)
+* `crates/pounce-cli/tests/issue_592_delta_c_walkback.rs` — three end-to-end
+  tests on the already-vendored `pooling_rt2stp` fixture, which exhibits the
+  same wrong-medicine pattern: the walk-back removes the #544 detour, disabling
+  it restores the long run, and both routes reach the same objective.
+
+## What is still open
+
+* **The multiplier-magnitude diagnostic.** The tolerance analysis above stands
+  on its own regardless of this fix: at `‖λ‖∞ ≈ 4e6` the default tolerances
+  determine this model's answer only to ±10 s, and nothing tells the user so.
+  POUNCE already has "masked certificate" machinery for the *objective-scale*
+  channel (`obj_scale_certificate_threshold`); the multiplier-magnitude channel
+  is the same phenomenon and is unguarded. When `‖λ‖∞ · max_constr_viol` is a
+  non-trivial fraction of `|f|`, the run could say the certificate is
+  tolerance-limited — in the console summary and the JSON report — without
+  changing the status or breaking parity.
+* **`dual_inf_tol` is silently inert on models like this one.** Tightening it
+  to `1e-3` or `1e-2` changed nothing, because `dual_inf_scale_kappa` raises
+  the effective floor above it. That is documented behaviour
+  (`docs/src/options.md`, "the floor is a floor"), but the documentation's
+  inertness argument — the floor does not rise above `dual_inf_tol` until
+  `dual_scale` exceeds `dual_inf_tol/tol = 1e8` — is computed at the *default*
+  `tol = 1e-8`. At `tol = 1e-5` the crossover is `dual_scale > 1e5`, a thousand
+  times easier to reach. The docs should say so.
+* **`min_pivot_index` in feral.** Knowing which block owns the smallest pivot
+  would let the handler pick `δ_c` versus `δ_x` directly, instead of raising
+  `δ_c` speculatively and walking it back. The walk-back is a three-iteration
+  recovery from a wrong guess; the index would avoid the guess.
+* **A synthetic reproducer for the premature certificate** (independent of the
+  trajectory fix). One was attempted and did not work: 8-variable NLPs with an
+  objective of order 1e4 and equality rows carrying a near-cancelling
+  `1e6..1e8` pair alongside O(1) nonlinear terms — heterogeneous *within* the
+  row, which row scaling cannot repair the way it repairs a uniform row
+  multiplier. 60 randomised instances, each solved at `tol=1e-5` and
+  `tol=1e-8`, produced **no** instance where both report `Solve_Succeeded` and
+  the loose solve is measurably worse. Ill-conditioning alone is not enough;
+  the real model also brought the degenerate active set and the frozen-iterate
+  corner (`lg(rg) > 10`, `‖d‖ ~ 1e-11`) that the synthetic instances never
+  entered.
