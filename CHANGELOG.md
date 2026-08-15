@@ -47,12 +47,37 @@ be dimensionally valid for the new problem — otherwise `solve_with_working_set
 would return `WarmStartDimensionMismatch` and turn "no warm start available"
 into "solve failed".
 
+Matching dimensions is necessary but not sufficient to reuse a working set, and
+the first cut of this change got that wrong (caught in review of #602).
+`ConsStatus::Equality` and `BoundStatus::Fixed` assert `bl == bu` / `xl == xu`
+about the problem they came from, and no drop test can ever remove either, so
+carrying one onto a problem where the row is a range pins it to a bound that
+does not exist — the `-1e20` sentinel — at a point the feasibility audit
+accepts. `min ½x² s.t. x == 1` re-solved as `min x² s.t. x ≤ 2` returned
+`Optimal` at `x = -1e19`, objective `1e38`, against a true optimum of 0; the
+same shape reproduced through `Fixed` when a pinned variable is freed. The hint
+is now passed through `WorkingSet::reconciled_with`, which re-derives both
+topology-dependent statuses from the new problem and drops any status naming a
+bound it does not have, using the same predicates the solver applies when it
+builds a working set itself.
+
+Note that `solve_with_working_set` itself still applies no such reconciliation:
+a caller handing it a working set from a problem with different bound topology
+gets the same behaviour. The active-set SQP driver is safe by construction — a
+linearization moves `A` and the row bounds, but an equality row stays an
+equality and a fixed variable stays fixed — which is an unstated precondition
+holding by accident of the caller rather than by contract. Tracked in the
+dev-note rather than changed here, since making it reconcile internally is a
+trajectory change for the SQP driver and needs its own measurement.
+
 `crates/pounce-qp/tests/homotopy.rs` pins the change count, not just the
 answer: the previous behaviour returned the *right* result and would have
-passed an answer-only assertion, which is the gh #544 failure mode. The CLI
-fixture sweep is unchanged on both the default and `algorithm=active-set-sqp`
-arms — expected, since `solve_parametric` currently has no production caller,
-and therefore *not* evidence for the change on its own.
+passed an answer-only assertion, which is the gh #544 failure mode. Four
+further tests cover the working-set reconciliation, two of which fail against
+the unfixed change. The CLI fixture sweep is unchanged on both the default and
+`algorithm=active-set-sqp` arms — expected, since `solve_parametric` currently
+has no production caller, and therefore *not* evidence for the change on its
+own.
 
 Background and the measurement behind the other three options #602 raises
 (tightening the guard on `A` / `xl` / `xu`, adding the missing bound-adding

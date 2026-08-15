@@ -3835,10 +3835,20 @@ impl ParametricActiveSetSolver {
         // `WorkingSet::cold` (all-inactive, i.e. no information) and a `MaxIter`
         // one carries a set that was still moving, neither of which the
         // measurement above covers.
+        //
+        // `reconciled_with` is not optional. Dimensional validity is not enough
+        // to make a working set *meaningful* for another problem: `Equality`
+        // and `Fixed` assert `bl == bu` / `xl == xu` about the problem they came
+        // from, and the solver never drops either, so carrying one onto a
+        // problem where the row is an inequality pins it to a bound that does
+        // not exist and reports the result `Optimal`. That is a wrong answer,
+        // not a slow one — see `WorkingSet::reconciled_with`, and the two
+        // regression tests it names.
         if sol_prev.status == QpStatus::Optimal
             && sol_prev.working.validate_dims(qp_new.n, qp_new.m).is_ok()
         {
-            return self.solve_with_working_set(qp_new, &sol_prev.working, opts);
+            let hint = sol_prev.working.reconciled_with(qp_new, opts);
+            return self.solve_with_working_set(qp_new, &hint, opts);
         }
         self.solve(qp_new, None, opts)
     }

@@ -410,3 +410,177 @@ fn ineligible_parametric_reuses_the_working_set() {
         cold.stats.n_working_set_changes
     );
 }
+
+// ---------------------------------------------------------------------------
+// Working-set statuses that assert something about the *problem*.
+//
+// `ConsStatus::Equality` and `BoundStatus::Fixed` mean `bl == bu` / `xl == xu`,
+// and the solver never drops either. Reusing a previous working set across a
+// problem whose bound topology changed therefore states something false that
+// nothing downstream can walk back: `pin_working_set` pins an `Equality` row to
+// `qp.bl[i]`, the M5 audit sees a feasible point, and the solve reports
+// `Optimal` at a point ~1e19 away from the optimum.
+//
+// Found in review of gh #602, against the working-set reuse added there.
+// `WorkingSet::reconciled_with` re-derives both statuses from the new problem.
+// ---------------------------------------------------------------------------
+
+/// Build a 1-variable, 1-row QP: `min ½·h·x² s.t. bl ≤ x ≤ bu`, `x` free.
+fn one_var_case(h_val: f64, bl: f64, bu: f64) -> Case {
+    Case {
+        n: 1,
+        m: 1,
+        h: (vec![1], vec![1], vec![h_val]),
+        g: vec![0.0],
+        a: (vec![1], vec![1], vec![1.0]),
+        bl: vec![bl],
+        bu: vec![bu],
+        xl: vec![NLP_LOWER_BOUND_INF],
+        xu: vec![NLP_UPPER_BOUND_INF],
+    }
+}
+
+/// Solve `prev` cold, then solve `new` parametrically from it and from cold,
+/// and assert the two agree. `H` differs between the two in every caller here,
+/// so the guard declines and the working-set fallback is what is under test.
+fn assert_declined_parametric_agrees(name: &str, prev: &Case, new: &Case) {
+    let mk = |c: &Case| {
+        let hs = SymTMatrixSpace::new(c.n as i32, c.h.0.clone(), c.h.1.clone());
+        let mut h = SymTMatrix::new(hs);
+        h.set_values(&c.h.2);
+        let asp = GenTMatrixSpace::new(c.m as i32, c.n as i32, c.a.0.clone(), c.a.1.clone());
+        let mut a = GenTMatrix::new(asp);
+        a.set_values(&c.a.2);
+        (h, a)
+    };
+    let (h_prev, a_prev) = mk(prev);
+    let (h_new, a_new) = mk(new);
+    macro_rules! qp {
+        ($c:expr, $h:expr, $a:expr) => {
+            QpProblem {
+                n: $c.n,
+                m: $c.m,
+                h: &$h,
+                g: &$c.g,
+                a: &$a,
+                bl: &$c.bl,
+                bu: &$c.bu,
+                xl: &$c.xl,
+                xu: &$c.xu,
+                hessian_inertia: HessianInertia::Psd,
+            }
+        };
+    }
+    let opts = QpOptions::default();
+    let mut s = new_solver();
+    let sol_prev = s
+        .solve(&qp!(prev, h_prev, a_prev), None, &opts)
+        .expect("previous solve");
+    assert_eq!(sol_prev.status, QpStatus::Optimal, "{name}: previous solve");
+
+    let warm = s
+        .solve_parametric(
+            &qp!(prev, h_prev, a_prev),
+            &sol_prev,
+            &qp!(new, h_new, a_new),
+            &opts,
+        )
+        .expect("declined parametric solve");
+    let cold = new_solver()
+        .solve(&qp!(new, h_new, a_new), None, &opts)
+        .expect("cold solve");
+
+    assert_eq!(warm.status, cold.status, "{name}: status");
+    for i in 0..new.n {
+        assert!(
+            (warm.x[i] - cold.x[i]).abs() < 1e-7,
+            "{name}: x[{i}] declined parametric {} vs cold {}",
+            warm.x[i],
+            cold.x[i]
+        );
+    }
+    assert!(
+        (warm.obj - cold.obj).abs() < 1e-7,
+        "{name}: obj declined parametric {} vs cold {}",
+        warm.obj,
+        cold.obj
+    );
+}
+
+/// The reported case: `min ½x² s.t. x == 1` re-solved as `min x² s.t. x ≤ 2`.
+/// Reusing `Equality` pinned `x` to the new problem's absent lower bound and
+/// returned `Optimal` at `x = -1e19`, `obj = 1e38`, against a true optimum of 0.
+#[test]
+fn declined_parametric_survives_an_equality_becoming_a_range() {
+    assert_declined_parametric_agrees(
+        "equality -> range",
+        &one_var_case(1.0, 1.0, 1.0),
+        &one_var_case(2.0, NLP_LOWER_BOUND_INF, 2.0),
+    );
+}
+
+/// The other direction: a range row that becomes an equality must be marked
+/// `Equality`, or the ratio test skips it (`bl == bu` ⇒ `continue`) and it can
+/// never enter the working set.
+///
+/// Unlike the two `Equality`/`Fixed` cases either side of it, this one passes
+/// without `reconciled_with` as well — a stale `AtUpper` pins to `bu`, which is
+/// the same point when `bl == bu`, and a stale `Inactive` is caught by the M5
+/// audit and recovered through elastic phase-1. It is here to pin the rule, not
+/// because it currently discriminates.
+#[test]
+fn declined_parametric_survives_a_range_becoming_an_equality() {
+    assert_declined_parametric_agrees(
+        "range -> equality",
+        &one_var_case(1.0, NLP_LOWER_BOUND_INF, 2.0),
+        &one_var_case(2.0, 1.0, 1.0),
+    );
+}
+
+/// A row active `AtLower` whose new lower bound is `-inf` names a bound the new
+/// problem does not have, and gets pinned to the `-1e20` sentinel exactly as
+/// the `Equality` case does.
+///
+/// It comes back with the right answer anyway, which is the distinction worth
+/// keeping in view: `AtLower` is *droppable*, so the dual ratio test sees a
+/// multiplier of the wrong sign and removes it. Only the statuses no drop test
+/// can reconsider — `Equality`, `Fixed` — turn the same bad pin into a wrong
+/// answer. So this test guards a rule that currently costs iterations rather
+/// than correctness.
+#[test]
+fn declined_parametric_survives_a_bound_side_disappearing() {
+    assert_declined_parametric_agrees(
+        "at-lower -> no lower bound",
+        &one_var_case(1.0, 1.0, 3.0),
+        &one_var_case(2.0, NLP_LOWER_BOUND_INF, 3.0),
+    );
+}
+
+/// The same failure through a *variable* bound: `BoundStatus::Fixed` carried
+/// onto a problem that has freed the variable pinned it to `xl = -1e20`.
+#[test]
+fn declined_parametric_survives_a_fixed_variable_being_freed() {
+    let prev = Case {
+        n: 2,
+        m: 1,
+        h: (vec![1, 2], vec![1, 2], vec![1.0, 1.0]),
+        g: vec![0.0, 0.0],
+        a: (vec![1, 1], vec![1, 2], vec![1.0, 1.0]),
+        bl: vec![NLP_LOWER_BOUND_INF],
+        bu: vec![4.0],
+        xl: vec![NLP_LOWER_BOUND_INF, 1.0],
+        xu: vec![NLP_UPPER_BOUND_INF, 1.0],
+    };
+    let new = Case {
+        h: (vec![1, 2], vec![1, 2], vec![2.0, 2.0]),
+        xl: vec![NLP_LOWER_BOUND_INF, NLP_LOWER_BOUND_INF],
+        xu: vec![NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF],
+        g: prev.g.clone(),
+        a: prev.a.clone(),
+        bl: prev.bl.clone(),
+        bu: prev.bu.clone(),
+        n: prev.n,
+        m: prev.m,
+    };
+    assert_declined_parametric_agrees("fixed -> free", &prev, &new);
+}

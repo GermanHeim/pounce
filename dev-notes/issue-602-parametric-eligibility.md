@@ -363,3 +363,82 @@ into anything else in `solver.rs` — it bounds collateral damage, it does not
 measure the intended effect. The intended effect is the table above, on a
 synthetic family, and it stays synthetic until something in-tree calls
 `solve_parametric`.
+
+### Review finding: reusing a working set needs more than matching dimensions
+
+[@GermanHeim caught a bug](https://github.com/jkitchin/pounce/issues/602#issuecomment-5303884538)
+in the change above, and it was a **wrong answer**, not a slow one. Reproduced
+before fixing:
+
+> prev: `min ½x² s.t. x == 1` → `x = 1`
+> new:  `min x²  s.t. x ≤ 2` (`H` changed, so the guard declines)
+>
+> | route | status | `x` | objective |
+> |---|---|---|---|
+> | parametric | `Optimal` | **−1e19** | **1e38** |
+> | cold | `Optimal` | 0 | 0 |
+
+The dimensional check the change shipped with is necessary but not sufficient.
+`ConsStatus::Equality` and `BoundStatus::Fixed` are not "active" markers — they
+are assertions about the *problem's* bound topology (`bl == bu`, `xl == xu`),
+and they carry the semantics that follow: always in the working set, multiplier
+unrestricted in sign, and a drop score hard-wired to `0.0` — never dropped.
+Carried onto a problem where the row is a range, that is a false statement
+nothing downstream can retract. `pin_working_set` pins an `Equality` row to
+`qp.bl[i]`, which for the new problem is the `-1e20` infinity sentinel; the
+resulting iterate is feasible for `x ≤ 2`, so the M5 audit passes it; no drop
+test can reconsider it; and the solve reports `Optimal`.
+
+The same shape reproduces through `Fixed` when a previously-pinned variable is
+freed (`x = [−0, −1e19]`), which the report predicted and which the fix covers.
+
+**Why the audit does not catch it.** `audit_and_repair` checks feasibility, and
+`x = −1e19` *is* feasible. The point is optimal for the problem the working set
+describes; it is the working set that describes the wrong problem. No
+feasibility-based check can see that.
+
+**The distinction that matters.** `AtLower` pinned to a lower bound the new
+problem does not have lands on the same sentinel — but it is *droppable*, so
+the dual ratio test sees a multiplier of the wrong sign and removes it. The
+damage is iterations. Only `Equality` and `Fixed`, which no drop test can
+reconsider, convert a bad pin into a wrong answer. That is the whole reason the
+first two rules of the fix are load-bearing and the rest are hygiene.
+
+**The fix.** `WorkingSet::reconciled_with(qp, opts)` re-derives both
+topology-dependent statuses from the new problem and drops any remaining status
+that names a bound the new problem does not have, matching the predicates the
+solver uses when it builds a working set itself (exact `bl == bu` for rows,
+both-finite-within-`feas_tol` for bounds). What survives is the part of a
+working set that is only ever a guess about which constraints bind — the part
+that costs at most iterations when it is wrong.
+
+Four regression tests in `crates/pounce-qp/tests/homotopy.rs`. Two of them
+(`Equality` → range, `Fixed` → free) fail against the unfixed change; the other
+two pin rules that currently cost iterations rather than correctness, and their
+doc comments say so rather than implying more coverage than they have. The
+step-1 measurements are unchanged — reconciliation is a no-op when the topology
+matches, which is every row of the sweep.
+
+### The same hazard exists in `solve_with_working_set` itself
+
+Worth recording separately, because the fix above does **not** address it.
+`solve_with_working_set` is public API and applies no such reconciliation: a
+caller who passes a working set from a problem whose bound topology has changed
+gets the `Optimal`-at-`-1e19` behaviour directly. What the change above did was
+make `solve_parametric` reach that hazard *on its own*, from two well-formed
+problems and no caller mistake — so fixing it there was the regression fix, not
+the whole problem.
+
+The in-tree caller that matters is the active-set SQP driver, which is safe by
+construction: an SQP linearization moves `A` and translates the row bounds, but
+a constraint that is an equality stays an equality across iterations, and a
+fixed variable stays fixed. That is why this has never been observed there, and
+also why it is not a reason to relax about it — it is an unstated precondition
+holding by accident of the caller, not by contract.
+
+Options, none of them taken here: document the precondition on
+`solve_with_working_set`; make it reconcile internally (a trajectory change for
+the SQP driver, so it needs its own A/B on `benchmarks/warmstart`); or promote
+`reconciled_with` to public API so callers can opt in. The middle one is
+probably right, and it is the kind of change that should be measured rather than
+assumed.
