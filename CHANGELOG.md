@@ -9,6 +9,11 @@ changes.
 
 ## [Unreleased]
 
+- **SOCP warm starts now support first-class variable bounds.** Bounds are
+  expanded and bound duals normalized internally; warm solves force the direct
+  driver for symmetric cones and may fall back to cold HSDE when enabled.
+  Exponential/power cones use their dedicated cold HSDE route.
+
 ### Fixed — a released bound is now accurate at a tight tolerance (#587 follow-up)
 
 `sens_boundcheck` / `estimate(mode="fix_relax")` could release a bound

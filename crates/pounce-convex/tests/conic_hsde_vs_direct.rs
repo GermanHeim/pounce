@@ -19,12 +19,81 @@
 //! feasible set is compact and nonempty. The RNG is a fixed-seed xorshift, so
 //! failures are reproducible and the suite is deterministic.
 
-use pounce_convex::{ConeSpec, QpOptions, QpProblem, QpStatus, Triplet, solve_socp_ipm};
+use pounce_common::types::{Index, Number};
+use pounce_convex::{
+    ConeSpec, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet, solve_socp_ipm,
+    solve_socp_ipm_warm,
+};
 use pounce_feral::FeralSolverInterface;
-use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
+}
+
+/// Force the first direct warm attempt to fail, leaving the following backend
+/// available for the cold-HSDE fallback.
+struct FailOnceBackend {
+    inner: FeralSolverInterface,
+    fail: bool,
+}
+
+impl SparseSymLinearSolverInterface for FailOnceBackend {
+    fn initialize_structure(
+        &mut self,
+        dim: Index,
+        nonzeros: Index,
+        ia: &[Index],
+        ja: &[Index],
+    ) -> ESymSolverStatus {
+        self.inner.initialize_structure(dim, nonzeros, ia, ja)
+    }
+
+    fn values_array_mut(&mut self) -> &mut [Number] {
+        self.inner.values_array_mut()
+    }
+
+    fn multi_solve(
+        &mut self,
+        new_matrix: bool,
+        ia: &[Index],
+        ja: &[Index],
+        nrhs: Index,
+        rhs_vals: &mut [Number],
+        check_neg_evals: bool,
+        number_of_neg_evals: Index,
+    ) -> ESymSolverStatus {
+        if self.fail {
+            self.fail = false;
+            ESymSolverStatus::Singular
+        } else {
+            self.inner.multi_solve(
+                new_matrix,
+                ia,
+                ja,
+                nrhs,
+                rhs_vals,
+                check_neg_evals,
+                number_of_neg_evals,
+            )
+        }
+    }
+
+    fn number_of_neg_evals(&self) -> Index {
+        self.inner.number_of_neg_evals()
+    }
+
+    fn increase_quality(&mut self) -> bool {
+        self.inner.increase_quality()
+    }
+
+    fn provides_inertia(&self) -> bool {
+        self.inner.provides_inertia()
+    }
+
+    fn matrix_format(&self) -> EMatrixFormat {
+        self.inner.matrix_format()
+    }
 }
 
 /// xorshift64*, so the suite is deterministic and a failure is reproducible
@@ -427,4 +496,39 @@ fn the_gh222_instance_solves_through_the_direct_entry_point() {
         hsde.obj
     );
     assert!(hsde.x.iter().all(|v| v.is_finite()));
+
+    // Force the direct warm attempt to fail, then verify that the default
+    // warm entry point recovers through its cold-HSDE fallback.
+    let seed = QpWarmStart {
+        x: vec![0.0; prob.n],
+        y: vec![],
+        z: vec![],
+        z_lb: vec![],
+        z_ub: vec![],
+    };
+    let mut first_backend = true;
+    let warm = solve_socp_ipm_warm(
+        &prob,
+        &cones,
+        &seed,
+        &QpOptions::default(),
+        || -> Box<dyn SparseSymLinearSolverInterface> {
+            if first_backend {
+                first_backend = false;
+                Box::new(FailOnceBackend {
+                    inner: FeralSolverInterface::new(),
+                    fail: true,
+                })
+            } else {
+                backend()
+            }
+        },
+    );
+    assert_eq!(warm.status, QpStatus::Optimal, "warm got {:?}", warm.status);
+    assert!(
+        (warm.obj - hsde.obj).abs() < 1e-9,
+        "{} vs {}",
+        warm.obj,
+        hsde.obj
+    );
 }
