@@ -257,6 +257,12 @@ fn bounded_soc_warm_start_splits_bound_duals() {
     assert!(warm.z_lb[1] > 1e-3, "active lower dual={}", warm.z_lb[1]);
     assert!(warm.z_ub.iter().all(|v| v.abs() < 1e-5));
     assert!(warm.z.iter().all(|v| v.is_finite()));
+    assert!(
+        warm.iters < cold.iters,
+        "warm {} cold {}",
+        warm.iters,
+        cold.iters
+    );
 }
 
 /// A larger second-order cone (dim 12) — exercises the sparse
