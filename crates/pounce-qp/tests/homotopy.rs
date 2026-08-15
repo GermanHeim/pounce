@@ -444,6 +444,17 @@ fn one_var_case(h_val: f64, bl: f64, bu: f64) -> Case {
 /// and assert the two agree. `H` differs between the two in every caller here,
 /// so the guard declines and the working-set fallback is what is under test.
 fn assert_declined_parametric_agrees(name: &str, prev: &Case, new: &Case) {
+    assert_declined_parametric_agrees_with_opts(name, prev, new, false);
+}
+
+/// As above, with the homotopy flag under the caller's control — the traced
+/// path and the fallback are different routes to the same hazard.
+fn assert_declined_parametric_agrees_with_opts(
+    name: &str,
+    prev: &Case,
+    new: &Case,
+    homotopy: bool,
+) {
     let mk = |c: &Case| {
         let hs = SymTMatrixSpace::new(c.n as i32, c.h.0.clone(), c.h.1.clone());
         let mut h = SymTMatrix::new(hs);
@@ -471,7 +482,10 @@ fn assert_declined_parametric_agrees(name: &str, prev: &Case, new: &Case) {
             }
         };
     }
-    let opts = QpOptions::default();
+    let opts = QpOptions {
+        use_homotopy: homotopy,
+        ..QpOptions::default()
+    };
     let mut s = new_solver();
     let sol_prev = s
         .solve(&qp!(prev, h_prev, a_prev), None, &opts)
@@ -583,4 +597,131 @@ fn declined_parametric_survives_a_fixed_variable_being_freed() {
         m: prev.m,
     };
     assert_declined_parametric_agrees("fixed -> free", &prev, &new);
+}
+
+/// The same topology failure reached through the **traced path** rather than
+/// the fallback, which is where it survived the first fix (found by
+/// @GermanHeim in review of #614).
+///
+/// With `H` identical the guard admits the pair, so `reconciled_with` on the
+/// fallback never runs: `solve_homotopy`'s warm arm clones `sol_prev.working`
+/// as-is and hands it to the corrector at `t = 1`, still claiming `Equality`.
+/// The row type does not interpolate — a row that is an equality at `t = 0` is
+/// a range at every `t > 0` — so the path cannot re-type it and no drop test
+/// can either.
+///
+/// Measured before the topology guard: `Optimal` at `x = -1e19`, objective
+/// `5e37`, against a true optimum of 0.
+#[test]
+fn traced_path_survives_an_equality_becoming_a_range() {
+    for homotopy in [false, true] {
+        assert_declined_parametric_agrees_with_opts(
+            &format!("equality -> range, identical H, homotopy={homotopy}"),
+            &one_var_case(1.0, 1.0, 1.0),
+            &one_var_case(1.0, NLP_LOWER_BOUND_INF, 2.0),
+            homotopy,
+        );
+    }
+}
+
+/// The `Fixed` half of the same hole: identical `H`, a variable pinned in the
+/// previous problem and free in the new one. This one was wrong on *both*
+/// `use_homotopy` settings before the guard.
+#[test]
+fn traced_path_survives_a_fixed_variable_being_freed() {
+    let prev = Case {
+        n: 2,
+        m: 1,
+        h: (vec![1, 2], vec![1, 2], vec![1.0, 1.0]),
+        g: vec![0.0, 0.0],
+        a: (vec![1, 1], vec![1, 2], vec![1.0, 1.0]),
+        bl: vec![NLP_LOWER_BOUND_INF],
+        bu: vec![4.0],
+        xl: vec![NLP_LOWER_BOUND_INF, 1.0],
+        xu: vec![NLP_UPPER_BOUND_INF, 1.0],
+    };
+    let new = Case {
+        // `H` identical, so the guard admits on `same_h` and only the topology
+        // check can decline.
+        h: (vec![1, 2], vec![1, 2], vec![1.0, 1.0]),
+        xl: vec![NLP_LOWER_BOUND_INF, NLP_LOWER_BOUND_INF],
+        xu: vec![NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF],
+        g: prev.g.clone(),
+        a: prev.a.clone(),
+        bl: prev.bl.clone(),
+        bu: prev.bu.clone(),
+        n: prev.n,
+        m: prev.m,
+    };
+    for homotopy in [false, true] {
+        assert_declined_parametric_agrees_with_opts(
+            &format!("fixed -> free, identical H, homotopy={homotopy}"),
+            &prev,
+            &new,
+            homotopy,
+        );
+    }
+}
+
+/// A caller handing `solve_with_working_set` a working set from a problem with
+/// different bound topology hits the same `-1e19` pin directly, with no
+/// `solve_parametric` involved — the public-API half of the hazard, raised by
+/// @GermanHeim in review of #614.
+#[test]
+fn solve_with_working_set_reconciles_a_stale_hint() {
+    let prev = one_var_case(1.0, 1.0, 1.0);
+    let new = one_var_case(1.0, NLP_LOWER_BOUND_INF, 2.0);
+    let mk = |c: &Case| {
+        let hs = SymTMatrixSpace::new(c.n as i32, c.h.0.clone(), c.h.1.clone());
+        let mut h = SymTMatrix::new(hs);
+        h.set_values(&c.h.2);
+        let asp = GenTMatrixSpace::new(c.m as i32, c.n as i32, c.a.0.clone(), c.a.1.clone());
+        let mut a = GenTMatrix::new(asp);
+        a.set_values(&c.a.2);
+        (h, a)
+    };
+    let (h_prev, a_prev) = mk(&prev);
+    let (h_new, a_new) = mk(&new);
+    macro_rules! qp {
+        ($c:expr, $h:expr, $a:expr) => {
+            QpProblem {
+                n: $c.n,
+                m: $c.m,
+                h: &$h,
+                g: &$c.g,
+                a: &$a,
+                bl: &$c.bl,
+                bu: &$c.bu,
+                xl: &$c.xl,
+                xu: &$c.xu,
+                hessian_inertia: HessianInertia::Psd,
+            }
+        };
+    }
+    let opts = QpOptions::default();
+    let sol_prev = new_solver()
+        .solve(&qp!(prev, h_prev, a_prev), None, &opts)
+        .expect("previous solve");
+    assert_eq!(sol_prev.status, QpStatus::Optimal);
+
+    // Passed straight in, exactly as an external caller would.
+    let out = new_solver()
+        .solve_with_working_set(&qp!(new, h_new, a_new), &sol_prev.working, &opts)
+        .expect("working-set solve");
+    let cold = new_solver()
+        .solve(&qp!(new, h_new, a_new), None, &opts)
+        .expect("cold solve");
+
+    assert!(
+        (out.x[0] - cold.x[0]).abs() < 1e-7,
+        "stale Equality hint: x = {} against cold's {}",
+        out.x[0],
+        cold.x[0]
+    );
+    assert!(
+        (out.obj - cold.obj).abs() < 1e-7,
+        "stale Equality hint: obj = {} against cold's {}",
+        out.obj,
+        cold.obj
+    );
 }

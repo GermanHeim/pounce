@@ -3861,6 +3861,41 @@ impl ParametricActiveSetSolver {
         // What would settle it is the discriminator #434 also wanted and did not
         // find: something observable at runtime that says whether the previous
         // active set is a good guess for this problem.
+        // Bound *topology* — which rows are equalities, which variables are
+        // fixed — is guarded on, and this is a correctness guard rather than a
+        // cost one, which is why it stands where the `A` / box guards were
+        // declined.
+        //
+        // `ConsStatus::Equality` and `BoundStatus::Fixed` are claims about the
+        // problem, and no drop test can retract either. The tracer starts from
+        // `sol_prev.working` and cannot re-type a row mid-path: the row type
+        // does not interpolate, so a row that is an equality at `t = 0` and a
+        // range at every `t > 0` stays marked `Equality` the whole way and is
+        // handed to the corrector still claiming it. That pins it to
+        // `qp_new.bl[i]` — the `-1e20` sentinel when the new lower bound is
+        // infinite — at a point the feasibility audit accepts, and the solve
+        // reports `Optimal`. Measured: `min ½x² s.t. x == 1` re-solved as
+        // `min x² s.t. x ≤ 2` returned `Optimal` at `x = -1e19`, and the same
+        // through `Fixed` when a pinned variable is freed (gh #602, found in
+        // review of #614).
+        //
+        // Declining sends the pair to the fallback below, which runs the hint
+        // through `WorkingSet::reconciled_with` and so cannot make that claim.
+        // A genuine parametric family does not trip this: an equality row stays
+        // an equality across a sweep, and a fixed variable stays fixed.
+        let same_topology = qp_prev.m == qp_new.m
+            && qp_prev.n == qp_new.n
+            && (0..qp_prev.m)
+                .all(|i| (qp_prev.bl[i] == qp_prev.bu[i]) == (qp_new.bl[i] == qp_new.bu[i]))
+            && (0..qp_prev.n).all(|j| {
+                let fixed = |xl: Number, xu: Number| {
+                    xl > NLP_LOWER_BOUND_INF
+                        && xu < NLP_UPPER_BOUND_INF
+                        && (xl - xu).abs() <= opts.feas_tol
+                };
+                fixed(qp_prev.xl[j], qp_prev.xu[j]) == fixed(qp_new.xl[j], qp_new.xu[j])
+            });
+
         let same_shape = qp_prev.n == qp_new.n && qp_prev.m == qp_new.m;
         let same_h = qp_prev.h.nonzeros() == qp_new.h.nonzeros()
             && qp_prev.h.values() == qp_new.h.values()
@@ -3869,6 +3904,7 @@ impl ParametricActiveSetSolver {
 
         if same_shape
             && same_h
+            && same_topology
             && sol_prev.status == QpStatus::Optimal
             && sol_prev.x.len() == qp_new.n
             && let Some(sol) = self.solve_homotopy(qp_new, Some((qp_prev, sol_prev)), opts)?
@@ -3944,6 +3980,32 @@ impl ParametricActiveSetSolver {
         if crate::deadline::expired() {
             return Ok(time_limit_solution(qp, None, 0));
         }
+
+        // Make the hint well-formed for `qp` before anything trusts it.
+        //
+        // This entry point is public API and the hint is caller-supplied, so
+        // `Equality` / `Fixed` can arrive on a problem where the row is a range
+        // or the variable free. Neither status is droppable, so the pin lands on
+        // a bound `qp` does not have — the `-1e20` sentinel — and the feasibility
+        // audit accepts it, because such a point genuinely is feasible. The
+        // result is `Optimal` at a wrong answer, and no check downstream of here
+        // can catch it: the point is optimal for the problem the working set
+        // describes, and it is the working set that describes the wrong problem
+        // (gh #602, raised in review of #614).
+        //
+        // It is *close* to a no-op for a well-formed hint — it re-derives
+        // statuses that already agree with `qp` — but not exactly one, and the
+        // measurement is the honest version of that claim rather than the
+        // convenient one. On `benchmarks/warmstart` the conventional arms are
+        // bit-identical and the homotopy arms improve (`cold-sqp-hom`
+        // 28487 -> 27828, `warm-sqp-hom` 2005 -> 1755), solved counts unchanged.
+        // On the CLI fixture sweep five lines move, all on fixtures that were
+        // already failing; `jit1` on the homotopy arm goes from
+        // `MaximumIterationsExceeded` to a converged solve (dual inf 9.3e-9,
+        // constraint violation 6.5e-19). The residual difference comes from
+        // hints where a variable's bounds sit within `feas_tol` of each other
+        // without being equal, which this promotes to `Fixed`.
+        let working = &working.reconciled_with(qp, opts);
 
         // Factor the pinned KKT for a primal that satisfies the hinted active
         // rows (pruning the hint first if it is rank-deficient).

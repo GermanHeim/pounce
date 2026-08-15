@@ -61,14 +61,27 @@ topology-dependent statuses from the new problem and drops any status naming a
 bound it does not have, using the same predicates the solver applies when it
 builds a working set itself.
 
-Note that `solve_with_working_set` itself still applies no such reconciliation:
-a caller handing it a working set from a problem with different bound topology
-gets the same behaviour. The active-set SQP driver is safe by construction — a
-linearization moves `A` and the row bounds, but an equality row stays an
-equality and a fixed variable stays fixed — which is an unstated precondition
-holding by accident of the caller rather than by contract. Tracked in the
-dev-note rather than changed here, since making it reconcile internally is a
-trajectory change for the SQP driver and needs its own measurement.
+Review of #614 found that fix incomplete in two ways, both now closed. The
+reconciliation ran only on the *declined* branch, so with `H` identical the
+guard admits and the traced path clones the stale working set straight through
+to the corrector — three of four topology-change cases returned `Optimal` at
+`x = -1e19`, and the first round of tests missed it because every one of them
+perturbed `H` and so only ever exercised the fallback. The row type does not
+interpolate (a row that is an equality at `t = 0` is a range at every `t > 0`),
+so the path cannot re-type it; the guard now also requires the same bound
+topology — which rows are equalities, which variables fixed. That is a
+**correctness** guard, unlike the cost-motivated `A`/box guards declined above,
+and it is inert on the fixture sweep since `solve_parametric` has no production
+caller.
+
+`solve_with_working_set` now reconciles too, closing the same hazard for any
+external caller. This was previously deferred as a trajectory change needing
+its own measurement; the measurement says it moves the trajectory in the right
+direction — `cold-sqp-hom` 28487 → 27828 and `warm-sqp-hom` 2005 → 1755 on
+`benchmarks/warmstart` with the conventional and IPM arms bit-identical and
+solved counts unchanged, and on the CLI sweep five lines move, all on fixtures
+already failing, one of which (`jit1`, homotopy arm) now converges in 11
+iterations at dual infeasibility 9.3e-9.
 
 `crates/pounce-qp/tests/homotopy.rs` pins the change count, not just the
 answer: the previous behaviour returned the *right* result and would have

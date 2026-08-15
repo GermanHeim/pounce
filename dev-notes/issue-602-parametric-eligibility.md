@@ -809,3 +809,89 @@ one — and they are consistent rather than merely discouraging. The discriminat
 is not in the problem data (#434), not in the change between the two problems
 (step 2), and not in the hint (here). What is left is the path itself, measured
 while it runs, which is where the remaining 27% lives.
+
+---
+
+## PR review: the topology hazard had a second entrance, and a third
+
+[@GermanHeim's review of #614](https://github.com/jkitchin/pounce/pull/614#issuecomment-5304670936)
+found that the `reconciled_with` fix above was incomplete, and he was right on
+both counts he raised.
+
+**1. The traced path never reached the reconciliation.** `reconciled_with` was
+applied only on the *declined* branch. When `H` is identical the guard
+**admits**, so `solve_homotopy`'s warm arm clones `sol_prev.working` as-is and
+hands it to the corrector at `t = 1`, still claiming `Equality`. Measured, with
+`H` bit-identical:
+
+| case | `use_homotopy` | parametric | cold |
+|---|---|---|---|
+| equality → range | false | **`Optimal`, x = −1e19** | x = 0 |
+| equality → range | true | x = 0 | x = 0 |
+| fixed → free | false | **`Optimal`, x = −1e19** | x = 0 |
+| fixed → free | true | **`Optimal`, x = −1e19** | x = 0 |
+
+Three of four wrong — worse than the original report, and invisible to the
+first round of tests because every one of them perturbed `H` and so only ever
+exercised the fallback.
+
+The reason the path cannot be patched into handling this: **the row type does
+not interpolate.** A row that is an equality at `t = 0` is a *range* at every
+`t > 0` (the lower bound's rate is zero when the new lower bound is infinite,
+so the interpolated row is `[1, 1+t]`). So `Equality` is correct only at the
+single point `t = 0`, the tracer has no mechanism to re-type it, and no drop
+test can either. That makes it a change the path genuinely cannot model —
+exactly the same category as `H`.
+
+Fixed by a `same_topology` condition on the guard: equality-ness of every row
+and fixed-ness of every variable must agree between the two problems, using the
+predicates the solver itself uses. Declining routes the pair to the fallback,
+which reconciles.
+
+**This is a correctness guard, and that distinction is the whole reason it
+stands where the `A` / box guards fell.** Step 2 was declined because it traded
+one heuristic for another with no reliable winner — a cost question. This one
+prevents a wrong answer. They are not the same decision and should not be
+weighed the same way. On the CLI fixture sweep the topology guard is inert on
+all three arms, since `solve_parametric` has no production caller.
+
+**2. `solve_with_working_set` accepts impossible statuses from any caller.**
+Recorded above as known-and-not-fixed, on the reasoning that fixing it is a
+trajectory change for the SQP driver and wants its own A/B. He asked for it
+anyway, so it got the A/B:
+
+| | base → new |
+|---|---|
+| `cold-sqp`, `warm-sqp`, all IPM arms | **bit-identical** |
+| `cold-sqp-hom` | 28487 → **27828** |
+| `warm-sqp-hom` | 2005 → **1755** (−12%) |
+
+Solved counts unchanged; every per-family move is an improvement. On the CLI
+fixture sweep five lines move, all on fixtures already failing — and one stops
+failing: `jit1` on the homotopy arm goes from `MaximumIterationsExceeded` to a
+converged solve in 11 iterations (dual infeasibility `9.3e-9`, constraint
+violation `6.5e-19`, objective 173346.0967 against the IPM path's 173345.3768 —
+two independently converged KKT points 4e-6 apart).
+
+So the prediction that it would move the SQP trajectory was right, and the
+inference that this made it too risky to include was wrong: it moves it in the
+right direction, and the arms where the driver actually lives are bit-identical.
+The residual difference comes from hints where a variable's bounds sit within
+`feas_tol` of each other without being exactly equal, which reconciliation
+promotes to `Fixed`.
+
+Three regression tests, all verified failing on the pre-fix code:
+`traced_path_survives_an_equality_becoming_a_range`,
+`traced_path_survives_a_fixed_variable_being_freed` (both across
+`use_homotopy ∈ {false, true}`), and
+`solve_with_working_set_reconciles_a_stale_hint`, which passes the stale hint
+straight into the public entry point as an external caller would.
+
+### What this says about the first fix
+
+The original `reconciled_with` change treated the symptom at the point it had
+been observed rather than at the point the hazard enters. The hint reaches the
+solver by three routes — the declined fallback, the traced path, and the public
+entry point directly — and only the first was covered. Worth remembering next
+time a fix is derived from a single reproduction: the reproduction picks the
+route, and the route is rarely the whole surface.
