@@ -35,14 +35,17 @@
 //!   [`SensSolve::with_reduced_hessian_eigen`], the `pounce_sens
 //!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
 //!   kwarg.
-//! * **`sens_boundcheck` bound projection** ✔ (single-pass clamp) —
-//!   [`boundcheck::clamp_step_to_bounds`] /
-//!   [`boundcheck::clamp_with_nlp`] project the perturbed step onto
-//!   `[x_l, x_u]` after the linear solve. Surfaced via
+//! * **`sens_boundcheck` bound refinement** ✔ —
+//!   [`boundcheck::refine_step_onto_bounds`] repairs the active set the
+//!   step implies, both halves of upstream's fix-relax: a coordinate
+//!   the step carries past a bound is pinned AT that bound, and a bound
+//!   multiplier the step drives negative is set to zero so the variable
+//!   can leave. Either way the system is re-solved, so the other
+//!   coordinates move with it. Surfaced via
 //!   [`SensSolve::with_boundcheck`], `pounce_sens --sens-boundcheck`,
-//!   and the Python `solve_with_sens(sens_boundcheck=True)` kwarg.
-//!   Upstream's iterative Schur refinement (re-factorize on each
-//!   violation) is **not** ported — see [`boundcheck`] module docs.
+//!   the Python `solve_with_sens(sens_boundcheck=True)` kwarg, and
+//!   `estimate(mode="fix_relax")` in pyomo-pounce, all four running the
+//!   same refinement.
 //!
 //! # Algorithmic reference
 //!

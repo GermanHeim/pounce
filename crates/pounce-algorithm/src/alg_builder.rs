@@ -703,6 +703,8 @@ pub struct PerturbationOptions {
     pub jacobian_regularization_exponent: Number,
     /// `perturb_always_cd` — always regularize the c/d (Jacobian) block.
     pub perturb_always_cd: bool,
+    /// `perturb_delta_c_max_rungs` → `delta_c_max_rungs` (pounce gh#592).
+    pub perturb_delta_c_max_rungs: Index,
 }
 
 impl Default for PerturbationOptions {
@@ -717,6 +719,7 @@ impl Default for PerturbationOptions {
             jacobian_regularization_value: 1e-8,
             jacobian_regularization_exponent: 0.25,
             perturb_always_cd: false,
+            perturb_delta_c_max_rungs: 3,
         }
     }
 }
@@ -969,6 +972,7 @@ impl AlgorithmBuilder {
         ph.delta_cd_val = self.perturbation.jacobian_regularization_value;
         ph.delta_cd_exp = self.perturbation.jacobian_regularization_exponent;
         ph.set_perturb_always_cd(self.perturbation.perturb_always_cd);
+        ph.delta_c_max_rungs = self.perturbation.perturb_delta_c_max_rungs;
         let perturb = Rc::new(RefCell::new(ph));
         let mut pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
         // Iterative-refinement constants (#191): registered but previously

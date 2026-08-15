@@ -75,7 +75,7 @@ pub struct RedHessianResult {
 /// (quietly) when the required suffixes are missing — the caller then
 /// writes just the nominal solution.
 ///
-/// `boundcheck_eps` enables the single-pass clamp of `x* + Δx` onto the
+/// `boundcheck_eps` enables the bound refinement of `x* + Δx` onto the
 /// declared `[x_l, x_u]` box (mirrors sIPOPT's `sens_boundcheck`); pass
 /// `None` to skip it.
 #[allow(clippy::too_many_arguments)]
@@ -90,56 +90,19 @@ pub fn compute_sens_perturbed_x(
     x_full: &[Number],
     boundcheck_eps: Option<Number>,
 ) -> Option<Vec<Number>> {
-    let mut dx = try_compute_sens_step(data, cq, nlp, pd, suffixes, n_full, m_full, x_full)?;
+    let dx = try_compute_sens_step(
+        data,
+        cq,
+        nlp,
+        pd,
+        suffixes,
+        n_full,
+        m_full,
+        x_full,
+        boundcheck_eps,
+    )?;
     let curr = data.borrow().curr.clone()?;
     let n_x = curr.x.dim() as usize;
-
-    // Per-variable `user-scaling` factors in var-x order, or all-ones
-    // (gh#486 stage 3). The step below comes back from the
-    // natural-units back-solve, but the iterate and the NLP's bounds
-    // are in the coordinates the solve ran in — so the projection has
-    // to move between them.
-    let d_var: Vec<Number> = {
-        let nlp_ref = nlp.borrow();
-        match nlp_ref.variable_scaling() {
-            Some(d) => (0..n_x)
-                .map(|v| d[nlp_ref.var_x_to_full_x(v as Index) as usize])
-                .collect(),
-            None => vec![1.0; n_x],
-        }
-    };
-
-    if let Some(eps) = boundcheck_eps {
-        // Single-pass clamp of the primal step before scattering onto
-        // the full-x grid; see pounce_sensitivity::boundcheck for the
-        // algorithm.
-        let x_curr_compressed: Vec<Number> = curr
-            .x
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.values().to_vec())
-            .unwrap_or_default();
-        let mut dx_primal = dx[..n_x].to_vec();
-        // Into the solve's coordinates for the projection, and back
-        // out of them after: clamping a natural-units step against
-        // scaled bounds would project onto the wrong box.
-        for (s, &di) in dx_primal.iter_mut().zip(d_var.iter()) {
-            *s *= di;
-        }
-        let n_clamped = pounce_sensitivity::boundcheck::clamp_with_nlp(
-            &*nlp.borrow(),
-            &x_curr_compressed,
-            &mut dx_primal,
-            eps,
-        );
-        for (s, &di) in dx_primal.iter_mut().zip(d_var.iter()) {
-            *s /= di;
-        }
-        if n_clamped > 0 {
-            eprintln!("pounce: --sens-boundcheck clamped {n_clamped} primal coordinate(s)");
-            dx[..n_x].copy_from_slice(&dx_primal);
-        }
-    }
 
     // Scatter the compressed primal step `dx[0..n_x_var]` back onto the
     // full-x grid; fixed variables stay at their nominal values.
@@ -314,6 +277,7 @@ fn try_compute_sens_step(
     n_full: usize,
     _m_full: usize,
     x_nominal: &[Number],
+    boundcheck_eps: Option<Number>,
 ) -> Option<Vec<Number>> {
     // Required suffixes. The "_1" suffix tier corresponds to upstream
     // sIPOPT's `n_sens_steps=1` mode. Higher tiers (sens_state_2 etc.)
@@ -411,6 +375,100 @@ fn try_compute_sens_step(
     if !backsolver.solve(&rhs_full, &mut dx_full) {
         eprintln!("pounce: KKT backsolve failed");
         return None;
+    }
+
+    // `sens_boundcheck`: hold every coordinate the step takes past a
+    // bound AT that bound by pinning and re-solving, so the others move
+    // with it. This runs here rather than in the caller because it
+    // re-solves against the factor, which only exists in this scope.
+    if let Some(eps) = boundcheck_eps {
+        let n_x = backsolver.block_dims()[0];
+        let x_curr = {
+            let d = data.borrow();
+            let curr = d.curr.as_ref()?;
+            curr.x
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|v| v.expanded_values())
+                .unwrap_or_default()
+        };
+        let (mut lo, mut hi) = {
+            let nl = nlp.borrow();
+            pounce_sensitivity::boundcheck::expand_bounds(
+                n_x,
+                &nl.px_l(),
+                &nl.px_u(),
+                nl.x_l(),
+                nl.x_u(),
+            )
+        };
+        // the iterate and the bounds are in the solve's coordinates
+        // while the step is in the model's own units (gh#486 stage 3),
+        // so both are brought into the step's units
+        let mut x_nat = x_curr.clone();
+        {
+            let nlp_ref = nlp.borrow();
+            if let Some(d) = nlp_ref.variable_scaling() {
+                for i in 0..n_x.min(x_nat.len()) {
+                    let di = d[nlp_ref.var_x_to_full_x(i as Index) as usize];
+                    if di == 0.0 || di == 1.0 {
+                        continue;
+                    }
+                    x_nat[i] /= di;
+                    let (a, b) = (lo[i] / di, hi[i] / di);
+                    lo[i] = a.min(b);
+                    hi[i] = a.max(b);
+                }
+            }
+        }
+        // base bound multipliers with their compound rows, so a bound
+        // the step wants to release can be released
+        let mults = {
+            let dims = backsolver.block_dims();
+            let base = dims[0] + dims[1] + dims[2] + dims[3];
+            let d = data.borrow();
+            let curr = d.curr.as_ref()?;
+            let mut out = Vec::new();
+            for (off, v) in [(base, &curr.z_l), (base + dims[4], &curr.z_u)] {
+                let vals = v
+                    .as_any()
+                    .downcast_ref::<DenseVector>()
+                    .map(|d| d.expanded_values())
+                    .unwrap_or_default();
+                for (k, &b) in vals.iter().enumerate() {
+                    out.push(pounce_sensitivity::boundcheck::BoundMultiplier {
+                        row: off + k,
+                        base: b,
+                    });
+                }
+            }
+            out
+        };
+        match pounce_sensitivity::boundcheck::refine_step_onto_bounds(
+            &backsolver,
+            &dx_full,
+            &x_nat[..n_x.min(x_nat.len())],
+            &lo,
+            &hi,
+            &mults,
+            eps,
+            16,
+        ) {
+            Ok((refined, pinned)) => {
+                if !pinned.is_empty() {
+                    eprintln!(
+                        "pounce: --sens-boundcheck pinned or released {} bound(s) \
+                         and re-solved",
+                        pinned.len()
+                    );
+                }
+                dx_full = refined;
+            }
+            Err(e) => {
+                eprintln!("pounce: --sens-boundcheck failed: {e}");
+                return None;
+            }
+        }
     }
     Some(dx_full)
 }

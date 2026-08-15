@@ -63,7 +63,6 @@
 
 use crate::PdSensBacksolver;
 use crate::backsolver::SensBacksolver;
-use crate::boundcheck::clamp_with_nlp;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
 use crate::vec_util::dense_to_vec;
@@ -440,6 +439,9 @@ impl SensSolve {
                 obj_scal,
                 ..SensOptions::default()
             };
+            // the refinement re-solves against the same factor, so it
+            // needs its own handle before the application takes one
+            let backsolver_for_refine = backsolver.clone();
             let mut sens_app = SensApplication::new(a_data, backsolver, opts);
 
             if let Some(d) = &deltas {
@@ -449,32 +451,95 @@ impl SensSolve {
                         Some("SensApplication::parametric_step failed".into());
                     return;
                 }
+                // Carry the step from the barrier problem's solution
+                // toward the original problem's, the paper's equation
+                // 11. `Solver::parametric_step` applies the same term,
+                // and the two are asserted equal.
+                {
+                    let dims = backsolver_for_refine.block_dims();
+                    let start = dims[0] + dims[1] + dims[2] + dims[3];
+                    let end = start + dims[4] + dims[5] + dims[6] + dims[7];
+                    let mu = data.borrow().curr_mu;
+                    let mut rhs = vec![0.0; n_full];
+                    for r in rhs.iter_mut().take(end).skip(start) {
+                        *r = mu;
+                    }
+                    let mut bc = vec![0.0; n_full];
+                    if !backsolver_for_refine.solve(&rhs, &mut bc) {
+                        outbox_cb.borrow_mut().error =
+                            Some("barrier correction backsolve failed".into());
+                        return;
+                    }
+                    for (v, c) in dx_full.iter_mut().zip(bc.iter()) {
+                        *v -= *c;
+                    }
+                }
                 if let Some(eps) = boundcheck_eps {
-                    // x_curr is the first `n_x` slots of the
-                    // compound-vector iterate.
+                    // Hold every crossing coordinate AT its bound by
+                    // pinning and re-solving, which is what upstream's
+                    // `sens_boundcheck` does. The iterate and the NLP's
+                    // bounds are in the solve's own coordinates while
+                    // the step came back from the natural-units
+                    // back-solve, so the bounds are brought into the
+                    // step's units rather than the step into theirs
+                    // (gh#486 stage 3).
                     let x_curr = dense_to_vec(&*curr.x);
-                    // clamp only the primal-x block of dx_full; the
-                    // rest (s, multipliers) doesn't have primal bounds.
-                    let mut dx_primal = dx_full[..n_x].to_vec();
-                    // The iterate and the NLP's bounds are both in the
-                    // solve's own coordinates, but the step came back
-                    // from the natural-units back-solve — so it goes
-                    // INTO the substitution for the projection and
-                    // comes back out of it (gh#486 stage 3). Clamping
-                    // a natural step against scaled bounds would
-                    // project onto the wrong box.
+                    let (mut lo, mut hi) = {
+                        let nl = nlp.borrow();
+                        crate::boundcheck::expand_bounds(
+                            n_x,
+                            &nl.px_l(),
+                            &nl.px_u(),
+                            nl.x_l(),
+                            nl.x_u(),
+                        )
+                    };
+                    let mut x_nat = x_curr.clone();
                     if let Some(d) = &d_var {
-                        for (s, &di) in dx_primal.iter_mut().zip(d.iter()) {
-                            *s *= di;
+                        for i in 0..n_x {
+                            let di = d[i];
+                            if di == 0.0 || di == 1.0 {
+                                continue;
+                            }
+                            x_nat[i] /= di;
+                            let (a, b) = (lo[i] / di, hi[i] / di);
+                            lo[i] = a.min(b);
+                            hi[i] = a.max(b);
                         }
                     }
-                    let _ = clamp_with_nlp(&*nlp.borrow(), &x_curr, &mut dx_primal, eps);
-                    if let Some(d) = &d_var {
-                        for (s, &di) in dx_primal.iter_mut().zip(d.iter()) {
-                            *s /= di;
+                    // The bound multipliers at the base point, so a
+                    // bound the step drives negative can be released.
+                    // Without these the refinement can only pin, and
+                    // this surface would answer differently from
+                    // `estimate(mode="fix_relax")` on the same model.
+                    let mults = {
+                        let dims = backsolver_for_refine.block_dims();
+                        let z_l_off = dims[0] + dims[1] + dims[2] + dims[3];
+                        let z_u_off = z_l_off + dims[4];
+                        let mut out = Vec::new();
+                        for (off, v) in [(z_l_off, &curr.z_l), (z_u_off, &curr.z_u)] {
+                            for (k, &base) in dense_to_vec(&**v).iter().enumerate() {
+                                out.push(crate::boundcheck::BoundMultiplier { row: off + k, base });
+                            }
+                        }
+                        out
+                    };
+                    match crate::boundcheck::refine_step_onto_bounds(
+                        &backsolver_for_refine,
+                        &dx_full,
+                        &x_nat[..n_x],
+                        &lo,
+                        &hi,
+                        &mults,
+                        eps,
+                        16,
+                    ) {
+                        Ok((refined, _pinned)) => dx_full = refined,
+                        Err(e) => {
+                            outbox_cb.borrow_mut().error = Some(e);
+                            return;
                         }
                     }
-                    dx_full[..n_x].copy_from_slice(&dx_primal);
                 }
                 let dx_primal = dx_full[..n_x].to_vec();
                 outbox_cb.borrow_mut().dx = Some(dx_primal);

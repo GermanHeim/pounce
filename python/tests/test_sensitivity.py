@@ -183,26 +183,44 @@ def test_solve_with_sens_rh_eigendecomp_diagonalizes_hr():
         assert col[np.abs(col).argmax()] > 0
 
 
-def test_solve_with_sens_boundcheck_clamps_violating_step():
-    """sens_boundcheck=True projects dx so x_curr+dx stays in [lb, ub].
+# Upstream sIPOPT's reported x after the step WITH bound checking, for
+# the same Δeta. Read from the `sens_sol_state_1` suffix of sIPOPT
+# 3.14.19 run on this model through pyomo.contrib.sensitivity_toolbox
+# with `sens_boundcheck=yes`. The residual ~1e-8 spread on these digits
+# is sIPOPT's own, and sets the tolerance the asserts can carry.
+UPSTREAM_X_BOUNDCHECK = np.array([
+    0.5000000167,
+    0.4999999733,
+    -0.0000000100,
+    4.5,
+    1.0,
+])
 
-    With deltas=[-0.5, 0.0] the unconstrained linear step drives x[2] to
-    ~-0.046, below its lower bound of 0. The clamp should zero that
-    coordinate exactly while leaving non-violating slots untouched.
+
+def test_solve_with_sens_boundcheck_matches_upstream_fix_relax():
+    """sens_boundcheck=True is upstream's fix-relax, not a projection.
+
+    With deltas=[-0.5, 0.0] the plain linear step drives x[2] to ~-0.046,
+    below its lower bound of 0. Fix-relax adds that bound as an active
+    constraint and re-solves the sensitivity system, so x[2] lands on the
+    bound and the REMAINING coordinates move to stay feasible in the
+    constraints. Clamping x[2] alone and leaving the rest at their plain
+    step would break `6x1+3x2+2x3 = eta1`; upstream does not do that, and
+    the goldens below are upstream's own answer.
     """
     x0 = np.array([0.15, 0.15, 0.0, 0.0, 0.0])
 
-    # Reference: unclamped solve, to confirm x[2]+dx[2] < 0.
-    _, info_unclamped = _make().solve_with_sens(
+    # Reference: unchecked solve, to confirm x[2]+dx[2] < 0.
+    _, info_unchecked = _make().solve_with_sens(
         x0=x0,
         pin_constraint_indices=[2, 3],
         deltas=[-0.5, 0.0],
     )
     x_nominal_2 = UPSTREAM_X_NOMINAL[2]
-    dx_unclamped_2 = info_unclamped["dx"][2]
-    assert x_nominal_2 + dx_unclamped_2 < -1e-6, "precondition: step violates bound"
+    dx_unchecked_2 = info_unchecked["dx"][2]
+    assert x_nominal_2 + dx_unchecked_2 < -1e-6, "precondition: step violates bound"
 
-    # Clamped solve.
+    # Bound-checked solve.
     _, info = _make().solve_with_sens(
         x0=x0,
         pin_constraint_indices=[2, 3],
@@ -213,13 +231,14 @@ def test_solve_with_sens_boundcheck_clamps_violating_step():
     dx = info["dx"]
     assert dx is not None
 
-    # x[2] is clamped to lb=0 → dx[2] = 0 - x_nominal[2].
-    # Use 5e-8 to match the convergence-floor tolerance used elsewhere in
-    # this file (pounce's converged x[2] vs the upstream-captured golden).
-    assert dx[2] == pytest.approx(-x_nominal_2, abs=5e-8)
-    # Non-violating coordinates (x[0], x[1], pinned x[3], x[4]) unchanged.
-    np.testing.assert_allclose(dx[0], UPSTREAM_DX[0], atol=5e-8)
-    np.testing.assert_allclose(dx[1], UPSTREAM_DX[1], atol=5e-8)
+    # Every coordinate, against upstream's bound-checked answer. 5e-7 is
+    # an order looser than sIPOPT's own spread on these digits and two
+    # orders tighter than the 7.7e-2 that separates x[0] here from its
+    # unchecked value, so a step that merely clamps x[2] fails this.
+    np.testing.assert_allclose(
+        UPSTREAM_X_NOMINAL + dx, UPSTREAM_X_BOUNDCHECK, atol=5e-7)
+    # x[2] is driven onto its bound, and the pins are still honoured.
+    assert dx[2] == pytest.approx(-x_nominal_2, abs=5e-7)
     np.testing.assert_allclose(dx[3], UPSTREAM_DX[3], atol=5e-8)
     np.testing.assert_allclose(dx[4], UPSTREAM_DX[4], atol=5e-8)
 
@@ -404,3 +423,90 @@ def test_solve_with_sens_finite_difference_cross_check():
     assert sign > 0
     # Non-parameter primals (x[0..3]) match FD to first order.
     np.testing.assert_allclose(sign * dx_sens[:3], dx_fd[:3], atol=1e-6)
+
+
+class ReleaseNLP:
+    """A bound active at the base point that a perturbation should let go.
+
+    ``min (x - p)^2 + 0.5 (y - p)^2  s.t.  y = 2x + 1,  x >= 0``, with
+    ``p`` carried as ``x[2]`` and pinned by ``g[1]``. At ``p = -1`` the
+    unconstrained minimum is ``x = -1``, so the lower bound holds ``x``
+    at 0 and carries a positive multiplier. At ``p = 3`` the minimum is
+    ``x = 5/3``, which the bound can only reach once it is released.
+    """
+
+    def objective(self, v):
+        x, y, p = v
+        return (x - p) ** 2 + 0.5 * (y - p) ** 2
+
+    def gradient(self, v):
+        x, y, p = v
+        return np.array([2 * (x - p), y - p, -2 * (x - p) - (y - p)])
+
+    def constraints(self, v):
+        x, y, p = v
+        return np.array([y - 2 * x - 1, p])
+
+    def jacobianstructure(self):
+        return (np.array([0, 0, 1], dtype=np.int64),
+                np.array([0, 1, 2], dtype=np.int64))
+
+    def jacobian(self, v):
+        return np.array([-2.0, 1.0, 1.0])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 2, 2, 2], dtype=np.int64),
+                np.array([0, 1, 0, 1, 2], dtype=np.int64))
+
+    def hessian(self, v, lagrange, obj_factor):
+        return obj_factor * np.array([2.0, 1.0, -2.0, -1.0, 3.0])
+
+
+def _make_release(p_nominal=-1.0):
+    prob = pounce.Problem(
+        n=3, m=2, problem_obj=ReleaseNLP(),
+        lb=[0.0, -50.0, -1e19],
+        ub=[10.0, 50.0, 1e19],
+        cl=[0.0, p_nominal],
+        cu=[0.0, p_nominal],
+    )
+    # 1e-8, not the 1e-10 the pin fixture above uses. Releasing a bound
+    # drives its multiplier to zero against a factorization held at the
+    # final mu, and the slack of an active bound goes to zero with mu,
+    # so that row grows worse conditioned the tighter the base solve is.
+    # Measured on this model: 2.6e-8 off at tol=1e-6, 7.3e-7 at 1e-8,
+    # 2.2e-4 at 1e-10, and no step at all at 1e-12.
+    prob.add_option("tol", 1e-8)
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    return prob
+
+
+def test_solve_with_sens_boundcheck_releases_a_bound_the_step_leaves():
+    """The release half of fix-relax, on this surface (gh #587 review).
+
+    The plain step cannot leave an active bound, because it preserves
+    complementarity, so it reports x = 0 however hard the perturbation
+    pulls. Releasing the bound reaches the re-solve's 5/3. Passing no
+    multipliers to the refinement makes it pin-only, and this test is
+    what catches that: it kept returning 0.0 while the pin-case test
+    above still passed.
+    """
+    x0 = np.array([0.5, 1.0, -1.0])
+
+    # The plain step stays on the bound.
+    _, info_plain = _make_release().solve_with_sens(
+        x0=x0, pin_constraint_indices=[1], deltas=[4.0])
+    assert info_plain["status_msg"] == "Solve_Succeeded"
+    assert info_plain["dx"][0] == pytest.approx(0.0, abs=1e-6)
+
+    # Releasing it reaches the re-solve.
+    _, info = _make_release().solve_with_sens(
+        x0=x0, pin_constraint_indices=[1], deltas=[4.0], sens_boundcheck=True)
+    assert info["status_msg"] == "Solve_Succeeded"
+    dx = info["dx"]
+    assert dx is not None
+    # x starts at its bound (0) and the re-solve puts it at 5/3.
+    assert dx[0] == pytest.approx(5.0 / 3.0, abs=1e-5)
+    # y = 2x + 1 still holds at the refined point.
+    assert dx[1] == pytest.approx(2 * dx[0], abs=1e-6)

@@ -2273,16 +2273,20 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
 
 /// Map a convex-solver status onto the AMPL `.sol` terminal line: the message,
 /// whether the solve is treated as a success (drives the exit code), and the
-/// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved to reduced
-/// accuracy, 200–299 infeasible, 300–399 unbounded, 400–499 limit, 500–599
+/// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved with a
+/// warning, 200–299 infeasible, 300–399 unbounded, 400–499 limit, 500–599
 /// failure. Shared by the QP/LP and SOCP report paths so the two cannot drift.
+///
+/// `OptimalInaccurate` reports `1` — Ipopt's code for the same
+/// reduced-accuracy convergence, and the same code the NLP path's
+/// `SolvedToAcceptableLevel` reports (`status_to_solve_result_num`), which
+/// this status maps onto in `qp_status_to_ars`. One status, one code: a model
+/// must not change its `.sol` verdict band depending on which engine took it.
 fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32) {
     use pounce_convex::QpStatus;
     match s {
         QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
-        QpStatus::OptimalInaccurate => {
-            ("Solved to acceptable level (reduced accuracy).", true, 100)
-        }
+        QpStatus::OptimalInaccurate => ("Solved to acceptable level (reduced accuracy).", true, 1),
         QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
         QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
         QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
@@ -3333,15 +3337,29 @@ mod convex_status_tests {
     /// Code review 2026-06 item M20: the reduced-accuracy convex status
     /// (`OptimalInaccurate`) must surface to the user as a *distinct* outcome —
     /// not silently folded into a clean `Optimal`. It maps to AMPL
-    /// `solve_result_num` 100 (the "solved to acceptable/reduced accuracy"
-    /// band) with a distinct message, and onto the NLP-side
+    /// `solve_result_num` 1 (Ipopt's own code for an accepted reduced-accuracy
+    /// solve) with a distinct message, and onto the NLP-side
     /// `SolvedToAcceptableLevel` status, so callers reading either the `.sol`
     /// terminal line or the JSON report can tell it apart from a full-accuracy
     /// solve.
+    ///
+    /// The code moved out of the 100 band in gh #591 — see
+    /// `pounce_solve_report::status_to_solve_result_num` — and must agree with
+    /// the NLP path, which reports the same status.
     #[test]
     fn optimal_inaccurate_is_distinct_from_optimal() {
         let (msg, ok, srn) = convex_status_report(QpStatus::OptimalInaccurate);
-        assert_eq!(srn, 100, "reduced-accuracy solve must use the 100 band");
+        assert_eq!(
+            srn,
+            pounce_cli::solve_report::status_to_solve_result_num(
+                ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "the convex and NLP paths must report one code for one status",
+        );
+        assert_eq!(
+            srn, 1,
+            "Ipopt's code for an accepted reduced-accuracy solve"
+        );
         assert!(ok, "a reduced-accuracy solve is still a usable success");
         assert!(
             msg.contains("acceptable"),

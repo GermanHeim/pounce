@@ -427,11 +427,29 @@ def _iter_data(comp):
 # Engine status -> (termination condition, solver status), mirroring the
 # semantics Pyomo's .sol reader gives the ordinary path via the AMPL
 # exit-code ranges (optimal / infeasible / unbounded / limit / error).
+#
+# `Solved_To_Acceptable_Level` is `ok`, not `warning`: the solve is an
+# accepted one, and the AMPL code POUNCE emits for it (1, Ipopt's own) puts
+# the ordinary `.sol` route in the 0..99 band that Pyomo's reader loads as
+# `ok`. Reporting `warning` here would make the sensitivity route disagree
+# with both the `.sol` route and `v2._V2_STATUS`, and would make Pyomo log a
+# load warning on a result IPOPT loads clean (gh #591). The reduced-accuracy
+# distinction stays in the solver message, not the severity.
+#
+# The table is exhaustive over `ApplicationReturnStatus`
+# (`crates/pounce-nlp/src/return_codes.rs`), whose `upstream_name()` is the
+# `status_msg` read below; `test_issue_589_status_table_coverage.py` holds it
+# and `v2._V2_STATUS` to the full enum. Eleven exits used to be missing,
+# `Restoration_Failed` among them, and they fell to the `(error, error)`
+# default. That default is a defensible severity, but it is less specific than
+# the `.sol` route's answer for the same solve -- Pyomo's reader turns the
+# AMPL 500 failure band into `internalSolverError` -- and on the v2 side the
+# matching gap decided whether the solve raised at all (gh #589).
 _STATUS_RESULT = {
     "Solve_Succeeded":
         (TerminationCondition.optimal, SolverStatus.ok),
     "Solved_To_Acceptable_Level":
-        (TerminationCondition.optimal, SolverStatus.warning),
+        (TerminationCondition.optimal, SolverStatus.ok),
     "Feasible_Point_Found":
         (TerminationCondition.feasible, SolverStatus.warning),
     "Infeasible_Problem_Detected":
@@ -446,6 +464,46 @@ _STATUS_RESULT = {
         (TerminationCondition.maxTimeLimit, SolverStatus.warning),
     "User_Requested_Stop":
         (TerminationCondition.userInterrupt, SolverStatus.aborted),
+    # AMPL's 400 "limit" band, like the two above. `warning` is the band's
+    # severity, and this is the ONE row whose severity differs from the
+    # `(error, error)` default it used to take -- a stalled solve is a limit
+    # case, not a failure, which is why it sits in the limit band. The
+    # termination condition deviates from what Pyomo's band-reading `.sol`
+    # table gives (`maxIterations`): POUNCE names this exit exactly, and the
+    # legacy enum has the member, so it does not have to borrow the
+    # iteration-limit one. Same deliberate precision as `maxTimeLimit` above.
+    "Search_Direction_Becomes_Too_Small":
+        (TerminationCondition.minStepLength, SolverStatus.warning),
+    # AMPL's 500 failure band. `internalSolverError` + `error` is what the
+    # ordinary `.sol` route reports for every code in it, so these agree with
+    # it rather than with the coarser `(error, error)` default they used to
+    # take. The two definition errors deviate on the termination condition,
+    # again for precision: `.sol` can only say `internalSolverError` for the
+    # whole band, while an over-determined or malformed model is not a solver
+    # failure and the legacy enum has `invalidProblem` for exactly that. The
+    # severity -- which is what callers branch on -- stays `error` either way.
+    "Restoration_Failed":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Error_In_Step_Computation":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Number_Detected":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Insufficient_Memory":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Internal_Error":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Option":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Not_Enough_Degrees_Of_Freedom":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    "Invalid_Problem_Definition":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    # ABI-parity members of the upstream enum that POUNCE never returns.
+    # Listed so the table covers the enum, not just today's exits.
+    "Unrecoverable_Exception":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "NonIpopt_Exception_Thrown":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
 }
 
 
@@ -1025,13 +1083,33 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
-def estimate(model, perturb, clamp=True):
+def estimate(model, perturb, clamp=True, mode="linear",
+             max_passes=16):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
     ComponentMap (plain dicts don't work: Pyomo components are unhashable).
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
+
+    mode selects what happens when the step leaves a variable bound.
+    "linear" (the default) takes the step and clamps, which truncates the
+    crossing variable and leaves every other one at its predictor value.
+    "fix_relax" instead pins the crossing variable at its bound and
+    re-solves, so the others move to stay consistent under the pin, which
+    is what `estimate_report`'s step fraction says the step needs. It
+    costs a dense solve and a backsolve per crossing and tracks a full
+    re-solve far more closely. Where nothing crosses the two agree
+    exactly.
+
+    max_passes bounds that work. Each pass costs a dense solve whose
+    size grows with the number of pins, and the refinement is only
+    worth running while it stays cheaper than a re-solve.
+
+    clamp keeps its meaning in both modes: it clips whatever is still
+    outside a bound at the end. Under "fix_relax" the pins usually
+    leave nothing to clip, and when they do not, the warning says
+    whether the pass budget or the degrees of freedom stopped it.
 
     The perturbation is measured from the SOLVE point (the pin
     constraint's stored right-hand side, which is the value the Param
@@ -1054,25 +1132,74 @@ def estimate(model, perturb, clamp=True):
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    if mode not in ("linear", "fix_relax"):
+        raise ValueError(
+            f"estimate: mode must be 'linear' or 'fix_relax', got {mode!r}")
+
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
     # parametric_step returns the factor's x block (var-x); base_x and
     # everything below it (nl.x_l/x_u, var_names) are full-x
-    dx = session.scatter_x(
-        np.asarray(session.solver.parametric_step(pin_idx, deltas)))
+    if mode == "fix_relax":
+        step, pinned = session.solver.parametric_step_bounded(
+            pin_idx, deltas, max_passes)
+    else:
+        step = session.solver.parametric_step(pin_idx, deltas)
+    dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
 
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    if clamp:
-        # scale-aware tolerance: 1e-9 relative to the variable's magnitude
-        tol = 1e-9 * np.maximum(1.0, np.abs(x_new))
+    if mode == "fix_relax":
+        # The refinement holds each pinned coordinate AT its bound and
+        # lets the others move, so a coordinate can still be left
+        # outside one, either because the pass budget ran out or because
+        # the pins have exhausted the problem's degrees of freedom.
+        # `clamp` decides what happens then, exactly as it does under
+        # `linear`, and the warning says which of the two stopped it.
+        #
+        # One tolerance for "outside its bound", taken from the solve
+        # rather than chosen here: it was willing to leave a converged
+        # point `bound_relax_factor` outside, so anything within that is
+        # on the bound. The refinement pins against the same number.
+        eps = max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+        # scaled by the coordinate's own magnitude, never by the
+        # bound: an absent bound arrives as the reader's +-1e19
+        # sentinel, which would put the tolerance at 1e10
+        tol = eps * np.maximum(1.0, np.abs(x_new))
+        out = np.where((x_new < lo - tol) | (x_new > hi + tol))[0]
+        if out.size:
+            names = [session.var_names[i] for i in out]
+            why = ("the pass limit of %d was reached, so raising "
+                   "max_passes may finish it" % max_passes
+                   if len(pinned) >= max_passes else
+                   "holding them all would need more pins than the "
+                   "problem has degrees of freedom, so no step does")
+            warnings.warn(
+                f"estimate: fix_relax pinned {len(pinned)} variable(s) and "
+                f"still leaves the bounds for {names}, because {why}."
+                + (" The values were clamped, which breaks the constraints "
+                   "the pins were solved against." if clamp else
+                   " The values are returned unclamped."))
+            if clamp:
+                x_new = np.clip(x_new, lo, hi)
+    elif clamp:
+        # `linear` takes the step as the predictor gives it, so a
+        # crossing shows up as a value outside its bound and clipping is
+        # all this mode can do about it. The active set changed and the
+        # step does not know, which is what `fix_relax` addresses.
+        eps = max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+        # scaled by the coordinate's own magnitude, never by the
+        # bound: an absent bound arrives as the reader's +-1e19
+        # sentinel, which would put the tolerance at 1e10
+        tol = eps * np.maximum(1.0, np.abs(x_new))
         clipped = (x_new < lo - tol) | (x_new > hi + tol)
         if clipped.any():
             names = [session.var_names[i] for i in np.where(clipped)[0]]
             warnings.warn(
                 "estimate: linear step leaves the variable bounds for "
                 f"{names}; values were clamped and the active set likely "
-                "changed, so the estimate is unreliable there.")
+                "changed, so the estimate is unreliable there. mode="
+                "'fix_relax' pins them and re-solves instead.")
         x_new = np.clip(x_new, lo, hi)
 
     out = ComponentMap()

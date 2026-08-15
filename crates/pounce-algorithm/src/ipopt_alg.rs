@@ -3081,9 +3081,9 @@ impl IpoptAlgorithm {
                 // `inf_pr = 1.7e-10` and `inf_du = 8.8e+47`; before gh #274
                 // the finiteness check was the only gate, `-8.8e47` is
                 // finite, and the solve was reported as
-                // `Solved_To_Acceptable_Level` with `solve_result_num = 100`.
-                // Pyomo maps that into the *solved* family and loads the
-                // diverging iterate as an optimal solution.
+                // `Solved_To_Acceptable_Level` — which Pyomo maps into the
+                // *solved* family, loading the diverging iterate as an
+                // optimal solution.
                 //
                 // So require the point to pass the full acceptable-level
                 // triplet (which includes `acceptable_dual_inf_tol`) before
