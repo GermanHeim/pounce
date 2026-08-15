@@ -696,3 +696,116 @@ not exist yet. Running
 `cargo run -p pounce-convex --release --example homotopy_sweep` over the 138
 problems, homotopy-on before and after, is the missing step, and it should
 happen before this reaches a release rather than after.
+
+---
+
+## The runtime signal: built, measured, declined
+
+Three decisions in this crate wanted the same missing thing, and the note says
+so three times: #434's abandon-the-path guard, step 1's fallback choice, and
+step 2's declined guard all reduce to **"is the previous active set worth
+keeping?"** So: build it and find out.
+
+#434 refuted the obvious *predictor* — `n_eq / n`, computable from problem data
+with no solve — and concluded that a discriminator, if one exists, has to be
+**measured rather than predicted**. The candidate measurement here is the
+cheapest honest one available:
+
+> Pin the hinted active rows, then count the rows and bounds *outside* the hint
+> that the pinned point violates.
+
+That is a property of the hint applied to the target problem, so it needs no
+model of what changed between the two problems. It costs one pinned-KKT
+factorization — which `solve_with_working_set` already pays, so a caller that
+goes on to keep the hint pays nothing extra for having asked. Implemented as
+`ParametricActiveSetSolver::hint_pin_quality`; the sweep is
+`crates/pounce-qp/src/tests/hint_signal.rs`:
+
+```text
+cargo test -p pounce-qp --release --lib hint_signal -- --ignored --nocapture
+```
+
+360 pairs — 5 sizes from `n = 12` to `n = 50`, crossed over `H`, `A`, `g`, row
+bound and box perturbations — scored against ground truth (the working-set
+changes each route actually took). Both arms are swept, because the fallback's
+opponent depends on the caller's options: `pounce-qp` defaults `use_homotopy`
+off, `pounce-convex`'s driver turns it on, and they are very different
+opponents.
+
+### Arm 1 — conventional cold (`pounce-qp`'s default): nothing to decide
+
+| policy | total working-set changes |
+|---|--:|
+| always keep the hint | **17497** |
+| always cold | 22338 |
+| oracle (per-case best) | 17488 |
+
+"Always keep the hint" is wrong on **2 of 360** cases, and the oracle beats it
+by **9 changes out of 17497 — 0.05%**. There is no prize here. Every threshold
+tested, on either normalization, lands at or above 17497.
+
+That is a real result rather than a null one: it says step 1's unconditional
+"keep the working set" is not a heuristic awaiting a guard, it is very close to
+optimal on this arm, and a signal would be machinery in front of a decision that
+does not need making.
+
+### Arm 2 — homotopy cold (`pounce-convex`'s default): a real prize the signal cannot reach
+
+| policy | total working-set changes |
+|---|--:|
+| always keep the hint | 17497 |
+| always cold | 19062 |
+| **oracle (per-case best)** | **12693** |
+
+Here "always keep" is wrong on **158 of 360**, and the oracle is 27% below it.
+The prize is real. No rule on this signal reaches any of it:
+
+| rule | cost | | rule | cost |
+|---|--:|---|---|--:|
+| `violated/active ≤ 0.2` | 17613 | | `violated ≤ 5` | 17787 |
+| `violated/active ≤ 0.3` | 17833 | | `violated ≤ 8` | 18088 |
+| `violated/active ≤ 0.5` | 19680 | | `violated ≤ 12` | 18396 |
+| *always keep* | **17497** | | *always keep* | **17497** |
+
+**Every threshold is worse than not having a rule at all.** Best error count is
+156 of 360 against a 158 baseline — two cases, i.e. noise.
+
+### Why, and it is not a tuning problem
+
+The refutation is direct: samples carrying an *identical* signal disagree about
+the answer, so no rule reading only that signal can be right about both.
+
+```text
+collision: active=20 violated=1 — same signal, opposite answers
+   n30 dh0   da0     dg0.15 xu-     ws  3  cold 21   keep
+   n30 dh0   da0.05  dg0.15 xu-     ws 64  cold 22   go cold
+```
+
+Same hint size, same number of violated rows, and the right answers differ by
+20× in one direction and 3× in the other.
+
+The structural reason is worth stating, because it also says what *would* work.
+The signal measures **"is the hint good?"**. The decision is **"is the hint
+better than the alternative?"** — and on arm 2 the alternative is the homotopy,
+whose cost is a property of the *path*: how many events it hits between `t = 0`
+and `t = 1`. The hint says nothing about that. A hint-quality signal is
+answering a different question from the one being asked, and the collision above
+is what that looks like in data.
+
+Which is exactly why #434 wanted a guard that *measures the path*, and it
+remains the shape with a live prize: 27%, on the one arm that ships the tracer
+by default. #434 replayed candidate path rules against recorded trajectories and
+declined them for want of margin; this note adds that the hint side is not the
+missing half either.
+
+### What ships
+
+The instrument and the negative result — no rule. `hint_pin_quality` is
+`#[cfg(test)]`, so nothing dead ships, and the next person who has this idea
+finds the sweep and the collision table rather than only the idea.
+
+That is now three declined guards in this area — #434's, #602 step 2's, and this
+one — and they are consistent rather than merely discouraging. The discriminator
+is not in the problem data (#434), not in the change between the two problems
+(step 2), and not in the hint (here). What is left is the path itself, measured
+while it runs, which is where the remaining 27% lives.

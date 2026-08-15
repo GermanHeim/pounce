@@ -94,14 +94,54 @@ trades a working path for the fallback — measured at 2 working-set changes
 becoming 5, for nothing. The reasoning is recorded at the guard itself in
 `solver.rs` so the next reader with the same idea meets the data first.
 
-Both the surviving change and the declined one share one open question, which
-is also #434's: **there is no runtime signal for whether the previous active
-set is worth keeping.** The step-1 fallback wins 9 of 12 rows in the same size
-sweep and loses 3, all at `n = 20` with `A` moved — precisely where the
-previous active set is a poor guess.
+Both the surviving change and the declined one shared one open question, which
+is also #434's: **is there a runtime signal for whether the previous active set
+is worth keeping?** That was then built and measured, and the answer is no —
+see below.
 
 Background and the full measurement are in
 `dev-notes/issue-602-parametric-eligibility.md`.
+
+### Measured — no runtime signal for "is this working set worth keeping" (#602, #434)
+
+Three decisions in `pounce-qp` want the same missing discriminator: #434's
+abandon-the-path guard, the parametric fallback's choice of route, and the
+eligibility guard declined above. #434 refuted the obvious *predictor*
+(`n_eq / n`, from problem data with no solve) and concluded that a
+discriminator, if one exists, must be **measured**. So one was built.
+
+The candidate: pin the hinted active rows, then count the rows and bounds
+*outside* the hint that the pinned point violates — a property of the hint
+applied to the target, needing no model of what changed. It costs one
+pinned-KKT factorization, which `solve_with_working_set` already pays. Swept
+over 360 pairs (5 sizes from `n = 12` to `n = 50`, crossed over `H`, `A`, `g`,
+row-bound and box perturbations) against ground truth, on both arms — the
+fallback's opponent differs by caller, since `pounce-qp` defaults
+`use_homotopy` off and `pounce-convex`'s driver turns it on.
+
+Against the **conventional** cold path there is nothing to decide: always
+keeping the hint is wrong on 2 of 360 cases and sits 9 working-set changes —
+0.05% — above the per-case oracle. That is a positive result about the shipped
+fallback, which is not a heuristic awaiting a guard.
+
+Against the **homotopy** cold path there is a real prize and this signal cannot
+reach it: always-keep costs 17497 against an oracle of 12693 (−27%), and every
+threshold on either normalization scores *worse* than having no rule at all
+(best 17613 and 17787). The refutation is direct rather than statistical —
+samples with identical signal values carry opposite correct answers, one pair
+differing 20× one way and 3× the other. The reason is structural: the signal
+measures "is the hint good", while the decision is "is the hint better than the
+alternative", and on that arm the alternative's cost is a property of the
+*path*, which the hint says nothing about.
+
+So no rule ships — only the instrument and the negative result.
+`hint_pin_quality` is `#[cfg(test)]`, and the sweep is
+`crates/pounce-qp/src/tests/hint_signal.rs`, runnable with
+`cargo test -p pounce-qp --release --lib hint_signal -- --ignored --nocapture`.
+Three declined guards in this area now agree: the discriminator is not in the
+problem data (#434), not in the change between the two problems (the guard
+above), and not in the hint (here). What is left is the path measured while it
+runs, which is where the 27% lives.
 
 ### Fixed — the QP homotopy could not add a variable bound to the working set (#602)
 

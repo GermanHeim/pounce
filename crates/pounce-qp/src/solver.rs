@@ -430,6 +430,45 @@ impl ParametricActiveSetSolver {
         point_is_feasible(qp, &x_cur, opts.feas_tol).then_some((x_cur, w_cur))
     }
 
+    /// How wrong the caller's working set turns out to be, measured on `qp`
+    /// itself rather than predicted from it.
+    ///
+    /// Pins the hinted active rows and counts how many *other* rows and bounds
+    /// the resulting point violates. That count is the cheapest honest answer
+    /// available to "is this active set a good guess for this problem": it is a
+    /// property of the hint applied to the target, so it needs no model of what
+    /// changed between the two problems and no threshold on problem data — the
+    /// approach gh #434 refuted when `n_eq / n` failed to discriminate.
+    ///
+    /// Costs one pinned-KKT factorization, which
+    /// [`Self::solve_with_working_set`] already pays, so a caller that goes on
+    /// to take the working-set route pays nothing extra for having asked.
+    ///
+    /// `None` when the pin does not take at all — an active row itself
+    /// violated, or a factorization failure. That is a hint too broken to
+    /// measure, which callers should read the same way as a large count.
+    ///
+    /// **Test-only, deliberately.** This measures cleanly and cheaply; what it
+    /// does not do is answer the question the solver actually has. See
+    /// `tests::hint_signal` for the sweep that declined it, and
+    /// `dev-notes/issue-602-parametric-eligibility.md` for why. It stays in the
+    /// tree because the next person to reach for this idea should find the
+    /// instrument and the negative result, not just the idea.
+    #[cfg(test)]
+    pub(crate) fn hint_pin_quality(
+        &mut self,
+        qp: &QpProblem,
+        working: &WorkingSet,
+        opts: &QpOptions,
+    ) -> Option<HintPinQuality> {
+        let (x, w) = self.pin_working_set(qp, working, opts).ok()?;
+        let (cons, bounds) = violated_inactive(qp, &x, &w, opts.feas_tol)?;
+        Some(HintPinQuality {
+            active: w.active_count(),
+            violated: cons.len() + bounds.len(),
+        })
+    }
+
     /// Primal active-set path for box-constrained QPs
     /// (no general constraints, finite or infinite variable
     /// bounds). Standard add/drop loop with refactor-per-change —
@@ -3993,6 +4032,18 @@ fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32)
 /// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
 /// path can tell whether the point it is about to substitute is actually an
 /// improvement on the one it is discarding.
+/// What [`ParametricActiveSetSolver::hint_pin_quality`] measured about a
+/// working-set hint: how big it is, and how many rows and bounds outside it the
+/// pinned point violates.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HintPinQuality {
+    /// Rows plus bounds the hint marks active.
+    pub(crate) active: usize,
+    /// Inactive rows plus bounds the pinned point violates beyond `feas_tol`.
+    pub(crate) violated: usize,
+}
+
 pub(crate) fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
     let ax = a_times_x(qp.a, x, qp.m);
     let mut worst: Number = 0.0;
