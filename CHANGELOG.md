@@ -79,9 +79,29 @@ the unfixed change. The CLI fixture sweep is unchanged on both the default and
 has no production caller, and therefore *not* evidence for the change on its
 own.
 
-Background and the measurement behind the other three options #602 raises
-(tightening the guard on `A` / `xl` / `xu`, adding the missing bound-adding
-ratio-test events, interpolating `A`) are in
+**The stricter eligibility guard #602 asks for was implemented, measured, and
+declined.** Requiring an unchanged `A`, unchanged `xl`/`xu` and unchanged
+inertia declaration makes the guard better or equal in 14 of 14 rows at
+`n = 30` and worse in 9 of 14 at `n = 20` — same family, same generator, with
+`A` perturbed 10% going from 2 working-set changes to 34. That is #434's
+situation restated, and its standard ("the failure mode of a bad threshold is
+giving back more than it recovers, silently") rules it out. Rejecting a pair is
+not a return to correctness; it is a switch to the working-set heuristic, which
+has its own failure mode, and nothing available predicts which of the two wins.
+The inertia condition is the clearest case against, having no upside even in
+principle: the tracer never reads the declaration, so declining on it only ever
+trades a working path for the fallback — measured at 2 working-set changes
+becoming 5, for nothing. The reasoning is recorded at the guard itself in
+`solver.rs` so the next reader with the same idea meets the data first.
+
+Both the surviving change and the declined one share one open question, which
+is also #434's: **there is no runtime signal for whether the previous active
+set is worth keeping.** The step-1 fallback wins 9 of 12 rows in the same size
+sweep and loses 3, all at `n = 20` with `A` moved — precisely where the
+previous active set is a poor guess.
+
+Background, the full measurement, and the two remaining options #602 raises
+(the missing bound-adding ratio-test events, interpolating `A`) are in
 `dev-notes/issue-602-parametric-eligibility.md`.
 
 - **SOCP warm starts now support first-class variable bounds.** Bounds are

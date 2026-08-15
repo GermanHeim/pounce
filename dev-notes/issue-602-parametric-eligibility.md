@@ -26,6 +26,13 @@ Short version:
   which is already what the SQP driver uses and which is the fastest of the
   three routes in 12 of 17 rows measured.
 
+**Outcome.** The better fallback shipped. The stricter guard was implemented,
+measured, and **declined** — it is better or equal in 14 of 14 rows at `n = 30`
+and worse in 9 of 14 at `n = 20`, on the same family. Sections at the bottom
+record both, and they are the parts to read first: the measurement changed the
+recommendation this note opens with, and the reasoning that produced the wrong
+recommendation is worth more than the conclusion.
+
 ---
 
 ## What the guard checks, and what the path models
@@ -89,9 +96,15 @@ Measured, flipping the declaration with `H` bit-identical changes nothing:
 | `Psd` → `Unknown` | `Optimal chg=4` |
 
 Since `H` must already be bit-identical to reach this path, a differing
-declaration means the *caller* contradicted itself about one matrix, which is
-worth rejecting as hygiene — but it is not a source of wasted path work, and it
-should not be sold as one.
+declaration means the *caller* contradicted itself about one matrix. That reads
+as worth rejecting on hygiene grounds, and this note originally recommended it.
+
+It was measured and it is not: because the tracer never reads the declaration,
+declining on it cannot improve any path — it can only swap a working path for
+the fallback. Measured at `n = 20`, that swap costs 2 working-set changes
+becoming 5, for nothing. See "Step 2, declined" below. A hygiene check with a
+2.5× price is not hygiene, and the general lesson is that "the caller was
+inconsistent" is a reason to *say so*, not a reason to do less work well.
 
 ## Bullet 2 is real, and the cause is worse than "not interpolated"
 
@@ -442,3 +455,127 @@ the SQP driver, so it needs its own A/B on `benchmarks/warmstart`); or promote
 `reconciled_with` to public API so callers can opt in. The middle one is
 probably right, and it is the kind of change that should be measured rather than
 assumed.
+
+---
+
+## Step 2, declined
+
+Step 1 made rejection cheap, which was supposed to make the guard #602 asks for
+affordable. It was implemented — `same_a` (structure and values), `same_box`,
+`same_inertia`, alongside the existing `same_h` — measured, and **backed out**.
+
+The measurement is the reason. Because the verdict looked size-dependent, the
+instrument gained a size dimension, and that is what killed the guard. Below,
+working-set changes with the guard off (what shipped before) against on, over
+every row it changes, at two sizes of the same family:
+
+| size | row | before | after | cold | |
+|---|---|--:|--:|--:|---|
+| n=20 | A 0.02 | 2 | 5 | 12 | worse |
+| n=20 | A 0.05 | 2 | 3 | 12 | worse |
+| n=20 | A 0.10 | **2** | **34** | 9 | worse |
+| n=20 | A 0.20 | 4 | 31 | 9 | worse |
+| n=20 | A 0.30 | 5 | 30 | 9 | worse |
+| n=20 | A 0.40 | 5 | 32 | 9 | worse |
+| n=20 | A 0.50 | 8 | 32 | 9 | worse |
+| n=20 | A 0.60 | 7 | 30 | 9 | worse |
+| n=20 | A 0.80 | 32 | 29 | 11 | better |
+| n=20 | A 1.00 | 30 | 29 | 11 | better |
+| n=20 | xu = 2 | 2 | 5 | 51 | worse |
+| n=20 | xu = 0.5 | 47 | 45 | 54 | better |
+| n=20 | xu = 0.1 | 46 | 44 | 64 | better |
+| n=20 | inertia | **2** | **5** | 12 | worse |
+| n=30 | A 0.02 | 3 | 3 | 18 | — |
+| n=30 | A 0.05 | 65 | 64 | 82 | better |
+| n=30 | A 0.10 | 5 | 4 | 19 | better |
+| n=30 | A 0.20 | 6 | 5 | 19 | better |
+| n=30 | A 0.30 | 8 | 7 | 19 | better |
+| n=30 | A 0.40 | 53 | 52 | 16 | better |
+| n=30 | A 0.50 | **54** | **9** | 16 | better |
+| n=30 | A 0.60 | 53 | 52 | 17 | better |
+| n=30 | A 0.80 | 55 | 54 | 71 | better |
+| n=30 | A 1.00 | 45 | 45 | 61 | — |
+| n=30 | xu = 2 | 4 | 3 | 97 | better |
+| n=30 | xu = 0.5 | **77** | **7** | 94 | better |
+| n=30 | xu = 0.1 | 77 | 75 | 103 | better |
+| n=30 | inertia | 4 | 3 | 18 | better |
+
+**16 better, 10 worse, 2 unchanged** — and the split is not noise, it is the
+size: at `n = 30` the guard is better or equal in 14 of 14, at `n = 20` it is
+worse in 9 of 14. Same family, same generator, same perturbations. `A 0.10` at
+`n = 20` goes from 2 working-set changes to 34.
+
+That is [#434](https://github.com/jkitchin/pounce/issues/434)'s situation
+restated: a rule that fires on the losses and the gains alike, whose apparent
+success depends on which instances you happened to measure. #434's standard —
+"if none does, this issue should be closed rather than shipping a guess; the
+failure mode of a bad threshold is giving back more than it recovers, silently"
+— applies unchanged, and this guard does not meet it.
+
+The **inertia** condition is the clearest single argument, because it is the one
+with no upside available even in principle. `hessian_inertia` is not read by the
+tracer or by `factorize_with_inertia_control`, so declining on it cannot improve
+a path — it can only replace one with a fallback. Measured: 2 working-set
+changes become 5, in exchange for nothing. A guard justified as "hygiene" that
+costs 2.5× is not hygiene.
+
+### What the reasoning got wrong
+
+The argument for step 2 was that the path does not *model* `A` or the box, so
+tracing it is unjustified extrapolation. That part is true and the measurement
+does not touch it. What does not follow is that declining is therefore better:
+rejection is not a return to correctness, it is a switch to a *different
+heuristic* — the working-set hint — which has its own failure mode. The guard
+only pays when the hint is the better of the two, and nothing here predicts
+when that is.
+
+Put another way: the choice is not "trace a path that models the change" versus
+"trace one that doesn't". It is between two guesses at the new active set, and
+#602's premise — that the modelled one must be better — is what the data
+declines.
+
+### What would settle it
+
+The discriminator #434 also looked for and did not find: something observable at
+runtime that says whether the previous active set is a good guess *for this
+problem*. The handoff violation is monotone in `‖ΔA‖` and so is a candidate, but
+it separates the good rows from the bad only loosely (§ above). Anything else
+needs the Maros-Mészáros sweep and `benchmarks/warmstart`, not this family.
+
+Recorded in `solver.rs` at the guard itself, so the next reader who has the same
+idea finds the measurement before writing the code.
+
+## Step 1's own losses, which the size sweep also exposed
+
+The same size dimension put a number on where the step-1 fallback loses, which
+the single-size measurement could not. Over the `H`-perturbed block — the one
+where the fallback is the whole behaviour — working-set changes, fallback
+against the cold solve it replaced:
+
+| size | row | ws fallback | cold |
+|---|---|--:|--:|
+| n=20 | H 0.01 | **5** | 12 |
+| n=20 | H 0.01 + A 0.1 | 34 | **9** |
+| n=20 | H 0.10 | **5** | 12 |
+| n=20 | H 0.10 + A 0.1 | 34 | **9** |
+| n=20 | H 0.50 | **5** | 12 |
+| n=20 | H 0.50 + A 0.1 | 35 | **12** |
+| n=30 | H 0.01 | **3** | 18 |
+| n=30 | H 0.01 + A 0.1 | **4** | 19 |
+| n=30 | H 0.10 | **3** | 18 |
+| n=30 | H 0.10 + A 0.1 | **67** | 84 |
+| n=30 | H 0.50 | **2** | 17 |
+| n=30 | H 0.50 + A 0.1 | **65** | 82 |
+
+**9 wins, 3 losses**, and the pattern is legible: the hint is good when the
+previous problem is genuinely close, and bad at `n = 20` when `A` also moved —
+i.e. exactly when the previous active set is not a good guess. Net positive with
+large wins (18 → 3) and real losses (9 → 34).
+
+Step 1 stays: its losses revert to the cold solve it replaced, which is not
+uniformly better either, and the wins are the larger effect. But this is a
+measured regression on a subset, and per `CLAUDE.md` that needs an issue and an
+owner rather than a line in a commit message — it is the same open question as
+the declined guard above, and as #434, seen from a third angle: **there is no
+runtime signal for "is the previous active set worth keeping".** All three want
+the same missing thing.

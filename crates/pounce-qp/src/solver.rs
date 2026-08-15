@@ -61,9 +61,27 @@ pub trait QpSolver {
     ) -> Result<QpSolution, QpError>;
 
     /// Parametric solve: trace the homotopy from `(qp_prev,
-    /// sol_prev)` to `qp_new`. Falls back to
-    /// [`solve`](Self::solve) when the parametric path detects a
-    /// structural change that requires a fresh refactor.
+    /// sol_prev)` to `qp_new`.
+    ///
+    /// The path interpolates `g` and the row bounds, and is traced when the
+    /// two problems have the same shape and a bit-identical `H`. A pair
+    /// that fails that — or a previous solve that did not reach
+    /// [`QpStatus::Optimal`], or a path the tracer cannot complete — falls
+    /// back to [`solve_with_working_set`](Self::solve_with_working_set) on
+    /// `sol_prev`'s working set, and to a cold [`solve`](Self::solve) when
+    /// that working set is unusable too. So handing over a previous solve
+    /// that turns out ineligible costs nothing beyond the cold solve the
+    /// caller would have done anyway.
+    ///
+    /// **`A` and `xl`/`xu` are not interpolated and not guarded on.** A pair
+    /// differing in either is still traced, and the path then extrapolates
+    /// about a point that is not on the previous problem's solution
+    /// manifold. The result stays correct — the path is a predictor and the
+    /// corrector re-solves — but the active-set prediction degrades, and how
+    /// much is not predictable from the size of the change. Callers wanting
+    /// the path to model what it is given should keep `A` and the variable
+    /// bounds fixed and vary `g` and the row bounds, which is the parametric
+    /// family this entry point is for. See gh #602.
     fn solve_parametric(
         &mut self,
         qp_prev: &QpProblem,
@@ -3781,12 +3799,35 @@ impl ParametricActiveSetSolver {
         // same `H`. `H` is not interpolated along the path (only `g` and the row
         // bounds are), so a changed Hessian would make the traced path solve a
         // different problem than the one requested. Rather than silently
-        // mispredict, fall back to a cold solve — correct, just not warm.
+        // mispredict, fall back (see below) — correct, just not warm.
+        //
+        // `A`, `xl`/`xu` and `hessian_inertia` are **deliberately not** guarded
+        // on, though the path does not model them either. gh #602 proposed
+        // adding them and the measurement declined it; do not re-add without
+        // reading `dev-notes/issue-602-parametric-eligibility.md`.
+        //
+        // The short version: it is not that tracing an unmodelled change is
+        // harmless, it is that declining is not reliably better. Rejecting sends
+        // the call to the working-set fallback, and which of the two wins swings
+        // with problem size on one synthetic family — at `n = 30` the guard is
+        // better or equal in 14 of 14 rows, at `n = 20` it is worse in 9 of 14,
+        // by as much as 2 working-set changes against 34. That is #434's
+        // situation exactly: a rule that fires on the losses and the gains alike.
+        //
+        // `hessian_inertia` is the clearest case against, because it has no
+        // upside at all: the tracer never reads it and neither does
+        // `factorize_with_inertia_control`, so declining on it can only cost —
+        // measured at 2 working-set changes becoming 5, for nothing.
+        //
+        // What would settle it is the discriminator #434 also wanted and did not
+        // find: something observable at runtime that says whether the previous
+        // active set is a good guess for this problem.
         let same_shape = qp_prev.n == qp_new.n && qp_prev.m == qp_new.m;
         let same_h = qp_prev.h.nonzeros() == qp_new.h.nonzeros()
             && qp_prev.h.values() == qp_new.h.values()
             && qp_prev.h.irows() == qp_new.h.irows()
             && qp_prev.h.jcols() == qp_new.h.jcols();
+
         if same_shape
             && same_h
             && sol_prev.status == QpStatus::Optimal

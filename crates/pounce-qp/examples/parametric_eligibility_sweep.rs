@@ -1,29 +1,33 @@
 //! Measurement harness for gh #602 — what does `solve_parametric` actually do
 //! when the caller changes something its eligibility guard does not check?
 //!
-//! `solve_parametric_scoped` admits a warm parametric solve on two conditions:
-//! the two problems have the same `(n, m)`, and the same `H`. The homotopy it
-//! then runs interpolates only `g` and the **row** bounds `(bl, bu)`. Three
-//! things are therefore free to differ between `qp_prev` and `qp_new` without
-//! the path modelling the difference at all: the constraint matrix `A`, the
-//! variable bounds `(xl, xu)`, and the `hessian_inertia` declaration.
+//! The homotopy interpolates only `g` and the **row** bounds `(bl, bu)`. Before
+//! #602 the guard admitting it checked only `(n, m)` and `H`, so three things
+//! could differ between `qp_prev` and `qp_new` with the path modelling the
+//! difference not at all: the constraint matrix `A`, the variable bounds
+//! `(xl, xu)`, and the `hessian_inertia` declaration. This example is what
+//! measured that, and #434 is why it exists at all: no guard in this area gets
+//! chosen without per-problem data.
 //!
-//! #602 asks whether those should be added to the guard. That is a *cost*
-//! question, not a correctness one (the path is a predictor and the corrector
-//! re-solves against the true problem), and #434 established that no guard in
-//! this area gets chosen without per-problem data. This example is the
-//! instrument for the synthetic half of that data; the real half is the
-//! Maros-Mészáros sweep in `pounce-convex/examples/homotopy_sweep.rs`.
+//! It now doubles as the regression instrument for the two changes #602
+//! produced — the guard admits only pairs differing in the interpolated
+//! quantities, and a declined pair keeps the caller's working set instead of
+//! cold-solving. Section headers say which side of the guard each block is on.
+//! The real half of the data is still the Maros-Mészáros sweep in
+//! `pounce-convex/examples/homotopy_sweep.rs`; this family is `n = 30`, `m = 20`
+//! with a diagonal PD `H`, and is an instrument for mechanism, not evidence
+//! about the shipped workload.
 //!
 //! Three routes are timed on the *same* target QP, so the columns are directly
 //! comparable:
 //!
-//! * `homotopy` — `solve_parametric`, i.e. what ships today.
-//! * `cold`     — `solve(qp_new, None)`, i.e. what a stricter guard would fall
-//!                back to.
+//! * `homotopy` — `solve_parametric`, i.e. what ships. On a block the guard
+//!                rejects, this column *is* the fallback.
+//! * `cold`     — `solve(qp_new, None)`, i.e. what the fallback used to be.
 //! * `ws-only`  — `solve_with_working_set(qp_new, sol_prev.working)`, i.e. the
-//!                route the SQP driver already takes, and the fallback that is
-//!                available to a stricter guard but is not what #602 proposes.
+//!                route the SQP driver takes, and what the fallback now does
+//!                (modulo `WorkingSet::reconciled_with`, a no-op whenever the
+//!                two problems share a bound topology — every row here).
 //!
 //! Run:
 //!
@@ -44,8 +48,18 @@ use pounce_qp::{
 };
 use std::rc::Rc;
 
-const N: usize = 30;
-const M: usize = 20;
+/// Problem dimensions for one block of the sweep.
+///
+/// Carried explicitly rather than fixed as constants because the verdict on
+/// `A` changes turns out to *depend* on it: at `(30, 20)` the traced path is
+/// consistently worse than simply re-using the working set, and at `(20, 14)`
+/// it is consistently better. A one-size instrument would have reported
+/// whichever of those it happened to be built on as the answer.
+#[derive(Clone, Copy)]
+struct Size {
+    n: usize,
+    m: usize,
+}
 
 fn backend() -> Box<pounce_feral::FeralSolverInterface> {
     Box::new(pounce_feral::FeralSolverInterface::new())
@@ -93,7 +107,7 @@ struct Data {
     xu: Vec<f64>,
 }
 
-fn data(c: Change) -> Data {
+fn data(sz: Size, c: Change) -> Data {
     let Change {
         dh,
         da,
@@ -101,46 +115,47 @@ fn data(c: Change) -> Data {
         db,
         xu_cap,
     } = c;
+    let (n, m) = (sz.n, sz.m);
 
     // H = diag(1 + i/n): positive definite, so the box relaxation the cold arm
     // starts from is bounded and every route is comparable on the same footing.
     let (mut hi, mut hj, mut hv) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..N {
+    for i in 0..n {
         hi.push((i + 1) as i32);
         hj.push((i + 1) as i32);
-        hv.push((1.0 + (i as f64) / (N as f64)) * (1.0 + dh * pr(i + 907)));
+        hv.push((1.0 + (i as f64) / (n as f64)) * (1.0 + dh * pr(i + 907)));
     }
-    let hs = SymTMatrixSpace::new(N as i32, hi, hj);
+    let hs = SymTMatrixSpace::new(n as i32, hi, hj);
     let mut h = SymTMatrix::new(Rc::clone(&hs));
     h.set_values(&hv);
 
     // Four nonzeros per row, each scaled by its own `da`-sized perturbation —
     // the shape a relinearization produces, rather than a uniform rescale.
     let (mut ai, mut aj, mut av) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..M {
+    for i in 0..m {
         for k in 0..4 {
-            let col = (i * 7 + k * 5) % N;
+            let col = (i * 7 + k * 5) % n;
             ai.push((i + 1) as i32);
             aj.push((col + 1) as i32);
             av.push((0.5 + pr(i * 13 + k).abs()) * (1.0 + da * pr(i * 31 + k + 7)));
         }
     }
-    let asp = GenTMatrixSpace::new(M as i32, N as i32, ai, aj);
+    let asp = GenTMatrixSpace::new(m as i32, n as i32, ai, aj);
     let mut a = GenTMatrix::new(Rc::clone(&asp));
     a.set_values(&av);
 
-    let g: Vec<f64> = (0..N)
+    let g: Vec<f64> = (0..n)
         .map(|j| -2.0 - pr(j).abs() + dg * pr(j + 501))
         .collect();
-    let bl = vec![NLP_LOWER_BOUND_INF; M];
-    let bu: Vec<f64> = (0..M)
+    let bl = vec![NLP_LOWER_BOUND_INF; m];
+    let bu: Vec<f64> = (0..m)
         .map(|i| 1.0 + 0.5 * pr(i + 101).abs() + db * pr(i + 601))
         .collect();
     let xu = match xu_cap {
-        Some(c) => (0..N)
+        Some(c) => (0..n)
             .map(|j| if j % 3 == 0 { c } else { 10.0 * c })
             .collect(),
-        None => vec![NLP_UPPER_BOUND_INF; N],
+        None => vec![NLP_UPPER_BOUND_INF; n],
     };
     Data {
         h,
@@ -148,15 +163,15 @@ fn data(c: Change) -> Data {
         g,
         bl,
         bu,
-        xl: vec![0.0; N],
+        xl: vec![0.0; n],
         xu,
     }
 }
 
-fn qp(d: &Data, inertia: HessianInertia) -> QpProblem<'_> {
+fn qp(sz: Size, d: &Data, inertia: HessianInertia) -> QpProblem<'_> {
     QpProblem {
-        n: N,
-        m: M,
+        n: sz.n,
+        m: sz.m,
         h: &d.h,
         g: &d.g,
         a: &d.a,
@@ -177,13 +192,13 @@ fn cell(s: &QpSolution) -> String {
     )
 }
 
-fn row(label: &str, prev: &Data, new: &Data, inertia_new: HessianInertia) {
+fn row(sz: Size, label: &str, prev: &Data, new: &Data, inertia_new: HessianInertia) {
     let opts = QpOptions {
         use_homotopy: true,
         ..QpOptions::default()
     };
     let mut s = ParametricActiveSetSolver::new(backend());
-    let q_prev = qp(prev, HessianInertia::Psd);
+    let q_prev = qp(sz, prev, HessianInertia::Psd);
     let sol_prev = s.solve(&q_prev, None, &opts).expect("previous solve");
     assert_eq!(
         sol_prev.status,
@@ -191,7 +206,7 @@ fn row(label: &str, prev: &Data, new: &Data, inertia_new: HessianInertia) {
         "{label}: previous solve"
     );
 
-    let q_new = qp(new, inertia_new);
+    let q_new = qp(sz, new, inertia_new);
     let warm = s
         .solve_parametric(&q_prev, &sol_prev, &q_new, &opts)
         .expect("parametric solve");
@@ -230,83 +245,96 @@ fn main() {
         xu_cap: None,
     };
 
-    let prev = data(Change::default());
-    println!(
-        "{:<24} {:>24} {:>24} {:>24}",
-        "change from prev", "homotopy", "cold", "ws-only"
-    );
+    for sz in [Size { n: 20, m: 14 }, Size { n: 30, m: 20 }] {
+        let prev = data(sz, Change::default());
+        println!(
+            "\n================ n = {}, m = {} ================",
+            sz.n, sz.m
+        );
+        println!(
+            "{:<24} {:>24} {:>24} {:>24}",
+            "change from prev", "homotopy", "cold", "ws-only"
+        );
 
-    println!("\n-- only the interpolated quantities move (guard admits; path models it) --");
-    row("g+b small", &prev, &data(BASE), HessianInertia::Psd);
-    row(
-        "g+b large",
-        &prev,
-        &data(Change {
-            dg: 1.50,
-            db: 1.0,
-            ..BASE
-        }),
-        HessianInertia::Psd,
-    );
-
-    println!("\n-- A moves too (guard admits; path does NOT model it) --");
-    for da in [0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00] {
+        println!("\n-- only the interpolated quantities move (guard admits; path models it) --");
+        row(sz, "g+b small", &prev, &data(sz, BASE), HessianInertia::Psd);
         row(
-            &format!("A{da:.2} + g+b small"),
+            sz,
+            "g+b large",
             &prev,
-            &data(Change { da, ..BASE }),
+            &data(
+                sz,
+                Change {
+                    dg: 1.50,
+                    db: 1.0,
+                    ..BASE
+                },
+            ),
             HessianInertia::Psd,
         );
-    }
 
-    println!("\n-- variable bounds tighten (guard admits; path never moves or tests them) --");
-    for c in [2.0, 0.5, 0.1] {
-        row(
-            &format!("xu={c} + g+b small"),
-            &prev,
-            &data(Change {
-                xu_cap: Some(c),
-                ..BASE
-            }),
-            HessianInertia::Psd,
-        );
-    }
+        println!("\n-- A moves too: the guard ADMITS, and the path does NOT model it --");
+        for da in [0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00] {
+            row(
+                sz,
+                &format!("A{da:.2} + g+b small"),
+                &prev,
+                &data(sz, Change { da, ..BASE }),
+                HessianInertia::Psd,
+            );
+        }
 
-    println!("\n-- inertia declaration changes, H bit-identical (guard admits) --");
-    row(
-        "inertia -> Indefinite",
-        &prev,
-        &data(BASE),
-        HessianInertia::Indefinite,
-    );
-    row(
-        "inertia -> Unknown",
-        &prev,
-        &data(BASE),
-        HessianInertia::Unknown,
-    );
+        println!("\n-- variable bounds tighten: the guard ADMITS, never moved or ratio-tested --");
+        for c in [2.0, 0.5, 0.1] {
+            row(
+                sz,
+                &format!("xu={c} + g+b small"),
+                &prev,
+                &data(
+                    sz,
+                    Change {
+                        xu_cap: Some(c),
+                        ..BASE
+                    },
+                ),
+                HessianInertia::Psd,
+            );
+        }
 
-    // The fallback branch. `H` differs, so `same_h` is false and
-    // `solve_parametric` never reaches the homotopy at all — the `homotopy`
-    // column below is really "whatever the ineligible branch does". Compare it
-    // against `ws-only`, which is the working set the caller already handed us.
-    println!("\n-- H moves: the guard REJECTS, so this measures the fallback --");
-    for dh in [0.01, 0.05, 0.10, 0.25, 0.50] {
+        println!("\n-- inertia declaration changes, H bit-identical: the guard ADMITS --");
         row(
-            &format!("H{dh:.2} + g+b small"),
+            sz,
+            "inertia -> Indefinite",
             &prev,
-            &data(Change { dh, ..BASE }),
-            HessianInertia::Psd,
+            &data(sz, BASE),
+            HessianInertia::Indefinite,
         );
-        row(
-            &format!("H{dh:.2} + A0.1 + g+b"),
-            &prev,
-            &data(Change {
-                dh,
-                da: 0.10,
-                ..BASE
-            }),
-            HessianInertia::Psd,
-        );
+
+        // `H` differs, so the guard has always declined here. This block is
+        // what measures the *fallback* rather than the path.
+        println!("\n-- H moves: the guard REJECTS (it always did) --");
+        for dh in [0.01, 0.10, 0.50] {
+            row(
+                sz,
+                &format!("H{dh:.2} + g+b small"),
+                &prev,
+                &data(sz, Change { dh, ..BASE }),
+                HessianInertia::Psd,
+            );
+            row(
+                sz,
+                &format!("H{dh:.2} + A0.1 + g+b"),
+                &prev,
+                &data(
+                    sz,
+                    Change {
+                        dh,
+                        da: 0.10,
+                        ..BASE
+                    },
+                ),
+                HessianInertia::Psd,
+            );
+        }
     }
 }
