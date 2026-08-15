@@ -1537,9 +1537,9 @@ fn chordal_reconstruct(sol: QpSolution, recon: &ChordalRecon, _prob1: &QpProblem
 /// `z_lb`/`z_ub`.
 ///
 /// Warm starts always use the direct (non-HSDE) driver. When `opts.use_hsde`
-/// is true, a cold HSDE solve is retried if the direct warm attempt does not
-/// produce a full answer. This preserves the robust default while ensuring
-/// that a supplied warm point is genuinely used.
+/// is true, a cold HSDE solve is retried if the direct warm attempt fails
+/// without producing a usable answer. `OptimalInaccurate` is usable and is
+/// returned directly, preserving the benefit of the warm start.
 pub fn solve_socp_ipm_warm<F>(
     prob: &QpProblem,
     cones: &[ConeSpec],
@@ -1634,13 +1634,7 @@ where
 
     // `use_hsde` is the fallback permission here, not the initial-driver
     // selector.
-    if opts.use_hsde
-        && matches!(
-            direct.status,
-            QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
-        )
-        && !crate::deadline::expired()
-    {
+    if opts.use_hsde && warm_hsde_retry_needed(direct.status) && !crate::deadline::expired() {
         let hsde_opts = QpOptions {
             use_hsde: true,
             ..*opts
@@ -1659,6 +1653,30 @@ where
         }
     }
     direct
+}
+
+/// Whether a direct warm result has no usable answer and therefore warrants a
+/// cold HSDE retry. `OptimalInaccurate` deliberately stays out of this set:
+/// it is a usable, certified-to-reduced-accuracy result, and retrying would
+/// discard the warm solve's iteration savings.
+fn warm_hsde_retry_needed(status: QpStatus) -> bool {
+    matches!(
+        status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    )
+}
+
+#[cfg(test)]
+mod warm_hsde_fallback_tests {
+    use super::warm_hsde_retry_needed;
+    use crate::qp::QpStatus;
+
+    #[test]
+    fn reduced_accuracy_warm_result_is_not_retried() {
+        assert!(!warm_hsde_retry_needed(QpStatus::OptimalInaccurate));
+        assert!(warm_hsde_retry_needed(QpStatus::NumericalFailure));
+        assert!(warm_hsde_retry_needed(QpStatus::IterationLimit));
+    }
 }
 
 /// Route a problem whose cone product contains an **exponential** cone to the
