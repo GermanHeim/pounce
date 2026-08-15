@@ -147,6 +147,58 @@ impl PdFullSpaceSolver {
         allow_inexact: bool,
         improve_solution: bool,
     ) -> bool {
+        self.solve_with_sigma_x(
+            data,
+            cq,
+            nlp,
+            alpha,
+            beta,
+            rhs,
+            res,
+            allow_inexact,
+            improve_solution,
+            None,
+        )
+    }
+
+    /// [`Self::solve`] against the same system with `sigma_x` replaced.
+    ///
+    /// `sigma_x` is the barrier term the active bounds contribute to
+    /// the `x` diagonal, `z / s` per bound. Zeroing an entry takes that
+    /// bound back out of the active set, which is what a *released*
+    /// bound means, so factoring the result gives the released system
+    /// directly.
+    ///
+    /// This exists because the released system cannot be recovered from
+    /// the converged factor. Reaching it by a rank-1 downdate through a
+    /// Schur complement asks for the difference of two quantities that
+    /// agree to about `eps * sigma`, and on a tightly converged bound
+    /// `sigma` is large enough that the difference is noise -- measured,
+    /// the released answer degrades in proportion to how well the solve
+    /// converged. Factoring is what buys those digits back, and it is
+    /// still one factorization against the twenty to a hundred a
+    /// re-solve would run.
+    ///
+    /// Only `pounce-sensitivity` calls this; the algorithm's own step
+    /// computation goes through [`Self::solve`] and is unaffected, so no
+    /// solver trajectory moves. `sigma_x` is one of the thirteen
+    /// dependency tags, so passing a different vector misses the
+    /// factorization cache and re-factors, and the next ordinary solve
+    /// misses it back -- correctness needs no extra bookkeeping here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_sigma_x(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        alpha: Number,
+        beta: Number,
+        rhs: &IteratesVector,
+        res: &mut IteratesVectorMut,
+        allow_inexact: bool,
+        improve_solution: bool,
+        sigma_x_override: Option<Rc<dyn pounce_linalg::Vector>>,
+    ) -> bool {
         debug_assert!(!allow_inexact || !improve_solution);
         debug_assert!(!improve_solution || beta == 0.0);
 
@@ -169,7 +221,7 @@ impl PdFullSpaceSolver {
         let cq_ref = cq.borrow();
         let j_c = cq_ref.curr_jac_c();
         let j_d = cq_ref.curr_jac_d();
-        let sigma_x = cq_ref.curr_sigma_x();
+        let sigma_x = sigma_x_override.unwrap_or_else(|| cq_ref.curr_sigma_x());
         let sigma_s = cq_ref.curr_sigma_s();
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
