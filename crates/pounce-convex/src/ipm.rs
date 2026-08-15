@@ -1023,22 +1023,7 @@ where
                 ..*opts
             };
             let retry = run(&hsde_opts, &mut make_backend);
-            let upgraded = match (sol.status, retry.status) {
-                // A clean optimum always wins.
-                (_, QpStatus::Optimal) => true,
-                // A failed solve carries no usable answer, so any verdict
-                // with information beats it. An `OptimalInaccurate` original
-                // is a usable answer, so only the clean arm above replaces it
-                // (in particular a contradictory infeasibility claim does not).
-                (
-                    QpStatus::NumericalFailure | QpStatus::IterationLimit,
-                    QpStatus::OptimalInaccurate
-                    | QpStatus::PrimalInfeasible
-                    | QpStatus::DualInfeasible,
-                ) => true,
-                _ => false,
-            };
-            if upgraded {
+            if hsde_retry_is_upgrade(sol.status, retry.status) {
                 return retry;
             }
         }
@@ -1648,15 +1633,7 @@ where
             ..*opts
         };
         let retry = solve_socp_ipm_inner(prob, cones, &hsde_opts, &mut make_backend);
-        let upgraded = match (direct.status, retry.status) {
-            (_, QpStatus::Optimal) => true,
-            (
-                QpStatus::NumericalFailure | QpStatus::IterationLimit,
-                QpStatus::OptimalInaccurate | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible,
-            ) => true,
-            _ => false,
-        };
-        if upgraded {
+        if hsde_retry_is_upgrade(direct.status, retry.status) {
             return retry;
         }
     }
@@ -1674,9 +1651,24 @@ fn warm_hsde_retry_needed(status: QpStatus) -> bool {
     )
 }
 
+/// Whether a retry has strictly more useful status information than the
+/// original solve. A clean optimum always wins; a failed solve can be
+/// replaced by any usable verdict, while an inaccurate result is replaced
+/// only by a clean optimum.
+fn hsde_retry_is_upgrade(original: QpStatus, retry: QpStatus) -> bool {
+    match (original, retry) {
+        (_, QpStatus::Optimal) => true,
+        (
+            QpStatus::NumericalFailure | QpStatus::IterationLimit,
+            QpStatus::OptimalInaccurate | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible,
+        ) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod warm_hsde_fallback_tests {
-    use super::warm_hsde_retry_needed;
+    use super::{hsde_retry_is_upgrade, warm_hsde_retry_needed};
     use crate::qp::QpStatus;
 
     #[test]
@@ -1684,6 +1676,26 @@ mod warm_hsde_fallback_tests {
         assert!(!warm_hsde_retry_needed(QpStatus::OptimalInaccurate));
         assert!(warm_hsde_retry_needed(QpStatus::NumericalFailure));
         assert!(warm_hsde_retry_needed(QpStatus::IterationLimit));
+    }
+
+    #[test]
+    fn retry_replaces_only_with_strictly_better_status() {
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::NumericalFailure,
+            QpStatus::OptimalInaccurate
+        ));
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::IterationLimit,
+            QpStatus::PrimalInfeasible
+        ));
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::OptimalInaccurate,
+            QpStatus::Optimal
+        ));
+        assert!(!hsde_retry_is_upgrade(
+            QpStatus::OptimalInaccurate,
+            QpStatus::PrimalInfeasible
+        ));
     }
 }
 
