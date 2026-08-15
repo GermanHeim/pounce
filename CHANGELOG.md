@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a released bound is now accurate at a tight tolerance (#587 follow-up)
+
+`sens_boundcheck` / `estimate(mode="fix_relax")` could release a bound
+onto the wrong answer, and did so more badly the *better* the solve had
+converged. Asking for `tol = 1e-10` instead of `1e-6` made the released
+coordinate about 30000x less accurate, with no warning: the check that
+guards the refinement watches the condition it imposed, which a release
+does satisfy, while the error lands in the other variables.
+
+The cause is that an active bound contributes `sigma = z / s` to the
+KKT's `x` diagonal. That term grows as the solve converges, and it
+destroys the released system's information in the converged factor, so
+no amount of rearranging recovers a release from it. Releases are now
+computed by dropping the bound's `sigma` and re-factoring — one
+factorization per released set, still well under a re-solve, and none
+at all for a step that releases nothing.
+
+Measured on the release model, error against the exact answer: at
+`tol = 1e-8`, 2.4e-7 → 2.2e-12; at `tol = 1e-10`, 2.2e-4 → 9.6e-15. The
+same holds under `obj_scaling_factor`, which reaches the defect by
+moving where the solve stops: flat at ~1.5e-10 across six decades,
+against 8.7e-4 at `obj_scaling_factor = 1000` before.
+
+Pinning is unchanged, as is every path that releases no bound.
+
 ### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
