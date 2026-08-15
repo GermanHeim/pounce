@@ -100,9 +100,65 @@ set is worth keeping.** The step-1 fallback wins 9 of 12 rows in the same size
 sweep and loses 3, all at `n = 20` with `A` moved — precisely where the
 previous active set is a poor guess.
 
-Background, the full measurement, and the two remaining options #602 raises
-(the missing bound-adding ratio-test events, interpolating `A`) are in
+Background and the full measurement are in
 `dev-notes/issue-602-parametric-eligibility.md`.
+
+### Fixed — the QP homotopy could not add a variable bound to the working set (#602)
+
+The §4.2 path's `Event` enum had `AddRowLower`/`AddRowUpper`/`DropRow`/
+`DropBound`, and its primal ratio test looped over general rows only. Bounds
+could therefore be *dropped* but never *added*: no inactive variable bound could
+become active along the path, so `x(t)` crossed one with nothing capping the
+step, and `worst_path_violation` skipped the box, so nothing reported it either.
+A crossing is absorbing — the ratio test only ever prevents a violation, never
+repairs one — so a bound crossed once stayed crossed for the rest of the path.
+
+This is a defect on the **cold** arm as much as the parametric one: nothing
+about starting from the box relaxation stops the direction leaving the box on
+the way to `t = 1`.
+
+Adds `AddBoundLower`/`AddBoundUpper` and the matching ratio test over
+`j in 0..n` (simpler than the row test — variable bounds do not move along the
+path, so `dx` alone governs the crossing), a `tabu_bounds` mirroring
+`tabu_cons` because the rank repair can now fight the new test the way it did
+for rows, and the box to the path-feasibility report.
+
+Measured on `benchmarks/warmstart`, whose `-hom` arms differ from their twins by
+exactly one option — the instrument #434 used — over 42 family×scale
+combinations, summing inner-QP working-set changes:
+
+| arm | base → new |
+|---|---|
+| `cold-sqp`, `warm-sqp`, all IPM arms | **bit-identical** |
+| `cold-sqp-hom` | 36726 → **28487** (−22%) |
+| `warm-sqp-hom` | 2240 → **2005** (−10%) |
+
+The non-homotopy arms being bit-identical is the control: the change is confined
+to the tracer. Solved counts are unchanged (855/855 SQP, 549/549 QP). In #434's
+framing, the homotopy's excess inner work over the conventional path falls from
+2.82× to 2.18× cold, and 2.22× to 1.99× warm.
+
+The aggregate hides the distribution, so: 4 rows better and 16 worse on
+`cold-sqp-hom`, 9 and 9 on `warm-sqp-hom`, with the entire net coming from one
+family — `mpc_horizon_80` drops ~4× (−10580) while every other family together
+moves +2341. Wall-clock is flat (41.8 s → 42.7 s). Part of the "worse" is the
+metric rather than the path: the tracer now takes pivots it used to skip by
+walking through the bound, and each counts as a working-set change. That the win
+lands on MPC is not incidental — MPC is mostly box constraints, which is exactly
+what the missing events were blind to.
+
+The CLI fixture sweep is empty on the default and `active-set-sqp` arms. With
+`sqp_qp_use_homotopy=yes` one line moves: `jit1` goes from
+`SearchDirectionBecomesTooSmall it=8` to `MaximumIterationsExceeded it=2`. That
+fixture does not solve on the active-set-SQP path in any configuration —
+homotopy off it is `MaximumIterationsExceeded it=0` before and after alike — so
+it is a fixture that fails either way changing which failure it reports.
+
+**Not yet measured:** `pounce-convex`'s active-set QP driver sets
+`use_homotopy: true` and is the one shipped path where the tracer runs by
+default. The Maros-Mészáros corpus it needs was not available where this ran, so
+`pounce-convex/examples/homotopy_sweep.rs` over the 138 problems, homotopy-on
+before and after, is outstanding and should happen before release.
 
 - **SOCP warm starts now support first-class variable bounds.** Bounds are
   expanded and bound duals normalized internally; warm solves force the direct

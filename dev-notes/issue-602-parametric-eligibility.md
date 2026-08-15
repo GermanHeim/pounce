@@ -579,3 +579,120 @@ owner rather than a line in a commit message — it is the same open question as
 the declined guard above, and as #434, seen from a third angle: **there is no
 runtime signal for "is the previous active set worth keeping".** All three want
 the same missing thing.
+
+---
+
+## Step 3, implemented and measured
+
+The homotopy had no way to say "an inactive variable bound became active". The
+`Event` enum carried `AddRowLower/AddRowUpper/DropRow/DropBound`, and the primal
+ratio test looped `for i in 0..m` over general rows only, so `x(t)` crossed
+inactive bounds with nothing capping the step — on the **cold** arm as much as
+the warm one — and `worst_path_violation` skipped the box, so nothing reported
+it either. This adds `AddBoundLower` / `AddBoundUpper`, the matching ratio test
+over `j in 0..n`, a `tabu_bounds` mirroring `tabu_cons` (the rank repair can now
+fight the new test the way it did for rows), and the box to the feasibility
+report.
+
+The bound test is simpler than the row test because variable bounds do not move
+along this path: the bound's own rate is zero, so `dx` alone governs.
+
+### Instrument
+
+`benchmarks/warmstart`, whose `-hom` arms differ from their twins by exactly one
+option (`sqp_qp_use_homotopy`) — the same instrument #434 used. 42 family×scale
+combinations, 8 arms, run against the Python bindings built from this tree. The
+metric is `n_qp_ws_changes`, inner-QP working-set changes summed over every
+step, which is what #434 reported.
+
+The Maros-Mészáros corpus is **not** available in this container
+(`BENCH_DATA_ROOT` unset), so `pounce-convex`'s driver is not covered. See the
+gap at the end.
+
+### Result
+
+| arm | ws changes, base → new | solved |
+|---|---|---|
+| `cold-ipm`, `cold-qp-ipm`, `warm-ipm`, `warm-qp-ipm` | 0 → 0 | unchanged |
+| `cold-sqp` | 13038 → **13038** | unchanged |
+| `warm-sqp` | 1009 → **1009** | unchanged |
+| `cold-sqp-hom` | 36726 → **28487** (−22%) | unchanged |
+| `warm-sqp-hom` | 2240 → **2005** (−10%) | unchanged |
+
+The non-homotopy arms are **bit-identical**, which is the control this needed:
+the change is confined to the tracer. Solved counts are unchanged everywhere
+(855/855 SQP, 549/549 QP), so nothing traded correctness for speed.
+
+In #434's framing — the homotopy's excess inner work over the conventional path
+— this recovers about a quarter of it:
+
+| | base | new |
+|---|---|---|
+| cold, homotopy ÷ conventional | 2.82× | **2.18×** |
+| warm, homotopy ÷ conventional | 2.22× | **1.99×** |
+
+### The distribution, which the aggregate hides
+
+| arm | rows better | rows worse | unchanged |
+|---|--:|--:|--:|
+| `cold-sqp-hom` | 4 | 16 | 22 |
+| `warm-sqp-hom` | 9 | 9 | 24 |
+
+And the net is one family:
+
+| arm | net | `mpc_horizon_80` | every other family |
+|---|--:|--:|--:|
+| `cold-sqp-hom` | −8239 | **−10580** | **+2341** |
+| `warm-sqp-hom` | −235 | −546 | +311 |
+
+`mpc_horizon_80` drops roughly 4× (`4749 → 1229`, `5115 → 1605`, `4708 → 1158`
+across scales). Everything else gets modestly worse.
+
+Two readings, and both are partly right. Some of the "worse" is real. But some
+of it is an artefact of the metric: the path now *takes* pivots it previously
+skipped by walking through the bound, and every one of those counts as a
+working-set change. A path that walks through a bound is cheap per step and
+wrong about the active set; the corrector then pays for it, off this metric.
+
+Wall-clock is the honest check on that, and it is **flat**: 41.8 s → 42.7 s
+(`cold-sqp-hom`), 3.9 s → 4.2 s (`warm-sqp-hom`). So outside `mpc_horizon_80`
+this buys correctness of the path, not speed.
+
+That `mpc_horizon_80` is where the win lands is not a coincidence worth
+shrugging at: MPC problems are mostly box constraints, which is exactly the
+structure the missing events were blind to, and MPC is the workload §4.2 cites
+as the reason for a parametric active-set method at all.
+
+### Fixture sweep
+
+* default arm: **empty diff**
+* `algorithm=active-set-sqp`: **empty diff** (the option defaults to homotopy
+  off, so this arm does not reach the tracer)
+* `algorithm=active-set-sqp sqp_qp_use_homotopy=yes`: **one line moves**
+
+```
+- jit1   SearchDirectionBecomesTooSmall  it=8  obj=170563.5973
++ jit1   MaximumIterationsExceeded       it=2  obj=165557.7682
+```
+
+Explained: `jit1` does not solve on the active-set-SQP path in *any*
+configuration. Homotopy off it is `MaximumIterationsExceeded it=0`, before and
+after this change alike (that arm's diff is empty). It solves only on the
+default IPM path (`SolveSucceeded it=24`). So the moving line is a fixture that
+fails on this path either way changing *which* failure it reports — not a
+capability regression. Worth stating plainly rather than leaving as an
+unexplained diff, since an unexplained moving line is how #544 shipped.
+
+### The gap, which matters before release
+
+`pounce-convex`'s active-set QP driver sets `use_homotopy: true` — it is the one
+shipped path where the tracer runs **by default**, and it is precisely the path
+this measurement does not cover, because the Maros-Mészáros corpus is not
+available here. #434's own numbers came from that corpus and are the reason the
+homotopy's cost profile is known at all.
+
+So: the SQP evidence above is real and positive, and the convex-QP evidence does
+not exist yet. Running
+`cargo run -p pounce-convex --release --example homotopy_sweep` over the 138
+problems, homotopy-on before and after, is the missing step, and it should
+happen before this reaches a release rather than after.
