@@ -61,9 +61,28 @@ fn pr(k: usize) -> f64 {
     ((s % 2000) as f64) / 1000.0 - 1.0
 }
 
-/// One member of the parametric family. `da` perturbs every entry of `A`
-/// (structure fixed), `dg` shifts `g`, `db` shifts the row upper bounds, and
-/// `xu_cap` tightens the variable box from `+inf` onto a finite cap.
+/// What moves between the previous problem and the new one.
+///
+/// `dh` is the one the guard *rejects* on; the rest it admits. Splitting them
+/// out this way keeps the two questions #602 raises separable: what the guard
+/// lets through (`da`, `xu_cap`, and the inertia argument to `row`), and what
+/// it costs to be turned away (`dh`).
+#[derive(Clone, Copy, Default)]
+struct Change {
+    /// Relative perturbation of the Hessian diagonal. Non-zero ⇒ `same_h` is
+    /// false ⇒ the parametric guard declines and takes the fallback branch.
+    dh: f64,
+    /// Relative perturbation of every entry of `A`; structure fixed.
+    da: f64,
+    /// Shift applied to `g`.
+    dg: f64,
+    /// Shift applied to the row upper bounds.
+    db: f64,
+    /// Finite cap for the variable box, which is `+inf` above by default.
+    xu_cap: Option<f64>,
+}
+
+/// One member of the parametric family.
 struct Data {
     h: SymTMatrix,
     a: GenTMatrix,
@@ -74,14 +93,22 @@ struct Data {
     xu: Vec<f64>,
 }
 
-fn data(da: f64, dg: f64, db: f64, xu_cap: Option<f64>) -> Data {
+fn data(c: Change) -> Data {
+    let Change {
+        dh,
+        da,
+        dg,
+        db,
+        xu_cap,
+    } = c;
+
     // H = diag(1 + i/n): positive definite, so the box relaxation the cold arm
     // starts from is bounded and every route is comparable on the same footing.
     let (mut hi, mut hj, mut hv) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..N {
         hi.push((i + 1) as i32);
         hj.push((i + 1) as i32);
-        hv.push(1.0 + (i as f64) / (N as f64));
+        hv.push((1.0 + (i as f64) / (N as f64)) * (1.0 + dh * pr(i + 907)));
     }
     let hs = SymTMatrixSpace::new(N as i32, hi, hj);
     let mut h = SymTMatrix::new(Rc::clone(&hs));
@@ -193,23 +220,32 @@ fn row(label: &str, prev: &Data, new: &Data, inertia_new: HessianInertia) {
 }
 
 fn main() {
-    let prev = data(0.0, 0.0, 0.0, None);
+    /// The small `g` / `b` movement every row carries, so the differences
+    /// between rows are attributable to the quantity named in the label.
+    const BASE: Change = Change {
+        dh: 0.0,
+        da: 0.0,
+        dg: 0.15,
+        db: 0.2,
+        xu_cap: None,
+    };
+
+    let prev = data(Change::default());
     println!(
         "{:<24} {:>24} {:>24} {:>24}",
         "change from prev", "homotopy", "cold", "ws-only"
     );
 
     println!("\n-- only the interpolated quantities move (guard admits; path models it) --");
-    row(
-        "g+b small",
-        &prev,
-        &data(0.0, 0.15, 0.2, None),
-        HessianInertia::Psd,
-    );
+    row("g+b small", &prev, &data(BASE), HessianInertia::Psd);
     row(
         "g+b large",
         &prev,
-        &data(0.0, 1.50, 1.0, None),
+        &data(Change {
+            dg: 1.50,
+            db: 1.0,
+            ..BASE
+        }),
         HessianInertia::Psd,
     );
 
@@ -218,7 +254,7 @@ fn main() {
         row(
             &format!("A{da:.2} + g+b small"),
             &prev,
-            &data(da, 0.15, 0.2, None),
+            &data(Change { da, ..BASE }),
             HessianInertia::Psd,
         );
     }
@@ -228,7 +264,10 @@ fn main() {
         row(
             &format!("xu={c} + g+b small"),
             &prev,
-            &data(0.0, 0.15, 0.2, Some(c)),
+            &data(Change {
+                xu_cap: Some(c),
+                ..BASE
+            }),
             HessianInertia::Psd,
         );
     }
@@ -237,13 +276,37 @@ fn main() {
     row(
         "inertia -> Indefinite",
         &prev,
-        &data(0.0, 0.15, 0.2, None),
+        &data(BASE),
         HessianInertia::Indefinite,
     );
     row(
         "inertia -> Unknown",
         &prev,
-        &data(0.0, 0.15, 0.2, None),
+        &data(BASE),
         HessianInertia::Unknown,
     );
+
+    // The fallback branch. `H` differs, so `same_h` is false and
+    // `solve_parametric` never reaches the homotopy at all — the `homotopy`
+    // column below is really "whatever the ineligible branch does". Compare it
+    // against `ws-only`, which is the working set the caller already handed us.
+    println!("\n-- H moves: the guard REJECTS, so this measures the fallback --");
+    for dh in [0.01, 0.05, 0.10, 0.25, 0.50] {
+        row(
+            &format!("H{dh:.2} + g+b small"),
+            &prev,
+            &data(Change { dh, ..BASE }),
+            HessianInertia::Psd,
+        );
+        row(
+            &format!("H{dh:.2} + A0.1 + g+b"),
+            &prev,
+            &data(Change {
+                dh,
+                da: 0.10,
+                ..BASE
+            }),
+            HessianInertia::Psd,
+        );
+    }
 }

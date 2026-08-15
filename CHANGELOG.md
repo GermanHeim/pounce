@@ -9,6 +9,56 @@ changes.
 
 ## [Unreleased]
 
+### Changed — a declined `solve_parametric` now keeps the caller's working set (#602)
+
+`QpSolver::solve_parametric` admits the homotopy only when the two problems
+have the same shape and a bit-identical `H`, because `H` is not interpolated
+along the path. When it declines — or when the tracer returns `Ok(None)` — it
+used to fall through to `self.solve(qp_new, None, opts)`: a cold solve that
+throws away the working set the caller has just handed over, one argument
+earlier in the same call.
+
+The primal genuinely does not carry over between two QPs, which is why the
+homotopy exists at all. The *discrete* state does, and it is far more stable
+than the iterate: it records which constraints bind, not where the solution is.
+The declined branch now routes through `solve_with_working_set`, which pins a
+fresh primal satisfying the hinted active rows and repairs the pin if some
+other row is violated (#428) — the same standing bet the active-set SQP driver
+already makes on every outer iteration, where each linearization moves `A` and
+translates the row bounds by `-c(x_k)`.
+
+Measured over rejected pairs (`H` perturbed, so the guard declines and this
+branch is the whole behaviour of `solve_parametric`), on the synthetic family
+in the new `pounce-qp` example `parametric_eligibility_sweep`:
+
+| `H` perturbation | working-set changes, was → now | time |
+|---|---|---|
+| 1% | 18 → **3** | 13.9 ms → **1.3 ms** |
+| 10% | 18 → **3** | 14.8 ms → **1.1 ms** |
+| 50% | 17 → **2** | 14.2 ms → **0.8 ms** |
+| 10%, with `A` also 10% off | 84 → **67** | 61.8 ms → **42.5 ms** |
+
+Answers are unchanged (agreement with a cold solve of the same target within
+`1.8e-15` across the sweep); this moves how the answer is reached, not what it
+is. Two conditions gate the hint: the previous solve must have reached
+`Optimal` (a `TimeLimit` result carries an all-inactive `WorkingSet::cold`, and
+a `MaxIter` one carries a set that was still moving), and the working set must
+be dimensionally valid for the new problem — otherwise `solve_with_working_set`
+would return `WarmStartDimensionMismatch` and turn "no warm start available"
+into "solve failed".
+
+`crates/pounce-qp/tests/homotopy.rs` pins the change count, not just the
+answer: the previous behaviour returned the *right* result and would have
+passed an answer-only assertion, which is the gh #544 failure mode. The CLI
+fixture sweep is unchanged on both the default and `algorithm=active-set-sqp`
+arms — expected, since `solve_parametric` currently has no production caller,
+and therefore *not* evidence for the change on its own.
+
+Background and the measurement behind the other three options #602 raises
+(tightening the guard on `A` / `xl` / `xu`, adding the missing bound-adding
+ratio-test events, interpolating `A`) are in
+`dev-notes/issue-602-parametric-eligibility.md`.
+
 - **SOCP warm starts now support first-class variable bounds.** Bounds are
   expanded and bound duals normalized internally; warm solves force the direct
   driver for symmetric cones and may fall back to cold HSDE when enabled.

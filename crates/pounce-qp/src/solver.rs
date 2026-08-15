@@ -3795,6 +3795,51 @@ impl ParametricActiveSetSolver {
         {
             return Ok(sol);
         }
+
+        // The path did not run — the guard declined it, or the tracer returned
+        // `Ok(None)`. Neither is a reason to throw away the *working set* the
+        // caller just handed us, which is what a cold solve here does.
+        //
+        // The primal genuinely does not carry over (that is why there is a
+        // homotopy at all), but the discrete state does: `solve_with_working_set`
+        // pins a fresh primal satisfying the hinted active rows, repairs the pin
+        // if some other row is violated (#428), and only then runs the
+        // conventional loop. So the hint costs one pinned-KKT factorization and
+        // is worth having even when it is stale — which is exactly the SQP
+        // driver's standing bet (`sqp_alg.rs` warm-starts this way on every
+        // iteration, because each linearization moves `A` and translates the row
+        // bounds by `-c(x_k)`).
+        //
+        // Measured on the synthetic family in
+        // `examples/parametric_eligibility_sweep.rs`, over the rejected pairs
+        // (`H` perturbed, so `same_h` is false and this branch is the whole
+        // behaviour of `solve_parametric`):
+        //
+        // | H perturbation | cold (was) | working-set hint (now) |
+        // |---|---|---|
+        // | 1%  | 18 changes | **3** |
+        // | 10% | 18 changes | **3** |
+        // | 50% | 17 changes | **2** |
+        //
+        // The hint survives a 50% Hessian perturbation because what it encodes
+        // is which constraints bind, and that is far more stable under a change
+        // of `H` than the iterate is. See gh #602 and
+        // `dev-notes/issue-602-parametric-eligibility.md`.
+        //
+        // Conditions. The working set must be dimensionally valid for the new
+        // problem, or `solve_with_working_set` rejects it with
+        // `WarmStartDimensionMismatch` — a hard `Err` out of a call that has a
+        // perfectly good cold answer available, which would turn a shape change
+        // from "warm start unavailable" into "solve failed". And the previous
+        // solve must have reached `Optimal`: a `TimeLimit` result carries
+        // `WorkingSet::cold` (all-inactive, i.e. no information) and a `MaxIter`
+        // one carries a set that was still moving, neither of which the
+        // measurement above covers.
+        if sol_prev.status == QpStatus::Optimal
+            && sol_prev.working.validate_dims(qp_new.n, qp_new.m).is_ok()
+        {
+            return self.solve_with_working_set(qp_new, &sol_prev.working, opts);
+        }
         self.solve(qp_new, None, opts)
     }
 

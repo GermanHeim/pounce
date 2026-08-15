@@ -222,9 +222,10 @@ corrector inside `pounce-sensitivity`". `pounce-sensitivity` does not depend on
 
 Ranked by measured value, not by how closely it matches the issue text.
 
-1. **Change the fallback, not the guard.** `solve_parametric_scoped`'s
-   ineligible branch is `self.solve(qp_new, None, opts)` — a cold solve that
-   throws away a working set the caller just handed us. Routing it to
+1. **Change the fallback, not the guard.** — **done, see below.**
+   `solve_parametric_scoped`'s ineligible branch was
+   `self.solve(qp_new, None, opts)` — a cold solve that throws away a working
+   set the caller just handed us. Routing it to
    `solve_with_working_set(qp_new, &sol_prev.working, opts)` costs nothing when
    the guard already passes and turns every rejection from "start over" into
    "keep the active-set guess". `ws-only` is the fastest of the three routes in
@@ -287,3 +288,78 @@ The tables above are from the debug profile, so read the ratios between columns
 rather than the absolute milliseconds. With the trace enabled each row is
 preceded by three `[hom] summary` lines — previous solve, warm path, cold solve
 — and the middle one carries the handoff violation quoted above.
+
+---
+
+## Step 1, implemented
+
+`solve_parametric_scoped`'s declined branch now routes to
+`solve_with_working_set` when the previous solve reached `Optimal` and its
+working set is dimensionally valid for the new problem, falling back to a cold
+solve otherwise.
+
+The measurement above could not show this, because every row in it is a pair
+the guard *admits* — the fallback is never reached. The sweep therefore gained
+a section that perturbs `H`, which is the one quantity the guard rejects on, so
+`solve_parametric` never reaches the path and the `homotopy` column is the
+fallback and nothing else:
+
+| change | before | after | `ws-only` |
+|---|---|---|---|
+| `H` 1% | `chg=18` 14.8 ms | `chg=3` 1.3 ms | `chg=3` 1.2 ms |
+| `H` 1%, `A` 10% | `chg=19` 16.7 ms | `chg=4` 1.5 ms | `chg=4` 1.8 ms |
+| `H` 5% | `chg=18` 15.5 ms | `chg=3` 1.1 ms | `chg=3` 1.1 ms |
+| `H` 10% | `chg=18` 14.6 ms | `chg=3` 1.1 ms | `chg=3` 1.3 ms |
+| `H` 10%, `A` 10% | `chg=84` 58.1 ms | `chg=67` 42.5 ms | `chg=67` 35.8 ms |
+| `H` 25% | `chg=18` 15.3 ms | `chg=3` 1.4 ms | `chg=3` 1.7 ms |
+| `H` 50% | `chg=17` 15.1 ms | `chg=2` 0.8 ms | `chg=2` 0.8 ms |
+| `H` 50%, `A` 10% | `chg=82` 51.6 ms | `chg=65` 37.1 ms | `chg=65` 34.8 ms |
+
+Two things worth reading off it. The "before" column is *identical* to the
+`cold` column, which is the direct confirmation that the declined branch was a
+cold solve; the "after" column is identical to `ws-only`, which is the
+confirmation that it now isn't. And the hint survives a **50%** Hessian
+perturbation (2 changes against a cold solve's 17) — because what a working set
+encodes is which constraints bind, and that is far more stable under a change
+of `H` than the iterate is. This is why the change is worth making even though
+the guard rejects these pairs for a good reason.
+
+Answers are unchanged: agreement with a cold solve of the same target within
+`1.8e-15` on every row.
+
+### Conditions on the hint
+
+* `sol_prev.status == Optimal`. A `TimeLimit` result carries
+  `WorkingSet::cold` — all-inactive, i.e. no information — and a `MaxIter` one
+  carries a set that was still moving. Neither is covered by the measurement,
+  so neither gets the hint.
+* `sol_prev.working.validate_dims(qp_new.n, qp_new.m).is_ok()`. Without it, a
+  shape change reaches `solve_with_working_set` and comes back
+  `WarmStartDimensionMismatch` — converting "no warm start available" into
+  "solve failed" for a call that has a perfectly good cold answer available.
+
+### Test
+
+`ineligible_parametric_reuses_the_working_set` in
+`crates/pounce-qp/tests/homotopy.rs` asserts the answer matches a cold solve
+**and** that the change count is strictly below it. The second half is the
+point: the old behaviour returned the right answer and would pass any
+answer-only assertion, which is precisely the gh #544 shape. Verified to fail
+against the previous code (7 changes against cold's 7) and pass after.
+
+The two existing closed-form cases are too small to carry that assertion — a
+cold solve reaches their optima in 0–2 working-set changes — so the test builds
+an `n = 12`, `m = 8` case with several rows binding.
+
+### Fixture sweep
+
+`scripts/sweep-fixtures.sh` over all 57 CLI fixtures, baseline against new, on
+both the default arm and `algorithm=active-set-sqp`: **empty diff on both**.
+
+That is the expected result and it is *not* evidence the change is good.
+`solve_parametric` has no production caller, so no CLI fixture can reach the
+branch that moved. The sweep's value here is confirming the change did not leak
+into anything else in `solver.rs` — it bounds collateral damage, it does not
+measure the intended effect. The intended effect is the table above, on a
+synthetic family, and it stays synthetic until something in-tree calls
+`solve_parametric`.
