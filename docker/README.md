@@ -7,8 +7,15 @@ unchanged on the other. They differ only in where the solver comes from.
 
 | File | Solver comes from | Build time | Published as |
 |---|---|---|---|
-| `Dockerfile.release` | PyPI wheels, pinned to `X.Y.Z` | seconds | `:X.Y.Z`, `:X.Y`, `:latest` |
-| `Dockerfile` | compiled from the tree you hand it | minutes | `:edge`, `:sha-<short>` |
+| `Dockerfile.release` | PyPI wheels, pinned to `X.Y.Z` | seconds | `:X.Y.Z`, `:X.Y`, `:latest` on a `v*` tag |
+| `Dockerfile` | compiled from the tree you hand it | minutes | nothing automatic; `:edge`, `:sha-<short>` on a manual run |
+
+Only the release image publishes on its own (gh#599). The source image used
+to go out as `:edge` on every commit to `main`; that trigger is gone, so
+`:edge` in the registry is stale and `make docker` is how you get an image of
+an unreleased fix. It still builds on every PR that touches `docker/**`, so
+it cannot rot, and `release-docker.yml` → *Run workflow* with
+`variant=source`, `dry_run=false` cuts one on demand.
 
 User-facing documentation lives in [`docs/src/docker.md`](../docs/src/docker.md)
 — pull commands, Apptainer/Singularity usage, bind mounts. This file covers
@@ -95,9 +102,9 @@ work.
 
 ## Publishing
 
-`.github/workflows/release-docker.yml` pushes both images to
-`ghcr.io/jkitchin/pounce`. Read the header comment there for the trigger
-matrix; two points matter when cutting a release:
+`.github/workflows/release-docker.yml` pushes the release image to
+`ghcr.io/jkitchin/pounce` on a `v*` tag. Read the header comment there for
+the trigger matrix; two points matter when cutting a release:
 
 1. **Tag order.** The release image installs from PyPI, but the `v*` tag
    this workflow fires on does not publish to PyPI — `python-v*` does. Push

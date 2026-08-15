@@ -7,22 +7,32 @@
 #       pip-installs the published pounce-solver / pyomo-pounce wheels. This
 #       is what a user gets from `docker pull ghcr.io/<owner>/pounce`.
 #   docker/Dockerfile         -> :edge, :sha-<short>
-#       compiles the tree at that commit. For reproducing a bug on an
-#       unreleased fix; :edge always means "tip of main", never a release.
+#       compiles the tree at that commit. NO LONGER PUBLISHED AUTOMATICALLY
+#       (gh#599, see below) — built here only as a PR rot guard, or on demand
+#       via workflow_dispatch with variant=source, dry_run=false.
 #
 # Triggers:
-#   - push of a `v*` tag -> both images, linux/amd64 + linux/arm64. This is
-#     the same marker tag release-crates keys off, so cutting a release ships
-#     crates.io, PyPI, and the images together.
-#   - push to main -> the source image only, as :edge and :sha-<short>. The
-#     release image is unchanged between releases, so rebuilding it here
-#     would only churn the registry.
+#   - push of a `v*` tag -> the release image, linux/amd64 + linux/arm64.
+#     This is the same marker tag release-crates keys off, so cutting a
+#     release ships crates.io, PyPI, and the images together.
 #   - pull_request touching docker/** -> build both, push neither. A
 #     Dockerfile that no longer builds is the failure mode this guards; it
 #     is invisible until the next release otherwise.
 #   - workflow_dispatch -> manual run, DEFAULTS TO A DRY RUN (builds, pushes
 #     nothing). Set dry_run=false to publish. Use this to re-cut the release
-#     image if the PyPI wait below timed out on the tag push.
+#     image if the PyPI wait below timed out on the tag push, or to cut a
+#     one-off source image (variant=source) for a bug repro.
+#
+# NO `push: branches: [main]` (gh#599). It used to publish the source image
+# as :edge and :sha-<short> on every commit to main. Two costs, one benefit:
+# a multi-arch compile of the whole workspace on every merge, and — the
+# reason it is gone — a guaranteed failure in every fork. "Sync fork" pushes
+# to the fork's main, which fires this workflow there, where the ghcr push
+# has no package to write to; contributors got a red X and an email for a
+# workflow that was never theirs to run. The benefit it bought was an image
+# of an unreleased fix, which `make docker` builds locally in the same time
+# the download would take. The `github.repository` guard on `plan` below
+# closes the same hole for the `v*` tag, which forks also receive.
 #
 # ORDERING GOTCHA: the release image installs from PyPI, but a `v*` tag does
 # not itself publish to PyPI — `python-v*` does (release-pounce.yml). Push
@@ -44,7 +54,6 @@ name: release-docker
 on:
   push:
     tags: ["v*"]
-    branches: [main]
   pull_request:
     paths:
       - "docker/**"
@@ -85,6 +94,14 @@ jobs:
   # reads these outputs rather than re-deriving the same event logic.
   plan:
     name: plan
+    # Nothing here can succeed outside the upstream repository: the ghcr
+    # package is jkitchin/pounce's, and a fork's GITHUB_TOKEN cannot write to
+    # it. Forks receive tags along with commits, so `v*` fires there too —
+    # this is what keeps that from being a failed run and an email in someone
+    # else's inbox (gh#599). `pull_request` runs in the *base* repo's context,
+    # so contributor PRs still get the rot guard; a PR opened inside a fork
+    # against the fork's own main does not, which is the point.
+    if: github.repository == 'jkitchin/pounce'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -162,11 +179,19 @@ jobs:
               fi
               ;;
             push)
-              if [ "$is_tag" = true ]; then
-                : # release: both images, both pushed
-              else
-                # main: :edge tracks the tip; the release image is unchanged.
-                build_release=false
+              # `v*` tags are the only push trigger left (gh#599). The source
+              # image is not published on a release: it would compile the same
+              # commit the wheels were built from, so :edge would be a slower
+              # second spelling of :latest rather than "an unreleased fix",
+              # which is the only thing it was ever for. It still builds on
+              # docker/** PRs so it cannot rot, and workflow_dispatch with
+              # variant=source can cut one on demand.
+              build_source=false
+              if [ "$is_tag" != true ]; then
+                # Unreachable given the trigger list; a `push` that is not a
+                # `v*` tag means someone widened `on:` without reading this.
+                echo "::error::release-docker fired on a non-tag push ($REF); refusing to publish." >&2
+                exit 1
               fi
               ;;
             workflow_dispatch)
@@ -390,8 +415,11 @@ jobs:
             # pre-1.0, a bare `0` would span breaking changes.
             tags+=("$VERSION" "${VERSION%.*}" "latest")
           else
-            # sha-<short> pins an exact commit for a bug report; edge floats
-            # with main. Never `latest` — that must mean "released".
+            # Reachable only from a manual variant=source run now (gh#599),
+            # so :edge means "the last commit someone cut a source image
+            # from", not "tip of main" — sha-<short> is the honest tag of the
+            # two and the one to quote in a bug report. Never `latest`; that
+            # must mean "released".
             tags+=("edge" "sha-${SHA:0:8}")
           fi
 

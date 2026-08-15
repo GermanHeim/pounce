@@ -18,11 +18,22 @@ docker run --rm ghcr.io/jkitchin/pounce:latest --version
 | `latest` | the newest release | you just want POUNCE |
 | `X.Y.Z` (e.g. `0.9.0`) | exactly that release, forever | reproducibility — papers, cluster job scripts, CI |
 | `X.Y` (e.g. `0.9`) | newest patch of that minor series | you want fixes but not feature changes |
-| `edge` | tip of `main`, compiled from source | testing an unreleased fix |
-| `sha-<short>` | one specific commit | reproducing a bug report against a known commit |
 
-Pin `X.Y.Z` for anything you intend to re-run months later. `latest` and
-`edge` both move under you.
+Pin `X.Y.Z` for anything you intend to re-run months later — `latest` and
+`X.Y` both move under you.
+
+Published images are cut from releases only. There are `edge` and
+`sha-<short>` tags in the registry from when every commit to `main` was
+built, but they are **frozen at whatever commit last published them** — do
+not read `edge` as "tip of `main`". To run an unreleased fix, build the
+image yourself from a checkout; it takes minutes and needs no Rust
+toolchain on your side beyond Docker:
+
+```sh
+git clone https://github.com/jkitchin/pounce && cd pounce
+make docker          # -> pounce:dev, compiled from the tree you checked out
+docker run --rm pounce:dev --version
+```
 
 ## Running solves
 
