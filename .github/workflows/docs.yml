@@ -34,12 +34,18 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # On the release (workflow_run) trigger, only rebuild if the release
-    # actually succeeded; push/dispatch runs are unconditional. `deploy` needs
-    # `build`, so skipping here skips the deploy too.
+    # Two gates, both of which skip `deploy` as well (it `needs: build`).
+    #
+    # 1. Only the upstream repository can deploy this site — a fork has no
+    #    Pages environment set up for it, so `deploy` fails there. "Sync fork"
+    #    pushes to the fork's main and fires this workflow, which is how forks
+    #    ended up with a red X and an email per sync (gh#599).
+    # 2. On the release (workflow_run) trigger, only rebuild if the release
+    #    actually succeeded; push/dispatch runs are unconditional.
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.repository == 'jkitchin/pounce' &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success')
     steps:
       # fetch-depth: 0 — the versioned build checks out each v* tag via
       # `git worktree`, so the full tag history must be present (the default

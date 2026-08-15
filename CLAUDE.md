@@ -32,6 +32,25 @@ topological order. Run it before tagging.
    `pip install pounce-solver` does not require the crates.io publish — but the
    crates.io publish is still part of a complete release.
 
+## Container images build for stable releases only
+
+A fourth surface, `ghcr.io/jkitchin/pounce`, is **not** covered by the
+version guard above and ships **only on a `v*` tag** (gh#599).
+`.github/workflows/release-docker.yml` has no `main` trigger: the
+source-built image no longer goes out as `:edge` / `:sha-<short>` on every
+merge, so those tags sit frozen at whatever commit last published them and
+must not be read as "tip of `main`". `make docker` is how you get an image
+of an unreleased fix; a manual workflow run (`variant=source`,
+`dry_run=false`) publishes one if a bug report needs it.
+
+Every publishing workflow — the three registry releases, this one, and the
+docs deploy — gates its first job on `github.repository ==
+'jkitchin/pounce'`. Forks receive tags when they sync, and none of these can
+succeed there, so without the gate a contributor's fork sync is a failed run
+and an email. Keep the gate on the job every other job reaches through
+`needs`; `pull_request` runs in the base repo's context, so PR checks are
+unaffected.
+
 ## Trajectory changes need the fixture sweep
 
 A change that reroutes **which** correction the solver reaches for, or that

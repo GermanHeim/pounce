@@ -482,6 +482,33 @@ the contrib `SolverFactory('pounce')` build the same session, because
 `Pounce.solve` sends a model carrying declarations down the same
 in-process route. The messages now name all three.
 
+### Fixed — publishing workflows no longer fail in forks (#599)
+
+Syncing a fork failed three checks — `Deploy docs` and both architectures
+of `release-docker`'s source-image build — every time, because both
+workflows fired on a push to `main` and neither can succeed anywhere but
+this repository: the fork has no Pages environment, and its `GITHUB_TOKEN`
+cannot write to `ghcr.io/jkitchin/pounce`. Contributors got a failed run
+and an email for work that was never theirs to publish.
+
+The container images are now cut from releases only. `release-docker.yml`
+has no `main` trigger at all: the source-built image was what that trigger
+published, as `:edge` and `:sha-<short>`, and it existed to hand out an
+image of an unreleased fix — which `make docker` builds locally in about
+the time the pull would take. The image itself is unchanged and still
+builds on every PR touching `docker/**`, so it cannot rot, and a manual
+run of the workflow (`variant=source`, `dry_run=false`) still publishes one
+when a bug report needs it. `:edge` and `:sha-*` already in the registry
+stay where they are and no longer move; `docs/src/docker.md` says so rather
+than promising a tag that tracks `main`.
+
+Tags reach forks too, so trigger changes alone would not have covered the
+`v*`, `python-v*` and `pyomo-pounce-v*` paths. All four publishing
+workflows and the docs deploy now gate their first job on
+`github.repository == 'jkitchin/pounce'`. Pull requests are unaffected —
+`pull_request` runs in the base repository's context, so a contributor's PR
+still gets the full CI and the Docker rot guard.
+
 ## [0.10.0] - 2026-08-11
 
 ### Fixed — an ill-scaled dense Hessian column no longer costs the solve its certificate

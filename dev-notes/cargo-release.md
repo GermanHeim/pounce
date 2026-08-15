@@ -184,9 +184,12 @@ version number, so they need their own attention.
   half-published, so re-run it from the Actions tab with `dry_run=false` once
   the wheels are live.
 - **What each tag means.** `v*` publishes `:X.Y.Z`, `:X.Y`, `:latest` from
-  the PyPI-based image. A push to `main` publishes `:edge` and
-  `:sha-<short>` from the source-built image. `:latest` therefore always
-  means "released", never "tip of main".
+  the PyPI-based image, and that is the whole of the automatic publishing.
+  The source-built image no longer goes out as `:edge` / `:sha-<short>` on
+  every push to `main` (gh#599) — those tags are frozen at whatever commit
+  last published them. Cut a fresh one from the Actions tab with
+  `variant=source`, `dry_run=false` if a bug report needs an image of an
+  unreleased commit; otherwise `make docker` builds it locally.
 - **After the release, check the base image pin.** `docker/Dockerfile.release`
   is pinned to Debian trixie because the wheels published through 0.9.0
   bundled a CLI needing glibc 2.39 (#452, fixed in #456). Once a release

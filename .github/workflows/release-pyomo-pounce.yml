@@ -34,6 +34,11 @@ jobs:
   # workflow_dispatch, which carries no release tag.
   verify-version:
     name: verify tag matches manifest
+    # Gate the whole workflow on the upstream repository: only it can publish
+    # to PyPI, and forks receive `pyomo-pounce-v*` tags when they sync. Every
+    # other job here reaches this one through `needs`, so skipping it skips
+    # them all (gh#599).
+    if: github.repository == 'jkitchin/pounce'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
