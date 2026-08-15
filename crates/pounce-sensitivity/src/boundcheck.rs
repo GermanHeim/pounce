@@ -294,6 +294,7 @@ pub fn refine_step_onto_bounds<B>(
     lo: &[Number],
     hi: &[Number],
     multipliers: &[BoundMultiplier],
+    rhs_plain: &[Number],
     eps: Number,
     max_passes: usize,
 ) -> Result<(Vec<Number>, Vec<usize>), String>
@@ -324,9 +325,20 @@ where
             .collect(),
     };
     let multipliers = &multipliers[..];
+    let bound_rows = backsolver.bound_rows();
+    let can_release = backsolver.supports_release() && rhs_plain.len() == n_full;
+
     // (compound row, right-hand side), the rhs fixed at creation since
-    // it is measured from the plain step
+    // it is measured from the base step
     let mut pins: Vec<(usize, Number)> = Vec::new();
+    // Multiplier rows taken out of the active set. Unlike a pin these
+    // never become a Schur condition: they change the operator, so the
+    // step is re-solved against a factorization that does not carry
+    // their `sigma` at all.
+    let mut released: Vec<usize> = Vec::new();
+    // The step corrections are measured from. It moves whenever the
+    // released set does, since that is a different system.
+    let mut dx_base = dx_plain.to_vec();
 
     for _ in 0..max_passes {
         let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
@@ -335,24 +347,54 @@ where
         // bound is the more direct violation, and releasing a bound can
         // only matter once the variables it constrains have settled
         let next = match worst_violation(x_curr, &dx, lo, hi, eps, &taken) {
-            Some((i, bound)) => Some((i, (x_curr[i] + dx_plain[i]) - bound)),
-            None => multipliers
-                .iter()
-                .filter(|m| !taken.contains(&m.row))
-                .map(|m| (m.row, m.base + dx[m.row]))
-                .filter(|&(_, v)| v < -eps)
-                // most negative first
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(row, _)| {
-                    let base = multipliers
-                        .iter()
-                        .find(|m| m.row == row)
-                        .map_or(0.0, |m| m.base);
-                    // drive it to zero: the bound stops being active
-                    (row, base + dx_plain[row])
-                }),
+            Some((i, bound)) => Some((i, (x_curr[i] + dx_base[i]) - bound)),
+            None => None,
         };
-        let Some((row, rhs_row)) = next else { break };
+
+        // Pins first. Only when nothing is outside its bound do we look
+        // at releasing, so the primal violations settle before a bound
+        // leaves the active set.
+        let Some((row, rhs_row)) = next else {
+            // A release is not a condition on the step, it is a
+            // different system: re-solve with that bound's `sigma`
+            // gone, then start over from the step that produced.
+            let worst = if can_release {
+                multipliers
+                    .iter()
+                    .filter(|m| !released.contains(&m.row))
+                    .filter(|m| bound_rows.is_some_and(|br| br.iter().any(|b| b.row == m.row)))
+                    .map(|m| (m.row, m.base + dx[m.row]))
+                    .filter(|&(_, v)| v < -eps)
+                    // most negative first
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(r, _)| r)
+            } else {
+                None
+            };
+            let Some(row) = worst else { break };
+            released.push(row);
+            let mut base = vec![0.0; n_full];
+            if !backsolver.solve_released_step(&released, rhs_plain, &mut base) {
+                // Could not factor with that bound out. Keep the step
+                // reached without it, which is what every other stop
+                // here does.
+                released.pop();
+                break;
+            }
+            // A released bound's multiplier is zero by construction; its
+            // own row of the re-solved step is a by-product of the
+            // complementarity row the factor still carries.
+            for &r in &released {
+                if let Some(m) = multipliers.iter().find(|m| m.row == r) {
+                    base[r] = -m.base;
+                }
+            }
+            dx_base = base;
+            dx.copy_from_slice(&dx_base);
+            // pins are measured from the base, which just moved
+            pins.clear();
+            continue;
+        };
         pins.push((row, rhs_row));
 
         let rows: Vec<Index> = pins.iter().map(|&(r, _)| r as Index).collect();
@@ -364,7 +406,14 @@ where
             run_sens: true,
             ..SensOptions::default()
         };
-        let mut pin_app = SensApplication::new(mk(rows.clone())?, backsolver.clone(), opts);
+        // Against the released operator, not the converged one: once a
+        // bound is out of the active set, every later condition has to
+        // be solved in the system that reflects that.
+        let view = ReleasedView {
+            base: backsolver.clone(),
+            rows: released.clone(),
+        };
+        let mut pin_app = SensApplication::new(mk(rows.clone())?, view, opts);
         let rhs: Vec<Number> = pins.iter().map(|&(_, r)| r).collect();
         let mut du = vec![0.0; rows.len()];
         let mut corr = vec![0.0; n_full];
@@ -392,8 +441,45 @@ where
             break;
         }
         for (k, d) in dx.iter_mut().enumerate() {
-            *d = dx_plain[k] + corr[k];
+            *d = dx_base[k] + corr[k];
         }
     }
-    Ok((dx, pins.into_iter().map(|(r, _)| r).collect()))
+    let mut out = released.clone();
+    out.extend(pins.into_iter().map(|(r, _)| r));
+    Ok((dx, out))
+}
+
+/// The converged backsolver with a set of bounds out of the active set,
+/// so the pin machinery can run against the released system without
+/// knowing that is what it is doing.
+#[derive(Clone)]
+struct ReleasedView<B: crate::backsolver::SensBacksolver + Clone> {
+    base: B,
+    rows: Vec<usize>,
+}
+
+impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBacksolver
+    for ReleasedView<B>
+{
+    fn dim(&self) -> usize {
+        self.base.dim()
+    }
+    fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.base.solve_released(&self.rows, rhs, lhs)
+    }
+    fn natural_units_factor(&self) -> Option<&[Number]> {
+        self.base.natural_units_factor()
+    }
+    fn bound_rows(&self) -> Option<&[crate::backsolver::BoundRow]> {
+        self.base.bound_rows()
+    }
+    fn supports_release(&self) -> bool {
+        self.base.supports_release()
+    }
+    fn solve_released(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.base.solve_released(released, rhs, lhs)
+    }
+    fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.base.solve_released_step(released, rhs, lhs)
+    }
 }

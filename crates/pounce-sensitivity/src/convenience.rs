@@ -446,6 +446,12 @@ impl SensSolve {
 
             if let Some(d) = &deltas {
                 let mut dx_full = vec![0.0; n_full];
+                let mut rhs_plain = vec![0.0; n_full];
+                if !sens_app.parametric_rhs(d, &mut rhs_plain) {
+                    outbox_cb.borrow_mut().error =
+                        Some("SensApplication::parametric_rhs failed".into());
+                    return;
+                }
                 if !sens_app.parametric_step(d, &mut dx_full) {
                     outbox_cb.borrow_mut().error =
                         Some("SensApplication::parametric_step failed".into());
@@ -463,6 +469,12 @@ impl SensSolve {
                     let mut rhs = vec![0.0; n_full];
                     for r in rhs.iter_mut().take(end).skip(start) {
                         *r = mu;
+                    }
+                    // the same term on the right-hand side a release
+                    // re-solves against, since the step carries it as a
+                    // correction to the solution instead
+                    for r in rhs_plain.iter_mut().take(end).skip(start) {
+                        *r += mu * crate::solver::BARRIER_SIGN;
                     }
                     let mut bc = vec![0.0; n_full];
                     if !backsolver_for_refine.solve(&rhs, &mut bc) {
@@ -531,6 +543,7 @@ impl SensSolve {
                         &lo,
                         &hi,
                         &mults,
+                        &rhs_plain,
                         eps,
                         16,
                     ) {
