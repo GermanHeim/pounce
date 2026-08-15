@@ -64,7 +64,7 @@ use crate::vec_util::dense_to_vec;
 
 /// Sign of the barrier correction term, set from a comparison
 /// against sIPOPT rather than derived.
-const BARRIER_SIGN: Number = -1.0;
+pub const BARRIER_SIGN: Number = -1.0;
 
 /// Errors returned by post-convergence operations on [`Solver`].
 #[derive(Debug, Clone)]
@@ -526,6 +526,56 @@ impl Solver {
         // so the two agree on their shared block.
     }
 
+    /// The right-hand side [`Self::parametric_step_full`] answers,
+    /// barrier term included. That method adds the term as a correction
+    /// to the solution rather than to the right-hand side, which is the
+    /// same thing by linearity.
+    ///
+    /// The parameter rows go through `map_pin_g_to_kkt_rows` exactly as
+    /// they do there. Passing the constraint indices raw instead puts
+    /// the perturbation on the x rows, where it contributes nothing --
+    /// a release then sees only its own multiplier shift and lands on
+    /// the wrong answer without failing.
+    fn parametric_rhs_full(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+    ) -> Result<Vec<Number>, SolverError> {
+        let state = self.converged().ok_or(SolverError::NotConverged)?;
+        let state = &*state;
+        let dims = state.backsolver.block_dims();
+        let n_full = state.backsolver.dim();
+        let param_rows = state
+            .backsolver
+            .map_pin_g_to_kkt_rows(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
+        let signs = vec![1; pin_constraint_indices.len()];
+        let a_data = IndexSchurData::from_parts(param_rows, signs)
+            .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
+        let opts = SensOptions {
+            run_sens: true,
+            ..SensOptions::default()
+        };
+        let sens_app = SensApplication::new(a_data, state.backsolver.clone(), opts);
+        let mut rhs = vec![0.0; n_full];
+        if !sens_app.parametric_rhs(deltas, &mut rhs) {
+            return Err(SolverError::SensComputationFailed(
+                "SensApplication::parametric_rhs failed".into(),
+            ));
+        }
+        let mu = {
+            let (data, _, _) = state.backsolver.activity_handles();
+            let d = data.borrow();
+            d.curr_mu
+        };
+        let start = dims[0] + dims[1] + dims[2] + dims[3];
+        let end = start + dims[4] + dims[5] + dims[6] + dims[7];
+        for r in rhs.iter_mut().take(end).skip(start) {
+            *r += mu * BARRIER_SIGN;
+        }
+        Ok(rhs)
+    }
+
     /// The barrier correction of the parametric step: the paper's
     /// equation 11 term, which carries the step from the solution of
     /// the barrier problem at `mu > 0` toward the one at `mu = 0`.
@@ -606,6 +656,7 @@ impl Solver {
         max_passes: usize,
     ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
         let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let n_x = state.backsolver.block_dims()[0];
@@ -672,6 +723,7 @@ impl Solver {
             &lo,
             &hi,
             &mults,
+            &rhs_plain,
             eps,
             max_passes,
         )

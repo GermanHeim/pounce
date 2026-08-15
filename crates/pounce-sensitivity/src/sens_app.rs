@@ -208,6 +208,18 @@ impl<B: SensBacksolver> SensApplication<B> {
     /// the Schur factor's only role in sIPOPT's std flow is the
     /// active-set bound-check refinement after a violating step, and
     /// that refinement is a follow-up (sens_boundcheck = yes).
+    /// The right-hand side [`Self::parametric_step`] solves against,
+    /// without solving it. A release re-solves in a system the
+    /// converged factor does not describe, so it needs the right-hand
+    /// side rather than the step.
+    pub fn parametric_rhs(&self, delta_p: &[Number], out: &mut [Number]) -> bool {
+        if out.len() != self.backsolver.dim() || delta_p.len() != self.a_data.nrows() as usize {
+            return false;
+        }
+        out.iter_mut().for_each(|v| *v = 0.0);
+        self.a_data.trans_multiply(delta_p, out).is_ok()
+    }
+
     pub fn parametric_step(&self, delta_p: &[Number], dx_full: &mut [Number]) -> bool {
         let n_full = self.backsolver.dim();
         if dx_full.len() != n_full {

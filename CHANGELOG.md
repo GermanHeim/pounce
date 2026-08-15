@@ -212,11 +212,79 @@ it is a fixture that fails either way changing which failure it reports.
 default. The Maros-Mészáros corpus it needs was not available where this ran, so
 `pounce-convex/examples/homotopy_sweep.rs` over the 138 problems, homotopy-on
 before and after, is outstanding and should happen before release.
+- **A feasible NLP whose constraint rows sit at their own floating-point
+  resolution is no longer refused a certificate — or convicted of local
+  infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit
+  continuation study: `pounce-solver 0.10.0` returned
+  `Infeasible_Problem_Detected` on the Problem 1 `f = 0.02` rung, a
+  known-feasible optimal-control problem that Ipopt 3.14.16 solves. Through
+  Pyomo that status is indistinguishable from a genuine infeasibility proof,
+  which makes it the most damaging verdict the solver can get wrong.
+
+  The model is written in Landau coordinates, so its conduction rows carry
+  `1/(H − S)²` and reach magnitudes near `1e8`. At the point POUNCE stalled on,
+  the scaled KKT error was `4.29e-10` against `tol = 1e-6`, and **no constraint
+  row's residual rose above its own noise floor** — yet the unscaled violation
+  read `1.62e-2`. One ulp of those rows is `~1e-2`, so that number is the
+  quantum the rows are measured in, not a distance from feasibility. Ipopt
+  lands on the same point with `8.06e-3` and calls it `Solved To Acceptable
+  Level`; which side of `1e-2` a run falls on is arithmetic luck.
+
+  gh #528 built the per-row noise floor for exactly this effect but gave it
+  only to the strict **aggregate**, leaving the per-component `constr_viol`
+  test on the raw residual. That was incoherent on its own terms — the
+  component test is a refinement of the aggregate, so an unfloored component
+  could veto a certificate the floored aggregate had already granted, which is
+  precisely what happened here — and it left the rapid-infeasibility detector's
+  absolute arm free to convict on a quantum. Both now consult the same floor,
+  in both cases **only when no row rises above it**: one resolvable row
+  anywhere and `constr_viol_tol` is back in charge. A genuinely infeasible
+  model is untouched, its violation being pinned at its infeasibility gap,
+  orders above `eps ·` the row's own magnitude.
+
+  On the reported rung POUNCE now exits `Optimal Solution Found` in 20
+  iterations at an endpoint of 6.14809 h, matching the issue's expected
+  6.1481 h; before the fix it was `Infeasible_Problem_Detected` on 0.10.0 and a
+  10000-iteration `Maximum_Iterations_Exceeded` on `main`. Ipopt needs 58
+  iterations to reach only "acceptable" on the same rung. The full continuation
+  ladder now walks past the reported failure to `f = 0.01`, every rung
+  `converged_to_tolerance`. On the scale-equivariant LP family from gh #528,
+  extended to the data scales where the quantum clears the issue's
+  `constr_viol_tol = 1e-6`, the change moved 23 verdicts and every one of them
+  improved — `Solved_To_Acceptable_Level`, `Search_Direction_Becomes_Too_Small`
+  and `Maximum_Iterations_Exceeded` all becoming `Solve_Succeeded`, with no
+  verdict degraded anywhere. `primal_noise_floor_kappa = 0` opts out of both
+  gates, as it already did for the aggregate.
 
 - **SOCP warm starts now support first-class variable bounds.** Bounds are
   expanded and bound duals normalized internally; warm solves force the direct
   driver for symmetric cones and may fall back to cold HSDE when enabled.
   Exponential/power cones use their dedicated cold HSDE route.
+
+### Fixed — a released bound is now accurate at a tight tolerance (#587 follow-up)
+
+`sens_boundcheck` / `estimate(mode="fix_relax")` could release a bound
+onto the wrong answer, and did so more badly the *better* the solve had
+converged. Asking for `tol = 1e-10` instead of `1e-6` made the released
+coordinate about 30000x less accurate, with no warning: the check that
+guards the refinement watches the condition it imposed, which a release
+does satisfy, while the error lands in the other variables.
+
+The cause is that an active bound contributes `sigma = z / s` to the
+KKT's `x` diagonal. That term grows as the solve converges, and it
+destroys the released system's information in the converged factor, so
+no amount of rearranging recovers a release from it. Releases are now
+computed by dropping the bound's `sigma` and re-factoring — one
+factorization per released set, still well under a re-solve, and none
+at all for a step that releases nothing.
+
+Measured on the release model, error against the exact answer: at
+`tol = 1e-8`, 2.4e-7 → 2.2e-12; at `tol = 1e-10`, 2.2e-4 → 9.6e-15. The
+same holds under `obj_scaling_factor`, which reaches the defect by
+moving where the solve stops: flat at ~1.5e-10 across six decades,
+against 8.7e-4 at `obj_scaling_factor = 1000` before.
+
+Pinning is unchanged, as is every path that releases no bound.
 
 ### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
 

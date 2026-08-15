@@ -245,7 +245,7 @@ def test_an_absent_bound_does_not_widen_the_tolerance():
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
 
-def active_at_base(p=-1.0):
+def releasing(p=-1.0):
     """x wants to be negative, so its lower bound is active at the base
     point and carries a positive multiplier. A large enough upward
     perturbation should release it."""
@@ -256,6 +256,11 @@ def active_at_base(p=-1.0):
     m.link = pyo.Constraint(expr=m.y == 2 * m.x + 1)
     m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + 0.5 * (m.y - m.p) ** 2)
     declare_sens_param(m.p)
+    return m
+
+
+def active_at_base(p=-1.0):
+    m = releasing(p)
     pyo.SolverFactory("pounce").solve(m)
     return m
 
@@ -285,6 +290,30 @@ def test_fix_relax_releases_a_bound_the_step_wants_to_leave():
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
 
+def test_a_release_holds_at_a_tight_tolerance():
+    """A release is accurate in proportion to how well the solve
+    converged, not inversely.
+
+    The released system is not recoverable from the converged factor: an
+    active bound puts `sigma = z/s` on the x diagonal, and the tighter
+    the solve the larger that term, so a release computed from the held
+    factorization degrades as the slack shrinks. It used to obey
+    err * s ~ 1e-16 -- at this tolerance the answer was off by 2.2e-4,
+    while at a *looser* 1e-6 it was off by 7e-9. Re-factoring without
+    the bound's sigma is what removes the dependence.
+
+    The assertion is four orders tighter than the old error, and the
+    loose-tolerance tests cannot stand in for it: they pass either way.
+    """
+    m = releasing()
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
+
+    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(5 / 3, abs=1e-8)
+    assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-8)
+
+
 def test_a_release_is_not_triggered_when_the_bound_should_stay():
     """A perturbation that pushes further INTO the bound must not
     release it: the multiplier grows rather than going negative."""
@@ -292,6 +321,47 @@ def test_a_release_is_not_triggered_when_the_bound_should_stay():
     fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
+
+
+def scaled_releasing(p=-1.0):
+    """The release model under a change of variables, with the two
+    factors far apart and on both sides of 1."""
+    m = releasing(p)
+    m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.scaling_factor[m.x] = 1000.0
+    m.scaling_factor[m.y] = 0.001
+    return m
+
+
+def test_a_release_holds_under_user_scaling():
+    """The release right-hand side is a bound multiplier read off the
+    converged iterate, so it is in the solve's own coordinates, while
+    the step it joins is in the model's units. Handing over an
+    unconverted multiplier puts a scaled right-hand side into a Schur
+    complement whose other rows are natural, which moves every
+    coordinate of the answer rather than the released one.
+
+    The other release tests cannot catch this: with no scaling active
+    the conversion is the identity, so they pass whichever way round it
+    goes -- which is how the defect survived its first review. Here
+    `d` is 1000 on the released variable, so dropping the conversion
+    or inverting it misses by orders of magnitude rather than by a
+    tolerance.
+    """
+    m = scaled_releasing()
+    pyo.SolverFactory("pounce").solve(
+        m, options={"nlp_scaling_method": "user-scaling"})
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
+
+    # the plain step still cannot leave the bound, scaled or not
+    lin = estimate(m, [(m.p, 3.0)])
+    assert lin[m.x] == pytest.approx(0.0, abs=1e-6)
+
+    # and releasing it reaches the same re-solve the unscaled model does
+    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(1.666667, abs=1e-5)
+    assert fix[m.y] == pytest.approx(4.333333, abs=1e-5)
+    assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
 
 def nonlinear(p=1.0):
