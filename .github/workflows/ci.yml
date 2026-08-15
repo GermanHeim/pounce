@@ -189,6 +189,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax
+          # `gamsapi[core]` is GAMS's own PyPI package: pure Python, no GAMS
+          # install and no license needed. It is here so the GAMS link's
+          # `gmoModelStat_*` / `gmoSolveStat_*` constants can be checked
+          # against GAMS's definitions rather than against a comment. Three of
+          # them were wrong, and a wrong integer there is invisible without
+          # GAMS in the loop — the link runs, the value is in range, and the
+          # `.lst` just says the wrong thing.
+          python -m pip install "gamsapi[core]"
       - name: Run Python tests
         run: python -m pytest python/tests -q
 

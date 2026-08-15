@@ -504,8 +504,10 @@ fix, because the iterate handed to them is the problem.
 Since [#544](https://github.com/jkitchin/pounce/pull/544) pounce already
 handles the sharpest form of this automatically: when the KKT is
 singular to working precision its inertia count is meaningless, and
-`feral_inertia_pivot_floor` (default `1e-12`) routes that case to `δ_c`
-rather than answering an unmeasurable test with `δ_w`. The recipe below
+`feral_inertia_pivot_floor` (default `n · eps` since
+[#592](https://github.com/jkitchin/pounce/issues/592), where `n` is the
+order of the factored KKT) routes that case to `δ_c` rather than
+answering an unmeasurable test with `δ_w`. The recipe below
 is for what remains — it attacks the same degeneracy higher up, capping
 the null-direction step outright, and on some models that is still
 markedly faster.

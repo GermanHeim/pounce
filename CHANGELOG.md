@@ -116,6 +116,142 @@ CLI flag, 1e-9 in the Python binding, and a third invented inside
 which is the value that says how far outside a bound the solve was
 willing to leave a converged point.
 
+- **A premature `Solve_Succeeded` on a badly-scaled model, caused by two
+  defects in the inertia-correction path** (#592). On a fixed-policy NLP from
+  LyoPRONTO's Problem 2 GDP, POUNCE returned `Solve_Succeeded`, and restarting
+  it from the returned primal point improved the objective twice — 25.096 s,
+  0.079 %, in total — landing on the point IPOPT 3.14.16 reaches in one solve.
+
+  The convergence test was not at fault: the certified point clears IPOPT's
+  own unscaled component gates too (dual `9.994e-3 <= 1`, violation
+  `2.844e-6 <= 1e-4`, complementarity `9.091e-7 <= 1e-4`). What differed was
+  the *trajectory*, and two things in the inertia correction were sending it
+  somewhere IPOPT does not go.
+
+  **The inertia-trust floor was dimension-blind.** `feral_inertia_pivot_floor`
+  (#540) decides when a mismatching inertia count is noise, by comparing the
+  smallest equilibrated pivot against a floor. Its rationale is the backward
+  error `n · eps`, but the value shipped was the constant `1e-12` — `n · eps`
+  at `n ≈ 4500`, while these KKT systems are order 165–311, where `n · eps` is
+  3.7e-14 … 6.9e-14. It now defaults to `n · eps` for the system actually being
+  factored. Setting the option explicitly still pins an absolute floor for
+  every dimension, and `0` still disables the trigger, so #540's opt-out is
+  unchanged. Across the 57-fixture CLI corpus exactly two models moved — both
+  the #540 models, both to *fewer* iterations, no status changes.
+
+  **`δ_c` could be spent on a full-rank Jacobian and never withdrawn.** When
+  the noise trigger fires, the handler raises `δ_c`. If the small pivot came
+  from the Hessian block rather than a rank-deficient Jacobian, `δ_c` is the
+  wrong medicine — but the handler kept it and climbed the `δ_x` ladder on top
+  of it, reaching `δ_w = 1e2` on a system IPOPT regularises at `1e-4`. The
+  resulting over-damped step froze the objective for eight iterations, and the
+  loose-tolerance exit then fired at the reported point.
+
+  Which block owns the smallest pivot would settle it directly, but that index
+  is not exposed by the linear-solver backend. What does separate the two
+  populations is how far the `δ_x` ladder climbs while `δ_c` is up: when `δ_c`
+  is right it is right within one rung (#540's models never exceed one), and
+  when it is wrong the ladder climbs without limit (4 rungs here, 14 on
+  `pooling_rt2stp`). So a **`δ_c` walk-back** was added — after
+  `perturb_delta_c_max_rungs` rungs (new option, default `3`) all four deltas
+  are withdrawn, the degeneracy probe is reset, and `δ_c` is latched off for
+  the remainder of that iterate. `w` marks the iteration line when it fires.
+  `perturb_delta_c_max_rungs = 0` restores the previous behaviour exactly.
+
+  With both fixed, the reported first solve reaches `31785.744274` in 27
+  iterations — the reporter's IPOPT answer — so the restart has nothing left to
+  improve. On the stricter criterion the reporter named — the *original cold
+  GDP pipeline*, where every option-level workaround had failed — the cold
+  solve now lands on IPOPT's phase-switch times (1.575762165 h / 3.917595809 h
+  against 1.925104405 h / 3.924408024 h before) and two successive restarts
+  reproduce it to twelve digits. `pooling_rt2stp`, which #544 had cost 812
+  iterations against a pre-#544 206, comes back to 298.
+
+  The reproducer is not vendored: it encodes LyoPRONTO's model equations and
+  LyoPRONTO is GPL-3.0 against POUNCE's EPL-2.0. The behaviour is pinned by
+  unit tests on the walk-back state machine and the dimension-aware floor, plus
+  end-to-end tests on the already-vendored `pooling_rt2stp` fixture, which
+  exhibits the same pattern. Investigation and evidence:
+  `dev-notes/issue-592-restart-non-idempotence.md`.
+
+  *Breaking (Rust API):* `pounce_feral::FeralConfig::inertia_pivot_floor` is
+  now `Option<f64>`, where `None` selects the dimension-aware default.
+
+- **A failed solve no longer raises on one Pyomo route and returns on the
+  other** (#589). `pyomo_pounce`'s two status tables — `sens._STATUS_RESULT`
+  for the legacy route and `v2._V2_STATUS` for `pyomo.contrib.solver` — each
+  listed nine of the engine's twenty exits. The other eleven — among them
+  `Restoration_Failed` — took the default, and on the v2 side that default was
+  `SolutionStatus.noSolution`. `noSolution` is not a severity there; it is the
+  switch that turns the solution loader off, so under the default
+  `load_solutions=True` the same failed solve returned a results object from
+  `SolverFactory("pounce")` and raised `NoSolutionError` from
+  `SolverFactory("pounce_v2")`:
+
+  ```text
+  SolverFactory("pounce")     -> results.solver.termination_condition = error
+  SolverFactory("pounce_v2")  -> NoSolutionError
+  ```
+
+  A restoration failure is an ordinary numerical exit: the engine stops at an
+  iterate and reports it, and `sens_solve` captures that iterate before its
+  non-converged early return — so the v2 route was declining to hand over a
+  point it was holding. Both tables now cover every `ApplicationReturnStatus`,
+  and no exit maps to `noSolution`, matching the rule the `.sol` route already
+  follows ("a primal vector came back"). The fallback for an unrecognized
+  status is `unknown` too, so a status added to the engine later cannot
+  silently reintroduce the asymmetry, and a new test holds both tables to the
+  Rust enum.
+
+  Termination conditions get more specific with the added rows. On the legacy
+  route the eleven exits reported plain `TerminationCondition.error` and now
+  agree with the severity the `.sol` route gives the same solve, while naming
+  the outcome more precisely than AMPL's bands can. Eight report
+  `internalSolverError` (the 500 failure band verbatim); the two definition
+  errors report `invalidProblem`, which `.sol` cannot distinguish from an
+  internal failure; and `Search_Direction_Becomes_Too_Small` reports
+  `minStepLength` where `.sol` says `maxIterations` for the whole 400 band.
+
+  One of the eleven changes severity. `Search_Direction_Becomes_Too_Small` is
+  now `SolverStatus.warning` rather than the default's `error`, matching the
+  400 limit band — a stalled solve is a limit case, not a failure. A legacy
+  caller branching on `status == error` for that exit will see `warning`. The
+  other ten stay `error`.
+
+  Callers on the v2 route were affected on every restoration failure; `drto`
+  in particular, since its `dynamic_optimization` transform declares
+  sensitivity parameters and so routes every model through `_sens_solve`.
+
+- **The GAMS links report the same thing as each other, on every exit**
+  (#589). Both links carry the same table, and checking them against the
+  engine's enum turned up the same class of gap plus one of its own.
+
+  Three exits — `Insufficient_Memory`, `Unrecoverable_Exception`,
+  `NonIpopt_Exception_Thrown` — were in neither link's table and took the
+  `default` arm, so a solve killed for memory was reported to GAMS as an
+  internal POUNCE error. All three are mapped now, and both tables cover the
+  enum, so `default` is reserved for a status POUNCE does not have yet.
+
+  `Restoration_Failed` and `Invalid_Number_Detected` now set the objective
+  row. `gmoSetSolution2` publishes the iterate as `x.l` for every exit, so
+  leaving these two out of the has-a-solution set did not hide the point — it
+  showed the point with an objective of `0` beside it. The report is guarded
+  on `isfinite(obj_val)` in both links, which is what makes it safe: POUNCE
+  leaves the objective at NaN when it refused the solve, and
+  `Invalid_Number_Detected` is by definition an exit where something went
+  non-finite. `Diverging_Iterates` and `Insufficient_Memory` stay out
+  deliberately.
+
+  The pip link's `gmoSolveStat_*` constants were wrong in three places:
+  `SOLVESTAT_EVAL_ERR` was `11` (`gmoSolveStat_InternalErr`) and
+  `SOLVESTAT_INTERNAL_ERR` was `12` (`gmoSolveStat_Skipped`), and four exits
+  used `gmoSolveStat_SolverErr` where the C link uses `gmoSolveStat_Solver`.
+  So the two links disagreed on four statuses and the pip link reported two
+  more under names it did not mean. A wrong integer there is invisible without
+  GAMS in the loop, so the values are now checked against GAMS's own
+  `gams.core.gmo` — `gamsapi[core]` is pure Python and needs no license, and
+  CI installs it for exactly this test.
+
 - **An accepted solve no longer loads into Pyomo as a warning** (#591).
   `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
   `solve_result_num = 1` — IPOPT's own code for the same outcome

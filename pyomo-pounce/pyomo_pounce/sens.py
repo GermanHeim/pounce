@@ -435,6 +435,16 @@ def _iter_data(comp):
 # with both the `.sol` route and `v2._V2_STATUS`, and would make Pyomo log a
 # load warning on a result IPOPT loads clean (gh #591). The reduced-accuracy
 # distinction stays in the solver message, not the severity.
+#
+# The table is exhaustive over `ApplicationReturnStatus`
+# (`crates/pounce-nlp/src/return_codes.rs`), whose `upstream_name()` is the
+# `status_msg` read below; `test_issue_589_status_table_coverage.py` holds it
+# and `v2._V2_STATUS` to the full enum. Eleven exits used to be missing,
+# `Restoration_Failed` among them, and they fell to the `(error, error)`
+# default. That default is a defensible severity, but it is less specific than
+# the `.sol` route's answer for the same solve -- Pyomo's reader turns the
+# AMPL 500 failure band into `internalSolverError` -- and on the v2 side the
+# matching gap decided whether the solve raised at all (gh #589).
 _STATUS_RESULT = {
     "Solve_Succeeded":
         (TerminationCondition.optimal, SolverStatus.ok),
@@ -454,6 +464,46 @@ _STATUS_RESULT = {
         (TerminationCondition.maxTimeLimit, SolverStatus.warning),
     "User_Requested_Stop":
         (TerminationCondition.userInterrupt, SolverStatus.aborted),
+    # AMPL's 400 "limit" band, like the two above. `warning` is the band's
+    # severity, and this is the ONE row whose severity differs from the
+    # `(error, error)` default it used to take -- a stalled solve is a limit
+    # case, not a failure, which is why it sits in the limit band. The
+    # termination condition deviates from what Pyomo's band-reading `.sol`
+    # table gives (`maxIterations`): POUNCE names this exit exactly, and the
+    # legacy enum has the member, so it does not have to borrow the
+    # iteration-limit one. Same deliberate precision as `maxTimeLimit` above.
+    "Search_Direction_Becomes_Too_Small":
+        (TerminationCondition.minStepLength, SolverStatus.warning),
+    # AMPL's 500 failure band. `internalSolverError` + `error` is what the
+    # ordinary `.sol` route reports for every code in it, so these agree with
+    # it rather than with the coarser `(error, error)` default they used to
+    # take. The two definition errors deviate on the termination condition,
+    # again for precision: `.sol` can only say `internalSolverError` for the
+    # whole band, while an over-determined or malformed model is not a solver
+    # failure and the legacy enum has `invalidProblem` for exactly that. The
+    # severity -- which is what callers branch on -- stays `error` either way.
+    "Restoration_Failed":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Error_In_Step_Computation":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Number_Detected":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Insufficient_Memory":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Internal_Error":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Invalid_Option":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "Not_Enough_Degrees_Of_Freedom":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    "Invalid_Problem_Definition":
+        (TerminationCondition.invalidProblem, SolverStatus.error),
+    # ABI-parity members of the upstream enum that POUNCE never returns.
+    # Listed so the table covers the enum, not just today's exits.
+    "Unrecoverable_Exception":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
+    "NonIpopt_Exception_Thrown":
+        (TerminationCondition.internalSolverError, SolverStatus.error),
 }
 
 

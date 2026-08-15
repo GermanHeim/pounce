@@ -91,8 +91,10 @@ pub struct FeralSolverInterface {
     singular_pivot_floor: f64,
 
     /// Floor under which a mismatching inertia count is treated as
-    /// noise; see [`FeralConfig::inertia_pivot_floor`].
-    inertia_pivot_floor: f64,
+    /// noise; `None` selects the dimension-aware default. See
+    /// [`FeralConfig::inertia_pivot_floor`] and
+    /// [`inertia_trust_floor`].
+    inertia_pivot_floor: Option<f64>,
 
     /// Running aggregate updated after every successful `factor()`.
     /// Exposed via [`Self::summary`] and (mirrored to) the optional
@@ -119,6 +121,31 @@ pub struct FeralSolverInterface {
 /// non-option callers (tests, standalone use, the env-only legacy
 /// path), [`FeralSolverInterface::new`] keeps reading the
 /// `POUNCE_FERAL_*` env vars to preserve the historic defaults.
+/// Effective inertia-trust floor for a factorization of order `dim`.
+///
+/// `configured` is [`FeralConfig::inertia_pivot_floor`]: `Some(v)` pins
+/// an absolute floor (`Some(0.0)` disables the trigger), `None` selects
+/// the dimension-aware default.
+///
+/// That default is `n · eps`, the backward-error bound on the smallest
+/// pivot of an equilibrated matrix of order `n`: below it a pivot's
+/// sign is a rounding artefact, above it the sign is a measurement.
+/// Before pounce gh#592 this was the fixed `1e-12` that sits mid-range
+/// over `n = 10 … 10^6`, but a constant cannot be right at both ends of
+/// six orders of magnitude in `n`, and at the small-to-middling
+/// dimensions an IPM actually factors (`n` in the hundreds, `n · eps`
+/// ≈ 5e-14) `1e-12` is more than an order of magnitude too generous.
+/// It then convicts pivots whose sign is perfectly good, spends `δ_c`
+/// on a constraint Jacobian that has full rank, and — because `δ_c`
+/// persists once switched on — makes the inertia *harder* to hit for
+/// the rest of the solve. See `dev-notes/issue-592-restart-non-idempotence.md`.
+pub fn inertia_trust_floor(configured: Option<f64>, dim: usize) -> f64 {
+    match configured {
+        Some(v) => v,
+        None => dim as f64 * f64::EPSILON,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FeralConfig {
     /// Tri-state. `None` (the pounce default) inherits whatever FERAL's
@@ -168,8 +195,14 @@ pub struct FeralConfig {
     /// to reject, so it never turns a usable factor into a failure —
     /// it only changes *which* perturbation is reached for first.
     /// Necessarily larger than [`Self::singular_pivot_floor`], which
-    /// governs factors that are unusable outright. `0` disables.
-    pub inertia_pivot_floor: f64,
+    /// governs factors that are unusable outright.
+    ///
+    /// `None` — the default — selects the dimension-aware floor
+    /// `n * f64::EPSILON` computed by [`inertia_trust_floor`], where
+    /// `n` is the order of the factored matrix. `Some(v)` pins an
+    /// absolute floor for every dimension; `Some(0.0)` disables the
+    /// trigger.
+    pub inertia_pivot_floor: Option<f64>,
     /// Relative Bunch-Kaufman partial-pivoting threshold `u`: a
     /// candidate diagonal pivot is rejected when `|d| < u * col_max`.
     /// Direct analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Smaller
@@ -258,12 +291,11 @@ impl Default for FeralConfig {
             // magnitude on the scaled matrix. Only pivots essentially
             // at the working-precision floor are flagged singular.
             singular_pivot_floor: 1e-20,
-            // The level at which a pivot of an equilibrated matrix
-            // stops carrying a trustworthy sign: `n · eps` spans
-            // ~2e-15 (n = 10) to ~2e-10 (n = 10^6), and 1e-12 sits in
-            // the middle of that range. Only consulted when the
-            // inertia already mismatched (pounce gh#540).
-            inertia_pivot_floor: 1e-12,
+            // Dimension-aware: `n · eps`, the level at which a pivot
+            // of an equilibrated matrix of order `n` stops carrying a
+            // trustworthy sign. Only consulted when the inertia
+            // already mismatched (pounce gh#540, gh#592).
+            inertia_pivot_floor: None,
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
             scaling: ScalingStrategy::Auto,
@@ -326,8 +358,7 @@ impl FeralConfig {
                 .unwrap_or(1e-20),
             inertia_pivot_floor: std::env::var("POUNCE_FERAL_INERTIA_PIVOT_FLOOR")
                 .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(1e-12),
+                .and_then(|s| s.parse::<f64>().ok()),
             pivtol: resolve_pivtol_env(
                 std::env::var("POUNCE_FERAL_PIVTOL").ok().as_deref(),
                 std::env::var("FERAL_PIVTOL").ok().as_deref(),
@@ -780,13 +811,14 @@ impl FeralSolverInterface {
                     // `Singular` reaches for. Upstream's MA27/MA57/MUMPS
                     // interfaces likewise test singularity *before* comparing
                     // the count.
-                    if self.inertia_pivot_floor > 0.0 {
+                    let floor = inertia_trust_floor(self.inertia_pivot_floor, self.dim as usize);
+                    if floor > 0.0 {
                         if let Some(min_piv) = self.solver.min_pivot_magnitude() {
-                            if min_piv < self.inertia_pivot_floor {
+                            if min_piv < floor {
                                 tracing::debug!(
                                     target: "pounce::linsol",
                                     got_neg = self.negevals, expected = number_of_neg_evals,
-                                    min_piv, floor = self.inertia_pivot_floor, dim = self.dim,
+                                    min_piv, floor, dim = self.dim,
                                     "inertia untrustworthy; reporting singular"
                                 );
                                 return ESymSolverStatus::Singular;
@@ -796,6 +828,7 @@ impl FeralSolverInterface {
                     tracing::debug!(
                         target: "pounce::linsol",
                         got_neg = self.negevals, expected = number_of_neg_evals, dim = self.dim,
+                        min_piv = self.solver.min_pivot_magnitude(), floor,
                         "inertia mismatch"
                     );
                     return ESymSolverStatus::WrongInertia;
@@ -1293,13 +1326,24 @@ mod tests {
     /// `[[1, 1], [1, 1 + 2^-50]]` is positive definite by a hair: its
     /// eigenvalues are ≈ 2 and ≈ 4.4e-16, so no diagonal equilibration can
     /// lift the small one — it is near-singular, not merely badly scaled.
+    ///
+    /// The floor is pinned explicitly here. Since gh#592 the default is
+    /// `n · eps`, and at `n = 2` that is 4.4e-16 — under this matrix's
+    /// 8.9e-16 pivot, so the *default* declines to fire on it (which is
+    /// the point of the dimension-aware floor and is asserted below).
+    /// A 2x2 cannot exhibit a floor that scales with `n`; the routing it
+    /// does pin is exercised at solver scale by the `eigena2` / `eigenb2`
+    /// CLI regressions.
     #[test]
     fn untrustworthy_inertia_is_reported_singular_not_wrong() {
         let irn: [Index; 3] = [1, 2, 2];
         let jcn: [Index; 3] = [1, 1, 2];
         let vals = [1.0, 1.0, 1.0 + f64::powi(2.0, -50)];
 
-        let mut s = FeralSolverInterface::new();
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            inertia_pivot_floor: Some(1e-12),
+            ..FeralConfig::default()
+        });
         assert_eq!(
             s.initialize_structure(2, 3, &irn, &jcn),
             ESymSolverStatus::Success
@@ -1313,11 +1357,30 @@ mod tests {
              passed on as evidence",
         );
 
+        // gh#592: the dimension-aware default is 2 * eps = 4.4e-16 here,
+        // and this pivot (8.9e-16) clears it — so the same factorization
+        // is reported `WrongInertia` under defaults. A 2x2's pivots are
+        // measurable at a level a 300x300's are not, and the floor now
+        // says so instead of applying a 1e-12 constant to both.
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&vals);
+        let mut rhs = [1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::WrongInertia,
+            "the n * eps floor convicted a pivot three orders of magnitude \
+             above it",
+        );
+
         // Disabling the trigger restores the pre-#540 verdict, which is what
         // makes this a routing change and not a new failure mode: the same
         // factorization is still rejected, just with the other status.
         let mut s = FeralSolverInterface::with_config(FeralConfig {
-            inertia_pivot_floor: 0.0,
+            inertia_pivot_floor: Some(0.0),
             ..FeralConfig::default()
         });
         assert_eq!(
@@ -1329,6 +1392,99 @@ mod tests {
         assert_eq!(
             s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
             ESymSolverStatus::WrongInertia
+        );
+    }
+
+    /// gh#592: the floor the trigger consults is `n · eps`, not a
+    /// constant. The option's own rationale always named `n · eps` as the
+    /// level at which an equilibrated pivot loses its sign; the constant
+    /// `1e-12` it shipped with corresponds to `n ≈ 4500`, so on the
+    /// few-hundred-order KKTs an IPM actually factors it convicted pivots
+    /// more than an order of magnitude above the noise. Explicit settings
+    /// are still absolute, and `0` still disables.
+    #[test]
+    fn inertia_trust_floor_is_dimension_aware_unless_pinned() {
+        // Auto: `n · eps`, so it tracks the matrix it is judging.
+        assert_eq!(inertia_trust_floor(None, 1), f64::EPSILON);
+        assert_eq!(inertia_trust_floor(None, 311), 311.0 * f64::EPSILON);
+        assert!(inertia_trust_floor(None, 311) < 1e-13);
+        assert!(inertia_trust_floor(None, 311) > 1e-14);
+        // ...and the old constant is only right around n ≈ 4500.
+        assert!((inertia_trust_floor(None, 4503) - 1e-12).abs() < 1e-14);
+
+        // Explicit: absolute at every dimension.
+        assert_eq!(inertia_trust_floor(Some(1e-12), 2), 1e-12);
+        assert_eq!(inertia_trust_floor(Some(1e-12), 100_000), 1e-12);
+
+        // Explicit zero disables the trigger (the pre-#540 routing).
+        assert_eq!(inertia_trust_floor(Some(0.0), 100_000), 0.0);
+    }
+
+    /// gh#592, the mechanism, at the dimension the constant got wrong.
+    ///
+    /// Order 400, identity but for one diagonal entry at `2e-13`. That
+    /// pivot is measured, not noise: it is more than twice `n · eps`
+    /// (8.9e-14 here), and its sign is as trustworthy as the other 399.
+    /// The requested count is deliberately wrong, so the trigger is
+    /// consulted — and must decline, leaving `WrongInertia` and the
+    /// `δ_w` ladder that answers a genuine curvature mismatch.
+    ///
+    /// Under the pre-#592 constant the same pivot is under `1e-12` and
+    /// the factor was reported `Singular`, which spends `δ_c` on a
+    /// constraint Jacobian that has full rank and then keeps it switched
+    /// on. Both verdicts are asserted, so this test says which floor is
+    /// in force rather than merely that some floor is.
+    #[test]
+    fn a_measurable_pivot_at_solver_scale_is_not_convicted_by_the_floor() {
+        const N: usize = 400;
+        const SMALL: f64 = 2e-13;
+        assert!(
+            SMALL > N as f64 * f64::EPSILON && SMALL < 1e-12,
+            "the pivot must sit between the two floors for this test to \
+             distinguish them",
+        );
+
+        // Identity on the first N-2 rows, then a 2x2 block
+        // `[[1, 1], [1, 1 + SMALL]]` whose Schur pivot is `SMALL`. A bare
+        // small *diagonal* entry would not do: equilibration lifts it back
+        // to 1, which is the whole point of `feral_scaling`. This block is
+        // near-singular after any diagonal scaling.
+        let mut irn: Vec<Index> = (1..=(N - 2) as Index).collect();
+        let mut jcn = irn.clone();
+        let mut vals = vec![1.0; N - 2];
+        let (a, b) = ((N - 1) as Index, N as Index);
+        irn.extend_from_slice(&[a, b, b]);
+        jcn.extend_from_slice(&[a, a, b]);
+        vals.extend_from_slice(&[1.0, 1.0, 1.0 + SMALL]);
+        let nnz = irn.len() as Index;
+
+        // The IPM asks for one negative eigenvalue; the matrix has none,
+        // so the count mismatches and the floor is consulted.
+        let mut solve_with = |cfg: FeralConfig| {
+            let mut s = FeralSolverInterface::with_config(cfg);
+            assert_eq!(
+                s.initialize_structure(N as Index, nnz, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&vals);
+            let mut rhs = vec![1.0; N];
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1)
+        };
+
+        assert_eq!(
+            solve_with(FeralConfig::default()),
+            ESymSolverStatus::WrongInertia,
+            "the n * eps floor convicted a pivot above it, so delta_c is \
+             being spent on a full-rank constraint Jacobian (gh#592)",
+        );
+        assert_eq!(
+            solve_with(FeralConfig {
+                inertia_pivot_floor: Some(1e-12),
+                ..FeralConfig::default()
+            }),
+            ESymSolverStatus::Singular,
+            "the pre-#592 constant no longer reproduces the misrouting, so \
+             the assertion above is no longer pinning the fix it describes",
         );
     }
 

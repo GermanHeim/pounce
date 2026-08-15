@@ -77,6 +77,9 @@ use pounce_nlp::ApplicationReturnStatus;
 /// `pooling_rt2stp` got slower for a real reason: #544
 /// (`feral_inertia_pivot_floor`) took it from 206 to 812 iterations, a
 /// known and recorded cost of that fix. The cap was not revisited then.
+/// #592 gives most of that back — the `δ_c` walk-back returns it to 298
+/// — but the cap stays where it is, because it is sized against test
+/// contention rather than against this model's iteration count.
 const HANG_GUARD: &str = "max_wall_time=300";
 
 fn pounce_exe() -> PathBuf {
