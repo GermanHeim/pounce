@@ -13,6 +13,7 @@ changes.
   expanded and bound duals normalized internally; warm solves force the direct
   driver for symmetric cones and may fall back to cold HSDE when enabled.
   Exponential/power cones use their dedicated cold HSDE route.
+
 ### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
@@ -255,6 +256,7 @@ willing to leave a converged point.
   GAMS in the loop, so the values are now checked against GAMS's own
   `gams.core.gmo` — `gamsapi[core]` is pure Python and needs no license, and
   CI installs it for exactly this test.
+
 - **An accepted solve no longer loads into Pyomo as a warning** (#591).
   `Solved_To_Acceptable_Level` is written into the `.sol` as AMPL
   `solve_result_num = 1` — IPOPT's own code for the same outcome
