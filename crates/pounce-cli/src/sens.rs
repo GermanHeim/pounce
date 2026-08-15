@@ -451,6 +451,9 @@ fn try_compute_sens_step(
             &lo,
             &hi,
             &mults,
+            // the right-hand side this path's own step came from, so a
+            // release re-solves the system it started in
+            &rhs_full,
             eps,
             16,
         ) {

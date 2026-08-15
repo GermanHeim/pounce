@@ -140,6 +140,11 @@ pub struct PdSensBacksolver {
     /// `finalize_solution_z_l` / `n_full_x`-length reports come in.
     /// `None` alongside [`Self::d_var`].
     d_full: Option<Rc<Vec<Number>>>,
+    /// Var-x row of the variable each bound multiplier constrains,
+    /// `z_l` entries then `z_u` entries, read off the `px_l` / `px_u`
+    /// expansions. `None` when either expansion is not an
+    /// `ExpansionMatrix` and the map cannot be recovered.
+    bound_vars: Option<Rc<Vec<crate::backsolver::BoundRow>>>,
 }
 
 /// Left/right diagonal pair for the natural-units back-solve; see the
@@ -189,6 +194,7 @@ impl PdSensBacksolver {
         ];
         let (d_var, d_full) = Self::variable_factors(nlp, &dims)?;
         let conj = Self::natural_units_conj(nlp, &dims, d_var.as_ref().map(|v| v.as_slice()))?;
+        let bound_vars = Self::bound_variable_rows(nlp, &dims);
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -199,7 +205,224 @@ impl PdSensBacksolver {
             conj,
             d_var,
             d_full,
+            bound_vars,
         })
+    }
+
+    /// Shared body of the two released solves. `shift` moves the
+    /// released multipliers onto their x rows, which the step needs and
+    /// a Schur complement's unit vectors must not get.
+    fn solve_released_inner(
+        &self,
+        released: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+        shift: bool,
+    ) -> bool {
+        if rhs.len() != self.dim() || lhs.len() != self.dim() {
+            return false;
+        }
+        // Nothing released is an ordinary solve. Taking this early lets
+        // callers route every solve through here without paying a
+        // re-factorization for a step that releases nothing.
+        if released.is_empty() {
+            return self.solve(rhs, lhs);
+        }
+        let Some(sigma) = self.released_sigma_x(released) else {
+            return false;
+        };
+        let mut scaled: Vec<Number> = match self.conj.as_ref() {
+            Some(c) => rhs.iter().zip(c.e.iter()).map(|(&r, &e)| r * e).collect(),
+            None => rhs.to_vec(),
+        };
+        if shift && !self.shift_released_rhs(released, &mut scaled) {
+            return false;
+        }
+        if !self.solve_released_scaled(sigma, &scaled, lhs) {
+            return false;
+        }
+        if let Some(c) = self.conj.as_ref() {
+            for (l, &f) in lhs.iter_mut().zip(c.f.iter()) {
+                *l *= f;
+            }
+        }
+        true
+    }
+
+    /// `curr_sigma_x` with each released bound's own `z / s` taken off
+    /// the variable it constrains -- subtracted rather than zeroed,
+    /// since a variable bounded on both sides contributes twice and
+    /// only one side is being released.
+    fn released_sigma_x(&self, released: &[usize]) -> Option<Rc<dyn pounce_linalg::Vector>> {
+        use pounce_linalg::dense_vector::DenseVectorSpace;
+        let rows = self.bound_vars.as_deref()?;
+        let base_row = rows.first()?.row;
+        let cq_ref = self.cq.borrow();
+        let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+        let mut sigma = dense(cq_ref.curr_sigma_x())?;
+        let slack_l = dense(cq_ref.curr_slack_x_l())?;
+        let slack_u = dense(cq_ref.curr_slack_x_u())?;
+        drop(cq_ref);
+        let (z_l, z_u) = {
+            let d = self.data.borrow();
+            let curr = d.curr.as_ref()?;
+            (dense(Rc::clone(&curr.z_l))?, dense(Rc::clone(&curr.z_u))?)
+        };
+        for &r in released {
+            let br = rows.iter().find(|b| b.row == r)?;
+            let k = r - base_row - if br.lower { 0 } else { self.dims[4] };
+            let (z, s) = if br.lower {
+                (*z_l.get(k)?, *slack_l.get(k)?)
+            } else {
+                (*z_u.get(k)?, *slack_u.get(k)?)
+            };
+            if s == 0.0 || !s.is_finite() {
+                return None;
+            }
+            *sigma.get_mut(br.var_row)? -= z / s;
+        }
+        let space = DenseVectorSpace::new(sigma.len() as Index);
+        let mut out = DenseVector::new(space);
+        out.values_mut().copy_from_slice(&sigma);
+        Some(Rc::new(out) as Rc<dyn pounce_linalg::Vector>)
+    }
+
+    /// Zero the released multipliers' own rows of a scaled-space
+    /// right-hand side and move each multiplier onto its variable's x
+    /// row.
+    ///
+    /// Dropping `sigma` gives the released *matrix*; the released
+    /// right-hand side still wants the multiplier moved across. The
+    /// elimination folds a multiplier row in as `r_z / s`, so zeroing
+    /// that row and adding the multiplier to the x row directly reaches
+    /// the same place without `s` appearing at all -- which is the
+    /// whole point of re-factoring rather than downdating.
+    fn shift_released_rhs(&self, released: &[usize], rhs: &mut [Number]) -> bool {
+        let Some(rows) = self.bound_vars.as_deref() else {
+            return false;
+        };
+        let Some(base_row) = rows.first().map(|b| b.row) else {
+            return false;
+        };
+        let d = self.data.borrow();
+        let Some(curr) = d.curr.as_ref() else {
+            return false;
+        };
+        let dense = |v: &Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|x| x.expanded_values())
+        };
+        let (Some(z_l), Some(z_u)) = (dense(&curr.z_l), dense(&curr.z_u)) else {
+            return false;
+        };
+        for &r in released {
+            let Some(br) = rows.iter().find(|b| b.row == r) else {
+                return false;
+            };
+            let k = r - base_row - if br.lower { 0 } else { self.dims[4] };
+            let Some(&z) = (if br.lower { z_l.get(k) } else { z_u.get(k) }) else {
+                return false;
+            };
+            if r >= rhs.len() || br.var_row >= rhs.len() {
+                return false;
+            }
+            rhs[r] = 0.0;
+            // the sign the x row carries this side's multiplier with
+            rhs[br.var_row] += if br.lower { -z } else { z };
+        }
+        true
+    }
+
+    /// One back-solve against the re-factored system, in the solver's
+    /// internal scaled space.
+    fn solve_released_scaled(
+        &self,
+        sigma: Rc<dyn pounce_linalg::Vector>,
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        let off = self.offsets();
+        let rhs_mut0 = self.template.make_new_zeroed();
+        let mut rhs_iv = rhs_mut0.freeze();
+        let mut res_iv = self.template.make_new_zeroed();
+        if !(write_rhs_block(&mut rhs_iv.x, &rhs[off[0]..off[1]])
+            && write_rhs_block(&mut rhs_iv.s, &rhs[off[1]..off[2]])
+            && write_rhs_block(&mut rhs_iv.y_c, &rhs[off[2]..off[3]])
+            && write_rhs_block(&mut rhs_iv.y_d, &rhs[off[3]..off[4]])
+            && write_rhs_block(&mut rhs_iv.z_l, &rhs[off[4]..off[5]])
+            && write_rhs_block(&mut rhs_iv.z_u, &rhs[off[5]..off[6]])
+            && write_rhs_block(&mut rhs_iv.v_l, &rhs[off[6]..off[7]])
+            && write_rhs_block(&mut rhs_iv.v_u, &rhs[off[7]..off[8]]))
+        {
+            return false;
+        }
+        if !self.pd.borrow_mut().solve_with_sigma_x(
+            &self.data,
+            &self.cq,
+            &self.nlp,
+            1.0,
+            0.0,
+            &rhs_iv,
+            &mut res_iv,
+            /* allow_inexact = */ true,
+            /* improve_solution = */ false,
+            Some(sigma),
+        ) {
+            return false;
+        }
+        read_res_block(&*res_iv.x, &mut lhs[off[0]..off[1]])
+            && read_res_block(&*res_iv.s, &mut lhs[off[1]..off[2]])
+            && read_res_block(&*res_iv.y_c, &mut lhs[off[2]..off[3]])
+            && read_res_block(&*res_iv.y_d, &mut lhs[off[3]..off[4]])
+            && read_res_block(&*res_iv.z_l, &mut lhs[off[4]..off[5]])
+            && read_res_block(&*res_iv.z_u, &mut lhs[off[5]..off[6]])
+            && read_res_block(&*res_iv.v_l, &mut lhs[off[6]..off[7]])
+            && read_res_block(&*res_iv.v_u, &mut lhs[off[7]..off[8]])
+    }
+
+    /// Var-x row behind each `z_l` then `z_u` entry, through the
+    /// `px_l` / `px_u` expansions. `None` when either is not an
+    /// `ExpansionMatrix` or reports the wrong length -- the release
+    /// half then stays off rather than guessing a mapping.
+    fn bound_variable_rows(
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        dims: &[usize; 8],
+    ) -> Option<Rc<Vec<crate::backsolver::BoundRow>>> {
+        let nlp_ref = nlp.borrow();
+        let z_l_off = dims[0] + dims[1] + dims[2] + dims[3];
+        let mut out = Vec::with_capacity(dims[4] + dims[5]);
+        for (pm, n_v, off, lower) in [
+            (nlp_ref.px_l(), dims[4], z_l_off, true),
+            (nlp_ref.px_u(), dims[5], z_l_off + dims[4], false),
+        ] {
+            if n_v == 0 {
+                continue;
+            }
+            let em = pm
+                .as_any()
+                .downcast_ref::<pounce_linalg::expansion_matrix::ExpansionMatrix>()?;
+            let pos = em.expanded_pos_indices();
+            if pos.len() != n_v {
+                return None;
+            }
+            for (k, &p) in pos.iter().enumerate() {
+                let p = p as usize;
+                if p >= dims[0] {
+                    return None;
+                }
+                out.push(crate::backsolver::BoundRow {
+                    row: off + k,
+                    var_row: p,
+                    lower,
+                });
+            }
+        }
+        Some(Rc::new(out))
     }
 
     /// Read the variable factors the solve ran under off the NLP and
@@ -924,6 +1147,22 @@ impl SensBacksolver for PdSensBacksolver {
     /// same numbers the back-solve used.
     fn natural_units_factor(&self) -> Option<&[Number]> {
         self.conj.as_ref().map(|c| c.f.as_slice())
+    }
+
+    fn bound_rows(&self) -> Option<&[crate::backsolver::BoundRow]> {
+        self.bound_vars.as_deref().map(|v| v.as_slice())
+    }
+
+    fn supports_release(&self) -> bool {
+        self.bound_vars.is_some()
+    }
+
+    fn solve_released(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.solve_released_inner(released, rhs, lhs, false)
+    }
+
+    fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.solve_released_inner(released, rhs, lhs, true)
     }
 
     /// Solve `K · lhs = rhs` against the converged factor, in

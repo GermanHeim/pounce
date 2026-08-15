@@ -185,13 +185,25 @@ uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
 `tol = 1e-8`. There is no option for it, since there is no reason to
 want the barrier problem's answer.
 
-Each pass rebuilds the Schur complement over the conditions so far,
-so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
-the total grows quadratically. The default `max_passes` of 16 is 136
-back-solves. The factorization itself is never rebuilt, which is what
-keeps this cheaper than re-solving. `max_passes` bounds that work and
-is a budget rather than a safeguard: the refinement is only worth
-running while it stays cheaper than the re-solve it replaces.
+Each pass rebuilds the Schur complement over the pins so far, so pass
+`k` costs one dense `k × k` solve and `k + 1` back-solves and the total
+grows quadratically. The default `max_passes` of 16 is 136 back-solves.
+A pin never rebuilds the factorization, which is what keeps it cheaper
+than re-solving. `max_passes` bounds that work and is a budget rather
+than a safeguard: the refinement is only worth running while it stays
+cheaper than the re-solve it replaces.
+
+A **release** does re-factor, once per released set. It has to. An
+active bound contributes `sigma = z / s` to the KKT's `x` diagonal, and
+the tighter the solve the larger that term, so the released system's
+information is destroyed in the converged factor to about `eps · sigma`.
+Computing a release from the held factorization therefore gets *worse*
+the better the solve converged — at `tol = 1e-10` the released answer
+was off by 2e-4 while at a looser `1e-6` it was off by 7e-9. Dropping
+the bound's `sigma` and re-factoring removes the dependence entirely.
+One factorization still sits an order of magnitude under the twenty to
+a hundred a re-solve runs, and a step that releases nothing pays
+nothing.
 
 Two things stop it short of holding every bound. The pass budget, which
 a caller can raise. And the problem's degrees of freedom, which no

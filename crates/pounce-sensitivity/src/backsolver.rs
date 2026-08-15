@@ -57,6 +57,78 @@ pub trait SensBacksolver {
     fn natural_units_factor(&self) -> Option<&[Number]> {
         None
     }
+
+    /// The variable behind each bound-multiplier row. `None` when the
+    /// backsolver cannot report it, which leaves
+    /// [`crate::boundcheck::refine_step_onto_bounds`] with no way to
+    /// release and so pinning only.
+    ///
+    /// A release re-factors with that variable's `sigma` removed, so it
+    /// needs to know which variable each row belongs to and which side
+    /// it bounds.
+    fn bound_rows(&self) -> Option<&[BoundRow]> {
+        None
+    }
+
+    /// Solve against the system with the bounds named by `released` --
+    /// compound multiplier rows -- taken out of the active set.
+    ///
+    /// This re-factors, and has to. An active bound puts
+    /// `sigma = z / s` on the x diagonal, and on a tightly converged
+    /// bound that term is large enough to destroy the released system's
+    /// information in the converged factor: recovering it from there
+    /// needs the difference of two quantities agreeing to about
+    /// `eps * sigma`, so the released answer comes out *worse* the
+    /// better the solve converged. Re-factoring with the term removed
+    /// is what buys those digits back, and one factorization still sits
+    /// an order of magnitude under a re-solve.
+    ///
+    /// This solves in the released *system* and does nothing to the
+    /// right-hand side, so it is the right call for every solve the
+    /// refinement makes once a bound is out -- including the unit
+    /// vectors a Schur complement is built from, which carry no
+    /// multiplier to move.
+    ///
+    /// `false` by default, which leaves the refinement pinning only.
+    fn solve_released(&self, _released: &[usize], _rhs: &[Number], _lhs: &mut [Number]) -> bool {
+        false
+    }
+
+    /// [`Self::solve_released`] against a *parametric* right-hand side,
+    /// which additionally needs the released multipliers moved onto
+    /// their variables' x rows.
+    ///
+    /// Dropping `sigma` gives the released matrix; this gives the
+    /// released right-hand side to go with it. Only the step itself
+    /// gets this treatment -- applying it to a Schur complement's unit
+    /// vectors would shift a right-hand side that has no multiplier in
+    /// it to begin with.
+    fn solve_released_step(
+        &self,
+        _released: &[usize],
+        _rhs: &[Number],
+        _lhs: &mut [Number],
+    ) -> bool {
+        false
+    }
+
+    /// Whether [`Self::solve_released`] is implemented.
+    fn supports_release(&self) -> bool {
+        false
+    }
+}
+
+/// One bound-multiplier row of the compound KKT vector, resolved to
+/// the variable it constrains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundRow {
+    /// Row of the compound KKT vector holding the multiplier.
+    pub row: usize,
+    /// Var-x row of the variable that bound constrains.
+    pub var_row: usize,
+    /// `true` for a lower bound (`z_l`), `false` for an upper (`z_u`).
+    /// The x row carries the two with opposite signs.
+    pub lower: bool,
 }
 
 /// Synthetic dense-LU backsolver. Used in this crate's tests to
