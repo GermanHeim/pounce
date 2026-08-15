@@ -507,13 +507,30 @@ impl SensSolve {
                             hi[i] = a.max(b);
                         }
                     }
+                    // The bound multipliers at the base point, so a
+                    // bound the step drives negative can be released.
+                    // Without these the refinement can only pin, and
+                    // this surface would answer differently from
+                    // `estimate(mode="fix_relax")` on the same model.
+                    let mults = {
+                        let dims = backsolver_for_refine.block_dims();
+                        let z_l_off = dims[0] + dims[1] + dims[2] + dims[3];
+                        let z_u_off = z_l_off + dims[4];
+                        let mut out = Vec::new();
+                        for (off, v) in [(z_l_off, &curr.z_l), (z_u_off, &curr.z_u)] {
+                            for (k, &base) in dense_to_vec(&**v).iter().enumerate() {
+                                out.push(crate::boundcheck::BoundMultiplier { row: off + k, base });
+                            }
+                        }
+                        out
+                    };
                     match crate::boundcheck::refine_step_onto_bounds(
                         &backsolver_for_refine,
                         &dx_full,
                         &x_nat[..n_x],
                         &lo,
                         &hi,
-                        &[],
+                        &mults,
                         eps,
                         16,
                     ) {

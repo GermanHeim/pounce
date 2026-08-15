@@ -47,10 +47,12 @@ parametric example, at its own perturbation, the refinement lands within
 
 `mode="linear"` is the default and is unchanged.
 
-Each crossing costs one dense solve against the held factorization plus
-a backsolve, with the solve growing as pins accumulate, and the
-factorization is never rebuilt. `max_passes` bounds that work and is a
-budget rather than a safeguard, since the refinement is only worth
+Each pass rebuilds the Schur complement over the conditions so far,
+so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
+the total grows quadratically. The default `max_passes` of 16 is 136
+back-solves. The factorization itself is never rebuilt, which is what
+keeps this cheaper than re-solving. `max_passes` bounds that work and
+is a budget rather than a safeguard: the refinement is only worth
 running while it stays cheaper than the re-solve it replaces.
 
 Two limits stop it short of holding every bound. The pass budget, which

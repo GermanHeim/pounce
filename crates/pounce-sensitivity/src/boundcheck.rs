@@ -234,31 +234,6 @@ mod tests {
     }
 }
 
-/// Hold every coordinate the step takes past a bound AT that bound, by
-/// pinning and re-solving rather than by clipping.
-///
-/// Returns the refined step and the coordinates pinned to reach it,
-/// worst violator first. This is the loop upstream runs under
-/// `sens_boundcheck`, and the reason it is not a clamp: clipping a
-/// coordinate leaves every other one at its linear-predictor value, so
-/// the result satisfies the bounds and no longer satisfies the
-/// constraints.
-///
-/// `dx_plain` is the unrefined step over the whole compound KKT vector,
-/// `x_curr` and the bounds cover its primal block, and all four are in
-/// the same units. Each pass augments the held factorization with every
-/// pin so far and takes the Schur complement over them, so the cost is
-/// one dense `k × k` solve and a backsolve per pass. The factorization
-/// is never rebuilt.
-///
-/// Passes stop when nothing is outside its bound by more than `eps`, at
-/// `max_passes`, or when a pin cannot be achieved. That last case is
-/// how an over-determined pin set is caught: once the pins exhaust the
-/// problem's degrees of freedom no step can hold them all, the
-/// augmented system is singular, and a dense LU returns a large
-/// solution instead of reporting it. The check is whether the pass
-/// actually moved the pinned coordinates where it asked, and the step
-/// returned is the last one that did.
 /// A bound multiplier the step can drive negative: where it sits in the
 /// compound KKT vector, and its value at the base point.
 ///
@@ -267,7 +242,11 @@ mod tests {
 pub struct BoundMultiplier {
     /// Row of the compound KKT vector holding this multiplier.
     pub row: usize,
-    /// Its value at the converged point.
+    /// Its value at the converged point, read raw off `curr.z_l` /
+    /// `curr.z_u`, so in the coordinates the solve ran in rather than
+    /// the model's own. [`refine_step_onto_bounds`] converts it with
+    /// the backsolver's own `F`, so every caller hands over the same
+    /// raw value and none of them needs to know the convention.
     pub base: Number,
 }
 
@@ -291,8 +270,17 @@ pub struct BoundMultiplier {
 /// correction is measured from the plain step rather than the previous
 /// pass. Adding successive corrections counts the earlier ones twice.
 /// The Schur complement over those rows is what upstream's equations 19
-/// through 22 describe, so the cost is one dense `k × k` solve and a
-/// backsolve per pass, and the factorization is never rebuilt.
+/// through 22 describe. The factorization is never rebuilt, which is
+/// what makes this cheaper than a re-solve, but the Schur complement is
+/// rebuilt from scratch each pass: pass `k` costs one dense `k × k`
+/// solve and `k + 1` back-solves, so the work grows quadratically in
+/// the number of conditions, and the default `max_passes` of 16 is 136
+/// back-solves rather than 16.
+///
+/// `multipliers` carry their base values in the solve's own
+/// coordinates. They are converted here, once, with the backsolver's
+/// [`SensBacksolver::natural_units_factor`], so they agree with the `z`
+/// rows of `dx_plain` before either is used.
 ///
 /// Passes stop when nothing is violated, at `max_passes`, or when a
 /// condition cannot be achieved, which is how an over-determined set is
@@ -316,6 +304,26 @@ where
 
     let n_full = dx_plain.len();
     let mut dx = dx_plain.to_vec();
+    // Into the units the step is in, before either is read. `F` is
+    // indexed by compound row, the same space `BoundMultiplier::row`
+    // lives in.
+    let multipliers: Vec<BoundMultiplier> = match backsolver.natural_units_factor() {
+        None => multipliers
+            .iter()
+            .map(|m| BoundMultiplier {
+                row: m.row,
+                base: m.base,
+            })
+            .collect(),
+        Some(f) => multipliers
+            .iter()
+            .map(|m| BoundMultiplier {
+                row: m.row,
+                base: m.base * f[m.row],
+            })
+            .collect(),
+    };
+    let multipliers = &multipliers[..];
     // (compound row, right-hand side), the rhs fixed at creation since
     // it is measured from the plain step
     let mut pins: Vec<(usize, Number)> = Vec::new();
@@ -361,7 +369,14 @@ where
         let mut du = vec![0.0; rows.len()];
         let mut corr = vec![0.0; n_full];
         if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
-            return Err("SensApplication::run_sens_step failed".into());
+            // An exactly singular augmented system, where the
+            // near-singular case is what the achievement check below
+            // catches. Drop the condition that could not be solved and
+            // stop, rather than discarding the refinement and the plain
+            // step with it: the caller is told how far it got by the
+            // rows returned, which is what every other stop does.
+            pins.pop();
+            break;
         }
 
         // The guard is for the singular case, where the conditions

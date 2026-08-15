@@ -36,12 +36,16 @@
 //!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
 //!   kwarg.
 //! * **`sens_boundcheck` bound refinement** ✔ —
-//!   [`boundcheck::refine_step_onto_bounds`] pins each coordinate the
-//!   step takes past a bound AT that bound and re-solves, so the others
-//!   move with it, which is what upstream's option does. Surfaced via
+//!   [`boundcheck::refine_step_onto_bounds`] repairs the active set the
+//!   step implies, both halves of upstream's fix-relax: a coordinate
+//!   the step carries past a bound is pinned AT that bound, and a bound
+//!   multiplier the step drives negative is set to zero so the variable
+//!   can leave. Either way the system is re-solved, so the other
+//!   coordinates move with it. Surfaced via
 //!   [`SensSolve::with_boundcheck`], `pounce_sens --sens-boundcheck`,
 //!   the Python `solve_with_sens(sens_boundcheck=True)` kwarg, and
-//!   `estimate(mode="fix_relax")` in pyomo-pounce.
+//!   `estimate(mode="fix_relax")` in pyomo-pounce, all four running the
+//!   same refinement.
 //!
 //! # Algorithmic reference
 //!

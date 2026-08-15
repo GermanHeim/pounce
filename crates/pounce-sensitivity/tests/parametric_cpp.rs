@@ -556,7 +556,8 @@ fn fix_relax_tracks_the_resolve_more_closely_than_the_clamp() {
 
     assert!(
         e_fixed < e_clamp * 1e-3,
-        "fix-relax ({e_fixed:.3e}) should track the re-solve far better          than the clamp ({e_clamp:.3e})",
+        "fix-relax ({e_fixed:.3e}) should track the re-solve far better \
+         than the clamp ({e_clamp:.3e})",
     );
 }
 

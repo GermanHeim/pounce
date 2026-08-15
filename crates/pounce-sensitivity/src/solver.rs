@@ -581,9 +581,11 @@ impl Solver {
     /// refinement upstream runs under `sens_boundcheck`.
     ///
     /// Each pass augments the held factorization with the pin rows and
-    /// takes the Schur complement over them, so the cost is one dense
-    /// `k × k` solve and a backsolve per pass, with `k` the number of
-    /// pins so far. The factorization itself is never rebuilt.
+    /// takes the Schur complement over them. The factorization itself
+    /// is never rebuilt, but the Schur complement is rebuilt each pass,
+    /// so pass `k` costs one dense `k × k` solve and `k + 1`
+    /// back-solves and the total grows quadratically in the number of
+    /// pins. The default `max_passes` of 16 is 136 back-solves.
     ///
     /// What counts as outside a bound is taken from the solve rather
     /// than from the caller: it was willing to leave a converged point
@@ -621,7 +623,10 @@ impl Solver {
         // (gh#486 stage 3). Undo the change of variables on the bounds
         // so all three agree, rather than projecting onto the wrong box.
         // A negative factor reflects the interval, so the sides swap.
-        if let Some(d) = state.backsolver.variable_scaling_full() {
+        // `variable_scaling`, not `variable_scaling_full`: `lo` / `hi`
+        // are var-x length, and the two index spaces diverge from the
+        // first fixed variable on.
+        if let Some(d) = state.backsolver.variable_scaling() {
             for i in 0..n_x {
                 let di = d[i];
                 if di == 0.0 || di == 1.0 {

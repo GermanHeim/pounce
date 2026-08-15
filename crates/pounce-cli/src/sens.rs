@@ -389,7 +389,7 @@ fn try_compute_sens_step(
             curr.x
                 .as_any()
                 .downcast_ref::<DenseVector>()
-                .map(|v| v.values().to_vec())
+                .map(|v| v.expanded_values())
                 .unwrap_or_default()
         };
         let (mut lo, mut hi) = {
@@ -457,7 +457,8 @@ fn try_compute_sens_step(
             Ok((refined, pinned)) => {
                 if !pinned.is_empty() {
                     eprintln!(
-                        "pounce: --sens-boundcheck pinned {} primal coordinate(s)                          at their bounds and re-solved",
+                        "pounce: --sens-boundcheck pinned or released {} bound(s) \
+                         and re-solved",
                         pinned.len()
                     );
                 }

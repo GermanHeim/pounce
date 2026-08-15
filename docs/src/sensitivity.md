@@ -185,12 +185,13 @@ uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
 `tol = 1e-8`. There is no option for it, since there is no reason to
 want the barrier problem's answer.
 
-Each crossing costs one dense solve against the held factorization plus
-a backsolve, with the solve growing as pins accumulate. The
-factorization is never rebuilt, which is what keeps this cheaper than
-re-solving. `max_passes` bounds that work and is a budget rather than a
-safeguard: the refinement is only worth running while it stays cheaper
-than the re-solve it replaces.
+Each pass rebuilds the Schur complement over the conditions so far,
+so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
+the total grows quadratically. The default `max_passes` of 16 is 136
+back-solves. The factorization itself is never rebuilt, which is what
+keeps this cheaper than re-solving. `max_passes` bounds that work and
+is a budget rather than a safeguard: the refinement is only worth
+running while it stays cheaper than the re-solve it replaces.
 
 Two things stop it short of holding every bound. The pass budget, which
 a caller can raise. And the problem's degrees of freedom, which no

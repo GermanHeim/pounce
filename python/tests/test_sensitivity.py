@@ -423,3 +423,90 @@ def test_solve_with_sens_finite_difference_cross_check():
     assert sign > 0
     # Non-parameter primals (x[0..3]) match FD to first order.
     np.testing.assert_allclose(sign * dx_sens[:3], dx_fd[:3], atol=1e-6)
+
+
+class ReleaseNLP:
+    """A bound active at the base point that a perturbation should let go.
+
+    ``min (x - p)^2 + 0.5 (y - p)^2  s.t.  y = 2x + 1,  x >= 0``, with
+    ``p`` carried as ``x[2]`` and pinned by ``g[1]``. At ``p = -1`` the
+    unconstrained minimum is ``x = -1``, so the lower bound holds ``x``
+    at 0 and carries a positive multiplier. At ``p = 3`` the minimum is
+    ``x = 5/3``, which the bound can only reach once it is released.
+    """
+
+    def objective(self, v):
+        x, y, p = v
+        return (x - p) ** 2 + 0.5 * (y - p) ** 2
+
+    def gradient(self, v):
+        x, y, p = v
+        return np.array([2 * (x - p), y - p, -2 * (x - p) - (y - p)])
+
+    def constraints(self, v):
+        x, y, p = v
+        return np.array([y - 2 * x - 1, p])
+
+    def jacobianstructure(self):
+        return (np.array([0, 0, 1], dtype=np.int64),
+                np.array([0, 1, 2], dtype=np.int64))
+
+    def jacobian(self, v):
+        return np.array([-2.0, 1.0, 1.0])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 2, 2, 2], dtype=np.int64),
+                np.array([0, 1, 0, 1, 2], dtype=np.int64))
+
+    def hessian(self, v, lagrange, obj_factor):
+        return obj_factor * np.array([2.0, 1.0, -2.0, -1.0, 3.0])
+
+
+def _make_release(p_nominal=-1.0):
+    prob = pounce.Problem(
+        n=3, m=2, problem_obj=ReleaseNLP(),
+        lb=[0.0, -50.0, -1e19],
+        ub=[10.0, 50.0, 1e19],
+        cl=[0.0, p_nominal],
+        cu=[0.0, p_nominal],
+    )
+    # 1e-8, not the 1e-10 the pin fixture above uses. Releasing a bound
+    # drives its multiplier to zero against a factorization held at the
+    # final mu, and the slack of an active bound goes to zero with mu,
+    # so that row grows worse conditioned the tighter the base solve is.
+    # Measured on this model: 2.6e-8 off at tol=1e-6, 7.3e-7 at 1e-8,
+    # 2.2e-4 at 1e-10, and no step at all at 1e-12.
+    prob.add_option("tol", 1e-8)
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    return prob
+
+
+def test_solve_with_sens_boundcheck_releases_a_bound_the_step_leaves():
+    """The release half of fix-relax, on this surface (gh #587 review).
+
+    The plain step cannot leave an active bound, because it preserves
+    complementarity, so it reports x = 0 however hard the perturbation
+    pulls. Releasing the bound reaches the re-solve's 5/3. Passing no
+    multipliers to the refinement makes it pin-only, and this test is
+    what catches that: it kept returning 0.0 while the pin-case test
+    above still passed.
+    """
+    x0 = np.array([0.5, 1.0, -1.0])
+
+    # The plain step stays on the bound.
+    _, info_plain = _make_release().solve_with_sens(
+        x0=x0, pin_constraint_indices=[1], deltas=[4.0])
+    assert info_plain["status_msg"] == "Solve_Succeeded"
+    assert info_plain["dx"][0] == pytest.approx(0.0, abs=1e-6)
+
+    # Releasing it reaches the re-solve.
+    _, info = _make_release().solve_with_sens(
+        x0=x0, pin_constraint_indices=[1], deltas=[4.0], sens_boundcheck=True)
+    assert info["status_msg"] == "Solve_Succeeded"
+    dx = info["dx"]
+    assert dx is not None
+    # x starts at its bound (0) and the re-solve puts it at 5/3.
+    assert dx[0] == pytest.approx(5.0 / 3.0, abs=1e-5)
+    # y = 2x + 1 still holds at the refined point.
+    assert dx[1] == pytest.approx(2 * dx[0], abs=1e-6)
