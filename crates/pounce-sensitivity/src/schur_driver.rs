@@ -44,32 +44,6 @@ pub trait SchurDriver {
     /// any backend failure (PCalculator solve, factor singular, …).
     fn schur_build_and_factor(&mut self, b: &dyn crate::SchurData) -> bool;
 
-    /// [`Self::schur_build_and_factor`] with a diagonal `d` added to
-    /// the Schur complement, i.e. factoring `S + diag(d)` rather than
-    /// `S`. `d` is empty or all-zero for the plain case.
-    ///
-    /// This is the `(2,2)` block of the bordered system
-    ///
-    /// ```text
-    /// [ K   E ] [ corr ]   [ 0     ]
-    /// [ Eᵀ  D ] [ du   ] = [ rhs_u ]
-    /// ```
-    ///
-    /// which is an exact condition on the selected row when `D = 0`
-    /// and a rank-1 downdate of `1/D` off `K` at that row otherwise.
-    /// [`crate::boundcheck::refine_step_onto_bounds`] uses the second
-    /// form to release a bound without ever asking `K⁻¹` for a
-    /// multiplier row.
-    ///
-    /// The default implementation refuses a non-zero `d`, so a driver
-    /// that has not opted in cannot silently drop it.
-    fn schur_build_and_factor_with_diag(&mut self, b: &dyn crate::SchurData, d: &[Number]) -> bool {
-        if d.iter().any(|&v| v != 0.0) {
-            return false;
-        }
-        self.schur_build_and_factor(b)
-    }
-
     /// Solve `S x = rhs` against the factored Schur complement.
     /// `rhs` and `x` are both of length `n_b` (the row count of the
     /// `B` matrix used at build time). Returns `false` if the driver
@@ -124,10 +98,6 @@ impl<P: PCalculator, B: SensBacksolver> DenseGenSchurDriver<P, B> {
 
 impl<P: PCalculator, B: SensBacksolver> SchurDriver for DenseGenSchurDriver<P, B> {
     fn schur_build_and_factor(&mut self, b: &dyn crate::SchurData) -> bool {
-        self.schur_build_and_factor_with_diag(b, &[])
-    }
-
-    fn schur_build_and_factor_with_diag(&mut self, b: &dyn crate::SchurData, d: &[Number]) -> bool {
         let n_b = b.nrows() as usize;
         let n_a = self.pcalc.data_a().nrows() as usize;
         if n_b != n_a {
@@ -149,16 +119,6 @@ impl<P: PCalculator, B: SensBacksolver> SchurDriver for DenseGenSchurDriver<P, B
         for i in 0..n_b {
             for j in 0..n_a {
                 s_row_major[i * n_a + j] = s_col_major[j * n_b + i];
-            }
-        }
-        // The bordered system's (2,2) block. Added after the transpose
-        // so it lands on the diagonal of the matrix actually factored.
-        if !d.is_empty() {
-            if d.len() != n_b {
-                return false;
-            }
-            for (i, &di) in d.iter().enumerate() {
-                s_row_major[i * n_a + i] += di;
             }
         }
         match DenseLuBacksolver::from_dense(n_b, &s_row_major) {

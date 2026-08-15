@@ -324,108 +324,38 @@ where
             .collect(),
     };
     let multipliers = &multipliers[..];
-
-    // Where the bound-multiplier blocks start, and which variable each
-    // multiplier row constrains. Without that map a bound cannot be
-    // released, since the release acts on the variable's own row.
-    let bound_rows = backsolver.bound_rows();
-
-    // One condition per pass. `x_row` is the row it acts on -- always
-    // an x row, for a release as much as for a pin -- `diag` is the
-    // bordered system's (2,2) entry, and `report_row` is what the
-    // caller is told, which stays the multiplier's own row for a
-    // release so the returned list keeps its documented meaning.
-    struct Cond {
-        x_row: usize,
-        rhs: Number,
-        diag: Number,
-        report_row: usize,
-        /// `(multiplier row, base value)` when this is a release.
-        release: Option<(usize, Number)>,
-    }
-    let mut conds: Vec<Cond> = Vec::new();
+    // (compound row, right-hand side), the rhs fixed at creation since
+    // it is measured from the plain step
+    let mut pins: Vec<(usize, Number)> = Vec::new();
 
     for _ in 0..max_passes {
-        let taken: Vec<usize> = conds.iter().map(|c| c.x_row).collect();
-        let taken_z: Vec<usize> = conds
-            .iter()
-            .filter_map(|c| c.release.map(|(r, _)| r))
-            .collect();
+        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
 
         // one condition per pass, primal first: a variable outside its
         // bound is the more direct violation, and releasing a bound can
         // only matter once the variables it constrains have settled
         let next = match worst_violation(x_curr, &dx, lo, hi, eps, &taken) {
-            Some((i, bound)) => Some(Cond {
-                x_row: i,
-                rhs: (x_curr[i] + dx_plain[i]) - bound,
-                diag: 0.0,
-                report_row: i,
-                release: None,
-            }),
-            None => bound_rows.and_then(|br| {
-                multipliers
-                    .iter()
-                    .filter(|m| !taken_z.contains(&m.row))
-                    .filter_map(|m| br.iter().find(|b| b.row == m.row).map(|b| (m, b)))
-                    .filter(|(_, b)| !taken.contains(&b.var_row))
-                    .map(|(m, b)| (m, b, m.base + dx[m.row]))
-                    .filter(|&(_, _, v)| v < -eps)
-                    // most negative first
-                    .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-                    .and_then(|(m, b, _)| {
-                        let i = b.var_row;
-                        let lower = b.lower;
-                        // The slack the bound carries at the base point.
-                        // Its reciprocal is the `sigma` this release
-                        // takes back off the x diagonal, so the tiny
-                        // number is only ever formed as `s / z`.
-                        let s = if lower {
-                            x_curr[i] - lo[i]
-                        } else {
-                            hi[i] - x_curr[i]
-                        };
-                        if !s.is_finite() || m.base == 0.0 {
-                            return None;
-                        }
-                        // Rank-1 downdate of `sigma = z / s` at row `i`,
-                        // which is what takes this bound back out of
-                        // the active set.
-                        //
-                        // The released x row also wants the multiplier
-                        // moved to the right-hand side. Most of that
-                        // shift is already carried by the parametric
-                        // right-hand side -- the barrier correction
-                        // leaves `-mu` on the multiplier's row, and the
-                        // elimination divides it by `s` -- but only most
-                        // of it, since `mu = s * z` holds at the base
-                        // point to the solve's tolerance and no better.
-                        // Taking the shift as zero on that identity
-                        // costs three orders of magnitude at a default
-                        // tolerance, so it is recovered exactly from the
-                        // step instead: the multiplier's own row gives
-                        // `r_z / s = sigma * dx_i + dz`, and what is
-                        // left is the multiplier the plain step
-                        // predicts, scaled by `s / z`.
-                        // The x row carries a lower bound's multiplier
-                        // with the opposite sign to an upper one, so
-                        // the shift is antisymmetric between the two
-                        // sides even though `sigma` is not.
-                        let shift = (s / m.base) * (m.base + dx_plain[m.row]);
-                        Some(Cond {
-                            x_row: i,
-                            rhs: if lower { -shift } else { shift },
-                            diag: s / m.base,
-                            report_row: m.row,
-                            release: Some((m.row, m.base)),
-                        })
-                    })
-            }),
+            Some((i, bound)) => Some((i, (x_curr[i] + dx_plain[i]) - bound)),
+            None => multipliers
+                .iter()
+                .filter(|m| !taken.contains(&m.row))
+                .map(|m| (m.row, m.base + dx[m.row]))
+                .filter(|&(_, v)| v < -eps)
+                // most negative first
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(row, _)| {
+                    let base = multipliers
+                        .iter()
+                        .find(|m| m.row == row)
+                        .map_or(0.0, |m| m.base);
+                    // drive it to zero: the bound stops being active
+                    (row, base + dx_plain[row])
+                }),
         };
-        let Some(cond) = next else { break };
-        conds.push(cond);
+        let Some((row, rhs_row)) = next else { break };
+        pins.push((row, rhs_row));
 
-        let rows: Vec<Index> = conds.iter().map(|c| c.x_row as Index).collect();
+        let rows: Vec<Index> = pins.iter().map(|&(r, _)| r as Index).collect();
         let signs = vec![1; rows.len()];
         let mk = |r: Vec<Index>| {
             IndexSchurData::from_parts(r, signs.clone()).map_err(|e| format!("{e:?}"))
@@ -435,18 +365,17 @@ where
             ..SensOptions::default()
         };
         let mut pin_app = SensApplication::new(mk(rows.clone())?, backsolver.clone(), opts);
-        let rhs: Vec<Number> = conds.iter().map(|c| c.rhs).collect();
-        let diag: Vec<Number> = conds.iter().map(|c| c.diag).collect();
+        let rhs: Vec<Number> = pins.iter().map(|&(_, r)| r).collect();
         let mut du = vec![0.0; rows.len()];
         let mut corr = vec![0.0; n_full];
-        if !pin_app.run_sens_step_with_diag(&mk(rows)?, &rhs, &diag, &mut du, &mut corr) {
+        if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
             // An exactly singular augmented system, where the
             // near-singular case is what the achievement check below
             // catches. Drop the condition that could not be solved and
             // stop, rather than discarding the refinement and the plain
             // step with it: the caller is told how far it got by the
             // rows returned, which is what every other stop does.
-            conds.pop();
+            pins.pop();
             break;
         }
 
@@ -454,43 +383,17 @@ where
         // have exhausted the degrees of freedom and a dense LU returns a
         // solution around 1e15 rather than reporting it. It is not an
         // accuracy check: a healthy pass lands within a few parts per
-        // million, so demanding more than that rejects working ones.
-        //
-        // A pin is checked on the displacement it asked for. A release
-        // is checked on what it was actually for -- the multiplier
-        // reaching zero -- since its own row carries the bordered
-        // system's diagonal and so does not simply return `-rhs`.
-        let achieved = conds.iter().enumerate().all(|(k, c)| match c.release {
-            None => (corr[c.x_row] + c.rhs).abs() <= 1e-3 * c.rhs.abs().max(1.0),
-            // A release carries the bordered system's diagonal, so its
-            // row does not simply return `-rhs`. What it does hold is
-            // that row itself, `x_i = -D * u`, and a singular solve
-            // breaks it by orders of magnitude. Compared on magnitude
-            // so the check does not depend on the driver's sign
-            // convention for `u`.
-            Some(_) => {
-                let vi = dx_plain[c.x_row] + corr[c.x_row];
-                let pred = (c.diag * du[k]).abs();
-                vi.is_finite() && (vi.abs() - pred).abs() <= 1e-3 * vi.abs().max(1.0)
-            }
-        });
+        // million, so demanding more than that rejects working pins.
+        let achieved = pins
+            .iter()
+            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-3 * want.abs().max(1.0));
         if !achieved {
-            conds.pop();
+            pins.pop();
             break;
         }
         for (k, d) in dx.iter_mut().enumerate() {
             *d = dx_plain[k] + corr[k];
         }
-        // The released bound's own row still carries the value the
-        // retained complementarity row produced, which is a by-product
-        // of the downdate and not the released multiplier. The released
-        // multiplier is zero by construction, so write the step that
-        // says so rather than leaving `z / s` noise in the block.
-        for c in &conds {
-            if let Some((z_row, base)) = c.release {
-                dx[z_row] = -base;
-            }
-        }
     }
-    Ok((dx, conds.into_iter().map(|c| c.report_row).collect()))
+    Ok((dx, pins.into_iter().map(|(r, _)| r).collect()))
 }

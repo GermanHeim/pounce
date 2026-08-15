@@ -184,28 +184,10 @@ impl<B: SensBacksolver> SensApplication<B> {
     where
         B: Clone,
     {
-        self.run_sens_step_with_diag(b_data, rhs_u, &[], du, dx_full)
-    }
-
-    /// [`Self::run_sens_step`] against the bordered system carrying
-    /// `diag` as its `(2,2)` block -- see
-    /// [`SchurDriver::schur_build_and_factor_with_diag`]. An empty or
-    /// all-zero `diag` is exactly [`Self::run_sens_step`].
-    pub fn run_sens_step_with_diag(
-        &mut self,
-        b_data: &IndexSchurData,
-        rhs_u: &[Number],
-        diag: &[Number],
-        du: &mut [Number],
-        dx_full: &mut [Number],
-    ) -> bool
-    where
-        B: Clone,
-    {
         let backsolver = self.backsolver.clone();
         let pcalc = IndexPCalculator::new(backsolver, self.a_data.clone());
         let mut driver = DenseGenSchurDriver::<_, B>::new(pcalc);
-        if !driver.schur_build_and_factor_with_diag(b_data, diag) {
+        if !driver.schur_build_and_factor(b_data) {
             return false;
         }
         let step = StdStepCalc::new(&driver, driver.pcalc());
