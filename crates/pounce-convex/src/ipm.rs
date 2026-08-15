@@ -1023,22 +1023,7 @@ where
                 ..*opts
             };
             let retry = run(&hsde_opts, &mut make_backend);
-            let upgraded = match (sol.status, retry.status) {
-                // A clean optimum always wins.
-                (_, QpStatus::Optimal) => true,
-                // A failed solve carries no usable answer, so any verdict
-                // with information beats it. An `OptimalInaccurate` original
-                // is a usable answer, so only the clean arm above replaces it
-                // (in particular a contradictory infeasibility claim does not).
-                (
-                    QpStatus::NumericalFailure | QpStatus::IterationLimit,
-                    QpStatus::OptimalInaccurate
-                    | QpStatus::PrimalInfeasible
-                    | QpStatus::DualInfeasible,
-                ) => true,
-                _ => false,
-            };
-            if upgraded {
+            if hsde_retry_is_upgrade(sol.status, retry.status) {
                 return retry;
             }
         }
@@ -1531,8 +1516,22 @@ fn chordal_reconstruct(sol: QpSolution, recon: &ChordalRecon, _prob1: &QpProblem
 /// Warm-started [`solve_socp_ipm`]: seed the iteration from `warm` (a nearby
 /// SOCP's solution). The warm `(s, z)` are projected into each cone's
 /// interior (orthant positivity / SOC `λ_min` floor); the solution is
-/// start-independent, so warm starting only reduces the iteration count.
-/// `prob` must be bound-free (use `G`/`h` rows for all constraints).
+/// start-independent, so warm starting is intended to reduce iterations when
+/// compared with the same direct driver. The default cold solve uses HSDE,
+/// however, while symmetric warm solves are forced onto the direct driver;
+/// SOC-heavy problems can therefore take more iterations than cold HSDE and
+/// may return `OptimalInaccurate`, a truthful reduced-accuracy KKT result with
+/// the same objective contract.
+/// Finite variable bounds are first-class and they are expanded into a trailing
+/// nonnegative cone block and the returned bound multipliers are restored to
+/// `z_lb`/`z_ub`.
+///
+/// Warm starts for symmetric cones always use the direct (non-HSDE) driver.
+/// Non-symmetric exponential/power cones use their dedicated cold HSDE route
+/// because that driver has no warm-start plumbing. When `opts.use_hsde` is
+/// true, a cold HSDE solve is retried if a symmetric direct warm attempt fails
+/// without producing a usable answer. `OptimalInaccurate` is usable and is
+/// returned directly, preserving the benefit of the warm start.
 pub fn solve_socp_ipm_warm<F>(
     prob: &QpProblem,
     cones: &[ConeSpec],
@@ -1544,7 +1543,19 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_socp_ipm_warm_scoped(prob, cones, warm, opts, make_backend)
+        if crate::deadline::expired() {
+            timed_out_solution(prob)
+        } else {
+            let sol = finite_or_failed(
+                prob,
+                solve_socp_ipm_warm_scoped(prob, cones, warm, opts, make_backend),
+            );
+            if crate::deadline::expired() {
+                mark_timed_out(sol)
+            } else {
+                sol
+            }
+        }
     })
 }
 
@@ -1553,7 +1564,7 @@ fn solve_socp_ipm_warm_scoped<F>(
     cones: &[ConeSpec],
     warm: &QpWarmStart,
     opts: &QpOptions,
-    make_backend: F,
+    mut make_backend: F,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -1561,10 +1572,15 @@ where
     if crate::deadline::expired() {
         return timed_out_solution(prob);
     }
-    assert!(
-        !prob.has_bounds(),
-        "solve_socp_ipm_warm: encode bounds as G/h rows (bound expansion + warm not combined)"
-    );
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     if !cone_dims_cover(cones, prob.m_ineq()) {
         return failed_solution(
             prob,
@@ -1574,13 +1590,118 @@ where
             0,
         );
     }
-    let cone = CompositeCone::from_specs(cones);
-    let w = WarmStart {
-        x: warm.x.clone(),
-        y: warm.y.clone(),
-        z: warm.z.clone(),
+    let has_nonsym = cones
+        .iter()
+        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
+
+    // Non-symmetric cones have no warm-start plumbing yet, so use the same
+    // cold HSDE route as `solve_socp_ipm` (the `use_hsde` flag is immaterial
+    // to this dedicated driver). Mixed non-symmetric/PSD products remain an
+    // unsupported combination, matching the cold entry point.
+    let direct = if has_nonsym {
+        if cones.iter().any(|c| matches!(c, ConeSpec::Psd(_))) {
+            failed_solution(
+                prob,
+                vec![0.0; prob.n],
+                vec![0.0; prob.m_eq()],
+                vec![0.0; prob.m_ineq()],
+                0,
+            )
+        } else {
+            return solve_nonsym(prob, cones, opts, &mut make_backend, None);
+        }
+    } else {
+        let direct_opts = QpOptions {
+            use_hsde: false,
+            ..*opts
+        };
+        let (expanded, bound_rows) = expand_bounds(prob);
+        let mut specs = cones.to_vec();
+        if !bound_rows.is_empty() {
+            specs.push(ConeSpec::Nonneg(bound_rows.len()));
+        }
+        let cone = CompositeCone::from_specs(&specs);
+        let w = WarmStart {
+            x: warm.x.clone(),
+            y: warm.y.clone(),
+            z: merge_bound_duals(prob, &bound_rows, warm),
+        };
+        let sol = solve_qp_core(&expanded, &cone, &direct_opts, Some(&w), &mut make_backend);
+        split_bound_duals(prob, &bound_rows, sol)
     };
-    solve_qp_core(prob, &cone, opts, Some(&w), make_backend)
+
+    // `use_hsde` is the fallback permission here, not the initial-driver
+    // selector.
+    if opts.use_hsde && warm_hsde_retry_needed(direct.status) && !crate::deadline::expired() {
+        let hsde_opts = QpOptions {
+            use_hsde: true,
+            ..*opts
+        };
+        let retry = solve_socp_ipm_inner(prob, cones, &hsde_opts, &mut make_backend);
+        if hsde_retry_is_upgrade(direct.status, retry.status) {
+            return retry;
+        }
+    }
+    direct
+}
+
+/// Whether a direct warm result has no usable answer and therefore warrants a
+/// cold HSDE retry. `OptimalInaccurate` deliberately stays out of this set:
+/// it is a usable, certified-to-reduced-accuracy result, and retrying would
+/// discard the warm solve's iteration savings.
+fn warm_hsde_retry_needed(status: QpStatus) -> bool {
+    matches!(
+        status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    )
+}
+
+/// Whether a retry has strictly more useful status information than the
+/// original solve. A clean optimum always wins; a failed solve can be
+/// replaced by any usable verdict, while an inaccurate result is replaced
+/// only by a clean optimum.
+fn hsde_retry_is_upgrade(original: QpStatus, retry: QpStatus) -> bool {
+    match (original, retry) {
+        (_, QpStatus::Optimal) => true,
+        (
+            QpStatus::NumericalFailure | QpStatus::IterationLimit,
+            QpStatus::OptimalInaccurate | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible,
+        ) => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod warm_hsde_fallback_tests {
+    use super::{hsde_retry_is_upgrade, warm_hsde_retry_needed};
+    use crate::qp::QpStatus;
+
+    #[test]
+    fn reduced_accuracy_warm_result_is_not_retried() {
+        assert!(!warm_hsde_retry_needed(QpStatus::OptimalInaccurate));
+        assert!(warm_hsde_retry_needed(QpStatus::NumericalFailure));
+        assert!(warm_hsde_retry_needed(QpStatus::IterationLimit));
+    }
+
+    #[test]
+    fn retry_replaces_only_with_strictly_better_status() {
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::NumericalFailure,
+            QpStatus::OptimalInaccurate
+        ));
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::IterationLimit,
+            QpStatus::PrimalInfeasible
+        ));
+        assert!(hsde_retry_is_upgrade(
+            QpStatus::OptimalInaccurate,
+            QpStatus::Optimal
+        ));
+        assert!(!hsde_retry_is_upgrade(
+            QpStatus::OptimalInaccurate,
+            QpStatus::PrimalInfeasible
+        ));
+    }
 }
 
 /// Route a problem whose cone product contains an **exponential** cone to the
