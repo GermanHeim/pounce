@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+- **A feasible NLP whose constraint rows sit at their own floating-point
+  resolution is no longer refused a certificate — or convicted of local
+  infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit
+  continuation study: `pounce-solver 0.10.0` returned
+  `Infeasible_Problem_Detected` on the Problem 1 `f = 0.02` rung, a
+  known-feasible optimal-control problem that Ipopt 3.14.16 solves. Through
+  Pyomo that status is indistinguishable from a genuine infeasibility proof,
+  which makes it the most damaging verdict the solver can get wrong.
+
+  The model is written in Landau coordinates, so its conduction rows carry
+  `1/(H − S)²` and reach magnitudes near `1e8`. At the point POUNCE stalled on,
+  the scaled KKT error was `4.29e-10` against `tol = 1e-6`, and **no constraint
+  row's residual rose above its own noise floor** — yet the unscaled violation
+  read `1.62e-2`. One ulp of those rows is `~1e-2`, so that number is the
+  quantum the rows are measured in, not a distance from feasibility. Ipopt
+  lands on the same point with `8.06e-3` and calls it `Solved To Acceptable
+  Level`; which side of `1e-2` a run falls on is arithmetic luck.
+
+  gh #528 built the per-row noise floor for exactly this effect but gave it
+  only to the strict **aggregate**, leaving the per-component `constr_viol`
+  test on the raw residual. That was incoherent on its own terms — the
+  component test is a refinement of the aggregate, so an unfloored component
+  could veto a certificate the floored aggregate had already granted, which is
+  precisely what happened here — and it left the rapid-infeasibility detector's
+  absolute arm free to convict on a quantum. Both now consult the same floor,
+  in both cases **only when no row rises above it**: one resolvable row
+  anywhere and `constr_viol_tol` is back in charge. A genuinely infeasible
+  model is untouched, its violation being pinned at its infeasibility gap,
+  orders above `eps ·` the row's own magnitude.
+
+  On the reported rung POUNCE now exits `Optimal Solution Found` in 20
+  iterations at an endpoint of 6.14809 h, matching the issue's expected
+  6.1481 h; before the fix it was `Infeasible_Problem_Detected` on 0.10.0 and a
+  10000-iteration `Maximum_Iterations_Exceeded` on `main`. Ipopt needs 58
+  iterations to reach only "acceptable" on the same rung. The full continuation
+  ladder now walks past the reported failure to `f = 0.01`, every rung
+  `converged_to_tolerance`. On the scale-equivariant LP family from gh #528,
+  extended to the data scales where the quantum clears the issue's
+  `constr_viol_tol = 1e-6`, the change moved 23 verdicts and every one of them
+  improved — `Solved_To_Acceptable_Level`, `Search_Direction_Becomes_Too_Small`
+  and `Maximum_Iterations_Exceeded` all becoming `Solve_Succeeded`, with no
+  verdict degraded anywhere. `primal_noise_floor_kappa = 0` opts out of both
+  gates, as it already did for the aggregate.
+
 - **SOCP warm starts now support first-class variable bounds.** Bounds are
   expanded and bound duals normalized internally; warm solves force the direct
   driver for symmetric cones and may fall back to cold HSDE when enabled.
