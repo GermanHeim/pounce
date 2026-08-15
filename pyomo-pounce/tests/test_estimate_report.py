@@ -465,10 +465,12 @@ def test_a_bound_the_step_crosses_is_never_missed():
 
 def test_a_relaxed_solve_reports_a_bound_its_own_solve_left():
     """`bound_relax_factor` lets the solve settle a coordinate outside a
-    declared bound. `crossed` names it, since it measures both bounds at
-    the predicted point, while the step fraction looks only along the
-    step direction and correctly finds nothing reached there. Both are
-    right, so the invariant above is scoped to unrelaxed solves."""
+    declared bound. `crossed` measures both bounds at the predicted
+    point, so it names that coordinate even though no step carried it
+    there, while the step fraction looks only along the step direction.
+    They answer different questions, which is why the invariant in
+    `test_a_bound_the_step_crosses_is_never_missed` is scoped to solves
+    that kept their bounds."""
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=4.0, mutable=True)
     m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
@@ -479,14 +481,17 @@ def test_a_relaxed_solve_reports_a_bound_its_own_solve_left():
         m, options={"bound_relax_factor": 1e-8})
     assert pyo.value(m.y) > 5.0, "the solve did not relax the bound"
 
-    # step downward, away from the bound the solve left y outside of
     r = estimate_report(m, [(m.p, 3.0)])
     assert r.bounds_relaxed is True
+    # the solve left y outside, and `crossed` reports it as such
     assert m.y in r.crossed
-    # the amount is the relaxation itself, not a modelling-scale number
+    # measured at the predicted point rather than the base one, so it
+    # is the relaxation's scale rather than that exact number, and well
+    # below anything the model itself works at
+    assert r.crossed[m.y] == pytest.approx(pyo.value(m.y) - 5.0, rel=0.1)
     assert r.crossed[m.y] < 1e-6
-    assert r.first == "x"
-    assert r.alpha >= 1.0
+    # and the classification is unavailable on this path
+    assert r.activity == {} and np.isnan(r.mu)
 
 
 def test_a_coordinate_on_one_bound_can_still_cross_the_other():

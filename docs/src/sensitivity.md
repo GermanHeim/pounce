@@ -27,8 +27,9 @@ existing AMPL / solver scripts keep working unchanged.
 
 Related flags:
 
-- `--sens-boundcheck` / `--sens-bound-eps EPS` — clamp the perturbed
-  primal `x* + Δx` onto the declared `[x_l, x_u]` box.
+- `--sens-boundcheck` / `--sens-bound-eps EPS` — hold the perturbed
+  primal `x* + Δx` at the declared bounds by pinning each crossing
+  coordinate there and re-solving, so the others move with it.
 - `--compute-red-hessian` / `--rh-eigendecomp` — compute the reduced
   Hessian (and its eigendecomposition) over the variables tagged by
   the `red_hessian` integer var-suffix.
@@ -56,8 +57,9 @@ let result = SensSolve::new(vec![2, 3])
 // result.dx, result.reduced_hessian, result.status
 ```
 
-`with_reduced_hessian_eigen()` adds the eigendecomposition;
-`with_boundcheck(eps)` enables the bound projection.
+`with_reduced_hessian_eigen()` adds the eigendecomposition, and
+`with_boundcheck(eps)` enables the bound refinement described under
+[Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax).
 
 ### Eigenvector sign convention
 
@@ -91,7 +93,7 @@ x, info = prob.solve_with_sens(x0, pin_constraint_indices=[2, 3],
 
 `compute_reduced_hessian=True` returns the reduced Hessian in
 `info["reduced_hessian"]`; `rh_eigendecomp=True` adds its
-eigendecomposition; `sens_bound_eps=…` tunes the bound projection. See
+eigendecomposition; `sens_bound_eps=…` tunes the bound refinement. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 
@@ -130,9 +132,10 @@ derivative columns for arbitrary perturbed values after the fact. Its
 perturbation is measured from the solve point, not the Param's current
 value, so writing a measurement into the Param before asking (the
 receding-horizon pattern) does not change the answer. It also
-warns when the linear step leaves the variable bounds (a single-pass
-projection analogous to the CLI's `--sens-boundcheck`) — with one
-exception, a bound written on a declared Param, covered in
+warns when the linear step leaves the variable bounds, and
+`mode="fix_relax"` pins those variables and re-solves instead, covered
+in [Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax)
+below. There is one exception to the warning, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `estimate_report()` measures the same step and reports where the
 active set changes along it, covered in
@@ -142,6 +145,69 @@ unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### Bending the estimate around a bound: `mode="fix_relax"`
+
+`estimate()` takes the linear step, and where that step leaves a
+variable's bound it clips the value and warns. Clipping is all the
+linear step can do, and it costs more than the one variable: every
+other variable keeps the value the step gave it, computed on the
+assumption that the clipped one was free to move where the step said.
+The result satisfies the bounds and no longer satisfies the
+constraints.
+
+`mode="fix_relax"` repairs the active set the step implies instead,
+which is upstream sIPOPT's strategy of that name and both of its cases.
+A variable the step carries past a bound is pinned there, activating it.
+A bound multiplier the step drives negative is set to zero, deactivating
+that bound so the variable can move. Each adds a row to the held
+factorization and re-solves, so the other variables move with it:
+
+```python
+estimate(m, [(m.setpoint, 3.0)])                      # clips
+estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
+```
+
+Both halves matter and they fail differently. On a model where
+`y = 2x + 1` and `x` hits its lower bound, the linear step returns
+`y = -5`, which does not satisfy the constraint at all, while pinning
+`x` returns `y = 1`, matching a full re-solve. On a model whose bound
+wants to release, the linear step is stuck at `x = 0` where the answer
+is `x = 1.667`, because the step preserves complementarity and nothing
+but the release lets the variable off its bound.
+
+Both modes also carry a correction for the barrier. The step is taken
+against a factorization held at the solve's final `mu`, so on its own it
+estimates where the BARRIER problem's solution moves rather than the
+original problem's, and the two differ by `O(mu)`. That is invisible at
+a converged tolerance and is not at a loose one: against sIPOPT the
+uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
+`tol = 1e-8`. There is no option for it, since there is no reason to
+want the barrier problem's answer.
+
+Each pass rebuilds the Schur complement over the conditions so far,
+so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
+the total grows quadratically. The default `max_passes` of 16 is 136
+back-solves. The factorization itself is never rebuilt, which is what
+keeps this cheaper than re-solving. `max_passes` bounds that work and
+is a budget rather than a safeguard: the refinement is only worth
+running while it stays cheaper than the re-solve it replaces.
+
+Two things stop it short of holding every bound. The pass budget, which
+a caller can raise. And the problem's degrees of freedom, which no
+budget helps: pinning uses one degree of freedom each, and past that no
+step holds every bound at once, so the pin is refused rather than
+returned from a singular system. In either case `estimate()` warns,
+names the variables still outside, and says which limit was reached.
+`clamp` then decides what happens to them, exactly as under `linear`.
+
+What counts as outside a bound is not a tolerance you pass. It comes
+from the solve, which was willing to leave a converged point
+`bound_relax_factor` outside its bound, so anything within that is on
+the bound rather than past it.
+
+This is what `sens_boundcheck` turns on for the CLI and the Rust API,
+and it mirrors upstream sIPOPT's option of that name.
 
 ### What the step did about the bounds: `estimate_report()`
 
@@ -722,9 +788,31 @@ the final factor is unregularized and the invariance is exact.
 
 All three entry points are verified against upstream sIPOPT 3.14.19's
 `parametric_cpp` golden output to within roughly 6e-9 per component.
-The bound projection is a single-pass clamp; upstream's iterative
-Schur refinement (re-factorize on each violation) is intentionally not
-ported.
+
+The bound refinement is verified on that same example, which crosses a
+bound under upstream's own perturbation: against a full re-solve the
+refinement lands within 6e-9 where clipping the crossing coordinate is
+off by 0.12. It is also checked on a model with three degrees of
+freedom, where three coordinates cross at once and all three pins hold,
+and for the refusal when the pins would exceed the degrees of freedom.
+
+Both halves of fix-relax and the barrier correction are also checked
+against sIPOPT 3.14.19 itself, driven through
+`pyomo.contrib.sensitivity_toolbox`, on cases built to separate them:
+
+| what it exercises | pounce vs sIPOPT |
+|---|---|
+| pinning a variable the step carries past a bound | 2e-8 |
+| releasing a bound the step drives the multiplier off | 1e-6 |
+| the barrier correction, at `tol = 1e-3` | 2.4e-7 |
+| the barrier correction, at `tol = 1e-8` | 4e-10 |
+
+Each case is one the other two do not reach. The release case returns
+`x = 0` without it where the answer is `1.667`, since the linear step
+preserves complementarity and holds the variable on its bound. The
+barrier case differs by 9e-6 without the correction at `tol = 1e-3`,
+and by 2e-9 at `tol = 1e-8`, which is why it is only visible where the
+solve leaves `mu` loose.
 
 ## Beyond one perturbation
 

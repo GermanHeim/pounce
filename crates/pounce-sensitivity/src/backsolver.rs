@@ -41,6 +41,22 @@ pub trait SensBacksolver {
     /// scratch; callers should treat it as moved-from on return.
     /// `lhs` must have length `self.dim()`.
     fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool;
+
+    /// Per-row factor carrying a quantity read off the converged
+    /// iterate into the units [`Self::solve`] answers in, indexed by
+    /// compound KKT row. `None` when the solve ran unscaled, which is
+    /// the identity.
+    ///
+    /// This is the same `F` the natural-units back-solve applies to
+    /// its result, so a bound multiplier read raw off `curr.z_l` and
+    /// multiplied by `f[row]` agrees with the `z` rows of a step this
+    /// backsolver returns. The two disagree by `d/df` otherwise, and
+    /// mixing them puts a scaled right-hand side into a Schur
+    /// complement whose other rows are natural, which moves every
+    /// coordinate of the answer rather than one.
+    fn natural_units_factor(&self) -> Option<&[Number]> {
+        None
+    }
 }
 
 /// Synthetic dense-LU backsolver. Used in this crate's tests to

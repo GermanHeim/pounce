@@ -261,8 +261,10 @@ const UPSTREAM_X_NOMINAL: [Number; 5] = [
 /// and return the primal Δx slice (first n_x entries of dx_full).
 /// `delta_p` is the (Δeta1, Δeta2) perturbation.
 fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
-    let dx_full_out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
-    let dx_full_clone = Rc::clone(&dx_full_out);
+    // Through the public method rather than a hand-built
+    // `SensApplication`, so this carries the same barrier correction the
+    // bounded step does and the two remain comparable.
+    use pounce_sensitivity::Solver;
 
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -273,39 +275,8 @@ fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
         .unwrap();
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
-
-    app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
-        // For ParametricTNLP: n_x=5, n_s=0, n_c=4, n_d=0 → y_c block
-        // starts at flat offset 5. Constraints 2 and 3 (the parameter
-        // pins g[2]=eta1, g[3]=eta2) live at flat indices 7 and 8 —
-        // matches upstream `MetadataMeasurement::GetInitialEqConstraints`
-        // (`ref/Ipopt/contrib/sIPOPT/src/SensMetadataMeasurement.cpp:69-83`).
-        let curr = data.borrow().curr.clone().expect("curr at convergence");
-        let n_x = curr.x.dim() as usize;
-        let n_s = curr.s.dim() as usize;
-        let y_c_offset = n_x + n_s;
-        let param_rows = vec![(y_c_offset + 2) as Index, (y_c_offset + 3) as Index];
-
-        let backsolver =
-            PdSensBacksolver::new(data, cq, nlp, pd).expect("PdSensBacksolver construction");
-        let n_full = backsolver.dim();
-
-        let a_data = IndexSchurData::from_parts(param_rows, vec![1, 1]).expect("A SchurData");
-        let opts = SensOptions {
-            run_sens: true,
-            ..SensOptions::default()
-        };
-        let sens_app = SensApplication::new(a_data, backsolver, opts);
-
-        let mut dx_full = vec![0.0; n_full];
-        assert!(
-            sens_app.parametric_step(&delta_p, &mut dx_full),
-            "SensApplication::parametric_step failed"
-        );
-        *dx_full_clone.borrow_mut() = Some(dx_full);
-    }));
-
-    let status = app.optimize_tnlp(tnlp);
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
     assert!(
         matches!(
             status,
@@ -314,12 +285,10 @@ fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
         ),
         "nominal solve failed: {status:?}",
     );
-
-    let dx_full = dx_full_out
-        .borrow()
-        .clone()
-        .expect("on_converged populated dx_full");
-    std::array::from_fn(|i| dx_full[i])
+    let dx = solver
+        .parametric_step(&[2, 3], &delta_p)
+        .expect("parametric_step");
+    std::array::from_fn(|i| dx[i])
 }
 
 #[test]
@@ -495,4 +464,333 @@ fn parametric_cpp_first_order_sensitivity_matches_finite_difference() {
             dx_fd[k],
         );
     }
+}
+
+// ── fix-relax: pin the crossing variable and re-solve ────────────────────
+//
+// At the perturbation upstream's own driver uses, `Delta eta = (-0.5, 0)`,
+// the plain step drives `x[2]` to -0.046 against its lower bound of 0. The
+// single-pass clamp truncates `x[2]` there and leaves every other
+// coordinate at its linear-predictor value. `parametric_step_bounded`
+// instead pins `x[2]` at the bound and re-solves, so the others move to
+// stay consistent under the pin.
+
+/// Solve at the nominal parameters and run `parametric_step_bounded`.
+fn run_bounded_step(delta_p: [Number; 2]) -> ([Number; 5], Vec<Index>) {
+    use pounce_sensitivity::Solver;
+
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "nominal solve failed: {status:?}",
+    );
+
+    let (dx, pinned) = solver
+        .parametric_step_bounded(&[2, 3], &delta_p, 8)
+        .expect("parametric_step_bounded");
+    (std::array::from_fn(|i| dx[i]), pinned)
+}
+
+#[test]
+fn fix_relax_pins_the_crossing_variable_at_its_bound() {
+    let base = solve_at(5.0, 1.0);
+    let plain = run_sensitivity_step([-0.5, 0.0]);
+    let (fixed, pinned) = run_bounded_step([-0.5, 0.0]);
+
+    assert_eq!(pinned, vec![2], "x[2] is the coordinate that crosses here");
+
+    // the plain step leaves the bound, which is why upstream's own
+    // no-bound-check output reports a negative x[2]
+    let plain_x2 = base[2] + plain[2];
+    assert!(
+        plain_x2 < -1e-3,
+        "expected the plain step to violate x[2] >= 0, got {plain_x2}",
+    );
+
+    // and the pinned re-solve puts it back on the bound
+    let fixed_x2 = base[2] + fixed[2];
+    assert!(
+        fixed_x2.abs() < 1e-8,
+        "fix-relax should land x[2] on its bound, got {fixed_x2}",
+    );
+}
+
+#[test]
+fn fix_relax_tracks_the_resolve_more_closely_than_the_clamp() {
+    let base = solve_at(5.0, 1.0);
+    let exact = solve_at(4.5, 1.0);
+    let plain = run_sensitivity_step([-0.5, 0.0]);
+    let (fixed, _) = run_bounded_step([-0.5, 0.0]);
+
+    // the clamp: truncate the crossing coordinate, leave the rest at
+    // their linear-predictor values
+    let clamped: [Number; 5] = std::array::from_fn(|k| {
+        let v = base[k] + plain[k];
+        if k < 3 { v.max(0.0) } else { v }
+    });
+    let fixed_x: [Number; 5] = std::array::from_fn(|k| base[k] + fixed[k]);
+
+    let err = |v: &[Number; 5]| -> Number {
+        (0..5)
+            .map(|k| (v[k] - exact[k]).abs())
+            .fold(0.0, Number::max)
+    };
+    let (e_clamp, e_fixed) = (err(&clamped), err(&fixed_x));
+    println!("exact   {exact:?}");
+    println!("clamped {clamped:?}  max err {e_clamp:.3e}");
+    println!("fixed   {fixed_x:?}  max err {e_fixed:.3e}");
+
+    assert!(
+        e_fixed < e_clamp * 1e-3,
+        "fix-relax ({e_fixed:.3e}) should track the re-solve far better \
+         than the clamp ({e_clamp:.3e})",
+    );
+}
+
+#[test]
+fn a_step_that_stays_inside_the_bounds_pins_nothing() {
+    let (bounded, pinned) = run_bounded_step([0.01, 0.0]);
+    let plain = run_sensitivity_step([0.01, 0.0]);
+    assert!(pinned.is_empty(), "nothing crosses at this perturbation");
+    for k in 0..5 {
+        assert!(
+            (bounded[k] - plain[k]).abs() < 1e-14,
+            "with no crossing the bounded step must equal the plain one",
+        );
+    }
+}
+
+#[test]
+fn a_pin_beyond_the_degrees_of_freedom_is_refused() {
+    // ParametricTNLP has five variables and four constraints, so one
+    // degree of freedom. Pinning x[2] consumes it. The step at this
+    // perturbation also drives x[0] out, but no step can hold both at
+    // their bounds and satisfy the constraints, so the augmented system
+    // is singular and the second pin is refused. The refinement keeps
+    // what it could achieve rather than returning the singular solve.
+    let base = solve_at(5.0, 1.0);
+    let (fixed, pinned) = run_bounded_step([-2.0, -0.5]);
+    assert_eq!(pinned, vec![2], "only the first pin fits in one DOF");
+
+    let x2 = base[2] + fixed[2];
+    assert!(x2.abs() < 1e-7, "the pin that was accepted holds: {x2}");
+    for k in 0..5 {
+        assert!(
+            (base[k] + fixed[k]).abs() < 1e3,
+            "a refused pin must not leak a singular solve into the step",
+        );
+    }
+}
+
+// ── a model with room for several pins ───────────────────────────────────
+//
+// `ParametricTNLP` has one degree of freedom, so it can only ever accept
+// one pin. This one has three: four variables against a single pin
+// constraint. Its unconstrained minimum is `x = (p, 2p, 3p)` and all
+// three carry a lower bound of 0, so a perturbation to a negative `p`
+// drives every one of them out at once and the exact answer is the
+// origin.
+
+struct ThreeFreeTNLP {
+    nominal_p: Number,
+}
+
+impl TNLP for ThreeFreeTNLP {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 4,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 7,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        for k in 0..3 {
+            b.x_l[k] = 0.0;
+            b.x_u[k] = 1.0e19;
+        }
+        b.x_l[3] = -1.0e19;
+        b.x_u[3] = 1.0e19;
+        b.g_l[0] = self.nominal_p;
+        b.g_u[0] = self.nominal_p;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = 1.0;
+        sp.x[1] = 1.0;
+        sp.x[2] = 1.0;
+        sp.x[3] = self.nominal_p;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let p = x[3];
+        Some((x[0] - p).powi(2) + (x[1] - 2.0 * p).powi(2) + (x[2] - 3.0 * p).powi(2))
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let p = x[3];
+        g[0] = 2.0 * (x[0] - p);
+        g[1] = 2.0 * (x[1] - 2.0 * p);
+        g[2] = 2.0 * (x[2] - 3.0 * p);
+        g[3] = -2.0 * (x[0] - p) - 4.0 * (x[1] - 2.0 * p) - 6.0 * (x[2] - 3.0 * p);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[3];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0 as Index]);
+                jcol.copy_from_slice(&[3 as Index]);
+            }
+            SparsityRequest::Values { values } => values[0] = 1.0,
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        // lower triangle of the objective Hessian; g is linear
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 2, 3, 3, 3, 3]);
+                jcol.copy_from_slice(&[0, 1, 2, 0, 1, 2, 3]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = 2.0 * obj_factor;
+                values[1] = 2.0 * obj_factor;
+                values[2] = 2.0 * obj_factor;
+                values[3] = -2.0 * obj_factor;
+                values[4] = -4.0 * obj_factor;
+                values[5] = -6.0 * obj_factor;
+                values[6] = 28.0 * obj_factor;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+fn three_free_solve_at(p: Number) -> [Number; 4] {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ThreeFreeTNLP { nominal_p: p }));
+    let captured: Rc<RefCell<Option<[Number; 4]>>> = Rc::new(RefCell::new(None));
+    let cap = Rc::clone(&captured);
+    app.set_on_converged(Box::new(move |data, _cq, _nlp, _pd| {
+        let curr = data.borrow().curr.clone().expect("curr");
+        let v = curr
+            .x
+            .as_any()
+            .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            .expect("dense")
+            .expanded_values();
+        *cap.borrow_mut() = Some(std::array::from_fn(|i| v[i]));
+    }));
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "three_free_solve_at({p}) failed: {status:?}",
+    );
+    captured.borrow().expect("on_converged fired")
+}
+
+#[test]
+fn fix_relax_pins_three_crossings_at_once() {
+    use pounce_sensitivity::Solver;
+
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ThreeFreeTNLP { nominal_p: 1.0 }));
+    let mut solver = Solver::new(app, tnlp);
+    assert!(matches!(
+        solver.solve(),
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    ));
+
+    let base = three_free_solve_at(1.0);
+    let exact = three_free_solve_at(-1.0);
+    let plain = solver.parametric_step(&[0], &[-2.0]).expect("plain step");
+    let (fixed, pinned) = solver
+        .parametric_step_bounded(&[0], &[-2.0], 8)
+        .expect("bounded step");
+
+    // dx/dp is (1, 2, 3), so the step drives all three below zero and
+    // the worst violator is taken first
+    assert_eq!(pinned, vec![2, 1, 0], "worst first, then the next two");
+
+    // three pins fit inside three degrees of freedom, so every one holds
+    for k in 0..3 {
+        let v = base[k] + fixed[k];
+        assert!(v.abs() < 1e-7, "x[{k}] should sit on its bound, got {v}");
+        assert!((exact[k]).abs() < 1e-6, "the exact answer is the origin");
+    }
+
+    let err = |v: &[Number; 4]| -> Number {
+        (0..4)
+            .map(|k| (v[k] - exact[k]).abs())
+            .fold(0.0, Number::max)
+    };
+    let clamped: [Number; 4] = std::array::from_fn(|k| {
+        let v = base[k] + plain[k];
+        if k < 3 { v.max(0.0) } else { v }
+    });
+    let fixed_x: [Number; 4] = std::array::from_fn(|k| base[k] + fixed[k]);
+    println!(
+        "exact {exact:?}\nclamp {clamped:?} err {:.3e}\nfixed {fixed_x:?} err {:.3e}",
+        err(&clamped),
+        err(&fixed_x)
+    );
+    assert!(err(&fixed_x) <= err(&clamped));
 }

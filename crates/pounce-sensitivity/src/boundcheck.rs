@@ -1,114 +1,115 @@
-//! Single-pass bound clamping for the parametric sensitivity step.
+//! Holding the parametric sensitivity step inside the variable bounds.
 //!
-//! Mirrors the **role** of upstream
-//! [`SensStdStepCalculator::BoundCheck`](../../../ref/Ipopt/contrib/sIPOPT/src/SensStdStepCalc.cpp)
-//! — keep the perturbed primal feasible — but uses a simpler single-pass
-//! clamp rather than upstream's iterative Schur-refinement loop.
+//! Mirrors upstream
+//! [`SensStdStepCalculator::BoundCheck`](https://github.com/coin-or/Ipopt/blob/master/contrib/sIPOPT/src/SensStdStepCalc.cpp),
+//! which is what `sens_boundcheck` turns on.
 //!
-//! # What this does
+//! A step can point outside the box. Clipping the offending coordinate
+//! back to its bound is cheap, but it leaves every other coordinate at
+//! its linear-predictor value, so the result satisfies the bounds and
+//! no longer satisfies the constraints. On upstream's own parametric
+//! example that costs an order of magnitude against a full re-solve.
 //!
-//! Given a converged iterate `x_curr` (length `n_x`), the algorithm's
-//! bound expansion matrices `Px_L` / `Px_U` and the compressed bounds
-//! `x_l` / `x_u`, project the proposed step `dx` so that
-//! `x_curr + dx ∈ [x_l, x_u]` within `eps`:
+//! [`refine_step_onto_bounds`] instead adds a row pinning the offending
+//! coordinate at its bound and re-solves, so the others move with it.
+//! [`worst_violation`] picks which coordinate that is and
+//! [`expand_bounds`] puts the bounds in a form both can read.
 //!
-//! * For each lower-bounded variable `i` with `x_curr[i] + dx[i] <
-//!   x_l[i] - eps`, clip `dx[i] := x_l[i] - x_curr[i]`.
-//! * For each upper-bounded variable `i` with `x_curr[i] + dx[i] >
-//!   x_u[i] + eps`, clip `dx[i] := x_u[i] - x_curr[i]`.
+//! # Both halves, and why each matters
 //!
-//! # Difference from upstream
+//! Upstream's fix-relax is two cases (Pirnay, Lopez-Negrete and Biegler
+//! 2012, section 2.5), and the name refers to both. Its equation 17
+//! pins a variable the step carries past a bound, activating it. Its
+//! equation 18 sets a bound multiplier to zero when the step drives it
+//! negative, deactivating that bound so the variable can move.
 //!
-//! Upstream's `BoundCheck` couples back into the Schur driver: each
-//! violation triggers a new row in `A` and `B`, followed by a
-//! re-factorize + re-solve, so the unviolated coordinates of `dx` shift
-//! to absorb the clamp under the IFT constraints. The single-pass
-//! clamp here keeps the non-violating coordinates frozen, which is
-//! cheaper but less accurate when violations are deep. For most user
-//! workflows the simple clamp is enough to keep the perturbed primal
-//! inside the feasible set without changing problem topology; users
-//! who need the full refinement should track
-//! [pounce#7](https://github.com/jkitchin/pounce/issues/7).
+//! They fail differently. Without the pin, a crossing variable is
+//! clipped and every other one keeps a value computed as though it had
+//! not been. Without the release, a variable sitting on a bound stays
+//! there however hard the perturbation pulls it off, because the linear
+//! step preserves complementarity. Measured against sIPOPT on a model
+//! whose bound wants to release, that second case is the difference
+//! between returning 0.0 and 1.667.
 //!
-//! Returns the number of clamped indices.
+//! Both are solved the same way: add the row, re-solve the augmented
+//! system through the Schur complement over the added rows, which is
+//! what the paper's equations 19 through 22 describe.
 
+use crate::schur_data::IndexSchurData;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::Vector;
 use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use std::rc::Rc;
 
-/// Clamp `dx` (length `n_x`) so that `x_curr + dx ∈ [x_l, x_u]`
-/// within `eps`. See module docs.
+/// Expand the compressed bound vectors into full var-x arrays, with
+/// infinities where a variable has no bound on that side.
 ///
-/// `px_l`, `px_u` are the algorithm-side bound expansion matrices
-/// (mapping compressed-bound slots into full var-x). `x_l`, `x_u`
-/// are the compressed bound vectors (length `n_lb`, `n_ub`).
-///
-/// Returns the count of clamped entries (0 means the step was
-/// already feasible).
-pub fn clamp_step_to_bounds(
-    x_curr: &[Number],
-    dx: &mut [Number],
+/// The compressed form pairs an [`ExpansionMatrix`] with a dense vector
+/// holding only the bounded slots. Reading it repeatedly means holding
+/// a borrow of the NLP, which a caller that also re-solves cannot do,
+/// so this copies once.
+pub fn expand_bounds(
+    n_x: usize,
     px_l: &Rc<dyn pounce_linalg::Matrix>,
     px_u: &Rc<dyn pounce_linalg::Matrix>,
     x_l: &dyn Vector,
     x_u: &dyn Vector,
+) -> (Vec<Number>, Vec<Number>) {
+    let mut lo = vec![Number::NEG_INFINITY; n_x];
+    let mut hi = vec![Number::INFINITY; n_x];
+    for (pm, src, dst) in [(px_l, x_l, &mut lo), (px_u, x_u, &mut hi)] {
+        let Some(em) = pm.as_any().downcast_ref::<ExpansionMatrix>() else {
+            continue;
+        };
+        let vals = compressed_values(src);
+        for (ci, &full_pos) in em.expanded_pos_indices().iter().enumerate() {
+            let i = full_pos as usize;
+            if let (true, Some(&v)) = (i < n_x, vals.get(ci)) {
+                dst[i] = v;
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// The coordinate whose predicted value leaves its bound by the most,
+/// as `(index, the bound it leaves)`.
+///
+/// This is the half of the bound check that fix-relax keeps. The clamp
+/// above answers "put it back", which loses the other coordinates; the
+/// refinement needs "which one, and where does it belong", and then
+/// re-solves with that coordinate pinned so the rest respond.
+///
+/// The worst violator is chosen rather than the first by index, so the
+/// order of the pins does not depend on how the model was written.
+/// `skip` names coordinates already pinned by an earlier pass, which
+/// sit ON their bound and would otherwise be picked again.
+pub fn worst_violation(
+    x_curr: &[Number],
+    dx: &[Number],
+    lo: &[Number],
+    hi: &[Number],
     eps: Number,
-) -> usize {
-    let n_x = x_curr.len();
-    if dx.len() != n_x {
-        return 0;
-    }
-    let mut clamped = 0;
-
-    if let Some(em) = px_l.as_any().downcast_ref::<ExpansionMatrix>() {
-        let bounds = compressed_values(x_l);
-        let expanded = em.expanded_pos_indices();
-        for (compressed_i, &full_pos) in expanded.iter().enumerate() {
-            let i = full_pos as usize;
-            if i >= n_x {
-                continue;
-            }
-            // No-op when the bound vector yielded no usable entries
-            // (non-dense downcast → empty; see `compressed_values`) or
-            // is shorter than the expansion. Honors the documented
-            // "silently no-op" contract instead of panicking on an
-            // out-of-range index (L16).
-            let lo = match bounds.get(compressed_i) {
-                Some(&v) => v,
-                None => continue,
-            };
-            let trial = x_curr[i] + dx[i];
-            if trial < lo - eps {
-                dx[i] = lo - x_curr[i];
-                clamped += 1;
-            }
+    skip: &[usize],
+) -> Option<(usize, Number)> {
+    let mut worst: Option<(usize, Number, Number)> = None;
+    for i in 0..x_curr.len().min(dx.len()) {
+        if skip.contains(&i) {
+            continue;
+        }
+        let trial = x_curr[i] + dx[i];
+        let (bound, over) = if trial < lo[i] {
+            (lo[i], lo[i] - trial)
+        } else if trial > hi[i] {
+            (hi[i], trial - hi[i])
+        } else {
+            continue;
+        };
+        if over > eps && worst.is_none_or(|(_, _, w)| over > w) {
+            worst = Some((i, bound, over));
         }
     }
-
-    if let Some(em) = px_u.as_any().downcast_ref::<ExpansionMatrix>() {
-        let bounds = compressed_values(x_u);
-        let expanded = em.expanded_pos_indices();
-        for (compressed_i, &full_pos) in expanded.iter().enumerate() {
-            let i = full_pos as usize;
-            if i >= n_x {
-                continue;
-            }
-            // See the lower-bound loop: no-op on missing/short bounds
-            // rather than panicking (L16).
-            let hi = match bounds.get(compressed_i) {
-                Some(&v) => v,
-                None => continue,
-            };
-            let trial = x_curr[i] + dx[i];
-            if trial > hi + eps {
-                dx[i] = hi - x_curr[i];
-                clamped += 1;
-            }
-        }
-    }
-
-    clamped
+    worst.map(|(i, bound, _)| (i, bound))
 }
 
 /// Extract dense values from a `dyn Vector` that wraps a `DenseVector`.
@@ -128,21 +129,6 @@ fn compressed_values(v: &dyn Vector) -> Vec<Number> {
     }
 }
 
-/// Convenience: walk an `IpoptNlp` + iterates handle to call
-/// [`clamp_step_to_bounds`]. Returns the count of clamped entries.
-pub fn clamp_with_nlp(
-    nlp: &dyn pounce_nlp::ipopt_nlp::IpoptNlp,
-    x_curr: &[Number],
-    dx: &mut [Number],
-    eps: Number,
-) -> usize {
-    let px_l = nlp.px_l();
-    let px_u = nlp.px_u();
-    let x_l = nlp.x_l();
-    let x_u = nlp.x_u();
-    clamp_step_to_bounds(x_curr, dx, &px_l, &px_u, x_l, x_u, eps)
-}
-
 // Quieter index-typed signature helper for callers that pass usize-
 // dimensioned slices but receive Index-counted bound dimensions.
 #[doc(hidden)]
@@ -154,7 +140,6 @@ pub fn _index_to_usize(i: Index) -> usize {
 mod tests {
     use super::*;
     use pounce_linalg::Vector;
-    use pounce_linalg::compound_vector::{CompoundVector, CompoundVectorSpace};
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
     use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
 
@@ -177,142 +162,238 @@ mod tests {
         dv
     }
 
-    #[test]
-    fn clamp_lowers_violating_step() {
-        // n_x = 3, lower bounds at slots {0, 2} with values {0.0, 0.5}.
-        let n_x = 3;
-        let x_curr = [0.1, 0.5, 0.6];
-        let mut dx = [-0.3, 0.0, -0.5]; // trial = [-0.2, 0.5, 0.1]
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 2], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        // No upper bounds.
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-        let x_l = make_dv(&[0.0, 0.5]);
-        let x_u = make_dv(&[]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-9);
-        assert_eq!(n, 2);
-        // Slot 0: trial -0.2 < 0 → dx clamps to (0 - 0.1) = -0.1.
-        assert!((dx[0] - (-0.1)).abs() < 1e-12, "dx[0] = {}", dx[0]);
-        // Slot 1: not lower-bounded, untouched.
-        assert!((dx[1] - 0.0).abs() < 1e-12);
-        // Slot 2: trial 0.1 < 0.5 → dx clamps to (0.5 - 0.6) = -0.1.
-        assert!((dx[2] - (-0.1)).abs() < 1e-12, "dx[2] = {}", dx[2]);
+    /// `(px, compressed)` for a bound present on the given positions.
+    fn expansion(n: Index, positions: &[Index]) -> Rc<dyn pounce_linalg::Matrix> {
+        let space = ExpansionMatrixSpace::new(n, positions.len() as Index, positions, 0);
+        Rc::new(ExpansionMatrix::new(space)) as Rc<dyn pounce_linalg::Matrix>
     }
 
     #[test]
-    fn clamp_uppers_violating_step() {
-        let n_x = 2;
-        let x_curr = [0.9, 1.0];
-        let mut dx = [0.5, 0.0]; // trial = [1.4, 1.0]
-        // No lower bounds.
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 1, &[0], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-        let x_l = make_dv(&[]);
-        let x_u = make_dv(&[1.0]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-9);
-        assert_eq!(n, 1);
-        // Slot 0: trial 1.4 > 1.0 → dx clamps to (1.0 - 0.9) = 0.1.
-        assert!((dx[0] - 0.1).abs() < 1e-12, "dx[0] = {}", dx[0]);
-        assert!((dx[1] - 0.0).abs() < 1e-12);
+    fn expand_bounds_puts_infinity_where_a_bound_is_absent() {
+        // only x1 has a lower bound, only x2 an upper one
+        let (lo, hi) = expand_bounds(
+            3,
+            &expansion(3, &[1]),
+            &expansion(3, &[2]),
+            &make_dv(&[-2.0]),
+            &make_dv(&[7.0]),
+        );
+        assert_eq!(lo, vec![Number::NEG_INFINITY, -2.0, Number::NEG_INFINITY]);
+        assert_eq!(hi, vec![Number::INFINITY, Number::INFINITY, 7.0]);
     }
 
     #[test]
-    fn clamp_is_noop_when_step_is_feasible() {
-        let n_x = 2;
-        let x_curr = [0.5, 0.5];
-        let mut dx = [0.1, -0.1]; // both inside [0, 1]
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-        let x_l = make_dv(&[0.0, 0.0]);
-        let x_u = make_dv(&[1.0, 1.0]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-9);
-        assert_eq!(n, 0);
-        assert!((dx[0] - 0.1).abs() < 1e-12);
-        assert!((dx[1] - (-0.1)).abs() < 1e-12);
-    }
-
-    // L16: a homogeneous bound vector (e.g. every lower bound 0) must
-    // not panic. Pre-fix, `compressed_values` called `dv.values()`,
-    // whose `debug_assert!(!homogeneous)` fires in debug/test builds;
-    // post-fix it uses `expanded_values()`, which materializes the
-    // scalar. The clamp itself must still be computed correctly.
-    #[test]
-    fn clamp_handles_homogeneous_bounds_without_panicking() {
-        let n_x = 2;
-        let x_curr = [0.1, 0.2];
-        let mut dx = [-0.3, -0.05]; // trial = [-0.2, 0.15]
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-        // Homogeneous lower bound: every variable bounded below by 0.
-        let x_l = make_homogeneous_dv(2, 0.0);
-        let x_u = make_dv(&[]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-9);
-        // Only slot 0 violates (trial -0.2 < 0); slot 1's trial 0.15 ≥ 0.
-        assert_eq!(n, 1);
-        assert!((dx[0] - (-0.1)).abs() < 1e-12, "dx[0] = {}", dx[0]);
-        assert!((dx[1] - (-0.05)).abs() < 1e-12, "dx[1] = {}", dx[1]);
-    }
-
-    // L16: a non-dense bound vector must silently no-op (per the module
-    // docs), not panic. Pre-fix, `compressed_values` returned an empty
-    // Vec for the failed downcast and the loop then indexed
-    // `bounds[compressed_i]` out of range; post-fix the `.get()` guard
-    // skips. Uses a CompoundVector (the only other `dyn Vector` impl) as
-    // a stand-in for "not a DenseVector".
-    #[test]
-    fn clamp_is_noop_on_non_dense_bounds() {
-        let n_x = 2;
-        let x_curr = [0.1, 0.2];
-        let mut dx = [-0.5, -0.5]; // would deeply violate a 0 lower bound
-        // px_l selects both variables as lower-bounded.
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-
-        // Non-dense bound vector: a 1-block CompoundVector of dim 2.
-        let cspace = CompoundVectorSpace::new(1, 2);
-        cspace.set_comp(0, 2, || {
-            Box::new(DenseVector::new(DenseVectorSpace::new(2)))
-        });
-        let mut x_l_compound = CompoundVector::new(cspace);
-        x_l_compound.set(0.0);
-        let x_u = make_dv(&[]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l_compound, &x_u, 1e-9);
-        // Non-dense ⇒ treated as no bounds ⇒ no clamp, dx untouched.
-        assert_eq!(n, 0);
-        assert!((dx[0] - (-0.5)).abs() < 1e-12);
-        assert!((dx[1] - (-0.5)).abs() < 1e-12);
+    fn expand_bounds_materializes_a_homogeneous_vector() {
+        // every lower bound 0, stored as a scalar rather than an array
+        let (lo, _) = expand_bounds(
+            2,
+            &expansion(2, &[0, 1]),
+            &expansion(2, &[]),
+            &make_homogeneous_dv(2, 0.0),
+            &make_dv(&[]),
+        );
+        assert_eq!(lo, vec![0.0, 0.0]);
     }
 
     #[test]
-    fn clamp_respects_epsilon_tolerance() {
-        let n_x = 1;
-        let x_curr = [0.0];
-        // trial = -5e-4. With eps = 1e-3, this is within tolerance →
-        // no clamp.
-        let mut dx = [-5e-4];
-        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 1, &[0], 0);
-        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
-        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
-        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
-        let x_l = make_dv(&[0.0]);
-        let x_u = make_dv(&[]);
-
-        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-3);
-        assert_eq!(n, 0);
-        assert!((dx[0] - (-5e-4)).abs() < 1e-12);
+    fn worst_violation_takes_the_largest_overshoot_not_the_first() {
+        let x = [0.5, 0.5, 0.5];
+        let dx = [-0.6, -2.0, -0.7];
+        let lo = [0.0, 0.0, 0.0];
+        let hi = [10.0, 10.0, 10.0];
+        // x1 is out by 1.5, x0 by 0.1, x2 by 0.2
+        let (i, bound) = worst_violation(&x, &dx, &lo, &hi, 1e-9, &[]).unwrap();
+        assert_eq!(i, 1);
+        assert_eq!(bound, 0.0);
     }
+
+    #[test]
+    fn worst_violation_skips_what_is_already_pinned() {
+        let x = [0.5, 0.5];
+        let dx = [-0.6, -2.0];
+        let lo = [0.0, 0.0];
+        let hi = [10.0, 10.0];
+        let (i, _) = worst_violation(&x, &dx, &lo, &hi, 1e-9, &[1]).unwrap();
+        assert_eq!(i, 0, "the worst one is pinned, so the next is taken");
+    }
+
+    #[test]
+    fn worst_violation_reports_an_upper_bound_too() {
+        let x = [0.5];
+        let dx = [3.0];
+        let (i, bound) = worst_violation(&x, &dx, &[0.0], &[1.0], 1e-9, &[]).unwrap();
+        assert_eq!((i, bound), (0, 1.0));
+    }
+
+    #[test]
+    fn worst_violation_is_none_inside_the_bounds_and_within_eps() {
+        let x = [0.5];
+        assert!(worst_violation(&x, &[0.1], &[0.0], &[1.0], 1e-9, &[]).is_none());
+        // just outside, but under the tolerance
+        assert!(worst_violation(&x, &[0.5 + 1e-12], &[0.0], &[1.0], 1e-9, &[]).is_none());
+    }
+}
+
+/// A bound multiplier the step can drive negative: where it sits in the
+/// compound KKT vector, and its value at the base point.
+///
+/// A negative multiplier means the bound should no longer be active,
+/// which is the second half of upstream's fix-relax (its equation 18).
+pub struct BoundMultiplier {
+    /// Row of the compound KKT vector holding this multiplier.
+    pub row: usize,
+    /// Its value at the converged point, read raw off `curr.z_l` /
+    /// `curr.z_u`, so in the coordinates the solve ran in rather than
+    /// the model's own. [`refine_step_onto_bounds`] converts it with
+    /// the backsolver's own `F`, so every caller hands over the same
+    /// raw value and none of them needs to know the convention.
+    pub base: Number,
+}
+
+/// Repair the active set the step implies, by pinning and releasing.
+///
+/// Returns the refined step and the compound rows it constrained.
+/// This is upstream's fix-relax, both cases:
+///
+/// * a variable the step carries past a bound is pinned AT that bound,
+///   which activates it (their equation 17);
+/// * a bound multiplier the step drives negative is set to zero, which
+///   deactivates that bound and lets the variable move (equation 18).
+///
+/// Without the second, a variable sitting on a bound at the base point
+/// stays there however hard the perturbation pulls it off, because the
+/// step holds complementarity. Measured on a model whose bound wants to
+/// release, that is the difference between 0.0 and 1.667.
+///
+/// Each pass adds one condition and re-solves the augmented system
+/// carrying all of them, against the original factorization, so its
+/// correction is measured from the plain step rather than the previous
+/// pass. Adding successive corrections counts the earlier ones twice.
+/// The Schur complement over those rows is what upstream's equations 19
+/// through 22 describe. The factorization is never rebuilt, which is
+/// what makes this cheaper than a re-solve, but the Schur complement is
+/// rebuilt from scratch each pass: pass `k` costs one dense `k × k`
+/// solve and `k + 1` back-solves, so the work grows quadratically in
+/// the number of conditions, and the default `max_passes` of 16 is 136
+/// back-solves rather than 16.
+///
+/// `multipliers` carry their base values in the solve's own
+/// coordinates. They are converted here, once, with the backsolver's
+/// [`SensBacksolver::natural_units_factor`], so they agree with the `z`
+/// rows of `dx_plain` before either is used.
+///
+/// Passes stop when nothing is violated, at `max_passes`, or when a
+/// condition cannot be achieved, which is how an over-determined set is
+/// caught: once the conditions exhaust the problem's degrees of freedom
+/// no step satisfies them all, the augmented system is singular, and a
+/// dense LU returns a large solution rather than reporting it.
+pub fn refine_step_onto_bounds<B>(
+    backsolver: &B,
+    dx_plain: &[Number],
+    x_curr: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+    multipliers: &[BoundMultiplier],
+    eps: Number,
+    max_passes: usize,
+) -> Result<(Vec<Number>, Vec<usize>), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    use crate::sens_app::{SensApplication, SensOptions};
+
+    let n_full = dx_plain.len();
+    let mut dx = dx_plain.to_vec();
+    // Into the units the step is in, before either is read. `F` is
+    // indexed by compound row, the same space `BoundMultiplier::row`
+    // lives in.
+    let multipliers: Vec<BoundMultiplier> = match backsolver.natural_units_factor() {
+        None => multipliers
+            .iter()
+            .map(|m| BoundMultiplier {
+                row: m.row,
+                base: m.base,
+            })
+            .collect(),
+        Some(f) => multipliers
+            .iter()
+            .map(|m| BoundMultiplier {
+                row: m.row,
+                base: m.base * f[m.row],
+            })
+            .collect(),
+    };
+    let multipliers = &multipliers[..];
+    // (compound row, right-hand side), the rhs fixed at creation since
+    // it is measured from the plain step
+    let mut pins: Vec<(usize, Number)> = Vec::new();
+
+    for _ in 0..max_passes {
+        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
+
+        // one condition per pass, primal first: a variable outside its
+        // bound is the more direct violation, and releasing a bound can
+        // only matter once the variables it constrains have settled
+        let next = match worst_violation(x_curr, &dx, lo, hi, eps, &taken) {
+            Some((i, bound)) => Some((i, (x_curr[i] + dx_plain[i]) - bound)),
+            None => multipliers
+                .iter()
+                .filter(|m| !taken.contains(&m.row))
+                .map(|m| (m.row, m.base + dx[m.row]))
+                .filter(|&(_, v)| v < -eps)
+                // most negative first
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(row, _)| {
+                    let base = multipliers
+                        .iter()
+                        .find(|m| m.row == row)
+                        .map_or(0.0, |m| m.base);
+                    // drive it to zero: the bound stops being active
+                    (row, base + dx_plain[row])
+                }),
+        };
+        let Some((row, rhs_row)) = next else { break };
+        pins.push((row, rhs_row));
+
+        let rows: Vec<Index> = pins.iter().map(|&(r, _)| r as Index).collect();
+        let signs = vec![1; rows.len()];
+        let mk = |r: Vec<Index>| {
+            IndexSchurData::from_parts(r, signs.clone()).map_err(|e| format!("{e:?}"))
+        };
+        let opts = SensOptions {
+            run_sens: true,
+            ..SensOptions::default()
+        };
+        let mut pin_app = SensApplication::new(mk(rows.clone())?, backsolver.clone(), opts);
+        let rhs: Vec<Number> = pins.iter().map(|&(_, r)| r).collect();
+        let mut du = vec![0.0; rows.len()];
+        let mut corr = vec![0.0; n_full];
+        if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
+            // An exactly singular augmented system, where the
+            // near-singular case is what the achievement check below
+            // catches. Drop the condition that could not be solved and
+            // stop, rather than discarding the refinement and the plain
+            // step with it: the caller is told how far it got by the
+            // rows returned, which is what every other stop does.
+            pins.pop();
+            break;
+        }
+
+        // The guard is for the singular case, where the conditions
+        // have exhausted the degrees of freedom and a dense LU returns a
+        // solution around 1e15 rather than reporting it. It is not an
+        // accuracy check: a healthy pass lands within a few parts per
+        // million, so demanding more than that rejects working pins.
+        let achieved = pins
+            .iter()
+            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-3 * want.abs().max(1.0));
+        if !achieved {
+            pins.pop();
+            break;
+        }
+        for (k, d) in dx.iter_mut().enumerate() {
+            *d = dx_plain[k] + corr[k];
+        }
+    }
+    Ok((dx, pins.into_iter().map(|(r, _)| r).collect()))
 }

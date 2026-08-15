@@ -9,6 +9,113 @@ changes.
 
 ## [Unreleased]
 
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
+
+`estimate()` takes the linear step, and where that step leaves a
+variable's bound it clips the value and warns. Clipping costs more than
+the one variable. Every other variable keeps the value the step gave it,
+computed on the assumption that the clipped one was free to move where
+the step said, so the result satisfies the bounds and no longer
+satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
+its lower bound, the clipped answer is `y = -5`, which is not on the
+constraint at all.
+
+`mode="fix_relax"` repairs the active set the step implies, which is
+upstream sIPOPT's strategy of that name (Pirnay, Lopez-Negrete and
+Biegler 2012, section 2.5) and both of its cases. A variable the step
+carries past a bound is pinned there, activating it. A bound multiplier
+the step drives negative is set to zero, deactivating that bound so the
+variable can move. Each adds a row to the held factorization and
+re-solves through the Schur complement, so the others move with it.
+
+Both halves matter and they fail differently. On the model above,
+pinning returns `y = 1` against the clamp's `y = -5`. On a model whose
+bound wants to release, the plain step is stuck at `x = 0` where the
+answer is `x = 1.667`, because the step preserves complementarity and
+nothing but the release lets the variable off the bound.
+
+Checked against sIPOPT 3.14.19 itself, driven through
+`pyomo.contrib.sensitivity_toolbox`, on cases built to separate the two:
+pounce and sIPOPT agree to 2e-8 on the pin case and to 1e-6 on the
+release case, and both match a full re-solve. On upstream's own
+parametric example, at its own perturbation, the refinement lands within
+6e-9 of a re-solve where clipping the crossing coordinate is off by
+0.12.
+
+    estimate(m, [(m.p, 3.0)])                       # clips
+    estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves
+
+`mode="linear"` is the default and is unchanged.
+
+Each pass rebuilds the Schur complement over the conditions so far,
+so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
+the total grows quadratically. The default `max_passes` of 16 is 136
+back-solves. The factorization itself is never rebuilt, which is what
+keeps this cheaper than re-solving. `max_passes` bounds that work and
+is a budget rather than a safeguard: the refinement is only worth
+running while it stays cheaper than the re-solve it replaces.
+
+Two limits stop it short of holding every bound. The pass budget, which
+a caller can raise. And the problem's degrees of freedom, which no
+budget helps: each pin consumes one, and past that no step holds every
+bound at once, so the augmented system is singular. A dense LU does not
+report that, it returns a solution around 1e15, so each pass checks that
+it achieved the displacement it asked for and drops the pin when it did
+not. `estimate()` warns in both cases, names the variables still
+outside, and says which limit was reached, since only the first can be
+fixed by asking for more.
+
+**Testing.** `crates/pounce-sensitivity/tests/parametric_cpp.rs` checks
+the refinement against a full re-solve on upstream's example, on a
+three-degree-of-freedom model where three coordinates cross at once and
+all three pins hold, and for the refusal when the pins would exceed the
+degrees of freedom. `pyomo-pounce/tests/test_fix_relax.py` covers the
+Pyomo surface, including under a `user-scaling` change of variables, and
+that the two modes agree exactly where nothing crosses.
+
+### Changed — every parametric step now carries the barrier correction (#587)
+
+`estimate()`, `gradient()`, `Solver.parametric_step` and the `SensSolve`
+builder take their step against a factorization held at the solve's
+final `mu`. On its own that estimates where the BARRIER problem's
+solution moves, not where the original problem's does, and the two
+differ by `O(mu)`. The paper's equation 11 closes the gap with one more
+term, and it is now applied on every path.
+
+This moves existing answers. At a converged tolerance the shift is
+below anything a caller would notice: measured against sIPOPT on a
+nonlinear model, agreement improves from 2e-9 to 4e-10 at `tol = 1e-8`.
+Where the solve leaves `mu` loose it is the point of the change: at
+`tol = 1e-3` the same comparison improves from 9e-6 to 2.4e-7. A caller
+comparing against a value recorded from a loosely converged solve will
+see a difference, and the new value is the better one.
+
+There is no option for it. The barrier problem's answer is not one a
+caller has a reason to want, and upstream applies the term
+unconditionally as well.
+
+### Changed — `sens_boundcheck` refines instead of clamping (#587)
+
+The option is named after upstream sIPOPT's, and upstream's runs an
+iterative Schur refinement. Pounce's ran a single-pass clamp, so the
+behavior under a shared option name differed from the solver it names.
+It now refines, which is the same computation `mode="fix_relax"` uses,
+across `--sens-boundcheck`, `SensSolve::with_boundcheck`, and
+`solve_with_sens(sens_boundcheck=True)`.
+
+This changes what the option guarantees. The clamp always returned a
+point inside the declared box. The refinement does not, because pins are
+limited by the problem's degrees of freedom, and the CLI's help text no
+longer promises it. The message it prints on stderr now reports pinned
+coordinates rather than clamped ones.
+
+What counts as outside a bound is no longer a separate tolerance. Three
+numbers answered that question, disagreeing across surfaces: 1e-3 on the
+CLI flag, 1e-9 in the Python binding, and a third invented inside
+`estimate()`. It now comes from the solve's own `bound_relax_factor`,
+which is the value that says how far outside a bound the solve was
+willing to leave a converged point.
+
 - **A premature `Solve_Succeeded` on a badly-scaled model, caused by two
   defects in the inertia-correction path** (#592). On a fixed-policy NLP from
   LyoPRONTO's Problem 2 GDP, POUNCE returned `Solve_Succeeded`, and restarting

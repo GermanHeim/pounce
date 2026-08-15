@@ -919,6 +919,13 @@ impl SensBacksolver for PdSensBacksolver {
         self.dims.iter().sum()
     }
 
+    /// `F` itself, the vector [`Self::solve`] post-multiplies its
+    /// result by, so a caller converting an iterate quantity uses the
+    /// same numbers the back-solve used.
+    fn natural_units_factor(&self) -> Option<&[Number]> {
+        self.conj.as_ref().map(|c| c.f.as_slice())
+    }
+
     /// Solve `K · lhs = rhs` against the converged factor, in
     /// **natural (unscaled) units** (pounce#128): when the NLP carries
     /// active scaling (`nlp_scaling_method`, `obj_scaling_factor`,

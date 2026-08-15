@@ -262,6 +262,77 @@ impl PySolver {
         Ok(dx.into_pyarray_bound(py))
     }
 
+    /// Parametric step with the bounds respected by pinning rather than
+    /// clamping, as `(dx, pinned)`.
+    ///
+    /// `parametric_step` points where the linear predictor points,
+    /// which can be outside the box. Clamping a coordinate back to its
+    /// bound leaves every other coordinate at its predictor value, so
+    /// the answer is feasible but no longer consistent with the KKT
+    /// relations. This adds a row pinning the offending coordinate at
+    /// the bound and re-solves, so the others move with it, which is
+    /// the refinement upstream runs under `sens_boundcheck`.
+    ///
+    /// `pinned` lists the rows the refinement constrained, worst
+    /// violator first, as **compound KKT rows** rather than variable
+    /// indices. Do not index a variable vector with them. Read them
+    /// against `block_dims()`, which gives the eight block lengths in
+    /// the `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` order:
+    ///
+    /// * a row below `dims[0]` is a variable pinned at its bound, and
+    ///   the row is its var-x index;
+    /// * a row at or above `dims[0] + dims[1] + dims[2] + dims[3]` is a
+    ///   bound multiplier driven to zero, which releases that bound and
+    ///   is the opposite action. Subtracting that offset gives its
+    ///   position in the `z_l` block, or in `z_u` past `dims[4]`.
+    ///
+    /// No other block appears. The list is empty when the plain step
+    /// already respects every bound, and the step is then the plain
+    /// one.
+    ///
+    /// `max_passes` is a budget rather than a safeguard: the
+    /// refinement is only worth running while it stays cheaper than a
+    /// re-solve. The factorization is never rebuilt, but the Schur
+    /// complement is rebuilt each pass, so pass `k` costs one dense
+    /// `k × k` solve and `k + 1` back-solves and the total grows
+    /// quadratically. The default of 16 is 136 back-solves. What counts
+    /// as outside a bound comes from the solve's own
+    /// `bound_relax_factor` rather than from an argument. Passes stop
+    /// when nothing is outside by that much, at `max_passes`, or when
+    /// the conditions exhaust the problem's degrees of freedom, which
+    /// makes the augmented system singular. None is an error, and
+    /// `pinned` says how far the refinement got.
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_passes=16))]
+    fn parametric_step_bounded<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        max_passes: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_bounded: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (dx, pinned) = s
+            .inner
+            .parametric_step_bounded(&pins, &deltas, max_passes)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            pinned.into_iter().map(|p| p as i64).collect(),
+        ))
+    }
+
     /// Full KKT-space parametric step: like `parametric_step` but
     /// returns the whole compound vector `(x, s, y_c, y_d, z_l, z_u,
     /// v_l, v_u)` so multiplier sensitivities are available. Use
