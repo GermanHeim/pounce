@@ -12,7 +12,10 @@
 //! labels **and** — critically — that infeasible / unbounded conic solves are
 //! unchanged (never falsely promoted).
 
-use pounce_convex::{ConeSpec, QpOptions, QpProblem, QpStatus, Triplet, solve_socp_ipm};
+use pounce_convex::{
+    ConeSpec, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet, solve_socp_ipm,
+    solve_socp_ipm_warm,
+};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -108,6 +111,27 @@ fn exp_gp_two_cones_stays_optimal() {
     let sol = solve(&prob, &[ConeSpec::Exponential; 2]);
     assert_eq!(sol.status, QpStatus::Optimal, "got {:?}", sol.status);
     assert!((sol.obj - 2.0).abs() < 1e-6, "objective {} vs 2", sol.obj);
+
+    // Warm starts are not available for the non-symmetric driver, but opting
+    // out of HSDE must still route to that driver's cold solve rather than
+    // returning a fabricated NumericalFailure.
+    let no_hsde = QpOptions {
+        use_hsde: false,
+        ..QpOptions::default()
+    };
+    let warm = solve_socp_ipm_warm(
+        &prob,
+        &[ConeSpec::Exponential; 2],
+        &QpWarmStart::from_solution(&sol),
+        &no_hsde,
+        backend,
+    );
+    assert_eq!(warm.status, QpStatus::Optimal, "warm got {:?}", warm.status);
+    assert!(
+        (warm.obj - 2.0).abs() < 1e-6,
+        "warm objective {} vs 2",
+        warm.obj
+    );
 }
 
 /// gh #329 case 2: `max cᵀx s.t. ‖x‖₄ ≤ 1`, four power cones `K_{1/4}`. Known

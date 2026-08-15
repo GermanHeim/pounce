@@ -1536,8 +1536,10 @@ fn chordal_reconstruct(sol: QpSolution, recon: &ChordalRecon, _prob1: &QpProblem
 /// nonnegative cone block and the returned bound multipliers are restored to
 /// `z_lb`/`z_ub`.
 ///
-/// Warm starts always use the direct (non-HSDE) driver. When `opts.use_hsde`
-/// is true, a cold HSDE solve is retried if the direct warm attempt fails
+/// Warm starts for symmetric cones always use the direct (non-HSDE) driver.
+/// Non-symmetric exponential/power cones use their dedicated cold HSDE route
+/// because that driver has no warm-start plumbing. When `opts.use_hsde` is
+/// true, a cold HSDE solve is retried if a symmetric direct warm attempt fails
 /// without producing a usable answer. `OptimalInaccurate` is usable and is
 /// returned directly, preserving the benefit of the warm start.
 pub fn solve_socp_ipm_warm<F>(
@@ -1602,16 +1604,22 @@ where
         .iter()
         .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
 
-    // The direct warm path is the symmetric-cone core. Non-symmetric cones
-    // have no warm-start plumbing yet.
+    // Non-symmetric cones have no warm-start plumbing yet, so use the same
+    // cold HSDE route as `solve_socp_ipm` (the `use_hsde` flag is immaterial
+    // to this dedicated driver). Mixed non-symmetric/PSD products remain an
+    // unsupported combination, matching the cold entry point.
     let direct = if has_nonsym {
-        failed_solution(
-            prob,
-            vec![0.0; prob.n],
-            vec![0.0; prob.m_eq()],
-            vec![0.0; prob.m_ineq()],
-            0,
-        )
+        if cones.iter().any(|c| matches!(c, ConeSpec::Psd(_))) {
+            failed_solution(
+                prob,
+                vec![0.0; prob.n],
+                vec![0.0; prob.m_eq()],
+                vec![0.0; prob.m_ineq()],
+                0,
+            )
+        } else {
+            return solve_nonsym(prob, cones, opts, &mut make_backend, None);
+        }
     } else {
         let direct_opts = QpOptions {
             use_hsde: false,
