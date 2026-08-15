@@ -1516,7 +1516,12 @@ fn chordal_reconstruct(sol: QpSolution, recon: &ChordalRecon, _prob1: &QpProblem
 /// Warm-started [`solve_socp_ipm`]: seed the iteration from `warm` (a nearby
 /// SOCP's solution). The warm `(s, z)` are projected into each cone's
 /// interior (orthant positivity / SOC `λ_min` floor); the solution is
-/// start-independent, so warm starting only reduces the iteration count.
+/// start-independent, so warm starting is intended to reduce iterations when
+/// compared with the same direct driver. The default cold solve uses HSDE,
+/// however, while symmetric warm solves are forced onto the direct driver;
+/// SOC-heavy problems can therefore take more iterations than cold HSDE and
+/// may return `OptimalInaccurate`, a truthful reduced-accuracy KKT result with
+/// the same objective contract.
 /// Finite variable bounds are first-class and they are expanded into a trailing
 /// nonnegative cone block and the returned bound multipliers are restored to
 /// `z_lb`/`z_ub`.
