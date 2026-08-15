@@ -245,7 +245,7 @@ def test_an_absent_bound_does_not_widen_the_tolerance():
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
 
-def active_at_base(p=-1.0):
+def releasing(p=-1.0):
     """x wants to be negative, so its lower bound is active at the base
     point and carries a positive multiplier. A large enough upward
     perturbation should release it."""
@@ -256,6 +256,11 @@ def active_at_base(p=-1.0):
     m.link = pyo.Constraint(expr=m.y == 2 * m.x + 1)
     m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + 0.5 * (m.y - m.p) ** 2)
     declare_sens_param(m.p)
+    return m
+
+
+def active_at_base(p=-1.0):
+    m = releasing(p)
     pyo.SolverFactory("pounce").solve(m)
     return m
 
@@ -292,6 +297,47 @@ def test_a_release_is_not_triggered_when_the_bound_should_stay():
     fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
+
+
+def scaled_releasing(p=-1.0):
+    """The release model under a change of variables, with the two
+    factors far apart and on both sides of 1."""
+    m = releasing(p)
+    m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.scaling_factor[m.x] = 1000.0
+    m.scaling_factor[m.y] = 0.001
+    return m
+
+
+def test_a_release_holds_under_user_scaling():
+    """The release right-hand side is a bound multiplier read off the
+    converged iterate, so it is in the solve's own coordinates, while
+    the step it joins is in the model's units. Handing over an
+    unconverted multiplier puts a scaled right-hand side into a Schur
+    complement whose other rows are natural, which moves every
+    coordinate of the answer rather than the released one.
+
+    The other release tests cannot catch this: with no scaling active
+    the conversion is the identity, so they pass whichever way round it
+    goes -- which is how the defect survived its first review. Here
+    `d` is 1000 on the released variable, so dropping the conversion
+    or inverting it misses by orders of magnitude rather than by a
+    tolerance.
+    """
+    m = scaled_releasing()
+    pyo.SolverFactory("pounce").solve(
+        m, options={"nlp_scaling_method": "user-scaling"})
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
+
+    # the plain step still cannot leave the bound, scaled or not
+    lin = estimate(m, [(m.p, 3.0)])
+    assert lin[m.x] == pytest.approx(0.0, abs=1e-6)
+
+    # and releasing it reaches the same re-solve the unscaled model does
+    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    assert fix[m.x] == pytest.approx(1.666667, abs=1e-5)
+    assert fix[m.y] == pytest.approx(4.333333, abs=1e-5)
+    assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
 
 def nonlinear(p=1.0):
