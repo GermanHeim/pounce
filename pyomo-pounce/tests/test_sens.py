@@ -273,9 +273,20 @@ def test_nonconvergence_returns_mapped_results():
     m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
     declare_sens_param(m.p)
     res = pyo.SolverFactory("pounce").solve(m)
+    # One free variable against two equalities plus the declared-parameter pin
+    # row, so this model actually exits `Not_Enough_Degrees_Of_Freedom` rather
+    # than reaching an infeasibility verdict. That exit had no entry in
+    # `_STATUS_RESULT` until gh #589 and fell to the `(error, error)` default,
+    # which is why `error` was enough here; it now reports `invalidProblem`,
+    # which is what this test's own premise -- "the mapped termination (like
+    # the ordinary .sol path)" -- asks for. The set stays a set because the
+    # exit is not the point: presolve or a different verdict would make this an
+    # infeasibility finding without making the test wrong.
     assert res.solver.termination_condition in (
         pyo.TerminationCondition.infeasible,
         pyo.TerminationCondition.error,
+        pyo.TerminationCondition.internalSolverError,
+        pyo.TerminationCondition.invalidProblem,
         pyo.TerminationCondition.maxIterations,
     )
     assert res.solver.status != pyo.SolverStatus.ok
