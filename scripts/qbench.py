@@ -220,6 +220,15 @@ def run_one(binary: str, name: str, nl: Path, extra: list[str], timeout: int) ->
 
 def cmd_run(args) -> int:
     instances = SETS[args.set]
+    if args.only:
+        wanted = set(args.only.split(","))
+        unknown = wanted - {n for n, _, _ in instances}
+        if unknown:
+            print(f"unknown instance(s): {sorted(unknown)}", file=sys.stderr)
+            return 2
+        instances = [t for t in instances if t[0] in wanted]
+    if args.opt:
+        instances = [(n, rel, extra + list(args.opt)) for n, rel, extra in instances]
     results = []
     for name, rel, extra in instances:
         print(f"  {name:16s} ", end="", flush=True)
@@ -239,6 +248,7 @@ def cmd_run(args) -> int:
         "set": args.set,
         "bench_data": str(BENCH),
         "git_describe": git_describe(),
+        "extra_opts": list(args.opt),
         "results": results,
     }
     Path(args.out).write_text(json.dumps(payload, indent=2))
@@ -342,6 +352,13 @@ def main() -> int:
     r.add_argument("out")
     r.add_argument("--set", default="quad", choices=sorted(SETS))
     r.add_argument("--timeout", type=int, default=1800)
+    r.add_argument("--only", help="comma-separated subset of the set's instances")
+    r.add_argument(
+        "--opt",
+        action="append",
+        default=[],
+        help="extra solver option, repeatable (e.g. --opt linear_solver=ma57)",
+    )
     r.set_defaults(func=cmd_run)
 
     c = sub.add_parser("compare")
