@@ -57,6 +57,34 @@ pub trait SensBacksolver {
     fn natural_units_factor(&self) -> Option<&[Number]> {
         None
     }
+
+    /// The variable behind each bound-multiplier row. `None` when the
+    /// backsolver cannot report it, which leaves
+    /// [`crate::boundcheck::refine_step_onto_bounds`] with no way to
+    /// release and so pinning only.
+    ///
+    /// A release is applied as a rank-1 downdate of that variable's
+    /// `sigma` off the x diagonal rather than as a condition on the
+    /// multiplier's own row, so it needs to know which variable each
+    /// row belongs to and which side it bounds. See
+    /// `refine_step_onto_bounds` for why the multiplier's row is the
+    /// wrong place to put the condition.
+    fn bound_rows(&self) -> Option<&[BoundRow]> {
+        None
+    }
+}
+
+/// One bound-multiplier row of the compound KKT vector, resolved to
+/// the variable it constrains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundRow {
+    /// Row of the compound KKT vector holding the multiplier.
+    pub row: usize,
+    /// Var-x row of the variable that bound constrains.
+    pub var_row: usize,
+    /// `true` for a lower bound (`z_l`), `false` for an upper (`z_u`).
+    /// The x row carries the two with opposite signs.
+    pub lower: bool,
 }
 
 /// Synthetic dense-LU backsolver. Used in this crate's tests to

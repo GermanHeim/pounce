@@ -140,6 +140,11 @@ pub struct PdSensBacksolver {
     /// `finalize_solution_z_l` / `n_full_x`-length reports come in.
     /// `None` alongside [`Self::d_var`].
     d_full: Option<Rc<Vec<Number>>>,
+    /// Var-x row of the variable each bound multiplier constrains,
+    /// `z_l` entries then `z_u` entries, read off the `px_l` / `px_u`
+    /// expansions. `None` when either expansion is not an
+    /// `ExpansionMatrix` and the map cannot be recovered.
+    bound_vars: Option<Rc<Vec<crate::backsolver::BoundRow>>>,
 }
 
 /// Left/right diagonal pair for the natural-units back-solve; see the
@@ -189,6 +194,7 @@ impl PdSensBacksolver {
         ];
         let (d_var, d_full) = Self::variable_factors(nlp, &dims)?;
         let conj = Self::natural_units_conj(nlp, &dims, d_var.as_ref().map(|v| v.as_slice()))?;
+        let bound_vars = Self::bound_variable_rows(nlp, &dims);
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -199,7 +205,48 @@ impl PdSensBacksolver {
             conj,
             d_var,
             d_full,
+            bound_vars,
         })
+    }
+
+    /// Var-x row behind each `z_l` then `z_u` entry, through the
+    /// `px_l` / `px_u` expansions. `None` when either is not an
+    /// `ExpansionMatrix` or reports the wrong length -- the release
+    /// half then stays off rather than guessing a mapping.
+    fn bound_variable_rows(
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        dims: &[usize; 8],
+    ) -> Option<Rc<Vec<crate::backsolver::BoundRow>>> {
+        let nlp_ref = nlp.borrow();
+        let z_l_off = dims[0] + dims[1] + dims[2] + dims[3];
+        let mut out = Vec::with_capacity(dims[4] + dims[5]);
+        for (pm, n_v, off, lower) in [
+            (nlp_ref.px_l(), dims[4], z_l_off, true),
+            (nlp_ref.px_u(), dims[5], z_l_off + dims[4], false),
+        ] {
+            if n_v == 0 {
+                continue;
+            }
+            let em = pm
+                .as_any()
+                .downcast_ref::<pounce_linalg::expansion_matrix::ExpansionMatrix>()?;
+            let pos = em.expanded_pos_indices();
+            if pos.len() != n_v {
+                return None;
+            }
+            for (k, &p) in pos.iter().enumerate() {
+                let p = p as usize;
+                if p >= dims[0] {
+                    return None;
+                }
+                out.push(crate::backsolver::BoundRow {
+                    row: off + k,
+                    var_row: p,
+                    lower,
+                });
+            }
+        }
+        Some(Rc::new(out))
     }
 
     /// Read the variable factors the solve ran under off the NLP and
@@ -924,6 +971,10 @@ impl SensBacksolver for PdSensBacksolver {
     /// same numbers the back-solve used.
     fn natural_units_factor(&self) -> Option<&[Number]> {
         self.conj.as_ref().map(|c| c.f.as_slice())
+    }
+
+    fn bound_rows(&self) -> Option<&[crate::backsolver::BoundRow]> {
+        self.bound_vars.as_deref().map(|v| v.as_slice())
     }
 
     /// Solve `K · lhs = rhs` against the converged factor, in
