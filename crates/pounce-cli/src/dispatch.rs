@@ -47,47 +47,62 @@ use std::collections::BTreeMap;
 /// toward the safe (more general) class.
 const PSD_TOL: f64 = 1e-9;
 
-/// Size budget (`n · m`) above which a convex QCQP is routed to the general
-/// NLP solver instead of the conic (SOCP) interior-point path.
+/// Budget on the **structural** cost of putting a convex QCQP into conic form,
+/// above which it is routed to the general NLP solver instead.
 ///
-/// The QCQP→SOCP reformulation ([`crate::qp_extract::extract_socp_with_map`])
-/// and the conic solve both scale with the problem's variable × constraint
-/// product; for the very large convex QCQPs in the mittelmann set
-/// (`nql180` ≈ 1.3e5 vars × 1.3e5 cons, `qssp180` ≈ 2.0e5 × 1.3e5) the
-/// reformulation alone burns the entire CPU budget before the solver starts.
-/// The pre-classifier baseline routed these to the NLP filter-IPM, which
-/// solves them in well under the time limit (`qssp180` 27 iters, `nql180`
-/// 44 iters). Above this budget we do the same: a convex QCQP is still a
-/// valid NLP, so the fallback is sound — it only forgoes the conic
-/// specialization on a scale the conic path is not yet tuned for.
+/// This is one of **two** independent guards on the conic path, and the split
+/// is the point. The `n · m` budget it replaces was silently doing two jobs:
+/// bounding the reformulation, and bounding the conic solve itself. Only the
+/// first was ever explained, and only the first has been fixed.
 ///
-/// `1e8` keeps the conic path for small-to-moderate QCQPs (e.g. 1e4 × 1e4)
-/// while bounding the reformulation cost to roughly a second.
-const SOCP_SIZE_BUDGET: u64 = 100_000_000;
+/// The reformulation cost genuinely used to scale with the problem's width —
+/// [`crate::qp_extract::extract_socp_with_map`] built a dense `n×n` Hessian and
+/// an `n`-column factor *per quadratic row*. It no longer does: rows are
+/// factored on their own support, and a diagonal row is factored in `O(k)`. So
+/// the model is now the actual work performed:
+///
+/// ```text
+/// Σ_rows  k³  if the row's Hessian has off-diagonal entries
+///         k   if it is diagonal (one √d per entry; no factorization)
+/// ```
+///
+/// where `k` is the number of variables that row couples. Units are
+/// floating-point operations, so the budget is a real time bound rather than a
+/// dimensionless guess. Measured: `qssp180` costs 1.96e5 flops and `nql180`
+/// 6.48e4 — both three orders of magnitude inside this budget, where the old
+/// proxy scored them at `n · m` ≈ 1e10 and rejected them.
+///
+/// **The value is deliberately conservative.** `2e7` sits just above `256³`,
+/// the per-row width the previous guard allowed, so every problem that routed
+/// to NLP for *reformulation* reasons still does — including the
+/// `qcqp1000-*`/`qcqp1500-*` rows, which Q0 measured solving well on the NLP
+/// path. Raising it to admit the dense thousand-variable rows is a separate
+/// experiment, now cheap to run because the `k³` term states its price.
+const SOCP_REFORM_FLOP_BUDGET: u128 = 20_000_000;
 
-/// Per-constraint coupling budget for the QCQP→SOCP conic path.
+/// The second guard: an **empirical** cap on the size of problem handed to the
+/// conic solve, independent of how cheap the reformulation is.
 ///
-/// The `n · m` [`SOCP_SIZE_BUDGET`] catches QCQPs that are large in the
-/// *problem* dimensions, but a problem can have a small `n · m` and still be
-/// ruinously expensive to put in conic form: each convex quadratic *row*
-/// `½xᵀQx ≤ b` is reformulated to a second-order cone via a factorization of
-/// its Hessian `Q` ([`crate::qp_extract::extract_socp_with_map`]), which costs
-/// `O(k³)` in the number of variables `k` that couple inside that one
-/// constraint. The mittelmann `qcqp1000-*` rows have only a handful of
-/// constraints (tiny `n · m`) but each couples ~1000 variables, so the
-/// per-row factorization alone exhausts the CPU budget before the conic solve
-/// starts.
+/// This exists because measurement, not theory, says so. With the extractor
+/// fixed, `qssp180` and `nql180` reformulate almost for free and the conic
+/// solver reaches an accurate optimum on both — and is *slower* doing it:
 ///
-/// When any single quadratic constraint couples more than this many active
-/// variables we route the whole QCQP to the general NLP filter-IPM, which
-/// solves it soundly without the conic reformulation — exactly what the
-/// classifier did for these rows before the convexity certificate was made
-/// cheap. A *diagonal* (separable) constraint Hessian is exempt: it is
-/// SOC-representable in `O(nnz)` with no factorization, so its size is
-/// harmless. This guard governs only the conic *reformulation* cost; the
-/// convexity test itself is the cheap sparse factorization in
-/// [`coupled_hessian_is_psd`].
-const QCQP_SOCP_COUPLED_VARS: usize = 256;
+/// ```text
+///            NLP filter-IPM        conic IPM
+/// qssp180    47.1 s / 27 it        178.5 s / 73 it     3.8x slower
+/// nql180     57.8 s / 36 it        156.5 s / 83 it     2.7x slower
+/// ```
+///
+/// Both reach `Optimal` with KKT error ≤ 1.5e-12, so this is a performance
+/// choice and not a soundness one. The conic path takes roughly 2.5x the
+/// iterations at this scale; until that is understood, the larger problems keep
+/// the solver that measurably wins.
+///
+/// `1e8` reproduces the routing the `n · m` proxy happened to produce for these
+/// two instances — the right answer for a reason that was never stated. It is a
+/// placeholder for a real conic-solve cost model, and it is deliberately the
+/// *only* thing still keyed to `n · m`.
+const SOCP_SOLVE_SIZE_CAP: u64 = 100_000_000;
 
 /// The mathematical class of a loaded problem, from most to least
 /// specialized. See the module docs and `dev-notes/lp-qp-routing.md`.
@@ -264,6 +279,7 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
         // misclassified nonconvex row would return a spurious "optimum".
         // Anything not provably convex falls back to NLP (sound: the
         // filter-IPM finds a local minimum either way).
+        let mut reform_flops: u128 = 0;
         for (row, c) in prob.con_nonlinear.iter().enumerate() {
             if is_trivially_zero(c) {
                 continue;
@@ -294,22 +310,37 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
                     // ruinous to put in SOC form, so route the whole QCQP to
                     // NLP (which solves it soundly) rather than burn the budget
                     // in the reformulation — the mittelmann `qcqp1000-*` rows.
-                    if !upper_only
-                        || !hessian_is_psd(&q, prob.n)
-                        || qcqp_constraint_too_costly_for_socp(&q)
-                    {
+                    if !upper_only || !hessian_is_psd(&q, prob.n) {
                         return ProblemClass::Nlp;
                     }
+                    reform_flops = reform_flops.saturating_add(socp_reform_flops(&q));
                 }
                 None => return ProblemClass::Nlp,
             }
         }
-        // A convex QCQP whose scale exceeds the conic path's budget falls
-        // back to NLP: the QCQP→SOCP reformulation and conic solve scale with
-        // `n · m`, and beyond this the setup alone exhausts the CPU budget
-        // (the mittelmann `nql180`/`qssp180` regression). NLP solves the same
-        // problem soundly — see `SOCP_SIZE_BUDGET`.
-        if (prob.n as u64).saturating_mul(prob.m as u64) > SOCP_SIZE_BUDGET {
+        // Two independent guards, for two different costs. A convex QCQP whose
+        // *reformulation* is too expensive falls back to NLP (see
+        // `SOCP_REFORM_FLOP_BUDGET`); so does one whose reformulation is cheap
+        // but whose *conic solve* is measurably slower than the filter-IPM at
+        // that scale (see `SOCP_SOLVE_SIZE_CAP`). Both fall back to a solver
+        // that answers the same question soundly, so either is a performance
+        // decision only.
+        let solve_size = (prob.n as u64).saturating_mul(prob.m as u64);
+        let too_costly_to_reform = reform_flops > SOCP_REFORM_FLOP_BUDGET;
+        let too_large_to_solve = solve_size > SOCP_SOLVE_SIZE_CAP;
+        if std::env::var_os("POUNCE_DBG_SOCP_COST").is_some() {
+            eprintln!(
+                "pounce: QCQP conic reformulation cost {reform_flops} flops \
+                 (budget {SOCP_REFORM_FLOP_BUDGET}), conic solve size n·m \
+                 {solve_size} (cap {SOCP_SOLVE_SIZE_CAP}) → {}",
+                if too_costly_to_reform || too_large_to_solve {
+                    "NLP"
+                } else {
+                    "ConvexQcqp"
+                }
+            );
+        }
+        if too_costly_to_reform || too_large_to_solve {
             return ProblemClass::Nlp;
         }
         return ProblemClass::ConvexQcqp;
@@ -653,17 +684,20 @@ fn hessian_active_vars(h: &QuadHessian) -> usize {
     active.len()
 }
 
-/// True when reformulating this *convex* quadratic constraint to a
-/// second-order cone would be too costly — a *coupled* (off-diagonal) Hessian
-/// over more than [`QCQP_SOCP_COUPLED_VARS`] active variables, whose per-row
-/// `O(k³)` factorization dominates the budget. A purely diagonal constraint
-/// Hessian is exempt (SOC-representable in `O(nnz)`). Callers route such a
-/// QCQP to the general NLP solver instead of the conic path. This is about
-/// the *reformulation* cost, not convexity: the constraint is already known
-/// convex (PSD) when this is consulted.
-fn qcqp_constraint_too_costly_for_socp(h: &QuadHessian) -> bool {
-    let has_offdiag = h.keys().any(|(i, j)| i != j);
-    has_offdiag && hessian_active_vars(h) > QCQP_SOCP_COUPLED_VARS
+/// Flops [`crate::qp_extract::socp_factor_rows`] will spend putting one
+/// quadratic row into cone form.
+///
+/// A diagonal Hessian takes the `O(k)` path — one `√d` per entry, no
+/// factorization — which is why the very large diagonal QCQPs are cheap to
+/// reformulate despite their width. Anything with an off-diagonal entry gets a
+/// pivoted Cholesky on a dense `k×k`, i.e. `O(k³)`.
+fn socp_reform_flops(h: &QuadHessian) -> u128 {
+    let k = hessian_active_vars(h) as u128;
+    if h.keys().any(|(i, j)| i != j) {
+        k.saturating_mul(k).saturating_mul(k)
+    } else {
+        k
+    }
 }
 
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
@@ -1284,7 +1318,8 @@ mod tests {
     /// Build a convex QCQP (linear objective + one convex quadratic
     /// constraint `x0² ≤ 1`) at an arbitrary declared `n`/`m`, padding the
     /// extra constraints with trivially-zero rows. Used to exercise the
-    /// `SOCP_SIZE_BUDGET` routing cap without allocating `n×n` data.
+    /// two routing caps (`SOCP_REFORM_FLOP_BUDGET`, `SOCP_SOLVE_SIZE_CAP`)
+    /// without allocating `n×n` data.
     fn convex_qcqp_at_size(n: usize, m: usize) -> NlProblem {
         let mut con_nonlinear = vec![Expr::Const(0.0); m];
         con_nonlinear[0] = Expr::Binary(
@@ -1326,16 +1361,31 @@ mod tests {
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
     }
 
-    /// A convex QCQP whose `n·m` exceeds [`SOCP_SIZE_BUDGET`] falls back to
-    /// NLP rather than the conic path — the mittelmann `nql180`/`qssp180`
-    /// regression, where the O(n·m) SOCP reformulation burned the whole CPU
-    /// budget before the solver started.
+    /// The two guards are independent, and this problem shows why both are
+    /// needed. Its one quadratic row is `x0² ≤ 1` — a single variable,
+    /// diagonal, one flop to put in cone form — so the *reformulation* guard
+    /// passes easily. It is still routed to NLP, by `SOCP_SOLVE_SIZE_CAP`,
+    /// because at 1e4 × 1e4 the conic solve itself measured slower than the
+    /// filter-IPM on exactly this shape (`nql180`, `qssp180`).
+    ///
+    /// Keeping the two apart matters: the old single `n·m` proxy conflated
+    /// them, so fixing the extractor's cost premise silently moved a *routing*
+    /// decision that measurement says should not move.
     #[test]
-    fn oversized_convex_qcqp_falls_back_to_nlp() {
-        // 10001 · 10001 ≈ 1.0002e8 > SOCP_SIZE_BUDGET (1e8).
+    fn large_qcqp_cheap_to_reform_still_falls_back_on_solve_size() {
         let prob = convex_qcqp_at_size(10_001, 10_001);
-        assert!((prob.n as u64) * (prob.m as u64) > SOCP_SIZE_BUDGET);
+        assert!((prob.n as u64) * (prob.m as u64) > SOCP_SOLVE_SIZE_CAP);
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// The same shape just *under* the solve-size cap keeps the conic path —
+    /// confirming the fallback above is the size cap talking and not the
+    /// reformulation budget rejecting a one-variable diagonal row.
+    #[test]
+    fn large_qcqp_under_the_solve_size_cap_keeps_conic() {
+        let prob = convex_qcqp_at_size(10_000, 9_000);
+        assert!((prob.n as u64) * (prob.m as u64) <= SOCP_SOLVE_SIZE_CAP);
+        assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
     }
 
     /// Build a convex QCQP whose single quadratic constraint `(Σ xᵢ)² ≤ 1`
@@ -1375,27 +1425,84 @@ mod tests {
         }
     }
 
-    /// A heavily-coupled *convex* QCQP constraint (here over 300 > 256 vars,
-    /// `n·m = 300` well under [`SOCP_SIZE_BUDGET`]) must still fall back to NLP:
-    /// the per-row SOC reformulation is `O(k³)` in the coupling width, which
-    /// is the mittelmann `qcqp1000-*` hang (small `n·m`, ~1000-var coupled
-    /// rows). The convexity certificate accepts it; the coupling guard routes
-    /// it away from the conic path.
+    /// Build a convex QCQP whose single quadratic constraint `Σ xᵢ² ≤ 1` is
+    /// **separable** — a diagonal Hessian over `k` variables, no coupling.
+    /// This is the `qssp180`/`nql180` shape: very wide, trivially factorable.
+    fn separable_convex_qcqp_with_k_vars(k: usize) -> NlProblem {
+        let sq = |i: usize| {
+            Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(i)),
+                Box::new(Expr::Const(2.0)),
+            )
+        };
+        let mut con = sq(0);
+        for i in 1..k {
+            con = Expr::Binary(BinOp::Add, Box::new(con), Box::new(sq(i)));
+        }
+        NlProblem {
+            n: k,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![con],
+            con_linear: vec![vec![]],
+            x_l: vec![f64::NEG_INFINITY; k],
+            x_u: vec![f64::INFINITY; k],
+            g_l: vec![f64::NEG_INFINITY],
+            g_u: vec![1.0],
+            x0: vec![0.0; k],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    /// The converse: a *small* problem can still be too expensive to
+    /// reformulate. This one is `n·m = 300`, but its single row couples all
+    /// 300 variables densely, so the pivoted Cholesky costs `300³ = 2.7e7`
+    /// flops — over budget. Route to NLP. This is the mittelmann `qcqp1000-*`
+    /// shape (few constraints, ~1000-var coupled rows), and Q0 measured those
+    /// solving well on the NLP path.
     #[test]
     fn heavily_coupled_convex_qcqp_falls_back_to_nlp() {
-        let k = QCQP_SOCP_COUPLED_VARS + 44; // 300
+        let k = 300;
         let prob = coupled_convex_qcqp_with_k_vars(k);
-        assert!((prob.n as u64) * (prob.m as u64) <= SOCP_SIZE_BUDGET);
+        assert!((k as u128).pow(3) > SOCP_REFORM_FLOP_BUDGET);
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
     }
 
-    /// The companion to the guard: a convex QCQP whose constraint couples few
-    /// enough variables keeps the conic path. Same `(Σ xᵢ)² ≤ 1` shape over
-    /// `k ≤ QCQP_SOCP_COUPLED_VARS` vars ⇒ `ConvexQcqp`.
+    /// The companion to the guard: a convex QCQP whose dense row is narrow
+    /// enough to factor inside the budget keeps the conic path.
+    /// `250³ = 1.56e7 ≤ 2e7`.
     #[test]
     fn lightly_coupled_convex_qcqp_keeps_conic() {
-        let k = QCQP_SOCP_COUPLED_VARS - 6; // 250 ≤ 256
+        let k = 250;
         let prob = coupled_convex_qcqp_with_k_vars(k);
+        assert!((k as u128).pow(3) <= SOCP_REFORM_FLOP_BUDGET);
+        assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
+    }
+
+    /// A diagonal row is factored in `O(k)`, so width alone must not push a
+    /// separable QCQP off the conic path — 1000 uncoupled variables cost 1000
+    /// flops, where the same width densely coupled would cost 1e9.
+    ///
+    /// `k` is held at 1000 by an unrelated defect, not by the cost model: the
+    /// constraint is a left-deep `Add` tree, and `to_poly` walks it
+    /// recursively, so a sum of ~5000 squares overflows the stack during
+    /// classification. That is a real crash on a legitimate model and it is
+    /// Q3's to fix (make the recognizer iterative); the cost model itself is
+    /// indifferent to `k`.
+    #[test]
+    fn wide_diagonal_convex_qcqp_keeps_conic() {
+        let k = 1_000;
+        let prob = separable_convex_qcqp_with_k_vars(k);
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
     }
 

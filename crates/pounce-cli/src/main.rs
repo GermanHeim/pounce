@@ -2927,8 +2927,9 @@ fn run_convex_socp(
     let elapsed = t0.elapsed().as_secs_f64();
 
     // The conic path returned no verified KKT point. A convex QCQP is still a
-    // valid NLP — the same reasoning `SOCP_SIZE_BUDGET` already uses to route
-    // large ones to the filter-IPM before solving — so hand it to the NLP path
+    // valid NLP — the same reasoning `SOCP_REFORM_FLOP_BUDGET` already uses to
+    // route expensive-to-reformulate ones to the filter-IPM before solving — so
+    // hand it to the NLP path
     // rather than reporting a failure with a working solver one branch away.
     //
     // `NumericalFailure` only. The other non-optimal statuses must NOT reroute:
