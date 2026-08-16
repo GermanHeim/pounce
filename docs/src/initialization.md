@@ -540,12 +540,17 @@ best, race = pounce.race_starts(fun, starts, jac=jac, bounds=bounds,
                                 return_report=True)
 print(race.report())
 # race: policy=halving eta=3 candidates=16 rungs=2
-#   rung 0: budget=52 evals entrants=16 -> survivors=7 spent=832 evals / 96 iters (0 resumed, 16 started)
-#       - #3: below halving cut (rank 8 of 16, keep 6)
-#       - #9: duplicate of candidate 2 (scaled distance 0.0004 <= 0.001)
-#   rung 1: budget=156 evals entrants=7 -> survivors=7 spent=559 evals / 77 iters (7 resumed, 0 started)
-#   total 1391 evals / 173 iters, 7 resumes
+#   rung 0: budget=37 evals entrants=16 -> survivors=7 spent=530 evals / 112 iters (0 resumed, 16 started)
+#       - #10: duplicate of candidate 6 (scaled distance 0.000606 <= 0.001)
+#       - #14: below halving cut (rank 7 of 15, keep 6)
+#       - #5: below halving cut (rank 8 of 15, keep 6)
+#       ... seven more
+#   rung 1: budget=111 evals entrants=7 -> survivors=7 spent=272 evals / 61 iters (7 resumed, 0 started)
+#   total 834 evals / 173 iters, 7 resumes
 ```
+
+(HS71, 16 Sobol starts, `iters=20` — the `hs71` row of the benchmark
+table below. The fixed policy spends 259 iterations on the same field.)
 
 `RaceReport` carries the per-rung resource spend and a reason for every
 candidate's exit; `RaceCandidate` carries each one's evaluations,
