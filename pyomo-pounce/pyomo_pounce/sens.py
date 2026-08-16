@@ -51,6 +51,7 @@ import tempfile
 import threading
 import time
 import warnings
+from collections import namedtuple
 from pathlib import Path
 
 import numpy as np
@@ -1102,9 +1103,22 @@ def estimate(model, perturb, clamp=True, mode="linear",
     re-solve far more closely. Where nothing crosses the two agree
     exactly.
 
-    max_iter bounds that work. Each pass costs a dense solve whose
-    size grows with the number of pins, and the refinement is only
-    worth running while it stays cheaper than a re-solve.
+    "path" applies the perturbation a little at a time, stopping at
+    each fraction where the active set changes and continuing under
+    the changed set, so a variable can reach a bound partway through
+    the change and leave it again further along. Where the two settle
+    the same active set it agrees with "fix_relax". At a change large
+    enough that they disagree, "fix_relax" decides every change from
+    a single step taken at the base point while "path" applies each
+    change at the fraction where it happens. `active_set_changes()`
+    returns the record of those changes.
+
+    max_iter bounds that work. Under "fix_relax" each pass costs a
+    dense solve whose size grows with the number of pins, and the
+    refinement is only worth running while it stays cheaper than a
+    re-solve. Under "path" it caps the number of active-set changes
+    applied, and past the cap the rest of the perturbation is taken
+    in one step under the active set reached.
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
@@ -1148,7 +1162,6 @@ def estimate(model, perturb, clamp=True, mode="linear",
     elif mode == "path":
         step, segments = session.solver.parametric_step_path(
             pin_idx, deltas, max_iter)
-        pinned = [row for _, row, _ in segments]
     else:
         step = session.solver.parametric_step(pin_idx, deltas)
     dx = session.scatter_x(np.asarray(step))
@@ -1175,13 +1188,19 @@ def estimate(model, perturb, clamp=True, mode="linear",
         out = np.where((x_new < lo - tol) | (x_new > hi + tol))[0]
         if out.size:
             names = [session.var_names[i] for i in out]
-            why = ("the pass limit of %d was reached, so raising "
+            if mode == "fix_relax":
+                n_changes = len(pinned)
+                did = f"pinned {n_changes} variable(s)"
+            else:
+                n_changes = len(segments)
+                did = f"applied {n_changes} active-set change(s)"
+            why = ("the limit of %d was reached, so raising "
                    "max_iter may finish it" % max_iter
-                   if len(pinned) >= max_iter else
+                   if n_changes >= max_iter else
                    "holding them all would need more pins than the "
                    "problem has degrees of freedom, so no step does")
             warnings.warn(
-                f"estimate: fix_relax pinned {len(pinned)} variable(s) and "
+                f"estimate: {mode} {did} and "
                 f"still leaves the bounds for {names}, because {why}."
                 + (" The values were clamped, which breaks the constraints "
                    "the pins were solved against." if clamp else
@@ -1537,6 +1556,63 @@ def estimate_report(model, perturb):
         perturbations=np.asarray(session.solver.kkt_perturbations).tolist(),
         bounds_relaxed=bounds_relaxed,
     )
+
+
+#: One active-set change along `estimate(mode="path")`'s path.
+#: `fraction` is how far along the perturbation the change happens,
+#: `var` is the variable (its solve-space name when the solve created
+#: it without a model counterpart), `bound` is "lower" or "upper", and
+#: `action` is "reaches" when the variable arrives at the bound and is
+#: held there, "leaves" when it comes off it.
+ActiveSetChange = namedtuple(
+    "ActiveSetChange", ["fraction", "var", "bound", "action"])
+
+
+def active_set_changes(model, perturb, max_iter=16):
+    """The active-set changes `estimate(mode="path")` applies, in order.
+
+    Takes the same perturbation argument `estimate()` takes and returns
+    a list of `ActiveSetChange` entries, one per change, in the order
+    the path applies them. Nothing about the estimate changes: this
+    runs the same path and returns its record.
+
+    The record is what `mode="path"` produces that no other mode does.
+    The first entry's fraction is how much of the measurement
+    discrepancy the held solve's active set survives unchanged, and the
+    list as a whole says which bounds the re-optimized solution enters
+    and leaves between the predicted state and the measured one.
+
+    A list of length `max_iter` means the cap stopped the path before
+    the target, the same condition `estimate()` warns about.
+    """
+    reg = model.__dict__.get(_REG)
+    session = reg.session if reg else None
+    if session is None:
+        raise RuntimeError(
+            "no sensitivity session: declare_sens_param() then solve with "
+            "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
+            "contrib SolverFactory('pounce') first")
+
+    pin_idx, deltas = _perturbation_deltas(session, perturb)
+    _, segments = session.solver.parametric_step_path(
+        pin_idx, deltas, max_iter)
+
+    # segments carry var-x rows (the factor's x block); var_names is
+    # full-x, so invert the same map scatter_x applies
+    full_of = {row: full
+               for full, row in enumerate(session._primal_row_map())
+               if row is not None}
+    out = []
+    for frac, var_row, lower, pinned in segments:
+        name = session.var_names[full_of[var_row]]
+        comp = model.find_component(name)
+        out.append(ActiveSetChange(
+            fraction=float(frac),
+            var=comp if comp is not None else name,
+            bound="lower" if lower else "upper",
+            action="reaches" if pinned else "leaves",
+        ))
+    return out
 
 
 # ── parameter covariance ──────────────────────────────────────────────────────

@@ -42,9 +42,11 @@ from pyomo_pounce.block_init import (
 )
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
+    ActiveSetChange,
     Covariance,
     EstimateReport,
     Gradient,
+    active_set_changes,
     covariance,
     declare_fitted,
     declare_residual,
@@ -109,6 +111,8 @@ __all__ = [
     "estimate",
     "estimate_report",
     "EstimateReport",
+    "active_set_changes",
+    "ActiveSetChange",
     "Gradient",
     "preflight",
     "PyomoPreflightReport",
