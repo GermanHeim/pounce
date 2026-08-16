@@ -1132,24 +1132,30 @@ def estimate(model, perturb, clamp=True, mode="linear",
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
-    if mode not in ("linear", "fix_relax"):
+    if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
-            f"estimate: mode must be 'linear' or 'fix_relax', got {mode!r}")
+            "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
+            f"{mode!r}")
 
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
     # parametric_step returns the factor's x block (var-x); base_x and
     # everything below it (nl.x_l/x_u, var_names) are full-x
+    segments = []
     if mode == "fix_relax":
         step, pinned = session.solver.parametric_step_bounded(
             pin_idx, deltas, max_iter)
+    elif mode == "path":
+        step, segments = session.solver.parametric_step_path(
+            pin_idx, deltas, max_iter)
+        pinned = [row for _, row, _ in segments]
     else:
         step = session.solver.parametric_step(pin_idx, deltas)
     dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
 
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    if mode == "fix_relax":
+    if mode in ("fix_relax", "path"):
         # The refinement holds each pinned coordinate AT its bound and
         # lets the others move, so a coordinate can still be left
         # outside one, either because the pass budget ran out or because

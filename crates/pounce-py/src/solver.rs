@@ -333,6 +333,63 @@ impl PySolver {
         ))
     }
 
+    /// Parametric step that walks the perturbation, stopping wherever
+    /// the active set changes, as `(dx, segments)`.
+    ///
+    /// `parametric_step_bounded` decides every condition at the base
+    /// point. This advances to the fraction of the perturbation that
+    /// reaches the first change, applies it, and continues from there
+    /// under the new set, so the result is piecewise linear in the
+    /// parameter.
+    ///
+    /// `segments` is one tuple per breakpoint crossed, in the order
+    /// crossed, as `(fraction, row, pinned)`. `fraction` is how far
+    /// along the perturbation the change happened, `row` is the
+    /// compound KKT row (read it against `block_dims()` the same way
+    /// `parametric_step_bounded`'s `pinned` is read), and `pinned` is
+    /// `True` for a variable held at a bound and `False` for a bound
+    /// released.
+    ///
+    /// `max_iter` caps the breakpoints crossed, and is in practice a
+    /// budget on factorizations, since a pin is a back-solve against
+    /// the held factor while a release re-factors. Reaching the cap is
+    /// not an error: the rest of the perturbation is taken in one step
+    /// under the active set reached, and a returned `segments` of
+    /// length `max_iter` is what says so.
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
+    fn parametric_step_path<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<(Number, i64, bool)>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_path: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (dx, segments) = s
+            .inner
+            .parametric_step_path(&pins, &deltas, max_iter)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            segments
+                .into_iter()
+                .map(|g| (g.at, g.row as i64, g.pinned))
+                .collect(),
+        ))
+    }
+
     /// Full KKT-space parametric step: like `parametric_step` but
     /// returns the whole compound vector `(x, s, y_c, y_d, z_l, z_u,
     /// v_l, v_u)` so multiplier sensitivities are available. Use
