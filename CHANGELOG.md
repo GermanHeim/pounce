@@ -64,6 +64,117 @@ changes.
   unchanged: the block DAG is read off the graph already built, and the
   conditioning check differentiates per block rather than rebuilding it.
   No Rust changed; the CLI fixture sweep is bit-identical.
+- **`Bool` in the C API is one byte again, matching the header** (#624
+  follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
+  which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the
+  header a source-level drop-in. The Rust implementation behind it used
+  `c_int`. Four bytes against one, in both directions, for every boolean
+  the C API exchanges.
+
+  Nothing observably misbehaved, and that is the uncomfortable part: on
+  x86-64 both gcc and clang zero-extend a `bool` return, so the values
+  came through. The psABI does not require it. It leaves the upper bits
+  of a `bool` return unspecified, which means a callback answering
+  `false` — *"I cannot evaluate at this point"* — was one compiler
+  decision away from being read as a nonzero, i.e. as success, and the
+  solver would accept a point it had been told was unusable instead of
+  cutting the step. The affected callers are real: the GAMS C link
+  (`static bool gams_eval_f(..., bool new_x, ...)`) and the CasADi plugin
+  both declare their callbacks with C99 `bool`, as the header instructs.
+
+  `Bool` is now `u8` — same layout as `_Bool`, but without Rust `bool`'s
+  validity invariant, so a caller arriving with something other than 0 or
+  1 (an older header where `Bool` was `int`, a hand-rolled binding) is
+  tested the way C would test it rather than being undefined behaviour.
+  The Fortran interface is unaffected; it never used this type.
+
+  `crates/pounce-cinterface/tests/header_abi.rs` now reads the typedefs
+  out of the shipped header and checks each against the implementation,
+  so editing either side alone fails the build rather than drifting. Both
+  of its tests fail on the parent commit, naming the size mismatch.
+
+- **Predictor-corrector NLP continuation, exposed across the non-AD
+  frontends** (#608). #90 delivered a path follower, but only for the
+  differentiable frontend: `pounce.jax.PathFollower` is written against
+  `JaxProblem` and reaches for `jax.grad` / `jax.jacobian`. None of the
+  algorithm needs autodiff, so `pounce.Continuation` runs the same loop
+  through the public `Problem` / `Solver` API, and adapters carry it to
+  Pyomo, the CLI and GAMS.
+
+  `run(thetas)` traces a prescribed repeated-NLP sequence;
+  `follow(theta_of_s, s_span)` traces an adaptive path and may accept a
+  point on the predictor alone. `ContinuationTrace` reports what #608
+  asks for: predictor residual, corrections, step rejections,
+  active-set events and total evaluations. Declaring the parameter's
+  pin-equality rows (`pins=`) enables the tangent predictor — a
+  back-solve against the held KKT factor — and omitting them falls back
+  to a zero-order warm transfer; `has_tangent` says which you got.
+
+  *`run` subdivides.* A corrector rejection between two prescribed
+  points no longer ends the trace with a runaway iterate recorded as an
+  answer: the driver halves the gap and re-predicts from the last point
+  known good. Inserted points carry `prescribed=False` and are counted
+  by `trace.n_inserted`; every prescribed point still appears, in
+  order. It is a no-op on a healthy path. `subdivide_tol` adds an
+  opt-in monitor-driven trigger, deliberately a separate knob from
+  `monitor_tol` (which at its `1e-6` default would subdivide on
+  essentially every step).
+
+  *Pseudo-arclength past folds.* `trace_arclength` follows the curve
+  through a turning point, where `run` and `follow` cannot: past a fold
+  there is no solution at the next `θ`. The tangent is the null vector
+  of the augmented `[∂R/∂z | ∂R/∂θ]`, taken by bordering with the
+  previous tangent — nonsingular *at* a simple fold, and no SVD, unlike
+  #90's dense route. `R` and its Jacobian are assembled sparsely from
+  the problem's own callbacks. On `min x0³/3 + x1²/2 s.t. x0 + x1 = θ`
+  (folding at `x0 = −1/2, θ = −1/4`), parameter continuation diverges
+  (`Diverging_Iterates`, |x0| > 10¹⁰) while `trace_arclength` turns and
+  continues onto the other branch, every point a root of `R` to < 10⁻⁷.
+  Scope is #90's: scalar `θ`, equality/unconstrained, fixed active set.
+
+  *CLI.* `pounce-continue` traces a path manifest — one command, one
+  report, one process per point. The KKT factor does not survive
+  `exec`, so there is no tangent predictor there and the trace says so
+  rather than implying one; what does cross is a primal **and dual**
+  transfer through the `.nl` `x` / `d` segments. Measured on a 20-point
+  van der Pol NMPC path: 226 → 193 iterations (−14.6%) against repeated
+  cold invocations, but only ~5% of wall clock, because process
+  startup, `.nl` parse and presolve dominate at these sizes.
+
+  *GAMS.* `pounce.gams.continuation.trace` routes a GAMS path through
+  the same driver; the pip link builds an ordinary `Problem` from a GMO
+  view, so driven from one process it gets the tangent predictor too.
+  The native C link's `sqp_state_file` is **not** a route to carrying
+  continuation state: it holds the discrete working set only — no
+  primal point, no multipliers, no barrier parameter — and its checksum
+  over `(n, m, bounds)` is invalidated by exactly the horizon shifts and
+  remeshes the transfer map exists to serve.
+
+  *What it is worth, stated as measured.* On an interior-point method
+  the tangent predictor does **not** make a warm-started solve
+  meaningfully cheaper. Over `mpc_horizon_{10,20,40,80}` at three step
+  scales — 12 cells, 240 solves per arm, baseline `cfc1121` — cold 2492,
+  warm 1229, predictor 1258 (+2.4%), predictor-corrector 1242 (+1.1%) at
+  `warm_start_recentering=residual`; 1257 (+2.3%) and 1215 (−1.1%) at
+  `=none`. Warm starting is worth 2.03×; the predictor on top of it is
+  noise, and at the largest step scale it is reliably worse (+17.5% at
+  horizon 80) because it extrapolates across critical-region boundaries
+  the corrector undoes. The mechanism is a floor, not a tuning failure:
+  in the continuation regime a warm-started IPM solve already converges
+  in one iteration per step. Recorded because "an accepted cost" with no
+  owner is indistinguishable from noise to the next reader.
+
+  Recentering does not move that verdict, and the reason is mechanical:
+  `cold-ipm`, `warm-ipm` and `pred-ipm` are bit-identical between the
+  two settings (0 of 240 steps differ each); only `predcorr-ipm` moves,
+  on 14 of 240, because it is the one arm supplying a *perturbed*
+  multiplier seed for the recentering measurement to act on. The warm
+  baseline is 1229 at both settings, so #606/#620 contributes none of
+  the 1097 → 1229 move against the earlier `70bf53de` measurement.
+
+  Where continuation does pay is `follow`, which skips the solve
+  entirely. Full write-up, including what the CLI path is and is not:
+  `docs/src/continuation.md`.
 
 - **`WarmStart` artifacts carry the model they belong to, and warm-start
   options no longer outlive the call that asked for them** (#607). Two
