@@ -9,6 +9,23 @@ changes.
 
 ## [Unreleased]
 
+- **The 1x1 initializer blocks read the `scaling_factor` Suffix, and
+  their convergence test is measured on the row's stated scale.**
+  `block_initialize`'s 1x1 path called
+  `calculate_variable_from_constraint` with its absolute `eps=1e-8`,
+  the one place in the package that ignored the Suffix the gh #483
+  reader delivers everywhere else. An equation whose terms sit near
+  3e7 (IDAES energy holdups in raw SI) has a double-precision
+  evaluation floor near 1e-7, so the linesearch hit its iteration
+  limit at a residual of 7.45e-8, the block was declared failed, and
+  827 of 1001 variables kept their seeds, costing the downstream
+  dynamic optimization 137 to 225 iterations against 19 from a full
+  start. The path now reads the constraint's factor through the gh
+  #483 reader and passes `eps = 1e-8 / f`, the identical test measured
+  on the scaled row `f*g(x)`. An untagged constraint keeps the
+  absolute default, and a model without an export-enabled Suffix makes
+  the exact call the current release makes.
+
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
   down with it** (#609). Four measurements on the parent commit
