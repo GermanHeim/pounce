@@ -42,7 +42,7 @@ changes.
   bound; activity of a base bound is now decided at the base point,
   where the factorization's sigma was frozen.
 
-  `python/notebooks/35_active_set_parametric_sensitivity.ipynb` works
+  `python/notebooks/36_active_set_parametric_sensitivity.ipynb` works
   a CSTR example through all three modes, and
   `docs/src/sensitivity.md` covers when each mode is the right one.
 - **Pyomo initialization: scaled projection, options that reach every

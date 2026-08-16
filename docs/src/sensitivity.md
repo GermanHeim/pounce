@@ -282,7 +282,7 @@ without re-factoring, each release re-factors once, and the wall time
 grows about linearly with the changes applied, well under a re-solve.
 
 See
-[`python/notebooks/35_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/35_active_set_parametric_sensitivity.ipynb)
+[`python/notebooks/36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
 for the worked CSTR example behind those numbers, including `max_iter`
 sweeps of both modes against re-solve wall time.
 
