@@ -19,7 +19,7 @@ constraints), this solves the full nonlinear projection with POUNCE.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 from pyomo_pounce.block_init import (
@@ -34,22 +34,134 @@ from pyomo_pounce.block_init import (
     structural_incidence,
     block_repair_plan,
 )
+from pyomo_pounce.init_options import InitOptions
 from pyomo_pounce.preflight import initialize_missing_values
 
 __all__ = ["project_to_feasible", "initialize", "InitializeReport"]
+
+
+def _install_projection_scaling(model, opts):
+    """Row scaling for one projection solve; returns ``(undo, opts)``.
+
+    The factors are delivered through the model's own ``scaling_factor``
+    Suffix and ``nlp_scaling_method=user-scaling`` -- the route Pyomo's NL
+    writer already emits and :mod:`pyomo_pounce.scaling` already reads --
+    rather than by rewriting the constraints, so nothing about the model
+    the user handed us changes and the solver needs to learn nothing new.
+
+    Entries the model already carries **win**: this fills in the rows the
+    user did not tag, and an explicit ``nlp_scaling_method`` in the solver
+    options wins over turning user-scaling on at all. ``undo()`` restores
+    the Suffix exactly, entry by entry, including removing one we created.
+
+    One case is deliberately left alone: a model carrying a
+    ``scaling_factor`` Suffix that is *not* export-enabled. Those entries
+    are the user's, and the only ways to attach ours are to flip their
+    Suffix to EXPORT -- which would ship values they deliberately kept
+    local -- or to shadow the name. Neither is ours to do, so the
+    projection runs unscaled, exactly as before gh #609.
+    """
+    import pyomo.environ as pyo
+
+    from pyomo_pounce.init_scaling import row_factors
+    from pyomo_pounce.scaling import SUFFIX_NAME
+
+    def _noop():
+        return None
+
+    if opts.scaling == "none":
+        return _noop, opts
+
+    found = [
+        sfx
+        for sfx in model.component_objects(pyo.Suffix, active=True, descend_into=True)
+        if sfx.local_name == SUFFIX_NAME
+    ]
+    if found and not any(sfx.export_enabled() for sfx in found):
+        return _noop, opts
+    existing = [sfx for sfx in found if sfx.export_enabled()]
+
+    auto = {}
+    if opts.scaling == "auto":
+        tagged = set()
+        for sfx in existing:
+            for key in sfx:
+                tagged.update(id(d) for d in _suffix_members(key))
+        rows = [
+            c
+            for c in model.component_data_objects(
+                pyo.Constraint, active=True, descend_into=True
+            )
+            if id(c) not in tagged
+        ]
+        auto = row_factors(rows)
+    if not auto and not existing:
+        # "auto" with nothing to say, or "user" with no Suffix: leave the
+        # solve exactly as it would have been, rather than switching it to
+        # user-scaling and thereby declaring every row's factor to be 1.0.
+        return _noop, opts
+
+    if existing:
+        sfx = existing[0]
+        created = False
+        restore = list(sfx.items())
+    else:
+        # The NAME is what the NL writer keys on -- a Suffix called
+        # anything else is emitted by nobody and read by nobody, which is
+        # a silent no-op rather than an error.
+        try:
+            model.add_component(
+                SUFFIX_NAME, pyo.Suffix(direction=pyo.Suffix.EXPORT)
+            )
+        except Exception:  # noqa: BLE001 - the name is taken by a non-Suffix
+            # A model may already use `scaling_factor` for a Param, Var or
+            # Block of its own. Ours is not the component that gets to win
+            # a name collision on the user's model, and an unscaled
+            # projection is exactly what happened before gh #609, so
+            # degrade to it rather than taking the call down.
+            return _noop, opts
+        sfx = model.component(SUFFIX_NAME)
+        created = True
+        restore = []
+    for con, factor in auto.items():
+        sfx[con] = factor
+    # The merit is a sum of squared *scaled* deviations, so it is already
+    # O(1) by construction; scaling it again would scale it twice.
+    if model._pounce_projection_objective not in sfx:
+        sfx[model._pounce_projection_objective] = 1.0
+
+    def undo():
+        if created:
+            model.del_component(sfx)
+        else:
+            sfx.clear()
+            for k, v in restore:
+                sfx[k] = v
+
+    return undo, opts.with_solver_options(nlp_scaling_method="user-scaling")
+
+
+def _suffix_members(key):
+    """Every ComponentData a Suffix key covers (itself, when scalar)."""
+    try:
+        if key.is_indexed():
+            return [key[i] for i in key]
+    except AttributeError:
+        pass
+    return [key]
 
 
 def project_to_feasible(
     model,
     solver=None,
     *,
-    options: Optional[dict] = None,
+    options=None,
     tee: bool = False,
 ) -> str:
     """Move the current point the minimum distance onto the feasible set.
 
     Temporarily replaces the model's objective with
-    ``min sum((v - v0)**2)`` over every unfixed variable that has a
+    ``min sum(w**2 * (v - v0)**2)`` over every unfixed variable that has a
     value ``v0``, solves against the model's own (active) constraints
     and bounds with POUNCE, and restores the original objective(s). The
     repaired point lands in ``Var.value``. Valueless variables get a
@@ -57,10 +169,24 @@ def project_to_feasible(
 
     Args:
         model: A Pyomo model. Modified in place: variable values only;
-            objectives/constraints are restored exactly.
+            objectives/constraints/Suffixes are restored exactly.
         solver: A Pyomo solver; default ``SolverFactory("pounce")``.
-        options: Solver options dict (e.g. ``{"tol": 1e-8}``).
-        tee: Echo solver output.
+        options: Solver options dict (e.g. ``{"tol": 1e-8}``), or an
+            :class:`~pyomo_pounce.InitOptions` to also choose the
+            scaling policy. A bare dict is always solver options.
+        tee: Echo solver output. Ignored when `options` is an
+            :class:`~pyomo_pounce.InitOptions`, which carries its own.
+
+    **Scaling** (gh #609). By default (``InitOptions.scaling="auto"``) the
+    anchor weights ``w`` are ``1/|v0|``, so the merit measures *relative*
+    movement and a repair is shared in proportion to what each variable
+    can afford rather than dumped on whichever has the smallest
+    magnitude; and every untagged constraint row is normalised two-sided
+    through the model's ``scaling_factor`` Suffix, so a row in units of
+    1e-6 is enforced to the same relative accuracy as one in units of
+    1e6. The model's own Suffix entries win over both. ``scaling="user"``
+    uses only the Suffix; ``scaling="none"`` restores the unweighted
+    pre-gh#609 merit. See :mod:`pyomo_pounce.init_scaling`.
 
     Returns the solver termination condition as a string; success is
     membership in :data:`~pyomo_pounce.block_init.OK_TERMINATIONS`
@@ -71,6 +197,12 @@ def project_to_feasible(
     anchor; run ``initialize_missing_values`` first).
     """
     import pyomo.environ as pyo
+
+    from pyomo_pounce.init_scaling import variable_weights
+
+    opts = InitOptions.coerce(options)
+    if not isinstance(options, InitOptions) and tee:
+        opts = replace(opts, tee=True)
 
     variables = [
         v
@@ -91,6 +223,11 @@ def project_to_feasible(
     if solver is None:
         solver = pyo.SolverFactory("pounce")
 
+    if opts.scaling == "none":
+        weights = {}
+    else:
+        weights = variable_weights(anchored)
+
     deactivated = []
     for obj in model.component_data_objects(
         pyo.Objective, active=True, descend_into=True
@@ -98,15 +235,26 @@ def project_to_feasible(
         obj.deactivate()
         deactivated.append(obj)
     model._pounce_projection_objective = pyo.Objective(
-        expr=sum((v - v0) ** 2 for v, v0 in anchored)
+        expr=sum(
+            weights.get(id(v), 1.0) ** 2 * (v - v0) ** 2 for v, v0 in anchored
+        )
     )
+    def undo_scaling():
+        return None
+
+    solve_opts = opts
     restore = True
     try:
-        results = solver.solve(model, tee=tee, options=dict(options or {}))
+        # Inside the try: everything from here on must be undone by the
+        # `finally` below, including a failure while installing the
+        # scaling itself.
+        undo_scaling, solve_opts = _install_projection_scaling(model, opts)
+        results = solver.solve(model, **solve_opts.solver_kwargs())
         cond = str(results.solver.termination_condition)
         restore = cond not in OK_TERMINATIONS
         return cond
     finally:
+        undo_scaling()
         if restore:
             for v, val in snapshot:
                 v.set_value(val, skip_validation=True)
@@ -132,6 +280,12 @@ class InitializeReport:
     #: actually needed repair; None when the decisions were used as-is.
     repair: Optional[BlockRepairPlan] = None
     warnings: List[str] = field(default_factory=list)
+
+    @property
+    def blocks(self):
+        """The block-stage per-block record, or ``[]`` when it did not
+        run (gh #609). See :class:`~pyomo_pounce.BlockOutcome`."""
+        return [] if self.block is None else self.block.blocks
 
     @property
     def ok(self) -> bool:
@@ -171,7 +325,7 @@ def initialize(
     repair: str = "auto",
     fill: str = "midpoint",
     project: bool = True,
-    options: Optional[dict] = None,
+    options=None,
     tee: bool = False,
 ) -> InitializeReport:
     """Fill, repair, and block-solve a model's starting point.
@@ -201,13 +355,30 @@ def initialize(
        equality system in calculation order, overwriting the repaired
        values with the consistent profile.
 
+    ``options`` is a solver-options dict (``{"tol": 1e-8}``) or an
+    :class:`~pyomo_pounce.InitOptions`. Either way **one** object is
+    built here and threaded through every stage that runs — the
+    projection, each block solve, and any fallback solve (gh #609).
+    Before gh #609 the dict reached the projection and nothing else, so
+    a tolerance tuned for the model was silently dropped by the block
+    solves that produced the actual starting point. An
+    :class:`~pyomo_pounce.InitOptions` additionally chooses the
+    projection's scaling, the block conditioning threshold and its
+    fallback, and what happens to the traversal when a block fails.
+
     Returns an :class:`InitializeReport`; ``report.block.square`` and
     the name lists tell you what the model is still missing.
+    ``report.blocks`` is the per-block record of what was initialized,
+    fell back, failed, or was skipped.
     """
     if repair not in ("auto", "off"):
         raise ValueError(
             f"initialize: repair must be 'auto' or 'off', got {repair!r}"
         )
+
+    opts = InitOptions.coerce(options)
+    if not isinstance(options, InitOptions) and tee:
+        opts = replace(opts, tee=True)
 
     report = InitializeReport()
 
@@ -270,7 +441,7 @@ def initialize(
         if project:
             try:
                 report.projection = project_to_feasible(
-                    model, solver=solver, options=options, tee=tee
+                    model, solver=solver, options=opts
                 )
                 if report.projection not in OK_TERMINATIONS:
                     report.warnings.append(
@@ -289,8 +460,8 @@ def initialize(
         report.block = block_initialize(
             model,
             solver=solver,
-            tee=tee,
             repair="off",
+            options=opts,
             igraph=igraph,
         )
     finally:
