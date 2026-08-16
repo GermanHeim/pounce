@@ -9,6 +9,59 @@ changes.
 
 ## [Unreleased]
 
+- **The two tolerance downgrades the least-square-init safeguard costs
+  are explained, measured and pinned** (#616, follow-up to #605). With
+  `least_square_init_primal=yes` — off by default — `csfi2` and
+  `eigenb2` finish at `SolvedToAcceptableLevel` where the unsafeguarded
+  step reached `SolveSucceeded`. That cost was recorded in a PR body and
+  nowhere else, which `CLAUDE.md` names as the way a real regression
+  becomes indistinguishable from noise. It is now documented in
+  `docs/src/initialization.md` with the sweep behind it, and pinned by
+  tests, and the decision is that it stays.
+
+  The three moving behaviours turn out not to share a mechanism, which
+  was the open question. Attributing every one of the fourteen fixtures
+  that move puts them in three different arms of the safeguard: three
+  start already feasible and never compute a step (`unbounded_cubic`'s
+  91 → 290 iterations, both `DivergingIterates`); six decline every
+  trial (`csfi2`, `pooling_rt2stp`, `deb7`); five accept a backtracked
+  step (`eigenb2`, and `eigena2`).
+
+  Neither downgrade is reachable by tightening the accept test.
+  `csfi2` already *declines* — recovering its old status would mean
+  accepting a step that raises the true violation, which is the one
+  thing the safeguard exists to refuse. `eigenb2` accepts on numbers
+  bit-identical to `eigena2`'s — same `θ₀`, same `θ`, same `α`, same
+  step norm — and `eigena2` improves, so no criterion computed from the
+  safeguard's inputs can separate them. Three candidate criteria were
+  measured and all fail: no `least_square_init_accept_ratio` in its
+  meaningful range rejects `eigenb2`'s step, its 4× violation reduction
+  is the median of the sixteen accepted steps in the corpus rather than
+  a marginal one, and its iteration-0 dual infeasibility *improves*
+  (100 → 47.7), so a dual-residual gate would accept it too.
+
+  Also documented, because it surprises people and is not what the old
+  wording implied: a **declined** step is not the same as never asking.
+  It restores your `x` exactly, but the augmented-system solve that
+  computed the rejected direction has already driven the first
+  factorization, and that carries. Forcing a decline on either side of
+  that call isolates it — before is bit-identical to
+  `least_square_init_primal=no` everywhere, after is bit-identical to
+  the real safeguard. It is visible on two fixtures: `pooling_rt2stp`
+  (298 iterations off, 81 declined) and `deb7` (154 against 202).
+
+  Two supporting changes. The safeguard's decision now also goes out
+  once per solve at `debug` level on `pounce::algorithm`, so a fixture
+  sweep can attribute a moving model with
+  `RUST_LOG=pounce::algorithm=debug` instead of patching the source and
+  rebuilding, which is what taking this measurement required. And the
+  accept test is a named predicate, `DefaultIterateInitializer::
+  accepts_trial`, so the argument above is pinned as executable
+  properties rather than prose. Solver behaviour is unchanged: the 57
+  fixtures are bit-identical to the parent commit under default options,
+  under `least_square_init_primal=yes`, and under
+  `mehrotra_algorithm=yes`.
+
 - **`Bool` in the C API is one byte again, matching the header** (#624
   follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
   which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the

@@ -138,6 +138,129 @@ if let Some(r) = app.least_square_init_report() {
 }
 ```
 
+From the CLI, where that accessor is not reachable, the same fields go
+out once per solve at `debug` level:
+
+```sh
+RUST_LOG=pounce::algorithm=debug pounce model.nl model.sol \
+    least_square_init_primal=yes
+# DEBUG pounce::algorithm: pounce: least_square_init_primal safeguard
+#   decision violation_initial=1.0 violation_final=0.25 alpha=0.5
+#   step_norm=3.2596 rejected_trials=1 termination="accepted"
+```
+
+### What the safeguard costs, and why it is not tuned away
+
+The guarantee above is about **the starting point's violation** — the
+only quantity the test measures. It says nothing about the trajectory
+that follows. A different, more feasible starting point on a nonconvex
+model is entitled to reach a different local minimum and to converge
+into a different tolerance band, and on this corpus two models do.
+
+Sweeping the 57 CLI fixtures with `least_square_init_primal=yes`, with
+the safeguard against without it (gh#616, measured on `a44f4e8b`):
+
+| fixture | unsafeguarded | safeguarded | what changed |
+|---|---|---|---|
+| `csfi2` | `SolveSucceeded`, 53 it | `SolvedToAcceptableLevel`, 35 it | objective bit-identical at 55.0176045 |
+| `eigenb2` | `SolveSucceeded`, 55 it | `SolvedToAcceptableLevel`, 57 it | 1.6 → 1.599999991 |
+| `pooling_rt2stp` | −4391.826, 134 it | −3273.955, 81 it | different local optimum |
+| `deb7` | 249.746, 479 it | 97.560, 202 it | different local optimum, much better |
+| `eigena2` | `SolveSucceeded`, 78 it | `SolveSucceeded`, 65 it | |
+| `unbounded_cubic` | `DivergingIterates`, 91 it | `DivergingIterates`, 290 it | unbounded either way |
+
+Fourteen fixtures move in total; `SolveSucceeded` goes 46 → 44 and the
+solved-or-acceptable set is unchanged at 46. Under **default options**
+the two routes are bit-identical, because `least_square_init_primal`
+defaults to `no`. Under `mehrotra_algorithm=yes` — which turns the
+option on as part of its cascade — the same 27 fixtures solve to the
+same objectives on both sides, at 2475 against 2463 total iterations.
+Twelve fixtures move there. Ten of them fail on both sides
+(restoration failure, detected infeasibility, a step-computation
+error), so only the failure label and the meaningless objective it
+carries change; the other two are `eigena2` and `eigenb2`, which solve
+to the same objectives either way and differ by a single iteration.
+
+Across the 57 fixtures the safeguard engages on 29: 16 accept, 8
+decline every trial, and 5 start feasible and short-circuit. It is
+inert on the other 28 — 26 are LP or convex-QP models the CLI
+dispatches to `pounce-convex`, which does not run this initializer at
+all, and 2 have no constraints for the step to act on.
+
+The two downgrades are deliberate, and they are **not** a defect in the
+accept test. Attributing every moving fixture through the report above
+puts them in three different arms of the safeguard, which do not share
+a mechanism:
+
+* **`theta_0 = 0`, short-circuit.** `unbounded_cubic`, `unbounded_exp`,
+  `boxed_qp_fixed_var` start feasible, so no direction is computed at
+  all. `unbounded_cubic`'s 91 → 290 is the unsafeguarded path having
+  taken a step from an already-feasible point; both routes return
+  `DivergingIterates` on a model that is genuinely unbounded.
+* **Declined.** `csfi2`, `deb7`, `pooling_rt2stp`,
+  `linear_eq_aggregation`, `issue_372_infeasible_bounds`: every trial
+  is worse than `theta_0`, so the user's point is kept.
+* **Backtracked accept.** `eigena2`, `eigenb2`, `hs71_obj1e8`,
+  `user_scaling_suffix`, `user_scaling_var_suffix` accept at
+  `alpha < 1`.
+
+`csfi2` is in the declined group. Its old `SolveSucceeded` came from
+taking a step that raises the true violation above `theta_0 = 1508.55`
+— exactly the step the safeguard exists to refuse. A *tighter* accept
+test still declines it, so no tuning reaches it; only removing the
+safeguard does. With the step declined, `csfi2` under
+`least_square_init_primal=yes` now matches `=no` to the bit, which is
+the least surprising thing an off-by-default option can do.
+
+`eigenb2` is in the accepted group, and it is paired with `eigena2`:
+the safeguard sees **bit-identical numbers** on both — `theta_0 = 1.0`,
+accepted `theta = 0.2500000062500001`, `alpha = 0.5`, one rejected
+trial, step norm `3.2596` — and `eigena2` improves while `eigenb2`
+drops a tolerance band. Any criterion computed from the safeguard's own
+inputs necessarily treats the two the same, so none can keep one and
+drop the other. Two specific proposals were measured and rejected:
+
+* **Retuning `least_square_init_accept_ratio`.** Acceptance is
+  `theta_0 − theta >= eta·alpha·theta_0`, so `eigenb2`'s trial survives
+  every `eta <= 1.5`, and `eta > 1` is meaningless (it would demand a
+  negative violation at `alpha = 1`). No reachable setting rejects it.
+* **A band that prefers the untouched point when the improvement is
+  marginal.** `eigenb2`'s step is not marginal: it cuts the violation
+  4×, the median of the sixteen accepted steps in the corpus and the
+  same ratio as `airport`, `cresc4` and both
+  `issue_508_infeasible_gap_*` fixtures, all of which are wins.
+* **Requiring the accepted point not to degrade the dual residual.**
+  Measured: iteration-0 `inf_du` *improves* on both, 100 → 13.9 on
+  `eigena2` and 100 → 47.7 on `eigenb2`. The gate accepts the step.
+
+So the downgrades are accepted as the cost of a route that is off by
+default, and the corpus measurement is pinned by
+`crates/pounce-cli/tests/issue_616_ls_init_downgrades.rs` rather than
+left in a PR body.
+
+### A declined step is not the same as never asking
+
+Worth knowing before you read `least_square_init_primal=yes` results:
+declining restores your `x` exactly, but it does not restore the
+solver's state. Computing the direction has by then driven the first
+factorization through the augmented-system solver, on the `W = 0`
+least-square matrix rather than on the first real KKT matrix.
+
+gh#616 isolated this by forcing a decline on either side of that call.
+Declining *before* the augmented-system solve is bit-identical to
+`least_square_init_primal=no` on every fixture; declining *after* it is
+bit-identical to the real safeguard. So the carrier is that one solve,
+not the staging or the trial evaluations — those are free.
+
+It shows on two of the eight declining fixtures: `pooling_rt2stp` takes
+298 iterations with the option off and 81 with it on and declined
+(same objective, same status), and `deb7` takes 154 against 202.
+Everywhere else declining and `=no` agree exactly. Making the decline a
+true no-op would need a separate augmented-system solver for the
+initializer; it was not done, because it is a trajectory change that
+costs `pooling_rt2stp` 81 → 298 iterations to buy a tidier contract on
+an off-by-default option.
+
 ## Warm-starting the interior-point path
 
 From Python, the packaged form is one object:
