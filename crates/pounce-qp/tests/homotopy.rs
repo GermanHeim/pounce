@@ -725,3 +725,84 @@ fn solve_with_working_set_reconciles_a_stale_hint() {
         cold.obj
     );
 }
+
+/// gh #615 — a **fully bound-active box relaxation** is the structural start
+/// that sends the path into the prune -> re-add cycle, and it must still land on
+/// the conventional path's answer.
+///
+/// The CVXQP family is n≈1000 with essentially every variable bound active at
+/// `t = 0` ((active bounds + active rows)/n = 0.999–1.0 across all six members).
+/// That over-determines the working set the moment rows start binding, the rank
+/// repair prunes bounds to make room, and the primal ratio test walks straight
+/// back into them. This is that shape in miniature: `H = I` with `g` pulling the
+/// unconstrained optimum far outside a unit box, so the relaxation sits on the
+/// vertex `x = 1` with **all six** bounds active, plus three dense rows that bind
+/// on the way to `t = 1`.
+///
+/// The assertion is agreement, not iteration count. The corpus is where the
+/// cycle's *cost* is measured (`REPRUNE_BUDGET`); no instance this small
+/// re-prunes 512 times, so this test pins the correctness half — a degenerate
+/// start must not change the answer, whether or not the budget ever trips.
+#[test]
+fn fully_bound_active_start_agrees_with_conventional() {
+    let n = 6;
+    let m = 3;
+    // H = I (positive definite, so the box relaxation is bounded and the
+    // homotopy can start at all).
+    let h = (
+        (1..=n as i32).collect::<Vec<_>>(),
+        (1..=n as i32).collect::<Vec<_>>(),
+        vec![1.0; n],
+    );
+    // Unconstrained optimum is x = 10·1, far outside the box, so every bound is
+    // active at the relaxation's vertex.
+    let g = vec![-10.0; n];
+    // Three overlapping rows, each summing four of the six variables. Together
+    // with six active bounds in six dimensions they are linearly dependent the
+    // moment any of them binds — the rank repair has to prune.
+    let mut irows = Vec::new();
+    let mut jcols = Vec::new();
+    let mut vals = Vec::new();
+    // Triplets are 1-based, as everywhere else in this crate.
+    for (r, cols) in [[1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6]]
+        .iter()
+        .enumerate()
+    {
+        for &c in cols {
+            irows.push(r as i32 + 1);
+            jcols.push(c);
+            vals.push(1.0);
+        }
+    }
+    let case = Case {
+        n,
+        m,
+        h,
+        g,
+        a: (irows, jcols, vals),
+        // Each row caps at 2.0 while the box alone would allow 4.0, so all three
+        // bind before t = 1.
+        bl: vec![NLP_LOWER_BOUND_INF; m],
+        bu: vec![2.0; m],
+        xl: vec![0.0; n],
+        xu: vec![1.0; n],
+    };
+
+    let (st_h, x_h, obj_h) = solve(&case, true);
+    let (st_c, x_c, obj_c) = solve(&case, false);
+
+    assert_eq!(st_h, st_c, "homotopy status disagrees with conventional");
+    assert_eq!(st_h, QpStatus::Optimal);
+    assert!(
+        (obj_h - obj_c).abs() <= 1e-9 * (1.0 + obj_c.abs()),
+        "degenerate fully-bound start: homotopy obj {obj_h} vs conventional {obj_c}"
+    );
+    for j in 0..n {
+        assert!(
+            (x_h[j] - x_c[j]).abs() <= 1e-7,
+            "degenerate fully-bound start: x[{j}] = {} vs conventional {}",
+            x_h[j],
+            x_c[j]
+        );
+    }
+}
