@@ -626,7 +626,17 @@ where
                 } else {
                     hi[br.var_row] - x_curr[br.var_row] - acc[br.var_row]
                 };
-                if slack > eps {
+                // Active means the multiplier dominates the slack. A
+                // converged interior point never sits ON a bound: an
+                // active bound's slack is order mu over the multiplier,
+                // so testing slack against `eps` calls every active
+                // bound inactive and the walk never releases anything.
+                // Complementarity splits the two sides cleanly, z of
+                // order one against slack of order mu on the active
+                // side and the reverse on the inactive, which is the
+                // same split the activity classifier draws.
+                let z_base = m.base + acc[m.row];
+                if !slack.is_finite() || z_base <= slack {
                     continue;
                 }
                 let z = m.base + acc[m.row];
