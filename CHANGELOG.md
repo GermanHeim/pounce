@@ -9,6 +9,58 @@ changes.
 
 ## [Unreleased]
 
+- **A transferred warm start now beats a cold solve, and the docs stop
+  saying otherwise** (#622). `WarmStart.reindex` filled the prolongated
+  stage of a receding horizon with zero clipped into the variable's box
+  — a value chosen without reference to the point being transferred or
+  to the model. On a chain with a slew limit that enters the new
+  problem **2.25 away from feasible** (the new variable at `0` beside a
+  neighbour at `2.75`, under a limit of `0.5`), and the filter's first
+  iterations go on undoing the transfer: 11 iterations against 7 for a
+  cold solve.
+
+  `fill_x` is now a policy. The default, `"prolong"`, repeats the last
+  stage: when the identifier map is a pure shift — every matched entry
+  the same distance from its counterpart, which is what a receding
+  horizon *is* — that distance is the layout's own period, read off the
+  map rather than assumed, and each unmatched entry takes the value one
+  period behind it, clipped into its box. One variable per stage or
+  `(p, v, u)` interleaved, the value lands in the same *kind* of slot; a
+  tail longer than one stage repeats the terminal stage; a map that is
+  not a shift has no stage to repeat and degrades to the old behaviour,
+  which is still available as `fill_x="zero"`. An explicit array or
+  scalar is used as-is. Same fixture: primal residual `2.25` → `1.7e-10`
+  and 11 iterations → 8.
+
+  The issue's table is the reverse of what it was. Eight steps of a
+  receding horizon on the sinusoidal tracking family, total iterations,
+  transferred against cold: **45/67** at horizon 5, **50/75** at 10,
+  **54/77** at 20, **46/76** at 40 — where the same table before #620
+  had the transferred start *losing* by more the longer the horizon got
+  (30 against 10 at horizon 40). Most of that turn is #620's
+  residual-adaptive recentering, measured here for the first time since
+  it landed, which is what #622 asked for; the fill policy is what
+  reaches the case recentering does not, the slew fixture, where the
+  closed loop goes 27 → 21 against cold's 22.
+
+  Two suggestions from the issue were measured and **rejected**, both
+  because #606/#620 already does the job they were reaching for.
+  Dropping the transferred multipliers so the solver rebuilds them from
+  the primal point costs 49 iterations against 45 at horizon 5 and 67
+  against 54 at horizon 20. Restarting the barrier is a wash at
+  `mu_init=1e-6` (46/53/48/47 against the carried μ's 45/50/54/46) and
+  loses steadily from there — 52/61/56/54 at `1e-4`, and by `1e-1` the
+  four horizons run 72/79/74/72, at or above the cold solve's
+  67/75/77/76. The carried μ stays the default. Recorded so the next
+  reader does not re-run them.
+
+  What is *not* claimed: a single hand-off across a large parameter step
+  on a small model is still not where warm starting wins — on the
+  five-variable slew fixture the transferred point costs 8 iterations
+  against a cold solve's 7 to 9, the cold arm's own spread over where
+  the guess is put. Python-side only; no Rust changed and no solver step
+  moved, so the CLI fixture sweep is untouched by construction.
+
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
   down with it** (#609). Four measurements on the parent commit
@@ -441,7 +493,11 @@ changes.
   point costs 12 iterations against 7 for a cold solve, and on a longer
   sinusoidal track the gap widens with the horizon (12 vs 9 at horizon 5,
   30 vs 10 at horizon 40). That is the barrier/active-set limit
-  `docs/src/initialization.md` already describes.
+  `docs/src/initialization.md` already describes. **Superseded within
+  this same unreleased cycle by #620 and #622** (first entry above): that
+  table no longer reproduces, and a transferred start now beats a cold
+  solve at every horizon of it. The numbers here are left as they were
+  measured, not silently corrected.
 
   Python-side, plus four additive `Problem` accessors
   (`options_snapshot` / `restore_options`, `get_bounds`,
