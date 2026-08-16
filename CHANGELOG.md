@@ -10,8 +10,8 @@ changes.
 ## [Unreleased]
 
 - **`estimate(mode="path")` applies the perturbation a little at a time,
-  and `active_set_changes()` returns the record of what changed where.**
-  Roadmap item 2. `mode="fix_relax"` decides every active-set change from
+  and `active_set_changes()` returns the record of what changed where**
+  (#631). Roadmap item 2. `mode="fix_relax"` decides every active-set change from
   full steps at the base point. The new mode follows the solution along
   the perturbation: it takes the largest fraction the current active set
   allows, applies the one change that happens there, and continues under
