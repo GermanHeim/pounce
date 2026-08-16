@@ -14,6 +14,9 @@ interface as well, carrying all of the extras below (see pyomo_pounce.v2):
 Initialization helpers (see the POUNCE docs' initialization chapter):
     report = pyomo_pounce.preflight(model)         # starting-point check
     pyomo_pounce.initialize(model, decisions=[...])  # fill -> repair -> block-solve
+    #     options=InitOptions(...) tunes every stage at once: the
+    #     projection's scaling, the block conditioning threshold and its
+    #     fallback, and what a failed block does to the traversal
     # ... or the individual stages:
     pyomo_pounce.initialize_missing_values(model)  # fill unset Var values
     pyomo_pounce.project_to_feasible(model)        # min-norm repair onto constraints
@@ -38,6 +41,7 @@ Parametric sensitivity (see pyomo_pounce.sens):
 from pyomo_pounce.block_init import (
     BlockAnalysisReport,
     BlockInitReport,
+    BlockOutcome,
     BlockRepairPlan,
     block_analyze,
     block_initialize,
@@ -45,6 +49,7 @@ from pyomo_pounce.block_init import (
     structural_incidence,
 )
 from pyomo_pounce.continuation import continuation, shift_map
+from pyomo_pounce.init_options import InitOptions
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
     Covariance,
@@ -129,6 +134,8 @@ __all__ = [
     "BlockAnalysisReport",
     "block_repair_plan",
     "BlockRepairPlan",
+    "BlockOutcome",
+    "InitOptions",
     "information",
     "Information",
     "structural_incidence",

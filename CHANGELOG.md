@@ -9,6 +9,61 @@ changes.
 
 ## [Unreleased]
 
+- **Pyomo initialization: scaled projection, options that reach every
+  stage, and a failed block that no longer takes independent branches
+  down with it** (#609). Four measurements on the parent commit
+  `cfc11218`, each a defect the issue names:
+
+  *Options were dropped after the projection.* `initialize(...,
+  options={"max_iter": 137})` handed the dict to `project_to_feasible`
+  and to nothing else — `block_initialize` had no `options` argument at
+  all — so a tolerance tuned for the model reached the repair stage and
+  was silently dropped by every block solve that followed, which is the
+  stage that produces the starting point you actually get. There is now
+  one typed `InitOptions` object, built once per call and threaded
+  through the projection, every block solve, and every fallback solve. A
+  bare dict still means solver options and is never reinterpreted as
+  policy.
+
+  *A failed block abandoned the whole traversal.* On a model with two
+  independent branches, failing one left the other at its seeds: `q` and
+  `r` stayed at `0.0` instead of reaching `7.0` and `8.0`, and
+  `n_vars_initialized` was `0`. The block order is a DAG, and it is now
+  tracked as one (`block_analyze(...).block_dependencies`): a failure
+  skips its **descendants** and every independent branch still
+  initializes — `n_vars_initialized` `0` → `2` on that model.
+  `on_block_failure="stop"` restores the old behaviour.
+
+  *A structurally square, numerically near-singular block returned wrong
+  values and reported success.* On a 2x2 block with condition number
+  `4/eps`, initialization wrote `u = 2, v = 0, w = 2` where the exact
+  answer is `u = v = 1, w = 3` — an error of **1.0**, `report.ok` true,
+  nothing said. Blocks are now rank-checked on their *scaled* Jacobian
+  before being solved (so a mixed-units block is not mistaken for a weak
+  one), and a weak block is diagnosed and routed to a regularized
+  least-squares fallback that selects the minimum-norm solution: error
+  **1.0 → 7.5e-9**. `fallback="coupled"` merges the weak block with its
+  dependents instead; `conditioning="off"` skips the check.
+
+  *The projection merit was unscaled.* Rows: on a model pairing a
+  `1e6`-unit energy balance with a `1e-6`-unit trace balance, the trace
+  row's relative residual was `1.2e-8` against the energy row's
+  `1.5e-16`, because the solver's gradient-based rule only ever scales a
+  row *down*. Rows are now normalised two-sided through the model's own
+  `scaling_factor` Suffix — error **7.9e-9 → 0**. Variables: the merit
+  measured absolute distance, so a repair shared between a pressure at
+  `1e6` and a mole fraction at `1e-4` moved the mole fraction 20% and
+  the pressure `1.8e-12` relative, a ratio of **1.1e11**; weighting each
+  anchor by its own magnitude makes that ratio **1.000**. Your own
+  `scaling_factor` entries win over the automatic ones, and the Suffix
+  is restored exactly. `scaling="none"` restores the old merit.
+
+  `report.blocks` is the new per-block record (initialized / fallback /
+  failed / skipped, with `rcond` and `depends_on`). The single
+  whole-model incidence walk per `initialize()` call from #444 is
+  unchanged: the block DAG is read off the graph already built, and the
+  conditioning check differentiates per block rather than rebuilding it.
+  No Rust changed; the CLI fixture sweep is bit-identical.
 - **`Bool` in the C API is one byte again, matching the header** (#624
   follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
   which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the
