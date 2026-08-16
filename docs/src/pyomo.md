@@ -286,15 +286,18 @@ rep = pyomo_pounce.block_initialize(            # solve the equality
 `initialize_missing_values` fills each variable independently, so the
 fill can be internally inconsistent (mole fractions that do not sum to
 one); `project_to_feasible` repairs that by minimizing
-`sum((v - v0)**2)` subject to the model's active constraints and
-bounds — the full nonlinear projection, solved with POUNCE, with the
-original objective restored afterwards.
+`sum(w**2 * (v - v0)**2)` subject to the model's active constraints
+and bounds — the full nonlinear projection, solved with POUNCE, with
+the original objective restored afterwards. The weights `w` and the
+row scaling that goes with them are described under [Scaling the
+projection](#scaling-the-projection) below.
 
 Both stages guarantee that a failed solve leaves variable values
 exactly as they were: a diverged projection restores the
 pre-projection point, and a failed block solve restores that block's
-seeds and stops, so initialization can never make your starting point
-worse than it found it.
+seeds, so initialization can never make your starting point worse than
+it found it. A failed block does **not** stop the traversal — see
+[When a block fails](#when-a-block-fails).
 
 `block_initialize` is IDAES-flavored initialization without
 hand-written routines. `decisions=` holds the listed variables at
@@ -332,6 +335,116 @@ block-triangular calculation order. Use it to diagnose a large model's
 specification, or as the structural front end for tooling that decides
 *what* to specify before calling `initialize` /
 `block_initialize` to do the work.
+
+## Tuning initialization: `InitOptions`
+
+Every stage of the pipeline takes its solver options and its policy
+from one object:
+
+```python
+from pyomo_pounce import InitOptions
+
+rep = pyomo_pounce.initialize(
+    model,
+    decisions=[m.feed, m.reflux],
+    options=InitOptions(
+        solver_options={"tol": 1e-10},  # reaches EVERY solve below
+        scaling="auto",                 # projection merit + row scaling
+        cond_tol=1e-8,                  # what counts as a weak block
+        fallback="regularized",         # where a weak block is routed
+        on_block_failure="skip-dependents",
+    ),
+)
+```
+
+`solver_options` reaches the projection, every block subsystem solve,
+and any fallback solve. A bare dict still works and still means solver
+options — `options={"tol": 1e-8}` is unchanged — and is *never*
+reinterpreted as policy, because POUNCE has solver options whose names
+collide with these fields.
+
+### Scaling the projection
+
+The projection merit is `sum(w**2 * (v - v0)**2)`. With the default
+`scaling="auto"`:
+
+* **Variables** are weighted by their own magnitude (`w = 1/|v0|`), so
+  the merit measures *relative* movement. An unweighted merit measures
+  absolute distance, which across mixed units is not a distance anyone
+  wants: with a pressure at `1e6` beside a mole fraction at `1e-4`, it
+  dumps the whole repair on the mole fraction. An anchor at (or very
+  near) zero has no relative scale, so it keeps `w = 1` and stays free
+  to move, and the spread between the smallest and largest weight is
+  capped.
+* **Rows** are normalised two-sided (`1/||grad c||_inf`) through the
+  model's own `scaling_factor` Suffix. The solver's default
+  gradient-based rule only ever scales a row *down*, so a row in units
+  of `1e-6` keeps its magnitude and an absolute convergence test
+  enforces it far more loosely than a row in units of `1e6`.
+
+Entries the model already carries in its `scaling_factor` Suffix
+**win** over the automatic ones, and the Suffix is restored exactly
+afterwards (a model that declared none does not acquire one). See
+[User scaling with the `scaling_factor` Suffix](#user-scaling-with-the-scaling_factor-suffix)
+for the Suffix itself. `scaling="user"` uses only your entries;
+`scaling="none"` restores the old unweighted merit.
+
+Rescaling a row by a constant does not change the feasible set, and it
+does not move where the projection lands — to within the solver's own
+convergence tolerance, which is what sets the floor (measured: `1.2e-9`
+at the default tolerance, `2.2e-16` at `tol=1e-12`).
+
+### When a block fails
+
+`block_initialize` walks the equality blocks in calculation order, and
+that order is a DAG: `block_analyze(model).block_dependencies[k]` lists
+the blocks block `k` consumes values from. When a block fails, only its
+**descendants** are skipped; branches that do not depend on it are
+still initialized:
+
+```python
+rep = pyomo_pounce.block_initialize(model)
+rep.initialized_blocks   # solved as square systems, values kept
+rep.fallback_blocks      # weak blocks routed to a fallback
+rep.failed_blocks        # solve failed; seed values restored
+rep.skipped_blocks       # descendants of a failure (with the reason)
+```
+
+Each entry is a `BlockOutcome` carrying the block's index, size,
+leading constraint name, status, `rcond`, and `depends_on`. Pass
+`on_block_failure="stop"` to go back to abandoning the traversal at the
+first failure.
+
+### Weak blocks: structurally square is not numerically solvable
+
+Structural matching proves a block is solvable *in principle*. Whether
+its Jacobian has usable rank at the current point is a separate,
+numerical question, and a square-but-near-singular block handed to a
+Newton step lands wherever the near-null direction takes it, silently.
+
+Each block is therefore rank-checked before it is solved. The check is
+run on the **scaled** Jacobian — rows divided by their own gradient
+norm, columns multiplied by their variable's magnitude — so it answers
+a numerical question and not a units one; a mixed-units block is not
+weak. A block whose reciprocal condition number falls below `cond_tol`
+is recorded in `rep.diagnostics` and routed to `fallback`:
+
+* `"regularized"` (default) minimises the block's scaled squared
+  residuals plus `regularization` times the scaled squared step from
+  the seed, which selects the minimum-norm solution instead of an
+  arbitrary point on the near-null direction. The residual it leaves is
+  the ridge bias, so it falls linearly with `regularization` — which is
+  why the default is small (`1e-8`).
+* `"coupled"` merges the weak block with the blocks that depend
+  directly on it and regularizes the union, for a deficiency that only
+  downstream rows resolve. Its precision on the near-null direction is
+  set by `regularization` against the solver tolerance rather than by
+  the ridge bias, so a *larger* `regularization` (around `1e-6`) is the
+  better choice there.
+* `"off"` reports the diagnostic and solves the block squarely anyway.
+
+`conditioning="off"` skips the check entirely.
+
 
 ## Repairing a bad specification
 
