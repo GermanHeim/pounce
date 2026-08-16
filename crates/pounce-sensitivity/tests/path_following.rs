@@ -1,15 +1,18 @@
 //! Walking the perturbation through more than one breakpoint.
 //!
 //! `parametric_cpp.rs` covers the walk on upstream's own example, where
-//! exactly one variable crosses and the walk therefore has to agree
-//! with the base-point refinement. This file is the case that separates
-//! them: a QP whose crossings interact, so the active set the step
-//! implies at the base point is not the active set the solution ends up
-//! in.
+//! exactly one variable crosses. This file is a QP whose crossings
+//! interact: holding one variable at its bound turns the other's
+//! direction.
 //!
-//! The reference is a full re-solve at the perturbed parameter. For a
-//! QP that is the exact answer, so any gap is the predictor's, and the
-//! two modes can be compared against the same truth.
+//! The reference is a full re-solve at the perturbed parameter, which
+//! for a QP is the exact answer. What the file pins is a measured
+//! identity, not a separation: both bound-aware modes reproduce the
+//! re-solve here, because once they settle on the same final active
+//! set the QP solution under that set is affine in the parameter, and
+//! the endpoint of the walk's piecewise path coincides with the
+//! base-point repair's single step. What the walk adds on this model
+//! is the breakpoint record.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -202,11 +205,10 @@ fn both_steps(p0: Number, dp: Number) -> ([Number; 2], [Number; 2], usize) {
 }
 
 #[test]
-fn the_walk_crosses_both_bounds_and_the_base_point_repair_does_not() {
-    // p from 0.3 to 1.6. x2 reaches its upper bound at p = 0.75
-    // because it carries the larger linear pull, and holding it there
-    // turns x1's slope from 1/3 to 1, which brings x1 to its own bound
-    // at p = 1.5.
+fn both_modes_reproduce_the_resolve_across_two_interacting_crossings() {
+    // p from 0.3 to 1.6. x2 reaches its upper bound first because it
+    // carries the larger linear pull, and holding it there turns x1's
+    // direction, which brings x1 to its own bound later in the path.
     let truth = solve_at(1.6);
     let (fixed, walked, segments) = both_steps(0.3, 1.3);
 
@@ -220,13 +222,11 @@ fn the_walk_crosses_both_bounds_and_the_base_point_repair_does_not() {
     let err_fixed = (fixed[0] - truth[0]).abs().max((fixed[1] - truth[1]).abs());
     assert!(
         err_walk < 1e-6,
-        "the walk should reproduce the re-solve on a QP, off by {err_walk} \
-         (walk {walked:?} against {truth:?})",
+        "the walk should reproduce the re-solve on a QP, off by {err_walk}          (walk {walked:?} against {truth:?})",
     );
     assert!(
-        err_fixed > 10.0 * err_walk,
-        "this case is meant to separate the two modes, but the base-point \
-         repair is off by only {err_fixed} against the walk's {err_walk}",
+        err_fixed < 1e-6,
+        "the base-point repair lands on the same final active set here,          so it should also reproduce the re-solve, off by {err_fixed}          (fixed {fixed:?} against {truth:?})",
     );
 }
 

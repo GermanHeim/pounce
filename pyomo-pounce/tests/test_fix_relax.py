@@ -95,7 +95,7 @@ def test_the_report_and_fix_relax_agree_on_what_crosses():
 def test_an_unknown_mode_is_refused():
     m = solved()
     with pytest.raises(ValueError, match="mode must be"):
-        estimate(m, [(m.p, 2.0)], mode="path")
+        estimate(m, [(m.p, 2.0)], mode="newton")
 
 
 def test_fix_relax_reaches_the_same_answer_through_every_route():
