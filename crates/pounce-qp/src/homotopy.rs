@@ -959,7 +959,14 @@ impl ParametricActiveSetSolver {
             // a *fallback that exists* when its prediction turns out unusable —
             // which is what `pounce-convex`'s seeded last-resort retry restores.
             if trace && let Some((i, v)) = worst_path_violation(qp, &x, &bl0, &bu0, t, m) {
-                eprintln!("[hom] path infeasible at t={t:.9e}: row {i} by {v:.3e}");
+                // Indices at or past `m` are variables, not rows — decode them
+                // here or a box violation prints as a row that does not exist.
+                let what = if i < m {
+                    format!("row {i}")
+                } else {
+                    format!("bound on x[{}]", i - m)
+                };
+                eprintln!("[hom] path infeasible at t={t:.9e}: {what} by {v:.3e}");
             }
 
             if ratio.winners.is_empty() {

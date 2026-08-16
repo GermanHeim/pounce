@@ -4091,9 +4091,6 @@ fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32)
 /// `Optimal` and recovers through elastic mode on failure.
 /// Largest constraint / bound violation at `x` (0.0 when feasible).
 ///
-/// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
-/// path can tell whether the point it is about to substitute is actually an
-/// improvement on the one it is discarding.
 /// What [`ParametricActiveSetSolver::hint_pin_quality`] measured about a
 /// working-set hint: how big it is, and how many rows and bounds outside it the
 /// pinned point violates.
@@ -4106,6 +4103,9 @@ pub(crate) struct HintPinQuality {
     pub(crate) violated: usize,
 }
 
+/// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
+/// path can tell whether the point it is about to substitute is actually an
+/// improvement on the one it is discarding.
 pub(crate) fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
     let ax = a_times_x(qp.a, x, qp.m);
     let mut worst: Number = 0.0;
