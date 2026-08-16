@@ -10,7 +10,8 @@ changes.
 ## [Unreleased]
 
 - **The 1x1 initializer blocks read the `scaling_factor` Suffix, and
-  their convergence test is measured on the row's stated scale.**
+  their convergence test is measured on the row's stated scale**
+  (#632).
   `block_initialize`'s 1x1 path called
   `calculate_variable_from_constraint` with its absolute `eps=1e-8`,
   the one place in the package that ignored the Suffix the gh #483
