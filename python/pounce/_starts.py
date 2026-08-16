@@ -1419,11 +1419,14 @@ def race_starts(
     whole interior-point iterate: the primal point, all three multiplier
     blocks, and the barrier parameter μ, replayed through the pounce#607
     warm-start path so pounce#606's recentering measures the point it is
-    handed. That is materially not a cold restart — measured on this
-    repository's racing fixtures, resuming a candidate paused at 5
-    iterations reaches the same answer in roughly a third of the
-    iterations that restarting it from its own iterate needs (see
-    ``docs/src/initialization.md``). What is *not* carried is the filter
+    handed. That is materially not a cold restart — measured on the
+    ``rastrigin_eq`` fixture in ``python/tests/test_starts_racing.py``,
+    eight candidates paused at 5 iterations reach the same answers in 17
+    iterations when resumed and 43 when restarted from their own
+    iterates; paused at 8, where they have already converged, the resume
+    costs **0** iterations against the restart's 43 (see
+    ``docs/src/initialization.md``). The size of that gap is
+    model-dependent — on HS71 it is a wash. What is *not* carried is the filter
     history and the line-search state; carrying those needs a
     ``Solver.resolve()`` that does not exist yet.
 
@@ -1446,9 +1449,12 @@ def race_starts(
         rungs: Number of ladder rungs. Default: just enough to walk
             ``N`` down to ``top`` at rate ``eta``.
         eval_budget: Pins the ladder's evaluation unit — rung ``r``'s
-            cumulative per-candidate budget is ``eval_budget * eta**r``.
-            Default: calibrate it from what rung 0 actually cost, which
-            needs no guess about how expensive this model is.
+            cumulative per-candidate budget is ``eval_budget * eta**r``
+            for ``r >= 1``. Default: calibrate it from what rung 0
+            actually cost, which needs no guess about how expensive this
+            model is. Rung 0 itself is never bounded by it, on either
+            setting: a unit small enough to be already spent would leave
+            a candidate never run, which is not a ranking.
         min_survivors: Floor on how many candidates a rung leaves.
         min_rung_iters: Iterations rung 0 must be worth. The rung count
             is shortened rather than let the bottom rung fall below

@@ -564,12 +564,29 @@ multipliers, both bound-multiplier blocks, and the barrier parameter μ,
 replayed through the warm-start machinery above so that pounce#606's
 recentering measures the point it is actually handed. That is materially
 not a cold restart. Measured on the `rastrigin_eq` fixture in
-`python/tests/test_starts_racing.py`, eight candidates paused at five
-iterations and then **resumed** reach the same answers in **17
-iterations total**; **restarted** from their own iterates, carrying the
-point but nothing else, they need **43**. What a pause does *not* carry
-is the filter history and the line-search state; that would need a
-`Solver.resolve()`, which does not exist yet.
+`python/tests/test_starts_racing.py`:
+
+| paused at | resumed (state + point) | restarted (point only) |
+|---|---|---|
+| 3 iterations | **32 iters** / 330 evals | 43 iters / 368 evals |
+| 5 iterations | **17 iters** / 250 evals | 43 iters / 376 evals |
+| 8 iterations | **0 iters** / 80 evals | 43 iters / 372 evals |
+
+Both arms start from the identical iterate and reach the identical
+objective, start for start. The last row is the clearest: by 8
+iterations every candidate has converged, the resumed solve recognises
+it immediately because the carried duals and μ satisfy the convergence
+check on entry, and the restarted solve — handed the same point and
+nothing else — needs 5 to 8 iterations each to re-derive the same
+certificate.
+
+The size of that gap is model-dependent. On HS71 the same comparison is
+a wash (98/92/77 iterations resumed against 102/87/79 restarted), which
+is the regime pounce#608 warns about: a warm-started IPM often converges
+in one iteration per step, and where it does a resume has nothing left
+to remove. What a pause does *not* carry is the filter history and the
+line-search state; that would need a `Solver.resolve()`, which does not
+exist yet.
 
 **Ranking.** Eliminations are decided on a weighted sum of five
 rank-normalized signals — rank-normalized so that a violation in mol/s
