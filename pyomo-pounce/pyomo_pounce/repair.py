@@ -40,7 +40,7 @@ from pyomo_pounce.preflight import initialize_missing_values
 __all__ = ["project_to_feasible", "initialize", "InitializeReport"]
 
 
-def _install_projection_scaling(model, opts, anchored, variables):
+def _install_projection_scaling(model, opts):
     """Row scaling for one projection solve; returns ``(undo, opts)``.
 
     The factors are delivered through the model's own ``scaling_factor``
@@ -109,9 +109,17 @@ def _install_projection_scaling(model, opts, anchored, variables):
         # The NAME is what the NL writer keys on -- a Suffix called
         # anything else is emitted by nobody and read by nobody, which is
         # a silent no-op rather than an error.
-        model.add_component(
-            SUFFIX_NAME, pyo.Suffix(direction=pyo.Suffix.EXPORT)
-        )
+        try:
+            model.add_component(
+                SUFFIX_NAME, pyo.Suffix(direction=pyo.Suffix.EXPORT)
+            )
+        except Exception:  # noqa: BLE001 - the name is taken by a non-Suffix
+            # A model may already use `scaling_factor` for a Param, Var or
+            # Block of its own. Ours is not the component that gets to win
+            # a name collision on the user's model, and an unscaled
+            # projection is exactly what happened before gh #609, so
+            # degrade to it rather than taking the call down.
+            return _noop, opts
         sfx = model.component(SUFFIX_NAME)
         created = True
         restore = []
@@ -231,11 +239,16 @@ def project_to_feasible(
             weights.get(id(v), 1.0) ** 2 * (v - v0) ** 2 for v, v0 in anchored
         )
     )
-    undo_scaling, solve_opts = _install_projection_scaling(
-        model, opts, anchored, variables
-    )
+    def undo_scaling():
+        return None
+
+    solve_opts = opts
     restore = True
     try:
+        # Inside the try: everything from here on must be undone by the
+        # `finally` below, including a failure while installing the
+        # scaling itself.
+        undo_scaling, solve_opts = _install_projection_scaling(model, opts)
         results = solver.solve(model, **solve_opts.solver_kwargs())
         cond = str(results.solver.termination_condition)
         restore = cond not in OK_TERMINATIONS

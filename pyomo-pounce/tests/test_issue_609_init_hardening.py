@@ -10,6 +10,7 @@ import pytest
 
 import pyomo_pounce
 from pyomo_pounce import InitOptions
+from pyomo_pounce.block_init import OK_TERMINATIONS
 
 pytest.importorskip("networkx", reason="initialize pipeline needs networkx")
 pytest.importorskip("scipy", reason="initialize pipeline needs scipy")
@@ -161,6 +162,30 @@ def test_projection_leaves_no_scaling_suffix_behind(solver):
     assert m.component("scaling_factor") is None
     objs = list(m.component_data_objects(pyo.Objective, descend_into=True))
     assert len(objs) == 1 and objs[0] is m.obj
+
+
+def test_a_taken_scaling_factor_name_degrades_instead_of_raising(solver):
+    """`scaling_factor` already used by a non-Suffix component.
+
+    The projection delivers its row factors through a Suffix of that
+    name, so a model that already spends the name on a Param, Var or
+    Block leaves nowhere to put them. That is not an error the caller
+    did anything about -- the name is theirs -- so the projection runs
+    unscaled, exactly as it did before gh #609, and the model comes back
+    untouched. Before the guard this raised `RuntimeError` from
+    `add_component` *after* the original objective had been deactivated,
+    leaving the model permanently broken.
+    """
+    m = _mixed_units()
+    m.scaling_factor = pyo.Param(initialize=1.0)
+    pyomo_pounce.initialize_missing_values(m)
+
+    cond = pyomo_pounce.project_to_feasible(m, solver=solver)
+
+    assert cond in OK_TERMINATIONS
+    assert m.obj.active
+    assert m.component("_pounce_projection_objective") is None
+    assert m.component("scaling_factor") is m.scaling_factor
 
 
 # --------------------------------------------------------------------------
