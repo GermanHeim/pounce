@@ -9,6 +9,61 @@ changes.
 
 ## [Unreleased]
 
+- **Pyomo initialization: scaled projection, options that reach every
+  stage, and a failed block that no longer takes independent branches
+  down with it** (#609). Four measurements on the parent commit
+  `cfc11218`, each a defect the issue names:
+
+  *Options were dropped after the projection.* `initialize(...,
+  options={"max_iter": 137})` handed the dict to `project_to_feasible`
+  and to nothing else — `block_initialize` had no `options` argument at
+  all — so a tolerance tuned for the model reached the repair stage and
+  was silently dropped by every block solve that followed, which is the
+  stage that produces the starting point you actually get. There is now
+  one typed `InitOptions` object, built once per call and threaded
+  through the projection, every block solve, and every fallback solve. A
+  bare dict still means solver options and is never reinterpreted as
+  policy.
+
+  *A failed block abandoned the whole traversal.* On a model with two
+  independent branches, failing one left the other at its seeds: `q` and
+  `r` stayed at `0.0` instead of reaching `7.0` and `8.0`, and
+  `n_vars_initialized` was `0`. The block order is a DAG, and it is now
+  tracked as one (`block_analyze(...).block_dependencies`): a failure
+  skips its **descendants** and every independent branch still
+  initializes — `n_vars_initialized` `0` → `2` on that model.
+  `on_block_failure="stop"` restores the old behaviour.
+
+  *A structurally square, numerically near-singular block returned wrong
+  values and reported success.* On a 2x2 block with condition number
+  `4/eps`, initialization wrote `u = 2, v = 0, w = 2` where the exact
+  answer is `u = v = 1, w = 3` — an error of **1.0**, `report.ok` true,
+  nothing said. Blocks are now rank-checked on their *scaled* Jacobian
+  before being solved (so a mixed-units block is not mistaken for a weak
+  one), and a weak block is diagnosed and routed to a regularized
+  least-squares fallback that selects the minimum-norm solution: error
+  **1.0 → 7.5e-9**. `fallback="coupled"` merges the weak block with its
+  dependents instead; `conditioning="off"` skips the check.
+
+  *The projection merit was unscaled.* Rows: on a model pairing a
+  `1e6`-unit energy balance with a `1e-6`-unit trace balance, the trace
+  row's relative residual was `1.2e-8` against the energy row's
+  `1.5e-16`, because the solver's gradient-based rule only ever scales a
+  row *down*. Rows are now normalised two-sided through the model's own
+  `scaling_factor` Suffix — error **7.9e-9 → 0**. Variables: the merit
+  measured absolute distance, so a repair shared between a pressure at
+  `1e6` and a mole fraction at `1e-4` moved the mole fraction 20% and
+  the pressure `1.8e-12` relative, a ratio of **1.1e11**; weighting each
+  anchor by its own magnitude makes that ratio **1.000**. Your own
+  `scaling_factor` entries win over the automatic ones, and the Suffix
+  is restored exactly. `scaling="none"` restores the old merit.
+
+  `report.blocks` is the new per-block record (initialized / fallback /
+  failed / skipped, with `rcond` and `depends_on`). The single
+  whole-model incidence walk per `initialize()` call from #444 is
+  unchanged: the block DAG is read off the graph already built, and the
+  conditioning check differentiates per block rather than rebuilding it.
+  No Rust changed; the CLI fixture sweep is bit-identical.
 - **The two tolerance downgrades the least-square-init safeguard costs
   are explained, measured and pinned** (#616, follow-up to #605). With
   `least_square_init_primal=yes` — off by default — `csfi2` and
@@ -173,7 +228,210 @@ changes.
   Where continuation does pay is `follow`, which skips the solve
   entirely. Full write-up, including what the CLI path is and is not:
   `docs/src/continuation.md`.
+- **A CasADi `nlpsol` plugin, and the two POUNCE-side gaps it exposed**
+  (#624). POUNCE now registers with [CasADi](docs/src/casadi.md) as a
+  first-class solver plugin: `nlpsol('S', 'pounce', nlp, opts)` and
+  `opti.solver('pounce')`, on MX graphs with parameters, with option
+  pass-through, warm starts, live iteration callbacks, the full
+  per-iteration `stats()['iterations']` trace, and derivatives of the
+  solution map (inherited from CasADi's `Nlpsol` base class, so
+  `jacobian(sol['x'], p)` and bilevel problems work). Source, build, and
+  parity tests against CasADi's bundled Ipopt live in `casadi/`; seven
+  runnable examples in `casadi/examples/`. Installation is either
+  `make -C casadi install`, which drops the plugin into CasADi's own
+  package directory — the first place its loader looks, so no
+  environment variable and no `sudo` — or a wheel: `casadi/wheel/build.sh`
+  packages `pounce-casadi`, and `import pounce_casadi` then registers the
+  plugin in-process, leaving CasADi's installation untouched and its
+  bundled Ipopt loadable alongside. Nothing is published to PyPI yet; `dev-notes/casadi-interface-options.md` records why this
+  shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
+  drop-in `libipopt`, and what the wheel would take.
 
+- **The CasADi plugin's option surface is now a superset of the ipopt
+  plugin's**, so swapping `ipopt` for `pounce` in an existing script does
+  not have to be edited into working. Four things it used to reject or
+  lack:
+
+  *Your own derivative functions.* `grad_f`, `jac_g` and `hess_lag`
+  replace the autogenerated ones — a hand-derived Jacobian, a codegen'd
+  one, anything cheaper than differentiating the graph. Same signatures
+  as the ipopt plugin; a wrong shape is refused when the solver is built,
+  naming the expected arity, rather than misreading a buffer later.
+
+  *Convexification.* `convexify_strategy` (`eigen-clip`,
+  `eigen-reflect`, `regularize`), `convexify_margin` and `max_iter_eig`
+  reshape the Lagrangian Hessian's spectrum before the solver sees it,
+  through CasADi's own `Convexify` — literally the code its ipopt plugin
+  calls, so a model tuned against `ipopt` behaves the same. Pinned
+  against that plugin on a nonconvex `sin` model where the strategies
+  disagree with each other: both plugins reach `f = −1.664033` unmodified
+  and `−1.922746` under `eigen-reflect`, i.e. the same *different* local
+  minimum. Exact-Hessian path only, and a `limited-memory` solve that
+  asks for it is warned rather than silently ignored.
+
+  *Serialization.* `S.save('s.casadi')` / `Function.load` round-trip the
+  solver, as they do for CasADi's own plugins; the reloaded solver solves
+  bit-identically. Configuration crosses, per-solve state does not — a
+  reloaded solver is cold, and a working set carried under
+  `warm_start_from_previous` lives in the memory object, which is never
+  serialized. Reading needs the plugin loadable in that process, the rule
+  for every out-of-tree CasADi plugin, and says so cleanly if it is not.
+
+  *Metadata.* `var_string_md` / `var_integer_md` / `var_numeric_md` and
+  the `con_*` trio were **rejected** — `Unknown option: var_string_md`,
+  which is a porting papercut for a script that sets them. They are now
+  accepted and echoed back through `stats()`. POUNCE has no metadata
+  channel, so nothing reaches the solver; the documentation says so
+  rather than implying a forward.
+
+- **The CasADi plugin generates C for the whole solve** (#624), so a
+  POUNCE-solved model can be deployed to a target with no Python and no
+  CasADi on it — firmware, a ROS node, a real-time target.
+  `solver.generate('mpc_step.c')` emits the oracle functions, the option
+  calls and the loop that drives them; the file needs `pounce.h` at
+  compile time and `libpounce_cinterface` at link time and nothing else.
+  This is the same bargain CasADi's Ipopt plugin strikes (its generated
+  code includes `<coin-or/IpStdCInterface.h>` and links libipopt), and it
+  works here for the same reason: that C API is what `pounce.h` is.
+  Linked codegen, not freestanding C, so it does not reach the smallest
+  microcontrollers.
+
+  The claim it replaces was wrong in a way worth recording: the docs said
+  code generation was unavailable *"the same as for CasADi's Ipopt
+  plugin"*. Ipopt's plugin has generated all along. What settled it was
+  not reading more source but taking the file CasADi generates for an
+  ipopt solver, swapping that one include for `pounce.h`, and compiling
+  it — which worked on the first try, and failed only at run time,
+  because CasADi resolves options through Ipopt's registry and bakes
+  `linear_solver=mumps` into the emitted calls. POUNCE's codegen types
+  options off CasADi's own `GenericType` instead, the way the
+  interpreted path already did.
+
+  The generated solve is required to be *bit-identical* to the
+  interpreted one — `x`, `f`, `lam_x`, `lam_g` — which is a stronger
+  contract than it sounds: `clip_inactive_lam` is a plugin-side
+  correction, so the emitted runtime (`casadi/pounce_runtime.hpp`) has to
+  reproduce it or the bound multipliers silently differ between the two
+  paths. So is the L-BFGS nonlinear-variable subset, emitted as a static
+  index array. CI compiles a generated file with `cc` and runs it on
+  every build. `iteration_callback`, `warm_start_from_previous` and
+  `convexify_strategy` cannot cross into generated code and are refused
+  **by name** at `generate()` rather than dropped.
+
+  Found while pinning it: the emitted runtime carves `z_L`/`z_U` out of
+  CasADi's `w` scratch, which the plugin had never reserved — the
+  generated code wrote past the caller's buffer. A heap corruption, not
+  an error message, and only in generated code. `alloc_w(2 * nx_, true)`.
+
+- Also fixed: `iteration_callback_step` was read by CasADi and ignored
+  here, so a callback throttled to every tenth iteration still ran on all
+  of them. It now throttles — but, unlike the ipopt plugin, only the
+  callback: there, the whole intermediate callback returns early, so the
+  step silently thins `stats()['iterations']` too. Throttling an
+  expensive callback and losing the convergence history are unrelated
+  wishes. Callback time is now visible as `t_wall_callback_fun`, and
+  failed evaluations as `stats()['n_eval_errors']`.
+
+- **A raising model no longer takes the process down with it** in the
+  CasADi plugin. POUNCE is Rust behind a C API, so an exception unwinding
+  out of an oracle callback aborts outright — `fatal runtime error: Rust
+  cannot catch foreign exceptions`. A model containing a `casadi.Callback`
+  that raises did exactly that. Every callback now converts at the
+  boundary: the error is reported and the evaluation fails, which the
+  solver treats as an un-evaluable point and answers by cutting the step,
+  reaching `Invalid_Number_Detected` — the same outcome CasADi's Ipopt
+  plugin gives on the same model. A `KeyboardInterrupt` is remembered
+  instead of swallowed: the solve stops at the next iteration and the
+  interrupt is re-raised once control is back on the C++ side, so Ctrl-C
+  is responsive without crossing the boundary.
+
+- **The CasADi plugin can carry the active-set SQP working set between
+  calls** (`warm_start_from_previous`, default off). `x0`/`lam_g0`/`lam_x0`
+  restart the iterate; the working set — which bounds and constraints were
+  active — is the other half, and `nlpsol`'s fixed input signature has
+  nowhere to pass one, so the plugin carries it in its memory object from
+  one call of a solver to the next. On a cart-pole MPC with saturating
+  force limits, a receding-horizon loop goes from 233 ms mean / 375 ms max
+  per solve to **18 ms / 23 ms** — an order of magnitude, and the
+  difference between active-set SQP being the worst option on that problem
+  and the best (the warm interior point reference is 27 ms / 38 ms). The
+  control trajectory is identical to 3e-11: a working set is a starting guess for the QP, not a constraint on
+  the answer, and the iteration count barely moves (2.86 → 2.79) because
+  the saving is inside each QP. Off by default because it makes the
+  function stateful; a stale set is validated and refused rather than
+  obeyed, and `stats()["warm_started_working_set"]` says whether a call
+  used one. Inert under the interior-point default, which produces no
+  working set.
+
+- **The CasADi plugin clips the multipliers of inactive bounds by default**
+  (#624), because not doing so silently zeroes sensitivities. An
+  interior-point solve leaves a residual ~1e-12 multiplier on bounds it
+  never touched; CasADi's solution-map derivative reads any nonzero bound
+  multiplier as an active constraint and holds that variable fixed, so
+  one such residual turns the variable's whole sensitivity row into
+  zeros. On an NMPC model with bounded controls that means
+  `jacobian(u0, x0)` — the feedback gain — reads exactly `0.0` where a
+  re-solve says `-9.109838`. The same is true of CasADi's own Ipopt
+  plugin at its defaults. POUNCE's plugin now tests primal distance to
+  the bound and zeroes what is demonstrably inactive: same rule, option
+  name and margin as the ipopt plugin's `clip_inactive_lam`, with the
+  default flipped to on. `clip_inactive_lam=False` restores the
+  Ipopt-identical behaviour. Pinned by
+  `test_nmpc_feedback_gain_is_not_silently_zero` in
+  `casadi/test_parity.py`.
+
+- **Ipopt-compatible nonlinear-variable subsets for the limited-memory
+  Hessian** (#624). `TNLP::get_number_of_nonlinear_variables` /
+  `get_list_of_nonlinear_variables` were declared but read nowhere. They
+  are now honoured: `TNLPAdapter::quasi_newton_nonlinear_vars` (a port of
+  upstream's `GetQuasiNewtonApproxSpaces`) maps an arbitrary,
+  noncontiguous subset through fixed-variable removal into the
+  algorithm's compressed space, and the L-BFGS updater projects its
+  curvature pairs onto that subspace and publishes `B = P·B_red·Pᵀ`, so
+  the Hessian is exactly zero for variables that only enter linearly. The
+  C API gains `IpoptSetNonlinearVariables` / `IpoptClearNonlinearVariables`
+  (a count plus an index list, not the `Bool` mask the issue suggested —
+  see the ABI note in the dev-note), and the CasADi plugin's
+  `pass_nonlinear_variables` routes through it. `num_linear_variables` is
+  now implemented as the contiguous-prefix fallback and has left the
+  unimplemented-options list; callback-supplied information takes
+  precedence over it, as in Ipopt. Exact-Hessian solves are untouched, a
+  solve that declares nothing behaves exactly as before, and the
+  restoration sub-IPM clears the subset (its primal is a different
+  space).
+
+  *One deliberate divergence from upstream, and the measurement behind
+  it.* Ipopt drops the quasi-Newton diagonal to exactly zero on the
+  masked-out variables — truthful (their second derivatives really are
+  zero) and a trap: those rows of the augmented system's `(1,1)` block
+  are then carried by the barrier term alone, which is ~0 for a variable
+  far from its bounds, and the symmetric factorization pays for a
+  near-singular diagonal on every one of them. Ported faithfully, a
+  model with 2 nonlinear and 2000 linear variables went from 0.85 s
+  unmasked to **4.7 s** masked; the same model through CasADi's Ipopt
+  plugin goes from 0.40 s to **399 s**, which is what identified the
+  flag rather than the port as the problem. POUNCE instead keeps a
+  curvature floor (`limited_memory_init_val_min`, 1e-8 by default and
+  registered with a strict positive lower bound) on those coordinates.
+  That restores parity at 2000 linear variables (0.93 s against 0.89 s)
+  and turns the feature into the win the issue asked for at 10 000
+  (5.1 s / 27 iterations against 6.0 s / 31). Filling the diagonal with
+  σ instead is equally fast and measurably worse — it injects a proximal
+  term at the problem's own curvature scale that the masked update has
+  no columns to learn back down, and it stalls the 6-variable fixture at
+  `Solved_To_Acceptable_Level` where `tol=1e-9` was reached before.
+
+- **`GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` aborted the
+  process when used as documented.** Called from inside an intermediate
+  callback — the only place they are valid — asking for `g` (or, for the
+  violations sibling, `grad_lag_x`) panicked with `RefCell already
+  borrowed`, and because the panic crosses an `extern "C"` boundary the
+  process **aborted** rather than returning `FALSE`. Both functions held
+  a shared borrow of the algorithm-side NLP across an `IpoptCq` accessor
+  that re-enters it mutably. Any C consumer that logs its iterates hits
+  this — the CasADi plugin found it, the GAMS C link is on the same path.
+  Regression test:
+  `crates/pounce-cinterface/tests/current_iterate_inspectors.rs`.
 - **`WarmStart` artifacts carry the model they belong to, and warm-start
   options no longer outlive the call that asked for them** (#607). Two
   independent silences in `pounce.WarmStart`, both of the shape gh#544
