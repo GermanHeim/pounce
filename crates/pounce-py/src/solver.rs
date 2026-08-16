@@ -333,7 +333,7 @@ impl PySolver {
         ))
     }
 
-    /// Parametric step that walks the perturbation, stopping wherever
+    /// Parametric step applied a little at a time, stopping wherever
     /// the active set changes, as `(dx, segments)`.
     ///
     /// `parametric_step_bounded` decides every condition at the base
@@ -343,12 +343,12 @@ impl PySolver {
     /// parameter.
     ///
     /// `segments` is one tuple per breakpoint crossed, in the order
-    /// crossed, as `(fraction, row, pinned)`. `fraction` is how far
-    /// along the perturbation the change happened, `row` is the
-    /// compound KKT row (read it against `block_dims()` the same way
-    /// `parametric_step_bounded`'s `pinned` is read), and `pinned` is
-    /// `True` for a variable held at a bound and `False` for a bound
-    /// released.
+    /// crossed, as `(fraction, var_row, lower, pinned)`. `fraction` is
+    /// how far along the perturbation the change happened, `var_row`
+    /// is the variable's row in the factor's x block for every kind of
+    /// change, `lower` is `True` when the bound involved is the lower
+    /// one, and `pinned` is `True` for a variable reaching a bound and
+    /// `False` for a variable leaving one.
     ///
     /// `max_iter` caps the breakpoints crossed, and is in practice a
     /// budget on factorizations, since a pin is a back-solve against
@@ -363,7 +363,7 @@ impl PySolver {
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
         max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<(Number, i64, bool)>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<(Number, i64, bool, bool)>)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "parametric_step_path: no converged factor (call solve() first)",
@@ -385,7 +385,7 @@ impl PySolver {
             dx.into_pyarray_bound(py),
             segments
                 .into_iter()
-                .map(|g| (g.at, g.row as i64, g.pinned))
+                .map(|g| (g.at, g.var_row as i64, g.lower, g.pinned))
                 .collect(),
         ))
     }

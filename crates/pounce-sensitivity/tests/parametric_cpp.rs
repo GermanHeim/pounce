@@ -854,7 +854,8 @@ fn path_stops_where_the_variable_reaches_its_bound() {
     let (walked, segs) = run_path_step([-0.5, 0.0]);
 
     assert_eq!(segs.len(), 1, "one crossing expected, got {segs:?}");
-    assert_eq!(segs[0].row, 2, "x[2] is what crosses here");
+    assert_eq!(segs[0].var_row, 2, "x[2] is what crosses here");
+    assert!(segs[0].lower, "x[2] reaches its lower bound here");
     assert!(segs[0].pinned, "it reaches a bound, so it pins");
     // The plain step puts x[2] at -0.0459 for the whole perturbation,
     // and x[2] starts at 0.0204, so the bound is reached partway.

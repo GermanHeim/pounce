@@ -696,7 +696,7 @@ impl Solver {
         ))
     }
 
-    /// Parametric step that walks the perturbation instead of taking it
+    /// Parametric step applied a little at a time instead of taken
     /// whole, stopping wherever the active set changes and continuing
     /// from there under the new one. Returns the primal step and the
     /// breakpoints crossed.
@@ -721,7 +721,7 @@ impl Solver {
         let ctx = self.bound_context()?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let (dx, segments) = crate::boundcheck::walk_step_along_path(
+        let (dx, segments) = crate::boundcheck::step_along_path(
             &state.backsolver,
             &rhs_plain,
             &ctx.x_curr,

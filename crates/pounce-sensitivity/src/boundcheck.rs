@@ -489,24 +489,28 @@ impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBackso
 const NO_BOUND_LO: Number = -1e19;
 /// Mirror of [`NO_BOUND_LO`].
 const NO_BOUND_HI: Number = 1e19;
-/// A segment shorter than this has not moved the walk, so the rows
-/// changed at its start stay barred from changing back.
+/// A segment shorter than this has not advanced the path, so the
+/// rows changed at its start stay barred from changing back.
 const PATH_MIN_SEGMENT: Number = 1e-12;
 
-/// One breakpoint the walk stopped at.
+/// One breakpoint the path stopped at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathSegment {
     /// Fraction of the perturbation applied when this segment ended,
     /// measured from the base point.
     pub at: Number,
-    /// Compound KKT row whose status changed. A var-x row when a
-    /// variable reached or left a bound the path holds, a
-    /// bound-multiplier row when a bound active at the base released.
-    pub row: usize,
-    /// `true` when a variable reached a bound and is held there from
-    /// this fraction on, `false` when it left one: either a bound
-    /// active at the base whose multiplier reached zero, or a hold this
-    /// path added earlier whose multiplier crossed zero.
+    /// Var-x row of the variable whose bound status changed, whatever
+    /// the kind of change. A release is detected on the bound's
+    /// multiplier row, but it is recorded here by the variable it
+    /// frees, so a caller never needs the multiplier layout to read
+    /// the record.
+    pub var_row: usize,
+    /// `true` when the bound involved is the variable's lower bound.
+    pub lower: bool,
+    /// `true` when the variable reached the bound and is held there
+    /// from this fraction on, `false` when it left it: either a bound
+    /// active at the base whose multiplier reached zero, or a hold
+    /// this path added earlier whose multiplier crossed zero.
     pub pinned: bool,
 }
 
@@ -519,13 +523,18 @@ pub struct PathSegment {
 struct PathHold {
     /// Var-x row held.
     row: usize,
+    /// `true` when the bound held is the variable's lower bound. Only
+    /// the record reads this: the drop test does not care which side
+    /// the hold is on.
+    lower: bool,
     /// Accumulated Schur-row multiplier, in whatever sign convention
     /// the augmented system uses: the drop test only asks when it
     /// crosses zero, so the convention never needs to be named.
     mult: Number,
 }
 
-/// Walk the perturbation, stopping wherever the active set changes.
+/// Apply the perturbation a little at a time, stopping wherever the
+/// active set changes.
 ///
 /// [`refine_step_onto_bounds`] decides every condition at the base
 /// point. This advances instead: it takes the fraction of the
@@ -546,7 +555,7 @@ struct PathHold {
 /// under a later one.
 ///
 /// Releasing a base-active bound needs no right-hand-side shift,
-/// unlike the base-point refinement. The walk stops exactly where the
+/// unlike the base-point refinement. The path stops exactly where the
 /// multiplier reaches zero, so there is nothing left to drive to zero.
 /// Dropping a hold needs no re-factorization at all, since the hold is
 /// a Schur row rather than a term in the held factor.
@@ -558,7 +567,7 @@ struct PathHold {
 /// for. A returned segment count equal to `max_iter` is what says that
 /// happened.
 #[allow(clippy::too_many_arguments)]
-pub fn walk_step_along_path<B>(
+pub fn step_along_path<B>(
     backsolver: &B,
     rhs_plain: &[Number],
     x_curr: &[Number],
@@ -573,7 +582,7 @@ where
     let n_full = backsolver.dim();
     let n_x = x_curr.len().min(lo.len()).min(hi.len());
     if rhs_plain.len() != n_full {
-        return Err("walk_step_along_path: rhs length is not the KKT dimension".into());
+        return Err("step_along_path: rhs length is not the KKT dimension".into());
     }
     // The same conversion the refinement makes, for the same reason:
     // these arrive in the solve's coordinates and get compared against
@@ -603,11 +612,11 @@ where
     let mut holds: Vec<PathHold> = Vec::new();
     let mut released: Vec<usize> = Vec::new();
     let mut segments: Vec<PathSegment> = Vec::new();
-    // Rows already changed at the fraction the walk currently sits at.
+    // Rows already changed at the fraction the path currently ends at.
     // A zero-length segment is where cycling comes from, so a row that
     // just changed cannot change back at the same fraction. The list
-    // clears as soon as the walk advances: barring a row any longer
-    // makes the walk miss real breakpoints in the following segment,
+    // clears as soon as the path advances: barring a row any longer
+    // makes it miss real breakpoints in the following segment,
     // which showed up as a released variable whose next bound crossing
     // went unrecorded.
     let mut changed_here: Vec<usize> = Vec::new();
@@ -663,12 +672,12 @@ where
                         && b.lower == lower_side
                         && !released.contains(&b.row)
                         && mult_nat.iter().any(|m| {
-                            let slack = if lower_side {
-                                x_curr[i] + acc[i] - lo[i]
+                            let slack_base = if lower_side {
+                                x_curr[i] - lo[i]
                             } else {
-                                hi[i] - x_curr[i] - acc[i]
+                                hi[i] - x_curr[i]
                             };
-                            m.row == b.row && slack.is_finite() && m.base + acc[m.row] > slack
+                            m.row == b.row && slack_base.is_finite() && m.base > slack_base
                         })
                 })
             };
@@ -690,11 +699,22 @@ where
                 // converged interior point never sits ON a bound: an
                 // active bound's slack is order mu over the multiplier,
                 // so testing slack against `eps` calls every active
-                // bound inactive and the walk never releases anything.
+                // bound inactive and the path never releases anything.
                 // Complementarity splits the two sides cleanly, z of
                 // order one against slack of order mu on the active
                 // side and the reverse on the inactive, which is the
                 // same split the activity classifier draws.
+                //
+                // The split is evaluated at the BASE point. Activity of
+                // a multiplier row is a property of the factorization,
+                // whose sigma for this bound was frozen at the base,
+                // and a bound inactive there is represented by a
+                // Schur-row hold if the path reaches it, never by this
+                // row. Testing accumulated values instead let a
+                // near-bound inactive multiplier drift past its
+                // shrinking slack mid-path and "release" a bound that
+                // was never held, putting a departure in the record for
+                // a variable that was not on that bound.
                 let Some(br) = bound_rows
                     .as_ref()
                     .and_then(|rows| rows.iter().find(|b| b.row == m.row))
@@ -704,17 +724,17 @@ where
                 if br.var_row >= n_x {
                     continue;
                 }
-                let slack = if br.lower {
-                    x_curr[br.var_row] + acc[br.var_row] - lo[br.var_row]
+                let slack_base = if br.lower {
+                    x_curr[br.var_row] - lo[br.var_row]
                 } else {
-                    hi[br.var_row] - x_curr[br.var_row] - acc[br.var_row]
+                    hi[br.var_row] - x_curr[br.var_row]
                 };
-                let z_base = m.base + acc[m.row];
-                if !slack.is_finite() || z_base <= slack {
+                if !slack_base.is_finite() || m.base <= slack_base {
                     continue;
                 }
+                let z_curr = m.base + acc[m.row];
                 if d[m.row] < 0.0 {
-                    offer(-z_base / d[m.row], m.row, Event::ReleaseBase);
+                    offer(-z_curr / d[m.row], m.row, Event::ReleaseBase);
                 }
             }
         }
@@ -755,26 +775,47 @@ where
         last_beta = beta;
         t += beta;
         changed_here.push(row);
-        match ev {
-            Event::ReachLower | Event::ReachUpper => holds.push(PathHold { row, mult: 0.0 }),
+        let (var_row, lower) = match ev {
+            Event::ReachLower | Event::ReachUpper => {
+                let lower = ev == Event::ReachLower;
+                holds.push(PathHold {
+                    row,
+                    lower,
+                    mult: 0.0,
+                });
+                (row, lower)
+            }
             Event::ReleaseBase => {
+                // The release scan only offers rows it found bound
+                // metadata for, so this lookup cannot miss.
+                let Some(br) = bound_rows
+                    .as_ref()
+                    .and_then(|rows| rows.iter().find(|b| b.row == row))
+                else {
+                    return Err("step_along_path: released a row with no bound metadata".into());
+                };
                 // Bar the released variable's own row too: the reach
                 // scan works in var rows while the release recorded the
                 // multiplier row, and without this the variable can be
                 // re-held at the same fraction it was just released.
-                if let Some(br) = bound_rows
-                    .as_ref()
-                    .and_then(|rows| rows.iter().find(|b| b.row == row))
-                {
-                    changed_here.push(br.var_row);
-                }
+                changed_here.push(br.var_row);
                 released.push(row);
+                (br.var_row, br.lower)
             }
-            Event::DropHold => holds.retain(|h| h.row != row),
-        }
+            Event::DropHold => {
+                // The drop event came from iterating the holds, so the
+                // hold is present.
+                let Some(h) = holds.iter().find(|h| h.row == row).copied() else {
+                    return Err("step_along_path: dropped a hold that does not exist".into());
+                };
+                holds.retain(|h| h.row != row);
+                (row, h.lower)
+            }
+        };
         segments.push(PathSegment {
             at: t,
-            row,
+            var_row,
+            lower,
             pinned: matches!(ev, Event::ReachLower | Event::ReachUpper),
         });
     }
@@ -791,7 +832,7 @@ where
     Ok((acc, segments))
 }
 
-/// The step for the whole perturbation under the active set the walk
+/// The step for the whole perturbation under the active set the path
 /// has reached: released bounds out of the operator with their
 /// multipliers constrained to stay at zero, and held variables kept
 /// where they are.
@@ -822,12 +863,12 @@ where
         backsolver.solve_released(released, rhs_plain, &mut d)
     };
     if !ok {
-        return Err("walk_step_along_path: back-solve failed".into());
+        return Err("step_along_path: back-solve failed".into());
     }
     if pinned.is_empty() {
         return Ok((d, Vec::new()));
     }
-    // Hold each variable where the walk left it, on its bound, by
+    // Hold each variable where the path left it, on its bound, by
     // asking the augmented system for the correction that takes its
     // further movement to zero.
     let rows: Vec<Index> = pinned.iter().map(|&r| r as Index).collect();
@@ -848,7 +889,7 @@ where
     let mut corr = vec![0.0; n_full];
     if !app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
         return Err(format!(
-            "walk_step_along_path: augmented solve failed              (holds {pinned:?}, released {released:?})"
+            "step_along_path: augmented solve failed              (holds {pinned:?}, released {released:?})"
         ));
     }
     for (k, v) in d.iter_mut().enumerate() {

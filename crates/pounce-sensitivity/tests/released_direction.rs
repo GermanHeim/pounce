@@ -252,8 +252,8 @@ fn the_released_direction_survives_a_prior_plain_solve() {
 }
 
 #[test]
-fn the_walk_releases_and_reaches_the_target_on_this_qp() {
-    // The same problem through the walk itself. From p = 0 to p = 1
+fn the_path_releases_and_reaches_the_target_on_this_qp() {
+    // The same problem through parametric_step_path itself. From p = 0 to p = 1
     // the true path releases x2 near 0.57 and holds x1 at its upper
     // bound near 0.75, ending at x = [1, 0.1].
     let mut app = IpoptApplication::new();
