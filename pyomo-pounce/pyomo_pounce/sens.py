@@ -1084,7 +1084,7 @@ def _perturbation_deltas(session, perturb):
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
-             max_passes=16):
+             max_iter=16):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
@@ -1102,13 +1102,13 @@ def estimate(model, perturb, clamp=True, mode="linear",
     re-solve far more closely. Where nothing crosses the two agree
     exactly.
 
-    max_passes bounds that work. Each pass costs a dense solve whose
+    max_iter bounds that work. Each pass costs a dense solve whose
     size grows with the number of pins, and the refinement is only
     worth running while it stays cheaper than a re-solve.
 
-    clamp keeps its meaning in both modes: it clips whatever is still
+    clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
-    leave nothing to clip, and when they do not, the warning says
+    leave nothing to clamp, and when they do not, the warning says
     whether the pass budget or the degrees of freedom stopped it.
 
     The perturbation is measured from the SOLVE point (the pin
@@ -1142,7 +1142,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     # everything below it (nl.x_l/x_u, var_names) are full-x
     if mode == "fix_relax":
         step, pinned = session.solver.parametric_step_bounded(
-            pin_idx, deltas, max_passes)
+            pin_idx, deltas, max_iter)
     else:
         step = session.solver.parametric_step(pin_idx, deltas)
     dx = session.scatter_x(np.asarray(step))
@@ -1170,8 +1170,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
         if out.size:
             names = [session.var_names[i] for i in out]
             why = ("the pass limit of %d was reached, so raising "
-                   "max_passes may finish it" % max_passes
-                   if len(pinned) >= max_passes else
+                   "max_iter may finish it" % max_iter
+                   if len(pinned) >= max_iter else
                    "holding them all would need more pins than the "
                    "problem has degrees of freedom, so no step does")
             warnings.warn(
@@ -1184,7 +1184,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 x_new = np.clip(x_new, lo, hi)
     elif clamp:
         # `linear` takes the step as the predictor gives it, so a
-        # crossing shows up as a value outside its bound and clipping is
+        # crossing shows up as a value outside its bound and clamping is
         # all this mode can do about it. The active set changed and the
         # step does not know, which is what `fix_relax` addresses.
         eps = max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
@@ -1192,9 +1192,9 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # bound: an absent bound arrives as the reader's +-1e19
         # sentinel, which would put the tolerance at 1e10
         tol = eps * np.maximum(1.0, np.abs(x_new))
-        clipped = (x_new < lo - tol) | (x_new > hi + tol)
-        if clipped.any():
-            names = [session.var_names[i] for i in np.where(clipped)[0]]
+        clamped = (x_new < lo - tol) | (x_new > hi + tol)
+        if clamped.any():
+            names = [session.var_names[i] for i in np.where(clamped)[0]]
             warnings.warn(
                 "estimate: linear step leaves the variable bounds for "
                 f"{names}; values were clamped and the active set likely "

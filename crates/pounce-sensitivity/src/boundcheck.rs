@@ -24,7 +24,7 @@
 //! negative, deactivating that bound so the variable can move.
 //!
 //! They fail differently. Without the pin, a crossing variable is
-//! clipped and every other one keeps a value computed as though it had
+//! clamped and every other one keeps a value computed as though it had
 //! not been. Without the release, a variable sitting on a bound stays
 //! there however hard the perturbation pulls it off, because the linear
 //! step preserves complementarity. Measured against sIPOPT on a model
@@ -274,7 +274,7 @@ pub struct BoundMultiplier {
 /// what makes this cheaper than a re-solve, but the Schur complement is
 /// rebuilt from scratch each pass: pass `k` costs one dense `k × k`
 /// solve and `k + 1` back-solves, so the work grows quadratically in
-/// the number of conditions, and the default `max_passes` of 16 is 136
+/// the number of conditions, and the default `max_iter` of 16 is 136
 /// back-solves rather than 16.
 ///
 /// `multipliers` carry their base values in the solve's own
@@ -282,7 +282,7 @@ pub struct BoundMultiplier {
 /// [`SensBacksolver::natural_units_factor`], so they agree with the `z`
 /// rows of `dx_plain` before either is used.
 ///
-/// Passes stop when nothing is violated, at `max_passes`, or when a
+/// Passes stop when nothing is violated, at `max_iter`, or when a
 /// condition cannot be achieved, which is how an over-determined set is
 /// caught: once the conditions exhaust the problem's degrees of freedom
 /// no step satisfies them all, the augmented system is singular, and a
@@ -296,7 +296,7 @@ pub fn refine_step_onto_bounds<B>(
     multipliers: &[BoundMultiplier],
     rhs_plain: &[Number],
     eps: Number,
-    max_passes: usize,
+    max_iter: usize,
 ) -> Result<(Vec<Number>, Vec<usize>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
@@ -340,7 +340,7 @@ where
     // released set does, since that is a different system.
     let mut dx_base = dx_plain.to_vec();
 
-    for _ in 0..max_passes {
+    for _ in 0..max_iter {
         let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
 
         // one condition per pass, primal first: a variable outside its

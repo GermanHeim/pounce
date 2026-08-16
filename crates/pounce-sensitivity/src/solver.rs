@@ -635,7 +635,7 @@ impl Solver {
     /// is never rebuilt, but the Schur complement is rebuilt each pass,
     /// so pass `k` costs one dense `k × k` solve and `k + 1`
     /// back-solves and the total grows quadratically in the number of
-    /// pins. The default `max_passes` of 16 is 136 back-solves.
+    /// pins. The default `max_iter` of 16 is 136 back-solves.
     ///
     /// What counts as outside a bound is taken from the solve rather
     /// than from the caller: it was willing to leave a converged point
@@ -643,17 +643,17 @@ impl Solver {
     /// is on the bound. An unrelaxed solve gets a roundoff floor.
     ///
     /// Passes stop when nothing is outside its bound by that much, at
-    /// `max_passes`, or when a pin cannot be achieved because the pins
+    /// `max_iter`, or when a pin cannot be achieved because the pins
     /// have exhausted the problem's degrees of freedom. None of those
     /// is an error: the step returned is the last one computed, and the
-    /// returned pin list says how far the refinement got. `max_passes`
+    /// returned pin list says how far the refinement got. `max_iter`
     /// is a budget, since each pass costs a dense `k × k` solve and the
     /// point of the refinement is to stay cheaper than a re-solve.
     pub fn parametric_step_bounded(
         &self,
         pin_constraint_indices: &[Index],
         deltas: &[Number],
-        max_passes: usize,
+        max_iter: usize,
     ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
         let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
@@ -725,7 +725,7 @@ impl Solver {
             &mults,
             &rhs_plain,
             eps,
-            max_passes,
+            max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((

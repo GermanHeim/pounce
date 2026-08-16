@@ -149,10 +149,10 @@ parameters; the first-move gradient IS the NMPC feedback gain).
 ### Bending the estimate around a bound: `mode="fix_relax"`
 
 `estimate()` takes the linear step, and where that step leaves a
-variable's bound it clips the value and warns. Clipping is all the
+variable's bound it clamps the value and warns. Clamping is all the
 linear step can do, and it costs more than the one variable: every
 other variable keeps the value the step gave it, computed on the
-assumption that the clipped one was free to move where the step said.
+assumption that the clamped one was free to move where the step said.
 The result satisfies the bounds and no longer satisfies the
 constraints.
 
@@ -164,7 +164,7 @@ that bound so the variable can move. Each adds a row to the held
 factorization and re-solves, so the other variables move with it:
 
 ```python
-estimate(m, [(m.setpoint, 3.0)])                      # clips
+estimate(m, [(m.setpoint, 3.0)])                      # clamps
 estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
 ```
 
@@ -187,9 +187,9 @@ want the barrier problem's answer.
 
 Each pass rebuilds the Schur complement over the pins so far, so pass
 `k` costs one dense `k × k` solve and `k + 1` back-solves and the total
-grows quadratically. The default `max_passes` of 16 is 136 back-solves.
+grows quadratically. The default `max_iter` of 16 is 136 back-solves.
 A pin never rebuilds the factorization, which is what keeps it cheaper
-than re-solving. `max_passes` bounds that work and is a budget rather
+than re-solving. `max_iter` bounds that work and is a budget rather
 than a safeguard: the refinement is only worth running while it stays
 cheaper than the re-solve it replaces.
 
@@ -223,7 +223,7 @@ and it mirrors upstream sIPOPT's option of that name.
 
 ### What the step did about the bounds: `estimate_report()`
 
-The clamp warning names the variables it clipped and stops there.
+The clamp warning names the variables it clamped and stops there.
 `estimate_report()` takes the same perturbation argument `estimate()`
 takes and measures the same step, so a caller can see how far along the
 perturbation the active set changes:
@@ -803,7 +803,7 @@ All three entry points are verified against upstream sIPOPT 3.14.19's
 
 The bound refinement is verified on that same example, which crosses a
 bound under upstream's own perturbation: against a full re-solve the
-refinement lands within 6e-9 where clipping the crossing coordinate is
+refinement lands within 6e-9 where clamping the crossing coordinate is
 off by 0.12. It is also checked on a model with three degrees of
 freedom, where three coordinates cross at once and all three pins hold,
 and for the refusal when the pins would exceed the degrees of freedom.

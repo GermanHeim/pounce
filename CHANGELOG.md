@@ -83,15 +83,15 @@ against 8.7e-4 at `obj_scaling_factor = 1000` before.
 
 Pinning is unchanged, as is every path that releases no bound.
 
-### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clamping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
-variable's bound it clips the value and warns. Clipping costs more than
+variable's bound it clamps the value and warns. Clamping costs more than
 the one variable. Every other variable keeps the value the step gave it,
-computed on the assumption that the clipped one was free to move where
+computed on the assumption that the clamped one was free to move where
 the step said, so the result satisfies the bounds and no longer
 satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
-its lower bound, the clipped answer is `y = -5`, which is not on the
+its lower bound, the clamped answer is `y = -5`, which is not on the
 constraint at all.
 
 `mode="fix_relax"` repairs the active set the step implies, which is
@@ -113,19 +113,19 @@ Checked against sIPOPT 3.14.19 itself, driven through
 pounce and sIPOPT agree to 2e-8 on the pin case and to 1e-6 on the
 release case, and both match a full re-solve. On upstream's own
 parametric example, at its own perturbation, the refinement lands within
-6e-9 of a re-solve where clipping the crossing coordinate is off by
+6e-9 of a re-solve where clamping the crossing coordinate is off by
 0.12.
 
-    estimate(m, [(m.p, 3.0)])                       # clips
+    estimate(m, [(m.p, 3.0)])                       # clamps
     estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves
 
 `mode="linear"` is the default and is unchanged.
 
 Each pass rebuilds the Schur complement over the conditions so far,
 so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
-the total grows quadratically. The default `max_passes` of 16 is 136
+the total grows quadratically. The default `max_iter` of 16 is 136
 back-solves. The factorization itself is never rebuilt, which is what
-keeps this cheaper than re-solving. `max_passes` bounds that work and
+keeps this cheaper than re-solving. `max_iter` bounds that work and
 is a budget rather than a safeguard: the refinement is only worth
 running while it stays cheaper than the re-solve it replaces.
 
@@ -458,7 +458,7 @@ willing to leave a converged point.
 
 ### Added — `pyomo_pounce.estimate_report()` says what the estimate's step did about the bounds (#584)
 
-`estimate()` takes the linear step, clips any variable it carries past a
+`estimate()` takes the linear step, clamps any variable it carries past a
 bound, warns, and returns. The warning names those variables and stops
 there, so a caller cannot tell how far along the perturbation the active
 set changed, whether a constraint became active before any variable did,
