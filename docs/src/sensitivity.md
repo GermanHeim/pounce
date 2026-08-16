@@ -135,6 +135,9 @@ receding-horizon pattern) does not change the answer. It also
 warns when the linear step leaves the variable bounds, and
 `mode="fix_relax"` pins those variables and re-solves instead, covered
 in [Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax)
+below. `mode="path"` applies the change a little at a time and records
+where the active set changes along it, covered in
+[Applying the change a little at a time](#applying-the-change-a-little-at-a-time-modepath)
 below. There is one exception to the warning, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `estimate_report()` measures the same step and reports where the
@@ -220,6 +223,68 @@ the bound rather than past it.
 
 This is what `sens_boundcheck` turns on for the CLI and the Rust API,
 and it mirrors upstream sIPOPT's option of that name.
+
+### Applying the change a little at a time: `mode="path"`
+
+`mode="fix_relax"` decides every active-set change from full steps
+taken at the base point. `mode="path"` follows the solution along the
+perturbation instead: it takes the largest fraction of the change the
+current active set allows, applies the one change that happens there,
+and continues under the updated set. The prediction is piecewise
+linear in the parameter. For a QP that is the exact solution path,
+since a QP's solution is piecewise affine in the parameter. For an NLP
+the one error left is the linearization at the base point, because
+nothing is re-linearized between breakpoints.
+
+Three kinds of breakpoint end a segment. A free variable reaches a
+bound and is held there. A bound active at the base has its multiplier
+fall to zero and the variable leaves it. A bound the path itself
+started holding stops binding under a later direction and the variable
+leaves it again. That last kind is what no decision at the base point
+can represent: a variable can arrive at a bound partway through the
+change and depart before the end.
+
+`active_set_changes()` returns that record, which is the part no other
+mode produces. It takes the same perturbation argument `estimate()`
+takes:
+
+```python
+from pyomo_pounce import active_set_changes, estimate
+
+estimate(m, [(m.setpoint, 3.0)], mode="path")
+for c in active_set_changes(m, [(m.setpoint, 3.0)]):
+    print(c.fraction, c.var.name, c.bound, c.action)
+```
+
+Each entry holds the fraction of the perturbation at which the change
+happens, the variable, which bound (`"lower"` or `"upper"`), and
+whether the variable `"reaches"` it or `"leaves"` it. The first
+entry's fraction is how much of the perturbation the held solve's
+active set survives unchanged.
+
+Where the two modes settle the same active set they give the same
+prediction. Where the changes are spread out along the perturbation
+they differ: on the notebook's CSTR at a change large enough to
+release thirteen bounds, `fix_relax` decides all thirteen at once
+from base-point multipliers and its prediction lands below even
+`mode="linear"` (worst relative miss 0.950 against 0.833), while
+`mode="path"` applies each release at the fraction the record names
+and stays the most accurate of the three (0.626). At changes this
+large every first-order prediction degrades: the CSTR trajectories
+read high near the start of the horizon in every mode, which is the
+base-point linearization and not something more segments repair.
+
+`max_iter` is the same knob it is under `fix_relax`: it caps the
+active-set changes applied, and past the cap the rest of the
+perturbation is taken in one step under the active set reached, with
+the warning naming the cap. On the cost side a reach adds a Schur row
+without re-factoring, each release re-factors once, and the wall time
+grows about linearly with the changes applied, well under a re-solve.
+
+See
+[`python/notebooks/35_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/35_active_set_parametric_sensitivity.ipynb)
+for the worked CSTR example behind those numbers, including `max_iter`
+sweeps of both modes against re-solve wall time.
 
 ### What the step did about the bounds: `estimate_report()`
 

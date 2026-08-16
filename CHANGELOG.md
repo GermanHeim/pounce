@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+- **`estimate(mode="path")` applies the perturbation a little at a time,
+  and `active_set_changes()` returns the record of what changed where.**
+  Roadmap item 2. `mode="fix_relax"` decides every active-set change from
+  full steps at the base point. The new mode follows the solution along
+  the perturbation: it takes the largest fraction the current active set
+  allows, applies the one change that happens there, and continues under
+  the updated set. The prediction is piecewise linear in the parameter,
+  exact for a QP (verified to 1e-10 against direct target solves on a
+  400-case random QP scan), and a variable can reach a bound partway
+  through the change and leave it again, which no decision at the base
+  point can represent. `active_set_changes()` reports each change with
+  the variable, the bound, whether it is reached or left, and the
+  fraction at which it happens. `max_iter` is the same knob it is under
+  `fix_relax`: past the cap the rest of the perturbation is one step
+  under the active set reached, with a warning.
+
+  Underneath: `parametric_step_path` on the Rust solver and the Python
+  binding, with the same information per breakpoint. Building the
+  path found three defects, each convicted by a hand-checkable QP.
+  `solve_released` folded the barrier correction of a released bound's
+  multiplier row into that variable's equation at order one (shipped
+  with #600's release machinery but unexercised, since `fix_relax`'s
+  shifted call zeroes the row first); the released rows are now zeroed
+  before the fold, and `released_sigma_x` rebuilds the released
+  diagonal entry from surviving bounds instead of differencing two
+  numbers of order `z / s`. The guard against a row changing twice at
+  one fraction barred it for a whole segment, skipping real
+  breakpoints. And the release test read accumulated values, so a
+  near-bound inactive multiplier could drift "active" mid-path and put
+  a departure in the record for a variable that was never on that
+  bound; activity of a base bound is now decided at the base point,
+  where the factorization's sigma was frozen.
+
+  `python/notebooks/35_active_set_parametric_sensitivity.ipynb` works
+  a CSTR example through all three modes, and
+  `docs/src/sensitivity.md` covers when each mode is the right one.
+
 - **The feasibility projection is sparse, and the linearized normal step is
   safeguarded against making the true violation worse** (#605). Two related
   defects, one in the Python helper and one in the Rust core.
