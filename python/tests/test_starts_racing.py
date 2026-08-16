@@ -527,6 +527,23 @@ def test_near_identical_survivors_are_collapsed():
     assert any("duplicate of candidate" in r for r in reasons), reasons
 
 
+def test_dedup_never_returns_fewer_results_than_asked_for():
+    """Collapsing twins is a survivor-slot policy, not a licence to hand
+    back a shorter list than `top`. Every start below falls into the same
+    basin, so dedup would otherwise leave one candidate standing and
+    `top=3` would quietly return one result."""
+    def f(x):
+        return float((x[0] - 1.0) ** 2 + (x[1] + 2.0) ** 2)
+
+    def g(x):
+        return np.array([2.0 * (x[0] - 1.0), 2.0 * (x[1] + 2.0)])
+
+    starts = np.array([[5.0, 5.0], [-5.0, -5.0], [0.0, 0.0], [9.0, -9.0]])
+    for top in (1, 2, 3):
+        best = pounce.race_starts(f, starts, jac=g, iters=10, top=top)
+        assert len(best) == top, f"top={top} returned {len(best)} results"
+
+
 def test_the_exploration_quota_keeps_an_outsider():
     f, g, bounds, cons = _hs71()
     starts = pounce.generate_starts(12, bounds=bounds, seed=11)

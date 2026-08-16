@@ -1205,6 +1205,14 @@ class _Racer:
                 break
 
             unique, dupes = self._dedupe(ordered)
+            if len(unique) < self._top:
+                # Dedup must not cost the caller results it asked for.
+                # `ordered` is best-first and `_dedupe` preserves that
+                # order in `dupes`, so re-admitting from the front takes
+                # back the best of what was collapsed.
+                take = self._top - len(unique)
+                unique = unique + [c for c, _ in dupes[:take]]
+                dupes = dupes[take:]
             for c, why in dupes:
                 c.eliminated_round = rung
                 c.reason = why
