@@ -9,6 +9,72 @@ changes.
 
 ## [Unreleased]
 
+- **`race_starts` races adaptively instead of paying full price for every
+  candidate** (#610). The old policy gave each of N starts the same
+  truncated solve from a cold start, ranked the field once on terminal
+  violation and objective, returned the best `top`, and reported nothing
+  — so the candidate that was hopeless after two iterations was still
+  charged for ten, and the solver state it had built was discarded
+  between rounds.
+
+  The default policy is now a successive-halving ladder. Every candidate
+  runs for a small budget; the field is ranked; the weakest fraction is
+  eliminated; the survivors are **resumed from their held solver state**
+  with a budget `eta` times larger. The winner ends with about the effort
+  `iters` would have bought it before, so the policies are comparable on
+  quality — what changes is what the losers cost. Over
+  `benchmarks/scripts/race_starts_bench.py` (six multi-basin models × three
+  field sizes, eighteen configurations): **17.9% fewer user-callable
+  evaluations with no quality regression anywhere**, from 43.8% fewer on
+  HS71 with 27 starts to 5.5% *more* on a two-variable model where a rung
+  boundary costs more than the iterations it saves. Solver iterations fall
+  in all eighteen.
+
+  What a pause carries is worth being precise about, because it is the
+  difference between a resume and a cold restart wearing a warm coat.
+  POUNCE has no API for suspending an IPM mid-iteration and re-entering
+  the same algorithm object — every `Solver.solve` builds its application
+  afresh. What travels is the whole interior-point iterate: the primal
+  point, the constraint multipliers, both bound-multiplier blocks, and the
+  barrier parameter μ, replayed through #607's warm-start path so #606's
+  recentering measures the point it is handed. Measured on the racing
+  fixtures, eight candidates paused at five iterations reach the same
+  answers in 17 iterations when resumed and 43 when restarted from their
+  own iterates. What does *not* travel is the filter history and the
+  line-search state; carrying those needs a `Solver.resolve()`, which does
+  not exist yet.
+
+  Eliminations are ranked on five rank-normalized signals — violation,
+  feasibility reduction, scaled KKT residual, objective progress per
+  evaluation, and numerical health (restoration share, non-finite
+  objective, failed exit) — weighted so feasibility dominates, because an
+  infeasible candidate's objective is not a number about the problem being
+  solved. Diversity is protected by collapsing survivors that have fallen
+  into the same basin and by an exploration quota that retains candidates
+  from outside the cut, chosen farthest-first. The ladder's resource is
+  **evaluations**: rung 0 calibrates what a solve of this model costs and
+  every later rung is a multiple of that, with each candidate converting
+  its budget to an iteration cap through its own measured
+  evaluations-per-iteration.
+
+  `return_report=True` returns a `RaceReport` alongside the results, with
+  per-rung resource use, per-candidate spend, and a reason for every
+  elimination — none of which the old function could report, because it
+  discarded every candidate outside `top`. `policy="fixed"` selects the
+  pre-#610 policy, kept verbatim; `test_starts_racing.py` pins it against
+  a transcription of the 0.10.0 body, result for result. The ladder is
+  deterministic — it draws no random numbers — and the whole per-round
+  record, not just the winner, is asserted to repeat.
+
+  Also new in `info`, and useful well outside racing: the solver's own
+  callback tallies (`n_obj_evals`, `n_grad_evals`, `n_constr_evals`,
+  `n_jac_evals`, `n_hess_evals`) and the restoration audit counters
+  (`restoration_calls`, `restoration_outer_iters`,
+  `restoration_inner_iters`), which were previously reachable only by
+  writing a solve report to a file.
+
+  Docs: `docs/src/initialization.md`.
+
 - **`Bool` in the C API is one byte again, matching the header** (#624
   follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
   which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the
