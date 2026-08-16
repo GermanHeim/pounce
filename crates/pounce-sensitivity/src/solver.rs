@@ -728,7 +728,6 @@ impl Solver {
             &ctx.lo,
             &ctx.hi,
             &ctx.mults,
-            ctx.eps,
             max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
