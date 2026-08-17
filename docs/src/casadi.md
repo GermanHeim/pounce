@@ -203,6 +203,41 @@ are **absent** rather than zero; in particular there are no phase
 timings (symbolic analysis, numeric factorization, back-solve), because
 POUNCE does not instrument those phases separately today.
 
+### The structured solve report
+
+`stats()` is the convenient view; POUNCE also writes a machine-readable
+one. Set `solve_report` to a path and each solve leaves a
+`pounce.solve-report/v1` JSON file — the same format the `pounce` CLI's
+`--json-output` produces, so the tools that read those (`diagnose`,
+`find_stalls`, `convergence_trace`) read this too.
+
+```python
+S = ca.nlpsol("S", "pounce", nlp, {
+    "solve_report": "run.json",
+    "solve_report_detail": "full",   # 'summary' (default) or 'full'
+})
+```
+
+`full` embeds the per-iteration trajectory; `summary` omits it and
+carries the problem, solution, statistics and linear-solver blocks.
+The trajectory is not free — POUNCE has to retain each iterate as it
+goes, which is why `summary` is the default and why the capture is
+switched on before the solve rather than reconstructed after it. Asking
+for `full` switches it on for you.
+
+Two things worth knowing before you wire it into a loop:
+
+- **The file is rewritten per solve.** A solver called repeatedly leaves
+  only the last report. Give each call its own path if you want to keep
+  them.
+- **A write that fails does not fail the solve.** You get a warning and
+  `stats()["solve_report_written"] == False`; the answer is still
+  returned, because a diagnostic file is not worth an exception. Check
+  that key rather than the log if a script depends on the file.
+
+`solve_report_detail` is validated when the solver is constructed, so a
+typo costs you the `nlpsol` call rather than a solve.
+
 ### Restoration
 
 `stats()["restoration"]` counts restoration-phase entries, the
@@ -609,6 +644,7 @@ refuses them by name rather than quietly dropping them:
 | `iteration_callback` | The callback is a CasADi `Function` living in this process; generated code runs without CasADi. |
 | `warm_start_from_previous` | It carries an active set between calls of one solver *object*; the generated entry point has no such channel. Pass `x0` / `lam_g0` / `lam_x0` instead. |
 | `convexify_strategy` | Not emitted yet. |
+| `solve_report` | The generated code links the same C API and could call `IpoptWriteSolveReport`, but the emitted runtime does not. Refused rather than dropped, so you are not left waiting for a file that never appears. |
 
 The runtime the plugin emits is `casadi/pounce_runtime.hpp`, the
 counterpart of CasADi's `ipopt_runtime.hpp`. Worked example:

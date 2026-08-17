@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+- **POUNCE's structured solve report is reachable from CasADi** (#644).
+  Set `solve_report` to a path and each solve writes a
+  `pounce.solve-report/v1` JSON file — the same format the `pounce`
+  CLI's `--json-output` produces, so the tools that read those read
+  this. `solve_report_detail` chooses `'summary'` (default) or
+  `'full'`, which embeds the per-iteration trajectory.
+
+  Both C entry points behind this (`IpoptEnableIterHistory`,
+  `IpoptWriteSolveReport`) already existed; what was missing was any way
+  for a CasADi caller to reach them, so the report was available to a
+  CLI user and not to this one.
+
+  Capturing the trajectory costs a retained iterate per iteration, which
+  is why `summary` is the default — and it has to be switched on before
+  the solve, since there is nothing to reconstruct it from afterwards.
+  Asking for `'full'` switches it on for you rather than making you set
+  a second option and discover the omission from an empty trajectory.
+
+  A report that cannot be written is a warning and
+  `stats()["solve_report_written"] == False`, not a failed solve: the
+  answer is already computed, and a diagnostic file is not worth an
+  exception. The file is rewritten per solve, so a solver called in a
+  loop leaves only the last one. `generate()` refuses the option by
+  name — the emitted runtime does not write reports, and dropping it
+  silently would leave you waiting for a file that never appears.
+
 - **CasADi plugin: solver diagnostics, and two defects found exposing
   them** (#634).
 
