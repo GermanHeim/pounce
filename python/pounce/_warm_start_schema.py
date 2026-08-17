@@ -13,8 +13,9 @@ This module carries the metadata that makes that detectable:
 
 * :class:`ProblemSignature` — dimensions, variable/constraint ordering
   or stable IDs, sparsity signature, bound signature, scaling
-  convention, algorithm/backend, and the model-defining option
-  fingerprint, captured from a live :class:`pounce.Problem`.
+  convention, algorithm/backend, the model-defining option
+  fingerprint, and an order-sensitive *model probe*, captured from a
+  live :class:`pounce.Problem`.
 * :func:`compare` — a facet-by-facet mismatch report.
 * :class:`WarmStartCompatibilityError` /
   :class:`WarmStartCompatibilityWarning` — the strict / warn outcomes.
@@ -43,6 +44,9 @@ __all__ = [
     "compare",
     "COMPAT_MODES",
     "MODEL_OPTIONS",
+    "PROBE_RTOL",
+    "ORDERING_UNVERIFIED_NOTE",
+    "ordering_is_unverified",
 ]
 
 #: Version of the on-disk ``WarmStart`` artifact schema.
@@ -227,6 +231,175 @@ def _scaling_digest(problem, opts: Sequence[Tuple[str, Any]]) -> str:
     return _digest(*parts)
 
 
+# ---------------------------------------------------------------------------
+# the model probe (pounce#621)
+# ---------------------------------------------------------------------------
+#
+# Every digest above is computed from what the model *declares*. None of
+# them can see a pure permutation of the variables: permute a model with
+# a uniform box and a dense jacobian and the bound digest and the
+# sparsity digest come out bit-identical, so a reordered replay is
+# allowed through unless the caller supplied `var_ids` on both sides
+# (pounce#621, split out of #607).
+#
+# The probe closes that by fingerprinting what the model *computes*
+# rather than what it declares: evaluate it once at a fixed point and
+# record an order-sensitive summary of the result. A permutation moves
+# the numbers; nothing else about it needs naming.
+#
+# Two properties do the work, and both are deliberate:
+#
+# 1. The probe point varies with the variable index. A point that did
+#    not (all-ones, say) would be a fixed point of every permutation, so
+#    a model symmetric at that point would slip through. Varying it
+#    breaks that symmetry for free.
+#
+# 2. What gets recorded is a small vector of order-weighted projections
+#    compared with a *relative tolerance*, not a hash compared for
+#    equality. A hash cannot be compared approximately, and a model
+#    whose evaluation is not bitwise reproducible — a threaded AD
+#    backend, a different BLAS, another platform — would then be refused
+#    for reproducing itself to 15 digits instead of 17. Refusing a valid
+#    replay is a worse failure than the one being fixed, so the
+#    comparison has to have slack in it, and that rules a digest out.
+
+#: Order-weighted projections taken of each probed block.
+_PROBE_PROJECTIONS = 4
+
+#: Relative tolerance for the probe comparison. A permutation of
+#: distinct values moves a projection by a fraction of the block's own
+#: magnitude; measured evaluation noise sits nine orders below that
+#: (re-associating a model's internal sums moves it by 5e-18 relative).
+PROBE_RTOL = 1e-9
+
+#: |bound| at or above this is not a bound. pounce/Ipopt spell infinity
+#: 2e19; nothing smaller than 1e19 is a real bound.
+_BOUND_INF = 1e19
+
+#: Irrational-ish strides. ``frac((j+1)*a)`` is a low-discrepancy
+#: sequence in [0,1), and ``*`` / ``floor`` are exact IEEE-754
+#: operations — so the weights and the probe point are bit-identical on
+#: every platform, which nothing routed through libm (``cos``, ``exp``)
+#: can promise.
+_PROBE_STRIDES = (
+    0.6180339887498949,   # 1/phi
+    0.4142135623730951,   # sqrt(2) - 1
+    0.7320508075688772,   # sqrt(3) - 1
+    0.2360679774997896,   # sqrt(5) - 2
+)
+
+#: The blocks evaluated at the probe point, in record order.
+_PROBE_BLOCKS = ("objective", "gradient", "constraints", "jacobian")
+
+
+def _frac(a: np.ndarray) -> np.ndarray:
+    return a - np.floor(a)
+
+
+def _probe_point(lb, ub) -> np.ndarray:
+    """A deterministic point strictly inside the box, varying with index.
+
+    Feasibility with respect to the *constraints* is neither sought nor
+    needed — this is a fingerprint, not a solve. Staying inside the
+    *bounds* is needed, because a model is entitled to be undefined
+    outside its own box (``log(x)`` with ``lb=0``).
+    """
+    lb = np.asarray(lb, dtype=float).ravel()
+    ub = np.asarray(ub, dtype=float).ravel()
+    j = np.arange(lb.size, dtype=float) + 1.0
+    # in [0.25, 0.75): off-centre, index-dependent, and never at a bound
+    t = 0.25 + 0.5 * _frac(j * _PROBE_STRIDES[0])
+    lo = lb > -_BOUND_INF
+    hi = ub < _BOUND_INF
+    x = np.empty(lb.size, dtype=float)
+    # Both bounds: the box centre, offset by a capped fraction of the
+    # span. Capping keeps a [-1e18, 1e18] box from being probed at 1e17,
+    # where a badly scaled model overflows and the probe is lost.
+    # `0.5*lb + 0.5*ub` rather than `0.5*(lb+ub)` for the same reason.
+    both = lo & hi
+    x[both] = (0.5 * lb + 0.5 * ub + (t - 0.5) * np.minimum(ub - lb, 1.0))[both]
+    only_lo = lo & ~hi
+    x[only_lo] = (lb + t)[only_lo]
+    only_hi = hi & ~lo
+    x[only_hi] = (ub - t)[only_hi]
+    free = ~lo & ~hi
+    x[free] = (t - 0.5)[free]
+    return x
+
+
+def _sketch(values) -> List[float]:
+    """`_PROBE_PROJECTIONS` order-weighted sums of `values`, plus a scale.
+
+    Each projection weights entry `j` by a different low-discrepancy
+    value in [-0.5, 0.5), so reordering the entries moves it. The
+    trailing L1 norm is permutation-*invariant* and is what the
+    comparison measures the projections against, which is what makes the
+    tolerance relative to the model's own magnitude rather than to 1.0.
+    """
+    v = np.asarray(values, dtype=float).ravel()
+    if v.size == 0:
+        return [0.0] * (_PROBE_PROJECTIONS + 1)
+    j = np.arange(v.size, dtype=float) + 1.0
+    out = [float(np.dot(_frac(j * a) - 0.5, v)) for a in _PROBE_STRIDES]
+    out.append(float(np.abs(v).sum()))
+    return out
+
+
+def _model_probe(problem) -> Optional[Tuple[float, ...]]:
+    """Evaluate `problem`'s model once and sketch the result.
+
+    ``None`` — an unrecorded, and therefore unverifiable, facet — when
+    the model cannot be reached, will not evaluate at the probe point,
+    or answers with something non-finite. Every one of those is a model
+    this cannot fingerprint, and none of them is a reason to refuse a
+    replay, so the facet is dropped rather than failed.
+    """
+    try:
+        obj = problem.problem_obj
+        lb, ub, _, _ = problem.get_bounds()
+    except AttributeError:  # pragma: no cover - pre-#607 extension
+        return None
+    if obj is None:
+        return None
+    try:
+        x = _probe_point(lb, ub)
+        flat: List[float] = []
+        for name in _PROBE_BLOCKS:
+            fn = getattr(obj, name, None)
+            flat += _sketch(() if fn is None else fn(x))
+    except Exception:  # noqa: BLE001 - a model that will not evaluate at
+        # an arbitrary interior point is a model this cannot fingerprint,
+        # not a model whose warm start is invalid. Same contract as
+        # `_structure_digest`: an unreadable facet reads as unverifiable.
+        return None
+    if not all(np.isfinite(flat)):
+        return None
+    return tuple(flat)
+
+
+def _probe_agrees(a: Sequence[float], b: Sequence[float]) -> bool:
+    """Do two probes describe the same model, to :data:`PROBE_RTOL`?
+
+    Compared block by block against each block's own L1 scale, with the
+    largest block's scale as a floor — so a gradient that is identically
+    zero is judged against the magnitude of the rest of the model rather
+    than against nothing, which would demand bit equality of exactly the
+    block least likely to reproduce bitwise.
+    """
+    if len(a) != len(b):
+        return False
+    stride = _PROBE_PROJECTIONS + 1
+    scales = [max(abs(a[k]), abs(b[k]))
+              for k in range(_PROBE_PROJECTIONS, len(a), stride)]
+    floor = max(scales) if scales else 0.0
+    for block, off in enumerate(range(0, len(a), stride)):
+        tol = PROBE_RTOL * max(scales[block], floor)
+        for k in range(off, off + stride):
+            if abs(a[k] - b[k]) > tol:
+                return False
+    return True
+
+
 def _ids_tuple(ids, n: int, what: str) -> Optional[Tuple[str, ...]]:
     if ids is None:
         return None
@@ -262,6 +435,11 @@ class ProblemSignature:
             merely detectable — see :meth:`pounce.WarmStart.reindex`.
         bounds: Digest of ``(lb, ub, cl, cu)``.
         sparsity: Digest of the declared jacobian / Hessian structure.
+        probe: Order-sensitive sketch of the model evaluated once at a
+            fixed interior point (pounce#621). This is the facet that
+            sees a pure *reordering*, which no digest of the model's
+            declarations can. Compared to a relative tolerance, not for
+            equality.
         scaling: Digest of the scaling convention.
         algorithm: Digest of the algorithm / backend selection.
         model: Digest of the model-defining options (:data:`MODEL_OPTIONS`).
@@ -273,6 +451,7 @@ class ProblemSignature:
     con_ids: Optional[Tuple[str, ...]] = None
     bounds: Optional[str] = None
     sparsity: Optional[str] = None
+    probe: Optional[Tuple[float, ...]] = None
     scaling: Optional[str] = None
     algorithm: Optional[str] = None
     model: Optional[str] = None
@@ -282,20 +461,29 @@ class ProblemSignature:
     #: artifact, and the one whose mismatch the native layer would
     #: otherwise report from deep inside solve preparation.
     FACETS = ("n", "m", "var_ids", "con_ids", "bounds", "sparsity",
-              "scaling", "algorithm", "model")
+              "probe", "scaling", "algorithm", "model")
 
-    #: Facets compared only when *both* sides recorded them. Stable IDs
-    #: are the transfer key, not a verification requirement: a live
-    #: ``Problem`` has no idea what its variables are called, so a target
-    #: signature almost never carries them, and treating that absence as
-    #: unverifiable would make signing an artifact with IDs strictly
-    #: worse than signing it without.
-    OPTIONAL_FACETS = ("var_ids", "con_ids")
+    #: Facets compared only when *both* sides recorded them.
+    #:
+    #: Stable IDs are the transfer key, not a verification requirement: a
+    #: live ``Problem`` has no idea what its variables are called, so a
+    #: target signature almost never carries them, and treating that
+    #: absence as unverifiable would make signing an artifact with IDs
+    #: strictly worse than signing it without.
+    #:
+    #: The probe is optional for a different reason: it is best-effort by
+    #: construction. A model that will not evaluate at an arbitrary
+    #: interior point, an artifact captured with ``probe=False``, and
+    #: every artifact written before pounce#621 all carry ``None``, and
+    #: none of them is evidence that the replay is wrong.
+    OPTIONAL_FACETS = ("var_ids", "con_ids", "probe")
 
     # -- construction ---------------------------------------------------
 
     @classmethod
-    def from_problem(cls, problem, var_ids=None, con_ids=None) -> "ProblemSignature":
+    def from_problem(
+        cls, problem, var_ids=None, con_ids=None, probe=True
+    ) -> "ProblemSignature":
         """Fingerprint a live :class:`pounce.Problem`.
 
         `var_ids` / `con_ids` are optional stable identifiers (any
@@ -303,6 +491,13 @@ class ProblemSignature:
         Supplying them is what lets :meth:`pounce.WarmStart.reindex`
         transfer a warm start across a reordering or a horizon shift
         instead of only refusing it.
+
+        `probe` evaluates the model once at a fixed interior point to
+        record the order-sensitive :attr:`probe` facet (pounce#621).
+        Pass ``False`` for a model whose evaluation is expensive enough
+        to notice or has side effects; the cost is then zero on both
+        sides, because a replay only probes the target when the artifact
+        it is being checked against carries a probe of its own.
         """
         n, m = int(problem.n), int(problem.m)
         opts = _effective_options(problem)
@@ -321,6 +516,7 @@ class ProblemSignature:
             con_ids=_ids_tuple(con_ids, m, "con_ids"),
             bounds=bounds,
             sparsity=_structure_digest(problem),
+            probe=_model_probe(problem) if probe else None,
             scaling=_scaling_digest(problem, opts),
             algorithm=_digest(_sorted_pairs(opts, _ALGORITHM_OPTIONS)),
             model=_digest(_sorted_pairs(opts, MODEL_OPTIONS)),
@@ -330,9 +526,12 @@ class ProblemSignature:
 
     def to_json(self) -> str:
         d = dataclasses.asdict(self)
-        for k in ("var_ids", "con_ids"):
+        for k in ("var_ids", "con_ids", "probe"):
             if d[k] is not None:
                 d[k] = list(d[k])
+        # `repr`-based float encoding round-trips a double exactly, so a
+        # probe survives save/load bit-for-bit and the tolerance is spent
+        # on the model's own noise rather than on the serializer's.
         return json.dumps(d, sort_keys=True)
 
     @classmethod
@@ -341,6 +540,8 @@ class ProblemSignature:
         for k in ("var_ids", "con_ids"):
             if d.get(k) is not None:
                 d[k] = tuple(str(v) for v in d[k])
+        if d.get("probe") is not None:
+            d["probe"] = tuple(float(v) for v in d["probe"])
         known = {f.name for f in dataclasses.fields(cls)}
         unknown = sorted(set(d) - known)
         if unknown:
@@ -372,6 +573,16 @@ class Mismatch:
                 f"{self.facet}: identifiers differ "
                 f"(captured {_preview(self.captured)}, "
                 f"target {_preview(self.target)})"
+            )
+        if self.facet == "probe" and not self.unverifiable:
+            # The raw projections mean nothing to a reader, and the one
+            # thing worth saying is what this facet is *for*: it is the
+            # only one that moves under a pure reordering.
+            return (
+                "probe: this problem's model does not evaluate to the same "
+                "numbers as the one the warm start was captured against "
+                "(a reordering of the variables looks exactly like this; so "
+                "does a different model of the same shape)"
             )
         if self.unverifiable:
             side = "the artifact" if self.captured is None else "this problem"
@@ -411,9 +622,41 @@ def compare(captured: ProblemSignature, target: ProblemSignature) -> List[Mismat
             if facet in ProblemSignature.OPTIONAL_FACETS:
                 continue
             out.append(Mismatch(facet, a, b, unverifiable=True))
+        elif facet == "probe":
+            # Floats out of a model evaluation: compared to a relative
+            # tolerance, never for equality. See `_probe_agrees`.
+            if not _probe_agrees(a, b):
+                out.append(Mismatch(facet, a, b))
         elif a != b:
             out.append(Mismatch(facet, a, b))
     return out
+
+
+def ordering_is_unverified(
+    captured: ProblemSignature, target: ProblemSignature
+) -> bool:
+    """True when nothing in this comparison could have seen a reordering.
+
+    Both routes to catching a permutation need something on *both*
+    sides: stable IDs, or a model probe. When neither is present on both
+    the structural digests are all that ran, and those are blind to it
+    (pounce#621) — which is worth saying out loud rather than leaving the
+    reader to infer from a clean report.
+    """
+    return not (
+        (captured.var_ids is not None and target.var_ids is not None)
+        or (captured.probe is not None and target.probe is not None)
+    )
+
+
+#: Said whenever a comparison could not have seen a reordering.
+ORDERING_UNVERIFIED_NOTE = (
+    "note: neither a model probe nor stable IDs were available on both "
+    "sides, so a pure reordering of the variables would not have been "
+    "caught here (pounce#621). Re-capture with "
+    "WarmStart.from_info(x, info, problem=prob) on a build that probes, "
+    "or pass var_ids= on both sides."
+)
 
 
 def format_report(
@@ -422,6 +665,7 @@ def format_report(
     replay: str,
     schema_version: Optional[int],
     source: Optional[ProblemSignature] = None,
+    ordering_unverified: bool = False,
 ) -> str:
     """The human-facing mismatch report.
 
@@ -438,6 +682,8 @@ def format_report(
         + "):",
     ]
     lines += [f"  - {m}" for m in mismatches]
+    if ordering_unverified:
+        lines.append(f"  ({ORDERING_UNVERIFIED_NOTE})")
     if source is not None:
         lines.append(
             f"  (this artifact was transferred from a {source.n}x{source.m} "
