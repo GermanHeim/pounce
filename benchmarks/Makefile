@@ -58,6 +58,7 @@ export IPOPT_LINEAR_SOLVER
 	$(addprefix ipopt-ref-,$(REF_SUITES)) \
 	gams-bench gams-rerun \
 	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
+	warmstart-ipopt warmstart-transfer warmstart-composite warmstart-all \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report
 
 # Show available targets
@@ -94,6 +95,10 @@ help:
 	@echo "  warmstart-quick            Warm-start suite, short sweep (3 families, one scale)"
 	@echo "  warmstart-selftest         Finite-difference check of the warm-start families (no solver needed)"
 	@echo "  warmstart-report           Re-render warmstart/results.md from the existing results.json"
+	@echo "  warmstart-ipopt            Warm-start suite under the external Ipopt adapter (needs cyipopt)"
+	@echo "  warmstart-transfer         Changed-structure arms: horizon shift and mesh prolongation"
+	@echo "  warmstart-composite        Render the pounce#611 composite report into dev-notes/"
+	@echo "  warmstart-all              Every warm-start run above, then the composite report"
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
@@ -341,6 +346,32 @@ warmstart-quick:
 warmstart-report:
 	cd $(CURDIR) && $(PYTHON) -m warmstart.report \
 		warmstart/results.json -o warmstart/results.md
+
+# pounce#611. The external arm needs cyipopt, which has no PyPI wheel:
+#   apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev
+#   pip install cython && pip install --no-build-isolation cyipopt
+# `warmstart.run --solver ipopt` exits with those instructions if it is
+# missing, so this target fails loudly rather than skipping quietly.
+warmstart-ipopt:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.run --solver ipopt \
+		--scales all --arms all --out warmstart/results-ipopt.json --no-report
+
+warmstart-transfer:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.transfer --experiment all \
+		--out warmstart/transfer.json
+
+# Regenerates dev-notes/warm-start-611-composite.{md,json} from whichever
+# of the three raw result files exist. A missing input produces a section
+# that says so, not a silently shorter report.
+warmstart-composite:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.composite \
+		--results warmstart/results.json \
+		--ipopt warmstart/results-ipopt.json \
+		--transfer warmstart/transfer.json \
+		-o ../dev-notes/warm-start-611-composite.md \
+		--json-out ../dev-notes/warm-start-611-composite.json
+
+warmstart-all: warmstart-run warmstart-ipopt warmstart-transfer warmstart-composite
 
 # Mittelmann lpopt LP suite — the curated HARD subset of Hans Mittelmann's
 # lpopt benchmark (https://plato.asu.edu/ftp/lpopt.html). These are large,

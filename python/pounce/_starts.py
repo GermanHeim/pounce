@@ -975,7 +975,21 @@ class _Racer:
 
         # Capture the pause. Signed against this candidate's own Problem,
         # so a resume is checked rather than merely attempted.
-        state["ws"] = WarmStart.from_info(x, info, problem=problem)
+        #
+        # `probe=False` deliberately: the pounce#621 model probe exists to
+        # catch a *reordering* between capture and replay, and this state
+        # is captured from, and resumed on, the same `Problem` object in
+        # the same process a moment later — there is no reordering to
+        # catch. It is not free either. The probe evaluates the model, and
+        # on this path the model is the caller's counted callable, so
+        # probing once per rung would spend four of the user's evaluations
+        # per resume on a facet that cannot fire: the racing suite went
+        # from 2592 to 2920 evaluations for the same three answers, which
+        # is what test_the_ladder_beats_the_pre_610_cost caught.
+        # Declining it at capture also makes the resume-side check free,
+        # because a target is only probed when the artifact carries a
+        # probe to compare it against.
+        state["ws"] = WarmStart.from_info(x, info, problem=problem, probe=False)
         return spent, used, resumed
 
     # -- scoring -------------------------------------------------------
