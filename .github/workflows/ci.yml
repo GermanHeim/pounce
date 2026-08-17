@@ -588,6 +588,42 @@ jobs:
                 "| builds shipped:", pounce_casadi.supported_casadi_versions())
           PY
 
+      # The wheel carries a compiled plugin and the solver library, so it
+      # must not be tagged `any`. It was: setuptools sees no `ext_modules`
+      # and calls the distribution pure, so `pip install` on Linux accepted
+      # a macOS build and the user met a missing `.dylib` at import instead
+      # of a resolver error at install. `build.sh` asserts this too; the
+      # check is repeated here because CI is where a packaging regression
+      # gets noticed on a platform nobody is building on by hand.
+      - name: Wheel is platform-tagged, not `any`
+        run: |
+          cd casadi/wheel
+          whl=$(ls dist/pounce_casadi-*.whl)
+          echo "built $(basename "$whl")"
+          case "$(basename "$whl")" in
+            *-none-any.whl)
+              echo "::error::wheel is tagged py3-none-any while carrying"\
+                   "platform-specific shared libraries; it would install on"\
+                   "every platform and import on one."
+              exit 1;;
+          esac
+          python - "$whl" <<'PY'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          meta = next(n for n in z.namelist() if n.endswith(".dist-info/WHEEL"))
+          text = z.read(meta).decode()
+          print(text)
+          assert "Root-Is-Purelib: false" in text, text
+          tag = next(l.split(": ", 1)[1] for l in text.splitlines()
+                     if l.startswith("Tag: "))
+          impl, abi, plat = tag.split("-")
+          assert plat != "any", tag
+          # One build serves every Python 3 -- nothing here links the
+          # CPython ABI -- so a cp3xx tag would be wrong in the other
+          # direction and would strand users on the next Python release.
+          assert (impl, abi) == ("py3", "none"), tag
+          PY
+
       # The wheel is supposed to carry its own copy of the solver library and
       # find it beside itself, so it must keep working with the build tree
       # gone. Before the install-name fix it did work here — but only because
