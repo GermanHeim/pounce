@@ -49,6 +49,20 @@ def _solver_version(name: str) -> str:
             return getattr(pounce, "__version__", "unknown")
         except Exception:
             return "unknown"
+    if name == "ipopt":
+        # Two versions matter and they are different things: the Python
+        # binding and the Ipopt it was linked against. A wall-time number
+        # from this arm is only interpretable with the second one, and
+        # with the linear solver, so both go in the metadata.
+        try:
+            import cyipopt
+
+            return (
+                f"cyipopt {cyipopt.__version__} / Ipopt "
+                f"{getattr(cyipopt, 'IPOPT_VERSION', 'unknown')}"
+            )
+        except Exception:
+            return "unknown"
     return "unknown"
 
 

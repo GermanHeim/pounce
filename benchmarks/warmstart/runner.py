@@ -195,7 +195,11 @@ def run_family_scale(
         if arm in arm_results:
             continue
         if not adapter.supports(arm):
-            skipped[arm] = f"{adapter.name} does not support {arm}"
+            why_not = getattr(adapter, "unsupported_reason", None)
+            skipped[arm] = (
+                f"{adapter.name}: {why_not(arm)}" if why_not is not None
+                else f"{adapter.name} does not support {arm}"
+            )
             continue
         why = arm_applies(arm, family)
         if why is not None:
