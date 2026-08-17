@@ -2028,6 +2028,16 @@ impl IpoptNlp for OrigIpoptNlp {
         Some((dl, du))
     }
 
+    fn declared_x_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        // No scaling to reapply, unlike `declared_d_bounds`: pounce models
+        // objective and constraint scaling only, so nothing has touched the
+        // variable box between the snapshot and now except the relaxation
+        // this accessor exists to undo.
+        let xl = self.declared_x_l.borrow().clone()?;
+        let xu = self.declared_x_u.borrow().clone()?;
+        Some((xl, xu))
+    }
+
     fn declared_c_rhs(&self) -> Option<Vec<Number>> {
         // `c_rhs` is captured at construction from the user's `g_l` and never
         // touched afterwards — no relaxation applies to an equality row, so it
@@ -3819,6 +3829,29 @@ mod tests {
         let (dl, du) = nlp.declared_d_bounds().expect("snapshotted at relax");
         assert_eq!(dl, vec![25.0], "declared bound is the pre-relax value");
         assert!(du.is_empty() || du[0] >= 25.0); // HS071: no finite d upper
+    }
+
+    /// gh#612: the variable box the user declared survives the relaxation.
+    ///
+    /// Crossover pivots against these, not the live vector. HS071's box is
+    /// `1 <= x_i <= 5`; a solution that sits exactly on `x = 1` is a full
+    /// `delta` *inside* the relaxed `1 - delta`, so an activity test against
+    /// the live bound reports the binding bound inactive — the one answer
+    /// crossover exists to get right.
+    #[test]
+    fn declared_x_bounds_are_the_pre_relax_box() {
+        let (_adapter, mut nlp) = build_orig_nlp();
+        assert_eq!(nlp.declared_x_bounds(), None, "no snapshot before relax");
+        let x_l_before = nlp.x_l.values().to_vec();
+        let x_u_before = nlp.x_u.values().to_vec();
+        nlp.relax_bounds(1e-2, 1.0);
+        let (xl, xu) = nlp.declared_x_bounds().expect("snapshotted at relax");
+        assert_eq!(xl, x_l_before, "declared lower box is the pre-relax value");
+        assert_eq!(xu, x_u_before, "declared upper box is the pre-relax value");
+        // And the live vectors did move, so the two are genuinely distinct
+        // rather than the accessor happening to alias an unrelaxed bound.
+        assert!(nlp.x_l.values()[0] < xl[0]);
+        assert!(nlp.x_u.values()[0] > xu[0]);
     }
 
     /// gh#390: the equality RHS folded into `c(x) = 0` is plumbed back out, so

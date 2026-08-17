@@ -51,6 +51,90 @@ changes.
   a progress bar will see the difference; upstream Ipopt fires from
   restoration too, so a callback ported from it was already written
   expecting these.
+- **Crossover: an opt-in phase that identifies an exact active set**
+  (#612). An interior-point method never puts an iterate *on* a
+  constraint, so at convergence "which constraints are active" is
+  something you infer from a tolerance test rather than something the
+  solve established. Where strict complementarity fails — a constraint
+  active with a zero multiplier — that inference cannot be repaired
+  afterwards: the barrier's own geometry parks the iterate `O(√μ)` from
+  the constraint, about `1e-5` at termination, four orders of magnitude
+  further out than the `1e-8` the solve reports converging at. The
+  information is not in the iterate.
+
+  `crossover=yes` runs the Byrd–Nocedal–Waltz KNITRO §7 phase after the
+  interior solve converges: estimate the active set, take one
+  EQP-equivalent step over it through `pounce-qp`'s working-set interface
+  with an ℓ₁ line search seeded at `ν₀` just above the largest
+  `|multiplier|`, and — if that already meets the stopping tolerances,
+  which is the common case and solves no LPs — stop. Otherwise run the
+  full active-set SQP from the interior iterate for at most
+  `crossover_max_iter` iterations. Knobs: `crossover_mult_tol` (`1e-8`),
+  `crossover_primal_tol` (`1e-6`).
+
+  Measured on `min (x₀−1)² + x₁² s.t. x₀+x₁ ≤ 1`, whose solution `(1, 0)`
+  is weakly active: the interior solve leaves the row slack by more than
+  `1e-7`; after crossover it holds to better than `1e-10` and the
+  identified set reports it `AtUpper`. On a strictly complementary
+  problem (HS14) crossover takes its one step, finds the point already
+  converged, and changes nothing.
+
+  Three subsystems were already paying for the approximate set.
+  `covariance()`'s AMBIGUOUS (loosely converged) class exists precisely
+  because the interior iterate cannot decide, and crossover collapses it.
+  Degeneracy had been met each time on the perturbation side (#540, #541,
+  #544, #592, `feral_singular_pivot_floor`); a linearly independent active
+  set attacks it structurally. And the active-set SQP could only warm-start
+  from a previous *SQP* solve — `last_sqp_working_set()` now returns the
+  crossed-over set, which is the IPM → SQP handoff (#611) that did not
+  exist.
+
+  The crossed-over point replaces the interior one only if constraint
+  violation, stationarity, and objective all hold up against it; any
+  failure returns the interior solution untouched, and
+  `crossover_report()` distinguishes "never ran" from "ran and declined"
+  so a consumer cannot read a declined crossover as a confirmed active
+  set. Being post-convergence and off by default, it moves no interior
+  trajectory. Docs: `docs/src/crossover.md`.
+
+  Reported residuals for an accepted crossover are measured against the
+  **declared** bounds (#646). `bound_relax_factor` widens every bound by `δ`
+  before the solve; the interior iteration never touches even the widened
+  bound, but crossover puts the point *exactly* on the declared one, which is
+  `δ` inside the relaxed one. Measured in the relaxed frame every active
+  constraint then carries slack `δ`, so complementarity reads `|multiplier|·δ`
+  instead of `~μ` — `1e-8` for a unit multiplier, i.e. `tol`. A strictly
+  better point printed an `Overall NLP error` above the tolerance it had
+  converged at, and the opt-in `kkt_fidelity_tol` gate, which runs *after*
+  crossover, downgraded `Solve_Succeeded` on it. On HS14 all four figures now
+  improve: dual infeasibility `1.9e-12 → 8.9e-16`, constraint violation
+  `2.9e-13 → 2.2e-16`, complementarity `2.5e-9 → 3.5e-16`, overall NLP error
+  `2.5e-9 → 8.9e-16`. Only the complementarity term needed the substitution —
+  stationarity involves no bounds and the point is interior to the relaxed
+  box — and it uses raw slacks rather than the interior machinery's
+  `eps·min(1,μ)` floor, which would have put `μ/z ≈ 1e-9` back as a fresh
+  artifact. Reporting only: it runs after the status is decided and applies
+  solely to a point the never-regress gate already accepted on its
+  declared-bound residuals.
+
+  Two defects surfaced while building it, both of which would have made
+  the phase report the opposite of the truth:
+
+  - `classify_working_set` had the constraint-row multiplier signs
+    inverted. Rows and variable bounds carry *opposite* sign conventions
+    (`λ_g ≤ 0` at a lower bound, `λ_x > 0` at one), because the bound
+    block enters the stationarity condition negated. Nothing caught it
+    because no test asserted a working-set *estimate*, only the solutions
+    it warm-starts, and a wrong hint is merely a slower correct answer to
+    `pounce-qp`. Now pinned by a test that solves a QP and asserts the
+    classifier reproduces the engine's own answer.
+  - Bound relaxation was inverting the activity test. `bound_relax_factor`
+    widens every bound by `1e-8` before the solve, so a point sitting
+    exactly on a declared bound is `1e-8` *inside* the relaxed one:
+    measured against the live bounds, every binding constraint reads as
+    inactive and the pivot stops short of each. Crossover now runs against
+    the declared bounds, via a new `Nlp::declared_x_bounds()` alongside
+    the existing `declared_d_bounds()`.
 
 - **CasADi plugin: solver diagnostics, and two defects found exposing
   them** (#634).

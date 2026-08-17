@@ -109,6 +109,21 @@ pub trait IpoptNlp: Nlp {
         None
     }
 
+    /// The *declared* compressed variable bounds `(x_L, x_U)` — the box the
+    /// user wrote, before `bound_relax_factor` widened it, in the same
+    /// compressed spaces as [`Self::x_l`] / [`Self::x_u`].
+    ///
+    /// Same "declared, not live" contract as [`Self::declared_d_bounds`].
+    /// Anything that reports *where the solution sits relative to the model*
+    /// — active-set identification above all — has to ask this rather than
+    /// the live vector: an iterate exactly on a declared bound is `1e-8`
+    /// inside the relaxed one, so a tolerance test against the live bounds
+    /// calls it inactive. `None` (the default) means "not tracked" — callers
+    /// should fall back to the live bounds.
+    fn declared_x_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        None
+    }
+
     /// The *declared* equality right-hand sides `b` — the pre-fold constants
     /// subtracted to turn `g_i(x) == b_i` into the algorithm's residual
     /// `c_i(x) = 0` — reported in the same (internally scaled) space as
