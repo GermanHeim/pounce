@@ -119,6 +119,40 @@ impl IpoptNlpAdapter {
         }
     }
 
+    /// The same adapter, but reporting the bounds the user *declared* rather
+    /// than the live ones the interior method widened by
+    /// `bound_relax_factor`.
+    ///
+    /// For the interior iteration the widening is the point — it is what
+    /// keeps a strictly-interior iterate from being pinned against a bound
+    /// it must approach. For anything asking *where the solution sits
+    /// relative to the model*, it inverts the answer: a point exactly on a
+    /// declared bound is a full `1e-8` inside the relaxed one, so an
+    /// activity test against the live bounds calls the binding constraint
+    /// inactive, and a pivot against them stops short of it. That is the
+    /// difference between crossover identifying the active set and
+    /// crossover identifying nothing.
+    ///
+    /// Falls back to the live bounds for any block the NLP does not track
+    /// (the trait accessors default to `None`).
+    pub fn new_with_declared_bounds(nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
+        let mut me = Self::new(Rc::clone(&nlp));
+        let (n, m_d) = (me.n, me.m_d);
+        let b = nlp.borrow();
+        if let Some((x_l_small, x_u_small)) = b.declared_x_bounds() {
+            me.x_l = scatter_bound(&*b.px_l(), &x_l_small, n, Number::NEG_INFINITY);
+            me.x_u = scatter_bound(&*b.px_u(), &x_u_small, n, Number::INFINITY);
+        }
+        if m_d > 0 {
+            if let Some((d_l_small, d_u_small)) = b.declared_d_bounds() {
+                me.d_l = scatter_bound(&*b.pd_l(), &d_l_small, m_d, Number::NEG_INFINITY);
+                me.d_u = scatter_bound(&*b.pd_u(), &d_u_small, m_d, Number::INFINITY);
+            }
+        }
+        drop(b);
+        me
+    }
+
     fn dv_from_slice(&self, space: &Rc<DenseVectorSpace>, s: &[Number]) -> DenseVector {
         let mut dv = space.make_new_dense();
         dv.set_values(s);
@@ -287,4 +321,124 @@ fn sym_t_downcast(m: &dyn pounce_linalg::matrix::SymMatrix) -> &SymTMatrix {
     m.as_any()
         .downcast_ref::<SymTMatrix>()
         .expect("IpoptNlp::eval_h must return SymTMatrix")
+}
+
+/// Gather the compressed indices of the finite lower / upper variable bounds
+/// — the small→large maps `px_l` and `px_u` own — as plain index vectors.
+///
+/// The IPM carries `z_l` and `z_u` in those *compressed* spaces (one entry
+/// per finite bound), while the SQP / `pounce-qp` side carries one packed
+/// multiplier per variable. Anything translating between the two engines
+/// needs the maps, and there is exactly one correct source for them; reading
+/// them off the NLP here keeps that from being re-derived (wrongly) at each
+/// call site.
+fn bound_maps(nlp: &Rc<RefCell<dyn IpoptNlp>>) -> (Vec<usize>, Vec<usize>) {
+    let b = nlp.borrow();
+    let idx = |m: &dyn pounce_linalg::Matrix| -> Vec<usize> {
+        m.as_any()
+            .downcast_ref::<ExpansionMatrix>()
+            .expect("px_l / px_u must be ExpansionMatrix")
+            .expanded_pos_indices()
+            .iter()
+            .map(|&p| p as usize)
+            .collect()
+    };
+    let lo = idx(&*b.px_l());
+    let up = idx(&*b.px_u());
+    (lo, up)
+}
+
+/// Pack the IPM's compressed bound multipliers into the SQP convention:
+/// one entry per variable, `λ_x = z_l − z_u`.
+///
+/// Both engines write stationarity as `∇f + Jᵀλ_g − λ_x` once `λ_x` is
+/// packed this way (the IPM's own form is `∇f + Jᵀλ − z_l + z_u = 0`), so
+/// this is a repacking and not a sign convention change.
+pub fn pack_bound_multipliers(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    z_l: &[Number],
+    z_u: &[Number],
+) -> Vec<Number> {
+    let n = nlp.borrow().n() as usize;
+    let (lo_map, up_map) = bound_maps(nlp);
+    let mut out = vec![0.0; n];
+    for (i, &pos) in lo_map.iter().enumerate() {
+        if let Some(&v) = z_l.get(i) {
+            out[pos] += v;
+        }
+    }
+    for (i, &pos) in up_map.iter().enumerate() {
+        if let Some(&v) = z_u.get(i) {
+            out[pos] -= v;
+        }
+    }
+    out
+}
+
+/// Inverse of [`pack_bound_multipliers`]: split a packed per-variable `λ_x`
+/// back into the IPM's compressed `(z_l, z_u)`.
+///
+/// The split is by sign — positive mass to the lower bound, negative to the
+/// upper — which is the only choice consistent with the sign restrictions
+/// `z_l ≥ 0`, `z_u ≥ 0` and with complementarity: away from a degenerate
+/// fixed variable at most one of the two can be nonzero, so the packing loses
+/// nothing to recover. A variable *fixed* by equal bounds is the one case
+/// where `λ_x` genuinely does not determine the pair; sign choice is the
+/// established convention there and the two are interchangeable in every
+/// downstream identity, since only their difference is ever used.
+///
+/// Mass that lands on a variable with no bound on the corresponding side has
+/// nowhere to go and is dropped — that can only happen if a caller hands in a
+/// multiplier violating the sign restrictions, and silently keeping it would
+/// corrupt the stationarity residual the user is shown.
+pub fn split_bound_multipliers(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    lambda_x: &[Number],
+) -> (Vec<Number>, Vec<Number>) {
+    let (lo_map, up_map) = bound_maps(nlp);
+    let z_l = lo_map
+        .iter()
+        .map(|&pos| lambda_x.get(pos).copied().unwrap_or(0.0).max(0.0))
+        .collect();
+    let z_u = up_map
+        .iter()
+        .map(|&pos| (-lambda_x.get(pos).copied().unwrap_or(0.0)).max(0.0))
+        .collect();
+    (z_l, z_u)
+}
+
+/// Split the inequality multipliers `y_d` into the IPM's compressed slack
+/// bound multipliers `(v_l, v_u)`.
+///
+/// Stationarity of the barrier problem with respect to the slacks is
+/// `−y_d − v_l + v_u = 0`, i.e. `v_l − v_u = −y_d`; with `v_l, v_u ≥ 0` and
+/// complementarity that determines the pair up to the same degenerate case
+/// [`split_bound_multipliers`] documents. Needed when writing a point
+/// computed on the active-set side back onto an IPM iterate, whose slack
+/// duals would otherwise still describe the interior point.
+pub fn split_slack_multipliers(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    y_d: &[Number],
+) -> (Vec<Number>, Vec<Number>) {
+    let b = nlp.borrow();
+    let idx = |m: &dyn pounce_linalg::Matrix| -> Vec<usize> {
+        m.as_any()
+            .downcast_ref::<ExpansionMatrix>()
+            .expect("pd_l / pd_u must be ExpansionMatrix")
+            .expanded_pos_indices()
+            .iter()
+            .map(|&p| p as usize)
+            .collect()
+    };
+    let lo_map = idx(&*b.pd_l());
+    let up_map = idx(&*b.pd_u());
+    let v_l = lo_map
+        .iter()
+        .map(|&pos| (-y_d.get(pos).copied().unwrap_or(0.0)).max(0.0))
+        .collect();
+    let v_u = up_map
+        .iter()
+        .map(|&pos| y_d.get(pos).copied().unwrap_or(0.0).max(0.0))
+        .collect();
+    (v_l, v_u)
 }

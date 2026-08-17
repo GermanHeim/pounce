@@ -1003,7 +1003,7 @@ fn ray_certifies_unbounded<N: SqpProblemSpec>(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct KktError {
+pub(crate) struct KktError {
     pub stationarity: Number,
     pub constr_viol: Number,
 }
@@ -1103,7 +1103,7 @@ fn compute_grad_lag(
     out
 }
 
-fn check_kkt(
+pub(crate) fn check_kkt(
     n: usize,
     m: usize,
     iter: &SqpIterates,
