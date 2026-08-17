@@ -34,6 +34,35 @@ changes.
   loop leaves only the last one. `generate()` refuses the option by
   name — the emitted runtime does not write reports, and dropping it
   silently would leave you waiting for a file that never appears.
+- **`pounce-rs`: a rejected solver option is no longer silently
+  discarded** (#649).
+
+  `Nlp::solve` applied `.option_num` / `.option_int` / `.option_str`
+  through `OptionsList::set_*_value` but dropped the returned `Result`.
+  `OptionsList` validates every option against the registry — unknown
+  name, wrong value type, out-of-range value, unregistered choice — so a
+  typo like `.option_str("mu_stratgey", "adaptive")` was rejected,
+  discarded, and the solve then ran with the default still in effect.
+  Nothing in the output distinguished that from an honoured request, and
+  the failure got worse the more the option mattered: a misspelled
+  `max_iter` reported a full converged solve at the default cap.
+
+  Rejected options are now reported. New `Nlp::try_solve` returns
+  `Result<Solution, NlpError>`, with `NlpError::InvalidOption` naming the
+  option, the value, and the registry's reason; `NlpError::UnknownVariableCount`
+  and `NlpError::Initialize` cover the other two setup failures.
+  `Nlp::solve` keeps its signature and now panics on those conditions
+  rather than solving a configuration the caller did not ask for — a
+  behaviour change for callers who were passing an invalid option and
+  (knowingly or not) getting the default. A solve that runs and fails to
+  converge is unaffected: still `Ok` with `success == false`.
+
+  The two internal defaults the builder sets for itself
+  (`hessian_approximation`, `sqp_hessian`) still ignore their result;
+  both names are hardcoded and valid. Only the interior-point path
+  through `pounce-rs` was affected — the Python, batch, and C interfaces
+  already propagated these errors.
+
 - **Crossover: an opt-in phase that identifies an exact active set**
   (#612). An interior-point method never puts an iterate *on* a
   constraint, so at convergence "which constraints are active" is
