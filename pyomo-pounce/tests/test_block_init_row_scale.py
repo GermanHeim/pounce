@@ -119,3 +119,59 @@ def test_a_well_scaled_model_is_untouched_by_a_factor_of_one():
     r_tagged = block_initialize(tagged)
     assert r_plain.ok and r_tagged.ok
     assert pyo.value(plain.x) == pyo.value(tagged.x)
+
+
+def cold_row(with_factor):
+    """The other direction: a row in *small* units, whose residual is
+    already under the absolute eps at the seed.
+
+    `1e-8 * x**2 == 2e-8` has the same root as the hot row, but its raw
+    residual at x=1 is 1e-8, which the absolute test accepts on the
+    spot. The block is reported initialized and the value it leaves
+    behind is the seed, ~29% from the root. Nothing fails, nothing
+    warns; this is the quiet half of the same defect.
+    """
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(initialize=1.0)
+    m.c = pyo.Constraint(expr=1e-8 * m.x**2 == 2e-8)
+    if with_factor:
+        m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+        m.scaling_factor[m.c] = 1e8
+    return m
+
+
+def test_an_untagged_cold_row_is_declared_solved_at_its_seed():
+    """Pins the pre-existing behaviour the tagged case below fixes, so
+    the fix cannot be mistaken for a no-op."""
+    m = cold_row(with_factor=False)
+    report = block_initialize(m)
+    assert report.ok
+    assert report.blocks[0].status == "initialized"
+    assert pyo.value(m.x) == pytest.approx(1.0, abs=1e-7), "never left the seed"
+
+
+def test_a_tagged_cold_row_is_solved_to_the_root():
+    """A factor above 1 tightens the test, which is the half that turns
+    a silently wrong initialization into a right one."""
+    m = cold_row(with_factor=True)
+    report = block_initialize(m)
+    assert report.ok, report.failures
+    assert pyo.value(m.x) == pytest.approx(ROOT2, rel=1e-7)
+
+
+def test_scaling_none_opts_out_of_both_directions():
+    """`scaling="none"` means no row scaling anywhere, so both rows
+    behave exactly as they did before the Suffix was read here. It is
+    the documented way back for a model whose factors make the test
+    stricter than its rows can meet."""
+    from pyomo_pounce import InitOptions
+
+    opts = InitOptions(scaling="none")
+
+    hot = hot_row(with_factor=True)
+    assert not block_initialize(hot, options=opts).ok
+    assert pyo.value(hot.x) == pytest.approx(1.0, abs=0.0), "seed restored"
+
+    cold = cold_row(with_factor=True)
+    assert block_initialize(cold, options=opts).ok
+    assert pyo.value(cold.x) == pytest.approx(1.0, abs=1e-7), "never left the seed"

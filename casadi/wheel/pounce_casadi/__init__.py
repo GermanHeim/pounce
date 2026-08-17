@@ -13,6 +13,12 @@ specific CasADi **minor** version; CasADi performs no version handshake
 of its own, and a mismatched plugin would load and then misbehave. This
 package therefore ships one build per supported minor version and
 selects on the CasADi actually installed, refusing to guess.
+
+The *platform* axis is handled the other way round, by the wheel tag
+(``py3-none-<platform>``, see ``../setup.py``): pip declines a wheel built
+for another platform, so the mismatch is caught by the resolver and never
+reaches import. A wheel copied into place by hand can still get here, which
+is what :func:`plugin_path` distinguishes when it reports a miss.
 """
 
 from __future__ import annotations
@@ -49,6 +55,16 @@ def supported_casadi_versions() -> list[str]:
     )
 
 
+def _staged_casadi_versions() -> list[str]:
+    """Minor versions with a `_plugins/<minor>/` directory, any platform."""
+    if not os.path.isdir(_PLUGIN_DIR):
+        return []
+    return sorted(
+        d for d in os.listdir(_PLUGIN_DIR)
+        if os.path.isdir(os.path.join(_PLUGIN_DIR, d))
+    )
+
+
 def plugin_path(casadi_version: str | None = None) -> str:
     """Absolute path to the plugin matching `casadi_version` (default: installed)."""
     import casadi
@@ -56,15 +72,35 @@ def plugin_path(casadi_version: str | None = None) -> str:
     version = casadi_version or casadi.__version__
     minor = ".".join(version.split(".")[:2])
     candidate = os.path.join(_PLUGIN_DIR, minor, _PLUGIN_LIB)
-    if not os.path.isfile(candidate):
-        available = supported_casadi_versions()
+    if os.path.isfile(candidate):
+        return candidate
+
+    # Two different failures reach here, and conflating them sends the
+    # reader after the wrong one. A build for this casadi that is for
+    # another platform is a *packaging* fault -- the wheel tag exists to
+    # make pip refuse it, so getting here means it was installed by hand
+    # or force-reinstalled -- and no amount of changing casadi versions
+    # will fix it.
+    staged = _staged_casadi_versions()
+    if minor in staged:
+        present = sorted(os.listdir(os.path.join(_PLUGIN_DIR, minor)))
         raise ImportError(
-            f"pounce-casadi has no plugin for casadi {version}. "
-            f"Builds available here: {', '.join(available) or 'none'}. "
-            "Install a matching casadi, upgrade pounce-casadi, or build the "
-            "plugin from the pounce repository (see casadi/README.md)."
+            f"pounce-casadi carries a build for casadi {minor}, but not for "
+            f"this platform ({sys.platform}): it has no {_PLUGIN_LIB}, only "
+            f"{', '.join(present) or 'nothing'}. This wheel was built for "
+            "another platform -- its tag should have stopped pip from "
+            "installing it here, so it was most likely copied or "
+            "force-installed. Install the wheel for this platform, or build "
+            "the plugin from the pounce repository (see casadi/README.md)."
         )
-    return candidate
+
+    available = supported_casadi_versions()
+    raise ImportError(
+        f"pounce-casadi has no plugin for casadi {version}. "
+        f"Builds available here: {', '.join(available) or 'none'}. "
+        "Install a matching casadi, upgrade pounce-casadi, or build the "
+        "plugin from the pounce repository (see casadi/README.md)."
+    )
 
 
 def register() -> None:
