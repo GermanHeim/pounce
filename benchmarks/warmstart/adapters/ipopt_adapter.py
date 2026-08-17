@@ -87,7 +87,7 @@ _OK_STATUS = (0, 1)
 _WARM_PUSH = 1e-9
 
 #: Arms this adapter can run at all.
-_SUPPORTED = ("cold-ipm", "warm-ipm", "warm-ipm-primal")
+_SUPPORTED = ("cold-ipm", "warm-ipm", "values-ipm")
 
 
 class _Instrumented:

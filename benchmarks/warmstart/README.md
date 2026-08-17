@@ -33,22 +33,23 @@ nearest public things and why each does not cover it:
 | `cold-ipm` | general NLP filter-IPM | nothing — the family's cold start | every family |
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-ipm` | general NLP filter-IPM | previous step's primal-dual point and μ | every family |
+| `values-ipm` | general NLP filter-IPM | previous step's primal point **alone** — no multipliers, no μ | every family |
 | `warm-sqp` | active-set SQP | previous step's working set and point | every family |
 | `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
 | `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous step's working set and point | every family |
 | `cold-qp-ipm` | dedicated convex QP IPM (`pounce.solve_qp`) | nothing | QP families only |
 | `warm-qp-ipm` | dedicated convex QP IPM | previous step's primal-dual point | QP families only |
-| `warm-ipm-primal` | general NLP filter-IPM | previous step's **primal point only** | every family |
 | `warm-ipm-norecenter` | general NLP filter-IPM | as `warm-ipm`, with `warm_start_recentering=none` | every family |
 | `cold-ipm-lsq` | general NLP filter-IPM, `least_square_init_primal=yes` | nothing | every family |
 | `race-fixed` | general NLP filter-IPM | winner of a fixed-budget start race | every family |
 | `race-halving` | general NLP filter-IPM | winner of a successive-halving race | every family |
 
-The last five are pounce#611's, and they complete the nine
-initializations that issue lists. Three are paired controls rather than
-candidates for "best":
+The last four are pounce#611's; with `values-ipm`, which pounce#622
+added for its own reasons, they complete the nine initializations that
+issue lists. Three are paired controls rather than candidates for
+"best":
 
-- **`warm-ipm-primal` vs `warm-ipm`** is the value of carrying the
+- **`values-ipm` vs `warm-ipm`** is the value of carrying the
   *dual* state. Both start at the same primal point; only one is handed
   the multipliers and μ.
 - **`warm-ipm-norecenter` vs `warm-ipm`** is the pre-#606 attribution
@@ -319,7 +320,7 @@ Ipopt. On Debian/Ubuntu:
 `--solver ipopt` without it exits with those instructions rather than
 "unknown solver". Ipopt has no active-set, QP-matrix or sensitivity
 path, so those arms are skipped with a recorded reason; the three it
-does run (`cold-ipm`, `warm-ipm`, `warm-ipm-primal`) go through the
+does run (`cold-ipm`, `warm-ipm`, `values-ipm`) go through the
 *same* callback object pounce is given, so evaluation counts compare.
 
 ### Changed structure

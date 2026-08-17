@@ -95,7 +95,7 @@ def test_the_report_and_fix_relax_agree_on_what_crosses():
 def test_an_unknown_mode_is_refused():
     m = solved()
     with pytest.raises(ValueError, match="mode must be"):
-        estimate(m, [(m.p, 2.0)], mode="path")
+        estimate(m, [(m.p, 2.0)], mode="newton")
 
 
 def test_fix_relax_reaches_the_same_answer_through_every_route():
@@ -198,19 +198,19 @@ def test_clamp_decides_what_happens_to_what_is_left_outside():
     assert raw[m.y] == pytest.approx(2 * raw[m.x] + 1, abs=1e-6)
 
 
-def test_max_passes_is_exposed_and_bounds_the_work():
+def test_max_iter_is_exposed_and_bounds_the_work():
     """The cap is a budget, so a caller has to be able to set it."""
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        full = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_passes=16)
+        full = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_iter=16)
     # one pass is enough for this model, so capping at 1 changes nothing
-    one = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_passes=1)
+    one = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_iter=1)
     assert one[m.x] == pytest.approx(full[m.x], rel=1e-12)
 
     # and a cap of zero pins nothing, leaving the plain step
     with pytest.warns(UserWarning):
-        none = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_passes=0,
+        none = estimate(m, [(m.p, -2.0)], mode="fix_relax", max_iter=0,
                         clamp=False)
     assert none[m.x] < -1e-3
 

@@ -8,6 +8,7 @@ arm          ``algorithm``                        warm-start payload
 cold-ipm     ``interior-point`` (default)         none
 cold-sqp     ``active-set-sqp``                   none
 warm-ipm     ``interior-point``                   ``WarmStart`` (x, λ, z, μ)
+values-ipm   ``interior-point``                   ``WarmStart`` (x alone)
 warm-sqp     ``active-set-sqp``                   working set + previous x
 pred-ipm     ``interior-point``                   previous state, primal seed
                                                   stepped by the held-factor
@@ -70,6 +71,7 @@ from .base import (
     is_primal_only,
     is_race,
     is_sqp,
+    VALUES_ARM,
     is_warm,
     predicts_duals,
     race_policy,
@@ -420,21 +422,26 @@ class PounceAdapter(SolverAdapter):
             else:
                 seed_x = warm.x
                 lam, zl, zu = warm.mult_g, warm.mult_x_L, warm.mult_x_U
+                mu = warm.mu
                 if is_primal_only(arm):
-                    # The issue's "previous primal only" arm. Dropping
-                    # the multipliers and mu is the whole difference
-                    # from `warm-ipm`; the initializer then has to
-                    # invent a dual point the way a cold solve does.
+                    # The point and nothing else: no multipliers, and no
+                    # barrier either, since a caller who kept only `x`
+                    # has no mu to carry. Dropping them is the whole
+                    # difference from `warm-ipm` -- the initializer then
+                    # has to invent a dual point the way a cold solve
+                    # does, which is the one path through the warm-start
+                    # initializer that leaves the duals unseeded
+                    # (gh#622).
                     lam = zl = zu = None
-                if uses_predictor(arm):
+                    mu = None
+                elif uses_predictor(arm):
                     t0 = time.perf_counter()
                     seed_x, lam, zl, zu = self._predict(
                         family, warm, arm, seed_x, lam, zl, zu
                     )
                     init_time = time.perf_counter() - t0
                 kwargs["warm_start"] = pounce.WarmStart(
-                    x=seed_x, lagrange=lam, zl=zl, zu=zu,
-                    mu=None if is_primal_only(arm) else warm.mu,
+                    x=seed_x, lagrange=lam, zl=zl, zu=zu, mu=mu,
                     recentering=recentering_override(arm) or self.recentering,
                 )
         elif is_race(arm):

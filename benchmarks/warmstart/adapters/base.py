@@ -37,6 +37,22 @@ defines:
     the suite exercises working-set hot starts but never the parametric
     path. Paired against ``cold-sqp`` / ``warm-sqp``, which differ in
     that one option and nothing else.
+``values-ipm``
+    Interior point seeded with the previous step's **primal point and
+    nothing else** — no multipliers, no barrier parameter — through
+    ``warm_start_init_point``. This is what a caller who kept only `x`
+    gets, and what every frontend that carries variable levels but no
+    duals produces (GAMS `x.L`, a Pyomo model whose `dual` Suffix was
+    never loaded, a `.nl` written without dual guesses). Paired against
+    ``cold-ipm``, and against ``warm-ipm`` to price the multipliers.
+
+    It exists because its absence hid a defect. gh#622's bound-multiplier
+    blocks arrived as literal zeros on this path and were floored at
+    `warm_start_mult_bound_push`, so a values-only start declared every
+    bound inactive and got *worse* the tighter the pushes were set —
+    and every arm above seeds duals, so the corpus was bit-identical
+    across the fix. An arm nobody runs is a regime nobody measures.
+
 ``pred-ipm`` / ``predcorr-ipm``
     Interior point seeded with a **tangent predictor** rather than with
     the previous solution alone: the first-order parametric step
@@ -77,6 +93,7 @@ ARMS: List[str] = [
     "cold-ipm",
     "cold-sqp",
     "warm-ipm",
+    "values-ipm",
     "warm-sqp",
     "cold-sqp-hom",
     "warm-sqp-hom",
@@ -85,7 +102,6 @@ ARMS: List[str] = [
     "cold-qp-ipm",
     "warm-qp-ipm",
     # pounce#611 additions, completing the issue's initialization list.
-    "warm-ipm-primal",
     "warm-ipm-norecenter",
     "cold-ipm-lsq",
     "race-fixed",
@@ -98,7 +114,10 @@ ARMS: List[str] = [
 #: a caller gets for free from any solver (and all an external solver
 #: without a dual warm-start API can accept), and the gap between it
 #: and ``warm-ipm`` is the value of carrying the dual state at all.
-PRIMAL_ONLY_ARMS = ("warm-ipm-primal",)
+#: It is also the only arm that reaches the warm-start initializer's
+#: unseeded-dual path (gh#622), which is why gh#622's absence of it hid
+#: a defect.
+PRIMAL_ONLY_ARMS = ("values-ipm",)
 
 #: Arms that pin ``warm_start_recentering=none`` regardless of the
 #: run's ``--recentering`` setting. This is the pre-#606 attribution
@@ -132,6 +151,12 @@ HOMOTOPY_ARMS = ("cold-sqp-hom", "warm-sqp-hom")
 #: Arms that need the family's instances to be QPs.
 QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
 
+#: The arm that seeds the primal point alone — no multipliers, no mu.
+#: Warm in the sense that it carries state forward. The sole member of
+#: `PRIMAL_ONLY_ARMS`; named separately because several call sites want
+#: the arm rather than the group.
+VALUES_ARM = PRIMAL_ONLY_ARMS[0]
+
 #: Arms whose primal seed is a held-factor tangent predictor rather than
 #: the previous solution (pounce#608). They need the family to declare
 #: which constraint rows carry θ.
@@ -148,7 +173,8 @@ def is_warm(arm: str) -> bool:
 
     The predictor arms do: they seed from the previous solve and then
     step that seed along the sensitivity, so they are warm arms with a
-    better seed, not a separate category.
+    better seed, not a separate category. `values-ipm` does too, with a
+    *worse* seed — the point without its duals.
 
     The race arms do **not**, even though they are elaborate
     initializations: they build their start from a fresh sample of the
@@ -157,7 +183,7 @@ def is_warm(arm: str) -> bool:
     previous answer", and the comparison is only meaningful if the
     runner does not hand them the previous answer as well.
     """
-    return arm.startswith("warm") or arm in PREDICTOR_ARMS
+    return arm.startswith("warm") or arm in PREDICTOR_ARMS or arm == VALUES_ARM
 
 
 def is_primal_only(arm: str) -> bool:

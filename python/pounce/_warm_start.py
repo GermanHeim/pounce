@@ -57,6 +57,7 @@ import numpy as np
 from . import _pounce
 from ._warm_start_schema import (
     COMPAT_MODES,
+    ORDERING_UNVERIFIED_NOTE,
     WARM_START_SCHEMA_VERSION,
     ProblemSignature,
     WarmStartCompatibilityError,
@@ -64,6 +65,7 @@ from ._warm_start_schema import (
     WarmStartLegacyWarning,
     compare,
     format_report,
+    ordering_is_unverified,
 )
 
 __all__ = [
@@ -181,7 +183,8 @@ class WarmStart:
 
     @classmethod
     def from_info(
-        cls, x, info, problem=None, var_ids=None, con_ids=None, **overrides
+        cls, x, info, problem=None, var_ids=None, con_ids=None, probe=True,
+        **overrides
     ) -> "WarmStart":
         """Capture a warm start from a solve's ``(x, info)`` result.
 
@@ -196,13 +199,23 @@ class WarmStart:
         identifiers for the variables and constraints; supply them and
         :meth:`reindex` can carry the state across a reordering or a
         horizon shift.
+
+        `probe` (default ``True``) additionally evaluates the model once
+        at a fixed interior point and records an order-sensitive sketch
+        of the result, which is what lets a later replay refuse a
+        *reordered* model without the caller having named anything
+        (pounce#621). Pass ``probe=False`` for a model whose evaluation
+        is expensive enough to notice or has side effects — the replay
+        then costs nothing either, since the target is only probed when
+        the artifact carries a probe to compare it against.
         """
         mu = info.get("mu")
         mu = float(mu) if mu is not None and float(mu) > 0.0 else None
         if problem is not None:
             overrides.setdefault(
                 "signature",
-                ProblemSignature.from_problem(problem, var_ids, con_ids),
+                ProblemSignature.from_problem(problem, var_ids, con_ids,
+                                              probe=probe),
             )
         elif var_ids is not None or con_ids is not None:
             raise TypeError(
@@ -399,13 +412,24 @@ class WarmStart:
         and names :meth:`migrate`; an unsigned state built in this
         process is the pre-#607 usage and stays silent.
 
+        A **reordering** is the one structural change no digest of the
+        model's *declarations* can see: permuting a model with a uniform
+        box and a dense jacobian leaves the bound and sparsity digests
+        bit-identical. Since pounce#621 a signed artifact carries a
+        model *probe* as well — the model evaluated once at a fixed
+        interior point — and that does move under a permutation, so a
+        reordered replay is refused with no help from the caller. The
+        probe is best-effort: an artifact captured with ``probe=False``,
+        one written before #621, or a model that will not evaluate at
+        the probe point leaves the facet unrecorded, and then only
+        `var_ids` can see the reordering.
+
         `var_ids` / `con_ids` name `problem`'s variables and constraints
-        in the vocabulary this state was captured with. Supply them to
-        catch a **reordering**: a permutation is the one structural
-        change a fingerprint cannot see on its own, because permuting a
-        model with a uniform box and a dense jacobian leaves the bound
-        and sparsity digests bit-identical. Ordering is knowledge only
-        the caller has; the digests cover everything else.
+        in the vocabulary this state was captured with. They remain the
+        *rigorous* answer — they say which variable is which rather than
+        inferring it from arithmetic — and they are what
+        :meth:`reindex` needs to repair a reordering instead of only
+        refusing it.
         """
         mode = self.compat if compat is None else compat
         if mode not in COMPAT_MODES:
@@ -416,7 +440,7 @@ class WarmStart:
         if mode == "unsafe":
             return []
 
-        mismatches = self._mismatches(problem, var_ids, con_ids)
+        mismatches, unordered = self._compare(problem, var_ids, con_ids)
         if self.signature is None and self.origin == "file" and not mismatches:
             # A *persisted* artifact with nothing to check it against.
             # Refusing outright would break every archive written before
@@ -441,6 +465,7 @@ class WarmStart:
                 replay=self.replay,
                 schema_version=self.schema_version,
                 source=self.source_signature,
+                ordering_unverified=unordered,
             )
             if mode == "strict":
                 raise WarmStartCompatibilityError(report)
@@ -450,30 +475,44 @@ class WarmStart:
     def describe_compatibility(self, problem, var_ids=None, con_ids=None) -> str:
         """The mismatch report against `problem` as a string, without
         raising or warning. The dry run for a replay you are unsure of.
+
+        A clean verdict says so, and — when the comparison could not
+        have seen a reordering — says that too. "Compatible" on its own
+        would otherwise read as a stronger claim than the check made
+        (pounce#621).
         """
-        mismatches = self._mismatches(problem, var_ids, con_ids)
+        mismatches, unordered = self._compare(problem, var_ids, con_ids)
         if not mismatches:
-            return "warm start is compatible with this problem"
+            ok = "warm start is compatible with this problem"
+            return f"{ok}\n  ({ORDERING_UNVERIFIED_NOTE})" if unordered else ok
         return format_report(
             mismatches,
             replay=self.replay,
             schema_version=self.schema_version,
             source=self.source_signature,
+            ordering_unverified=unordered,
         )
 
     def _mismatches(self, problem, var_ids=None, con_ids=None) -> list:
-        """The facets on which this state and `problem` disagree.
+        """The facets on which this state and `problem` disagree."""
+        return self._compare(problem, var_ids, con_ids)[0]
+
+    def _compare(self, problem, var_ids=None, con_ids=None) -> tuple:
+        """``(mismatches, ordering_unverified)`` against `problem`.
 
         A signed state is compared facet by facet. An unsigned one is
         compared on the only facets its own arrays witness — the
         dimensions — which is what keeps a legacy artifact from being
         replayed at the wrong size.
+
+        The second element says whether anything in that comparison
+        *could* have seen a reordering; it is always ``True`` for an
+        unsigned state, which witnesses nothing but its own lengths.
         """
         if self.signature is not None:
-            return compare(
-                self.signature,
-                ProblemSignature.from_problem(problem, var_ids, con_ids),
-            )
+            target = self._target_signature(problem, var_ids, con_ids)
+            return (compare(self.signature, target),
+                    ordering_is_unverified(self.signature, target))
         if var_ids is not None or con_ids is not None:
             raise WarmStartCompatibilityError(
                 "this warm start carries no model signature, so there is "
@@ -487,12 +526,33 @@ class WarmStart:
         # unverifiable facet out of the target's `m`. (An unconstrained
         # solve reports an empty `mult_g`, which `_opt_array` normalizes
         # to None — that is the common case here, not an exotic one.)
-        return compare(
-            arrays,
-            ProblemSignature(
-                n=int(problem.n),
-                m=int(problem.m) if arrays.m is not None else None,
+        return (
+            compare(
+                arrays,
+                ProblemSignature(
+                    n=int(problem.n),
+                    m=int(problem.m) if arrays.m is not None else None,
+                ),
             ),
+            True,
+        )
+
+    def _target_signature(self, problem, var_ids=None, con_ids=None):
+        """Fingerprint `problem` for a comparison against this state.
+
+        The target is probed only when *this* state carries a probe to
+        compare it against. That is what keeps the pounce#621 facet from
+        charging an extra model evaluation to callers who never bought
+        into it — an artifact captured with ``probe=False``, and every
+        artifact written before #621, replay at exactly their old cost.
+        It matters most on the repeated-check paths (`_starts.py` checks
+        once per multistart rung), where the alternative would be one
+        wasted evaluation per rung for a facet that is going to be
+        skipped anyway.
+        """
+        return ProblemSignature.from_problem(
+            problem, var_ids, con_ids,
+            probe=self.signature is not None and self.signature.probe is not None,
         )
 
     def _array_signature(self) -> ProblemSignature:
@@ -570,6 +630,16 @@ class WarmStart:
         a mapper with an off-by-one fails here rather than three
         function evaluations into the solve.
 
+        "Carried over unchanged" is the right default for a mapper that
+        rescales or nudges a point whose *indexing* is unchanged, and a
+        trap for one that moves the entries: the carried block is still
+        the length the target expects, so nothing downstream notices it
+        is now against the wrong variables. So when the identifiers say
+        an axis moved and the mapper left that axis's multipliers out,
+        this refuses rather than replaying them (pounce#622) — return
+        the block rearranged, or ``None`` to leave it unseeded, or use
+        :meth:`reindex`, which writes the whole mapping for you.
+
         This is the hook for a horizon shift or a changed
         discretization: the arrays are yours to rearrange, interpolate,
         or prolong. When both sides carry stable IDs and the only change
@@ -580,15 +650,27 @@ class WarmStart:
         and remembers where it came from, so replaying it on a *third*
         problem is refused exactly like an unmapped one.
         """
-        target = ProblemSignature.from_problem(problem, var_ids, con_ids)
+        # Probed on the same terms as :meth:`_target_signature`: only
+        # when *this* state carries a probe. Signing the target
+        # unconditionally would charge an extra model evaluation to a
+        # caller who passed ``probe=False``, and `transfer` is the
+        # per-step call in a receding-horizon loop (pounce#622), so that
+        # is four of the user's evaluations every step for a facet they
+        # declined. A source without a probe produces a mapped result
+        # without one, which is the same trade `probe=False` already
+        # makes everywhere else.
+        target = ProblemSignature.from_problem(
+            problem, var_ids, con_ids,
+            probe=self.signature is not None and self.signature.probe is not None,
+        )
         n, m = target.n, target.m
         if mapper is None:
             mapper = _reindex_mapper(fill_x)
         elif fill_x is not None:
             raise TypeError(
                 "transfer: fill_x is the default mapper's policy for "
-                "variables the target has and the source does not; it means "
-                "nothing alongside an explicit mapper"
+                "variables the target has and the source does not (see "
+                "reindex); it means nothing alongside an explicit mapper"
             )
         ctx = TransferContext(source=self, target=target, problem=problem)
         payload = mapper(ctx)
@@ -621,7 +703,11 @@ class WarmStart:
             schema_version=WARM_START_SCHEMA_VERSION,
             origin="memory",
         )
+        # Lengths first: an off-by-one in the mapper is a more specific
+        # complaint than "you left a block behind", and a mapper that
+        # got the shape wrong has not earned the second question yet.
         _check_lengths(out, n, m)
+        _check_carried_blocks(self, ctx, payload)
         return out
 
     def reindex(self, problem, var_ids, con_ids=None, fill_x=None) -> "WarmStart":
@@ -633,11 +719,38 @@ class WarmStart:
         target shares with the source are carried across to their new
         positions; entries the target has and the source does not are
         *unseeded* — ``NaN`` in the multiplier blocks, which is the
-        native warm-start contract for "you decide", and `fill_x`
-        (default: zero clipped into the variable's box) in ``x``.
+        native warm-start contract for "you decide".
 
         That covers the two cases the issue names: a reordering, where
         the ID sets are equal, and a horizon shift, where they overlap.
+
+        ``fill_x`` decides what goes in the primal entries the target
+        has and the source does not — the prolongated stage of a
+        receding horizon, and the difference between a warm start that
+        beats a cold solve and one that loses to it (pounce#622):
+
+        ``"prolong"`` (the default)
+            Repeat the last stage. When the identifier map is a pure
+            shift — every matched entry the same distance from its
+            counterpart, which is what a receding horizon *is* — that
+            distance is the layout's period, and each unmatched entry
+            takes the value one period behind it (clipped into its
+            box). One variable per stage or ``(p, v, u)`` interleaved,
+            the value lands in the same kind of slot either way, and a
+            tail longer than one stage repeats the terminal stage. When
+            the map is not a shift there is no stage to repeat and this
+            degrades to ``"zero"``.
+        ``"zero"``
+            Zero clipped into the variable's box, the pre-#622
+            behaviour. Independent of the point, and independent of the
+            model: on a chain with a slew limit it enters the new stage
+            2.25 away from feasible and the filter spends its first
+            iterations walking that back (11 iterations against 7 for a
+            cold solve; 8 under ``"prolong"``, and 21 against 22 over
+            the whole closed loop).
+        an array or scalar
+            Your values, used as-is. Nothing is prolongated on top of
+            them — an explicit fill *is* the answer to this question.
         """
         if self.signature is None or self.signature.var_ids is None:
             raise WarmStartCompatibilityError(
@@ -697,6 +810,54 @@ def _gather(src, idx, fill):
     return out
 
 
+FILL_POLICIES = ("prolong", "zero")
+
+
+def _shift_stride(vmap) -> Optional[int]:
+    """The constant source-minus-target offset of `vmap`, or ``None``.
+
+    A receding horizon shows up here as a *pure shift*: every target
+    entry that has a counterpart finds it the same distance away, so
+    ``vmap[i] - i`` is one nonzero constant. The distance is the layout's
+    own period — 1 for one variable per stage, 3 for a ``(p, v, u)``
+    stage — read off the identifier map rather than assumed, which is
+    what lets the prolongation below place a value in the right *kind*
+    of slot without knowing anything about the model.
+
+    ``None`` for anything that is not a pure shift (a reordering, an
+    interpolation, a partial overlap), where there is no stage to
+    repeat and the caller's own fill is the only defensible answer.
+    """
+    hit = np.flatnonzero(vmap >= 0)
+    if hit.size == 0 or hit.size == vmap.size:
+        return None                      # nothing to fill, or nothing to fill *from*
+    d = vmap[hit] - hit
+    if d[0] == 0 or not np.all(d == d[0]):
+        return None
+    return int(d[0])
+
+
+def _prolong(new_x, vmap, stride, lb, ub):
+    """Fill unmatched entries by repeating the stage `stride` away.
+
+    In place, in the direction that reads only already-filled entries:
+    a forward shift (the receding-horizon case) leaves its holes at the
+    tail and fills left to right, so a tail longer than one stage
+    repeats the terminal stage as many times as it needs. Entries whose
+    source would fall outside the vector keep whatever `new_x` already
+    holds. Everything written is clipped into the target's box.
+    """
+    todo = np.flatnonzero(vmap < 0)
+    if stride < 0:
+        todo = todo[::-1]
+    n = new_x.size
+    for i in todo:
+        j = i - stride
+        if 0 <= j < n:
+            new_x[i] = min(max(new_x[j], lb[i]), ub[i])
+    return new_x
+
+
 def _reindex_mapper(fill_x):
     """The default :meth:`WarmStart.transfer` mapper: match stable IDs.
 
@@ -704,6 +865,11 @@ def _reindex_mapper(fill_x):
     initializer reads as "unseeded" and fills with its own resolved
     default — so a prolonged horizon does not carry a fabricated
     multiplier into the new block.
+
+    Unmatched *primal* entries are the prolongated stage of a receding
+    horizon, and what goes in them is load-bearing (pounce#622): the
+    barrier's first job is undoing whatever infeasibility the fill
+    invented. See :data:`FILL_POLICIES` and :meth:`WarmStart.reindex`.
     """
 
     def mapper(ctx: TransferContext) -> dict:
@@ -717,8 +883,17 @@ def _reindex_mapper(fill_x):
                 "var_ids=), or supply an explicit mapper."
             )
         lb, ub, _, _ = ctx.bounds()
-        if fill_x is None:
-            base = np.clip(0.0, np.asarray(lb, dtype=float), np.asarray(ub, dtype=float))
+        lb = np.asarray(lb, dtype=float)
+        ub = np.asarray(ub, dtype=float)
+        policy = fill_x if isinstance(fill_x, str) else None
+        if policy is not None and policy not in FILL_POLICIES:
+            raise ValueError(
+                f"transfer: fill_x={policy!r} is not a fill policy; expected "
+                + " or ".join(repr(p) for p in FILL_POLICIES)
+                + ", or an array/scalar of values"
+            )
+        if fill_x is None or policy is not None:
+            base = np.clip(0.0, lb, ub)
         else:
             base = np.asarray(fill_x, dtype=float).ravel()
             if base.size == 1:
@@ -732,6 +907,10 @@ def _reindex_mapper(fill_x):
         new_x = base.astype(float, copy=True)
         hit = vmap >= 0
         new_x[hit] = x[vmap[hit]]
+        if fill_x is None or policy == "prolong":
+            stride = _shift_stride(vmap)
+            if stride is not None:
+                _prolong(new_x, vmap, stride, lb, ub)
         out = {
             "x": new_x,
             "zl": _gather(ctx.source.zl, vmap, np.nan),
@@ -759,6 +938,49 @@ def _reindex_mapper(fill_x):
         return out
 
     return mapper
+
+
+def _check_carried_blocks(src: "WarmStart", ctx: "TransferContext", payload: dict) -> None:
+    """Refuse a mapper that moves the point and leaves a dual behind.
+
+    :meth:`WarmStart.transfer` carries over any block the mapper does
+    not return — which is right when the mapper is rescaling or nudging
+    a point whose *indexing* is unchanged, and silently wrong when the
+    identifiers say the entries moved. A horizon shift is the case that
+    bites: the blocks are the same length as the target expects, so
+    :func:`_check_lengths` passes, and stale multipliers replay against
+    the wrong variables. The failure is a plausible-looking answer down
+    a longer trajectory, which is the class of defect this module
+    exists to make loud (pounce#622).
+
+    Checked per axis, so a reordering that touches only the variables
+    still carries the constraint multipliers: the variable map governs
+    ``zl`` / ``zu``, the constraint map governs ``lagrange``. Silent
+    when either side lacks identifiers — there is nothing to compare —
+    and when the block being carried is absent anyway.
+    """
+    checks = (
+        ("var", ("zl", "zu"), "variable"),
+        ("con", ("lagrange",), "constraint"),
+    )
+    for axis, blocks, noun in checks:
+        idx = ctx.index_map(axis)
+        if idx is None or np.array_equal(idx, np.arange(idx.size)):
+            continue                      # identity: carrying is correct
+        stale = [b for b in blocks
+                 if b not in payload and getattr(src, b) is not None]
+        if not stale:
+            continue
+        raise WarmStartCompatibilityError(
+            f"transfer: the mapper did not return {' / '.join(stale)}, so "
+            f"{'it would be' if len(stale) == 1 else 'they would be'} "
+            f"carried over unchanged — but the {noun} identifiers say the "
+            f"entries moved, so the carried values would line up against "
+            f"the wrong {noun}s. They are the right length, so nothing "
+            f"downstream would catch it.\nreturn the block from your "
+            f"mapper (rearranged, or None to leave it unseeded), or use "
+            f"reindex(), which writes that mapping for you."
+        )
 
 
 def _check_lengths(ws: "WarmStart", n: int, m: int) -> None:

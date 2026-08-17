@@ -68,7 +68,7 @@ _INF = float("inf")
 #: away from what the suite actually runs.
 ISSUE_ARMS: List[Tuple[str, Tuple[str, ...], str]] = [
     ("raw user point / cold solve", ("cold-ipm", "cold-sqp"), ""),
-    ("previous primal only", ("warm-ipm-primal",), ""),
+    ("previous primal only", ("values-ipm",), ""),
     ("complete primal-dual-barrier", ("warm-ipm",), ""),
     ("residual-adaptive recentering", ("warm-ipm", "warm-ipm-norecenter"),
      "the pair is the attribution control: `none` is pre-#606 behaviour"),
@@ -86,7 +86,7 @@ ISSUE_ARMS: List[Tuple[str, Tuple[str, ...], str]] = [
 #: "switched algorithms".
 PAIRS: Dict[str, str] = {
     "warm-ipm": "cold-ipm",
-    "warm-ipm-primal": "cold-ipm",
+    "values-ipm": "cold-ipm",
     "warm-ipm-norecenter": "cold-ipm",
     "warm-sqp": "cold-sqp",
     "warm-sqp-hom": "cold-sqp-hom",
@@ -430,7 +430,7 @@ def render(
                             ("evals", "function/derivative evaluations"),
                             ("time", "wall time (solve + init)")):
         profile_arms = [a for a in all_arms if a in
-                        ("cold-ipm", "warm-ipm", "warm-ipm-primal",
+                        ("cold-ipm", "warm-ipm", "values-ipm",
                          "warm-ipm-norecenter", "cold-ipm-lsq",
                          "race-fixed", "race-halving")]
         prof = performance_profile(results, profile_arms, cost_key, _TAUS)
@@ -454,7 +454,7 @@ def render(
       "arms defined on the same families.")
     w("")
     dp_arms = [a for a in all_arms if a in
-               ("cold-ipm", "warm-ipm", "warm-ipm-primal", "pred-ipm",
+               ("cold-ipm", "warm-ipm", "values-ipm", "pred-ipm",
                 "predcorr-ipm", "race-fixed", "race-halving")]
     dp = data_profile(results, dp_arms, _KAPPAS)
     w("| arm | " + " | ".join(f"κ={int(k)}" for k in _KAPPAS) + " |")
@@ -479,7 +479,7 @@ def render(
         w("")
         w("| arm | solver | steps | iters | evals | solve s | bad | speedup |")
         w("|---|---|--:|--:|--:|--:|--:|--:|")
-        for arm in ("cold-ipm", "warm-ipm", "warm-ipm-primal"):
+        for arm in ("cold-ipm", "warm-ipm", "values-ipm"):
             for label, payload in (("pounce", results), ("ipopt", ipopt)):
                 t = _arm_totals(payload, arm)
                 if t is None:
@@ -620,7 +620,7 @@ def summarize(
     if ipopt is not None:
         payload["ipopt_arms"] = {
             arm: _arm_totals(ipopt, arm)
-            for arm in ("cold-ipm", "warm-ipm", "warm-ipm-primal")
+            for arm in ("cold-ipm", "warm-ipm", "values-ipm")
             if _arm_totals(ipopt, arm) is not None
         }
         skipped: Dict[str, str] = {}
@@ -631,7 +631,7 @@ def summarize(
     payload["falsification"] = _falsification_rows(results, _FALSIFY)
 
     prof_arms = [a for a in all_arms if a in
-                 ("cold-ipm", "warm-ipm", "warm-ipm-primal",
+                 ("cold-ipm", "warm-ipm", "values-ipm",
                   "warm-ipm-norecenter", "cold-ipm-lsq",
                   "race-fixed", "race-halving")]
     for cost_key in ("iters", "evals", "time"):
@@ -641,7 +641,7 @@ def summarize(
             for arm, vals in prof.items()
         }
     dp_arms = [a for a in all_arms if a in
-               ("cold-ipm", "warm-ipm", "warm-ipm-primal", "pred-ipm",
+               ("cold-ipm", "warm-ipm", "values-ipm", "pred-ipm",
                 "predcorr-ipm", "race-fixed", "race-halving")]
     payload["profiles"]["data"] = {
         arm: {str(int(k)): v for k, v in vals.items()}
