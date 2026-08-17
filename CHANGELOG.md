@@ -1651,6 +1651,16 @@ still gets the full CI and the Docker rot guard.
   `.json` beside it. Every table is computed from the raw result files;
   none is transcribed.
 
+  Fixed while checking the reproduction commands this note documents:
+  `warmstart/report.py` gated its homotopy section on `cold-sqp-hom`
+  alone but then indexed `warm-sqp` and `warm-sqp-hom` unconditionally,
+  so any narrowed `--arms` that dropped the warm twins — including the
+  `--arms cold-sqp,cold-sqp-hom` reproduction in
+  `dev-notes/warm-start-benchmark.md` — died with `KeyError:
+  'warm-sqp'` after the solves had already run. The absent arms now
+  render as `—`. The full sweep's report is byte-identical across the
+  change.
+
   No solver code changed — this is benchmark and documentation only.
 
 
