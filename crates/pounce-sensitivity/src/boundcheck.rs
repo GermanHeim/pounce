@@ -575,6 +575,8 @@ pub fn step_along_path<B>(
     hi: &[Number],
     multipliers: &[BoundMultiplier],
     max_iter: usize,
+    initial_released: &[usize],
+    initial_holds: &[(usize, bool)],
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
@@ -662,8 +664,21 @@ where
 
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
-    let mut holds: Vec<PathHold> = Vec::new();
-    let mut released: Vec<usize> = Vec::new();
+    // Seeded state from the directional-derivative decision at a
+    // degenerate base point. Every weakly active row arrives released,
+    // since its order-one sigma is wrong for both sides of the kink,
+    // and the rows the accepted working set held arrive as holds with
+    // zero accumulated multiplier, exactly as a hold added at fraction
+    // zero would, so the drop test can end them later like any other.
+    let mut holds: Vec<PathHold> = initial_holds
+        .iter()
+        .map(|&(row, lower)| PathHold {
+            row,
+            lower,
+            mult: 0.0,
+        })
+        .collect();
+    let mut released: Vec<usize> = initial_released.to_vec();
     let mut segments: Vec<PathSegment> = Vec::new();
     // Rows already changed at the fraction the path currently ends at.
     // A zero-length segment is where cycling comes from, so a row that

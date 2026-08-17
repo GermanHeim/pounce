@@ -1043,6 +1043,33 @@ class Gradient:
             columns=[p.name for p in self._params])
 
 
+def _weakly_active(session):
+    """The degenerate bounds at the held solve, cached per session.
+
+    `(variable name, "lower" or "upper")` for every bound the
+    classifier could call neither active nor inactive. Empty when the
+    solve relaxed its bounds, since the classifier cannot read shifted
+    slacks. Cached because the factor is fixed per solve and
+    `gradient()` runs in tight loops.
+    """
+    cached = getattr(session, "_weakly_active_cache", None)
+    if cached is None:
+        if session.solver.bound_relax_factor:
+            cached = []
+        else:
+            full_of = {row: full
+                       for full, row in enumerate(session._primal_row_map())
+                       if row is not None}
+            cached = [
+                (session.var_names[full_of[vr]],
+                 "lower" if low else "upper")
+                for vr, low in session.solver.weakly_active_bounds()
+                if vr in full_of
+            ]
+        session._weakly_active_cache = cached
+    return cached
+
+
 def gradient(target=None, *, wrt):
     """d(target*)/d(wrt).
 
@@ -1051,8 +1078,23 @@ def gradient(target=None, *, wrt):
     model variables. wrt: a declared Param (data or container).
 
     Scalar target and scalar wrt -> float. Anything else -> a Gradient
-    object: g[target, param], or g.to_dataframe() for the full Jacobian."""
+    object: g[target, param], or g.to_dataframe() for the full Jacobian.
+
+    At a degenerate base point the solution has two one-sided
+    derivatives and this call has no direction to choose between them,
+    so it returns the one-sided value the held factorization leans
+    toward and warns. `estimate()` computes the directional derivative
+    for the perturbation it is given."""
     session = _session_for(wrt)
+    weak = _weakly_active(session)
+    if weak:
+        warnings.warn(
+            "gradient: the base point is degenerate: "
+            f"{[f'{nm} ({side})' for nm, side in weak]} sit on a bound "
+            "with a multiplier of the same order as the slack, so the "
+            "solution has two one-sided derivatives there and this "
+            "value is one side's. estimate() computes the directional "
+            "derivative for the perturbation it is given.")
     params = list(_iter_data(wrt))
     if target is None:
         targets = [v for v in (session.orig_var(nm)
@@ -1085,7 +1127,7 @@ def _perturbation_deltas(session, perturb):
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
-             max_iter=16):
+             max_iter=16, degeneracy="directional"):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
@@ -1120,6 +1162,16 @@ def estimate(model, perturb, clamp=True, mode="linear",
     applied, and past the cap the rest of the perturbation is taken
     in one step under the active set reached.
 
+    degeneracy selects what happens when the base point itself sits at
+    an active-set kink: a bound the classifier can call neither active
+    nor inactive, on the bound with a multiplier of the same order as
+    the slack. The solution has two one-sided derivatives there.
+    "directional" (the default) decides the weakly active bounds by the
+    directional-derivative QP for the perturbation's own direction, in
+    every mode, at the cost of a few extra backsolves paid only at a
+    kink. "one_sided" takes the single-sided value today's thresholds
+    produce, bit-identical to the release before this option existed.
+
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
     leave nothing to clamp, and when they do not, the warning says
@@ -1150,20 +1202,52 @@ def estimate(model, perturb, clamp=True, mode="linear",
         raise ValueError(
             "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
             f"{mode!r}")
+    if degeneracy not in ("directional", "one_sided"):
+        raise ValueError(
+            "estimate: degeneracy must be 'directional' or 'one_sided', "
+            f"got {degeneracy!r}")
 
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
     # parametric_step returns the factor's x block (var-x); base_x and
     # everything below it (nl.x_l/x_u, var_names) are full-x
     segments = []
-    if mode == "fix_relax":
-        step, pinned = session.solver.parametric_step_bounded(
-            pin_idx, deltas, max_iter)
-    elif mode == "path":
-        step, segments = session.solver.parametric_step_path(
-            pin_idx, deltas, max_iter)
-    else:
-        step = session.solver.parametric_step(pin_idx, deltas)
+    fell_back = False
+    if degeneracy == "directional":
+        # At a degenerate base point the weakly active bounds are
+        # decided by the directional-derivative QP for this
+        # perturbation's own direction; at a clean base point these are
+        # the plain calls at no extra solve cost. A failed decision
+        # (budget exhausted, no sign-consistent working set) falls back
+        # to the one-sided step and says so.
+        try:
+            if mode == "fix_relax":
+                step, pinned, _ = (
+                    session.solver.parametric_step_bounded_directional(
+                        pin_idx, deltas, max_iter))
+            elif mode == "path":
+                step, segments, _ = (
+                    session.solver.parametric_step_path_directional(
+                        pin_idx, deltas, max_iter))
+            else:
+                step, _, _ = session.solver.parametric_step_directional(
+                    pin_idx, deltas, max_iter)
+        except RuntimeError as e:
+            if "directional derivative" not in str(e):
+                raise
+            warnings.warn(
+                f"estimate: {e}. Falling back to the one-sided step, "
+                "the degeneracy='one_sided' behavior.")
+            fell_back = True
+    if degeneracy == "one_sided" or fell_back:
+        if mode == "fix_relax":
+            step, pinned = session.solver.parametric_step_bounded(
+                pin_idx, deltas, max_iter)
+        elif mode == "path":
+            step, segments = session.solver.parametric_step_path(
+                pin_idx, deltas, max_iter)
+        else:
+            step = session.solver.parametric_step(pin_idx, deltas)
     dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
 
@@ -1455,8 +1539,15 @@ def _user_row_names(session):
     return [back.get(nm, nm) for nm in session.con_names]
 
 
-def estimate_report(model, perturb):
+def estimate_report(model, perturb, max_iter=16,
+                    degeneracy="directional"):
     """Report what `estimate()`'s linear step does about the bounds.
+
+    degeneracy and max_iter match `estimate()`'s arguments of the same
+    names, so the step measured here is the step `estimate()` takes
+    for the same arguments, including the directional-derivative
+    correction at a degenerate base point. max_iter budgets only that
+    correction here.
 
     Takes the same perturbation argument `estimate()` takes and returns
     an EstimateReport. Nothing about the estimate changes: this runs
@@ -1479,9 +1570,25 @@ def estimate_report(model, perturb):
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    if degeneracy not in ("directional", "one_sided"):
+        raise ValueError(
+            "estimate_report: degeneracy must be 'directional' or "
+            f"'one_sided', got {degeneracy!r}")
     pin_idx, deltas = _perturbation_deltas(session, perturb)
-    dx = session.scatter_x(
-        np.asarray(session.solver.parametric_step(pin_idx, deltas)))
+    if degeneracy == "directional":
+        try:
+            step, _, _ = session.solver.parametric_step_directional(
+                pin_idx, deltas, max_iter)
+        except RuntimeError as e:
+            if "directional derivative" not in str(e):
+                raise
+            warnings.warn(
+                f"estimate_report: {e}. Falling back to the one-sided "
+                "step, the degeneracy='one_sided' behavior.")
+            step = session.solver.parametric_step(pin_idx, deltas)
+    else:
+        step = session.solver.parametric_step(pin_idx, deltas)
+    dx = session.scatter_x(np.asarray(step))
     base = np.asarray(session.base_x)
     x_new = base + dx
 
@@ -1568,7 +1675,8 @@ ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 
 
-def active_set_changes(model, perturb, max_iter=16):
+def active_set_changes(model, perturb, max_iter=16,
+                       degeneracy="directional"):
     """The active-set changes `estimate(mode="path")` applies, in order.
 
     Takes the same perturbation argument `estimate()` takes and returns
@@ -1584,6 +1692,11 @@ def active_set_changes(model, perturb, max_iter=16):
 
     A list of length `max_iter` means the cap stopped the path before
     the target, the same condition `estimate()` warns about.
+
+    degeneracy matches `estimate()`'s argument of the same name. Under
+    "directional" (the default), a weakly active bound the QP decides
+    to leave appears in the record as a departure at fraction 0.0,
+    which is where the kink resolves.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
@@ -1593,9 +1706,26 @@ def active_set_changes(model, perturb, max_iter=16):
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    if degeneracy not in ("directional", "one_sided"):
+        raise ValueError(
+            "active_set_changes: degeneracy must be 'directional' or "
+            f"'one_sided', got {degeneracy!r}")
     pin_idx, deltas = _perturbation_deltas(session, perturb)
-    _, segments = session.solver.parametric_step_path(
-        pin_idx, deltas, max_iter)
+    if degeneracy == "directional":
+        try:
+            _, segments, _ = session.solver.parametric_step_path_directional(
+                pin_idx, deltas, max_iter)
+        except RuntimeError as e:
+            if "directional derivative" not in str(e):
+                raise
+            warnings.warn(
+                f"active_set_changes: {e}. Falling back to the "
+                "one-sided record, the degeneracy='one_sided' behavior.")
+            _, segments = session.solver.parametric_step_path(
+                pin_idx, deltas, max_iter)
+    else:
+        _, segments = session.solver.parametric_step_path(
+            pin_idx, deltas, max_iter)
 
     # segments carry var-x rows (the factor's x block); var_names is
     # full-x, so invert the same map scatter_x applies
