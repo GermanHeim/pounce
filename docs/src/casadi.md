@@ -49,6 +49,17 @@ Importing the package loads the plugin into the process and registers it
 with CasADi directly, which leaves CasADi's own installation untouched
 and its bundled plugins — Ipopt included — loadable alongside.
 
+The wheel this produces is tagged `py3-none-<platform>`, and carries a
+build of the plugin for each supported CasADi **minor** version under
+`pounce_casadi/_plugins/<minor>/`, chosen on `casadi.__version__` at
+import. The two axes are handled at different layers deliberately: the
+platform is in the wheel tag, so `pip` refuses a wheel from the wrong
+one, while the CasADi version cannot be expressed by any tag and is
+resolved inside the package, with a plain `ImportError` when there is no
+matching build. See [`casadi/wheel/README.md`](
+https://github.com/jkitchin/pounce/blob/main/casadi/wheel/README.md) for
+the release matrix.
+
 **Or in place**, without packaging:
 
 ```bash

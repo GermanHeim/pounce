@@ -667,18 +667,27 @@ where
                 let Some(rows) = bound_rows.as_ref() else {
                     return false;
                 };
+                // The same base-point activity test the release scan
+                // below applies, and for the same reason: an active
+                // bound's multiplier dominates its slack. It depends
+                // only on the variable and the side, not on the
+                // multiplier row being scanned, so it is decided once
+                // here rather than inside the inner search.
+                let slack_base = if lower_side {
+                    x_curr[i] - lo[i]
+                } else {
+                    hi[i] - x_curr[i]
+                };
+                if !slack_base.is_finite() {
+                    return false;
+                }
                 rows.iter().any(|b| {
                     b.var_row == i
                         && b.lower == lower_side
                         && !released.contains(&b.row)
-                        && mult_nat.iter().any(|m| {
-                            let slack_base = if lower_side {
-                                x_curr[i] - lo[i]
-                            } else {
-                                hi[i] - x_curr[i]
-                            };
-                            m.row == b.row && slack_base.is_finite() && m.base > slack_base
-                        })
+                        && mult_nat
+                            .iter()
+                            .any(|m| m.row == b.row && m.base > slack_base)
                 })
             };
             let v = x_curr[i] + acc[i];
@@ -889,7 +898,7 @@ where
     let mut corr = vec![0.0; n_full];
     if !app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
         return Err(format!(
-            "step_along_path: augmented solve failed              (holds {pinned:?}, released {released:?})"
+            "step_along_path: augmented solve failed (holds {pinned:?}, released {released:?})"
         ));
     }
     for (k, v) in d.iter_mut().enumerate() {

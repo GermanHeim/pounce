@@ -48,6 +48,9 @@ from .trf import trf_minimize, TRFResult, TRFConfig
 from ._preflight import preflight, PreflightReport
 from ._starts import (
     ProjectionReport,
+    RaceCandidate,
+    RaceReport,
+    RaceRound,
     generate_starts,
     project_to_feasible,
     race_starts,
@@ -122,7 +125,11 @@ __all__ = [
     "generate_starts",
     "project_to_feasible",
     "ProjectionReport",
+    # Adaptive successive-halving racing (see docs: initialization.md)
     "race_starts",
+    "RaceReport",
+    "RaceRound",
+    "RaceCandidate",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "ActiveSet",
     "QpResult",
