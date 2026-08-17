@@ -167,7 +167,7 @@ st["iter_count"]
 st["t_solve_pounce"] # seconds inside POUNCE
 st["iterations"]     # dict of per-iteration lists:
                      #   inf_pr, inf_du, mu, d_norm, regularization_size,
-                     #   obj, alpha_pr, alpha_du, ls_trials
+                     #   obj, alpha_pr, alpha_du, ls_trials, alg_mod
 
 st["final_inf_pr"]      # final primal infeasibility
 st["final_inf_du"]      # final dual infeasibility
@@ -203,6 +203,41 @@ are **absent** rather than zero; in particular there are no phase
 timings (symbolic analysis, numeric factorization, back-solve), because
 POUNCE does not instrument those phases separately today.
 
+### The structured solve report
+
+`stats()` is the convenient view; POUNCE also writes a machine-readable
+one. Set `solve_report` to a path and each solve leaves a
+`pounce.solve-report/v1` JSON file — the same format the `pounce` CLI's
+`--json-output` produces, so the tools that read those (`diagnose`,
+`find_stalls`, `convergence_trace`) read this too.
+
+```python
+S = ca.nlpsol("S", "pounce", nlp, {
+    "solve_report": "run.json",
+    "solve_report_detail": "full",   # 'summary' (default) or 'full'
+})
+```
+
+`full` embeds the per-iteration trajectory; `summary` omits it and
+carries the problem, solution, statistics and linear-solver blocks.
+The trajectory is not free — POUNCE has to retain each iterate as it
+goes, which is why `summary` is the default and why the capture is
+switched on before the solve rather than reconstructed after it. Asking
+for `full` switches it on for you.
+
+Two things worth knowing before you wire it into a loop:
+
+- **The file is rewritten per solve.** A solver called repeatedly leaves
+  only the last report. Give each call its own path if you want to keep
+  them.
+- **A write that fails does not fail the solve.** You get a warning and
+  `stats()["solve_report_written"] == False`; the answer is still
+  returned, because a diagnostic file is not worth an exception. Check
+  that key rather than the log if a script depends on the file.
+
+`solve_report_detail` is validated when the solver is constructed, so a
+typo costs you the `nlpsol` call rather than a solve.
+
 ### Restoration
 
 `stats()["restoration"]` counts restoration-phase entries, the
@@ -210,11 +245,32 @@ iterations its inner solver ran, and the seconds spent there — enough to
 answer "did this solve struggle, and how much of it was restoration?"
 without raising `print_level`.
 
-It is per solve, not per iteration. POUNCE fires the intermediate
-callback only from its outer loop and always reports `RegularMode` in
-Ipopt's `alg_mod`, so no per-iteration restoration flag is published —
-a column that is constant zero would read as working restoration
-detection.
+Individual iterations are labelled too, by
+`stats()["iterations"]["alg_mod"]`: `0` for an outer iteration, `1` for
+one of the restoration subproblem. The solve-level dict above stays
+useful alongside it — it is the only source for the inner iteration
+count and the wall time, and it answers the question in one read.
+
+**Read `alg_mod` before plotting anything else.** On a restoration row
+every other column describes the min-‖c‖₁ *feasibility subproblem*, not
+your NLP: its objective is the constraint-violation penalty, and its
+`inf_pr` falls to zero as the subproblem converges while your problem's
+violation is untouched. Plotted on one axis without splitting on
+`alg_mod`, a restoration episode looks like the objective exploding and
+the infeasibility being solved, and neither happened.
+
+```python
+it = st["iterations"]
+outer = [(i, o) for i, (o, m)
+         in enumerate(zip(it["obj"], it["alg_mod"])) if m == 0]
+```
+
+`iteration_callback` is not called for restoration iterations. CasADi
+fixes its signature at `(x, f, g, lam_x, lam_g)` and a restoration
+iterate supplies none of them — it is a point of a different problem, in
+that problem's variable space. The trace still records those iterations,
+so nothing is hidden; they simply are not handed to a callback that
+would have to interpret them as a solution estimate.
 
 `lam_p` deserves a note because its sign surprises people. CasADi's
 `Nlpsol` base class computes it — no plugin is involved, which is why
@@ -609,6 +665,7 @@ refuses them by name rather than quietly dropping them:
 | `iteration_callback` | The callback is a CasADi `Function` living in this process; generated code runs without CasADi. |
 | `warm_start_from_previous` | It carries an active set between calls of one solver *object*; the generated entry point has no such channel. Pass `x0` / `lam_g0` / `lam_x0` instead. |
 | `convexify_strategy` | Not emitted yet. |
+| `solve_report` | The generated code links the same C API and could call `IpoptWriteSolveReport`, but the emitted runtime does not. Refused rather than dropped, so you are not left waiting for a file that never appears. |
 
 The runtime the plugin emits is `casadi/pounce_runtime.hpp`, the
 counterpart of CasADi's `ipopt_runtime.hpp`. Worked example:
@@ -630,10 +687,11 @@ counterpart of CasADi's `ipopt_runtime.hpp`. Worked example:
   supported"* otherwise. Identical in both plugins; `eigen-clip` and
   `eigen-reflect` have no such restriction, and POUNCE's own
   inertia-correcting regularization is on by default regardless.
-- **Per-iteration restoration flags, and linear-solver phase timings.**
-  Both are reported at solve level instead (`stats()["restoration"]`,
-  `stats()["linear_solver"]`), because that is the granularity POUNCE
-  measures. See
+- **Linear-solver phase timings.** Reported at solve level only
+  (`stats()["linear_solver"]`), because that is the granularity POUNCE
+  measures — the per-phase numbers are absent rather than zero. (The
+  per-iteration restoration flag that used to sit in this bullet now
+  ships: see `iterations["alg_mod"]` above.) See
   [`dev-notes/casadi-diagnostics-and-native-builds.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/casadi-diagnostics-and-native-builds.md)
   for what each would take.
 - **Native (non-Python) plugin builds and prebuilt plugin archives.**

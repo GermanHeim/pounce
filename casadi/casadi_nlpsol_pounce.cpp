@@ -49,10 +49,14 @@ namespace casadi {
     // per-iteration trace, mirroring casadi's ipopt `iterations` stats
     std::vector<double> inf_pr, inf_du, mu_trace, d_norm, obj_trace,
                         alpha_pr, alpha_du, regularization_size;
-    std::vector<casadi_int> ls_trials;
+    std::vector<casadi_int> ls_trials, alg_mod;
     /// Final KKT errors, read off the problem before it is freed —
     /// `FreeIpoptProblem` takes the accessors with it.
     double final_inf_pr = 0, final_inf_du = 0, final_compl_inf = 0;
+    /// Whether the last solve's report reached disk (gh#644). Reported
+    /// through `stats()` so a script can check it without scraping the
+    /// warning, and absent when no report was asked for.
+    bool report_written = false;
     /// Linear-solver post-mortem, harvested at the same moment.
     PounceLinearSolverStats linsol{};
     bool linsol_valid = false;
@@ -132,6 +136,20 @@ namespace casadi {
     std::string inactive_lam_strategy_ = "reltol";
     double inactive_lam_value_ = 10;
 
+    /// Where to write POUNCE's structured solve report, and how much of
+    /// it (gh#644). Empty path means off, which is the default: the
+    /// report is a file write per solve, and `stats()` already carries
+    /// what most callers want.
+    std::string solve_report_;
+    std::string solve_report_detail_ = "summary";
+    /// `detail = "full"` embeds the per-iteration trajectory, which
+    /// POUNCE only retains when asked before the solve. Derived rather
+    /// than exposed as a third option: capturing the history has no use
+    /// here except to reach the report, so making the caller ask twice
+    /// only creates a way to ask wrong — `detail="full"` with an empty
+    /// trajectory and nothing saying why.
+    bool report_needs_iter_history() const { return solve_report_detail_ == "full"; }
+
     /// Convexification of the Lagrangian Hessian before it reaches the
     /// solver, using CasADi's own `Convexify` (the same code path its ipopt
     /// plugin uses), so `convexify_strategy` means exactly what it means
@@ -205,12 +223,14 @@ namespace casadi {
     static bool cb_h(ipindex n, ipnumber* x, bool new_x, ipnumber obj_factor, ipindex m,
                      ipnumber* lambda, bool new_lambda, ipindex nele,
                      ipindex* iRow, ipindex* jCol, ipnumber* values, UserDataPtr ud);
-    /// The leading `alg_mod` is unnamed on purpose: POUNCE fires this
-    /// callback only from its outer loop and always reports
-    /// `RegularMode` (`ipopt_alg.rs`, `build_iter_stats`), so recording
-    /// it would publish a column that is constant zero and reads as
-    /// working restoration detection. `stats()['restoration']` reports
-    /// what POUNCE does measure; see gh#634.
+    /// `alg_mod` is 0 for an outer-loop iteration and 1 for one of the
+    /// feasibility-restoration subproblem (gh#645 made the second kind
+    /// fire at all; before that it was constant 0 and deliberately not
+    /// recorded). It is published in `stats()['iterations']['alg_mod']`
+    /// because without it the other columns of a restoration row are
+    /// unreadable — they describe the min-||c||_1 subproblem, not this
+    /// NLP. `stats()['restoration']` still carries the solve-level
+    /// totals; see gh#634.
     static bool cb_iter(ipindex alg_mod, ipindex iter_count, ipnumber obj_value,
                         ipnumber inf_pr, ipnumber inf_du, ipnumber mu, ipnumber d_norm,
                         ipnumber regularization_size, ipnumber alpha_du, ipnumber alpha_pr,
@@ -280,6 +300,17 @@ namespace casadi {
        {OT_DOUBLE,
         "Maximum number of iterations to compute an eigenvalue decomposition "
         "(default: 200)."}},
+      {"solve_report",
+       {OT_STRING,
+        "Path to write POUNCE's structured solve report (pounce.solve-report/v1 "
+        "JSON) after each solve. Empty (the default) writes nothing. The file "
+        "is rewritten per solve, so a solver called in a loop leaves only the "
+        "last one — give each call its own path if you need to keep them."}},
+      {"solve_report_detail",
+       {OT_STRING,
+        "'summary' (default) or 'full'. 'full' embeds the per-iteration "
+        "trajectory, which costs a retained iterate per iteration and is "
+        "enabled automatically when you ask for it."}},
       {"var_string_md",
        {OT_DICT, "String metadata about variables. Accepted for ipopt-plugin "
                  "compatibility; not forwarded (POUNCE has no metadata "
@@ -346,6 +377,10 @@ namespace casadi {
         convexify_margin = op.second;
       } else if (op.first == "max_iter_eig") {
         max_iter_eig = op.second;
+      } else if (op.first == "solve_report") {
+        solve_report_ = op.second.to_string();
+      } else if (op.first == "solve_report_detail") {
+        solve_report_detail_ = op.second.to_string();
       } else if (op.first == "var_string_md") {
         var_string_md_ = op.second;
       } else if (op.first == "var_integer_md") {
@@ -360,6 +395,14 @@ namespace casadi {
         con_numeric_md_ = op.second;
       }
     }
+
+    // Reject a bad `solve_report_detail` here rather than at write time.
+    // The C API validates it too, but only when the report is written —
+    // i.e. after a solve that has already run. A typo should cost the
+    // construction of the solver, not a solve.
+    casadi_assert(solve_report_detail_ == "summary" || solve_report_detail_ == "full",
+                  "solve_report_detail must be 'summary' or 'full', got '"
+                  + solve_report_detail_ + "'.");
 
     // Do we have an exact Hessian?
     exact_hessian_ = true;
@@ -536,12 +579,13 @@ namespace casadi {
     return true;
   }
 
-  bool PounceInterface::cb_iter(ipindex, ipindex iter_count, ipnumber obj_value,
+  bool PounceInterface::cb_iter(ipindex alg_mod, ipindex iter_count, ipnumber obj_value,
                                 ipnumber inf_pr, ipnumber inf_du, ipnumber mu,
                                 ipnumber d_norm, ipnumber regularization_size,
                                 ipnumber alpha_du, ipnumber alpha_pr, ipindex ls_trials,
                                 UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
+    m->alg_mod.push_back(alg_mod);
     m->inf_pr.push_back(inf_pr);
     m->inf_du.push_back(inf_du);
     m->mu_trace.push_back(mu);
@@ -551,12 +595,28 @@ namespace casadi {
     m->alpha_pr.push_back(alpha_pr);
     m->alpha_du.push_back(alpha_du);
     m->ls_trials.push_back(ls_trials);
-    m->iter = iter_count;
+    // On a restoration fire `iter_count` counts the *subproblem's* inner
+    // iterations and restarts from 0 on every entry, so letting it
+    // through here would make `stats()['iter_count']` report whatever
+    // the last restoration episode happened to reach. Outer fires only.
+    if (alg_mod == 0) m->iter = iter_count;
 
     // A Ctrl-C caught in an oracle callback stops the solve here: returning
     // false is `User_Requested_Stop`, the one channel POUNCE offers for
     // "stop now" that does not involve unwinding through it.
     if (m->interrupted) return false;
+
+    // Restoration fires stop here. CasADi fixes the callback signature
+    // at `(x, f, g, lam_x, lam_g)` and a restoration iterate supplies
+    // none of them: it is a point of the min-||c||_1 subproblem, in the
+    // subproblem's own variable space, and POUNCE's `GetIpoptCurrent*`
+    // inspectors report no data for its duration by design. Handing the
+    // user's callback a stale `x` from the previous outer iteration
+    // beside a fresh restoration `f` would be worse than not calling it.
+    // The trace above still records the iteration, tagged `alg_mod = 1`,
+    // so the episode is visible in `stats()` without being fed to user
+    // code as if it were a solution estimate.
+    if (alg_mod != 0) return true;
 
     // Full callback: pull the current iterate out of POUNCE and drive
     // casadi's `iteration_callback` with it.
@@ -626,7 +686,9 @@ namespace casadi {
     m->alpha_pr.clear();
     m->alpha_du.clear();
     m->ls_trials.clear();
+    m->alg_mod.clear();
     m->final_inf_pr = m->final_inf_du = m->final_compl_inf = 0;
+    m->report_written = false;
     m->linsol_valid = false;
     m->resto_calls = m->resto_inner = m->resto_outer = 0;
     m->resto_secs = 0;
@@ -655,6 +717,13 @@ namespace casadi {
       &PounceInterface::cb_grad_f, &PounceInterface::cb_jac_g,
       exact_hessian_ ? &PounceInterface::cb_h : nullptr);
     casadi_assert(prob != nullptr, "POUNCE: CreateIpoptProblem failed");
+
+    // Has to precede the solve: POUNCE keeps the per-iteration trajectory
+    // only when asked beforehand, and there is no way to reconstruct it
+    // afterwards.
+    if (!solve_report_.empty() && report_needs_iter_history()) {
+      IpoptEnableIterHistory(prob);
+    }
     m->prob = prob;
 
     if (!exact_hessian_) {
@@ -778,6 +847,24 @@ namespace casadi {
     m->linsol_valid = GetPounceLinearSolverStats(prob, &m->linsol);
     GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
                               &m->resto_outer, &m->resto_secs);
+    // Same window as the harvest above, and for the same reason: the
+    // report is built from the solve retained on `prob`, which the free
+    // below takes with it.
+    //
+    // A failed write is a warning, not an error. The solve succeeded and
+    // its answer is already in `m`; refusing to return it because a
+    // diagnostic file could not be written would be the wrong trade, and
+    // an unwritable path is a caller mistake that a warning names
+    // exactly. `m->report_written` records what happened so `stats()`
+    // can be asked rather than the log read.
+    if (!solve_report_.empty()) {
+      m->report_written = IpoptWriteSolveReport(prob, solve_report_.c_str(),
+                                                solve_report_detail_.c_str()) != 0;
+      if (!m->report_written) {
+        casadi_warning("POUNCE: could not write solve report to '" + solve_report_
+                       + "' (unwritable path, or no solve to report).");
+      }
+    }
     FreeIpoptProblem(prob);
     m->prob = nullptr;
 
@@ -872,6 +959,12 @@ namespace casadi {
     stats["warm_started_working_set"] = m->ws_used;
     stats["working_set_available"] = m->ws_valid;
     stats["n_eval_errors"] = m->eval_errors;
+    // Only when one was asked for: an absent key means "no report
+    // requested", which is a different thing from "the write failed".
+    if (!solve_report_.empty()) {
+      stats["solve_report"] = solve_report_;
+      stats["solve_report_written"] = m->report_written;
+    }
     // Metadata POUNCE has no channel for: given back rather than dropped, so
     // a caller that set it can at least see it survived the round trip.
     if (!var_string_md_.empty()) stats["var_string_md"] = var_string_md_;
@@ -890,6 +983,9 @@ namespace casadi {
     iterations["alpha_pr"] = m->alpha_pr;
     iterations["alpha_du"] = m->alpha_du;
     iterations["ls_trials"] = m->ls_trials;
+    // 0 = outer iteration, 1 = restoration subproblem iteration. Every
+    // other vector here is only interpretable against it.
+    iterations["alg_mod"] = m->alg_mod;
     stats["iterations"] = iterations;
 
     // `stats()` is callable from inside `iteration_callback`, where the
@@ -933,10 +1029,10 @@ namespace casadi {
       stats["final_inf_du"] = m->final_inf_du;
       stats["final_compl_inf"] = m->final_compl_inf;
 
-      // Restoration is reported per solve, not per iteration: POUNCE's
-      // intermediate callback always reports RegularMode, so labelling
-      // a single iteration as a restoration one is not something this
-      // plugin can honestly do yet (gh#634).
+      // Solve-level restoration totals. Per-iteration labelling now
+      // exists too — see `iterations['alg_mod']` (gh#645) — but these
+      // are the only source for the inner iteration count and the wall
+      // time, and they answer "how much restoration?" in one read.
       Dict resto;
       resto["calls"] = static_cast<casadi_int>(m->resto_calls);
       resto["inner_iters"] = static_cast<casadi_int>(m->resto_inner);
@@ -1002,6 +1098,13 @@ namespace casadi {
                   "carries an active-set working set between calls of one "
                   "solver object, which the generated entry point has no "
                   "channel for. Pass x0/lam_g0/lam_x0 instead.");
+    casadi_assert(solve_report_.empty(),
+                  "solve_report cannot be code generated by this plugin yet. "
+                  "The generated code links the same C API and could call "
+                  "IpoptWriteSolveReport, but the emitted runtime does not, "
+                  "and silently dropping the option would leave you waiting "
+                  "for a file that is never written. Drop it, or keep this "
+                  "solver interpreted.");
     casadi_assert(jacg_sp_.size1() == 0 || jacg_sp_.nnz() > 0,
                   "A constraint Jacobian with no nonzeros is not supported by "
                   "the C API this generates against.");

@@ -190,46 +190,74 @@ already decided, and it applies solely to a point the never-regress gate
 accepted on its declared-bound residuals, so it cannot dress up a worse
 iterate — the reading it replaces is the artifact, not the point.
 
-### The same frame applies to the sensitivity path
+## What it does to a downstream sensitivity result
 
-The residual report was only half of it. The barrier diagonal
-`Σ = z/s` is built from those same relaxed-frame slacks, so at a
-crossed-over point it reads `z/δ` where an interior iterate would have
-given `z²/μ`:
-
-```text
-no crossover     Σ = z / (μ/z) = z²/μ
-crossover        Σ = z / δ
-```
-
-Since `δ` is capped at `constr_viol_tol` and `μ` ends near
-`tol/(barrier_tol_factor+1)`, that is *looser* whenever `z·δ/μ > 1`, which
-is the ordinary case. `Σ` is the stiffness with which the barrier holds a
+Crossover moves the iterate onto its active bounds, which changes the
+barrier diagonal `Σ = z/s` the sensitivity path factorizes. That was
+expected to be a hazard — a slack driven to zero divides badly — and it
+is the opposite. `Σ` is the stiffness with which the barrier pins a
 bounded variable, and a reduced Hessian read off the held KKT factor
-carries a residual error of exactly `O(1/Σ)` — the leftover of that pin
-being finite. So the looser reading was a measurably less accurate
-covariance, by a factor that tracked the bound multiplier: `18x` at
-`z = 4.5`, `396x` at `z = 994.5`. That was
-[#654](https://github.com/jkitchin/pounce/issues/654), and it is fixed the
-same way: **when crossover is accepted, `Σ` is re-measured against the
-declared bounds** — for variable bounds and inequality-row bounds alike —
-before the sensitivity path factors with it or classifies against it.
+carries a residual error of exactly `O(1/Σ)`: the leftover of that pin
+being finite rather than exact. A **larger** `Σ` is a sharper pin and a
+more accurate answer.
+
+Measured on `min ½xᵀQx − qᵀx` with two parameters held by pin rows and a
+third variable capped by a bound that binds with multiplier `4.5`. The
+reduced Hessian over the pins has an `O(1)` gap between the
+bound-pinned answer and the free one, so drift is unmissable:
+
+| | `Σ` at the active bound | reduced-Hessian error |
+|---|---|---|
+| `crossover=no` | `8.1e+09` | `4.95e-10` |
+| `crossover=yes`, `bound_relax_factor=0` | `2.0e+16` | **`4.44e-16`** |
+| `crossover=yes`, default relaxation | `2.0e+16` | **`4.44e-16`** |
+
+**Against the bounds as declared, crossover sharpens the result by
+exactly the factor `Σ` grew.** The error is `Q_aw²/Σ`, the bound block's
+Schur complement, and it holds to every printed digit until `Σ` grows
+large enough that the prediction drops below the roundoff of the answer
+itself — which is where the two crossover rows above sit. With the point
+*on* its bound the pin is as exact as double precision expresses.
+
+**The two crossover rows are identical, and that is recent.** Until
+[#654](https://github.com/jkitchin/pounce/issues/654) the second one read
+`4.5e+08` / `8.89e-09` — 18× *worse* than not crossing over at all,
+rising toward 400× as the bound's multiplier grew. The crossed-over point
+sits exactly `δ = bound_relax_factor` inside the live relaxed bound, so
+the barrier saw a slack of `δ` where an interior iterate would have
+carried `μ/z`, making `Σ = z/δ` instead of `z²/μ` and *loosening* the pin
+by `z·δ/μ`. That was the same frame mismatch as
+[#646](https://github.com/jkitchin/pounce/issues/646) reaching the
+numerics rather than the printed residuals, and it is fixed the same way:
+**when crossover is accepted, `Σ` is re-measured against the declared
+bounds** — for variable bounds and inequality-row bounds alike — before
+the sensitivity path factors with it or classifies against it.
 
 The correction is applied at the consumer boundary, not on the live
 iterate: the relaxed bounds are still what the algorithm ran against, and
-nothing about the solve moves. It covers `covariance()`,
-`information()`, `classify_activity()`, `compute_reduced_hessian`, the
-parametric steps, and the `SensSolve` builder, because all of them read
-the one held factor.
+nothing about the solve moves. It covers `covariance()`, `information()`,
+`classify_activity()`, `compute_reduced_hessian`, the parametric steps,
+and the `SensSolve` builder, because all of them read the one held
+factor.
 
-The practical consequence is that `crossover=yes` and
-`bound_relax_factor = 0` are now independent choices. Before the fix,
-crossover *helped* the sensitivity path by `306x` with the relaxation off
-and *hurt* it by `18x` with the relaxation at its default, so the option
-was only safe in combination with a second, unrelated one. Now a
-crossed-over solve reports the same downstream numbers either way — at
-the roundoff of the answer itself, since the point is on its bound and the
-pin is as exact as double precision expresses.
+So `crossover=yes` and `bound_relax_factor = 0` are now independent
+choices: a crossed-over solve reports the same downstream numbers either
+way. You may still want `bound_relax_factor = 0` for
+`classify_activity()`, which requires it for an unrelated reason — the
+central-path checks it makes read the barrier's own slacks, which the
+relaxation shifts.
+
+`Σ` never becomes infinite along this path. The declared-frame
+measurement floors a slack at `eps·max(1,|bound|)`, the distance at which
+the point *is* the bound, so a pivot landing exactly on it gives a large
+`Σ` rather than a `NaN`. That floor is deliberately not
+`CalculateSafeSlack`'s, which the live interior path applies: that one
+raises a below-floor slack to about `μ/z` and would put back the very
+standoff crossover exists to remove. On this fixture the crossed-over
+slack reaches the floor; the one measured in
+[#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
+`1.8e-12` — the residual of the QP step plus line search — and never
+reached it at all.
 
 ## Reading the result
 

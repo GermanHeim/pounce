@@ -72,6 +72,18 @@ pub struct RestoSolveResult {
     /// surfaces `SolverReturn::LocalInfeasibility` instead of cycling
     /// in restoration on an unchanged iterate.
     pub locally_infeasible: bool,
+    /// `true` when the inner sub-IPM stopped because the user's
+    /// `intermediate_callback` returned `false` from a
+    /// restoration-phase fire (gh#645). Propagated by the driver as
+    /// [`RestorationOutcome::UserRequestedStop`], which the outer loop
+    /// surfaces without promoting the staged trial point.
+    ///
+    /// Checked *before* `locally_infeasible`: an aborted sub-solve has
+    /// not finished deciding anything about the original NLP's
+    /// feasibility, so reporting local infeasibility off the back of a
+    /// point the user interrupted us at would be a verdict we have not
+    /// earned.
+    pub user_requested_stop: bool,
 }
 
 /// Inner-loop driver hook. Constructs and runs the nested IPM around
@@ -103,6 +115,10 @@ pub type RestoInnerSolver = Box<
         // Shared interactive debugger, forwarded onto the inner IPM so the
         // same debugger can step the restoration sub-solve.
         Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+        // User TNLP, forwarded onto the inner IPM so its
+        // `intermediate_callback` fires per inner iteration (gh#645).
+        // `None` when the caller installed no callback.
+        Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
     ) -> Option<RestoSolveResult>,
 >;
 
@@ -136,6 +152,11 @@ pub struct MinC1NormRestoration {
     /// Shared debugger forwarded onto the inner IPM (set by the outer
     /// driver via `RestorationPhase::set_debug_hook`).
     pub(crate) debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    /// User TNLP forwarded onto the inner IPM (set by the outer driver
+    /// via `RestorationPhase::set_intermediate_tnlp`) so the callback
+    /// fires during restoration too (gh#645). `None` when the caller
+    /// installed no callback.
+    pub(crate) intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
 }
 
 impl Default for MinC1NormRestoration {
@@ -147,11 +168,12 @@ impl Default for MinC1NormRestoration {
             expect_infeasible_problem: false,
             start_with_resto: false,
             eq_mult: Box::new(LeastSquareMults::new()),
-            inner_solver: Box::new(|_, _, _, _, _, _| None),
+            inner_solver: Box::new(|_, _, _, _, _, _, _| None),
             orig_progress: None,
             last_inner_iter_count: 0,
             print_iter_output: true,
             debug_hook: None,
+            intermediate_tnlp: None,
         }
     }
 }
@@ -203,6 +225,10 @@ impl RestorationPhase for MinC1NormRestoration {
         self.debug_hook = hook;
     }
 
+    fn set_intermediate_tnlp(&mut self, tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>) {
+        self.intermediate_tnlp = tnlp;
+    }
+
     fn perform_restoration(
         &mut self,
         data: &IpoptDataHandle,
@@ -245,6 +271,7 @@ impl RestorationPhase for MinC1NormRestoration {
             cb,
             self.print_iter_output,
             self.debug_hook.clone(),
+            self.intermediate_tnlp.clone(),
         ) else {
             return RestorationOutcome::Failed;
         };
@@ -253,6 +280,17 @@ impl RestorationPhase for MinC1NormRestoration {
             let mut d = data.borrow_mut();
             d.curr_mu = saved_mu;
             d.curr_tau = saved_tau;
+        }
+
+        // 1a'. User-stop short-circuit (gh#645). Ahead of every branch
+        // below, including the locally-infeasible one: the transcription
+        // block that follows exists to hand a *recovered* iterate back
+        // to the outer loop, and there is nothing to hand back from a
+        // sub-solve the user interrupted. The outer loop leaves
+        // `data.curr` — the last iterate accepted for the original NLP —
+        // in place and terminates on it.
+        if result.user_requested_stop {
+            return RestorationOutcome::UserRequestedStop;
         }
 
         // 1b. Locally-infeasible short-circuit. The inner sub-IPM
@@ -920,7 +958,7 @@ mod tests {
             Rc::clone(&nlp),
         )));
 
-        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _| {
+        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| {
             Some(RestoSolveResult {
                 trial_x: rcv(&[10.0, 20.0]),
                 trial_s: rcv(&[4.0]),
@@ -928,6 +966,7 @@ mod tests {
                 iters_since_header: 0,
                 last_output: 0.0,
                 locally_infeasible: false,
+                user_requested_stop: false,
             })
         });
 

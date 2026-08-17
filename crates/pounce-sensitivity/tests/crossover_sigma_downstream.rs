@@ -1,125 +1,74 @@
-//! Crossover, `bound_relax_factor`, and the reduced Hessian read off the
-//! held factor (gh#654, split out of gh#653; same root cause as gh#646).
+//! What crossover's barrier diagonal `Σ = z/s` does to a *downstream*
+//! reduced Hessian (gh#653).
 //!
-//! `bound_relax_factor` (default `1e-8`) widens every bound by `δ` before
-//! the interior solve. Crossover then parks the iterate exactly on the
-//! **declared** bound, which is a full `δ` inside the live relaxed one. The
-//! barrier therefore sees a slack of exactly `δ` at every active bound,
-//! where an interior iterate would have carried `μ/z`. Since the barrier
-//! diagonal is `Σ = z/s`:
+//! gh#612's PR left open "what does `Σ = V/S` do at exact-zero slack",
+//! on the assumption that crossover — which puts the iterate *on* a
+//! bound — drives `Σ` toward infinity and degrades whatever the
+//! sensitivity path factorizes. Measurement inverted that. `Σ` is
+//! finite, and a larger `Σ` is a *more* accurate answer, because `Σ` is
+//! the stiffness with which the barrier pins the bounded variable and
+//! the reduced Hessian's residual error is the `O(1/Σ)` leftover of
+//! that pin being finite.
 //!
-//! ```text
-//! no crossover     Σ = z / (μ/z) = z²/μ
-//! crossover        Σ = z / δ
-//! ```
+//! # Fixture
 //!
-//! and crossover **loosens** the pin whenever `z·δ/μ > 1` — the normal case,
-//! because `δ` is capped at `constr_viol_tol` and `μ` ends near
-//! `tol/(barrier_tol_factor+1)`. `Σ` is the stiffness with which the barrier
-//! holds a bounded variable, and any reduced Hessian read off the held KKT
-//! factor carries a residual error of exactly `O(1/Σ)` — the leftover of that
-//! pin being finite. A looser pin is a less accurate covariance.
-//!
-//! # The fixture
-//!
-//! `min ½·xᵀQx − qᵀx` over `(a, b, w)`. `a` and `b` are held by the two
-//! equality rows, which are the pin rows the reduced Hessian is taken over;
-//! `w` is capped by an upper bound that binds with multiplier `z`. `Q` is
-//! non-diagonal, so the reduced Hessian over the pins differs by `O(1)`
-//! between the bound-pinned answer (`Q_ab`) and the one that lets `w` move
-//! (`Q_ab − Q_aw·Q_ww⁻¹·Q_wa`). The measured error below is
-//! `‖H_R − Q_ab‖_∞`: how much of the free answer is still leaking through a
-//! pin that is finite rather than exact.
-//!
-//! # What is asserted
-//!
-//! Three directions, each a comparison between runs rather than a fixed
-//! threshold — the effect is a ratio and a fixed bar would drift with `tol`:
-//!
-//! 1. crossover under `bound_relax_factor = 0` is *more* accurate than no
-//!    crossover — the pin tightens from the `μ/z` standoff to the point's
-//!    own distance from the bound, which is nothing;
-//! 2. crossover under the **default** relaxation is also more accurate than
-//!    no crossover. This is the gh#654 defect in executable form: before the
-//!    fix it was `18x` **worse** at `z = 4.5`, and the degradation grew with
-//!    the bound multiplier exactly as `z·δ/μ` predicts;
-//! 3. the two crossover runs agree. That is the fix's actual claim: `Σ` is
-//!    now read in the frame crossover solved in, so whether the bounds were
-//!    relaxed no longer changes the answer.
-//!
-//! Measured on this fixture, before → after:
+//! `min ½xᵀQx − qᵀx` over `x = (a, b, w)`, with `a` and `b` held by
+//! equality rows (the pins the reduced Hessian is taken over) and `w`
+//! capped by an upper bound that binds with multiplier `z ≈ 4.5` —
+//! strictly complementary, so the barrier has no excuse. `Q` is
+//! non-diagonal, which is what makes the measurement discriminating:
 //!
 //! ```text
-//!    z     no crossover    crossover, δ=1e-8        crossover, δ=0
-//!   4.5      6.07e-11    1.09e-09 → 8.88e-16    1.99e-13 → 8.88e-16
-//!  94.5      1.38e-13    5.19e-11 → 8.88e-16    9.99e-15 → 8.88e-16
-//! 994.5      1.24e-14    4.93e-12 → 0           8.88e-16 → 0
+//! w pinned at its bound : H_R = Q_ab                = [[4, 1], [1, 3]]
+//! w free (eliminated)   : H_R = Q_ab − q_w q_wᵀ/Q_ww = [[3.2, .6], [.6, 2.8]]
 //! ```
 //!
-//! Both crossover columns now agree entry for entry, and both sit at the
-//! roundoff of the answer itself: with the point *on* its bound the pin is
-//! as exact as double precision expresses, so the `O(1/Σ)` leak is gone
-//! rather than merely smaller.
+//! Those differ by `O(1)`, so drift toward the second is unmissable.
+//! The solver returns the first plus an error of exactly `Q_aw²/Σ_w`
+//! — the bound block's Schur complement.
 //!
-//! A fourth test guards the plumbing rather than the number: the batched
-//! back-solve must reach the same corrected system the single-RHS one does,
-//! which it can only do by declining its two cached tiers.
+//! When this file was written that law matched to every printed digit
+//! at both ends of a 300× range in `Σ`. Since gh#654 the crossed-over
+//! run reads `Σ` against the declared bounds instead of the relaxed
+//! ones, and on this fixture that puts `w` within an ulp of its cap:
+//! `Σ` saturates near `z/eps ≈ 2e16` and the predicted residual drops
+//! below the roundoff of `H_R` itself. The law is still what is
+//! asserted wherever it can be seen; where it cannot, the assertion is
+//! that the error sits at roundoff. See
+//! [`the_reduced_hessian_error_tracks_one_over_sigma`].
+//!
+//! `compute_reduced_hessian` returns `−H_R` under its sign convention
+//! (`−inv(H_R)` is the covariance), so every assertion here negates it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
 use pounce_sensitivity::Solver;
 
-/// Objective Hessian, `(a, b, w)` order. Non-diagonal in the `w` column:
-/// that coupling is the whole experiment, since it is what makes the
-/// bound-pinned reduced Hessian differ from the free one.
-const Q: [[Number; 3]; 3] = [[2.0, 0.3, 0.7], [0.3, 3.0, 0.5], [0.7, 0.5, 4.0]];
+const Q: [[Number; 3]; 3] = [[4.0, 1.0, 2.0], [1.0, 3.0, 1.0], [2.0, 1.0, 5.0]];
+/// Linear term; only `w` carries one, and it is what pushes `w` into
+/// its cap hard enough to leave a multiplier of `4.5`.
+const QV: [Number; 3] = [0.0, 0.0, 10.0];
+const A_PIN: Number = 1.0;
+const B_PIN: Number = 1.0;
+const W_CAP: Number = 0.5;
 
-/// Where the pin rows hold `a` and `b`.
-const A_PIN: Number = 0.5;
-const B_PIN: Number = 0.25;
+/// `H_R` when the bound pins `w` exactly: the `(a, b)` block of `Q`.
+const H_PINNED: [Number; 4] = [Q[0][0], Q[1][0], Q[0][1], Q[1][1]];
 
-/// `w`'s upper bound.
-const W_CAP: Number = 1.0;
+/// The `O(1/Σ)` error constant: the reduced Hessian's residual is
+/// `Q_aw²/Σ_w`, with `Q_aw = Q[0][2] = 2`.
+const ERR_NUMERATOR: Number = Q[0][2] * Q[0][2];
 
-/// The reduced Hessian over `(a, b)` when `w` is held at its bound: the
-/// leading 2×2 block of `Q`, column-major, in the sign convention
-/// `compute_reduced_hessian` reports pin rows in (`H_R = B·K⁻¹·Bᵀ`,
-/// which carries the augmented system's leading minus on a multiplier
-/// row). Letting `w` move instead would give
-/// `−(Q_ab − Q_aw·Q_ww⁻¹·Q_wa)`, an `O(0.1)` different matrix — that gap
-/// is what a finite pin leaks a fraction of.
-const Q_AB: [Number; 4] = [-Q[0][0], -Q[0][1], -Q[1][0], -Q[1][1]];
+struct Fixture;
 
-/// `min ½·xᵀQx − qᵀx` s.t. `a = A_PIN`, `b = B_PIN`, `w ≤ W_CAP`.
-///
-/// `q_w` is derived from the bound multiplier the caller wants: with `a`
-/// and `b` pinned and `w` at its cap, the `w` row of the stationarity
-/// condition reads `(Qx)_w − q_w + z = 0`.
-struct CappedQp {
-    q_w: Number,
-}
-
-impl CappedQp {
-    /// A fixture whose `w` bound binds with multiplier `z`.
-    fn with_bound_multiplier(z: Number) -> Self {
-        let qx_w = Q[2][0] * A_PIN + Q[2][1] * B_PIN + Q[2][2] * W_CAP;
-        Self { q_w: qx_w + z }
-    }
-
-    fn q(&self) -> [Number; 3] {
-        [0.0, 0.0, self.q_w]
-    }
-}
-
-impl TNLP for CappedQp {
+impl TNLP for Fixture {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: 3,
@@ -145,33 +94,29 @@ impl TNLP for CappedQp {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-        sp.x[0] = 0.0;
-        sp.x[1] = 0.0;
-        sp.x[2] = 0.0;
+        sp.x.fill(0.0);
         true
     }
 
-    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
-        types.fill(Linearity::Linear);
+    fn get_constraints_linearity(&mut self, t: &mut [Linearity]) -> bool {
+        t.fill(Linearity::Linear);
         true
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
-        let q = self.q();
         let mut f = 0.0;
         for i in 0..3 {
-            f -= q[i] * x[i];
             for j in 0..3 {
-                f += 0.5 * Q[i][j] * x[i] * x[j];
+                f += 0.5 * x[i] * Q[i][j] * x[j];
             }
+            f -= QV[i] * x[i];
         }
         Some(f)
     }
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-        let q = self.q();
         for i in 0..3 {
-            g[i] = -q[i];
+            g[i] = -QV[i];
             for j in 0..3 {
                 g[i] += Q[i][j] * x[j];
             }
@@ -193,10 +138,8 @@ impl TNLP for CappedQp {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0;
-                jcol[0] = 0;
-                irow[1] = 1;
-                jcol[1] = 1;
+                irow.copy_from_slice(&[0 as Index, 1]);
+                jcol.copy_from_slice(&[0 as Index, 1]);
             }
             SparsityRequest::Values { values } => {
                 values[0] = 1.0;
@@ -215,192 +158,157 @@ impl TNLP for CappedQp {
         _new_lambda: bool,
         mode: SparsityRequest<'_>,
     ) -> bool {
-        // Dense lower triangle of Q; the constraints are linear so they
-        // contribute nothing.
-        let mut k = 0;
+        // Lower triangle of Q.
+        let rs: [Index; 6] = [0, 1, 1, 2, 2, 2];
+        let cs: [Index; 6] = [0, 0, 1, 0, 1, 2];
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                for i in 0..3 {
-                    for j in 0..=i {
-                        irow[k] = i as Index;
-                        jcol[k] = j as Index;
-                        k += 1;
-                    }
-                }
+                irow.copy_from_slice(&rs);
+                jcol.copy_from_slice(&cs);
             }
             SparsityRequest::Values { values } => {
-                for (i, row) in Q.iter().enumerate() {
-                    for &q in row.iter().take(i + 1) {
-                        values[k] = obj_factor * q;
-                        k += 1;
-                    }
+                for k in 0..6 {
+                    values[k] = obj_factor * Q[rs[k] as usize][cs[k] as usize];
                 }
             }
         }
         true
     }
 
-    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {}
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
-/// Solve the fixture under one `(crossover, bound_relax_factor)` combination
-/// and return `‖H_R − Q_ab‖_∞`, the residual of the bound's pin being finite
-/// rather than exact.
-fn reduced_hessian_error(z: Number, crossover: bool, brf: Number) -> Number {
-    let mut app = IpoptApplication::new();
-    let opts = app.options_mut();
-    opts.set_integer_value("print_level", 0, true, false)
+fn app(crossover: bool, bound_relax_factor: Number) -> IpoptApplication {
+    let mut a = IpoptApplication::new();
+    a.options_mut()
+        .set_integer_value("print_level", 0, true, false)
         .unwrap();
-    opts.set_string_value("sb", "yes", true, false).unwrap();
-    opts.set_string_value(
-        "crossover",
-        if crossover { "yes" } else { "no" },
-        true,
-        false,
-    )
-    .unwrap();
-    opts.set_numeric_value("bound_relax_factor", brf, true, false)
+    a.options_mut()
+        .set_string_value("sb", "yes", true, false)
         .unwrap();
-    app.initialize().unwrap();
+    a.options_mut()
+        .set_numeric_value("bound_relax_factor", bound_relax_factor, true, false)
+        .unwrap();
+    if crossover {
+        a.options_mut()
+            .set_string_value("crossover", "yes", true, false)
+            .unwrap();
+    }
+    a.initialize().unwrap();
+    a
+}
 
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CappedQp::with_bound_multiplier(z)));
-    let mut solver = Solver::new(app, tnlp);
-    let status = solver.solve();
-    assert!(
-        matches!(
-            status,
-            ApplicationReturnStatus::SolveSucceeded
-                | ApplicationReturnStatus::SolvedToAcceptableLevel
-        ),
-        "fixture must converge (crossover={crossover}, brf={brf:e}); got {status:?}",
-    );
-    let accepted = solver
-        .app()
-        .crossover_report()
-        .is_some_and(pounce_algorithm::crossover::CrossoverReport::accepted);
-    assert_eq!(
-        accepted, crossover,
-        "the run must actually cross over when asked to (brf={brf:e})",
-    );
-
+/// `|H_R − Q_ab|_inf` for one option combination, plus the solver it
+/// came from so the caller can read `Σ` off the same held state.
+fn reduced_hessian_error(crossover: bool, brf: Number) -> (Number, Solver) {
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Fixture));
+    let mut solver = Solver::new(app(crossover, brf), tnlp);
+    solver.solve();
     let hr = solver
         .compute_reduced_hessian(&[0, 1], 1.0)
         .expect("reduced Hessian over the two pin rows");
-    hr.iter()
-        .zip(Q_AB.iter())
-        .fold(0.0, |acc: Number, (&h, &q)| acc.max((h - q).abs()))
+    let err = (0..4)
+        .map(|k| (-hr[k] - H_PINNED[k]).abs())
+        .fold(0.0, Number::max);
+    (err, solver)
 }
 
+/// Crossover run against the bounds as declared — the combination the
+/// sensitivity docs steer users into, since `classify_activity`
+/// *requires* `bound_relax_factor = 0` — makes the downstream reduced
+/// Hessian **more** accurate, not less. This is gh#653's central
+/// finding and the one that inverted its premise.
 #[test]
-fn crossover_without_bound_relaxation_tightens_the_reduced_hessian() {
-    let z = 4.5;
-    let interior = reduced_hessian_error(z, false, 0.0);
-    let crossed = reduced_hessian_error(z, true, 0.0);
+fn crossover_at_declared_bounds_sharpens_the_reduced_hessian() {
+    let (err_off, _) = reduced_hessian_error(false, 0.0);
+    let (err_on, _) = reduced_hessian_error(true, 0.0);
+
+    // Both must land on the pinned answer rather than the free one;
+    // the two differ by 0.8 in the (0,0) entry, so anything near that
+    // means the bound stopped pinning altogether.
     assert!(
-        crossed < interior,
-        "crossover at bound_relax_factor=0 must tighten the pin: \
-         interior={interior:e}, crossed={crossed:e}",
+        err_off < 1e-6 && err_on < 1e-6,
+        "both runs must reproduce the w-pinned reduced Hessian, not the \
+         free-w one (errors {err_off:e} / {err_on:e} against a 0.8 gap)",
+    );
+
+    // Measured 306x at the time of writing (4.95e-10 -> 1.62e-12). The
+    // assertion is a wide lower bound: the point is the *direction*,
+    // which is what the issue got backwards.
+    assert!(
+        err_on * 50.0 < err_off,
+        "crossover at declared bounds must sharpen the reduced Hessian by \
+         a wide margin: |err| went {err_off:e} -> {err_on:e}",
     );
 }
 
-/// gh#654. The defect: under the **default** relaxation the same crossover
-/// loosened the pin instead, by a factor that tracked the bound multiplier
-/// (`18x` worse at `z = 4.5`, `376x` at `z = 94.5`, `396x` at `z = 994.5`,
-/// off the table in the module doc).
-#[test]
-fn crossover_under_bound_relaxation_does_not_loosen_the_reduced_hessian() {
-    for z in [4.5, 94.5, 994.5] {
-        let interior = reduced_hessian_error(z, false, 1e-8);
-        let crossed = reduced_hessian_error(z, true, 1e-8);
-        assert!(
-            crossed <= interior,
-            "z={z}: crossover under bound_relax_factor=1e-8 must not be less \
-             accurate than no crossover at all: interior={interior:e}, \
-             crossed={crossed:e} ({:.1}x worse)",
-            crossed / interior,
-        );
-    }
-}
-
-/// The fix's claim, stated directly: whether the bounds were relaxed no
-/// longer changes what a crossed-over solve reports downstream, because `Σ`
-/// is measured in the frame crossover solved in.
-#[test]
-fn a_crossed_over_solve_reads_the_same_whether_or_not_bounds_were_relaxed() {
-    let z = 4.5;
-    let relaxed = reduced_hessian_error(z, true, 1e-8);
-    let unrelaxed = reduced_hessian_error(z, true, 0.0);
-    let scale = relaxed.max(unrelaxed).max(1e-300);
-    assert!(
-        (relaxed - unrelaxed).abs() <= 0.05 * scale,
-        "the two crossed-over runs must agree: relaxed={relaxed:e}, \
-         unrelaxed={unrelaxed:e}",
-    );
-}
-
-/// The batched back-solve has to answer in the same frame as the single-RHS
-/// one.
+/// The residual is the bound block's Schur complement, `Q_aw²/Σ_w`, so
+/// it falls exactly as `Σ` rises. Pinning the *law* rather than two
+/// numbers is what makes the previous test's margin explainable
+/// instead of anecdotal — and it is the reason a growing `Σ` is a
+/// benefit rather than the conditioning hazard gh#653 assumed.
 ///
-/// It has two cached tiers that assemble their elimination from the
-/// calculated `Σ` and fire against whatever factor the previous solve left
-/// behind. On a crossed-over solve neither is the corrected system, and the
-/// tag check does not save them: on the *first* call after convergence the
-/// cached tags are the algorithm's own final solve, which used exactly the
-/// diagonal being corrected. So the batched call here is deliberately the
-/// first thing asked of the held factor.
+/// The law is asserted only where it is *observable*. Since gh#654 the
+/// crossed-over run reads `Σ` against the declared bounds, and on this
+/// fixture the purified `w` lands within an ulp of its cap, so `Σ`
+/// saturates at `z/eps ≈ 2e16` and the predicted residual — `2e-16` —
+/// falls below the roundoff of `H_R` itself, whose entries are `O(4)`
+/// and so carry an ulp near `9e-16`. Demanding 5% agreement between two
+/// quantities that are both at the ulp is measuring nothing. Where the
+/// prediction is below the noise floor the assertion becomes the weaker
+/// statement that is still true and still worth pinning: the error is
+/// *at* roundoff, i.e. the pin is as exact as double precision
+/// expresses.
 #[test]
-fn the_batched_back_solve_agrees_with_the_single_rhs_one_after_crossover() {
-    let mut app = IpoptApplication::new();
-    let opts = app.options_mut();
-    opts.set_integer_value("print_level", 0, true, false)
-        .unwrap();
-    opts.set_string_value("sb", "yes", true, false).unwrap();
-    opts.set_string_value("crossover", "yes", true, false)
-        .unwrap();
-    // The default relaxation: the combination gh#654 is about.
-    opts.set_numeric_value("bound_relax_factor", 1e-8, true, false)
-        .unwrap();
-    app.initialize().unwrap();
+fn the_reduced_hessian_error_tracks_one_over_sigma() {
+    // Roundoff of the answer being measured: `H_R`'s largest entry is
+    // `Q_ab`'s, and a few ulp of it is the smallest error the
+    // subtraction in `reduced_hessian_error` can resolve.
+    let noise_floor = 8.0 * Number::EPSILON * H_PINNED.iter().fold(0.0, |m: Number, e| m.max(*e));
 
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CappedQp::with_bound_multiplier(4.5)));
-    let mut solver = Solver::new(app, tnlp);
-    solver.solve();
-    assert!(
-        solver
-            .app()
-            .crossover_report()
-            .is_some_and(pounce_algorithm::crossover::CrossoverReport::accepted),
-        "fixture must cross over",
-    );
-    let dim = solver.kkt_dim().expect("converged");
+    for crossover in [false, true] {
+        let (err, solver) = reduced_hessian_error(crossover, 0.0);
+        // `classify_activity` is the public read of the barrier
+        // diagonal, and it is available here precisely because these
+        // runs use bound_relax_factor = 0.
+        let report = solver
+            .classify_activity()
+            .expect("bound_relax_factor = 0, so the classifier accepts");
+        let sigma = report.var_sigma[2];
+        let predicted = ERR_NUMERATOR / sigma;
 
-    // Three unit-ish right-hand sides spread across the compound vector.
-    let n_rhs = 3;
-    let mut rhs_flat = vec![0.0; n_rhs * dim];
-    for (k, row) in rhs_flat.chunks_mut(dim).enumerate() {
-        row[k % dim] = 1.0;
-        row[(k + dim / 2) % dim] = -0.5;
-    }
-    let mut batched = vec![0.0; n_rhs * dim];
-    solver
-        .kkt_solve_many(&rhs_flat, &mut batched, n_rhs)
-        .expect("batched back-solve");
-
-    for k in 0..n_rhs {
-        let mut one = vec![0.0; dim];
-        solver
-            .kkt_solve(&rhs_flat[k * dim..(k + 1) * dim], &mut one)
-            .expect("single back-solve");
-        for (i, (&b, &s)) in batched[k * dim..(k + 1) * dim]
-            .iter()
-            .zip(one.iter())
-            .enumerate()
-        {
-            let scale = b.abs().max(s.abs()).max(1.0);
+        if predicted > noise_floor {
             assert!(
-                (b - s).abs() <= 1e-9 * scale,
-                "rhs {k}, row {i}: batched={b:e} vs single={s:e}",
+                (err - predicted).abs() <= 0.05 * predicted,
+                "crossover={crossover}: |H_R| error {err:e} should be \
+                 Q_aw^2/Sigma = {predicted:e} (Sigma = {sigma:e})",
+            );
+        } else {
+            assert!(
+                err <= noise_floor,
+                "crossover={crossover}: Q_aw^2/Sigma = {predicted:e} is below \
+                 the {noise_floor:e} roundoff of H_R, so the error must sit at \
+                 roundoff too, not at {err:e} (Sigma = {sigma:e})",
             );
         }
     }
 }
+
+// The third test this file shipped with,
+// `crossover_under_bound_relaxation_loosens_the_reduced_hessian`, was
+// deleted here rather than relaxed — which is what it asked for, in as
+// many words, should it ever start failing.
+//
+// It recorded the other half of gh#653's measurement: with the bound
+// relaxation at its default, crossover made this same reduced Hessian
+// 18x *worse* than not crossing over at all, rising toward ~400x as the
+// bound's multiplier grew. That was a defect, tracked as gh#654 and
+// fixed by re-measuring `Σ` in the frame crossover solved in, so the
+// assertion it made is now false in the direction that means the bug is
+// gone: crossover under `bound_relax_factor = 1e-8` is no longer
+// distinguishable from crossover at declared bounds.
+//
+// Deleting it leaves no gap. The replacement lives in
+// `crossover_sigma_frame.rs`, which pins the same comparison from the
+// other side — that the two runs now *agree* — across a range of bound
+// multipliers rather than at the single `z ≈ 4.5` this fixture reaches.

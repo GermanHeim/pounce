@@ -49,8 +49,78 @@ changes.
   `eps·max(1,|bound|)` — the distance at which the point *is* the bound —
   rather than by `CalculateSafeSlack`, which would put the `μ/z` standoff
   crossover exists to remove straight back. Pinned by
-  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs`.
+  `crates/pounce-sensitivity/tests/crossover_sigma_frame.rs`, which sweeps
+  the bound multiplier; #653's `crossover_sigma_downstream.rs` measures the
+  same effect at a single multiplier and lost the test that recorded the
+  defect, which this fixes.
 
+- **POUNCE's structured solve report is reachable from CasADi** (#644).
+  Set `solve_report` to a path and each solve writes a
+  `pounce.solve-report/v1` JSON file — the same format the `pounce`
+  CLI's `--json-output` produces, so the tools that read those read
+  this. `solve_report_detail` chooses `'summary'` (default) or
+  `'full'`, which embeds the per-iteration trajectory.
+
+  Both C entry points behind this (`IpoptEnableIterHistory`,
+  `IpoptWriteSolveReport`) already existed; what was missing was any way
+  for a CasADi caller to reach them, so the report was available to a
+  CLI user and not to this one.
+
+  Capturing the trajectory costs a retained iterate per iteration, which
+  is why `summary` is the default — and it has to be switched on before
+  the solve, since there is nothing to reconstruct it from afterwards.
+  Asking for `'full'` switches it on for you rather than making you set
+  a second option and discover the omission from an empty trajectory.
+
+  A report that cannot be written is a warning and
+  `stats()["solve_report_written"] == False`, not a failed solve: the
+  answer is already computed, and a diagnostic file is not worth an
+  exception. The file is rewritten per solve, so a solver called in a
+  loop leaves only the last one. `generate()` refuses the option by
+  name — the emitted runtime does not write reports, and dropping it
+  silently would leave you waiting for a file that never appears.
+- **The iteration callback now fires during feasibility restoration, and
+  can stop the solve from there** (#645).
+
+  Previously it fired only from the outer loop, so a caller went silent
+  for the whole of a restoration episode and could not interrupt one.
+  That is the phase most likely to overrun a real-time budget, which
+  makes it the phase a controller most needs to be able to abort in —
+  and it is why the C API's `alg_mod` argument was, until now, always
+  `0`: not merely untracked, but unreachable, because no fire happened
+  from anywhere that could have set it.
+
+  Restoration iterations arrive with `alg_mod = 1`
+  (`RestorationPhaseMode`), matching Ipopt, and reach CasADi as
+  `stats()["iterations"]["alg_mod"]`.
+
+  **The label is not decoration — read it before reading anything
+  beside it.** On a restoration iteration every other value describes
+  the min-‖c‖₁ *feasibility subproblem*, not your problem: the objective
+  is the constraint-violation penalty, and `inf_pr` falls to zero as the
+  subproblem converges while your own violation sits unchanged. Plotted
+  on one axis without splitting on `alg_mod`, an episode reads as the
+  objective exploding and the infeasibility being solved, and neither
+  happened.
+
+  Two deliberate silences on those fires. The `GetIpoptCurrent*`
+  inspectors report no data: the restoration iterate is a point of the
+  subproblem and does not have your problem's dimensions, so there is
+  nothing truthful to hand back. And CasADi's `iteration_callback` is
+  not called at all, because its signature is fixed at
+  `(x, f, g, lam_x, lam_g)` and a restoration iterate supplies none of
+  them; the trace still records the iteration, so nothing is hidden.
+
+  Returning `false` from a restoration fire ends the solve at the last
+  iterate accepted for **your** NLP, not at the subproblem's iterate —
+  so a caller aborting on a deadline gets back a point it can actually
+  use. The status is `User_Requested_Stop`, as from any other fire.
+
+  Existing callbacks fire more often than before on solves that enter
+  restoration. Anything counting fires, sampling for a plot, or driving
+  a progress bar will see the difference; upstream Ipopt fires from
+  restoration too, so a callback ported from it was already written
+  expecting these.
 - **`pounce-rs`: a rejected solver option is no longer silently
   discarded** (#649).
 
@@ -145,6 +215,36 @@ changes.
   artifact. Reporting only: it runs after the status is decided and applies
   solely to a point the never-regress gate already accepted on its
   declared-bound residuals.
+
+  What crossover does to a **downstream sensitivity result** was measured
+  rather than assumed (#653). The open worry was that putting the iterate
+  *on* a bound drives the barrier diagonal `Σ = z/s` toward infinity and
+  wrecks whatever the sensitivity path factorizes. It is the opposite: `Σ` is
+  the stiffness with which the barrier pins a bounded variable, and a reduced
+  Hessian read off the held KKT factor carries a residual error of exactly
+  `Q_aw²/Σ` — the bound block's Schur complement, i.e. the leftover of that
+  pin being finite. A larger `Σ` is a sharper pin and a better answer. On a
+  fixture with two parameters held by pin rows and a third capped by a bound
+  binding at multiplier `4.5`, crossover against the declared bounds takes
+  `Σ` from `8.1e9` to `2.0e16` and the reduced-Hessian error from `4.95e-10`
+  to `4.44e-16` — the roundoff of the answer itself. The `1/Σ` law matches to
+  every printed digit until `Σ` grows past the point where its prediction
+  falls below that roundoff. `Σ` never goes infinite: the declared-frame
+  measurement floors a slack at `eps·max(1,|bound|)`, so a pivot landing
+  exactly on a bound gives a large `Σ` rather than a `NaN`.
+
+  The same measurement found the reverse under a nonzero
+  `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics
+  rather than the printed residuals: the crossed-over point sat exactly `δ`
+  inside the live relaxed bound, so `Σ` became `z/δ` instead of `z²/μ` and
+  the pin **loosened** — `4.5e8` against `8.1e9`, an `8.89e-9` reduced-Hessian
+  error where crossover-off gives `4.95e-10`, with the degradation factor
+  `z·δ/μ` growing to ~400× by a multiplier of `1000`. That is the defect
+  fixed by the #654 entry at the top of this section, in the same release:
+  `Σ` is re-measured against the declared bounds, and the two now agree.
+  Directions are pinned by
+  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs` (this
+  measurement) and `crossover_sigma_frame.rs` (the fix).
 
   Two defects surfaced while building it, both of which would have made
   the phase report the opposite of the truth:
