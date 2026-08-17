@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+- **`Sigma = z/s` no longer overflows to `inf` on a converged solve**
+  (#655).
+
+  At `tol = compl_inf_tol = 1e-306` with `mu_min = 5e-324`, an adaptive
+  solve converged (`SolveSucceeded`) at `mu = 9.09e-308` with a subnormal
+  slack of `2.02e-308`; against a bound multiplier of `4.5` that is a
+  `Sigma` of `2.2e308`, past `f64::MAX`, on the KKT diagonal — and from
+  there into every backsolve the sensitivity path makes.
+
+  `calculate_safe_slack`'s floor did not catch it because it is not the
+  floor for this: `eps*min(1, mu)` is `2.0e-323` at that `mu` — a
+  representable subnormal, not the `0` that would have substituted
+  `f64::MIN_POSITIVE` — so the slack cleared it and no correction fired
+  at all. The quantity that has to stay finite is `z/s`, so the floor is
+  now also `s >= max_i z_i / (f64::MAX/4)`, applied both to the trigger
+  and again after the `slack_move` bound-move cap (which can otherwise
+  cap a flagged slack back below the floor when the multipliers are
+  enormous, or when `slack_move` is `0`).
+
+  Off the overflow edge the floor sits at `z_max/4.5e307`, below every
+  slack an ordinary iterate carries: `scripts/sweep-fixtures.sh` over all
+  57 CLI fixtures is byte-identical in status, objective and iteration
+  count. Re-run under the issue's own settings, one line moves —
+  `linear_eq_collapsed_box` reported `SolveSucceeded` at a slack of
+  `4.2e-310` against `z = 84.4`, i.e. at `Σ = inf`, and now reports
+  `SearchDirectionBecomesTooSmall`. The trajectory is identical (same 20
+  iterations, same objective to the last bit, same factorizations); what
+  changed is that its complementarity is now measured on a slack that can
+  be divided by — `1.58e-304`, which does not meet the `compl_inf_tol =
+  1e-306` the caller asked for. A solve that cannot reach the requested
+  complementarity with a representable slack now says so instead of
+  claiming success, matching what the issue's own table already reported
+  one notch further down at `tol = 1e-308`.
+
 - **POUNCE's structured solve report is reachable from CasADi** (#644).
   Set `solve_report` to a path and each solve writes a
   `pounce.solve-report/v1` JSON file — the same format the `pounce`
@@ -183,10 +217,13 @@ changes.
   binding at multiplier `4.5`, crossover against the declared bounds takes
   `Σ` from `8.1e9` to `2.5e12` and the reduced-Hessian error from `4.95e-10`
   to `1.62e-12` — **306× more accurate**, matching the `1/Σ` law to every
-  printed digit. `Σ` never goes infinite: `CalculateSafeSlack` floors a slack
-  below `eps·min(1,μ)` up to about `μ/z`, so even an exactly-zero slack falls
-  back to the pre-crossover `Σ = z²/μ`, and the crossed-over slack measured
-  here bottoms out at `1.8e-12` without reaching the floor.
+  printed digit. `Σ` never goes infinite on this path: `CalculateSafeSlack`
+  floors a slack below `eps·min(1,μ)` up to about `μ/z`, so even an
+  exactly-zero slack falls back to the pre-crossover `Σ = z²/μ`, and the
+  crossed-over slack measured here bottoms out at `1.8e-12` without reaching
+  the floor. That threshold is about the barrier term and does not mention
+  the multiplier, so it does not bound `Σ` once `μ` goes subnormal; the floor
+  that does is the `s >= max_i z_i / (f64::MAX/4)` added for #655.
 
   The same measurement found the reverse under a nonzero
   `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics

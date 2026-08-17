@@ -51,6 +51,18 @@ use std::rc::Rc;
 /// inside the band from either edge.
 const ROW_NOISE_KAPPA: Number = 64.0;
 
+/// Headroom on the representability floor `calculate_safe_slack` puts under a
+/// slack so that `Σ = z/s` stays inside the double range (gh#655).
+///
+/// The bare requirement is `s ≥ z/f64::MAX`, which bounds `z/s` by `f64::MAX`
+/// exactly — no room for the rounding in the divide itself, and none for the
+/// fact that `Σ_x` *sums* a lower and an upper ratio into the same diagonal
+/// entry. Dividing the floor's budget by `4` bounds each ratio by `MAX/4` and
+/// so their sum by `MAX/2`, which leaves the KKT diagonal finite with a bit
+/// to spare. The factor costs nothing anywhere it is not needed: the floor is
+/// `z_max/4.5e307`, below every slack any non-pathological iterate carries.
+const SIGMA_OVERFLOW_HEADROOM: Number = 4.0;
+
 /// Calculated-quantities object. Holds shared handles on data and the
 /// NLP; per-quantity caches live in `RefCell`s here.
 pub struct IpoptCalculatedQuantities {
@@ -224,6 +236,11 @@ impl IpoptCalculatedQuantities {
     /// is `min(max(mu/multiplier, s_min), slack_move*max(1,|bound|)+slack)`.
     /// `multiplier` and `mu` are taken from the *current* iterate, exactly
     /// as upstream does even for trial slacks.
+    ///
+    /// Deviates from upstream in one place: `s_min` also carries a
+    /// representability floor `max_i z_i / (f64::MAX/4)` so that the
+    /// `Σ = z/s` this slack feeds stays inside the double range (gh#655).
+    /// See the comments at the two sites below.
     fn calculate_safe_slack(
         &self,
         slack: &mut dyn Vector,
@@ -241,6 +258,28 @@ impl IpoptCalculatedQuantities {
         let mut s_min = f64::EPSILON * mu.min(1.0);
         if s_min == 0.0 {
             s_min = f64::MIN_POSITIVE;
+        }
+        // gh#655: `eps*min(1,mu)` floors the *barrier* term, and nothing in it
+        // mentions the multiplier — so a slack can clear it and still be small
+        // enough against its own `z` that `Σ = z/s` leaves the double range.
+        // At `mu = 9.1e-308` the threshold is `2.0e-323`; a slack of
+        // `2.0e-308` sails past it untouched, and `z = 4.5` over that slack is
+        // `2.2e308`, i.e. `inf` on the KKT diagonal under a reported
+        // `SolveSucceeded`. `f64::MIN_POSITIVE` is not the fix either: the
+        // quantity that has to stay finite is `z/s`, so the floor is
+        // `s >= z/f64::MAX` (with `SIGMA_OVERFLOW_HEADROOM` of margin), not
+        // the smallest representable positive double. Divide before
+        // multiplying so a `z` near `f64::MAX` cannot overflow the floor
+        // itself; a non-finite `z` leaves the floor alone and is caught
+        // downstream by the iterate finiteness checks.
+        //
+        // Taken over `max_i z_i` rather than componentwise so one scalar also
+        // serves the `min_slack >= s_min` trigger above. That is conservative
+        // in the harmless direction: it can only raise a flagged slack
+        // further, and raising a slack only lowers `Σ`.
+        let sigma_floor = multiplier.amax() / (f64::MAX / SIGMA_OVERFLOW_HEADROOM);
+        if sigma_floor.is_finite() && sigma_floor > s_min {
+            s_min = sigma_floor;
         }
         if min_slack >= s_min {
             return 0;
@@ -295,6 +334,16 @@ impl IpoptCalculatedQuantities {
 
         // new slack = min(target, t_max) where flagged, else slack.
         t.element_wise_min(&*t_max);
+        // gh#655, second half: re-apply the floor *after* the bound-move cap.
+        // `t_max` bounds how far a bound may be nudged, which is a policy the
+        // user sets; a finite `z/s` is not one. The cap sits below `s_min`
+        // only when `slack_move*max(1,|bound|)` does — with the default
+        // `slack_move` that needs `max_i z_i` past `6e295`, and `slack_move = 0`
+        // (the "never move a bound" setting) makes it exact — but where it
+        // does, the min above would hand back the overflowing slack it was
+        // called to repair. Components that were not flagged are `>= s_min`
+        // already, so this is a no-op for them.
+        t.element_wise_max(&*s_min_vec);
         slack.copy(&*t);
         retval
     }
@@ -3013,6 +3062,81 @@ mod tests {
         let s = dense_vals(&cq.curr_sigma_x());
         assert!((s[0] - 0.25).abs() < 1e-15);
         assert!((s[1] - 0.35).abs() < 1e-15);
+    }
+
+    /// gh#655 fixture. `x_L[0] = 0`, so the lower-bound block of `x` carries
+    /// slack `x0` against multiplier `z_l`, at barrier parameter `mu`. The
+    /// rest of the iterate is the default fixture's.
+    fn fixture_at_mu(x0: Number, z_l: Number, mu: Number) -> IpoptCalculatedQuantities {
+        let mut data = IpoptData::new();
+        data.curr_mu = mu;
+        let iv = IteratesVector::new(
+            rcv(&[x0, 3.0]),
+            rcv(&[4.0]),
+            rcv(&[1.0]),
+            rcv(&[1.0]),
+            rcv(&[z_l]),
+            rcv(&[0.7]),
+            rcv(&[0.3]),
+            rcv(&[]),
+        );
+        data.set_curr(iv);
+        let data_handle = StdRc::new(RefCell::new(data));
+        let nlp: StdRc<RefCell<dyn IpoptNlp>> = StdRc::new(RefCell::new(MockNlp::new()));
+        let mut cq = IpoptCalculatedQuantities::new(data_handle, nlp);
+        cq.kappa_d = 0.0;
+        cq
+    }
+
+    /// gh#655. The reported point, verbatim: `mu = 9.0909e-308`, a subnormal
+    /// slack of `2.0202e-308` against `z = 4.5`, reached under a
+    /// `SolveSucceeded`. The old floor never even fired here — `eps*mu` is
+    /// `2.0e-323`, still a representable subnormal rather than the `0` that
+    /// would have substituted `f64::MIN_POSITIVE`, so the slack cleared the
+    /// threshold untouched and `4.5 / 2.0202e-308 = 2.2e308` overflowed.
+    #[test]
+    fn subnormal_slack_does_not_overflow_sigma() {
+        let mu: Number = 9.0909e-308;
+        let slack: Number = 2.0202e-308;
+        let z: Number = 4.5;
+        // The premise: the barrier-side threshold does not catch this point.
+        assert!(f64::EPSILON * mu.min(1.0) > 0.0);
+        assert!(slack > f64::EPSILON * mu.min(1.0));
+        assert!(!(z / slack).is_finite());
+
+        let cq = fixture_at_mu(slack, z, mu);
+        let s = dense_vals(&cq.curr_sigma_x());
+        assert!(s[0].is_finite(), "Sigma_x[0] = {} is not finite", s[0]);
+        // Floored at z/(MAX/4), so the ratio lands at MAX/4 at worst.
+        assert!(s[0] <= f64::MAX / SIGMA_OVERFLOW_HEADROOM);
+        // The slack itself was raised to the floor, not to f64::MIN_POSITIVE.
+        assert!(dense_vals(&cq.curr_slack_x_l())[0] >= z / f64::MAX);
+        // The untouched upper block still reads (5 - 3) against z_U = 0.7.
+        assert!((s[1] - 0.35).abs() < 1e-15);
+    }
+
+    /// gh#655, the half the trigger alone does not cover: a multiplier large
+    /// enough that the bound-move cap (`slack_move*max(1,|bound|) + slack`)
+    /// sits *below* the representability floor. Capping there would hand back
+    /// a slack that still overflows, so the floor is re-applied after the cap.
+    #[test]
+    fn representability_floor_survives_the_bound_move_cap() {
+        let cq = fixture_at_mu(1e-300, 1e300, 1e-8);
+        // Premise: the cap really is the binding constraint here.
+        assert!(cq.slack_move * 1.0 + 1e-300 < 1e300 / (f64::MAX / SIGMA_OVERFLOW_HEADROOM));
+        let s = dense_vals(&cq.curr_sigma_x());
+        assert!(s[0].is_finite(), "Sigma_x[0] = {} is not finite", s[0]);
+        assert!(s[0] <= f64::MAX / SIGMA_OVERFLOW_HEADROOM);
+    }
+
+    /// The floor is `z_max/4.5e307`; a slack twelve orders of magnitude above
+    /// anything subnormal is nowhere near it, and must come back bit-identical
+    /// — the correction is meant to be invisible off the overflow edge.
+    #[test]
+    fn ordinary_small_slack_is_left_exactly_alone() {
+        let cq = fixture_at_mu(1e-20, 0.5, 1e-8);
+        assert_eq!(dense_vals(&cq.curr_slack_x_l()), vec![1e-20]);
+        assert_eq!(dense_vals(&cq.curr_sigma_x())[0], 0.5 / 1e-20);
     }
 
     #[test]
