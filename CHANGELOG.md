@@ -192,10 +192,13 @@ changes.
   binding at multiplier `4.5`, crossover against the declared bounds takes
   `Σ` from `8.1e9` to `2.5e12` and the reduced-Hessian error from `4.95e-10`
   to `1.62e-12` — **306× more accurate**, matching the `1/Σ` law to every
-  printed digit. `Σ` never goes infinite: `CalculateSafeSlack` floors a slack
-  below `eps·min(1,μ)` up to about `μ/z`, so even an exactly-zero slack falls
-  back to the pre-crossover `Σ = z²/μ`, and the crossed-over slack measured
-  here bottoms out at `1.8e-12` without reaching the floor.
+  printed digit. `Σ` never goes infinite on this path: `CalculateSafeSlack`
+  floors a slack below `eps·min(1,μ)` up to about `μ/z`, so even an
+  exactly-zero slack falls back to the pre-crossover `Σ = z²/μ`, and the
+  crossed-over slack measured here bottoms out at `1.8e-12` without reaching
+  the floor. That threshold is about the barrier term and does not mention
+  the multiplier, so it does not bound `Σ` once `μ` goes subnormal; the floor
+  that does is the `s >= max_i z_i / (f64::MAX/4)` added for #655.
 
   The same measurement found the reverse under a nonzero
   `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics
