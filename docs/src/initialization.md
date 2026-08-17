@@ -238,7 +238,9 @@ initializer instead rebuilds what it was not given:
   re-derived from the stationarity identity
   `P_L z_L − P_U z_U = ∇f + J_c^T y_c + J_d^T y_d` (and its slack-block
   twin `P_L v_L − P_U v_U = −y_d`), floored at `μ / slack` so an
-  inactive bound still gets the value complementarity implies;
+  inactive bound still gets the value complementarity implies and
+  capped at ten times that floor, so a stationarity *miss* cannot be
+  laundered into a multiplier (#617);
 - an equality-multiplier block that is identically zero goes through
   the same regularized least-squares augmented solve the cold path
   uses, now with real bound multipliers in its right-hand side;
@@ -256,6 +258,44 @@ initializer instead rebuilds what it was not given:
 
 `warm_start_target_mu`, when set, still pins `mu` outright.
 
+### A seed the solver will not believe
+
+Everything above derives the blocks you did not supply *from* the ones
+you did, so a supplied block that does not describe your point gets
+propagated rather than caught. Two guards bound that (#617, #618). Both
+are as conservative as the `mu` rule above, and for the same reason —
+refusing a seed reroutes the trajectory exactly as much as trusting a
+bad one does.
+
+**A dual block that cannot belong to this primal point is refused.**
+Each seeded bound-multiplier block is measured on the quantity the
+barrier *is*: `|z_i| · s_i`, averaged over the entries you actually
+seeded. A point on any central path — converged, mid-solve, or stale —
+carries that at the order of its own barrier, and a point that misses
+feasibility by `inf_pr` may carry it at that order too. A block reading
+ten times above **both** cannot have come from a solve of this problem,
+so it takes the pre-#606 constant fill and stops being an input to
+anything. The equality block gets the matching test — a `y` whose
+stationarity residual dwarfs `∇f` and the multipliers *you* supplied is
+not this point's `y` — and while the block itself is left where you put
+it (there is no constant to fall back to), the split no longer runs off
+it.
+
+**A slack the point's own infeasibility swamps is not a measurement.**
+Both halves of the bound reconstruction read a small slack as "this
+bound is active". On a point that misses feasibility by more than the
+slack itself, that reading is not available, so those entries keep the
+pre-#606 constant instead. It is a per-entry test, so a partly-stale
+seed keeps the reconstruction exactly where its slacks still outrun the
+residual. The comparison is made against `inf_pr` only once `inf_pr`
+clears the barrier by a factor of ten — a converged solve leaves
+`inf_pr` at its own tolerance, routinely above the pushed slacks, and
+comparing the two unguarded would throw away the reconstruction on the
+exact restarts it exists for.
+
+Neither guard fires on a good seed: an exact same-model restart is
+bit-identical to what #606 shipped.
+
 What happened is reported back. From Python it is `info["warm_start"]`:
 
 ```python
@@ -264,13 +304,23 @@ info2["warm_start"]
 # {'primal_residual': 1.6e-09, 'dual_residual': 3.5e-10,
 #  'complementarity': 4.2e-09, 'mu_in': 2.5e-09, 'mu_out': 4.2e-09,
 #  'bound_duals': 'reconstructed', 'eq_duals': 'accepted',
-#  'bound_duals_reconstructed': 1, 'recentering_disabled': False}
+#  'bound_duals_reconstructed': 1, 'bound_duals_rejected': 0,
+#  'eq_duals_rejected': False, 'stationarity_split': True,
+#  'recentering_disabled': False}
 ```
+
+`bound_duals` reads `rejected` when a seeded block was refused, and
+`bound_duals_rejected` counts the entries; the verdicts are per block,
+so a model can refuse the blocks you seeded and still reconstruct the
+slack-bound blocks nobody can seed, and the two counters keep that
+legible.
 
 From Rust it is `IpoptApplication::warm_start_diagnostics()`. At
 `print_level=5` the iteration line carries `wz` (bound multipliers
-rebuilt), `wy` (equality multipliers rebuilt), `wy0` (a reconstruction
-was discarded) and `wmu` (the barrier was loosened).
+rebuilt), `wz!` (a seeded bound block was refused), `wy` (equality
+multipliers rebuilt), `wy0` (a reconstruction was discarded), `wy!`
+(the seeded `y` was refused as an input) and `wmu` (the barrier was
+loosened).
 
 ### Two options that are refused
 

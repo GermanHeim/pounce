@@ -9,6 +9,82 @@ changes.
 
 ## [Unreleased]
 
+- **Warm start: a dual seed that cannot belong to its primal point is
+  refused instead of reconstructed off, and a slack the point's own
+  infeasibility swamps stops being read as an active bound** (#617,
+  #618). Both are #606 follow-ups in the residual-adaptive recentering
+  pass, and both regressions reproduce on the parent commit `66cc1d41`
+  larger than they were first filed at. Measured on
+  `benchmarks/warmstart` at 4x scale, 14 families, summed iterations,
+  with `warm_start_recentering=none` as the pre-#606 control:
+
+  | seed | pre-#606 | `66cc1d41` | now |
+  |---|--:|--:|--:|
+  | exact restart, full duals | 13 | 9 | **9** |
+  | exact restart, `lagrange` only | 24 | 11 | **11** |
+  | corrupted duals, full | 33 | 164 | **25** |
+  | corrupted duals, `lagrange` only | 27 | 115 | **20** |
+  | stale seed, full | 344 | 351 | **354** |
+  | stale seed, `lagrange` only | 273 | 339 | **279** |
+  | cold (no seed) | 166 | 166 | 166 |
+
+  *A corrupted dual seed escalated `mu` to the cold ceiling* (#617).
+  Multipliers corrupted by `N(0, 1e4)` noise, paired with the exact
+  primal solution, read back as an average complementarity of `1e2` to
+  `4e2`; the #606 escalation took that at face value and moved `mu`
+  eight orders — from the converged barrier to `MU_CEILING` — while
+  keeping `x` at the answer, which is the most off-centre a point can
+  be for that barrier. Every corrupted regression in the corpus had
+  `mu_out = 0.1`, and the result cost about what a cold solve costs. A
+  seeded bound block is now measured on `|z_i| · s_i` over the entries
+  the caller seeded, and refused — taking the pre-#606 constant fill —
+  when that reads ten times above both `mu_init` and the point's own
+  `inf_pr`; a seeded `y` whose stationarity residual dwarfs `∇f` and
+  the caller's own multipliers stops being an input to the split. On
+  HS071 with the same corruption: 9 iterations → **3** (cold: 8,
+  pre-#606: 3), and `mu_out` is back to `mu_in`.
+
+  *The stationarity split laundered a miss into a multiplier* (#617).
+  The split may raise a bound multiplier above `mu / slack` — the
+  push's inflation put #606's reconstructed HS071 multiplier 5.5x low,
+  so the margin is real — but it may not raise it by orders. It is now
+  capped at ten times the complementarity floor. On `nmpc_vanderpol` a
+  corrupted `lagrange` seed had been hiding behind the multipliers this
+  same pass invented: 12 iterations → **2**.
+
+  *The reconstruction read stale slacks as active bounds* (#618). Both
+  `mu / slack` and the split treat a small slack as "this bound is
+  active". On a seed carried across a parameter move, a slack smaller
+  than the point's own primal infeasibility supports neither reading,
+  and those entries now keep the pre-#606 constant. It is a per-entry
+  test, so a partly-stale seed keeps the reconstruction wherever its
+  slacks still outrun the residual, and the comparison only engages
+  once `inf_pr` clears the barrier tenfold — unguarded it fires on
+  converged points, whose `inf_pr` routinely exceeds the pushed slacks,
+  and cost the exact partial restart 11 → 15. Worst case in the corpus,
+  `mpc_horizon_40` at a stale `lagrange`-only seed: 81 → **45**.
+
+  *What is not fixed.* #618's first proposed remedy — a gentler `mu`
+  escalation band below the 10x trigger — was measured and is inert on
+  current `main`: every stale regression left in the corpus has a
+  measured complementarity within 1.2x to 3x of `mu_init`, so a band
+  starting at 1x has nothing to raise `mu` to. The residue is one
+  family, `degenerate_vertex`, 2 → 12 in both stale seed modes. It is
+  feasible (`inf_pr = 8.4e-9`), centred (`avrg_compl = 3.0e-9` against
+  `mu_init = 2.5e-9`), and only its `y` has moved; no measurement
+  available to the initializer separates it from a good seed, and the
+  conservatism both issues ask for is what stops one being invented.
+
+  `cresc4` — the canary both issues name — is bit-identical, as is the
+  whole 57-fixture corpus in all three regimes the initializer reaches
+  (default options, `warm_start_init_point=yes`, and the tightened-push
+  recipe). `warm_start_recentering=none` remains bit-identical to
+  `66cc1d41` across the whole seed-mode corpus. `info["warm_start"]`
+  grows `bound_duals_rejected` and `eq_duals_rejected`, `bound_duals`
+  gains a `rejected` verdict, and the iteration line gains `wz!` /
+  `wy!`. `benchmarks/warmstart/seedmodes.py` is the harness both
+  issues' reproduce sections assume and neither had.
+
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
   down with it** (#609). Four measurements on the parent commit
