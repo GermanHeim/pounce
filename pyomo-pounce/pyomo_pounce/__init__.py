@@ -52,9 +52,11 @@ from pyomo_pounce.continuation import continuation, shift_map
 from pyomo_pounce.init_options import InitOptions
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
+    ActiveSetChange,
     Covariance,
     EstimateReport,
     Gradient,
+    active_set_changes,
     covariance,
     declare_fitted,
     declare_residual,
@@ -121,6 +123,8 @@ __all__ = [
     "continuation",
     "shift_map",
     "EstimateReport",
+    "active_set_changes",
+    "ActiveSetChange",
     "Gradient",
     "preflight",
     "PyomoPreflightReport",
