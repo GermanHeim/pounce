@@ -58,6 +58,14 @@ pub enum RestorationOutcome {
     /// `IpRestoConvCheck.cpp:240`. Outer loop maps this to
     /// `SolverReturn::LocalInfeasibility`.
     LocallyInfeasible,
+    /// The user's intermediate callback returned `false` from a
+    /// restoration-phase fire (gh#645). Outer loop maps this to
+    /// `SolverReturn::UserRequestedStop` **without** promoting the
+    /// staged trial point, so the solve hands back the last iterate
+    /// accepted for the *original* NLP rather than a point of the
+    /// restoration subproblem — the same discipline the pounce#244
+    /// deadline exit already follows.
+    UserRequestedStop,
 }
 
 pub trait RestorationPhase {
@@ -92,6 +100,29 @@ pub trait RestorationPhase {
     fn set_debug_hook(
         &mut self,
         _hook: Option<std::rc::Rc<std::cell::RefCell<dyn crate::debug::DebugHook>>>,
+    ) {
+    }
+
+    /// Forward the user's TNLP onto the restoration inner IPM so its
+    /// `intermediate_callback` fires from the sub-solve too (gh#645).
+    /// Default no-op, like [`Self::set_debug_hook`] above, which this
+    /// deliberately mirrors — the debugger took the same route first.
+    ///
+    /// Without this the callback fires only from the outer loop, so a
+    /// caller is blind for the whole of restoration. That is the phase
+    /// most likely to overrun a control period, which makes it the
+    /// phase a real-time caller most needs to be able to abort in.
+    ///
+    /// The inner IPM iterates on the min-C1-norm feasibility
+    /// subproblem, so the stats those fires carry describe *that*
+    /// problem, not the user's NLP. `AlgorithmMode::RestorationPhaseMode`
+    /// on each such fire is what makes them interpretable, and
+    /// [`crate::ipopt_alg::IpoptAlgorithm::fires_as_restoration`] is
+    /// what sets it — see the note there on why the live-inspector
+    /// context is deliberately *not* installed for these fires.
+    fn set_intermediate_tnlp(
+        &mut self,
+        _tnlp: Option<std::rc::Rc<std::cell::RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
     ) {
     }
 

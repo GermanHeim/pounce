@@ -115,7 +115,13 @@ pub fn make_resto_inner_solver(
     mut backend_factory_factory: InnerBackendFactoryFactory,
 ) -> crate::min_c_1nrm::RestoInnerSolver {
     Box::new(
-        move |outer_data, outer_cq, outer_nlp, orig_progress_cb, print_iter_output, debug_hook| {
+        move |outer_data,
+              outer_cq,
+              outer_nlp,
+              orig_progress_cb,
+              print_iter_output,
+              debug_hook,
+              intermediate_tnlp| {
             run_inner_resto(
                 outer_data,
                 outer_cq,
@@ -126,6 +132,7 @@ pub fn make_resto_inner_solver(
                 orig_progress_cb,
                 print_iter_output,
                 debug_hook,
+                intermediate_tnlp,
             )
         },
     )
@@ -245,6 +252,7 @@ pub fn run_inner_resto(
     orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
     print_iter_output: bool,
     debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -568,6 +576,17 @@ pub fn run_inner_resto(
     if let Some(h) = debug_hook {
         alg = alg.with_debug_hook(h);
     }
+    // Forward the user's TNLP so `intermediate_callback` fires per inner
+    // iteration (gh#645), flagged so those fires carry
+    // `AlgorithmMode::RestorationPhaseMode` and skip the live-inspector
+    // context — the inner iterate is a compound `(x_orig, n, p)` vector,
+    // not a point of the user's NLP. Left unset when the caller
+    // installed no callback, so nothing about this path is reachable for
+    // them.
+    if let Some(t) = intermediate_tnlp {
+        alg = alg.with_tnlp(t);
+        alg.fires_as_restoration = true;
+    }
     // Forward the outer `print_level == 0` gate. Suppresses the
     // restoration `r`-suffixed iter table; the resto-of-resto level
     // also inherits the same flag (its `RestorationPhase` impl is the
@@ -598,6 +617,26 @@ pub fn run_inner_resto(
         let d = alg.data.borrow();
         (d.iter_count, d.info_iters_since_header, d.info_last_output)
     };
+
+    // gh#645: the user's callback returned `false` from a restoration
+    // fire. Return before the locally-infeasible adjudication below
+    // rather than after it: that verdict is a claim about the original
+    // NLP's feasibility, and a sub-solve the user interrupted has not
+    // finished earning it. The caller maps this to
+    // `RestorationOutcome::UserRequestedStop` and drops `trial_x` /
+    // `trial_s` on the floor — they are carried here only because the
+    // struct is shared with the success path.
+    if matches!(status, SolverReturn::UserRequestedStop) {
+        return Some(RestoSolveResult {
+            trial_x,
+            trial_s,
+            iter_count: inner_iter_count,
+            iters_since_header,
+            last_output,
+            locally_infeasible: false,
+            user_requested_stop: true,
+        });
+    }
 
     // Locally-infeasible detection. Mirrors upstream
     // `IpRestoConvCheck.cpp:208-241`: fires when the inner sub-IPM
@@ -866,6 +905,7 @@ pub fn run_inner_resto(
         iters_since_header,
         last_output,
         locally_infeasible,
+        user_requested_stop: false,
     })
 }
 
