@@ -9,6 +9,64 @@ changes.
 
 ## [Unreleased]
 
+- **A diverging restoration is no longer reported as an infeasible
+  model** (#661).
+
+  `run_inner_resto` renders `Infeasible_Problem_Detected` from six gates.
+  One is a verdict the restoration sub-solve's own convergence check
+  issued at a point it certified. The other five *reconstruct* "the
+  sub-solve stalled at a point it could not improve on" after the fact,
+  from a terminal status plus a KKT residual — and each then tested only
+  that the recovered violation was *large*.
+
+  Large is a different claim from stalled, and they come apart in the
+  worst direction: a restoration that is actively blowing up satisfies a
+  size test more emphatically the further it diverges. On
+  `pooling_rt2stp.nl` under `mehrotra_algorithm=yes` the `step_failure`
+  gate fired at an original-NLP violation of `7.35e5` after restoration
+  was *entered* at `6.96e0` — feasibility made 105,700x worse — and the
+  solver told the user the model may be infeasible. It is not; the same
+  model solves at default options. `hs71_obj1e8` was a second instance
+  (entry `1.04e2`, verdict at `6.79e9`).
+
+  The five reconstructed gates now also require what their own comments
+  already claimed: the recovered point must be within
+  `RESTO_DIVERGENCE_HEADROOM` (10x) of the violation restoration was
+  entered at. A plateau — the signature they describe, and what
+  `qcqp750-2nc` showed when the `step_failure` gate was written — sits at
+  ~1x entry, so the guard is loose enough to leave it alone. The
+  sub-solve's own certified verdict is not gated; it carries the stall
+  evidence the other five infer.
+
+  #619 did not introduce this. Its change of starting point only made
+  `pooling_rt2stp`'s inner explode at iteration 32 rather than 19, and
+  the gate carries an `iter >= 30` floor — identical divergence on either
+  side of #619, opposite verdict, decided by an iteration count.
+
+  The guard stands down once the sub-solve has burned
+  `RESTO_STALL_EVIDENCE_ITERS` — the 1000-iteration budget the `cycle`
+  gate above already required before reading a stall as local
+  infeasibility. `issue_508_infeasible_gap_1em2` is why: it is infeasible
+  by a constructed `1e-2` gap, and its restoration sits at `1.04e-2` —
+  the violation it entered at, to the digit — for 1016 inner iterations
+  before jumping to `3.19e9` over its last three. The large final ratio
+  describes those three iterations, not the run. `pooling_rt2stp` and
+  `hs71_obj1e8` have no such plateau: both exit after ~30 inner
+  iterations, and `hs71_obj1e8` was still *reducing* the original
+  violation (`4.48e1` to `2.25e1`) shortly before diverging. Deferring to
+  that budget also removes an inconsistency predating this guard — a
+  sub-solve stalling 1000+ iterations and exiting by iteration cap
+  rendered the verdict, while the identical stall exiting by step failure
+  did not.
+
+  Trajectory sweep: the fixture corpus is byte-identical at default
+  options and under `least_square_init_primal=yes`. Under
+  `mehrotra_algorithm=yes` exactly two lines move —
+  `pooling_rt2stp` and `hs71_obj1e8`, both from
+  `Infeasible_Problem_Detected` to `Restoration_Failed`, both feasible
+  models, both with iteration count and objective unchanged. No fixture
+  loses a correct verdict on any arm.
+
 - **A warm-start check that could not have seen a reordering now says
   so** (#660). `check_compatible()` computed the "ordering unverified"
   caveat on every path but rendered it only inside its
