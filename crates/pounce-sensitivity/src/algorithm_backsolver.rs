@@ -235,6 +235,21 @@ impl PdSensBacksolver {
             Some(c) => rhs.iter().zip(c.e.iter()).map(|(&r, &e)| r * e).collect(),
             None => rhs.to_vec(),
         };
+        // A released bound's multiplier is fixed at zero, so its row
+        // has no equation and the right-hand side there is meaningless.
+        // It is also dangerous: the elimination folds a multiplier
+        // row's entry in as r_z / s, and at a tightly active bound the
+        // barrier-correction term every parametric right-hand side
+        // carries, -mu on each bound row, folds to -mu / s = -z by
+        // complementarity, an order-one injection into the released
+        // variable's equation. Measured on a two-variable QP that bent
+        // the released direction from the analytic [1.227, 0.454] to
+        // [1.154, 0.194].
+        for &r in released {
+            if r < scaled.len() {
+                scaled[r] = 0.0;
+            }
+        }
         if shift && !self.shift_released_rhs(released, &mut scaled) {
             return false;
         }
@@ -272,18 +287,33 @@ impl PdSensBacksolver {
             let curr = d.curr.as_ref()?;
             (dense(Rc::clone(&curr.z_l))?, dense(Rc::clone(&curr.z_u))?)
         };
+        // Rebuild each released variable's entry from its bounds that
+        // stay active, rather than subtracting the released bound's
+        // `z / s` from the cached total. The subtraction differences
+        // two numbers of order `z / s`, 1e7 and up at a tightly
+        // active bound, and its correctness rests on the cache having
+        // built its total from bitwise-identical products. Rebuilding
+        // makes the released side an exact zero by construction and
+        // depends on nothing about the cache.
         for &r in released {
             let br = rows.iter().find(|b| b.row == r)?;
-            let k = r - base_row - if br.lower { 0 } else { self.dims[4] };
-            let (z, s) = if br.lower {
-                (*z_l.get(k)?, *slack_l.get(k)?)
-            } else {
-                (*z_u.get(k)?, *slack_u.get(k)?)
-            };
-            if s == 0.0 || !s.is_finite() {
-                return None;
+            let mut fresh = 0.0;
+            for other in rows.iter().filter(|b| b.var_row == br.var_row) {
+                if released.contains(&other.row) {
+                    continue;
+                }
+                let k = other.row - base_row - if other.lower { 0 } else { self.dims[4] };
+                let (z, s) = if other.lower {
+                    (*z_l.get(k)?, *slack_l.get(k)?)
+                } else {
+                    (*z_u.get(k)?, *slack_u.get(k)?)
+                };
+                if s == 0.0 || !s.is_finite() {
+                    return None;
+                }
+                fresh += z / s;
             }
-            *sigma.get_mut(br.var_row)? -= z / s;
+            *sigma.get_mut(br.var_row)? = fresh;
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);
