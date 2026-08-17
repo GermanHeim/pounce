@@ -1,0 +1,24 @@
+# Every PR prepends its entry to CHANGELOG.md's `[Unreleased]` section, so
+# any two open PRs conflict there on exactly the same lines — N queued PRs
+# produce N-1 conflicts, none of which is a disagreement about anything.
+# Measured during the 17 Aug rush (#637, #638, #639, #640, #642 open at
+# once): #637 was re-synced twice in one hour and conflicted in this file
+# both times, in the `[Unreleased]` section only.
+#
+# `merge=union` is git's built-in driver for exactly this shape: on a
+# conflicting hunk it keeps both sides' lines instead of stopping. Both
+# entries survive, in whichever order the hunks give, and the merge
+# completes.
+#
+# The trade it makes is real and worth knowing before relying on it: union
+# is not smart, it is *silent*. Two branches editing the SAME line — two
+# rewordings of one entry, say — produce both lines, one after the other,
+# with no conflict raised for anyone to adjudicate. That is a contradictory
+# changelog landing unreviewed rather than a merge that stops and asks. It
+# is the right trade only because entries here are append-only in practice:
+# a PR adds its own entry and does not edit anyone else's.
+#
+# So: still read the `[Unreleased]` seam after a merge. Union also tends to
+# eat the blank line between the two entries it joins, which is cosmetic
+# but visible in the rendered changelog.
+CHANGELOG.md merge=union
