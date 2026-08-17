@@ -479,8 +479,8 @@ moved = ws.transfer(next_prob, shift, var_ids=next_ids, con_ids=next_con_ids)
 
 With stable IDs on both sides, `reindex` writes that mapper for you —
 entries the target shares with the source move to their new positions,
-entries only the target has are left *unseeded* (`NaN`, which the warm
-initializer reads as "you decide") rather than fabricated:
+and entries only the target has are the freshly-entered stage of a
+receding horizon:
 
 ```python
 moved = ws.reindex(next_prob, var_ids=next_ids, con_ids=next_con_ids)
@@ -488,13 +488,138 @@ x, info = next_prob.solve(warm_start=moved)
 ```
 
 That covers both cases: a reordering, where the ID sets are equal, and a
-receding horizon, where they overlap. Note what it does *not* buy you —
-a transferred interior-point start is about validity, not speed. On a
-slew-limited tracking model the mapped point costs 12 iterations against
-7 for a cold solve; on a longer sinusoidal track the gap widens with the
-horizon (12 vs 9 at horizon 5, 30 vs 10 at horizon 40). That is the same
-barrier/active-set limit described just below, and the reason the SQP
-path exists.
+receding horizon, where they overlap.
+
+#### What goes in the new stage
+
+The two blocks of a prolongated stage are answered differently, and both
+answers were measured (pounce#622).
+
+Its **multipliers** are left *unseeded* — `NaN`, which the warm
+initializer reads as "you decide" — rather than fabricated. Since
+pounce#606 the solver reconstructs each unseeded *bound* multiplier
+from `μ̂ / slack`, the complementarity relation it is about to enforce,
+which is a better number than anything this side can invent. That
+reconstruction needs no dual to work from, only the slacks the point
+already determines, so it runs however much or little you seeded
+(pounce#622).
+
+The *equality* multipliers are the asymmetric half. Completing those
+takes a least-squares solve that a partial seed can support and a bare
+point cannot, so a state carrying no duals at all gets them reported
+`unseeded` and left at the constant fill — deliberately, with its own
+measurement behind it (deriving them from a primal-only seed cost
+1102 → 1211 iterations across the 27 parametric paths in
+`benchmarks/warmstart`). `info["warm_start"]` reports the split
+directly: `eq_duals: accepted` for a mapped replay against `unseeded`
+for a values-only one.
+
+So what the carried multipliers buy is that equality block, not the
+bound blocks. Dropping them is close to a wash on iteration count here
+— 44/55/55/47 against 45/50/54/46 over the eight-step loop tabulated
+below — and the reason to carry them is that they are the only thing
+that *can* carry `y` across the shift.
+
+Its **primal values** are the `fill_x` argument, and they matter more
+than they look:
+
+| `fill_x` | what lands in the new stage |
+|---|---|
+| `"prolong"` (default) | Repeat the last stage. When the identifier map is a pure shift — every matched entry the same distance from its counterpart, which is what a receding horizon *is* — that distance is the layout's own period, and each new entry takes the value one period behind it, clipped into its box. One variable per stage or `(p, v, u)` interleaved, the value lands in the same *kind* of slot; a tail longer than one stage repeats the terminal stage. Not a shift (a reordering, an interpolation) means no stage to repeat, and this degrades to `"zero"`. |
+| `"zero"` | Zero clipped into the variable's box: independent of the point, and of the model. The pre-#622 default. |
+| an array or scalar | Your values, used as-is — nothing is prolongated on top of an explicit answer. |
+
+The default is worth what it costs to state. On a chain with a slew
+limit, `"zero"` enters the new stage 2.25 away from feasible — the new
+variable starts at `0` next to a neighbour at `2.75` under a limit of
+`0.5` — and the filter's first iterations go on walking that back: 11
+iterations against 7 for a cold solve. `"prolong"` enters it *feasible*
+(primal residual 1.7e-10) and costs 8, and over the closed loop 21
+against cold's 22.
+
+Where the transfer pays properly is over a sequence, at a horizon long
+enough to have something to carry. Eight steps of a receding horizon on
+the sinusoidal tracking family, total iterations, transferred against
+cold:
+
+| horizon | transferred | cold |
+|---|---|---|
+| 5 | 45 | 67 |
+| 10 | 50 | 75 |
+| 20 | 54 | 77 |
+| 40 | 46 | 76 |
+
+`"zero"` runs the same loop in 42 / 47 / 55 / 53 — ahead at the two
+short horizons, behind at the two long ones, and 27 against 21 on the
+slew fixture. The default is not the one that wins every row; it is the
+one that never hands the solver a point the model itself rejects. When
+your own prolongation is better than repeating a stage — a simulation
+step, a tangent predictor — `transfer()` with an explicit mapper is
+where it goes.
+
+Those numbers are `66cc1d4` + pounce#622, and they are the *reverse* of
+what this page said before pounce#620: a transferred start used to lose
+to a cold solve by more the longer the horizon got. Residual-adaptive
+recentering (pounce#606/#620) is what turned that around; the fill
+policy above is what fixed the case it did not reach.
+
+#### Could a better transfer do better? (pounce#622)
+
+Yes, by about 2x — and not by any of the obvious routes, so the
+measurements are recorded here rather than left for the next person to
+re-run. Bound the question with oracles no transfer can beat: seed each
+window with the *next* window's converged answer. Eight-step receding
+horizon, total iterations:
+
+| horizon | cold | shipped | perfect primal | perfect primal+dual |
+|---|---|---|---|---|
+| 5 | 67 | 45 | 21 | 9 |
+| 10 | 75 | 50 | 24 | 12 |
+| 20 | 77 | 54 | 26 | 18 |
+| 40 | 76 | 46 | 23 | 18 |
+
+So the barrier's own floor is about one iteration per warm step, and
+roughly half of what the shipped transfer spends is the zero-order
+prediction rather than the interior-point method. Two ways of
+collecting it were measured and neither works:
+
+**A finite-difference (secant) predictor** — each variable stepped by
+its own drift across the last two solves, which stable identifiers make
+directly observable — is *worse than zero-order everywhere*: 59/75/66/60
+against 45/50/54/46, and at horizon 10 no better than a cold solve. The
+prolongated point is feasible to 1e-10; extrapolating pushes it off the
+constraint manifold and breaks the pairing between the carried
+multipliers and the new slacks. This is the same failure
+`docs/src/continuation.md` records for the predictor at horizon 80.
+
+**The KKT tangent** (`pounce.Solver.parametric_step`, the machinery
+behind the `pred-ipm` arm) cannot be pointed at a horizon shift at all,
+for a reason worth stating plainly: **a receding horizon is not a
+parametric perturbation.** On the stages two consecutive windows share,
+theta does not move — the same physical targets are in force. What
+changes is *which stages exist*: one leaves, one enters. Fed a shift,
+`parametric_step` is handed a delta vector of exact zeros and correctly
+returns a zero step, so the "predictor" is bit-identical to the
+zero-order transfer. Give the same family a parameter that genuinely
+moves — an MPC initial-condition pin — and the tangent becomes
+non-trivial and then degrades with horizon: 52/87/95/137 against the
+zero-order 54/78/81/93 at horizons 5/10/20/40, ahead only at the
+shortest, and worst where there are the most active-set events per step.
+
+What is left, then, is the part no first-order step can supply: the
+freshly-entered stage has no history to extrapolate *from*. Closing the
+gap means predicting it from the model — a dynamics rollout, which
+`transfer()`'s mapper already lets you supply and which only you can
+write — or changing method, which is what the active-set SQP path is
+for.
+
+Two things it still does not buy you. A single hand-off across a *large*
+parameter step on a *small* model is not where warm starting wins —
+on the five-variable slew fixture, whose targets move by 2.0 per stage,
+the transferred point costs 8 iterations against a cold solve's 7 to 9
+(the cold arm's own spread over where you put the guess). And the
+underlying barrier/active-set limit described just below has not gone
+anywhere; it is still the reason the SQP path exists.
 
 ### Artifacts written before pounce#607
 

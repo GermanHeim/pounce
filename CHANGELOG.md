@@ -9,6 +9,146 @@ changes.
 
 ## [Unreleased]
 
+- **A warm start that carries only a point is no longer charged for
+  multipliers it never claimed to have** (#622, second half). Raised on
+  the issue with a controlled table: turning on `warm_start_init_point`
+  degraded pounce on a values-only start while ipopt paid at most a few
+  iterations for the same options. It reproduced here, smaller, and the
+  mechanism was in the plumbing rather than the algorithm.
+
+  `TNLP::get_starting_point` is asked for `init_z` and may leave the
+  blocks untouched — a caller warm starting from a point alone does
+  exactly that — and the buffer behind them was pre-filled with **zero**.
+  Zero is a *legal multiplier value*, so it sailed past the "was this
+  seeded?" resolution the warm-start initializer performs on NaN and was
+  merely floored at `warm_start_mult_bound_push`: 1e-3 by default, and
+  1e-9 under the tightened pushes `pounce.WarmStart` ships. A start of
+  `z = 1e-9` declares every bound inactive and breaks complementarity
+  against μ before the first iteration — so the tighter the push, the
+  worse the start, which is the opposite of what a push is for. The
+  buffers now carry the unseeded marker, and an absent block and a block
+  written as NaN are finally the same statement.
+
+  That exposed a second half. #606's reconstruction was gated
+  wholesale on some dual having been supplied, but only half of it needs
+  one: `z = μ / slack` needs the slacks the point already determines,
+  while the least-squares `y` needs a dual to complete and from a bare
+  point is the cold path's estimate wearing the warm path's barrier
+  (the 1102 → 1211 measurement that motivated the gate). The gate is now
+  drawn between those two. μ escalation stays on the gated side: with
+  the bound blocks filled to `μ / slack`, the measured complementarity
+  *is* μ, and escalating off it is the barrier arguing with itself.
+
+  On HS071 from a transferred point, a values-only warm start went 11
+  iterations → 7 against 6 for a plain solve from the same point (→ 8
+  on aarch64 macOS; the last iteration is platform-sensitive), and
+  tightening the pushes no longer moves it at all. Restarted from its
+  own solution: 3 → 2. On the #622 receding-horizon family, a
+  values-only transfer over the eight-step loop went 49/60/67/57 →
+  44/55/55/47 at horizons 5/10/20/40.
+
+  One measured cost, named rather than buried: HS071 restarted from its
+  own solution with `warm_start_recentering=none` goes 3 → 4. The kill
+  switch keeps the constant fill, and the constant is now
+  `bound_mult_init_val` where it used to be a bound-multiplier push so
+  small it read as "every bound inactive" — which happens to be right
+  about a converged point whose bounds mostly are. It is one iteration,
+  on the kill-switch path, on a configuration that has the solution
+  already; the default path takes the same restart to 2.
+
+  **Nothing that seeded duals moved.** The `benchmarks/warmstart` corpus
+  is bit-identical across `cold-ipm`, `warm-ipm`, `pred-ipm` and
+  `predcorr-ipm` (10288 / 3404 / 1258 / 1242, 0 of 42 rows), and the CLI
+  fixture sweep is identical across all 57 models. That is also the
+  uncomfortable part — no arm of the warm-start suite supplied a
+  primal-only seed, so the corpus could not see this defect. There is
+  now a **`values-ipm` arm** that does, and across this fix it reads
+  5490 → 4385 iterations (39 of 42 rows), with `moving_bound_qp` alone
+  going 1040 → 428.
+
+  That arm also priced the one family this costs: **`degenerate_vertex`
+  220 → 396**. It holds 12 rows tight in 4 variables, so the true
+  multipliers are a mass of ties near zero and the old fill — a push
+  small enough to read as "every bound inactive" — was accidentally
+  right about them. Every honest fill loses there: capping `μ / slack`
+  at `bound_mult_init_val` costs 341 instead of 396 but regresses
+  `redundant_rows` 162 → 292, so the cap was measured and dropped. The
+  cost is inherent to filling those blocks at all, it is the price of
+  the 2.4× on `moving_bound_qp`, and the new arm is what will notice if
+  it moves again.
+
+- **A transferred warm start now beats a cold solve, and the docs stop
+  saying otherwise** (#622). `WarmStart.reindex` filled the prolongated
+  stage of a receding horizon with zero clipped into the variable's box
+  — a value chosen without reference to the point being transferred or
+  to the model. On a chain with a slew limit that enters the new
+  problem **2.25 away from feasible** (the new variable at `0` beside a
+  neighbour at `2.75`, under a limit of `0.5`), and the filter's first
+  iterations go on undoing the transfer: 11 iterations against 7 for a
+  cold solve.
+
+  `fill_x` is now a policy. The default, `"prolong"`, repeats the last
+  stage: when the identifier map is a pure shift — every matched entry
+  the same distance from its counterpart, which is what a receding
+  horizon *is* — that distance is the layout's own period, read off the
+  map rather than assumed, and each unmatched entry takes the value one
+  period behind it, clipped into its box. One variable per stage or
+  `(p, v, u)` interleaved, the value lands in the same *kind* of slot; a
+  tail longer than one stage repeats the terminal stage; a map that is
+  not a shift has no stage to repeat and degrades to the old behaviour,
+  which is still available as `fill_x="zero"`. An explicit array or
+  scalar is used as-is. Same fixture: primal residual `2.25` → `1.7e-10`
+  and 11 iterations → 8.
+
+  The issue's table is the reverse of what it was. Eight steps of a
+  receding horizon on the sinusoidal tracking family, total iterations,
+  transferred against cold: **45/67** at horizon 5, **50/75** at 10,
+  **54/77** at 20, **46/76** at 40 — where the same table before #620
+  had the transferred start *losing* by more the longer the horizon got
+  (30 against 10 at horizon 40). Most of that turn is #620's
+  residual-adaptive recentering, measured here for the first time since
+  it landed, which is what #622 asked for; the fill policy is what
+  reaches the case recentering does not, the slew fixture, where the
+  closed loop goes 27 → 21 against cold's 22.
+
+  The remaining headroom is measured rather than guessed, and recorded
+  in `docs/src/initialization.md`: seeding each window with the *next*
+  window's converged primal point runs the same loops in 21/24/26/23
+  against the shipped 45/50/54/46, so about half of what a transfer
+  spends is the zero-order prediction and not the barrier (whose own
+  floor, from a perfect primal *and* dual seed, is 9/12/18/18). Two
+  ways of collecting it were tried and both fail: a finite-difference
+  secant predictor is worse than zero-order everywhere (59/75/66/60),
+  and the KKT tangent behind the `pred-ipm` arm cannot be pointed at a
+  horizon shift at all — on the stages two windows share, theta does
+  not move, so `parametric_step` receives a delta vector of exact zeros
+  and returns a zero step. **A receding horizon is a structural change,
+  not a parametric one.** Given a parameter that does move (an MPC
+  initial-condition pin) the tangent degrades with horizon,
+  52/87/95/137 against 54/78/81/93. What is left is the freshly-entered
+  stage, which has no history to extrapolate from and can only be
+  predicted from the model — which is what `transfer()`'s mapper is for.
+
+  Two suggestions from the issue were measured. Dropping the
+  transferred multipliers so the solver rebuilds them from the primal
+  point is close to a wash once the values-only path is fixed (the
+  entry below): 44/55/55/47 against the carried 45/50/54/46 over the
+  eight-step loop. What the carried block actually buys is the
+  *equality* multipliers — those are the half #606 will not derive from
+  a bare point, and `info["warm_start"]` reports the split as
+  `eq_duals: accepted` against `unseeded`. Restarting the barrier is a wash at
+  `mu_init=1e-6` (46/53/48/47 against the carried μ's 45/50/54/46) and
+  loses steadily from there — 52/61/56/54 at `1e-4`, and by `1e-1` the
+  four horizons run 72/79/74/72, at or above the cold solve's
+  67/75/77/76. The carried μ stays the default. Recorded so the next
+  reader does not re-run them.
+
+  What is *not* claimed: a single hand-off across a large parameter step
+  on a small model is still not where warm starting wins — on the
+  five-variable slew fixture the transferred point costs 8 iterations
+  against a cold solve's 7 to 9, the cold arm's own spread over where
+  the guess is put. Python-side only; no Rust changed and no solver step
+  moved, so the CLI fixture sweep is untouched by construction.
 - **`estimate(mode="path")` applies the perturbation a little at a time,
   and `active_set_changes()` returns the record of what changed where**
   (#631). Roadmap item 2. `mode="fix_relax"` decides every active-set change from
@@ -694,7 +834,11 @@ changes.
   point costs 12 iterations against 7 for a cold solve, and on a longer
   sinusoidal track the gap widens with the horizon (12 vs 9 at horizon 5,
   30 vs 10 at horizon 40). That is the barrier/active-set limit
-  `docs/src/initialization.md` already describes.
+  `docs/src/initialization.md` already describes. **Superseded within
+  this same unreleased cycle by #620 and #622** (first entry above): that
+  table no longer reproduces, and a transferred start now beats a cold
+  solve at every horizon of it. The numbers here are left as they were
+  measured, not silently corrected.
 
   Python-side, plus four additive `Problem` accessors
   (`options_snapshot` / `restore_options`, `get_bounds`,
