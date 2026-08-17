@@ -794,3 +794,94 @@ fn fix_relax_pins_three_crossings_at_once() {
     );
     assert!(err(&fixed_x) <= err(&clamped));
 }
+
+/// Walk the same perturbation the fix-relax tests use. Returns the
+/// primal step and the breakpoints crossed.
+fn run_path_step(
+    delta_p: [Number; 2],
+) -> (
+    [Number; 5],
+    Vec<pounce_sensitivity::boundcheck::PathSegment>,
+) {
+    use pounce_sensitivity::Solver;
+
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "nominal solve failed: {status:?}",
+    );
+    let (dx, segs) = solver
+        .parametric_step_path(&[2, 3], &delta_p, 8)
+        .expect("parametric_step_path");
+    (std::array::from_fn(|i| dx[i]), segs)
+}
+
+#[test]
+fn path_agrees_with_the_plain_step_when_nothing_crosses() {
+    // A perturbation small enough to keep every variable inside its
+    // bounds leaves nothing for the walk to do, so it must reproduce
+    // the plain step rather than merely come close.
+    let plain = run_sensitivity_step([-0.01, 0.0]);
+    let (walked, segs) = run_path_step([-0.01, 0.0]);
+    assert!(segs.is_empty(), "no breakpoint expected, got {segs:?}");
+    for i in 0..5 {
+        assert!(
+            (walked[i] - plain[i]).abs() < 1e-12,
+            "coordinate {i}: walk {} vs plain {}",
+            walked[i],
+            plain[i],
+        );
+    }
+}
+
+#[test]
+fn path_stops_where_the_variable_reaches_its_bound() {
+    let base = solve_at(5.0, 1.0);
+    let (walked, segs) = run_path_step([-0.5, 0.0]);
+
+    assert_eq!(segs.len(), 1, "one crossing expected, got {segs:?}");
+    assert_eq!(segs[0].var_row, 2, "x[2] is what crosses here");
+    assert!(segs[0].lower, "x[2] reaches its lower bound here");
+    assert!(segs[0].pinned, "it reaches a bound, so it pins");
+    // The plain step puts x[2] at -0.0459 for the whole perturbation,
+    // and x[2] starts at 0.0204, so the bound is reached partway.
+    assert!(
+        segs[0].at > 0.0 && segs[0].at < 1.0,
+        "the crossing is interior to the perturbation, got {}",
+        segs[0].at,
+    );
+    // Having pinned there, the walk must leave it on the bound.
+    let x2 = base[2] + walked[2];
+    assert!(x2.abs() < 1e-8, "x[2] should finish on its bound, got {x2}",);
+}
+
+#[test]
+fn path_and_fix_relax_agree_on_a_single_crossing() {
+    // Both repair the same one condition on this model, so they must
+    // land on the same point. They separate only when crossings
+    // interact, which needs more than one.
+    let (walked, _) = run_path_step([-0.5, 0.0]);
+    let (fixed, _) = run_bounded_step([-0.5, 0.0]);
+    for i in 0..5 {
+        assert!(
+            (walked[i] - fixed[i]).abs() < 1e-7,
+            "coordinate {i}: path {} vs fix_relax {}",
+            walked[i],
+            fixed[i],
+        );
+    }
+}
