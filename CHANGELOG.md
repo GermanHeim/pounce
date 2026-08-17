@@ -9,6 +9,52 @@ changes.
 
 ## [Unreleased]
 
+- **The `pounce-casadi` wheel is tagged for the platform it was built
+  for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
+  Python, installs anywhere" — while carrying a compiled CasADi plugin and
+  the POUNCE solver library under `pounce_casadi/_plugins/<minor>/`.
+  setuptools reaches that conclusion because the package defines no
+  `ext_modules`: it loads its payload with `ctypes`, and package data is
+  not something setuptools inspects. So a wheel built on macOS installed
+  cleanly on Linux and failed at `import pounce_casadi`, looking for a
+  `.dylib` that platform cannot load.
+
+  Measured on the wheel `build.sh` produced before this change, offered to
+  a Linux target: `pip install --platform manylinux_2_28_x86_64` accepted
+  it and unpacked `libcasadi_nlpsol_pounce.dylib` into place. After: `pip`
+  refuses it — *"not a supported wheel on this platform"* — which is where
+  that decision belongs.
+
+  Nothing was published, so no user hit this; it was a defect in the
+  release path rather than in a release.
+
+  The tag is now `py3-none-<platform>`. Platform-specific in one direction
+  and *not* CPython-specific in the other: an impure wheel defaults to
+  `cp311-cp311-…`, which would be wrong the other way round, since nothing
+  here links the CPython ABI and one build per platform serves every
+  Python 3. `POUNCE_CASADI_PLAT_NAME` overrides the platform half for
+  manylinux and macOS cross builds — worth noting that `auditwheel repair`
+  refuses a `py3-none-any` wheel outright, so the documented Linux release
+  step could not have run before this.
+
+  The CasADi axis of the matrix stays where it was, inside the wheel: no
+  wheel tag can express "built against casadi 3.7.x", so one wheel per
+  platform carries a build per supported minor and selects on
+  `casadi.__version__` at import. `POUNCE_CASADI_STAGE_ONLY=1` stages a
+  minor without building, which is what makes the documented
+  once-per-(minor × platform) release loop expressible as a script.
+
+  Three supporting changes, each for a failure that was silent:
+  `build.sh` and CI now *assert* the built tag rather than trust it, since
+  a packaging regression here shows up only on a machine the packager does
+  not have; `build.sh` treats a missing solver library as fatal instead of
+  a warning, because staging without it produces exactly the
+  installs-then-fails-at-import artefact this entry is about; and
+  `plugin_path` now distinguishes "no build for this platform" from "no
+  build for this CasADi version" — a hand-copied wheel used to report the
+  platform mismatch as a missing CasADi version, sending the reader after
+  the wrong axis.
+
 - **A reordered warm start is refused without the caller supplying
   `var_ids`** (#621, split out of #607). Every facet the #607
   `ProblemSignature` carries is a digest of what the model *declares*,

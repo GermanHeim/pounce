@@ -43,13 +43,55 @@ so this package refuses to guess: it ships one build per supported minor
 version under `pounce_casadi/_plugins/<minor>/` and selects on
 `casadi.__version__`, raising a clear `ImportError` when there is no match.
 
-To publish, `build.sh` has to run once per (CasADi minor × platform) and the
-resulting `_plugins/<minor>/` trees merged into one wheel per platform:
+### The tag scheme
+
+The two axes are not symmetric, and the wheel tag only carries one of them.
+
+**Platform is in the tag.** The wheel is `py3-none-<platform>` —
+`macosx_11_0_arm64`, `manylinux_2_28_x86_64`, `win_amd64`. Not `any`: it
+carries a compiled plugin and the solver library, so a build for one
+platform must not install on another, and `pip` is the right place to say
+so. Not `cp311` either: nothing here links the CPython ABI — the payload is
+loaded with `ctypes` — so one build per platform serves every Python 3, and
+a CPython tag would strand users on the next Python release for no reason.
+`setup.py` does both halves; `build.sh` and CI assert the result rather than
+trust it, because the failure is silent at build time and only shows up on
+a machine the packager does not have.
+
+`POUNCE_CASADI_PLAT_NAME` overrides the platform half for a build whose
+host is not its target: a manylinux tag (a raw `linux_x86_64` wheel is not
+installable from PyPI, and `auditwheel repair` is the usual way to get one —
+this is the escape hatch when it is not in the loop), or a macOS cross or
+`universal2` build.
+
+**CasADi minor is not in the tag, and cannot be.** CasADi is a runtime
+dependency; there is no wheel tag that expresses "built against casadi
+3.7.x". So it is resolved inside the wheel: one build per minor under
+`_plugins/<minor>/`, selected on `casadi.__version__` at import, with a
+plain `ImportError` when there is no match. One wheel per platform carries
+every supported minor.
+
+So the matrix collapses to: run `build.sh` once per (CasADi minor ×
+platform), and per platform merge the staged `_plugins/<minor>/` trees into
+a single wheel. Within one platform the runs share this tree and the staging
+directory accumulates, so that is:
+
+```sh
+# in a platform's build image, once per supported casadi minor
+pip install 'casadi==3.6.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
+pip install 'casadi==3.7.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
+./build.sh          # one wheel carrying both
+```
+
+Per-platform build notes:
 
 - **Linux** — inside a manylinux image, `-D_GLIBCXX_USE_CXX11_ABI=0` to match
   the CasADi wheels (the Makefile's default), then `auditwheel` **excluding**
   `libcasadi` (it must resolve to the user's installed copy at runtime, not be
-  vendored).
+  vendored). `auditwheel repair` also does the manylinux retag, so
+  `POUNCE_CASADI_PLAT_NAME` is not needed when it runs — but note it *refuses*
+  a `py3-none-any` wheel outright, so before the tagging fix this step could
+  not have run at all.
 - **macOS** — x86_64 and arm64. The Makefile rewrites the plugin's reference
   to `libpounce_cinterface` to `@rpath` and adds `@loader_path`, because Rust
   stamps a cdylib's install name with its absolute *build* path; without that
@@ -59,6 +101,15 @@ resulting `_plugins/<minor>/` trees merged into one wheel per platform:
   the build tree and re-solves through the installed wheel, since a plugin
   that only *appears* relocatable passes every other test on the build
   machine.
+
+  Watch the platform tag on macOS: it takes its OS version from
+  `MACOSX_DEPLOYMENT_TARGET`, which defaults to the *building* machine's.
+  A build on macOS 26 tags `macosx_26_0_arm64` and pip then declines it on
+  every older macOS — a wheel that is correct and almost universally
+  uninstallable. Set `MACOSX_DEPLOYMENT_TARGET=11.0` (or
+  `POUNCE_CASADI_PLAT_NAME`) for a release build. CI does not catch this:
+  its runner and its test environment are the same machine, so the tag is
+  always satisfiable there.
 - **Windows** — MSVC, matching CasADi's own toolchain.
 
 CasADi minor releases are infrequent (3.6 in 2023, 3.7 in 2025), so the matrix
