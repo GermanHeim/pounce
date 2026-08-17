@@ -515,6 +515,161 @@ res = pounce.minimize(fun, best.x,
                       warm_start=pounce.WarmStart.from_info(best.x, best.info))
 ```
 
+### Racing starts: the successive-halving ladder
+
+The default policy, `policy="fixed"`, spends the same budget on every
+candidate from a cold start and ranks the field once at the end. That
+keeps most of multistart's cost — the candidate that was hopeless after
+two iterations is still charged for ten — and throws away the solver
+state between rounds. pounce#610 adds an opt-in alternative,
+`policy="halving"`, an adaptive **successive-halving ladder**:
+
+1. every candidate runs for a small budget;
+2. the field is ranked on five signals (below);
+3. the weakest fraction is eliminated;
+4. the survivors are **resumed from their held solver state** with a
+   budget `eta` times larger, and the ladder repeats.
+
+The winner ends up with about the effort `iters` would have given it
+under the fixed policy; what changes is what the losers cost.
+
+**It is opt-in, and the reason is measured — read this before using
+it.** The ladder's early rungs rank the field on a handful of
+iterations. On a strongly multimodal model that ranking carries almost
+no information about which basin ends lowest, so rung 0 discards the
+eventual winner. On 2-D Ackley from 27 Sobol starts with `iters=40` —
+so rung 0 is four iterations and cuts 27 candidates to 9 — the start
+that reaches the global minimum at full effort is cut at rung 0 in
+every seed tried, ranked 19th, 13th and 24th of 27. The fixed policy
+returns 4e-16 on all three seeds; the ladder returns 3.57, 5.38 and
+3.57. Across an independent five-model set the ladder was 30% cheaper
+overall and returned a worse answer in 13 of 45 configurations, and the
+gap *widened* with more starts, because a larger field is culled harder
+on the same weak signal.
+
+Nor is that a tuning accident. `explore` does not help — it retains the
+candidate *farthest* from those kept, which is not the winner — and the
+only setting that recovered the answer, `min_rung_iters=20` (half the
+total budget, i.e. a single cut), cost slightly more than the fixed
+policy on both models. On a genuinely multimodal problem the ladder's
+saving *is* the quality loss.
+
+Reach for `policy="halving"` when a solver iteration is expensive and
+the basins are few or well separated, and check the answer against the
+default before relying on it. `python/tests/test_starts_racing.py::`
+`test_the_ladder_can_cut_the_winner_at_rung_zero` pins the failure
+mode, so if the rung-0 ranking ever becomes informative on that model
+the test fails and the default is worth revisiting.
+
+```python
+best, race = pounce.race_starts(fun, starts, jac=jac, bounds=bounds,
+                                constraints=cons, iters=20,
+                                policy="halving", return_report=True)
+print(race.report())
+# race: policy=halving eta=3 candidates=16 rungs=2
+#   rung 0: budget=37 evals entrants=16 -> survivors=7 spent=530 evals / 112 iters (0 resumed, 16 started)
+#       - #10: duplicate of candidate 6 (scaled distance 0.000606 <= 0.001)
+#       - #14: below halving cut (rank 7 of 15, keep 6)
+#       - #5: below halving cut (rank 8 of 15, keep 6)
+#       ... seven more
+#   rung 1: budget=111 evals entrants=7 -> survivors=7 spent=272 evals / 61 iters (7 resumed, 0 started)
+#   total 834 evals / 173 iters, 7 resumes
+```
+
+(HS71, 16 Sobol starts, `iters=20` — the `hs71` row of the benchmark
+table below. The fixed policy spends 259 iterations on the same field.)
+
+`RaceReport` carries the per-rung resource spend and a reason for every
+candidate's exit; `RaceCandidate` carries each one's evaluations,
+iterations, resumes, restoration calls and final residuals.
+
+**What "resumed" means, precisely.** POUNCE has no API for suspending an
+IPM mid-iteration and re-entering the same algorithm object — every
+`Solver.solve` builds its application afresh. What a pause carries is the
+whole interior-point *iterate*: the primal point, the constraint
+multipliers, both bound-multiplier blocks, and the barrier parameter μ,
+replayed through the warm-start machinery above so that pounce#606's
+recentering measures the point it is actually handed. That is materially
+not a cold restart. Measured on the `rastrigin_eq` fixture in
+`python/tests/test_starts_racing.py`:
+
+| paused at | resumed (state + point) | restarted (point only) |
+|---|---|---|
+| 3 iterations | **32 iters** / 330 evals | 43 iters / 368 evals |
+| 5 iterations | **17 iters** / 250 evals | 43 iters / 376 evals |
+| 8 iterations | **0 iters** / 80 evals | 43 iters / 372 evals |
+
+Both arms start from the identical iterate and reach the identical
+objective, start for start. The last row is the clearest: by 8
+iterations every candidate has converged, the resumed solve recognises
+it immediately because the carried duals and μ satisfy the convergence
+check on entry, and the restarted solve — handed the same point and
+nothing else — needs 5 to 8 iterations each to re-derive the same
+certificate.
+
+The size of that gap is model-dependent. On HS71 the same comparison is
+a wash (98/92/77 iterations resumed against 102/87/79 restarted), which
+is the regime pounce#608 warns about: a warm-started IPM often converges
+in one iteration per step, and where it does a resume has nothing left
+to remove. What a pause does *not* carry is the filter history and the
+line-search state; that would need a `Solver.resolve()`, which does not
+exist yet.
+
+**Ranking.** Eliminations are decided on a weighted sum of five
+rank-normalized signals — rank-normalized so that a violation in mol/s
+and a dimensionless KKT residual can be combined without an invented
+scale factor:
+
+| signal | what it reads | default weight |
+|---|---|---|
+| `violation` | how infeasible the iterate is now | 3.0 |
+| `feasibility_progress` | how much of its *initial* violation it has removed | 1.0 |
+| `kkt` | the scaled first-order residual, in log units | 1.5 |
+| `objective_progress` | objective removed per evaluation spent, damped while infeasible | 1.0 |
+| `health` | restoration share, non-finite objective, failed exit | 1.0 |
+
+Feasibility carries the most weight because an infeasible candidate's
+objective is not a number about the problem being solved. Pass
+`weights=` to re-balance. Diversity is protected two ways: survivors
+within `cluster_tol` of each other in scaled units are collapsed to the
+best of the group, and `explore` candidates from *outside* the cut are
+retained anyway, chosen farthest-first from those already kept.
+
+**Evaluations, not iterations, are the resource.** Rung 0 has no
+evaluation budget — it *is* the calibration — and every later rung's
+budget is a multiple of what rung 0 actually cost. Each candidate then
+converts its remaining budget into an iteration cap through *its own*
+measured evaluations-per-iteration, so a candidate whose iterations are
+expensive (a dozen line-search trials, a restoration excursion) is
+granted fewer of them for the same resource. A cumulative iteration
+ceiling rising to `iters` bounds the other side.
+
+**When not to use it.** A rung boundary costs a fresh solver application
+and a re-evaluation at the seed. On a model where that fixed cost is a
+large fraction of the whole solve — one variable, no constraints, a
+handful of evaluations per iteration — the ladder cuts iterations but
+comes out level or slightly up on evaluations. Measured over
+`benchmarks/scripts/race_starts_bench.py` (six multi-basin models × three
+field sizes): **17.9% fewer** user-callable evaluations overall with no
+quality regression *on that set*, ranging from **43.8% fewer** on HS71
+with 27 starts to **5.5% more** on the two-variable `himmelblau_disc`
+with 16. Iterations fall in every one of the eighteen configurations.
+That set is not a promise about your model — see the quality caveat
+above. Where the ladder does not pay, the default `policy="fixed"` is
+the pre-#610 policy, kept verbatim and reproducing its old answers
+exactly:
+
+```python
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10)  # fixed
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10,
+                          policy="halving")                      # the ladder
+```
+
+`policy="halving"` runs on the NLP path only — it holds a
+`pounce.Solver` session per candidate, which is what a pause suspends —
+and refuses a non-`"nlp"` `solver_selection` rather than silently losing
+the session it needs.
+
 When the model has many local minima and you want *all* of them (or a
 managed search rather than a tournament), the
 [global search drivers](find-minima.md) (`multistart`, `mlsl`,
