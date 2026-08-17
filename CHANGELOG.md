@@ -9,6 +9,27 @@ changes.
 
 ## [Unreleased]
 
+- **Warm-start probe: an inert objective constant no longer blinds
+  reorder detection** (#659). `_probe_agrees` documented a per-block
+  tolerance — each probed block judged against its own L1 scale, with
+  the largest block's scale as a floor — but computed
+  `floor = max(scales)`, which makes `max(scales[block], floor)` equal
+  `floor` for every block. Every block was therefore judged against the
+  *largest* block's magnitude, and the per-block half never took effect.
+
+  Adding an additive constant to the objective — inert to the
+  optimization: no derivative, no constraint and no solution changes —
+  inflated the objective block's scale and with it the gradient,
+  constraint and jacobian tolerances. Past roughly 1e9 that was enough
+  to swallow a single variable transposition, so
+  `ws.check_compatible(reordered_problem)` returned cleanly where it had
+  previously raised, and the replayed seed went into the solve permuted.
+  This was the *enforcing* gate, not just `describe_compatibility`.
+
+  The floor is now `_PROBE_FLOOR_FRAC` (1e-6) of the largest scale
+  rather than the bare maximum. That keeps what the floor was for — a
+  block computing to ~0 out of cancellation of large terms is still not
+  held to bit equality — while letting a healthy block's own scale win.
 - **Crossover: the sensitivity path reads the barrier diagonal in the
   frame crossover solved in** (#654).
 

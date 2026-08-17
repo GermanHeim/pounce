@@ -1134,3 +1134,59 @@ def test_the_note_also_rides_on_a_mismatch_report():
     ws = WarmStart.from_info(x, info, problem=p, probe=False)
     report = ws.describe_compatibility(make(ub=4.0))
     assert "bounds:" in report and "pure reordering" in report
+
+
+# --- gh#659: the per-block scale must actually be per-block ----------------
+class HS071Offset(HS071):
+    """HS071 plus an additive constant on the objective.
+
+    The constant changes no derivative, no constraint and no solution —
+    it is inert to the optimization. It exists only to make the
+    objective block's L1 scale large.
+    """
+
+    def __init__(self, offset, **kw):
+        super().__init__(**kw)
+        self.offset = offset
+
+    def objective(self, x):
+        return super().objective(x) + self.offset
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e3, 1e6, 1e9, 1e12])
+def test_an_inert_objective_offset_does_not_blind_the_probe(offset):
+    """gh#659. `floor = max(scales)` made every block's tolerance the
+    *largest* block's, so inflating the objective raised the gradient,
+    constraint and jacobian tolerances too. Past ~1e9 that was enough to
+    swallow a variable transposition — on `check_compatible`, the gate
+    that is supposed to refuse it, not just on the dry run."""
+    base = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset))).probe
+    permuted = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset, perm=PERM))).probe
+    from pounce._warm_start_schema import _probe_agrees
+
+    assert not _probe_agrees(base, permuted), (
+        f"a reordering went undetected at objective offset {offset:g}"
+    )
+
+
+def test_the_probe_floor_still_rescues_a_near_zero_block():
+    """The floor is not merely deleted: a block that computes to ~0 out
+    of cancellation of large terms must still not be held to bit
+    equality, which is what it was there for."""
+    from pounce._warm_start_schema import _PROBE_PROJECTIONS, _probe_agrees
+
+    stride = _PROBE_PROJECTIONS + 1
+    # block 0 is large; block 1 computes to zero with absolute noise
+    # commensurate with block 0's magnitude.
+    a = [1e8] * _PROBE_PROJECTIONS + [4e8] + [0.0] * _PROBE_PROJECTIONS + [0.0]
+    b = list(a)
+    for k in range(stride, stride + _PROBE_PROJECTIONS):
+        b[k] = 1e-8                      # ~1e-16 relative to block 0
+    assert _probe_agrees(a, b)
+
+    # but a difference the size of block 0 itself is still a difference
+    c = list(a)
+    c[stride] = 1e6
+    assert not _probe_agrees(a, c)
