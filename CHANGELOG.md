@@ -59,9 +59,22 @@ changes.
   is bit-identical across `cold-ipm`, `warm-ipm`, `pred-ipm` and
   `predcorr-ipm` (10288 / 3404 / 1258 / 1242, 0 of 42 rows), and the CLI
   fixture sweep is identical across all 57 models. That is also the
-  uncomfortable part: **no arm of the warm-start suite supplies a
-  primal-only seed**, so the corpus could not see this defect and cannot
-  see the fix. A `values-ipm` arm is the missing coverage.
+  uncomfortable part — no arm of the warm-start suite supplied a
+  primal-only seed, so the corpus could not see this defect. There is
+  now a **`values-ipm` arm** that does, and across this fix it reads
+  5490 → 4385 iterations (39 of 42 rows), with `moving_bound_qp` alone
+  going 1040 → 428.
+
+  That arm also priced the one family this costs: **`degenerate_vertex`
+  220 → 396**. It holds 12 rows tight in 4 variables, so the true
+  multipliers are a mass of ties near zero and the old fill — a push
+  small enough to read as "every bound inactive" — was accidentally
+  right about them. Every honest fill loses there: capping `μ / slack`
+  at `bound_mult_init_val` costs 341 instead of 396 but regresses
+  `redundant_rows` 162 → 292, so the cap was measured and dropped. The
+  cost is inherent to filling those blocks at all, it is the price of
+  the 2.4× on `moving_bound_qp`, and the new arm is what will notice if
+  it moves again.
 
 - **A transferred warm start now beats a cold solve, and the docs stop
   saying otherwise** (#622). `WarmStart.reindex` filled the prolongated

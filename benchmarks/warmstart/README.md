@@ -33,6 +33,7 @@ nearest public things and why each does not cover it:
 | `cold-ipm` | general NLP filter-IPM | nothing — the family's cold start | every family |
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-ipm` | general NLP filter-IPM | previous step's primal-dual point and μ | every family |
+| `values-ipm` | general NLP filter-IPM | previous step's primal point **alone** — no multipliers, no μ | every family |
 | `warm-sqp` | active-set SQP | previous step's working set and point | every family |
 | `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
 | `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous step's working set and point | every family |
