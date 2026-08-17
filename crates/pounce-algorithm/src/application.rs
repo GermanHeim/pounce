@@ -2984,6 +2984,57 @@ impl IpoptApplication {
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
                 stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
                 stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
+
+                // Report an accepted crossover in the frame it solved in
+                // (#646). Everything above measures against the bounds the
+                // interior iteration ran against, which `bound_relax_factor`
+                // widened by `δ` before the solve. That is the right frame
+                // for an interior iterate — it never touches a bound — but a
+                // crossed-over point sits *exactly* on the constraints of the
+                // problem as declared, i.e. `δ` inside the relaxed ones, so
+                // the four `s·z` blocks above read `|multiplier| · δ`. For a
+                // unit multiplier and the default `δ = 1e-8` that is `1e-8`,
+                // which is `tol`: a strictly better point printed an `Overall
+                // NLP error` above tolerance, and the opt-in
+                // `kkt_fidelity_tol` gate below downgraded it.
+                //
+                // Only complementarity moves. Stationarity involves no
+                // bounds, and the crossed-over point is *interior* to the
+                // relaxed box, so its violation is zero under either reading.
+                //
+                // The substitution is confined to reporting. Crossover runs
+                // after the status is decided, and it only ever installs a
+                // point the never-regress gate accepted on the declared-bound
+                // residuals, so this cannot dress up a worse iterate — the
+                // measurement it replaces is the artifact.
+                if let Some(report) = self.crossover_report.as_ref()
+                    && report.accepted()
+                    && report.compl_after.is_finite()
+                {
+                    let compl_declared = report.compl_after;
+                    stats.final_compl = compl_declared;
+                    stats.final_kkt_error =
+                        cq.curr_nlp_error_with_complementarity(compl_declared, 0.0);
+                    stats.final_kkt_error_above_noise = cq.curr_nlp_error_with_complementarity(
+                        compl_declared,
+                        builder.conv_check.primal_noise_floor_kappa,
+                    );
+                    // Same unscaling as `curr_unscaled_complementarity_max`:
+                    // the slack's row factor and the multiplier's cancel in
+                    // the product, leaving the objective factor. Magnitude —
+                    // `obj_scaling_factor` is signed, `-1` being the
+                    // documented way to pose a maximization.
+                    let df = cq.obj_scaling_factor().abs();
+                    stats.final_unscaled_compl = if df == 0.0 || df == 1.0 {
+                        compl_declared
+                    } else {
+                        compl_declared / df
+                    };
+                    stats.final_unscaled_kkt_error = stats
+                        .final_unscaled_dual_inf
+                        .max(stats.final_unscaled_constr_viol)
+                        .max(stats.final_unscaled_compl);
+                }
             }
         }
 

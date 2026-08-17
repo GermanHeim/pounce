@@ -55,20 +55,25 @@ changes.
   set. Being post-convergence and off by default, it moves no interior
   trajectory. Docs: `docs/src/crossover.md`.
 
-  One measured cost, documented rather than absorbed. The end-of-run
-  summary measures against the **relaxed** bounds while crossover solves
-  against the declared ones, and the two frames disagree by exactly the
-  relaxation — all of it landing on complementarity, which reads `v·δ`
-  instead of `~μ` at an active constraint. On HS14: dual infeasibility
-  `1.9e-12 → 8.9e-16` and constraint violation `2.9e-13 → 2.2e-16`, both
-  three to four orders better, against complementarity `2.5e-9 → 1.9e-8`,
-  about 7× worse and over `tol`. In the frame crossover actually solves
-  in that term is zero, which is why the never-regress gate accepts the
-  point. The exit status is unaffected (it is decided before crossover
-  runs), but `Overall NLP error` in the summary can exceed `tol`, and the
-  opt-in `kkt_fidelity_tol` gate — applied *after* crossover — will
-  downgrade a threshold set between the two figures. Tracked as a
-  reporting-frame defect in #646, separately from this feature.
+  Reported residuals for an accepted crossover are measured against the
+  **declared** bounds (#646). `bound_relax_factor` widens every bound by `δ`
+  before the solve; the interior iteration never touches even the widened
+  bound, but crossover puts the point *exactly* on the declared one, which is
+  `δ` inside the relaxed one. Measured in the relaxed frame every active
+  constraint then carries slack `δ`, so complementarity reads `|multiplier|·δ`
+  instead of `~μ` — `1e-8` for a unit multiplier, i.e. `tol`. A strictly
+  better point printed an `Overall NLP error` above the tolerance it had
+  converged at, and the opt-in `kkt_fidelity_tol` gate, which runs *after*
+  crossover, downgraded `Solve_Succeeded` on it. On HS14 all four figures now
+  improve: dual infeasibility `1.9e-12 → 8.9e-16`, constraint violation
+  `2.9e-13 → 2.2e-16`, complementarity `2.5e-9 → 3.5e-16`, overall NLP error
+  `2.5e-9 → 8.9e-16`. Only the complementarity term needed the substitution —
+  stationarity involves no bounds and the point is interior to the relaxed
+  box — and it uses raw slacks rather than the interior machinery's
+  `eps·min(1,μ)` floor, which would have put `μ/z ≈ 1e-9` back as a fresh
+  artifact. Reporting only: it runs after the status is decided and applies
+  solely to a point the never-regress gate already accepted on its
+  declared-bound residuals.
 
   Two defects surfaced while building it, both of which would have made
   the phase report the opposite of the truth:

@@ -412,6 +412,89 @@ fn crossover_publishes_the_identified_set_for_a_following_sqp_solve() {
     );
 }
 
+/// HS14: `min (x₁−2)² + (x₂−1)²  s.t.  x₁ − 2x₂ + 1 = 0, x₁²/4 + x₂² ≤ 1`.
+/// `f* ≈ 1.3934649` at `x* ≈ (0.8228756, 0.9114378)`, where the inequality is
+/// active with a multiplier bounded away from zero — strict complementarity
+/// holds, so this is the case crossover must leave alone.
+struct Hs14;
+impl TNLP for Hs14 {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 4,
+            nnz_h_lag: 3,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[-INF; 2]);
+        b.x_u.copy_from_slice(&[INF; 2]);
+        b.g_l[0] = 0.0;
+        b.g_u[0] = 0.0;
+        b.g_l[1] = -INF;
+        b.g_u[1] = 0.0;
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[2.0, 2.0]);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some((x[0] - 2.0).powi(2) + (x[1] - 1.0).powi(2))
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = 2.0 * (x[0] - 2.0);
+        g[1] = 2.0 * (x[1] - 1.0);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] - 2.0 * x[1] + 1.0;
+        g[1] = x[0] * x[0] / 4.0 + x[1] * x[1] - 1.0;
+        true
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("values without x");
+                values[0] = 1.0;
+                values[1] = -2.0;
+                values[2] = 0.5 * x[0];
+                values[3] = 2.0 * x[1];
+            }
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1]);
+                jcol.copy_from_slice(&[0, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                let lam = lambda.expect("values without lambda");
+                values[0] = obj_factor * 2.0 + lam[1] * 0.5;
+                values[1] = 0.0;
+                values[2] = obj_factor * 2.0 + lam[1] * 2.0;
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
 /// Where crossover should show nothing: a problem satisfying strict
 /// complementarity. HS14's inequality is active with a multiplier bounded
 /// away from zero, so the interior iterate's active set is already
@@ -419,92 +502,6 @@ fn crossover_publishes_the_identified_set_for_a_following_sqp_solve() {
 /// same optimum rather than wander off it.
 #[test]
 fn crossover_is_a_no_op_on_a_strictly_complementary_solution() {
-    // HS14: min (x₁−2)² + (x₂−1)²  s.t.  x₁ − 2x₂ + 1 = 0, x₁²/4 + x₂² ≤ 1.
-    // f* ≈ 1.3934649 at x* ≈ (0.8228756, 0.9114378).
-    struct Hs14;
-    impl TNLP for Hs14 {
-        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
-            Some(NlpInfo {
-                n: 2,
-                m: 2,
-                nnz_jac_g: 4,
-                nnz_h_lag: 3,
-                index_style: IndexStyle::C,
-            })
-        }
-        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-            b.x_l.copy_from_slice(&[-INF; 2]);
-            b.x_u.copy_from_slice(&[INF; 2]);
-            b.g_l[0] = 0.0;
-            b.g_u[0] = 0.0;
-            b.g_l[1] = -INF;
-            b.g_u[1] = 0.0;
-            true
-        }
-        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-            sp.x.copy_from_slice(&[2.0, 2.0]);
-            true
-        }
-        fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
-            Some((x[0] - 2.0).powi(2) + (x[1] - 1.0).powi(2))
-        }
-        fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
-            g[0] = 2.0 * (x[0] - 2.0);
-            g[1] = 2.0 * (x[1] - 1.0);
-            true
-        }
-        fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
-            g[0] = x[0] - 2.0 * x[1] + 1.0;
-            g[1] = x[0] * x[0] / 4.0 + x[1] * x[1] - 1.0;
-            true
-        }
-        fn eval_jac_g(
-            &mut self,
-            x: Option<&[Number]>,
-            _n: bool,
-            mode: SparsityRequest<'_>,
-        ) -> bool {
-            match mode {
-                SparsityRequest::Structure { irow, jcol } => {
-                    irow.copy_from_slice(&[0, 0, 1, 1]);
-                    jcol.copy_from_slice(&[0, 1, 0, 1]);
-                }
-                SparsityRequest::Values { values } => {
-                    let x = x.expect("values without x");
-                    values[0] = 1.0;
-                    values[1] = -2.0;
-                    values[2] = 0.5 * x[0];
-                    values[3] = 2.0 * x[1];
-                }
-            }
-            true
-        }
-        fn eval_h(
-            &mut self,
-            _x: Option<&[Number]>,
-            _n: bool,
-            obj_factor: Number,
-            lambda: Option<&[Number]>,
-            _nl: bool,
-            mode: SparsityRequest<'_>,
-        ) -> bool {
-            match mode {
-                SparsityRequest::Structure { irow, jcol } => {
-                    irow.copy_from_slice(&[0, 1, 1]);
-                    jcol.copy_from_slice(&[0, 0, 1]);
-                }
-                SparsityRequest::Values { values } => {
-                    let lam = lambda.expect("values without lambda");
-                    values[0] = obj_factor * 2.0 + lam[1] * 0.5;
-                    values[1] = 0.0;
-                    values[2] = obj_factor * 2.0 + lam[1] * 2.0;
-                }
-            }
-            true
-        }
-        fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
-    }
-
     let f_star = 1.393_464_91;
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -519,5 +516,100 @@ fn crossover_is_a_no_op_on_a_strictly_complementary_solution() {
         (stats.final_objective - f_star).abs() < 1e-6,
         "crossover moved a strictly complementary optimum: f = {} (expected {f_star})",
         stats.final_objective
+    );
+}
+
+/// gh#646 — an accepted crossover must not make the solve's *reported*
+/// residuals worse.
+///
+/// The trap this pins is that crossover and the interior iteration measure
+/// against different bounds. `bound_relax_factor` (default `1e-8`) widens
+/// every bound before the solve, and the interior iterate never touches even
+/// the widened one, so the difference is invisible — until crossover puts the
+/// point *exactly* on a declared bound, which is `1e-8` inside the relaxed
+/// one. The four `s·z` complementarity blocks then read `|multiplier| · 1e-8`
+/// rather than zero: on HS14 that took a converged solve from `2.5e-9` to
+/// `1.8e-8`, i.e. across `tol`, so `Overall NLP error` printed above the
+/// tolerance the run had converged at and `kkt_fidelity_tol` would downgrade
+/// `Solve_Succeeded` on a strictly *better* point.
+///
+/// Asserting "not worse than the interior solve" rather than a fixed number
+/// is deliberate: the defect is a relative one — a comparison between two
+/// runs of the same problem — and a threshold would drift with `tol`.
+#[test]
+fn crossover_does_not_inflate_the_reported_complementarity() {
+    let solve = |crossover: bool| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value(
+                "crossover",
+                if crossover { "yes" } else { "no" },
+                true,
+                false,
+            )
+            .unwrap();
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs14));
+        let status = app.optimize_tnlp(tnlp);
+        assert!(
+            succeeded(status),
+            "HS14 failed (crossover={crossover}): {status:?}"
+        );
+        let crossed = app
+            .crossover_report()
+            .is_some_and(pounce_algorithm::crossover::CrossoverReport::accepted);
+        (app.statistics().clone(), crossed)
+    };
+
+    let (interior, _) = solve(false);
+    let (crossed, accepted) = solve(true);
+    assert!(
+        accepted,
+        "HS14 crossover was expected to run and be accepted; without that this \
+         test is not measuring anything"
+    );
+
+    // The reported complementarity is the term the relaxation lands on.
+    assert!(
+        crossed.final_compl <= interior.final_compl,
+        "crossover inflated the reported complementarity: {:.6e} (interior) → {:.6e}",
+        interior.final_compl,
+        crossed.final_compl
+    );
+    assert!(
+        crossed.final_unscaled_compl <= interior.final_unscaled_compl,
+        "crossover inflated the reported unscaled complementarity: {:.6e} → {:.6e}",
+        interior.final_unscaled_compl,
+        crossed.final_unscaled_compl
+    );
+
+    // ...and therefore neither aggregate crosses `tol`, which is what made
+    // the summary and the `kkt_fidelity_tol` gate disagree with the status.
+    let tol = 1e-8;
+    assert!(
+        crossed.final_kkt_error <= tol,
+        "Overall NLP error above tol after crossover: {:.6e}",
+        crossed.final_kkt_error
+    );
+    assert!(
+        crossed.final_unscaled_kkt_error <= tol,
+        "unscaled KKT error above tol after crossover — `kkt_fidelity_tol` \
+         would downgrade this status: {:.6e}",
+        crossed.final_unscaled_kkt_error
+    );
+
+    // The other two terms were already better; guard against a "fix" that
+    // trades them away for the complementarity number.
+    assert!(
+        crossed.final_dual_inf <= interior.final_dual_inf.max(tol),
+        "dual infeasibility regressed: {:.6e} → {:.6e}",
+        interior.final_dual_inf,
+        crossed.final_dual_inf
+    );
+    assert!(
+        crossed.final_constr_viol <= interior.final_constr_viol.max(tol),
+        "constraint violation regressed: {:.6e} → {:.6e}",
+        interior.final_constr_viol,
+        crossed.final_constr_viol
     );
 }

@@ -241,6 +241,19 @@ pub struct CrossoverReport {
     /// The same at the returned point. Never worse than `kkt_before` beyond
     /// the tolerances [`accepts`] allows.
     pub kkt_after: Number,
+    /// Max-norm complementarity at the returned point, measured against the
+    /// **declared** bounds — see [`complementarity_at`]. `NaN` when crossover
+    /// declined.
+    ///
+    /// This exists because the interior method's own complementarity is
+    /// measured against the *relaxed* bounds, and after crossover the two
+    /// frames disagree by the entire relaxation: an iterate sitting exactly
+    /// on a declared bound is `bound_relax_factor` inside the relaxed one, so
+    /// the relaxed reading is `|multiplier| · δ` — around `1e-8` — where the
+    /// truth is zero. Reporting that as the solve's complementarity printed a
+    /// converged run as `Overall NLP error` above `tol` (#646). The caller
+    /// substitutes this figure when the point was accepted.
+    pub compl_after: Number,
 }
 
 impl CrossoverReport {
@@ -255,6 +268,7 @@ impl CrossoverReport {
             estimated_active: 0,
             kkt_before: Number::NAN,
             kkt_after: Number::NAN,
+            compl_after: Number::NAN,
         }
     }
 
@@ -311,6 +325,66 @@ pub fn accepts(
     // interior objective's own magnitude.
     let obj_slack = OBJ_REL_SLACK * obj_b.abs().max(1.0);
     obj_a <= obj_b + obj_slack
+}
+
+/// Max-norm complementarity `max_i |slack_i · multiplier_i|` at a
+/// crossed-over point, in the frame crossover actually solved in.
+///
+/// Two things make this different from [`crate::ipopt_cq::IpoptCq`]'s
+/// complementarity, and both are deliberate.
+///
+/// **The bounds are the declared ones.** `nlp` here is the adapter built by
+/// `new_with_declared_bounds`, so `xl`/`xu`/`bl_c`/`bu_c` are the box the
+/// user wrote rather than the `bound_relax_factor`-widened one the interior
+/// iteration ran against. Crossover's whole job is to put the iterate *on*
+/// the active constraints of the problem as posed; measured against the
+/// relaxed bounds that same point reads `|multiplier| · δ` — the relaxation
+/// times the dual, `~1e-8` for a unit multiplier — which is not a residual of
+/// anything, just the width of an internal safeguard (#646).
+///
+/// **The slacks are raw.** The CQ floors a slack that falls below
+/// `eps·min(1,μ)` up to about `μ/z`, which keeps the barrier's `Σ = V/S`
+/// finite during the iteration. At a purified point the active slacks are
+/// *exactly* zero and that floor would put `μ/z ≈ 1e-9` back — reintroducing,
+/// as a reporting artifact, the very quantity crossover removed.
+///
+/// Sign conventions follow the rest of this module: `λ_x = z_l − z_u`
+/// (positive at a lower bound), while a row's `λ_g` is **negative** at its
+/// lower bound, because the bound block enters stationarity negated.
+fn complementarity_at(
+    x: &[Number],
+    c_vals: &[Number],
+    lambda_x: &[Number],
+    lambda_g: &[Number],
+    xl: &[Number],
+    xu: &[Number],
+    bl_c: &[Number],
+    bu_c: &[Number],
+) -> Number {
+    let mut worst = 0.0_f64;
+    // A point may sit a rounding step outside a bound; that is constraint
+    // violation, which `check_kkt` already reports. Clamping at zero here
+    // keeps it from re-entering as a *negative* complementarity.
+    let mut take = |slack: Number, mult: Number| {
+        worst = worst.max((slack.max(0.0) * mult).abs());
+    };
+    for i in 0..x.len() {
+        if xl[i] > NLP_LOWER_BOUND_INF {
+            take(x[i] - xl[i], lambda_x[i].max(0.0));
+        }
+        if xu[i] < NLP_UPPER_BOUND_INF {
+            take(xu[i] - x[i], (-lambda_x[i]).max(0.0));
+        }
+    }
+    for i in 0..c_vals.len() {
+        if bl_c[i] > NLP_LOWER_BOUND_INF {
+            take(c_vals[i] - bl_c[i], (-lambda_g[i]).max(0.0));
+        }
+        if bu_c[i] < NLP_UPPER_BOUND_INF {
+            take(bu_c[i] - c_vals[i], lambda_g[i].max(0.0));
+        }
+    }
+    worst
 }
 
 /// Count the active entries of a working set, split bounds / rows.
@@ -503,6 +577,16 @@ where
             if within_tol && accepts(before, after, sqp_opts) {
                 let identified = identify_at(nlp, &cand.x, m_eq, &xl, &xu, &bl_c, &bu_c);
                 let (active_bounds, active_constraints) = count_active(&identified);
+                let compl_after = complementarity_at(
+                    &cand.x,
+                    &ls.c_new,
+                    &cand.lambda_x,
+                    &cand.lambda_g,
+                    &xl,
+                    &xu,
+                    &bl_c,
+                    &bu_c,
+                );
                 return (
                     CrossoverReport {
                         phase: Some(CrossoverPhase::EqpStep),
@@ -514,6 +598,7 @@ where
                         estimated_active,
                         kkt_before: kkt_before.stationarity.max(kkt_before.constr_viol),
                         kkt_after: kkt_after.stationarity.max(kkt_after.constr_viol),
+                        compl_after,
                     },
                     Some(SqpResult {
                         x: cand.x,
@@ -569,6 +654,19 @@ where
     }
     let identified = identify_at(nlp, &res.x, m_eq, &xl, &xu, &bl_c, &bu_c);
     let (active_bounds, active_constraints) = count_active(&identified);
+    let compl_after = {
+        let c_final = nlp.eval_c(&res.x);
+        complementarity_at(
+            &res.x,
+            &c_final,
+            &res.lambda_x,
+            &res.lambda_g,
+            &xl,
+            &xu,
+            &bl_c,
+            &bu_c,
+        )
+    };
     let mut res = res;
     res.working_set = Some(identified);
     let report = CrossoverReport {
@@ -581,6 +679,7 @@ where
         estimated_active,
         kkt_before: kkt_before.stationarity.max(kkt_before.constr_viol),
         kkt_after: res.final_stationarity.max(res.final_constr_viol),
+        compl_after,
     };
     (report, Some(res))
 }

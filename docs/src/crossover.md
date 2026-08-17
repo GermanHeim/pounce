@@ -144,14 +144,24 @@ gate still refuses is a residual crossing its own tolerance.
 Because it runs strictly *after* convergence and is off by default, enabling
 it moves no interior trajectory.
 
-## The one number that gets worse
+## Which bounds the reported residuals are measured against
 
-Crossover puts the iterate on the declared bounds, but the end-of-run
-summary still measures against the **relaxed** ones. Those two frames
-disagree by exactly the relaxation, and the disagreement lands entirely on
-the complementarity term: at an active constraint the returned point has
-slack `δ ≈ 1e-8` in the relaxed frame with the true multiplier `v` beside
-it, so the product reads `v·δ` instead of `~μ`.
+`bound_relax_factor` (default `1e-8`) widens every bound by `δ` before the
+solve. That is invisible during the interior iteration, which never touches
+even the widened bound — but crossover puts the iterate *exactly* on the
+declared one, which is `δ` **inside** the relaxed one. Measured in the
+relaxed frame the returned point therefore has slack `δ` at every active
+constraint, and the complementarity term reads `v·δ` rather than `~μ`.
+
+For a unit multiplier and the default relaxation that is `1e-8` — which is
+`tol`. So the summary printed a converged, strictly better point as having
+an `Overall NLP error` at or above the tolerance it converged at, and the
+opt-in `kkt_fidelity_tol` gate (applied *after* crossover) downgraded
+`Solve_Succeeded` on it. That was [#646](https://github.com/jkitchin/pounce/issues/646),
+and it is fixed: **when crossover is accepted, the reported complementarity
+and the two KKT aggregates are measured against the declared bounds** — the
+frame crossover solved in, and the frame the never-regress gate already
+judged the point in.
 
 Measured on HS14 (strictly complementary, `v ≈ 1.85`):
 
@@ -159,30 +169,26 @@ Measured on HS14 (strictly complementary, `v ≈ 1.85`):
 |---|---|---|
 | Dual infeasibility | `1.9e-12` | `8.9e-16` |
 | Constraint violation | `2.9e-13` | `2.2e-16` |
-| Complementarity | `2.5e-09` | `1.9e-08` |
+| Complementarity | `2.5e-09` | `3.5e-16` |
+| Overall NLP error | `2.5e-09` | `8.9e-16` |
 
-The point is three to four orders of magnitude better on stationarity and
-feasibility, and about 7× "worse" on a complementarity residual computed
-against a constraint the model does not contain. In the frame crossover
-actually solves in — the declared bounds — that residual is zero, which is
-why the never-regress gate (which measures there, via `check_kkt`) accepts
-the point.
+Two details of the substitution are worth stating, because they are the
+places it could have been done wrong:
 
-Two practical consequences:
+- **Only complementarity moves.** Stationarity involves no bounds, and the
+  crossed-over point is strictly *interior* to the relaxed box, so its
+  constraint violation is zero under either reading.
+- **The slacks are raw.** The interior machinery floors a slack that falls
+  below `eps·min(1,μ)` up to about `μ/z`, which is what keeps the barrier's
+  `Σ = V/S` finite while the iteration runs. At a purified point the active
+  slacks are *exactly* zero, and that floor would put `μ/z ≈ 1e-9` straight
+  back — reintroducing as a reporting artifact the very quantity crossover
+  removed. The declared-frame measurement does not apply it.
 
-- **`Overall NLP error` in the summary can exceed `tol`** on a solve that
-  legitimately converged, because it is the max over the three and
-  complementarity now dominates it. The exit status is unaffected: it is
-  decided by the interior loop before crossover runs.
-- **`kkt_fidelity_tol` is the exception.** That opt-in gate is applied
-  *after* crossover, so a threshold set between the two numbers above will
-  downgrade a crossed-over solve. If you use both, set it against the
-  post-crossover figure.
-
-This is a reporting-frame mismatch rather than a property of the returned
-point, and fixing it means teaching the summary which frame a crossed-over
-solve lives in — tracked in [#646](https://github.com/jkitchin/pounce/issues/646),
-separately from this feature.
+This is a change to *reporting* only. It runs after the exit status is
+already decided, and it applies solely to a point the never-regress gate
+accepted on its declared-bound residuals, so it cannot dress up a worse
+iterate — the reading it replaces is the artifact, not the point.
 
 ## Reading the result
 
@@ -204,6 +210,7 @@ if let Some(r) = app.crossover_report() {
     println!("active:   {} bounds, {} rows", r.active_bounds, r.active_constraints);
     println!("estimated {} active before pivoting", r.estimated_active);
     println!("KKT {:e} -> {:e}", r.kkt_before, r.kkt_after);
+    println!("complementarity (declared frame): {:e}", r.compl_after);
 }
 
 // The identified set, ready to seed an `algorithm=active-set-sqp` solve.

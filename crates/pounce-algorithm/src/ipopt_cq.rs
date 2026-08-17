@@ -2125,9 +2125,49 @@ impl IpoptCalculatedQuantities {
         self.nlp_error(Some(kappa))
     }
 
+    /// [`Self::curr_nlp_error`] with the complementarity term supplied by the
+    /// caller instead of read off the iterate, keeping the `s_c` normalisation
+    /// and the other two terms exactly as they are.
+    ///
+    /// One caller: the crossover phase (#612). Its returned point sits
+    /// *exactly* on the active constraints of the problem **as the user
+    /// declared it**, which is `bound_relax_factor` inside the widened bounds
+    /// this object measures against — so the iterate-derived complementarity
+    /// reads `|multiplier| · δ`, around `1e-8` for a unit multiplier, where
+    /// the truth in the frame that was solved is zero. Left alone that put a
+    /// converged run's `Overall NLP error` above `tol` and let the opt-in
+    /// `kkt_fidelity_tol` gate downgrade a strictly better point (#646).
+    ///
+    /// `compl_raw` is the un-normalised max-norm `max_i |s_i · z_i|`, the same
+    /// quantity [`Self::curr_complementarity_max`] returns; the `s_c` divide
+    /// happens here. `kappa` follows
+    /// [`Self::curr_nlp_error_above_primal_noise`], `0` disabling the floor.
+    ///
+    /// This is a *reporting* substitution and nothing more — no convergence
+    /// decision reads it, because crossover runs after the status is already
+    /// settled.
+    pub fn curr_nlp_error_with_complementarity(&self, compl_raw: Number, kappa: Number) -> Number {
+        let floor = (kappa > 0.0).then_some(kappa);
+        self.nlp_error_inner(floor, Some(compl_raw))
+    }
+
     /// `above_primal_noise` carries the floor's `kappa` when the primal term is
     /// to be floored, and is `None` for the plain upstream aggregate.
     fn nlp_error(&self, above_primal_noise: Option<Number>) -> Number {
+        self.nlp_error_inner(above_primal_noise, None)
+    }
+
+    /// `compl_override` replaces the iterate-derived complementarity max-norm
+    /// before the `s_c` divide; see
+    /// [`Self::curr_nlp_error_with_complementarity`]. The NaN guard below
+    /// still inspects the iterate's own complementarity vectors either way —
+    /// an override is a change of *frame*, not a licence to stop looking at
+    /// the iterate for non-finite numbers.
+    fn nlp_error_inner(
+        &self,
+        above_primal_noise: Option<Number>,
+        compl_override: Option<Number>,
+    ) -> Number {
         let iv = self.curr_iv();
         let (s_d, s_c) = self.optimality_error_scaling(&iv);
 
@@ -2170,7 +2210,9 @@ impl IpoptCalculatedQuantities {
             Some(kappa) if kappa > 0.0 => self.curr_primal_infeasibility_above_noise(kappa),
             _ => c.amax().max(dms.amax()),
         };
-        let compl = cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()) / s_c;
+        let compl_raw = compl_override
+            .unwrap_or_else(|| cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()));
+        let compl = compl_raw / s_c;
 
         dual.max(primal).max(compl)
     }
