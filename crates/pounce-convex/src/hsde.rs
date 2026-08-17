@@ -184,7 +184,11 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
 /// re-attribution then amplifies that slack into a large stationarity violation
 /// in the original problem. Tying the crossover to `tol` keeps it self-consistent
 /// under a caller-tightened/loosened tolerance.
-fn relative_stop_permitted(max_scale: f64, tol: f64) -> bool {
+///
+/// Shared with the active-set driver's post-loop adjudication
+/// (`crate::active_set`, gh #641), which faces the identical crossover: its
+/// status test compares the same unnormalized KKT error against the same `tol`.
+pub(crate) fn relative_stop_permitted(max_scale: f64, tol: f64) -> bool {
     max_scale * f64::EPSILON > tol
 }
 

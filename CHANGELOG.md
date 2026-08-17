@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+- **`solve_qp(method="active-set")` reported `success=False` at exactly
+  optimal points on large-data QPs** (#641). The driver's post-loop
+  adjudication compared the raw, unnormalized KKT error against the absolute
+  `tol`. Its complementarity term `max|zᵢsᵢ|` carries the problem-data
+  magnitude twice over — `sᵢ = hᵢ − gᵢᵀx` cannot be formed to better than
+  `‖data‖·ε`, so `zᵢsᵢ` floors at `‖z‖·‖data‖·ε` — and stationarity floors at
+  `‖P‖·‖x‖·ε` the same way. Above `‖data‖ ≈ 1e9` both floors sit over the
+  default `tol = 1e-8`, so *no* iterate could pass, however exact.
+
+  Reported on `min ½K‖x‖² − K(x₁+x₂) s.t. x₁+x₂ ≤ 1` with `K = 1e9`, where
+  `cond(P) = 1` — the problem is large, not ill-conditioned. The returned
+  point was `x = (0.5, 0.5)` to `1.1e−16` and the objective exact to
+  `1.6e−16`, labelled `optimal_inaccurate` / `success=False`, degrading to
+  `numerical_failure` when the user asked for *more* accuracy. The convex IPM
+  — the less accurate engine on the same instance — reported a clean
+  `optimal`, so the two drivers disagreed and the one claiming failure held
+  the better answer.
+
+  This is the active-set analogue of #336, whose fix (#337) made the
+  non-symmetric HSDE driver's post-loop adjudication scale-relative; the
+  `pounce-qp` path was not covered by it. The status bands now score the
+  recovered point on a scale-relative residual, reusing the same crossover
+  gate (`max_scale·ε > tol`) the HSDE stopping test uses, so it opens only
+  where absolute `tol` accuracy is unreachable in double precision and can
+  only ever lower the measured error. Well- and moderately-scaled solves are
+  untouched — both fixture sweeps (default and `solver_selection=qp-active-set`)
+  diff empty against the parent commit.
+
+  **Primal feasibility is deliberately excluded from the relaxation.** An
+  earlier draft normalized all three terms and regressed the
+  `scaled_feasible_a` fixture from an exact solve to `Optimal` printed beside
+  a `7.8e−3` constraint violation: rows with `1e6` coefficients make a real
+  violation look like `1e−9` relative to the row, and accepting the unscaled
+  attempt then skipped the equilibrated retry that actually solves it. A
+  violation of the user's constraints is reported in the user's units at any
+  scale; only the two dual-side terms are measured relatively, and only in
+  the Ruiz-equilibrated metric, so the #414 variable-scale blindness cannot
+  return through this door.
+
+  Impact was confined to the Python API's `success` / `status`, which a
+  caller gating on them would read as a failed solve. The CLI already mapped
+  this case into the solved family (`solve_result_num=100`, exit 0).
+
 - **The `pounce-casadi` wheel is tagged for the platform it was built
   for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
   Python, installs anywhere" — while carrying a compiled CasADi plugin and
