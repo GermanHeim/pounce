@@ -25,8 +25,17 @@
 //!
 //! Those differ by `O(1)`, so drift toward the second is unmissable.
 //! The solver returns the first plus an error of exactly `Q_aw²/Σ_w`
-//! — the bound block's Schur complement, matched to every printed
-//! digit at both ends of a 300× range in `Σ`.
+//! — the bound block's Schur complement.
+//!
+//! When this file was written that law matched to every printed digit
+//! at both ends of a 300× range in `Σ`. Since gh#654 the crossed-over
+//! run reads `Σ` against the declared bounds instead of the relaxed
+//! ones, and on this fixture that puts `w` within an ulp of its cap:
+//! `Σ` saturates near `z/eps ≈ 2e16` and the predicted residual drops
+//! below the roundoff of `H_R` itself. The law is still what is
+//! asserted wherever it can be seen; where it cannot, the assertion is
+//! that the error sits at roundoff. See
+//! [`the_reduced_hessian_error_tracks_one_over_sigma`].
 //!
 //! `compute_reduced_hessian` returns `−H_R` under its sign convention
 //! (`−inv(H_R)` is the covariance), so every assertion here negates it.
@@ -238,8 +247,25 @@ fn crossover_at_declared_bounds_sharpens_the_reduced_hessian() {
 /// numbers is what makes the previous test's margin explainable
 /// instead of anecdotal — and it is the reason a growing `Σ` is a
 /// benefit rather than the conditioning hazard gh#653 assumed.
+///
+/// The law is asserted only where it is *observable*. Since gh#654 the
+/// crossed-over run reads `Σ` against the declared bounds, and on this
+/// fixture the purified `w` lands within an ulp of its cap, so `Σ`
+/// saturates at `z/eps ≈ 2e16` and the predicted residual — `2e-16` —
+/// falls below the roundoff of `H_R` itself, whose entries are `O(4)`
+/// and so carry an ulp near `9e-16`. Demanding 5% agreement between two
+/// quantities that are both at the ulp is measuring nothing. Where the
+/// prediction is below the noise floor the assertion becomes the weaker
+/// statement that is still true and still worth pinning: the error is
+/// *at* roundoff, i.e. the pin is as exact as double precision
+/// expresses.
 #[test]
 fn the_reduced_hessian_error_tracks_one_over_sigma() {
+    // Roundoff of the answer being measured: `H_R`'s largest entry is
+    // `Q_ab`'s, and a few ulp of it is the smallest error the
+    // subtraction in `reduced_hessian_error` can resolve.
+    let noise_floor = 8.0 * Number::EPSILON * H_PINNED.iter().fold(0.0, |m: Number, e| m.max(*e));
+
     for crossover in [false, true] {
         let (err, solver) = reduced_hessian_error(crossover, 0.0);
         // `classify_activity` is the public read of the barrier
@@ -250,51 +276,39 @@ fn the_reduced_hessian_error_tracks_one_over_sigma() {
             .expect("bound_relax_factor = 0, so the classifier accepts");
         let sigma = report.var_sigma[2];
         let predicted = ERR_NUMERATOR / sigma;
-        assert!(
-            (err - predicted).abs() <= 0.05 * predicted,
-            "crossover={crossover}: |H_R| error {err:e} should be \
-             Q_aw^2/Sigma = {predicted:e} (Sigma = {sigma:e})",
-        );
+
+        if predicted > noise_floor {
+            assert!(
+                (err - predicted).abs() <= 0.05 * predicted,
+                "crossover={crossover}: |H_R| error {err:e} should be \
+                 Q_aw^2/Sigma = {predicted:e} (Sigma = {sigma:e})",
+            );
+        } else {
+            assert!(
+                err <= noise_floor,
+                "crossover={crossover}: Q_aw^2/Sigma = {predicted:e} is below \
+                 the {noise_floor:e} roundoff of H_R, so the error must sit at \
+                 roundoff too, not at {err:e} (Sigma = {sigma:e})",
+            );
+        }
     }
 }
 
-/// The other half of the measurement, and a defect rather than a
-/// property: with the bound relaxation left at its default, crossover
-/// makes the same reduced Hessian **worse** than not crossing over at
-/// all.
-///
-/// Crossover parks the iterate exactly on the *declared* bound, which
-/// is a full `δ = bound_relax_factor` inside the *live* relaxed one.
-/// The slack the barrier then sees is `δ` rather than the `μ/z` an
-/// interior iterate would have carried, so `Σ = z/δ` instead of
-/// `z²/μ`, and the bound is pinned **less** stiffly. The degradation
-/// factor is `z·δ/μ` — it grows with the bound's multiplier.
-///
-/// This is gh#646's frame mismatch reaching the numerics; gh#647 fixed
-/// only the reporting half. Tracked as gh#654. The assertion records the
-/// regression in executable form so it cannot drift, or be fixed,
-/// unnoticed.
-#[test]
-fn crossover_under_bound_relaxation_loosens_the_reduced_hessian() {
-    let (err_off, _) = reduced_hessian_error(false, 1e-8);
-    let (err_on, _) = reduced_hessian_error(true, 1e-8);
-
-    // Measured 18x at the time of writing (4.95e-10 -> 8.89e-9), rising
-    // toward ~400x as the bound multiplier grows.
-    assert!(
-        err_on > err_off * 5.0,
-        "known gh#654 defect: crossover under a nonzero bound_relax_factor \
-         should LOOSEN the pin (errors {err_off:e} -> {err_on:e}). If this \
-         now fails, the frame mismatch was fixed — delete the test and say \
-         so, do not relax the bound.",
-    );
-
-    // And it is strictly worse than the same crossover run against
-    // declared bounds: the relaxation, not crossover, is the cause.
-    let (err_declared, _) = reduced_hessian_error(true, 0.0);
-    assert!(
-        err_declared < err_on,
-        "crossover at declared bounds ({err_declared:e}) must beat crossover \
-         under relaxation ({err_on:e})",
-    );
-}
+// The third test this file shipped with,
+// `crossover_under_bound_relaxation_loosens_the_reduced_hessian`, was
+// deleted here rather than relaxed — which is what it asked for, in as
+// many words, should it ever start failing.
+//
+// It recorded the other half of gh#653's measurement: with the bound
+// relaxation at its default, crossover made this same reduced Hessian
+// 18x *worse* than not crossing over at all, rising toward ~400x as the
+// bound's multiplier grew. That was a defect, tracked as gh#654 and
+// fixed by re-measuring `Σ` in the frame crossover solved in, so the
+// assertion it made is now false in the direction that means the bug is
+// gone: crossover under `bound_relax_factor = 1e-8` is no longer
+// distinguishable from crossover at declared bounds.
+//
+// Deleting it leaves no gap. The replacement lives in
+// `crossover_sigma_frame.rs`, which pins the same comparison from the
+// other side — that the two runs now *agree* — across a range of bound
+// multipliers rather than at the single `z ≈ 4.5` this fixture reaches.

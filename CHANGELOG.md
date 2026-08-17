@@ -30,6 +30,87 @@ changes.
   rather than the bare maximum. That keeps what the floor was for — a
   block computing to ~0 out of cancellation of large terms is still not
   held to bit equality — while letting a healthy block's own scale win.
+- **Crossover: the sensitivity path reads the barrier diagonal in the
+  frame crossover solved in** (#654).
+
+  `bound_relax_factor` (default `1e-8`) widens every bound by `δ` before
+  the solve, and crossover parks the iterate exactly on the **declared**
+  bound — a full `δ` inside the live relaxed one. So the barrier saw a
+  slack of exactly `δ` at every active bound where an interior iterate
+  would have carried `μ/z`, and the barrier diagonal `Σ = z/s` came out
+  as `z/δ` instead of `z²/μ`. Since `δ` is capped at `constr_viol_tol`
+  and `μ` ends near `tol/(barrier_tol_factor+1)`, that is *looser*
+  whenever `z·δ/μ > 1`, which is the ordinary case.
+
+  `Σ` is the stiffness with which the barrier holds a bounded variable,
+  and a reduced Hessian read off the held KKT factor carries a residual
+  error of exactly `O(1/Σ)` — the leftover of that pin being finite. So
+  crossover was *degrading* the sensitivity path by a factor that tracked
+  the bound multiplier: on the pinned fixture, `18x` at `z = 4.5`, `376x`
+  at `z = 94.5`, `396x` at `z = 994.5`. With `bound_relax_factor = 0` the
+  same run was instead `306x` more accurate than no crossover — so an
+  option documented as the remedy for the sensitivity path's AMBIGUOUS
+  class only helped when a second, unrelated option was also set.
+
+  `Σ` is now re-measured against the declared bounds — variable bounds
+  and inequality-row bounds alike — whenever the held iterate came from
+  an accepted crossover, and the same corrected diagonal is what the
+  factor is rebuilt with and what `classify_activity` reads, so the two
+  cannot disagree about which bounds the point is measured against. The
+  reduced-Hessian error drops to the roundoff of the answer itself
+  (`8.9e-16`, and exactly `0` at the larger multipliers) and is now
+  identical with the relaxation on and off. Covers `covariance()`,
+  `information()`, `classify_activity()`, `Solver::compute_reduced_hessian`,
+  both parametric steps, `kkt_solve`/`kkt_solve_many`, and the
+  `SensSolve` builder — every one of them reads the one held factor.
+
+  Applied at the consumer boundary, as #646 did for the residual report:
+  nothing on the live iterate moves, no solver trajectory changes, and a
+  solve that did not cross over is bit-identical. Slacks are floored at
+  `eps·max(1,|bound|)` — the distance at which the point *is* the bound —
+  rather than by `CalculateSafeSlack`, which would put the `μ/z` standoff
+  crossover exists to remove straight back. The declared frame does carry
+  #655's representability floor `s >= max_i z_i / (f64::MAX/4)`, which is
+  about what a double can hold rather than about where the barrier would
+  have put the point, and would otherwise have stopped at the frame
+  boundary. Pinned by
+  `crates/pounce-sensitivity/tests/crossover_sigma_frame.rs`, which sweeps
+  the bound multiplier; #653's `crossover_sigma_downstream.rs` measures the
+  same effect at a single multiplier and lost the test that recorded the
+  defect, which this fixes.
+- **`Sigma = z/s` no longer overflows to `inf` on a converged solve**
+  (#655).
+
+  At `tol = compl_inf_tol = 1e-306` with `mu_min = 5e-324`, an adaptive
+  solve converged (`SolveSucceeded`) at `mu = 9.09e-308` with a subnormal
+  slack of `2.02e-308`; against a bound multiplier of `4.5` that is a
+  `Sigma` of `2.2e308`, past `f64::MAX`, on the KKT diagonal — and from
+  there into every backsolve the sensitivity path makes.
+
+  `calculate_safe_slack`'s floor did not catch it because it is not the
+  floor for this: `eps*min(1, mu)` is `2.0e-323` at that `mu` — a
+  representable subnormal, not the `0` that would have substituted
+  `f64::MIN_POSITIVE` — so the slack cleared it and no correction fired
+  at all. The quantity that has to stay finite is `z/s`, so the floor is
+  now also `s >= max_i z_i / (f64::MAX/4)`, applied both to the trigger
+  and again after the `slack_move` bound-move cap (which can otherwise
+  cap a flagged slack back below the floor when the multipliers are
+  enormous, or when `slack_move` is `0`).
+
+  Off the overflow edge the floor sits at `z_max/4.5e307`, below every
+  slack an ordinary iterate carries: `scripts/sweep-fixtures.sh` over all
+  57 CLI fixtures is byte-identical in status, objective and iteration
+  count. Re-run under the issue's own settings, one line moves —
+  `linear_eq_collapsed_box` reported `SolveSucceeded` at a slack of
+  `4.2e-310` against `z = 84.4`, i.e. at `Σ = inf`, and now reports
+  `SearchDirectionBecomesTooSmall`. The trajectory is identical (same 20
+  iterations, same objective to the last bit, same factorizations); what
+  changed is that its complementarity is now measured on a slack that can
+  be divided by — `1.58e-304`, which does not meet the `compl_inf_tol =
+  1e-306` the caller asked for. A solve that cannot reach the requested
+  complementarity with a representable slack now says so instead of
+  claiming success, matching what the issue's own table already reported
+  one notch further down at `tol = 1e-308`.
 
 - **POUNCE's structured solve report is reachable from CasADi** (#644).
   Set `solve_report` to a path and each solve writes a
@@ -203,26 +284,29 @@ changes.
   pin being finite. A larger `Σ` is a sharper pin and a better answer. On a
   fixture with two parameters held by pin rows and a third capped by a bound
   binding at multiplier `4.5`, crossover against the declared bounds takes
-  `Σ` from `8.1e9` to `2.5e12` and the reduced-Hessian error from `4.95e-10`
-  to `1.62e-12` — **306× more accurate**, matching the `1/Σ` law to every
-  printed digit. `Σ` never goes infinite: `CalculateSafeSlack` floors a slack
-  below `eps·min(1,μ)` up to about `μ/z`, so even an exactly-zero slack falls
-  back to the pre-crossover `Σ = z²/μ`, and the crossed-over slack measured
-  here bottoms out at `1.8e-12` without reaching the floor.
+  `Σ` from `8.1e9` to `2.0e16` and the reduced-Hessian error from `4.95e-10`
+  to `4.44e-16` — the roundoff of the answer itself. The `1/Σ` law matches to
+  every printed digit until `Σ` grows past the point where its prediction
+  falls below that roundoff. `Σ` never goes infinite in either frame: on the
+  live path `CalculateSafeSlack` floors a slack below `eps·min(1,μ)` up to
+  about `μ/z`, and since that threshold is about the barrier term and does
+  not mention the multiplier, the floor that bounds `Σ` once `μ` goes
+  subnormal is the `s >= max_i z_i / (f64::MAX/4)` added for #655; the
+  declared frame carries `eps·max(1,|bound|)` and the same `#655` bound. The
+  slack measured here bottoms out at `1.8e-12` and reaches neither.
 
   The same measurement found the reverse under a nonzero
   `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics
-  rather than the printed residuals: the crossed-over point sits exactly `δ`
-  inside the live relaxed bound, so `Σ` becomes `z/δ` instead of `z²/μ` and
-  the pin **loosens** — `4.5e8` against `8.1e9`, an `8.89e-9` reduced-Hessian
-  error where crossover-off gives `4.95e-10`. The degradation factor is
-  `z·δ/μ`, so it grows with the bound's multiplier, reaching ~400× by a
-  multiplier of `1000`. `covariance()` and `curve_fit` are unaffected — the
-  declaration-triggered solve already sets `bound_relax_factor = 0`, which
-  `classify_activity()` requires — but a `Solver` or `SensSolve` session
-  configured by hand is not. Set `bound_relax_factor = 0` when combining
-  crossover with any sensitivity result. All three directions are pinned by
-  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs`.
+  rather than the printed residuals: the crossed-over point sat exactly `δ`
+  inside the live relaxed bound, so `Σ` became `z/δ` instead of `z²/μ` and
+  the pin **loosened** — `4.5e8` against `8.1e9`, an `8.89e-9` reduced-Hessian
+  error where crossover-off gives `4.95e-10`, with the degradation factor
+  `z·δ/μ` growing to ~400× by a multiplier of `1000`. That is the defect
+  fixed by the #654 entry at the top of this section, in the same release:
+  `Σ` is re-measured against the declared bounds, and the two now agree.
+  Directions are pinned by
+  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs` (this
+  measurement) and `crossover_sigma_frame.rs` (the fix).
 
   Two defects surfaced while building it, both of which would have made
   the phase report the opposite of the truth:

@@ -1841,6 +1841,11 @@ impl IpoptApplication {
         solver_status: SolverReturn,
     ) {
         self.crossover_report = None;
+        // Cleared on every entry, alongside the report, so the flag
+        // describes this solve and not a previous one — the same reason
+        // `crossover_report` is reset here rather than only written on
+        // the accept path.
+        alg.data.borrow_mut().curr_from_crossover = false;
         let xopts = self.crossover_options();
         if !xopts.enabled {
             return;
@@ -1966,7 +1971,17 @@ impl IpoptApplication {
             );
             return;
         }
-        alg.data.borrow_mut().set_curr(out.freeze());
+        let mut d = alg.data.borrow_mut();
+        d.set_curr(out.freeze());
+        // Mark which frame the installed iterate belongs to. It sits on the
+        // *declared* bounds, and every barrier quantity built off `curr` —
+        // slacks, and through them `Σ = z/s` — is measured against the
+        // `bound_relax_factor`-widened ones, so a consumer that wants the
+        // point's own geometry rather than the barrier's has to know this
+        // happened (gh#654). Set only on the path that actually replaced
+        // `curr`: a declined or abandoned crossover leaves the interior
+        // iterate, which is an interior-frame point.
+        d.curr_from_crossover = true;
     }
 
     fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {

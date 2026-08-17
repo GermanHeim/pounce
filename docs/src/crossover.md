@@ -179,11 +179,15 @@ places it could have been done wrong:
   crossed-over point is strictly *interior* to the relaxed box, so its
   constraint violation is zero under either reading.
 - **The slacks are raw.** The interior machinery floors a slack that falls
-  below `eps·min(1,μ)` up to about `μ/z`, which is what keeps the barrier's
-  `Σ = V/S` finite while the iteration runs. At a purified point the active
+  below `eps·min(1,μ)` up to about `μ/z`, which is part of what keeps the
+  barrier's `Σ = V/S` finite while the iteration runs (the other part is
+  the representability floor `s ≥ max_i z_i / (f64::MAX/4)`, which is what
+  covers a subnormal `μ` — see below). At a purified point the active
   slacks are *exactly* zero, and that floor would put `μ/z ≈ 1e-9` straight
   back — reintroducing as a reporting artifact the very quantity crossover
-  removed. The declared-frame measurement does not apply it.
+  removed. The declared-frame measurement does not apply the `μ/z`
+  correction. It does carry the representability floor, for the reason
+  given below.
 
 This is a change to *reporting* only. It runs after the exit status is
 already decided, and it applies solely to a point the never-regress gate
@@ -209,40 +213,75 @@ bound-pinned answer and the free one, so drift is unmissable:
 | | `Σ` at the active bound | reduced-Hessian error |
 |---|---|---|
 | `crossover=no` | `8.1e+09` | `4.95e-10` |
-| `crossover=yes`, `bound_relax_factor=0` | `2.5e+12` | **`1.62e-12`** |
-| `crossover=yes`, default relaxation | `4.5e+08` | **`8.89e-09`** |
+| `crossover=yes`, `bound_relax_factor=0` | `2.0e+16` | **`4.44e-16`** |
+| `crossover=yes`, default relaxation | `2.0e+16` | **`4.44e-16`** |
 
-Two things follow, and they point in opposite directions.
+**Against the bounds as declared, crossover sharpens the result by
+exactly the factor `Σ` grew.** The error is `Q_aw²/Σ`, the bound block's
+Schur complement, and it holds to every printed digit until `Σ` grows
+large enough that the prediction drops below the roundoff of the answer
+itself — which is where the two crossover rows above sit. With the point
+*on* its bound the pin is as exact as double precision expresses.
 
-- **Against the bounds as declared, crossover sharpens the result by
-  exactly the factor `Σ` grew** — 306× here. The error is `Q_aw²/Σ`, the
-  bound block's Schur complement, which matches the measurement to every
-  printed digit at both ends of that range. This is the combination
-  [Sensitivity Analysis](sensitivity.md) steers you into, because
-  `classify_activity()` requires `bound_relax_factor = 0` anyway.
-- **Under a nonzero `bound_relax_factor`, crossover makes it worse than
-  not crossing over at all** — 18× worse here. The crossed-over point
-  sits exactly `δ = bound_relax_factor` inside the live relaxed bound,
-  so the barrier sees a slack of `δ` where an interior iterate would
-  have carried `μ/z`. `Σ` becomes `z/δ` instead of `z²/μ`, and the pin
-  *loosens*. The degradation factor is `z·δ/μ`, so it grows with the
-  bound's multiplier — around 400× by a multiplier of 1000.
+**The two crossover rows are identical, and that is recent.** Until
+[#654](https://github.com/jkitchin/pounce/issues/654) the second one read
+`4.5e+08` / `8.89e-09` — 18× *worse* than not crossing over at all,
+rising toward 400× as the bound's multiplier grew. The crossed-over point
+sits exactly `δ = bound_relax_factor` inside the live relaxed bound, so
+the barrier saw a slack of `δ` where an interior iterate would have
+carried `μ/z`, making `Σ = z/δ` instead of `z²/μ` and *loosening* the pin
+by `z·δ/μ`. That was the same frame mismatch as
+[#646](https://github.com/jkitchin/pounce/issues/646) reaching the
+numerics rather than the printed residuals, and it is fixed the same way:
+**when crossover is accepted, `Σ` is re-measured against the declared
+bounds** — for variable bounds and inequality-row bounds alike — before
+the sensitivity path factors with it or classifies against it.
 
-This is the same frame mismatch as
-[#646](https://github.com/jkitchin/pounce/issues/646), reaching the
-numerics rather than the printed residuals; the fix there was to the
-reporting only. Tracked as
-[#654](https://github.com/jkitchin/pounce/issues/654). If you combine
-crossover with any sensitivity result — `covariance()`,
-`compute_reduced_hessian`, `parametric_step` — set
-`bound_relax_factor = 0`.
+The correction is applied at the consumer boundary, not on the live
+iterate: the relaxed bounds are still what the algorithm ran against, and
+nothing about the solve moves. It covers `covariance()`, `information()`,
+`classify_activity()`, `compute_reduced_hessian`, the parametric steps,
+and the `SensSolve` builder, because all of them read the one held
+factor.
 
-`Σ` never becomes infinite along this path. `CalculateSafeSlack` floors
-a slack below `eps·min(1, μ)` up to about `μ/z`, so even a slack landing
-at exactly zero degrades gracefully back to the pre-crossover `Σ = z²/μ`
-rather than dividing by nothing. The crossed-over slack measured here
-bottoms out at `1.8e-12` — the residual of the QP step plus line search
-— and never reaches the floor at all.
+So `crossover=yes` and `bound_relax_factor = 0` are now independent
+choices: a crossed-over solve reports the same downstream numbers either
+way. You may still want `bound_relax_factor = 0` for
+`classify_activity()`, which requires it for an unrelated reason — the
+central-path checks it makes read the barrier's own slacks, which the
+relaxation shifts.
+
+`Σ` never becomes infinite, in either frame — but the two frames get
+there by different floors, and it is worth knowing which supplies the
+guarantee where.
+
+On the **live interior path**, `CalculateSafeSlack` carries two. The
+first, `eps·min(1, μ)`, is a threshold on the *barrier* term; nothing in
+it mentions the multiplier, so it bounds `Σ` only because a normal `μ`
+makes `μ/z` a usable slack. Push `μ` into the subnormal range and it
+stops covering anything — at `μ = 9.1e-308` the threshold is `2.0e-323`,
+small enough that a slack of `2.0e-308` clears it untouched and `z/s`
+overflows ([#655](https://github.com/jkitchin/pounce/issues/655)). What
+makes `Σ` finite unconditionally is the second, `s ≥ max_i z_i /
+(f64::MAX/4)`, which is stated in terms of the quantity that has to stay
+representable rather than in terms of `μ`.
+
+The **declared frame** does not go through that function at all — the
+`max(μ/z, s_min)` correction is exactly the standoff crossover exists to
+remove, and applying it would put back as an artifact what the phase
+just took out. So it carries its own pair: `eps·max(1,|bound|)`, the
+distance at which the point *is* the bound, which covers a pivot landing
+on it exactly; and the same `max_i z_i / (f64::MAX/4)` as above, because
+a representability bound is about what a double can hold rather than
+about where the barrier would have put the point, and it would otherwise
+stop at the frame boundary.
+
+Neither floor is reached in ordinary use. On the fixture in the table
+above the crossed-over slack does reach the first one; the slack measured
+in [#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
+`1.8e-12` — the residual of the QP step plus line search — and reached
+neither. The representability half matters for solves at pathological
+tolerances, not for these.
 
 ## Reading the result
 

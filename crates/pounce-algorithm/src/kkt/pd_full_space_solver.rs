@@ -24,6 +24,26 @@ use pounce_linsol::ESymSolverStatus;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Barrier-diagonal replacements for one
+/// [`PdFullSpaceSolver::solve_with_sigma`] call. `None` on a side means
+/// "use the calculated quantity", so [`Self::default`] is exactly
+/// [`PdFullSpaceSolver::solve`].
+///
+/// The two blocks travel together because they answer the same question
+/// about the same iterate — how stiffly the barrier holds each active
+/// bound — and a caller that corrects one and not the other leaves the
+/// factor describing a point that is half in one frame and half in the
+/// other.
+#[derive(Default, Clone)]
+pub struct SigmaOverride {
+    /// Replacement for `cq.curr_sigma_x()`: the variable-bound
+    /// contribution to the `x` diagonal.
+    pub x: Option<Rc<dyn Vector>>,
+    /// Replacement for `cq.curr_sigma_s()`: the inequality-row-bound
+    /// contribution to the `s` diagonal.
+    pub s: Option<Rc<dyn Vector>>,
+}
+
 pub struct PdFullSpaceSolver {
     aug_solver: Box<dyn AugSystemSolver>,
     perturb: Rc<RefCell<PdPerturbationHandler>>,
@@ -147,7 +167,7 @@ impl PdFullSpaceSolver {
         allow_inexact: bool,
         improve_solution: bool,
     ) -> bool {
-        self.solve_with_sigma_x(
+        self.solve_with_sigma(
             data,
             cq,
             nlp,
@@ -157,36 +177,44 @@ impl PdFullSpaceSolver {
             res,
             allow_inexact,
             improve_solution,
-            None,
+            SigmaOverride::default(),
         )
     }
 
-    /// [`Self::solve`] against the same system with `sigma_x` replaced.
+    /// [`Self::solve`] against the same system with the barrier
+    /// diagonals `sigma_x` / `sigma_s` replaced.
     ///
-    /// `sigma_x` is the barrier term the active bounds contribute to
-    /// the `x` diagonal, `z / s` per bound. Zeroing an entry takes that
-    /// bound back out of the active set, which is what a *released*
-    /// bound means, so factoring the result gives the released system
-    /// directly.
+    /// `sigma` is the barrier term the active bounds contribute to the
+    /// `x` (variable bounds) and `s` (inequality-row bounds) diagonals,
+    /// `z / s` per bound. Two callers want it substituted, for
+    /// different reasons:
     ///
-    /// This exists because the released system cannot be recovered from
-    /// the converged factor. Reaching it by a rank-1 downdate through a
-    /// Schur complement asks for the difference of two quantities that
-    /// agree to about `eps * sigma`, and on a tightly converged bound
-    /// `sigma` is large enough that the difference is noise -- measured,
-    /// the released answer degrades in proportion to how well the solve
-    /// converged. Factoring is what buys those digits back, and it is
-    /// still one factorization against the twenty to a hundred a
-    /// re-solve would run.
+    /// * **Release.** Zeroing an entry takes that bound back out of the
+    ///   active set, which is what a *released* bound means, so
+    ///   factoring the result gives the released system directly. The
+    ///   released system cannot be recovered from the converged factor:
+    ///   reaching it by a rank-1 downdate through a Schur complement
+    ///   asks for the difference of two quantities that agree to about
+    ///   `eps * sigma`, and on a tightly converged bound `sigma` is
+    ///   large enough that the difference is noise -- measured, the
+    ///   released answer degrades in proportion to how well the solve
+    ///   converged. Factoring is what buys those digits back, and it is
+    ///   still one factorization against the twenty to a hundred a
+    ///   re-solve would run.
+    /// * **Crossover (gh#654).** A crossed-over iterate sits on the
+    ///   *declared* bounds, so its live slacks read `bound_relax_factor`
+    ///   rather than the barrier's `mu/z`, and `sigma` comes out of the
+    ///   cache describing a looser pin than the point actually has. The
+    ///   sensitivity path substitutes the declared-frame diagonal here.
     ///
     /// Only `pounce-sensitivity` calls this; the algorithm's own step
     /// computation goes through [`Self::solve`] and is unaffected, so no
-    /// solver trajectory moves. `sigma_x` is one of the thirteen
+    /// solver trajectory moves. Both sigmas are among the thirteen
     /// dependency tags, so passing a different vector misses the
     /// factorization cache and re-factors, and the next ordinary solve
     /// misses it back -- correctness needs no extra bookkeeping here.
     #[allow(clippy::too_many_arguments)]
-    pub fn solve_with_sigma_x(
+    pub fn solve_with_sigma(
         &mut self,
         data: &IpoptDataHandle,
         cq: &IpoptCqHandle,
@@ -197,7 +225,7 @@ impl PdFullSpaceSolver {
         res: &mut IteratesVectorMut,
         allow_inexact: bool,
         improve_solution: bool,
-        sigma_x_override: Option<Rc<dyn pounce_linalg::Vector>>,
+        sigma_override: SigmaOverride,
     ) -> bool {
         debug_assert!(!allow_inexact || !improve_solution);
         debug_assert!(!improve_solution || beta == 0.0);
@@ -221,8 +249,8 @@ impl PdFullSpaceSolver {
         let cq_ref = cq.borrow();
         let j_c = cq_ref.curr_jac_c();
         let j_d = cq_ref.curr_jac_d();
-        let sigma_x = sigma_x_override.unwrap_or_else(|| cq_ref.curr_sigma_x());
-        let sigma_s = cq_ref.curr_sigma_s();
+        let sigma_x = sigma_override.x.unwrap_or_else(|| cq_ref.curr_sigma_x());
+        let sigma_s = sigma_override.s.unwrap_or_else(|| cq_ref.curr_sigma_s());
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
         let slack_s_l = cq_ref.curr_slack_s_l();
