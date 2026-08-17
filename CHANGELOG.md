@@ -110,6 +110,24 @@ changes.
   reaches the case recentering does not, the slew fixture, where the
   closed loop goes 27 → 21 against cold's 22.
 
+  The remaining headroom is measured rather than guessed, and recorded
+  in `docs/src/initialization.md`: seeding each window with the *next*
+  window's converged primal point runs the same loops in 21/24/26/23
+  against the shipped 45/50/54/46, so about half of what a transfer
+  spends is the zero-order prediction and not the barrier (whose own
+  floor, from a perfect primal *and* dual seed, is 9/12/18/18). Two
+  ways of collecting it were tried and both fail: a finite-difference
+  secant predictor is worse than zero-order everywhere (59/75/66/60),
+  and the KKT tangent behind the `pred-ipm` arm cannot be pointed at a
+  horizon shift at all — on the stages two windows share, theta does
+  not move, so `parametric_step` receives a delta vector of exact zeros
+  and returns a zero step. **A receding horizon is a structural change,
+  not a parametric one.** Given a parameter that does move (an MPC
+  initial-condition pin) the tangent degrades with horizon,
+  52/87/95/137 against 54/78/81/93. What is left is the freshly-entered
+  stage, which has no history to extrapolate from and can only be
+  predicted from the model — which is what `transfer()`'s mapper is for.
+
   Two suggestions from the issue were measured. Dropping the
   transferred multipliers so the solver rebuilds them from the primal
   point is close to a wash once the values-only path is fixed (the

@@ -439,6 +439,56 @@ to a cold solve by more the longer the horizon got. Residual-adaptive
 recentering (pounce#606/#620) is what turned that around; the fill
 policy above is what fixed the case it did not reach.
 
+#### Could a better transfer do better? (pounce#622)
+
+Yes, by about 2x — and not by any of the obvious routes, so the
+measurements are recorded here rather than left for the next person to
+re-run. Bound the question with oracles no transfer can beat: seed each
+window with the *next* window's converged answer. Eight-step receding
+horizon, total iterations:
+
+| horizon | cold | shipped | perfect primal | perfect primal+dual |
+|---|---|---|---|---|
+| 5 | 67 | 45 | 21 | 9 |
+| 10 | 75 | 50 | 24 | 12 |
+| 20 | 77 | 54 | 26 | 18 |
+| 40 | 76 | 46 | 23 | 18 |
+
+So the barrier's own floor is about one iteration per warm step, and
+roughly half of what the shipped transfer spends is the zero-order
+prediction rather than the interior-point method. Two ways of
+collecting it were measured and neither works:
+
+**A finite-difference (secant) predictor** — each variable stepped by
+its own drift across the last two solves, which stable identifiers make
+directly observable — is *worse than zero-order everywhere*: 59/75/66/60
+against 45/50/54/46, and at horizon 10 no better than a cold solve. The
+prolongated point is feasible to 1e-10; extrapolating pushes it off the
+constraint manifold and breaks the pairing between the carried
+multipliers and the new slacks. This is the same failure
+`docs/src/continuation.md` records for the predictor at horizon 80.
+
+**The KKT tangent** (`pounce.Solver.parametric_step`, the machinery
+behind the `pred-ipm` arm) cannot be pointed at a horizon shift at all,
+for a reason worth stating plainly: **a receding horizon is not a
+parametric perturbation.** On the stages two consecutive windows share,
+theta does not move — the same physical targets are in force. What
+changes is *which stages exist*: one leaves, one enters. Fed a shift,
+`parametric_step` is handed a delta vector of exact zeros and correctly
+returns a zero step, so the "predictor" is bit-identical to the
+zero-order transfer. Give the same family a parameter that genuinely
+moves — an MPC initial-condition pin — and the tangent becomes
+non-trivial and then degrades with horizon: 52/87/95/137 against the
+zero-order 54/78/81/93 at horizons 5/10/20/40, ahead only at the
+shortest, and worst where there are the most active-set events per step.
+
+What is left, then, is the part no first-order step can supply: the
+freshly-entered stage has no history to extrapolate *from*. Closing the
+gap means predicting it from the model — a dynamics rollout, which
+`transfer()`'s mapper already lets you supply and which only you can
+write — or changing method, which is what the active-set SQP path is
+for.
+
 Two things it still does not buy you. A single hand-off across a *large*
 parameter step on a *small* model is not where warm starting wins —
 on the five-variable slew fixture, whose targets move by 2.0 per stage,
