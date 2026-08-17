@@ -53,6 +53,7 @@
 - [Initialization and Warm Starts](initialization.md)
 - [Active-Set SQP & Warm Starts](active-set-sqp.md)
   - [Design Note](active-set-sqp-warm-start.md)
+- [Crossover](crossover.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
