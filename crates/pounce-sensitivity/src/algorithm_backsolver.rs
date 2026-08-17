@@ -1238,24 +1238,54 @@ impl PdSensBacksolver {
     }
 }
 
-/// The smallest offset from a bound that double precision tells apart
-/// from the bound itself, at that bound's own magnitude.
+/// Headroom on the representability half of [`declared_slack_floor`],
+/// matching `ipopt_cq`'s `SIGMA_OVERFLOW_HEADROOM` (gh#655) because it
+/// bounds the same quantity for the same reason: `Σ_x` sums a lower and
+/// an upper ratio into one diagonal entry, so bounding each by `MAX/4`
+/// bounds the sum by `MAX/2` with room for the rounding in the divide.
+const SIGMA_OVERFLOW_HEADROOM: Number = 4.0;
+
+/// The smallest offset from a bound that the declared-frame slack is
+/// allowed to be: the larger of what double precision tells apart from
+/// the bound itself, and what keeps `Σ = z/s` inside the double range.
 ///
 /// A crossed-over point is *on* its active bounds, so its declared-frame
 /// slack is the residual of the QP step and the line search — measured
-/// around `1.8e-12` (gh#653), comfortably above this floor, which
-/// therefore does nothing on the ordinary path. It exists for the corner
-/// where a pivot lands on the bound exactly: `Σ = z/0` is not a stiffer
-/// pin, it is a `NaN` in the KKT matrix. Flooring here says the honest
-/// thing instead — below this distance the point *is* the bound, and the
-/// slack carries no further information about how far inside it sits.
+/// around `1.8e-12` (gh#653), comfortably above both, so this does
+/// nothing on the ordinary path. Each half covers a different corner:
 ///
-/// Deliberately not `CalculateSafeSlack`'s floor, which is what the live
-/// path applies: that one raises a below-floor slack to `max(μ/z, s_min)`,
-/// i.e. straight back to the `μ/z` standoff crossover exists to remove
-/// (the same reason gh#646 declined it for the residual report).
-fn declared_slack_floor(bound: Number) -> Number {
-    Number::EPSILON * bound.abs().max(1.0)
+/// * **`eps·max(1,|bound|)`** — a pivot landing on the bound exactly.
+///   `Σ = z/0` is not a stiffer pin, it is a `NaN` in the KKT matrix.
+///   Flooring says the honest thing instead: below this distance the
+///   point *is* the bound, and the slack carries no further information
+///   about how far inside it sits.
+/// * **`z_max/(f64::MAX/4)`** — a multiplier large enough that `z/s`
+///   leaves the double range even at a slack this frame considers
+///   resolvable. This is gh#655's floor, which the live path gained in
+///   `CalculateSafeSlack`; the declared frame does not go through that
+///   function, so without carrying the bound here explicitly the
+///   guarantee would stop at the frame boundary. It takes `max_i z_i`
+///   over the block rather than each bound's own `z`, matching gh#655
+///   and conservative in the harmless direction — raising a slack only
+///   lowers `Σ`. A non-finite `z` leaves the floor alone; the iterate
+///   finiteness checks own that case.
+///
+/// What is deliberately *not* borrowed is the rest of
+/// `CalculateSafeSlack`: it raises a below-floor slack to
+/// `max(μ/z, s_min)`, i.e. straight back to the `μ/z` standoff crossover
+/// exists to remove (the same reason gh#646 declined it for the residual
+/// report). Only the representability bound crosses over, because that
+/// one is about what a double can hold, not about where the barrier
+/// would have put the point.
+fn declared_slack_floor(bound: Number, z_max: Number) -> Number {
+    let resolvable = Number::EPSILON * bound.abs().max(1.0);
+    if z_max.is_finite() && z_max > 0.0 {
+        // Divide before multiplying so a `z_max` near `f64::MAX` cannot
+        // overflow the floor itself.
+        resolvable.max(z_max / (Number::MAX / SIGMA_OVERFLOW_HEADROOM))
+    } else {
+        resolvable
+    }
 }
 
 /// `Σ = Σ_l z_l/s_l + Σ_u z_u/s_u` for one primal block, with the slacks
@@ -1282,6 +1312,11 @@ fn declared_frame_sigma(
     use pounce_linalg::Vector;
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
+    // One scalar over both sides of the block, as gh#655 does: the two
+    // ratios land in the same `Σ` entry, so the bound that keeps their
+    // sum representable has to be taken over both.
+    let z_max = z_l.amax().max(z_u.amax());
+
     // `lower`: s = Pᵀx − b_l. Otherwise: s = b_u − Pᵀx.
     let slack = |p: &dyn pounce_linalg::Matrix, b: &[Number], lower: bool| -> DenseVector {
         let mut v = DenseVector::new(DenseVectorSpace::new(b.len() as Index));
@@ -1291,7 +1326,7 @@ fn declared_frame_sigma(
         let (alpha, beta) = if lower { (1.0, -1.0) } else { (-1.0, 1.0) };
         p.trans_mult_vector(alpha, primal, beta, &mut v);
         for (s, &bi) in v.values_mut().iter_mut().zip(b.iter()) {
-            *s = s.max(declared_slack_floor(bi));
+            *s = s.max(declared_slack_floor(bi, z_max));
         }
         v
     };

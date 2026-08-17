@@ -48,7 +48,11 @@ changes.
   solve that did not cross over is bit-identical. Slacks are floored at
   `eps·max(1,|bound|)` — the distance at which the point *is* the bound —
   rather than by `CalculateSafeSlack`, which would put the `μ/z` standoff
-  crossover exists to remove straight back. Pinned by
+  crossover exists to remove straight back. The declared frame does carry
+  #655's representability floor `s >= max_i z_i / (f64::MAX/4)`, which is
+  about what a double can hold rather than about where the barrier would
+  have put the point, and would otherwise have stopped at the frame
+  boundary. Pinned by
   `crates/pounce-sensitivity/tests/crossover_sigma_frame.rs`, which sweeps
   the bound multiplier; #653's `crossover_sigma_downstream.rs` measures the
   same effect at a single multiplier and lost the test that recorded the
@@ -262,18 +266,13 @@ changes.
   `Σ` from `8.1e9` to `2.0e16` and the reduced-Hessian error from `4.95e-10`
   to `4.44e-16` — the roundoff of the answer itself. The `1/Σ` law matches to
   every printed digit until `Σ` grows past the point where its prediction
-  falls below that roundoff. `Σ` never goes infinite: the declared-frame
-  measurement floors a slack at `eps·max(1,|bound|)`, so a pivot landing
-  exactly on a bound gives a large `Σ` rather than a `NaN`.
-  `Σ` from `8.1e9` to `2.5e12` and the reduced-Hessian error from `4.95e-10`
-  to `1.62e-12` — **306× more accurate**, matching the `1/Σ` law to every
-  printed digit. `Σ` never goes infinite on this path: `CalculateSafeSlack`
-  floors a slack below `eps·min(1,μ)` up to about `μ/z`, so even an
-  exactly-zero slack falls back to the pre-crossover `Σ = z²/μ`, and the
-  crossed-over slack measured here bottoms out at `1.8e-12` without reaching
-  the floor. That threshold is about the barrier term and does not mention
-  the multiplier, so it does not bound `Σ` once `μ` goes subnormal; the floor
-  that does is the `s >= max_i z_i / (f64::MAX/4)` added for #655.
+  falls below that roundoff. `Σ` never goes infinite in either frame: on the
+  live path `CalculateSafeSlack` floors a slack below `eps·min(1,μ)` up to
+  about `μ/z`, and since that threshold is about the barrier term and does
+  not mention the multiplier, the floor that bounds `Σ` once `μ` goes
+  subnormal is the `s >= max_i z_i / (f64::MAX/4)` added for #655; the
+  declared frame carries `eps·max(1,|bound|)` and the same `#655` bound. The
+  slack measured here bottoms out at `1.8e-12` and reaches neither.
 
   The same measurement found the reverse under a nonzero
   `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics

@@ -185,7 +185,9 @@ places it could have been done wrong:
   covers a subnormal `μ` — see below). At a purified point the active
   slacks are *exactly* zero, and that floor would put `μ/z ≈ 1e-9` straight
   back — reintroducing as a reporting artifact the very quantity crossover
-  removed. The declared-frame measurement does not apply it.
+  removed. The declared-frame measurement does not apply the `μ/z`
+  correction. It does carry the representability floor, for the reason
+  given below.
 
 This is a change to *reporting* only. It runs after the exit status is
 already decided, and it applies solely to a point the never-regress gate
@@ -249,31 +251,37 @@ way. You may still want `bound_relax_factor = 0` for
 central-path checks it makes read the barrier's own slacks, which the
 relaxation shifts.
 
-`Σ` never becomes infinite along this path. The declared-frame
-measurement floors a slack at `eps·max(1,|bound|)`, the distance at which
-the point *is* the bound, so a pivot landing exactly on it gives a large
-`Σ` rather than a `NaN`. That floor is deliberately not
-`CalculateSafeSlack`'s, which the live interior path applies: that one
-raises a below-floor slack to about `μ/z` and would put back the very
-standoff crossover exists to remove. On this fixture the crossed-over
-slack reaches the floor; the one measured in
-[#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
-`1.8e-12` — the residual of the QP step plus line search — and never
-reached it at all.
+`Σ` never becomes infinite, in either frame — but the two frames get
+there by different floors, and it is worth knowing which supplies the
+guarantee where.
 
-"Along this path" is doing real work in that sentence, and it is worth
-knowing which part of the floor supplies the guarantee. `eps·min(1, μ)`
-is a threshold on the *barrier* term; nothing in it mentions the
-multiplier, so it bounds `Σ` only because a normal `μ` makes `μ/z` a
-usable slack. Push `μ` into the subnormal range and it stops covering
-anything — at `μ = 9.1e-308` the threshold is `2.0e-323`, small enough
-that a slack of `2.0e-308` clears it untouched and `z/s` overflows
-([#655](https://github.com/jkitchin/pounce/issues/655)). What makes
-`Σ` finite unconditionally is the second floor `CalculateSafeSlack`
-carries, `s ≥ max_i z_i / (f64::MAX/4)`, which is stated in terms of the
-quantity that has to stay representable rather than in terms of `μ`.
-Crossover never goes near either floor; the guarantee matters for the
-solves that do.
+On the **live interior path**, `CalculateSafeSlack` carries two. The
+first, `eps·min(1, μ)`, is a threshold on the *barrier* term; nothing in
+it mentions the multiplier, so it bounds `Σ` only because a normal `μ`
+makes `μ/z` a usable slack. Push `μ` into the subnormal range and it
+stops covering anything — at `μ = 9.1e-308` the threshold is `2.0e-323`,
+small enough that a slack of `2.0e-308` clears it untouched and `z/s`
+overflows ([#655](https://github.com/jkitchin/pounce/issues/655)). What
+makes `Σ` finite unconditionally is the second, `s ≥ max_i z_i /
+(f64::MAX/4)`, which is stated in terms of the quantity that has to stay
+representable rather than in terms of `μ`.
+
+The **declared frame** does not go through that function at all — the
+`max(μ/z, s_min)` correction is exactly the standoff crossover exists to
+remove, and applying it would put back as an artifact what the phase
+just took out. So it carries its own pair: `eps·max(1,|bound|)`, the
+distance at which the point *is* the bound, which covers a pivot landing
+on it exactly; and the same `max_i z_i / (f64::MAX/4)` as above, because
+a representability bound is about what a double can hold rather than
+about where the barrier would have put the point, and it would otherwise
+stop at the frame boundary.
+
+Neither floor is reached in ordinary use. On the fixture in the table
+above the crossed-over slack does reach the first one; the slack measured
+in [#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
+`1.8e-12` — the residual of the QP step plus line search — and reached
+neither. The representability half matters for solves at pathological
+tolerances, not for these.
 
 ## Reading the result
 
