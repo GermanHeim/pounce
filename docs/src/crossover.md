@@ -179,8 +179,10 @@ places it could have been done wrong:
   crossed-over point is strictly *interior* to the relaxed box, so its
   constraint violation is zero under either reading.
 - **The slacks are raw.** The interior machinery floors a slack that falls
-  below `eps·min(1,μ)` up to about `μ/z`, which is what keeps the barrier's
-  `Σ = V/S` finite while the iteration runs. At a purified point the active
+  below `eps·min(1,μ)` up to about `μ/z`, which is part of what keeps the
+  barrier's `Σ = V/S` finite while the iteration runs (the other part is
+  the representability floor `s ≥ max_i z_i / (f64::MAX/4)`, which is what
+  covers a subnormal `μ` — see below). At a purified point the active
   slacks are *exactly* zero, and that floor would put `μ/z ≈ 1e-9` straight
   back — reintroducing as a reporting artifact the very quantity crossover
   removed. The declared-frame measurement does not apply it.
@@ -258,6 +260,20 @@ slack reaches the floor; the one measured in
 [#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
 `1.8e-12` — the residual of the QP step plus line search — and never
 reached it at all.
+
+"Along this path" is doing real work in that sentence, and it is worth
+knowing which part of the floor supplies the guarantee. `eps·min(1, μ)`
+is a threshold on the *barrier* term; nothing in it mentions the
+multiplier, so it bounds `Σ` only because a normal `μ` makes `μ/z` a
+usable slack. Push `μ` into the subnormal range and it stops covering
+anything — at `μ = 9.1e-308` the threshold is `2.0e-323`, small enough
+that a slack of `2.0e-308` clears it untouched and `z/s` overflows
+([#655](https://github.com/jkitchin/pounce/issues/655)). What makes
+`Σ` finite unconditionally is the second floor `CalculateSafeSlack`
+carries, `s ≥ max_i z_i / (f64::MAX/4)`, which is stated in terms of the
+quantity that has to stay representable rather than in terms of `μ`.
+Crossover never goes near either floor; the guarantee matters for the
+solves that do.
 
 ## Reading the result
 
