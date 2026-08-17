@@ -129,6 +129,27 @@ const MU_ESCALATION_TRIGGER: Number = 10.0;
 /// a primal point that is feasible to `1e-9`.
 const SEED_REJECTION_TRIGGER: Number = 10.0;
 
+/// What the recentering pass measured about the point as *supplied*,
+/// before anything was rebuilt from it.
+///
+/// Grouped rather than passed loose because the three travel together
+/// through every decision gh#617 and gh#618 added, and because the
+/// distinction that matters is exactly "measured on what the caller
+/// handed over" versus "measured on what this pass then built" — the
+/// second is what `eq_seed_is_incoherent` must never see.
+#[derive(Debug, Clone, Copy)]
+struct SeedMeasurement {
+    /// The provisional barrier: what `mu_init` asked for, clamped into
+    /// the band a warm start may use.
+    mu_hat: Number,
+    /// `‖c(x)‖∞` of the supplied primal point.
+    inf_pr: Number,
+    /// Largest bound multiplier the *caller* supplied that survived the
+    /// coherence test. Zero when the caller seeded none, or when every
+    /// seeded block was refused.
+    seeded_z_amax: Number,
+}
+
 /// What happened to one multiplier block of the supplied warm point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlockVerdict {
@@ -286,8 +307,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         let dual_info =
             self.opts.recentering == WarmStartRecentering::Residual && any_dual_seeded(data);
         let mu_hat = if dual_info {
-            let (mu_hat, unseeded, seeded_z_amax) =
-                recenter_from_residuals(data, cq, &self.opts, &mut diag);
+            let (seed, unseeded) = recenter_from_residuals(data, cq, &self.opts, &mut diag);
             reconstruct_eq_duals(data, cq, nlp, aug_solver, &self.opts, &mut diag);
             // The split below reads `y`; running it against a `y` this
             // same pass just derived *from* the provisional `z` is
@@ -300,21 +320,12 @@ impl IterateInitializer for WarmStartIterateInitializer {
                 // arrived seeded, and claiming the split ran there
                 // made `info["warm_start"]` say something untrue
                 // (gh#606 review).
-                let inf_pr = diag.primal_residual;
                 let split = refine_bound_duals_from_stationarity(
-                    data,
-                    cq,
-                    nlp,
-                    &self.opts,
-                    mu_hat,
-                    inf_pr,
-                    seeded_z_amax,
-                    &unseeded,
-                    &mut diag,
+                    data, cq, nlp, &self.opts, seed, &unseeded, &mut diag,
                 );
                 diag.stationarity_split = split;
             }
-            Some(mu_hat)
+            Some(seed.mu_hat)
         } else if self.opts.recentering == WarmStartRecentering::Residual {
             diag.primal_residual = cq.borrow().curr_primal_infeasibility_max();
             diag.bound_duals = BlockVerdict::Unseeded;
@@ -442,7 +453,7 @@ fn recenter_from_residuals(
     cq: &IpoptCqHandle,
     opts: &WarmStartOptions,
     diag: &mut WarmStartDiagnostics,
-) -> (Number, [Vec<bool>; 4], Number) {
+) -> (SeedMeasurement, [Vec<bool>; 4]) {
     let inf_pr = cq.borrow().curr_primal_infeasibility_max();
     diag.primal_residual = inf_pr;
 
@@ -467,7 +478,16 @@ fn recenter_from_residuals(
     let mut seeded_z_amax = 0.0;
     let curr = match data.borrow().curr.clone() {
         Some(c) => c,
-        None => return (mu_hat, unseeded, seeded_z_amax),
+        None => {
+            return (
+                SeedMeasurement {
+                    mu_hat,
+                    inf_pr,
+                    seeded_z_amax,
+                },
+                unseeded,
+            );
+        }
     };
     let cq_ref = cq.borrow();
     let slacks = [
@@ -593,7 +613,14 @@ fn recenter_from_residuals(
         data.borrow_mut().set_curr(new_curr);
     }
 
-    (mu_hat, unseeded, seeded_z_amax)
+    (
+        SeedMeasurement {
+            mu_hat,
+            inf_pr,
+            seeded_z_amax,
+        },
+        unseeded,
+    )
 }
 
 /// How much primal infeasibility this point carries *in excess of what
@@ -775,12 +802,15 @@ fn refine_bound_duals_from_stationarity(
     cq: &IpoptCqHandle,
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     opts: &WarmStartOptions,
-    mu_hat: Number,
-    inf_pr: Number,
-    seeded_z_amax: Number,
+    seed: SeedMeasurement,
     unseeded: &[Vec<bool>; 4],
     diag: &mut WarmStartDiagnostics,
 ) -> bool {
+    let SeedMeasurement {
+        mu_hat,
+        inf_pr,
+        seeded_z_amax,
+    } = seed;
     // `true` only when the split actually rewrote a multiplier, so the
     // caller can report `stationarity_split` honestly (gh#606 review).
     if unseeded.iter().all(|m| m.is_empty()) {
