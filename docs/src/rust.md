@@ -59,6 +59,24 @@ assert!((sol.x[0] - 1.0).abs() < 1e-5 && (sol.x[1] - 2.0).abs() < 1e-5);
 same names as the CLI and upstream Ipopt — `option_num`, `option_int`,
 `option_str`; see [Solver Options](options.md).
 
+Option names, value types, ranges, and choices are validated against the
+option registry, and a rejected option is never applied silently — a
+misspelled name would otherwise leave the default in effect while the solve
+looked like it had honoured the request. `solve` panics on a rejected option;
+`try_solve` returns the same conditions as `Err(NlpError)` instead:
+
+```rust
+use pounce_rs::builder::{Nlp, NlpError};
+
+let err = Nlp::new(P).x0(&[0.0, 0.0])
+    .option_str("mu_stratgey", "adaptive")   // typo
+    .try_solve();
+assert!(matches!(err, Err(NlpError::InvalidOption { .. })));
+```
+
+`try_solve` reports setup failures only. A solve that runs and does not
+converge is `Ok` with `success == false` and the reason in `status`.
+
 The returned `Solution` carries `success` / `status`, `x`, `objective`,
 `multipliers`, the constraint values `g`, the bound multipliers `z_l` / `z_u`,
 and `stats` (wall time, iteration count, evaluation counts, final
