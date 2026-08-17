@@ -40,6 +40,14 @@ large it is. An earlier version of this page warned against the SQP for
 "large-scale problems with thousands of active inequalities"; the
 measured behavior does not support that for warm-started sequences.
 
+The awkward case in such a sequence is the **first** solve, which has no
+previous working set to inherit and so pays the cold-SQP cost the
+paragraph above warns about. [Crossover](crossover.md) fills that gap:
+run the first solve on the IPM with `crossover=yes`, and
+`last_sqp_working_set()` returns an identified active set the following
+SQP solve can warm-start from. Before it, the only source of a working
+set was another SQP solve.
+
 ## 2. Switching to the SQP path
 
 The switch is a single option flip — `algorithm` from its default

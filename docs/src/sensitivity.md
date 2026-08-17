@@ -517,6 +517,16 @@ relaxation, pass `bound_relax_factor` explicitly in `options=`: your
 value wins, and `covariance()` then refuses with a clear error rather
 than classifying against shifted slacks.
 
+The AMBIGUOUS class is the one this machinery cannot argue away: the
+interior iterate simply does not carry enough information to decide
+whether the constraint binds. [Crossover](crossover.md) (`crossover=yes`)
+attacks that directly — it pivots to the active-set path after
+convergence and returns a point at which a linearly independent set of
+constraints holds with *equality*, collapsing the ambiguity into a
+STRONGLY or WEAKLY ACTIVE verdict. It is a different remedy to the same
+problem the `bound_relax_factor = 0` rule above addresses, and the two
+compose.
+
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as
 [`pounce.curve_fit`](curve-fitting.md) — both read a reduced-Hessian
