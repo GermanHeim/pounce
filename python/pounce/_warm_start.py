@@ -570,6 +570,16 @@ class WarmStart:
         a mapper with an off-by-one fails here rather than three
         function evaluations into the solve.
 
+        "Carried over unchanged" is the right default for a mapper that
+        rescales or nudges a point whose *indexing* is unchanged, and a
+        trap for one that moves the entries: the carried block is still
+        the length the target expects, so nothing downstream notices it
+        is now against the wrong variables. So when the identifiers say
+        an axis moved and the mapper left that axis's multipliers out,
+        this refuses rather than replaying them (pounce#622) — return
+        the block rearranged, or ``None`` to leave it unseeded, or use
+        :meth:`reindex`, which writes the whole mapping for you.
+
         This is the hook for a horizon shift or a changed
         discretization: the arrays are yours to rearrange, interpolate,
         or prolong. When both sides carry stable IDs and the only change
@@ -621,7 +631,11 @@ class WarmStart:
             schema_version=WARM_START_SCHEMA_VERSION,
             origin="memory",
         )
+        # Lengths first: an off-by-one in the mapper is a more specific
+        # complaint than "you left a block behind", and a mapper that
+        # got the shape wrong has not earned the second question yet.
         _check_lengths(out, n, m)
+        _check_carried_blocks(self, ctx, payload)
         return out
 
     def reindex(self, problem, var_ids, con_ids=None, fill_x=None) -> "WarmStart":
@@ -852,6 +866,49 @@ def _reindex_mapper(fill_x):
         return out
 
     return mapper
+
+
+def _check_carried_blocks(src: "WarmStart", ctx: "TransferContext", payload: dict) -> None:
+    """Refuse a mapper that moves the point and leaves a dual behind.
+
+    :meth:`WarmStart.transfer` carries over any block the mapper does
+    not return — which is right when the mapper is rescaling or nudging
+    a point whose *indexing* is unchanged, and silently wrong when the
+    identifiers say the entries moved. A horizon shift is the case that
+    bites: the blocks are the same length as the target expects, so
+    :func:`_check_lengths` passes, and stale multipliers replay against
+    the wrong variables. The failure is a plausible-looking answer down
+    a longer trajectory, which is the class of defect this module
+    exists to make loud (pounce#622).
+
+    Checked per axis, so a reordering that touches only the variables
+    still carries the constraint multipliers: the variable map governs
+    ``zl`` / ``zu``, the constraint map governs ``lagrange``. Silent
+    when either side lacks identifiers — there is nothing to compare —
+    and when the block being carried is absent anyway.
+    """
+    checks = (
+        ("var", ("zl", "zu"), "variable"),
+        ("con", ("lagrange",), "constraint"),
+    )
+    for axis, blocks, noun in checks:
+        idx = ctx.index_map(axis)
+        if idx is None or np.array_equal(idx, np.arange(idx.size)):
+            continue                      # identity: carrying is correct
+        stale = [b for b in blocks
+                 if b not in payload and getattr(src, b) is not None]
+        if not stale:
+            continue
+        raise WarmStartCompatibilityError(
+            f"transfer: the mapper did not return {' / '.join(stale)}, so "
+            f"{'it would be' if len(stale) == 1 else 'they would be'} "
+            f"carried over unchanged — but the {noun} identifiers say the "
+            f"entries moved, so the carried values would line up against "
+            f"the wrong {noun}s. They are the right length, so nothing "
+            f"downstream would catch it.\nreturn the block from your "
+            f"mapper (rearranged, or None to leave it unseeded), or use "
+            f"reindex(), which writes that mapping for you."
+        )
 
 
 def _check_lengths(ws: "WarmStart", n: int, m: int) -> None:

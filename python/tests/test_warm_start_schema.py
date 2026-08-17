@@ -567,6 +567,52 @@ def test_explicit_mapper_gets_the_context_and_is_length_checked():
         ws.transfer(p1, wrong_key, var_ids=v1, con_ids=c1)
 
 
+def test_a_mapper_that_moves_the_point_must_say_what_happens_to_the_duals():
+    """The carried-block trap (gh#622).
+
+    `transfer` carries over whatever the mapper does not return. On a
+    horizon shift that silently replays the previous window's
+    multipliers against the new window's variables — same length, so
+    the length check passes, and the result is a plausible answer down
+    a longer trajectory. It is refused instead.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    p1, v1, c1 = window(1)
+
+    with pytest.raises(WarmStartCompatibilityError, match="wrong variables"):
+        ws.transfer(p1, lambda ctx: {"x": np.roll(ctx.source.x, -1)},
+                    var_ids=v1, con_ids=c1)
+
+    # Saying what should happen to them is all it asks for: rearranged,
+    # or None for "unseeded".
+    moved = ws.transfer(
+        p1,
+        lambda ctx: {"x": np.roll(ctx.source.x, -1), "zl": None, "zu": None,
+                     "lagrange": None},
+        var_ids=v1, con_ids=c1,
+    )
+    assert moved.replay == "mapped"
+    p1.solve(warm_start=moved)
+
+
+def test_a_mapper_may_still_carry_the_duals_when_nothing_moved():
+    """The check is per axis and only fires on a map that moved: a
+    mapper nudging a point whose indexing is unchanged still carries
+    the multipliers, which is the case the carry-over default is for."""
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+
+    same, v_same, c_same = window(0)
+    nudged = ws.transfer(same, lambda ctx: {"x": ctx.source.x * 1.001},
+                         var_ids=v_same, con_ids=c_same)
+    np.testing.assert_array_equal(nudged.zl, ws.zl)
+    np.testing.assert_array_equal(nudged.lagrange, ws.lagrange)
+    same.solve(warm_start=nudged)
+
+
 def test_transfer_without_ids_or_mapper_explains_itself():
     ws = signed()
     with pytest.raises(WarmStartCompatibilityError, match="stable variable IDs"):
