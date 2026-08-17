@@ -888,6 +888,61 @@ def test_the_multistart_ladder_does_not_pay_for_the_probe():
     )
 
 
+def test_transfer_does_not_pay_for_a_probe_the_caller_declined():
+    """`transfer` re-signs the *target*, and it is the per-step call in
+    a receding-horizon loop (pounce#622) — so signing it unconditionally
+    charges four of the caller's evaluations every step to a caller who
+    passed ``probe=False``. It is the same trap
+    `test_the_multistart_ladder_does_not_pay_for_the_probe` covers on
+    the check path, one call site over: `_target_signature` gates on
+    whether the source carries a probe, and `transfer` has to gate the
+    same way.
+    """
+    calls = []
+
+    class Counted(HS071):
+        def objective(self, x):
+            calls.append("objective")
+            return super().objective(x)
+
+        def gradient(self, x):
+            calls.append("gradient")
+            return super().gradient(x)
+
+        def constraints(self, x):
+            calls.append("constraints")
+            return super().constraints(x)
+
+        def jacobian(self, x):
+            calls.append("jacobian")
+            return super().jacobian(x)
+
+    p = make(obj=Counted())
+    x, info = p.solve(x0=X0)
+
+    # Declined at capture: the mapped result carries no probe either,
+    # and the target is never evaluated.
+    ws = WarmStart.from_info(x, info, problem=p, var_ids=VAR_IDS,
+                             con_ids=CON_IDS, probe=False)
+    calls.clear()
+    out = ws.transfer(make(obj=Counted()), var_ids=VAR_IDS, con_ids=CON_IDS)
+    assert calls == [], (
+        f"transfer evaluated the model {len(calls)} times for a probe the "
+        f"caller declined: {calls}"
+    )
+    assert out.signature.probe is None
+
+    # Bought into at capture: the mapped result is protected, so a
+    # replay of it on a third problem is still refused on the probe.
+    ws_probed = WarmStart.from_info(x, info, problem=p, var_ids=VAR_IDS,
+                                    con_ids=CON_IDS, probe=True)
+    calls.clear()
+    out = ws_probed.transfer(make(obj=Counted()), var_ids=VAR_IDS,
+                             con_ids=CON_IDS)
+    assert calls, "a probed transfer must actually probe the target"
+    assert out.signature.probe is not None
+
+
 def test_the_note_also_rides_on_a_mismatch_report():
     p, x, info = cold()
     ws = WarmStart.from_info(x, info, problem=p, probe=False)

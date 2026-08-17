@@ -640,7 +640,19 @@ class WarmStart:
         and remembers where it came from, so replaying it on a *third*
         problem is refused exactly like an unmapped one.
         """
-        target = ProblemSignature.from_problem(problem, var_ids, con_ids)
+        # Probed on the same terms as :meth:`_target_signature`: only
+        # when *this* state carries a probe. Signing the target
+        # unconditionally would charge an extra model evaluation to a
+        # caller who passed ``probe=False``, and `transfer` is the
+        # per-step call in a receding-horizon loop (pounce#622), so that
+        # is four of the user's evaluations every step for a facet they
+        # declined. A source without a probe produces a mapped result
+        # without one, which is the same trade `probe=False` already
+        # makes everywhere else.
+        target = ProblemSignature.from_problem(
+            problem, var_ids, con_ids,
+            probe=self.signature is not None and self.signature.probe is not None,
+        )
         n, m = target.n, target.m
         if mapper is None:
             mapper = _reindex_mapper(fill_x)
