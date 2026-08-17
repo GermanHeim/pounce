@@ -171,6 +171,37 @@ changes.
   solely to a point the never-regress gate already accepted on its
   declared-bound residuals.
 
+  What crossover does to a **downstream sensitivity result** was measured
+  rather than assumed (#653). The open worry was that putting the iterate
+  *on* a bound drives the barrier diagonal `Σ = z/s` toward infinity and
+  wrecks whatever the sensitivity path factorizes. It is the opposite: `Σ` is
+  the stiffness with which the barrier pins a bounded variable, and a reduced
+  Hessian read off the held KKT factor carries a residual error of exactly
+  `Q_aw²/Σ` — the bound block's Schur complement, i.e. the leftover of that
+  pin being finite. A larger `Σ` is a sharper pin and a better answer. On a
+  fixture with two parameters held by pin rows and a third capped by a bound
+  binding at multiplier `4.5`, crossover against the declared bounds takes
+  `Σ` from `8.1e9` to `2.5e12` and the reduced-Hessian error from `4.95e-10`
+  to `1.62e-12` — **306× more accurate**, matching the `1/Σ` law to every
+  printed digit. `Σ` never goes infinite: `CalculateSafeSlack` floors a slack
+  below `eps·min(1,μ)` up to about `μ/z`, so even an exactly-zero slack falls
+  back to the pre-crossover `Σ = z²/μ`, and the crossed-over slack measured
+  here bottoms out at `1.8e-12` without reaching the floor.
+
+  The same measurement found the reverse under a nonzero
+  `bound_relax_factor` (#654), #646's frame mismatch reaching the numerics
+  rather than the printed residuals: the crossed-over point sits exactly `δ`
+  inside the live relaxed bound, so `Σ` becomes `z/δ` instead of `z²/μ` and
+  the pin **loosens** — `4.5e8` against `8.1e9`, an `8.89e-9` reduced-Hessian
+  error where crossover-off gives `4.95e-10`. The degradation factor is
+  `z·δ/μ`, so it grows with the bound's multiplier, reaching ~400× by a
+  multiplier of `1000`. `covariance()` and `curve_fit` are unaffected — the
+  declaration-triggered solve already sets `bound_relax_factor = 0`, which
+  `classify_activity()` requires — but a `Solver` or `SensSolve` session
+  configured by hand is not. Set `bound_relax_factor = 0` when combining
+  crossover with any sensitivity result. All three directions are pinned by
+  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs`.
+
   Two defects surfaced while building it, both of which would have made
   the phase report the opposite of the truth:
 

@@ -525,7 +525,14 @@ convergence and returns a point at which a linearly independent set of
 constraints holds with *equality*, collapsing the ambiguity into a
 STRONGLY or WEAKLY ACTIVE verdict. It is a different remedy to the same
 problem the `bound_relax_factor = 0` rule above addresses, and the two
-compose.
+compose — but only in that order. **Crossover is a sensitivity remedy
+only when the bounds are not relaxed**, and it makes matters worse when
+they are; see [Crossover and the barrier
+diagonal](crossover.md#what-it-does-to-a-downstream-sensitivity-result)
+for the measurement. A solve routed through the declaration-triggered
+path already sets `bound_relax_factor = 0` and is on the right side of
+that; a `Solver` or `SensSolve` session you configure yourself is not,
+unless you set it.
 
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as
