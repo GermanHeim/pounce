@@ -9,6 +9,67 @@ changes.
 
 ## [Unreleased]
 
+- **A reordered warm start is refused without the caller supplying
+  `var_ids`** (#621, split out of #607). Every facet the #607
+  `ProblemSignature` carries is a digest of what the model *declares*,
+  and a pure permutation of the variables changes none of them.
+  Measured on the parent commit `b4c4d32e`, permuted HS071 (uniform box
+  `[1,5]^4`, dense jacobian) with no `var_ids`: `ws.check_compatible`
+  reported **no mismatch at all**, and the replay returned objective
+  **16.0909032757** against a true **17.0140171452** — `x` off by 0.2205
+  in the inf-norm — with status `Error_In_Step_Computation` in 44
+  iterations.
+
+  The signature now also carries a **`probe`**: the model evaluated once
+  at a fixed, deterministic, index-varying point inside the bounds,
+  recorded as a small vector of order-weighted projections. A
+  permutation moves those numbers, so the reordered replay above is
+  refused with nothing supplied by the caller.
+
+  The probe is compared to a **relative tolerance** (`PROBE_RTOL`,
+  `1e-9`), not hashed and compared for equality — a hash cannot be
+  compared approximately, and a model whose evaluation is not bitwise
+  reproducible would then be refused for reproducing itself to 15 digits
+  instead of 17, which is a worse failure than the one being fixed.
+  Measured: re-associating a model's internal summation (what a
+  different BLAS or thread count does) moves the probe by `5e-18`
+  relative and is accepted; a jax model is bit-identical across fresh
+  captures; injected relative jitter is accepted 40/40 at `1e-9` and
+  refused 40/40 at `1e-6`.
+
+  Cost, measured rather than asserted: `0.15 ms` at n=4 rising to
+  `1.73 ms` at n=10 000 per capture — `1.17%` down to `0.002%` of a cold
+  solve of the same model — and a fixed 20 floats in the artifact
+  regardless of problem size. `probe=False` at capture declines it, and
+  by construction then costs nothing at replay either, because a target
+  is only probed when the artifact carries a probe to compare against.
+  The multistart ladder in `_starts.py` declines it: that path resumes
+  on the same `Problem` object in the same process, where no reordering
+  is possible, and probing once per rung spent four of the caller's own
+  evaluations per resume (racing suite `2592` → `2920` evaluations for
+  the same three answers; back to `2592` with the probe declined).
+
+  The facet is optional on both sides, so artifacts written before this
+  and models that will not evaluate at an arbitrary interior point
+  degrade to *unverifiable* rather than refused. `var_ids` remain the
+  rigorous answer — a model genuinely symmetric under the permutation is
+  invisible to arithmetic, and only IDs let `reindex` *repair* a
+  reordering instead of only refusing it — and the #607 property that
+  signing with IDs must never be worse than signing without is now
+  pinned by test. When neither route was available on both sides, the
+  report says so instead of reporting a clean "compatible".
+
+  Note for downstream readers: a signature written by this build carries
+  a facet older builds do not know, and `ProblemSignature.from_json`
+  raises on unknown facets by design (#607) rather than silently
+  weakening the artifact. Re-capture, or upgrade the reader.
+
+  Fixture sweep over all 57 CLI fixtures against a baseline binary built
+  from `origin/main`: empty diff (no Rust changed). The Python
+  warm-start path — cold solve, warm replay, replay from file, and the
+  multistart ladder, at n = 4/10/50/200 — is unchanged in status,
+  objective and iteration count.
+
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
   down with it** (#609). Four measurements on the parent commit
