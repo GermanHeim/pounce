@@ -31,10 +31,22 @@ Three properties this has and ``mpc_horizon_*`` does not
   changes from iteration to iteration. Every existing large family has
   a constant Hessian, which flatters any method that reuses a factor.
   The dedicated QP arms correctly skip here.
-* **The active set is sparse and scattered too.** Congested edges are
-  the ones on the short paths between a moved demand and the slack bus,
-  so the active bounds move around the graph as θ rotates rather than
-  sliding along an index range.
+* **The active set is thin, and only exists at the `large` scale.**
+  This is the family's weakest axis and is stated rather than implied.
+  Congested edges are the ones on the short paths between a moved demand
+  and the slack bus, so what activity there is moves *around the graph*
+  as θ rotates rather than sliding along an index range — but at `tiny`
+  and `small` no bound is active at any step, and at `large` the count
+  runs 0-4 (V = 60,120) and 0-2 (V = 800).
+
+  The reason is structural rather than a bad constant. The flow
+  distribution is extremely skewed (p99 = 0.204 against a maximum of
+  0.781) while feasibility requires ``f_max > max|d| / min-degree``, so
+  the window between "nothing congests" and "infeasible everywhere" is
+  narrow; raising the minimum degree from 2 to 4 is what opened it at
+  all. Read this family for its sparsity pattern, its non-constant
+  Hessian and its size — not as an active-set probe. The suite has
+  better ones for that.
 
 The topology and coefficients are deterministic functions of the node
 index — no RNG anywhere — so an instance is reproducible from ``V``
@@ -51,11 +63,29 @@ from ..spec import Bounds, ParametricFamily
 
 
 def _edges(nv: int) -> List[Tuple[int, int]]:
-    """Ring plus evenly spaced chords. Deterministic in ``nv``."""
+    """Ring plus two chord families. Deterministic in ``nv``.
+
+    Every node carries a chord, so the minimum degree is 4 rather than
+    2. That is a feasibility property, not a cosmetic one. With a
+    ring-only node the entire demand at that node has to arrive over its
+    two incident edges, so the instance is infeasible unless
+    ``f_max > max|d| / 2`` — and measured on the uncapped solution, the
+    99th percentile of |f| sits at or below that floor. There is then no
+    capacity that is simultaneously feasible and tight enough for any
+    edge to congest: the family jumps straight from "no bound active
+    anywhere" to "infeasible everywhere", which is what the first
+    version of it did.
+
+    Raising the minimum degree to 4 drops the feasibility floor to
+    ``max|d| / 4`` while leaving the flow distribution about where it
+    was, which opens the window that ``_F_MAX`` sits in.
+
+    The chords still reach a third of the way around, so the pattern is
+    as un-bandable as before; there are now ``2V`` edges rather than
+    ``1.5V``.
+    """
     ring = [(k, (k + 1) % nv) for k in range(nv)]
-    # Chords reach a third of the way around, which is what makes the
-    # pattern non-bandable; there are nv//2 of them so E = 1.5·V.
-    chords = [(k, (k + nv // 3) % nv) for k in range(nv // 2)]
+    chords = [(k, (k + nv // 3) % nv) for k in range(nv)]
     return ring + chords
 
 
@@ -71,9 +101,31 @@ class ResistiveNetworkBase(ParametricFamily):
     pin_rows = (0, 1)
 
     _NV = 100
-    _F_MAX = 1.2
+    #: Chosen from the measured flow distribution, not guessed. On the
+    #: uncapped problem |f| has p99 = 0.204 against a maximum of 0.781,
+    #: with the per-step maximum swinging 0.206 -> 0.781 as theta
+    #: rotates; the feasibility floor is max|d| / min-degree = 0.5/4 =
+    #: 0.125. This sits above the floor and inside the tail, so the few
+    #: most heavily loaded edges congest and nothing else does.
+    _F_MAX = 0.40
     _D_AMP = 0.4  # fixed demand amplitude at the non-parametric nodes
-    _RADIUS = 1.0  # θ walks a circle of this radius
+    #: Spatial period of the fixed demand pattern, in nodes — **not** the
+    #: ring length. A demand sinusoid spanning the whole ring needs
+    #: transport proportional to that ring: the induced flow amplitude is
+    #: about ``_D_AMP · V / 2π``, which is 3.8 at V = 60 and 7.6 at
+    #: V = 120 against a capacity of 1.2, so the instance stops being
+    #: feasible somewhere between the two. It did: `resistive_network_120`
+    #: returned `Infeasible_Problem_Detected` on all 60 steps of its first
+    #: full sweep while `resistive_network_60` was fine, because the
+    #: chords happened to shorten the path enough at the smaller size.
+    #:
+    #: Fixing a *period* instead makes the transport local, so the flows
+    #: are O(_D_AMP) whatever V is and the family means the same thing at
+    #: every size — which is the entire point of having it at three.
+    _D_PERIOD = 6
+    #: Envelope period, coprime to ``_D_PERIOD`` so cell loadings vary.
+    _D_ENVELOPE = 17
+    _RADIUS = 0.5  # θ walks a circle of this radius
     _DPHI = 0.05
 
     def __init__(self):
@@ -98,9 +150,24 @@ class ResistiveNetworkBase(ParametricFamily):
         return r, c
 
     def _fixed_demand(self) -> np.ndarray:
-        """Demand at rows 2 … V−2 (nodes 3 … V−1); θ supplies rows 0, 1."""
+        """Demand at rows 2 … V−2 (nodes 3 … V−1); θ supplies rows 0, 1.
+
+        Period ``_D_PERIOD`` nodes, so a node's demand is met by its near
+        neighbours and the flow it induces does not grow with V.
+
+        The envelope is what makes the family have an active set at all.
+        A pure sinusoid loads every cell identically, so capacity either
+        admits all of them or none — the instance jumps from "no bound
+        active anywhere" to "infeasible everywhere" between ``f_max``
+        0.70 and 0.68, with no setting in between where some edges
+        congest and others do not. The envelope's period is coprime to
+        the demand's, so cell loadings spread over a range and ``f_max``
+        can sit inside it: the heavily loaded cells congest, the light
+        ones do not, and θ moves the boundary between them.
+        """
         v = np.arange(3, self._NV)
-        return self._D_AMP * np.sin(2.0 * np.pi * v / self._NV)
+        envelope = 0.6 + 0.4 * np.sin(2.0 * np.pi * v / self._D_ENVELOPE)
+        return self._D_AMP * envelope * np.sin(2.0 * np.pi * v / self._D_PERIOD)
 
     def _theta_at(self, phi: float) -> np.ndarray:
         return self._RADIUS * np.array([np.cos(phi), np.sin(phi)])
@@ -218,7 +285,7 @@ def _network_family(nv: int, tier: str = "default") -> Type[ResistiveNetworkBase
     )
 
 
-#: ``n = 1.5·V`` edges, ``m = V−1`` balance rows.
+#: ``n = 2V`` edges, ``m = V−1`` balance rows.
 NETWORK_SIZES = (60, 120)
 LARGE_NETWORK_SIZES = (800,)
 
