@@ -40,7 +40,8 @@ changes.
   *is* μ, and escalating off it is the barrier arguing with itself.
 
   On HS071 from a transferred point, a values-only warm start went 11
-  iterations → 7 against 6 for a plain solve from the same point, and
+  iterations → 7 against 6 for a plain solve from the same point (→ 8
+  on aarch64 macOS; the last iteration is platform-sensitive), and
   tightening the pushes no longer moves it at all. Restarted from its
   own solution: 3 → 2. On the #622 receding-horizon family, a
   values-only transfer over the eight-step loop went 49/60/67/57 →
