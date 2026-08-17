@@ -41,8 +41,12 @@ use std::rc::Rc;
 /// readable after the solve through
 /// [`crate::application::IpoptApplication::least_square_init_report`],
 /// so a starting point that silently got worse is visible somewhere
-/// other than the iteration count. Nothing prints it: it is a
-/// programmatic accessor, not a log line.
+/// other than the iteration count. It is primarily a programmatic
+/// accessor; since gh#616 the same fields are also emitted once per
+/// solve at `debug` level on the `pounce::algorithm` target, so a
+/// fixture sweep can attribute a moving model without a source patch
+/// (`RUST_LOG=pounce::algorithm=debug`). Nothing prints it at the
+/// default log level.
 #[derive(Debug, Clone, Default)]
 pub struct LeastSquareInitReport {
     /// Nonlinear violation at the user's `x0`, after the interior push.
@@ -247,6 +251,33 @@ impl DefaultIterateInitializer {
         Some(Rc::new(sol_x))
     }
 
+    /// The safeguard's accept test, as a pure predicate of the four
+    /// numbers it actually reads.
+    ///
+    /// A trial at step fraction `alpha` whose true nonlinear violation
+    /// is `theta` is accepted when
+    /// `theta <= (1 - eta*alpha) * theta_0` — the linear model predicts
+    /// `theta -> 0` at `alpha = 1`, so the predicted reduction at
+    /// `alpha` is `alpha * theta_0` and the test is exactly "the actual
+    /// reduction is at least `eta` times the predicted one". The
+    /// trailing `theta < theta_0` makes the contract independent of
+    /// `eta`: however small `eta` is set, a trial that does not strictly
+    /// reduce the violation is never accepted.
+    ///
+    /// Split out of the trial loop for gh#616, whose conclusion rests on
+    /// what this predicate *can* express. `eta` is confined to `(0, 1]`
+    /// — at `eta > 1` the `alpha = 1` trial would demand a negative
+    /// violation and the full step could never be taken — and over that
+    /// whole range the reachable rejections are bounded. The tests in
+    /// `tests/issue_616_ls_init_accept_test.rs` pin the consequence: no
+    /// `eta` rejects `eigenb2`'s accepted trial, so retuning `eta` is
+    /// not a route to its old `SolveSucceeded` status.
+    pub fn accepts_trial(theta_0: Number, theta: Number, alpha: Number, eta: Number) -> bool {
+        let predicted = alpha * theta_0;
+        let actual = theta_0 - theta;
+        theta.is_finite() && actual >= eta * predicted && theta < theta_0
+    }
+
     /// Stage `x_cand` as the current iterate and return the true
     /// nonlinear constraint violation there.
     ///
@@ -298,6 +329,48 @@ impl DefaultIterateInitializer {
     /// * The first accepted trial wins (they are tried longest-first,
     ///   so that is also the best available reduction on this ray).
     /// * If no trial is accepted the user's `x` is returned unchanged.
+    ///
+    /// # What the safeguard does *not* promise (gh#616)
+    ///
+    /// The guarantee above is about **the starting point's violation** —
+    /// the only quantity the test measures. It says nothing about the
+    /// trajectory that follows. A more feasible starting point on a
+    /// nonconvex model is entitled to reach a different local minimum,
+    /// and to converge into a different tolerance band. Two fixtures do
+    /// exactly that under `least_square_init_primal=yes`: `csfi2` and
+    /// `eigenb2` end at `SolvedToAcceptableLevel` where the
+    /// unsafeguarded step reached `SolveSucceeded`.
+    ///
+    /// gh#616 attributed every moving fixture through
+    /// [`LeastSquareInitReport`] and established that this is not a
+    /// defect in the accept test, and cannot be repaired by tightening
+    /// it. See `docs/src/initialization.md` for the measurements. The
+    /// two facts that decide it:
+    ///
+    /// * `csfi2` **declines** — all four trials are worse than `theta_0`.
+    ///   Recovering its old status would require accepting a step that
+    ///   *increases* the true violation, which is the one thing this
+    ///   function exists to prevent. No tightening reaches it.
+    /// * `eigenb2` **accepts** at `alpha = 0.5`, cutting the violation
+    ///   `1.0 -> 0.25`. `eigena2` accepts on bit-identical numbers —
+    ///   same `theta_0`, same `theta`, same `alpha`, same step norm —
+    ///   and *improves* (78 -> 65 iterations). Any criterion computed
+    ///   from this function's own inputs necessarily treats the two
+    ///   alike, so none can keep the `eigena2` win and drop the
+    ///   `eigenb2` step.
+    ///
+    /// Also worth knowing before reading `least_square_init_primal=yes`
+    /// results: a **declined** step is not the same as never asking.
+    /// Declining restores the user's `x` exactly, but
+    /// `calculate_least_square_primals` has by then driven the first
+    /// factorization through the augmented-system solver, on the
+    /// `W = 0` least-square matrix rather than on the first real KKT
+    /// matrix. gh#616 isolated this by forcing a decline on either side
+    /// of that call: declining *before* it is bit-identical to
+    /// `least_square_init_primal=no` on every fixture, declining *after*
+    /// it is bit-identical to the real safeguard. On `pooling_rt2stp`
+    /// the carried-over state is worth 298 -> 81 iterations, on `deb7`
+    /// 154 -> 202.
     ///
     /// Returns `(accepted_x, diagnostics)`.
     #[allow(clippy::too_many_arguments)]
@@ -377,12 +450,7 @@ impl DefaultIterateInitializer {
             self.push_into_bounds(nlp, &mut cand);
 
             let theta = Self::violation_at(data, cq, template, &cand);
-            let predicted = alpha * theta_0;
-            let actual = theta_0 - theta;
-            if theta.is_finite()
-                && actual >= self.least_square_init_accept_ratio * predicted
-                && theta < theta_0
-            {
+            if Self::accepts_trial(theta_0, theta, alpha, self.least_square_init_accept_ratio) {
                 report.violation_final = theta;
                 report.step_norm = alpha * dir_norm;
                 report.alpha = alpha;
@@ -523,6 +591,25 @@ impl IterateInitializer for DefaultIterateInitializer {
             if let Some(x_new) = accepted {
                 x.copy(&*x_new);
             }
+            // Attribution for a fixture sweep (gh#616). The accessor
+            // alone is unreachable from the CLI, so working out *which*
+            // arm of the safeguard moved a given model meant patching
+            // this file and rebuilding — which is how gh#616's
+            // measurement was taken, and is not a thing the next
+            // reader should have to repeat. `RUST_LOG=pounce::
+            // algorithm=debug` now prints it. Nothing at the default
+            // level does: it is one line per solve, not per iteration,
+            // and it stays off the normal log.
+            tracing::debug!(
+                target: "pounce::algorithm",
+                violation_initial = report.violation_initial,
+                violation_final = report.violation_final,
+                alpha = report.alpha,
+                step_norm = report.step_norm,
+                rejected_trials = report.rejected_trials,
+                termination = report.termination,
+                "pounce: least_square_init_primal safeguard decision",
+            );
             self.last_least_square_report = Some(report);
         }
 
