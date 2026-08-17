@@ -21,6 +21,7 @@ before the schema existed.
 
 import dataclasses
 import os
+import warnings
 
 os.environ.setdefault("RUST_LOG", "off")
 
@@ -28,6 +29,7 @@ import numpy as np
 import pytest
 
 import pounce
+from pounce._warm_start_schema import ORDERING_UNVERIFIED_NOTE
 from pounce import (
     WarmStart,
     WarmStartCompatibilityError,
@@ -1134,3 +1136,73 @@ def test_the_note_also_rides_on_a_mismatch_report():
     ws = WarmStart.from_info(x, info, problem=p, probe=False)
     report = ws.describe_compatibility(make(ub=4.0))
     assert "bounds:" in report and "pure reordering" in report
+
+
+# --- gh#660: a clean verdict that could not have seen a reordering ---------
+def test_a_clean_but_unverifiable_check_warns_that_it_was_unverifiable():
+    """gh#660. `check_compatible` computed `unordered` on every path but
+    rendered it only inside `if mismatches:`, so the one case the note
+    exists for — nothing disagreed, *and* nothing could have seen a
+    reordering — was the one case that stayed silent. Only
+    `describe_compatibility`, which the caller has to know to call, ever
+    said it."""
+    ws = signed(probe=False)                      # signed, but no probe facet
+    with pytest.warns(pounce.WarmStartOrderingUnverifiedWarning,
+                      match="pounce#621"):
+        assert ws.check_compatible(make(obj=HS071(perm=PERM))) == []
+
+
+def test_a_verifiable_clean_check_stays_quiet():
+    """The note is about a *blind* comparison. When the probe ran on both
+    sides the check really did rule a reordering out, and saying
+    otherwise would train the reader to ignore it."""
+    ws = signed()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make()) == []
+
+
+def test_stable_ids_on_both_sides_also_silence_the_note():
+    ws = signed(var_ids=VAR_IDS, con_ids=CON_IDS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make(), var_ids=VAR_IDS,
+                                   con_ids=CON_IDS) == []
+
+
+def test_the_note_can_be_raised_to_a_refusal():
+    """A warning category rather than a print is what lets a caller who
+    would rather refuse than replay unverified say so."""
+    ws = signed(probe=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "error", pounce.WarmStartOrderingUnverifiedWarning)
+        with pytest.raises(pounce.WarmStartOrderingUnverifiedWarning):
+            make(obj=HS071(perm=PERM)).solve(warm_start=ws)
+
+
+def test_a_mismatched_check_still_carries_the_note_inline(recwarn):
+    """The pre-existing rendering — inside the report — must not have
+    turned into a second, separate warning."""
+    ws = signed(probe=False)
+    with pytest.warns(WarmStartCompatibilityWarning) as rec:
+        ws.check_compatible(make(n=5), compat="warn")
+    assert len(rec) == 1
+    assert ORDERING_UNVERIFIED_NOTE in str(rec[0].message)
+
+
+def test_a_legacy_artifact_does_not_get_told_twice(tmp_path):
+    """An unsigned artifact read from a file already gets
+    WarmStartLegacyWarning, which says the same thing in more detail.
+    Emitting both would be noise, so the new note is scoped to *signed*
+    states — which is every case gh#660 names."""
+    p, cold_x, cold_info = cold()
+    path = tmp_path / "legacy.npz"
+    _write_v1(path, WarmStart.from_info(cold_x, cold_info))
+    with pytest.warns(WarmStartLegacyWarning) as rec:
+        WarmStart.load(path).check_compatible(make())
+    assert len(rec) == 1
+    assert not any(
+        isinstance(w.message, pounce.WarmStartOrderingUnverifiedWarning)
+        for w in rec
+    )

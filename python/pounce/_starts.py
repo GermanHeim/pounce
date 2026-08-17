@@ -911,6 +911,7 @@ class _Racer:
         """
         from ._minimize import _result_from_info
         from ._warm_start import WarmStart
+        from ._warm_start_schema import WarmStartOrderingUnverifiedWarning
 
         problem, solver, ws = state["problem"], state["solver"], state["ws"]
         max_iter = iter_budget - cand.iters
@@ -942,7 +943,18 @@ class _Racer:
                 # snapshot the seven `warm_start_*` / `mu_init` options
                 # outlive the rung and the next candidate's first,
                 # nominally cold, solve is not (pounce#607).
-                ws.check_compatible(problem)
+                # gh#660's note does not apply here and would fire on
+                # every rung of every race. The state a few lines below
+                # is captured with `probe=False` *because* it is
+                # captured from, and resumed on, this same `Problem`
+                # object a moment later — there is no reordering for the
+                # comparison to have missed. The check still runs; only
+                # the "could not have seen a reordering" caveat is
+                # dropped, and only where it is provably vacuous.
+                with warnings.catch_warnings():
+                    warnings.simplefilter(
+                        "ignore", WarmStartOrderingUnverifiedWarning)
+                    ws.check_compatible(problem)
                 for key, val in ws.options().items():
                     problem.add_option(key, val)
                 kw = ws.solve_kwargs()

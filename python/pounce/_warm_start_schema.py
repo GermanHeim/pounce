@@ -46,6 +46,7 @@ __all__ = [
     "MODEL_OPTIONS",
     "PROBE_RTOL",
     "ORDERING_UNVERIFIED_NOTE",
+    "WarmStartOrderingUnverifiedWarning",
     "ordering_is_unverified",
 ]
 
@@ -111,6 +112,19 @@ class WarmStartCompatibilityError(ValueError):
 class WarmStartCompatibilityWarning(UserWarning):
     """``compat="warn"`` counterpart of
     :class:`WarmStartCompatibilityError`."""
+
+
+class WarmStartOrderingUnverifiedWarning(UserWarning):
+    """A warm start was accepted by a comparison that could not have
+    seen a reordering of the variables.
+
+    Not a mismatch — nothing disagreed. It says that the one structural
+    change the comparison is blind to (pounce#621) was not ruled out,
+    which a bare clean verdict would otherwise leave the caller to infer.
+    Raised to an error with
+    ``warnings.simplefilter("error", WarmStartOrderingUnverifiedWarning)``
+    by callers who would rather refuse than replay unverified.
+    """
 
 
 class WarmStartLegacyWarning(UserWarning):
