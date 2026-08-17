@@ -286,6 +286,17 @@ _PROBE_PROJECTIONS = 4
 #: (re-associating a model's internal sums moves it by 5e-18 relative).
 PROBE_RTOL = 1e-9
 
+#: What fraction of the largest block's scale floors a *near-zero*
+#: block's tolerance. It has to be small: the floor exists to keep a
+#: block that computes to ~0 out of cancellation of large terms from
+#: being held to bit equality, and `PROBE_RTOL * _PROBE_FLOOR_FRAC`
+#: (1e-15 of the largest scale) sits an order above that cancellation
+#: noise. Making it 1.0 — which is what the pre-#659 code computed —
+#: hands every block the *largest* block's tolerance, so an inert
+#: additive constant on the objective silently switches reorder
+#: detection off (gh#659).
+_PROBE_FLOOR_FRAC = 1e-6
+
 #: |bound| at or above this is not a bound. pounce/Ipopt spell infinity
 #: 2e19; nothing smaller than 1e19 is a real bound.
 _BOUND_INF = 1e19
@@ -394,18 +405,29 @@ def _model_probe(problem) -> Optional[Tuple[float, ...]]:
 def _probe_agrees(a: Sequence[float], b: Sequence[float]) -> bool:
     """Do two probes describe the same model, to :data:`PROBE_RTOL`?
 
-    Compared block by block against each block's own L1 scale, with the
-    largest block's scale as a floor — so a gradient that is identically
-    zero is judged against the magnitude of the rest of the model rather
-    than against nothing, which would demand bit equality of exactly the
-    block least likely to reproduce bitwise.
+    Compared block by block against each block's own L1 scale, with
+    `_PROBE_FLOOR_FRAC` of the largest block's scale as a floor — so a
+    gradient that is identically zero is judged against the magnitude of
+    the rest of the model rather than against nothing, which would
+    demand bit equality of exactly the block least likely to reproduce
+    bitwise.
+
+    The floor is a *fraction* of the largest scale, not the largest
+    scale itself. Flooring at the bare maximum is what gh#659 was: it
+    made `max(scales[block], floor)` equal `floor` for every block, so
+    each block was judged against the largest block's magnitude and the
+    per-block scale this docstring describes never took effect. An inert
+    additive constant on the objective — which changes no derivative and
+    no solution — then raised the gradient/constraint/jacobian
+    tolerances until a variable transposition slipped through the
+    enforcing `check_compatible` gate.
     """
     if len(a) != len(b):
         return False
     stride = _PROBE_PROJECTIONS + 1
     scales = [max(abs(a[k]), abs(b[k]))
               for k in range(_PROBE_PROJECTIONS, len(a), stride)]
-    floor = max(scales) if scales else 0.0
+    floor = _PROBE_FLOOR_FRAC * max(scales) if scales else 0.0
     for block, off in enumerate(range(0, len(a), stride)):
         tol = PROBE_RTOL * max(scales[block], floor)
         for k in range(off, off + stride):

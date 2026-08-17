@@ -119,6 +119,21 @@ def test_path_releases_a_bound_the_perturbation_pulls_off():
     assert 0.0 < c.fraction < 1.0
 
 
+def test_a_bound_pushed_deeper_stays_and_records_nothing():
+    """The perturbation pushes x further into its active lower bound.
+    The factorization already enforces that bound, so the path must
+    not hold it again through a Schur row: the multiplier grows,
+    nothing changes hands, and the record is empty. Holding it a
+    second time would put a wrong entry in the record at fraction
+    zero and enforce the same bound twice."""
+    m = releasing()
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
+    path = estimate(m, [(m.p, -3.0)], mode="path")
+    assert path[m.x] == pytest.approx(0.0, abs=1e-6)
+    assert path[m.y] == pytest.approx(1.0, abs=1e-6)
+    assert active_set_changes(m, [(m.p, -3.0)]) == []
+
+
 def test_a_release_on_an_upper_bound():
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=5.0, mutable=True)
@@ -176,6 +191,50 @@ def test_a_variable_reached_partway_can_leave_again():
     fracs = [c.fraction for c in rec]
     assert fracs == sorted(fracs), "the record is in path order"
     assert all(0.0 < f <= 1.0 for f in fracs)
+
+
+def returning_qp(p=0.0):
+    """A parametric QP whose solution path releases x1's upper bound
+    partway through the change and returns x1 to that same bound
+    before the target: x2 reaching its lower bound mid-path flips
+    x1's direction. Found by a random scan over QPs of this family
+    and verified against re-solves."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.x1 = pyo.Var(bounds=(0.0, 1.0), initialize=0.3)
+    m.x2 = pyo.Var(bounds=(0.0, 10.0), initialize=0.3)
+    g, a0, a1, b0, b1 = -0.73, 0.48, 0.58, 0.4, -2.6
+    m.obj = pyo.Objective(
+        expr=0.5 * m.x1**2 + 0.5 * m.x2**2 + g * m.x1 * m.x2
+        - (a0 + a1 * m.p) * m.x1 - (b0 + b1 * m.p) * m.x2)
+    declare_sens_param(m.p)
+    return m
+
+
+def test_a_released_bound_can_be_reached_again():
+    """Base activity is decided once at the base point, but a released
+    row leaves the factorization at the fraction it releases, so the
+    variable can come back to that same bound and be held through a
+    Schur row. A reach scan that treated the factorization's bounds as
+    fixed for the whole path would refuse this hold and miss the
+    endpoint."""
+    m = returning_qp()
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
+
+    exact = returning_qp(1.0)
+    pyo.SolverFactory("pounce").solve(exact, options={"tol": 1e-10})
+
+    path = estimate(m, [(m.p, 1.0)], mode="path")
+    assert path[m.x1] == pytest.approx(pyo.value(exact.x1), abs=1e-8)
+    assert path[m.x2] == pytest.approx(pyo.value(exact.x2), abs=1e-8)
+
+    rec = active_set_changes(m, [(m.p, 1.0)])
+    x1_upper = [c.action for c in rec
+                if c.var is m.x1 and c.bound == "upper"]
+    assert x1_upper == ["leaves", "reaches"], (
+        f"x1 should leave its upper bound and return to it, record: {rec}")
+    fracs = [c.fraction for c in rec]
+    assert fracs == sorted(fracs)
 
 
 def test_the_cap_falls_back_to_the_clamp_with_a_warning():
