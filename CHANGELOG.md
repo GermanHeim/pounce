@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+- **Crossover: the sensitivity path reads the barrier diagonal in the
+  frame crossover solved in** (#654).
+
+  `bound_relax_factor` (default `1e-8`) widens every bound by `δ` before
+  the solve, and crossover parks the iterate exactly on the **declared**
+  bound — a full `δ` inside the live relaxed one. So the barrier saw a
+  slack of exactly `δ` at every active bound where an interior iterate
+  would have carried `μ/z`, and the barrier diagonal `Σ = z/s` came out
+  as `z/δ` instead of `z²/μ`. Since `δ` is capped at `constr_viol_tol`
+  and `μ` ends near `tol/(barrier_tol_factor+1)`, that is *looser*
+  whenever `z·δ/μ > 1`, which is the ordinary case.
+
+  `Σ` is the stiffness with which the barrier holds a bounded variable,
+  and a reduced Hessian read off the held KKT factor carries a residual
+  error of exactly `O(1/Σ)` — the leftover of that pin being finite. So
+  crossover was *degrading* the sensitivity path by a factor that tracked
+  the bound multiplier: on the pinned fixture, `18x` at `z = 4.5`, `376x`
+  at `z = 94.5`, `396x` at `z = 994.5`. With `bound_relax_factor = 0` the
+  same run was instead `306x` more accurate than no crossover — so an
+  option documented as the remedy for the sensitivity path's AMBIGUOUS
+  class only helped when a second, unrelated option was also set.
+
+  `Σ` is now re-measured against the declared bounds — variable bounds
+  and inequality-row bounds alike — whenever the held iterate came from
+  an accepted crossover, and the same corrected diagonal is what the
+  factor is rebuilt with and what `classify_activity` reads, so the two
+  cannot disagree about which bounds the point is measured against. The
+  reduced-Hessian error drops to the roundoff of the answer itself
+  (`8.9e-16`, and exactly `0` at the larger multipliers) and is now
+  identical with the relaxation on and off. Covers `covariance()`,
+  `information()`, `classify_activity()`, `Solver::compute_reduced_hessian`,
+  both parametric steps, `kkt_solve`/`kkt_solve_many`, and the
+  `SensSolve` builder — every one of them reads the one held factor.
+
+  Applied at the consumer boundary, as #646 did for the residual report:
+  nothing on the live iterate moves, no solver trajectory changes, and a
+  solve that did not cross over is bit-identical. Slacks are floored at
+  `eps·max(1,|bound|)` — the distance at which the point *is* the bound —
+  rather than by `CalculateSafeSlack`, which would put the `μ/z` standoff
+  crossover exists to remove straight back. Pinned by
+  `crates/pounce-sensitivity/tests/crossover_sigma_downstream.rs`.
+
 - **`pounce-rs`: a rejected solver option is no longer silently
   discarded** (#649).
 

@@ -525,7 +525,15 @@ convergence and returns a point at which a linearly independent set of
 constraints holds with *equality*, collapsing the ambiguity into a
 STRONGLY or WEAKLY ACTIVE verdict. It is a different remedy to the same
 problem the `bound_relax_factor = 0` rule above addresses, and the two
-compose.
+compose — genuinely independently, since
+[#654](https://github.com/jkitchin/pounce/issues/654). A crossed-over
+point sits *on* the declared bounds, i.e. `bound_relax_factor` inside the
+box the barrier measured against, so its `Σ = z/s` used to read `z/δ` and
+hold the bound more loosely than an interior iterate would have —
+degrading, rather than improving, every quantity read off the held factor
+unless the relaxation was also switched off. `Σ` is now re-measured
+against the declared bounds whenever crossover is accepted, so the two
+options no longer have to be set together.
 
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as

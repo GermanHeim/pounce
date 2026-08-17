@@ -190,6 +190,47 @@ already decided, and it applies solely to a point the never-regress gate
 accepted on its declared-bound residuals, so it cannot dress up a worse
 iterate — the reading it replaces is the artifact, not the point.
 
+### The same frame applies to the sensitivity path
+
+The residual report was only half of it. The barrier diagonal
+`Σ = z/s` is built from those same relaxed-frame slacks, so at a
+crossed-over point it reads `z/δ` where an interior iterate would have
+given `z²/μ`:
+
+```text
+no crossover     Σ = z / (μ/z) = z²/μ
+crossover        Σ = z / δ
+```
+
+Since `δ` is capped at `constr_viol_tol` and `μ` ends near
+`tol/(barrier_tol_factor+1)`, that is *looser* whenever `z·δ/μ > 1`, which
+is the ordinary case. `Σ` is the stiffness with which the barrier holds a
+bounded variable, and a reduced Hessian read off the held KKT factor
+carries a residual error of exactly `O(1/Σ)` — the leftover of that pin
+being finite. So the looser reading was a measurably less accurate
+covariance, by a factor that tracked the bound multiplier: `18x` at
+`z = 4.5`, `396x` at `z = 994.5`. That was
+[#654](https://github.com/jkitchin/pounce/issues/654), and it is fixed the
+same way: **when crossover is accepted, `Σ` is re-measured against the
+declared bounds** — for variable bounds and inequality-row bounds alike —
+before the sensitivity path factors with it or classifies against it.
+
+The correction is applied at the consumer boundary, not on the live
+iterate: the relaxed bounds are still what the algorithm ran against, and
+nothing about the solve moves. It covers `covariance()`,
+`information()`, `classify_activity()`, `compute_reduced_hessian`, the
+parametric steps, and the `SensSolve` builder, because all of them read
+the one held factor.
+
+The practical consequence is that `crossover=yes` and
+`bound_relax_factor = 0` are now independent choices. Before the fix,
+crossover *helped* the sensitivity path by `306x` with the relaxation off
+and *hurt* it by `18x` with the relaxation at its default, so the option
+was only safe in combination with a second, unrelated one. Now a
+crossed-over solve reports the same downstream numbers either way — at
+the roundoff of the answer itself, since the point is on its bound and the
+pin is as exact as double precision expresses.
+
 ## Reading the result
 
 The returned solution — `x`, the objective, `g`, and every multiplier — is
