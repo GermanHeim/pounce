@@ -42,12 +42,39 @@
 //!    `μ̂ / slack` instead, the same complementarity relation the
 //!    solver is about to enforce. Seeded (strictly positive) entries
 //!    are left alone.
+//!
+//!    This step needs no dual to work from — only the slacks the
+//!    supplied *point* already determines — so it runs even for a
+//!    caller who seeded nothing but `x` (gh#622). That case used to
+//!    fall through to the constant, and the constant it fell through
+//!    to was `warm_start_mult_bound_push`: 1e-3 by default, and 1e-9
+//!    under the tightened pushes `pounce.WarmStart` ships, i.e. a
+//!    start declaring every bound inactive. Against the pre-gh#622
+//!    behaviour, filling it properly is worth 49 -> 44 iterations at
+//!    horizon 5 and 67 -> 55 at horizon 20 on that issue's
+//!    receding-horizon family, and takes an HS071 restart from a
+//!    transferred point with no duals from 11 iterations to 7.
+//!
+//!    It costs one iteration in one place: HS071 restarted from its
+//!    own solution under `warm_start_recentering=none`, 3 -> 4, where
+//!    the kill switch keeps the constant fill and the constant is now
+//!    `bound_mult_init_val` rather than a bound-multiplier push so
+//!    small it read as "inactive" and happened to be right about a
+//!    solution whose bounds mostly are. Under the default the same
+//!    restart is 3 -> 2.
 //! 3. **Reconstruct equality multipliers.** A `y` block that is
 //!    identically zero is likewise unseeded, and is re-derived from
 //!    stationarity by the same regularized least-squares augmented
 //!    solve the cold path uses ([`LeastSquareMults`]) — now with the
 //!    reconstructed `z` in its right-hand side, so the estimate is not
 //!    forced to absorb the bound multipliers.
+//!
+//!    Unlike step 2, this one *completes a partial seed* and is gated
+//!    on [`any_dual_seeded`]: from a point alone it is the cold path's
+//!    estimate wearing the warm path's barrier, measured over
+//!    `benchmarks/warmstart` at 1102 -> 1211 iterations across 27
+//!    parametric paths. Step 4 is gated the same way and for the same
+//!    reason.
 //! 4. **Choose μ.** With the point complete, μ is raised to the
 //!    measured `avrg_compl` when that overshoots what `mu_init` asked
 //!    for by more than [`MU_ESCALATION_TRIGGER`], clamped to
@@ -115,6 +142,41 @@ const MU_CEILING: Number = 0.1;
 /// three-order cases still fire.
 const MU_ESCALATION_TRIGGER: Number = 10.0;
 
+/// How far a *seeded* bound-multiplier block's implied complementarity
+/// may sit above what the primal point it arrived with can support
+/// before the block is refused outright (gh#617).
+///
+/// Deliberately the same factor as [`MU_ESCALATION_TRIGGER`], and for
+/// the same reason: refusing a seed is as much a trajectory change as
+/// moving μ, so it has to be worth it. A converged seed measures its
+/// own barrier and misses by a factor of two; a stale one is caught by
+/// the `inf_pr` half of the comparison rather than by this factor. What
+/// this is here to reject is a block that *cannot* have come from a
+/// solve of this problem at this point — a `z` that reads `1e2` against
+/// a primal point that is feasible to `1e-9`.
+const SEED_REJECTION_TRIGGER: Number = 10.0;
+
+/// What the recentering pass measured about the point as *supplied*,
+/// before anything was rebuilt from it.
+///
+/// Grouped rather than passed loose because the three travel together
+/// through every decision gh#617 and gh#618 added, and because the
+/// distinction that matters is exactly "measured on what the caller
+/// handed over" versus "measured on what this pass then built" — the
+/// second is what `eq_seed_is_incoherent` must never see.
+#[derive(Debug, Clone, Copy)]
+struct SeedMeasurement {
+    /// The provisional barrier: what `mu_init` asked for, clamped into
+    /// the band a warm start may use.
+    mu_hat: Number,
+    /// `‖c(x)‖∞` of the supplied primal point.
+    inf_pr: Number,
+    /// Largest bound multiplier the *caller* supplied that survived the
+    /// coherence test. Zero when the caller seeded none, or when every
+    /// seeded block was refused.
+    seeded_z_amax: Number,
+}
+
 /// What happened to one multiplier block of the supplied warm point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlockVerdict {
@@ -129,9 +191,18 @@ pub enum BlockVerdict {
     /// `constr_mult_init_max`, or the augmented solve failed); the
     /// block fell back to the pre-gh#606 constant fill.
     Discarded,
-    /// The caller supplied no dual information *at all*, so there was
-    /// nothing to reconstruct this block from and it kept the
-    /// pre-gh#606 constant fill. See [`any_dual_seeded`].
+    /// The caller *did* seed this block, and the seed was refused: its
+    /// implied complementarity was orders of magnitude away from what
+    /// the primal point it arrived with supports, so it cannot have
+    /// come from a solve of this problem (gh#617). The block took the
+    /// pre-gh#606 constant fill, and nothing was reconstructed off it.
+    Rejected,
+    /// The caller supplied no dual information *at all*, so this block
+    /// kept the pre-gh#606 constant fill for want of anything to
+    /// derive it from. Since gh#622 only the equality multipliers
+    /// report this: the bound blocks are reconstructible from the
+    /// slacks alone and are filled whichever way the caller seeded.
+    /// See [`any_dual_seeded`].
     Unseeded,
 }
 
@@ -157,6 +228,16 @@ pub struct WarmStartDiagnostics {
     /// Bound-multiplier entries that arrived unseeded and were filled
     /// from `μ̂ / slack` rather than from the constant floor.
     pub bound_duals_reconstructed: usize,
+    /// Bound-multiplier entries that arrived *seeded* and were refused
+    /// as incoherent with the primal point, taking the pre-gh#606
+    /// constant fill instead (gh#617).
+    pub bound_duals_rejected: usize,
+    /// `true` when the seeded equality multipliers were refused as
+    /// incoherent with the primal point, so the stationarity split was
+    /// not run off them (gh#617). The `y` block itself is left where
+    /// the caller put it — that is what the pre-gh#606 path does with a
+    /// supplied `y` — but it stops being an input to anything.
+    pub eq_duals_rejected: bool,
     /// `true` when the unseeded bound multipliers were re-derived from
     /// the stationarity identity rather than left at `μ̂ / slack`. That
     /// needs a caller-supplied `y`; see
@@ -178,6 +259,8 @@ impl Default for WarmStartDiagnostics {
             bound_duals: BlockVerdict::Absent,
             eq_duals: BlockVerdict::Absent,
             bound_duals_reconstructed: 0,
+            bound_duals_rejected: 0,
+            eq_duals_rejected: false,
             stationarity_split: false,
             recentering_disabled: false,
         }
@@ -253,8 +336,16 @@ impl IterateInitializer for WarmStartIterateInitializer {
         // keeps the pre-gh#606 fills, and only μ is still measured.
         let dual_info =
             self.opts.recentering == WarmStartRecentering::Residual && any_dual_seeded(data);
+        // gh#622: the bound blocks are filled from the barrier relation
+        // even when the caller seeded nothing, because `mu / slack`
+        // needs no dual to derive it from — only the slacks the
+        // supplied point already determines. What stays gated on
+        // `dual_info` is everything that *does* need one: the
+        // least-squares `y`, the stationarity split, and letting the
+        // measurement move mu.
+        let bound_fill_only = !dual_info && self.opts.recentering == WarmStartRecentering::Residual;
         let mu_hat = if dual_info {
-            let (mu_hat, unseeded) = recenter_from_residuals(data, cq, &self.opts, &mut diag);
+            let (seed, unseeded) = recenter_from_residuals(data, cq, &self.opts, true, &mut diag);
             reconstruct_eq_duals(data, cq, nlp, aug_solver, &self.opts, &mut diag);
             // The split below reads `y`; running it against a `y` this
             // same pass just derived *from* the provisional `z` is
@@ -267,23 +358,35 @@ impl IterateInitializer for WarmStartIterateInitializer {
                 // arrived seeded, and claiming the split ran there
                 // made `info["warm_start"]` say something untrue
                 // (gh#606 review).
-                diag.stationarity_split = refine_bound_duals_from_stationarity(
-                    data, cq, nlp, &self.opts, mu_hat, &unseeded,
+                let split = refine_bound_duals_from_stationarity(
+                    data, cq, nlp, &self.opts, seed, &unseeded, &mut diag,
                 );
+                diag.stationarity_split = split;
             }
-            Some(mu_hat)
-        } else if self.opts.recentering == WarmStartRecentering::Residual {
-            diag.primal_residual = cq.borrow().curr_primal_infeasibility_max();
-            diag.bound_duals = BlockVerdict::Unseeded;
+            Some(seed.mu_hat)
+        } else if bound_fill_only {
+            let (seed, _unseeded) = recenter_from_residuals(data, cq, &self.opts, false, &mut diag);
+            // Left alone deliberately: with no `y` and no `z` supplied,
+            // a least-squares `y` would be the cold path's estimate
+            // wearing the warm path's barrier, which is the case gh#606
+            // measured at 1102 -> 1211 iterations and gated off.
             diag.eq_duals = BlockVerdict::Unseeded;
-            // Only the `is_some()` is read on this path — `final_mu`
-            // re-reads `curr_mu` itself — so this carried a clamp that
-            // was computed and thrown away. Left as the plain value so
-            // it does not read as a policy it never was.
-            Some(data.borrow().curr_mu)
+            Some(seed.mu_hat)
         } else {
             None
         };
+        // Whether the measurement is allowed to *move* mu. Not on a
+        // seed with no duals in it: `final_mu` reads the
+        // complementarity of the iterate the solve starts from, and on
+        // that path every multiplier in it was just written by this
+        // initializer as `mu / slack` — so the measurement returns the
+        // mu it was handed, and any escalation off it is the barrier
+        // arguing with itself. It stayed academic while an unsupplied
+        // block arrived as a literal 0 floored at
+        // `warm_start_mult_bound_push`, a fill so small `avrg_compl`
+        // never cleared the trigger, and became load bearing the
+        // moment gh#622 gave those blocks an honest one.
+        let mu_may_move = dual_info;
 
         {
             // Rebuild `curr` with clamped multipliers. Components are
@@ -334,7 +437,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         if self.opts.target_mu > 0.0 {
             data.borrow_mut().curr_mu = self.opts.target_mu;
         } else if mu_hat.is_some() {
-            let mu = final_mu(data, cq, &mut diag);
+            let mu = final_mu(data, cq, &mut diag, mu_may_move);
             data.borrow_mut().curr_mu = mu;
         }
 
@@ -360,13 +463,18 @@ impl WarmStartDiagnostics {
     /// above what `mu_init` asked for (the stale-point fallback).
     fn info_string_tokens(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.bound_duals == BlockVerdict::Reconstructed {
-            out.push("wz");
+        match self.bound_duals {
+            BlockVerdict::Reconstructed => out.push("wz"),
+            BlockVerdict::Rejected => out.push("wz!"),
+            _ => {}
         }
         match self.eq_duals {
             BlockVerdict::Reconstructed => out.push("wy"),
             BlockVerdict::Discarded => out.push("wy0"),
             _ => {}
+        }
+        if self.eq_duals_rejected {
+            out.push("wy!");
         }
         if self.mu_out > self.mu_in * 10.0 {
             out.push("wmu");
@@ -393,8 +501,9 @@ fn recenter_from_residuals(
     data: &IpoptDataHandle,
     cq: &IpoptCqHandle,
     opts: &WarmStartOptions,
+    seed_implies_barrier: bool,
     diag: &mut WarmStartDiagnostics,
-) -> (Number, [Vec<bool>; 4]) {
+) -> (SeedMeasurement, [Vec<bool>; 4]) {
     let inf_pr = cq.borrow().curr_primal_infeasibility_max();
     diag.primal_residual = inf_pr;
 
@@ -413,9 +522,22 @@ fn recenter_from_residuals(
     let mu_hat = safe_mu(data.borrow().curr_mu);
 
     let mut unseeded: [Vec<bool>; 4] = [vec![], vec![], vec![], vec![]];
+    // Largest bound multiplier the *caller* supplied and that survived
+    // the coherence test — the only scale [`eq_seed_is_incoherent`] may
+    // measure the seeded `y` against.
+    let mut seeded_z_amax = 0.0;
     let curr = match data.borrow().curr.clone() {
         Some(c) => c,
-        None => return (mu_hat, unseeded),
+        None => {
+            return (
+                SeedMeasurement {
+                    mu_hat,
+                    inf_pr,
+                    seeded_z_amax,
+                },
+                unseeded,
+            );
+        }
     };
     let cq_ref = cq.borrow();
     let slacks = [
@@ -427,8 +549,22 @@ fn recenter_from_residuals(
     drop(cq_ref);
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
 
+    // gh#618's test asks whether the point's infeasibility outruns the
+    // barrier the *seed* implies. A seed that carried no multipliers
+    // implies no barrier: `mu_hat` here is the caller's `mu_init`, an
+    // option, so comparing `inf_pr` against it measures nothing about
+    // the seed. On that path `μ / slack` is also the only information
+    // there is — gh#622 measured it beating every constant fill on
+    // exactly this fixture — so the guard is not armed. See
+    // [`swamping_residual`].
+    let swamping = if seed_implies_barrier {
+        swamping_residual(inf_pr, mu_hat)
+    } else {
+        0.0
+    };
     let mut rebuilt: [Option<Rc<dyn Vector>>; 4] = [None, None, None, None];
     let mut n_reconstructed = 0usize;
+    let mut n_rejected = 0usize;
     let mut n_total = 0usize;
     for (i, (z, slack)) in blocks.iter().zip(slacks.iter()).enumerate() {
         if z.dim() == 0 {
@@ -447,18 +583,45 @@ fn recenter_from_residuals(
             // pair up entries that may not correspond.
             continue;
         }
+        // gh#617. Before anything is derived *from* this block, ask
+        // whether it can have come from a solve of this problem at this
+        // primal point. A block that fails takes the pre-gh#606
+        // constant fill wholesale and is not used as an input again.
+        if seed_is_incoherent(&vals, &sl, mu_hat, inf_pr) {
+            let fill = opts.mult_bound_push.max(0.0);
+            for v in vals.iter_mut() {
+                *v = fill;
+            }
+            n_rejected += vals.len();
+            // No mask is recorded, so `refine_bound_duals_from_stationarity`
+            // skips this block entirely: a refused seed must not come
+            // back through the split's floor.
+            let mut out = z.make_new();
+            if scatter(&mut *out, &vals) {
+                rebuilt[i] = Some(Rc::from(out));
+            }
+            continue;
+        }
         let mut touched = 0usize;
         let mut mask = vec![false; vals.len()];
         for (k, (v, s)) in vals.iter_mut().zip(sl.iter()).enumerate() {
             if !(v.is_nan() || *v == 0.0) {
+                if v.is_finite() {
+                    seeded_z_amax = seeded_z_amax.max(v.abs());
+                }
                 continue;
             }
             touched += 1;
             mask[k] = true;
             // `slack` can be tiny (an active bound) or non-finite on a
             // point outside its bounds; both are clamped into the band
-            // the caps below would have allowed anyway.
-            let filled = if s.is_finite() && *s > 0.0 {
+            // the caps below would have allowed anyway. A slack the
+            // point's own infeasibility swamps is not a measurement at
+            // all and takes the pre-gh#606 constant (gh#618) — see
+            // [`slack_is_swamped`].
+            let filled = if slack_is_swamped(*s, swamping) {
+                opts.mult_bound_push.max(0.0)
+            } else if s.is_finite() && *s > 0.0 {
                 mu_hat / *s
             } else {
                 mu_hat
@@ -480,13 +643,20 @@ fn recenter_from_residuals(
     }
 
     if n_total > 0 {
-        diag.bound_duals = if n_reconstructed == 0 {
+        // A rejection is the loudest thing that can happen to a block,
+        // so it wins the summary: a caller who seeded a block and had
+        // it refused needs to see that, not "some other block was
+        // rebuilt" (gh#617).
+        diag.bound_duals = if n_rejected > 0 {
+            BlockVerdict::Rejected
+        } else if n_reconstructed == 0 {
             BlockVerdict::Accepted
         } else {
             BlockVerdict::Reconstructed
         };
     }
     diag.bound_duals_reconstructed = n_reconstructed;
+    diag.bound_duals_rejected = n_rejected;
 
     if rebuilt.iter().any(|r| r.is_some()) {
         let pick = |i: usize, orig: &Rc<dyn Vector>| -> Rc<dyn Vector> {
@@ -505,7 +675,168 @@ fn recenter_from_residuals(
         data.borrow_mut().set_curr(new_curr);
     }
 
-    (mu_hat, unseeded)
+    (
+        SeedMeasurement {
+            mu_hat,
+            inf_pr,
+            seeded_z_amax,
+        },
+        unseeded,
+    )
+}
+
+/// How much primal infeasibility this point carries *in excess of what
+/// the barrier it claims explains* (gh#618). Zero for a point that is
+/// converged on its own terms.
+///
+/// A solve stopped at barrier μ leaves `inf_pr` at the level of its own
+/// tolerance, and the slacks reaching this initializer have been shoved
+/// to `warm_start_slack_bound_push` — routinely *smaller* than that
+/// tolerance. Comparing the two directly would therefore call an exact
+/// restart's active bounds "swamped" and throw away the reconstruction
+/// on precisely the case gh#606 wins on (measured: an unguarded
+/// comparison cost the exact partial restart 11 -> 15 iterations across
+/// the corpus). Requiring the miss to clear the barrier by
+/// [`SEED_REJECTION_TRIGGER`] first is the same conservatism the rest
+/// of this module applies to every other measurement-driven decision.
+///
+/// The caller decides whether to ask at all: `μ̂` is the barrier the
+/// *seed* claims, and a seed that carried no multipliers claims none —
+/// see the `seed_implies_barrier` gate in [`recenter_from_residuals`].
+fn swamping_residual(inf_pr: Number, mu_hat: Number) -> Number {
+    if inf_pr.is_finite() && inf_pr > SEED_REJECTION_TRIGGER * mu_hat {
+        inf_pr
+    } else {
+        0.0
+    }
+}
+
+/// `true` when this slack is smaller than the primal infeasibility of
+/// the point it was measured on, as resolved by [`swamping_residual`]
+/// (gh#618).
+///
+/// Both halves of the bound-multiplier reconstruction read a slack as a
+/// statement about activity. `μ̂ / slack` says "this slack is small, so
+/// this bound is active, so give it a large multiplier"; the
+/// stationarity split says "this bound is active, so it is what carries
+/// the stationarity residual". On a seed that still solves the problem
+/// being solved, both are right, and they are where gh#606's wins come
+/// from — an exact restart has `inf_pr` at round-off and nothing here
+/// ever fires.
+///
+/// A slack smaller than the point's own infeasibility supports neither
+/// claim. The point misses feasibility by more than the distance it
+/// reports to that bound, so which side of the bound it will end up on
+/// is not something this measurement knows. Both halves then have
+/// nothing to derive from, and what is left is the constant the
+/// pre-gh#606 path would have used — the same fallback gh#617 gives a
+/// seed it refuses, reached here by staleness rather than by
+/// incoherence.
+///
+/// This is a per-entry test, not a per-point gate: on a partly-stale
+/// seed the bounds whose slacks still outrun the residual keep their
+/// reconstruction and only the swamped ones fall back, so the
+/// reconstruction's reach scales down with the measurement instead of
+/// switching off at a threshold.
+fn slack_is_swamped(slack: Number, swamping: Number) -> bool {
+    swamping > slack
+}
+
+/// gh#617. Can this seeded bound-multiplier block have come from a
+/// solve of this problem, at the primal point it arrived with?
+///
+/// The test is the complementarity the block *implies*: `|z_i| · s_i`,
+/// averaged over the entries the caller actually seeded, which is the
+/// same quantity [`final_mu`] reads off the assembled point and the
+/// same one the barrier is. A point on any central path — converged,
+/// stale, or mid-solve — carries `z · s` of the order of its own
+/// barrier, and a point that misses feasibility by `inf_pr` can carry
+/// it of that order too. A block reading orders of magnitude above
+/// *both* is not describing this point.
+///
+/// `|z_i|` rather than `z_i`: a strictly negative bound multiplier is
+/// already impossible, and averaging signed products would let the
+/// negative half of a corrupted block cancel the positive half and hide
+/// the very thing being tested for.
+///
+/// Unseeded entries (`0` exactly, or NaN) are excluded — they are what
+/// the reconstruction is *for*, and pairing a zero multiplier against
+/// its slack would drag every average to zero.
+fn seed_is_incoherent(vals: &[Number], sl: &[Number], mu_hat: Number, inf_pr: Number) -> bool {
+    let mut acc = 0.0;
+    let mut n = 0usize;
+    for (v, s) in vals.iter().zip(sl.iter()) {
+        if v.is_nan() || *v == 0.0 {
+            continue;
+        }
+        if !v.is_finite() {
+            // An infinite seed is incoherent with any point at all.
+            return true;
+        }
+        if !s.is_finite() || *s <= 0.0 {
+            continue;
+        }
+        acc += v.abs() * *s;
+        n += 1;
+    }
+    if n == 0 {
+        return false;
+    }
+    let supported = if inf_pr.is_finite() && inf_pr > mu_hat {
+        inf_pr
+    } else {
+        mu_hat
+    };
+    acc / (n as Number) > SEED_REJECTION_TRIGGER * supported
+}
+
+/// gh#617, the equality-multiplier half. Does the seeded `y` belong to
+/// the primal point it arrived with?
+///
+/// At a stationary point `∇f + J_cᵀ y_c + J_dᵀ y_d = P_L z_L − P_U z_U`,
+/// so the residual `r_x` of the left-hand side is bounded by the bound
+/// multipliers — that is the identity
+/// [`refine_bound_duals_from_stationarity`] exists to exploit. A `y`
+/// that leaves `r_x` orders of magnitude above everything else in that
+/// identity is not the `y` of this point, and splitting `r_x` by sign
+/// then manufactures bound multipliers out of the miss.
+///
+/// The scale is `max(‖∇f‖∞, ‖z_seeded‖∞, mu_hat)`, which assumes the
+/// true multipliers are not orders of magnitude larger than the
+/// gradient they balance — for a nonbasic block that is a statement
+/// about the conditioning of the basis, not about the `y`. A badly
+/// conditioned model can therefore have a legitimate `y` refused. It
+/// is deliberate that `‖Jᵀy‖∞` is *not* in the scale: adding the very
+/// quantity under test would make the comparison vacuous. This bound
+/// is derived, not measured; the mitigation is that a refusal only
+/// declines to *derive* from the `y`, never discards it.
+///
+/// Unlike a rejected `z` block the `y` is **not** overwritten: the
+/// pre-gh#606 path keeps a supplied `y` (clamped) and there is no
+/// constant fill to fall back to. What the rejection buys is that
+/// nothing is *derived* from it.
+fn eq_seed_is_incoherent(
+    r_x: &dyn Vector,
+    grad_f: &dyn Vector,
+    seeded_z_amax: Number,
+    mu_hat: Number,
+) -> bool {
+    let resid = r_x.amax();
+    if !resid.is_finite() {
+        return true;
+    }
+    // The scale is what the *caller* supplied, never what this pass
+    // just built: scaling the test by the reconstruction's own output
+    // lets a `μ̂ / slack` fill at a tight bound — which is large by
+    // construction — vouch for the very seed it was derived from.
+    // Measured on `nmpc_vanderpol`, doing that hid a corrupted `y`
+    // behind a reconstructed `z` of order `1e3` and cost the corrupted
+    // partial seed 2 -> 12 iterations.
+    let scale = grad_f.amax().max(seeded_z_amax).max(mu_hat);
+    if !scale.is_finite() || scale <= 0.0 {
+        return false;
+    }
+    resid > SEED_REJECTION_TRIGGER * scale
 }
 
 /// gh#606 step 3b. Having reconstructed the equality multipliers,
@@ -547,9 +878,15 @@ fn refine_bound_duals_from_stationarity(
     cq: &IpoptCqHandle,
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     opts: &WarmStartOptions,
-    mu_hat: Number,
+    seed: SeedMeasurement,
     unseeded: &[Vec<bool>; 4],
+    diag: &mut WarmStartDiagnostics,
 ) -> bool {
+    let SeedMeasurement {
+        mu_hat,
+        inf_pr,
+        seeded_z_amax,
+    } = seed;
     // `true` only when the split actually rewrote a multiplier, so the
     // caller can report `stationarity_split` honestly (gh#606 review).
     if unseeded.iter().all(|m| m.is_empty()) {
@@ -561,7 +898,7 @@ fn refine_bound_duals_from_stationarity(
     };
 
     // r_x = ∇f + J_cᵀ y_c + J_dᵀ y_d, and r_s = −y_d.
-    let (r_x, r_s, slacks) = {
+    let (r_x, r_s, slacks, grad_f) = {
         let cq_ref = cq.borrow();
         let grad_f = cq_ref.curr_grad_f();
         let jc_t = cq_ref.curr_jac_c_t_times_curr_y_c();
@@ -578,8 +915,18 @@ fn refine_bound_duals_from_stationarity(
             cq_ref.curr_slack_s_l(),
             cq_ref.curr_slack_s_u(),
         ];
-        (r_x, r_s, slacks)
+        (r_x, r_s, slacks, grad_f)
     };
+
+    // gh#617. The split's whole input is `r_x` / `r_s`, i.e. the
+    // supplied `y`. If that `y` does not belong to this primal point,
+    // splitting its miss by sign manufactures bound multipliers out of
+    // the corruption; the `μ̂ / slack` fill already in place is the
+    // pre-gh#606-shaped answer and is left standing.
+    if eq_seed_is_incoherent(&*r_x, &*grad_f, seeded_z_amax, mu_hat) {
+        diag.eq_duals_rejected = true;
+        return false;
+    }
 
     let nlp_ref = nlp.borrow();
     // Rearranged, the two identities read `P_L z_L − P_U z_U = r_x`
@@ -611,8 +958,19 @@ fn refine_bound_duals_from_stationarity(
         }
         let cap = opts.mult_init_max_or_inf();
         let hard_floor = opts.mult_bound_push.max(MU_FLOOR);
+        let swamping = swamping_residual(inf_pr, mu_hat);
         for k in 0..vals.len() {
             if !mask[k] {
+                continue;
+            }
+            // gh#618. Both terms below read `sl[k]` as a statement
+            // about whether this bound is active, and a slack the
+            // point's own infeasibility swamps makes no such statement
+            // — so the entry keeps the constant the pre-gh#606 path
+            // would have given it. Same principle [`final_mu`] applies
+            // to μ, one level down: a residual is not a multiplier.
+            if slack_is_swamped(sl[k], swamping) {
+                vals[k] = hard_floor.min(cap);
                 continue;
             }
             let compl_floor = if sl[k].is_finite() && sl[k] > 0.0 {
@@ -620,8 +978,22 @@ fn refine_bound_duals_from_stationarity(
             } else {
                 mu_hat
             };
+            // gh#617. The split may raise a multiplier above what
+            // complementarity implies — that is the point of it, and
+            // the margin is real: the slacks reaching here have been
+            // shoved to `warm_start_slack_bound_push`, which on a
+            // converged point inflates them and put gh#606's
+            // reconstructed HS071 multiplier 5.5x low. It may not raise
+            // it by *orders*. A point at barrier μ̂ carries `z · s ≈ μ̂`
+            // at every bound, converged or stale, so a split demanding
+            // a thousand times that is not describing a point at this
+            // barrier — it is a corrupted `y`'s stationarity miss being
+            // laundered into a multiplier, which then reads back as
+            // enormous complementarity and escalates μ to the ceiling.
+            // Measured on `nmpc_vanderpol`, that took a corrupted
+            // partial seed to 12 iterations, against 2 with the cap.
             let split = if target[k].is_finite() {
-                target[k]
+                target[k].min(SEED_REJECTION_TRIGGER * compl_floor)
             } else {
                 0.0
             };
@@ -782,7 +1154,18 @@ fn reconstruct_eq_duals(
 /// is here to catch a point that cannot support it, not to
 /// second-guess a good one downward. It also has to miss by
 /// [`MU_ESCALATION_TRIGGER`] before it is overridden at all.
-fn final_mu(data: &IpoptDataHandle, cq: &IpoptCqHandle, diag: &mut WarmStartDiagnostics) -> Number {
+/// `may_move` is false when the caller seeded no duals at all. The
+/// measurements are still recorded — they describe the iterate the
+/// solve really starts from, which is what `info["warm_start"]` is for
+/// — but they describe *this initializer's own fill*, so they do not
+/// get to reroute the solve. See the `mu_may_move` note at the call
+/// site (gh#622).
+fn final_mu(
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    diag: &mut WarmStartDiagnostics,
+    may_move: bool,
+) -> Number {
     let (compl, inf_du) = {
         let cq_ref = cq.borrow();
         (
@@ -809,7 +1192,7 @@ fn final_mu(data: &IpoptDataHandle, cq: &IpoptCqHandle, diag: &mut WarmStartDiag
     // when μ goes up. `.max(mu_in)` keeps the floor semantics this
     // function documents without capping a barrier the caller chose on
     // purpose.
-    if compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
+    if may_move && compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
         safe_mu(compl).max(mu_in)
     } else {
         mu_in
@@ -963,8 +1346,22 @@ fn seed_from_nlp(
     let mut z_u = DenseVectorSpace::new(n_zu).make_new_dense();
     let mut v_l = DenseVectorSpace::new(n_vl).make_new_dense();
     let mut v_u = DenseVectorSpace::new(n_vu).make_new_dense();
-    z_l.set(0.0);
-    z_u.set(0.0);
+    // Unseeded, not zero (gh#622): whatever `get_starting_z` declines
+    // to write is a block the caller never seeded, and the clamp block
+    // below resolves NaN to `bound_mult_init_val` where a literal 0
+    // would pass for a supplied multiplier and be floored at
+    // `warm_start_mult_bound_push` — 1e-9 under the pushes
+    // `pounce.WarmStart` ships, which declares every bound inactive.
+    // `OrigIpoptNlp::fetch_warm_start_snapshot` carries the same
+    // marker and the full reasoning; this pre-fill is what survives if
+    // the NLP declines the request outright.
+    //
+    // `v_l` / `v_u` keep the zero fill: `TNLP::get_starting_point` has
+    // no field for the slack-bound multipliers, so they are not blocks
+    // a caller left out — they were never on offer, and gh#606's
+    // reconstruction is what fills them whenever any dual is seeded.
+    z_l.set(Number::NAN);
+    z_u.set(Number::NAN);
     v_l.set(0.0);
     v_u.set(0.0);
     nlp.borrow_mut()

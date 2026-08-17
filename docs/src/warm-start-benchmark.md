@@ -37,6 +37,7 @@ Each runs cold and warm, giving six arms:
 |---|---|---|---|
 | `cold-ipm` | NLP filter-IPM | nothing | every family |
 | `warm-ipm` | NLP filter-IPM | previous point + μ | every family |
+| `values-ipm` | NLP filter-IPM | previous point alone, no duals | every family |
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-sqp` | active-set SQP | previous working set + point | every family |
 | `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
@@ -50,6 +51,40 @@ option, `sqp_qp_use_homotopy`: the inner QP's **cold** solve traces the
 the row bounds along `t ∈ [0,1]`, jump the working set at each event —
 instead of the conventional phase-1/phase-2 scheme. It is the algorithm
 `pounce-qp` is named for.
+
+### Why `values-ipm` exists
+
+Every other warm arm hands the solver multipliers. That is the
+comfortable case, and measuring only it left a defect invisible for
+two releases: on a seed carrying *no* duals, the bound-multiplier
+blocks reached the warm-start initializer as literal zeros and were
+floored at `warm_start_mult_bound_push` — 1e-9 under the tightened
+pushes `pounce.WarmStart` ships — so the start declared every bound
+inactive and got worse the tighter the pushes were set (pounce#622).
+The corpus was bit-identical across the fix on `cold-ipm`,
+`warm-ipm`, `pred-ipm` and `predcorr-ipm`, because not one of them
+enters that path.
+
+It is not a synthetic regime. A caller who kept only `x` is the
+default on every frontend that carries variable levels but no duals:
+GAMS `x.L`, a Pyomo model whose `dual` Suffix was never loaded, a
+`.nl` written without dual guesses.
+
+Across the pounce#622 fix, on this corpus: `values-ipm` **5490 →
+4385** iterations (39 of 42 rows moved), while `warm-ipm` stayed at
+3404 and `cold-ipm` at 10288 to the digit. `moving_bound_qp` alone
+went 1040 → 428.
+
+One family moved the other way, and the arm is now what watches it:
+`degenerate_vertex` **220 → 396**. It holds 12 rows tight in 4
+variables, so the true multipliers are a mass of ties near zero, and
+the pre-fix fill — a bound-multiplier push small enough to read as
+"every bound inactive" — happened to be right about them. Every
+honest fill loses there: `mu / slack` costs 396, and capping that at
+`bound_mult_init_val` costs 341 while introducing a fresh regression
+on `redundant_rows` (162 → 292), so the cap was measured and dropped.
+The regression is inherent to filling the blocks rather than to the
+choice of fill, and it buys the 2.4× on `moving_bound_qp`.
 
 Each warm arm is scored against **its own** cold counterpart. That
 pairing is the whole point: `warm-sqp` beating `cold-ipm` would confound

@@ -490,8 +490,12 @@ def test_horizon_shift_transfers_and_replays():
     moved = ws.reindex(p1, var_ids=v1, con_ids=c1)
     assert moved.replay == "mapped"
     assert moved.source_signature == ws.signature
-    # x1..x4 carried across; the freshly-entered stage is unseeded.
+    # x1..x4 carried across; the freshly-entered stage repeats the one
+    # before it (the default "prolong" fill, gh#622). Its *multipliers*
+    # stay unseeded — a value the solver reconstructs is better than one
+    # this side fabricates.
     np.testing.assert_allclose(moved.x[:HORIZON - 1], x0[1:])
+    assert moved.x[-1] == x0[-1]
     assert np.isnan(moved.zl[-1]) and np.isnan(moved.zu[-1])
     assert np.isnan(moved.lagrange[-1])
 
@@ -499,19 +503,14 @@ def test_horizon_shift_transfers_and_replays():
     cold_x, cold_info = window(1)[0].solve(x0=np.full(HORIZON, 3.0))
     assert warm_info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(warm_x, cold_x, atol=1e-6)
-    # Deliberately no assertion that the mapped replay is *cheaper*. On
-    # this family it is not: the shifted point costs 12 iterations here
-    # against 7 for a cold solve, and on a longer sinusoidal track the
-    # gap widens with the horizon -- 12 vs 9 at HORIZON=5, 15 vs 11 at
-    # 10, 22 vs 9 at 20, 30 vs 10 at 40. Neither dropping the carried mu
-    # nor loosening it nor loosening bound_push moves it (11-13 across
-    # six variants).
-    # That is the structural limit docs/src/initialization.md already
-    # states — the barrier pushes iterates off their bounds, so a
-    # converged interior point's active-set information does not survive
-    # the transfer — and it is what pounce#606 attacks on the Rust side.
-    # The transfer hook's job here is that the replay is *valid* and
-    # *labelled*, not that it is fast.
+    # No iteration assertion *on this window*: the targets move by 2.0
+    # per stage here, which is a large parameter step for a 5-variable
+    # model, and the transferred point costs 8 iterations against a cold
+    # solve that costs 7 to 9 depending on where the cold guess is put
+    # (7 at x0=1/3/5/8, 9 at 0, 8 at 10). Where the win is real and
+    # measurable is over the sequence, and over a horizon long enough to
+    # have something to carry — which is what the two tests below
+    # assert. Numbers on 66cc1d4 + gh#622.
 
 
 def test_mapped_artifact_is_still_refused_on_a_third_problem():
@@ -568,10 +567,197 @@ def test_explicit_mapper_gets_the_context_and_is_length_checked():
         ws.transfer(p1, wrong_key, var_ids=v1, con_ids=c1)
 
 
+def test_a_mapper_that_moves_the_point_must_say_what_happens_to_the_duals():
+    """The carried-block trap (gh#622).
+
+    `transfer` carries over whatever the mapper does not return. On a
+    horizon shift that silently replays the previous window's
+    multipliers against the new window's variables — same length, so
+    the length check passes, and the result is a plausible answer down
+    a longer trajectory. It is refused instead.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    p1, v1, c1 = window(1)
+
+    with pytest.raises(WarmStartCompatibilityError, match="wrong variables"):
+        ws.transfer(p1, lambda ctx: {"x": np.roll(ctx.source.x, -1)},
+                    var_ids=v1, con_ids=c1)
+
+    # Saying what should happen to them is all it asks for: rearranged,
+    # or None for "unseeded".
+    moved = ws.transfer(
+        p1,
+        lambda ctx: {"x": np.roll(ctx.source.x, -1), "zl": None, "zu": None,
+                     "lagrange": None},
+        var_ids=v1, con_ids=c1,
+    )
+    assert moved.replay == "mapped"
+    p1.solve(warm_start=moved)
+
+
+def test_a_mapper_may_still_carry_the_duals_when_nothing_moved():
+    """The check is per axis and only fires on a map that moved: a
+    mapper nudging a point whose indexing is unchanged still carries
+    the multipliers, which is the case the carry-over default is for."""
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+
+    same, v_same, c_same = window(0)
+    nudged = ws.transfer(same, lambda ctx: {"x": ctx.source.x * 1.001},
+                         var_ids=v_same, con_ids=c_same)
+    np.testing.assert_array_equal(nudged.zl, ws.zl)
+    np.testing.assert_array_equal(nudged.lagrange, ws.lagrange)
+    same.solve(warm_start=nudged)
+
+
 def test_transfer_without_ids_or_mapper_explains_itself():
     ws = signed()
     with pytest.raises(WarmStartCompatibilityError, match="stable variable IDs"):
         ws.transfer(make())
+
+
+# ---------------------------------------------------------------------------
+# 6b. what goes in the prolongated stage (gh#622)
+# ---------------------------------------------------------------------------
+def test_prolong_repeats_the_stage_a_stride_back():
+    """The default fill reads the *stride* off the identifier map, so it
+    lands in the right kind of slot on an interleaved layout too.
+
+    Two stages of `(p, v, u)` mapped one stage forward: the map is a
+    pure shift by 3, so the new stage takes `p <- p`, `v <- v`,
+    `u <- u`, not "whatever the previous entry held".
+    """
+    n = 6
+    p = pounce.Problem(
+        n=n, m=0, problem_obj=Chain(np.zeros(n)),
+        lb=[-10.0] * n, ub=[10.0] * n, cl=[], cu=[],
+    )
+    ids0 = ["p0", "v0", "u0", "p1", "v1", "u1"]
+    ids1 = ["p1", "v1", "u1", "p2", "v2", "u2"]
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    ws = WarmStart(x=x, signature=pounce.ProblemSignature.from_problem(p, ids0))
+
+    moved = ws.reindex(p, var_ids=ids1)
+    np.testing.assert_allclose(moved.x, [4.0, 5.0, 6.0, 4.0, 5.0, 6.0])
+
+    # A tail longer than one stage repeats the terminal stage again,
+    # rather than reading a hole it has not filled yet.
+    ids2 = ["p1", "v1", "u1", "p3", "v3", "u3"]
+    far = ws.reindex(p, var_ids=ids2)
+    np.testing.assert_allclose(far.x[:3], [4.0, 5.0, 6.0])
+    assert np.isfinite(far.x).all()
+
+
+def test_prolong_stays_in_the_box_and_yields_to_an_explicit_fill():
+    n = 4
+    lb = [0.0, 0.0, 0.0, 0.0]
+    ub = [10.0, 10.0, 10.0, 1.5]          # the new stage is capped low
+    p = pounce.Problem(n=n, m=0, problem_obj=Chain(np.zeros(n)),
+                       lb=lb, ub=ub, cl=[], cu=[])
+    ids0 = ["a0", "a1", "a2", "a3"]
+    ids1 = ["a1", "a2", "a3", "a4"]
+    ws = WarmStart(x=np.array([1.0, 2.0, 3.0, 9.0]),
+                   signature=pounce.ProblemSignature.from_problem(p, ids0))
+
+    assert ws.reindex(p, var_ids=ids1).x[-1] == 1.5     # clipped, not 9.0
+    assert ws.reindex(p, var_ids=ids1, fill_x="zero").x[-1] == 0.0
+    assert ws.reindex(p, var_ids=ids1, fill_x=7.0).x[-1] == 7.0
+    with pytest.raises(ValueError, match="not a fill policy"):
+        ws.reindex(p, var_ids=ids1, fill_x="hold")
+
+
+def test_prolong_falls_back_when_the_map_is_not_a_shift():
+    """No constant stride means no stage to repeat: a reordering that
+    also introduces a variable gets the box-clipped zero, unchanged."""
+    n = 3
+    p = pounce.Problem(n=n, m=0, problem_obj=Chain(np.zeros(n)),
+                       lb=[-1.0, -1.0, 2.0], ub=[10.0] * n, cl=[], cu=[])
+    ws = WarmStart(
+        x=np.array([1.0, 2.0, 3.0]),
+        signature=pounce.ProblemSignature.from_problem(p, ["a", "b", "c"]),
+    )
+    moved = ws.reindex(p, var_ids=["c", "a", "d"])
+    np.testing.assert_allclose(moved.x, [3.0, 1.0, 2.0])   # 0 clipped into [2, 10]
+
+
+def test_a_mapped_replay_carries_the_equality_multipliers_a_bare_point_cannot():
+    """What the carried multipliers are actually worth (gh#622).
+
+    The *bound* blocks are reconstructible from the slacks the point
+    already determines (`z = mu / slack`), so the solver fills them
+    whichever way the state arrives — dropping them costs nothing it
+    cannot rebuild. The *equality* multipliers are the ones that need a
+    dual to complete: from a point alone the solver reports them
+    unseeded and leaves them at the constant fill, deliberately. That
+    is the asymmetry `reindex` is built around, and the reason it
+    carries what it matched instead of handing over a bare point.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    moved = ws.reindex(window(1)[0], var_ids=window(1)[1], con_ids=window(1)[2])
+
+    _, info = window(1)[0].solve(warm_start=moved)
+    assert info["warm_start"]["bound_duals"] == "reconstructed"
+    assert info["warm_start"]["eq_duals"] == "accepted"
+
+    bare = dataclasses.replace(moved, lagrange=None, zl=None, zu=None)
+    _, bare_info = window(1)[0].solve(warm_start=bare)
+    assert bare_info["warm_start"]["bound_duals"] == "reconstructed"
+    assert bare_info["warm_start"]["eq_duals"] == "unseeded"
+
+
+# The sinusoidal track of the gh#622 table: a receding horizon with
+# enough history to be worth carrying.
+SINE = 5.0 + 4.0 * np.sin(np.arange(64) * 0.35)
+
+
+def sine_window(start, H):
+    t = SINE[start:start + H]
+    p = pounce.Problem(
+        n=H, m=H - 1, problem_obj=Chain(t),
+        lb=[0.0] * H, ub=[10.0] * H,
+        cl=[-0.5] * (H - 1), cu=[0.5] * (H - 1),
+    )
+    p.add_option("tol", 1e-8)
+    p.add_option("print_level", 0)
+    return p, [f"x{start + i}" for i in range(H)], \
+        [f"c{start + i}" for i in range(H - 1)]
+
+
+def _receding_loop(H, steps, warm):
+    """Total iterations over `steps` of a receding horizon."""
+    total, ws = 0, None
+    for s in range(steps):
+        p, v, c = sine_window(s, H)
+        if warm and ws is not None:
+            x, info = p.solve(warm_start=ws.reindex(p, var_ids=v, con_ids=c))
+        else:
+            x, info = p.solve(x0=np.full(H, 3.0))
+        assert info["status_msg"] == "Solve_Succeeded"
+        total += info["iter_count"]
+        ws = WarmStart.from_info(x, info, problem=p, var_ids=v, con_ids=c)
+    return total
+
+
+@pytest.mark.parametrize("H", [5, 10, 20, 40])
+def test_a_transferred_start_beats_a_cold_solve_over_the_horizon(H):
+    """gh#622's acceptance criterion, at every horizon of its table.
+
+    On 66cc1d4 + gh#622, over eight steps: 45 against 67 at H=5, 50/75
+    at 10, 54/77 at 20, 46/76 at 40 — and 21 against 22 on the
+    slew-limited fixture above. The margin is asserted loosely (the
+    point is the sign, not the digit) but the *direction* is the
+    contract now: gh#620's recentering plus a prolongated tail turned
+    the table in the issue upside down, and this is what keeps it that
+    way.
+    """
+    warm = _receding_loop(H, 8, warm=True)
+    cold = _receding_loop(H, 8, warm=False)
+    assert warm < cold, f"H={H}: transferred {warm} vs cold {cold}"
 
 
 # ---------------------------------------------------------------------------

@@ -1440,10 +1440,31 @@ impl OrigIpoptNlp {
 
     fn fetch_warm_start_snapshot(&self) -> Option<StartingPointSnapshot> {
         let cls = self.adapter.borrow().classification().clone();
+        // The bound-multiplier slots start *unseeded*, not at zero
+        // (gh#622). `TNLP::get_starting_point` is asked for `init_z`
+        // and is free to leave the blocks untouched — a caller warm
+        // starting from a point alone does exactly that — and this
+        // snapshot is what `get_starting_z` then hands the algorithm.
+        // Zero is a legal multiplier value, so it sails past the "was
+        // this seeded?" resolution in the warm-start initializer and
+        // is merely floored at `warm_start_mult_bound_push`: 1e-3 by
+        // default, 1e-9 under the tightened pushes `pounce.WarmStart`
+        // ships. A start of z = 1e-9 declares every bound inactive and
+        // breaks complementarity against mu before the first
+        // iteration. NaN is the marker that initializer already
+        // documents for "you decide", and resolves to
+        // `bound_mult_init_val`.
+        //
+        // `lambda` deliberately keeps its zero fill. The equality
+        // multipliers' unseeded resolution is *also* zero, so the
+        // marker would buy nothing, and `any_dual_seeded` reads an
+        // all-zero `y` as unseeded — which is what keeps gh#606's
+        // reconstruction off a primal-only seed (measured there:
+        // 1102 -> 1211 iterations across 27 parametric paths).
         let mut snapshot = StartingPointSnapshot {
             x: vec![0.0; cls.n_full_x as usize],
-            z_l: vec![0.0; cls.n_full_x as usize],
-            z_u: vec![0.0; cls.n_full_x as usize],
+            z_l: vec![Number::NAN; cls.n_full_x as usize],
+            z_u: vec![Number::NAN; cls.n_full_x as usize],
             lambda: vec![0.0; cls.n_full_g as usize],
         };
         let ok = {
@@ -1489,8 +1510,12 @@ impl OrigIpoptNlp {
         let n_x_u = self.x_u.dim() as usize;
 
         let mut full_x = vec![0.0; n_full_x];
-        let mut full_z_l = vec![0.0; n_full_x];
-        let mut full_z_u = vec![0.0; n_full_x];
+        // Unseeded, not zero, for the reason spelled out in
+        // `fetch_warm_start_snapshot` (gh#622): a block the TNLP
+        // declines to write must not read as a supplied multiplier of
+        // zero. `full_lambda` keeps its zero fill, also per that note.
+        let mut full_z_l = vec![Number::NAN; n_full_x];
+        let mut full_z_u = vec![Number::NAN; n_full_x];
         let mut full_lambda = vec![0.0; n_full_g];
 
         let ok = {

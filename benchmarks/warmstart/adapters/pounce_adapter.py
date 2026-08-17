@@ -8,6 +8,7 @@ arm          ``algorithm``                        warm-start payload
 cold-ipm     ``interior-point`` (default)         none
 cold-sqp     ``active-set-sqp``                   none
 warm-ipm     ``interior-point``                   ``WarmStart`` (x, λ, z, μ)
+values-ipm   ``interior-point``                   ``WarmStart`` (x alone)
 warm-sqp     ``active-set-sqp``                   working set + previous x
 pred-ipm     ``interior-point``                   previous state, primal seed
                                                   stepped by the held-factor
@@ -68,6 +69,7 @@ from .base import (
     QP_ARMS,
     SolverAdapter,
     is_sqp,
+    VALUES_ARM,
     is_warm,
     predicts_duals,
     uses_homotopy,
@@ -283,12 +285,21 @@ class PounceAdapter(SolverAdapter):
             else:
                 seed_x = warm.x
                 lam, zl, zu = warm.mult_g, warm.mult_x_L, warm.mult_x_U
-                if uses_predictor(arm):
+                mu = warm.mu
+                if arm == VALUES_ARM:
+                    # The point and nothing else: no multipliers, and no
+                    # barrier either, since a caller who kept only `x`
+                    # has no mu to carry. This is the one arm that
+                    # reaches the warm-start initializer's unseeded-dual
+                    # path (gh#622).
+                    lam = zl = zu = None
+                    mu = None
+                elif uses_predictor(arm):
                     seed_x, lam, zl, zu = self._predict(
                         family, warm, arm, seed_x, lam, zl, zu
                     )
                 kwargs["warm_start"] = pounce.WarmStart(
-                    x=seed_x, lagrange=lam, zl=zl, zu=zu, mu=warm.mu,
+                    x=seed_x, lagrange=lam, zl=zl, zu=zu, mu=mu,
                     recentering=self.recentering,
                 )
         else:
