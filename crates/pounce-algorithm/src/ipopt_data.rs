@@ -126,6 +126,22 @@ pub struct IpoptData {
     /// [`crate::application::IpoptApplication::warm_start_diagnostics`].
     pub warm_start_diagnostics: Option<WarmStartDiagnostics>,
 
+    /// `curr` was installed by the post-convergence crossover phase
+    /// (gh#612) rather than produced by the interior iteration.
+    ///
+    /// The distinction is not bookkeeping: a crossed-over point sits
+    /// *on* the bounds the user declared, which is `bound_relax_factor`
+    /// **inside** the widened box the barrier quantities are measured
+    /// against, so every slack at an active bound reads exactly `δ`
+    /// where an interior iterate would have carried `μ/z` (gh#646,
+    /// gh#654). Anything that reads `curr` through the barrier — the
+    /// residual report, the sensitivity path's `Σ = z/s` — has to know
+    /// which of the two frames the iterate belongs to before it can
+    /// pick the bounds to measure against. Nothing inside the
+    /// algorithm reads this: the flag is set after `optimize()` has
+    /// returned and no further step is taken.
+    pub curr_from_crossover: bool,
+
     /// Line-search reset request from the μ-update layer (pounce#510).
     /// Upstream's μ updates hold a `linesearch_` handle and call
     /// `linesearch_->Reset()` themselves at fixed points
@@ -227,6 +243,7 @@ impl IpoptData {
             tiny_step_flag: false,
             request_resto: false,
             warm_start_diagnostics: None,
+            curr_from_crossover: false,
             request_ls_reset: false,
             request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',
