@@ -574,6 +574,18 @@ warm start is compatible with this problem
   caught here (pounce#621). ...)
 ```
 
+`describe_compatibility()` is the dry run, though, and you have to know
+to call it. The enforcing path — `check_compatible()`, which
+`solve(warm_start=...)` takes for you — says the same thing as a
+`WarmStartOrderingUnverifiedWarning` (#660), so a replay that could not
+have ruled a reordering out is never silent. Nothing disagreed, so it is
+a warning and not a refusal; if you would rather refuse, promote it:
+
+```python
+import warnings
+warnings.simplefilter("error", pounce.WarmStartOrderingUnverifiedWarning)
+```
+
 ### Transferring a warm start: horizon shifts and reindexing
 
 When the model *has* changed and you know how, say so. `transfer()`

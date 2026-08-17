@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+- **A warm-start check that could not have seen a reordering now says
+  so** (#660). `check_compatible()` computed the "ordering unverified"
+  caveat on every path but rendered it only inside its
+  `if mismatches:` arm. The one case the caveat exists for — nothing
+  disagreed, *and* nothing in the comparison could have caught a
+  permutation — was therefore the one case that stayed silent. Only
+  `describe_compatibility()`, the opt-in dry run, ever mentioned it,
+  so the safe-looking path (just replay it) was the uninformative one.
+
+  That happens without anything exotic: an artifact captured with
+  `probe=False`, one written before #621, or a model with a domain
+  restriction that will not evaluate at the schema's interior probe
+  point. With no `var_ids` on both sides, a uniform box and a dense
+  jacobian leave the structural digests bit-identical under a
+  permutation, and the reordered seed goes into the solve.
+
+  It is now a `WarmStartOrderingUnverifiedWarning` — a warning, not a
+  refusal, because nothing actually disagreed. Callers who would rather
+  refuse than replay unverified can promote it with
+  `warnings.simplefilter("error",
+  pounce.WarmStartOrderingUnverifiedWarning)`.
+
+  The multistart ladder is exempt and stays quiet: it captures with
+  `probe=False` precisely because it resumes on the same `Problem`
+  object a moment later, so there is no reordering for the check to have
+  missed and the caveat would fire on every rung of every race.
+
 - **Warm-start probe: an inert objective constant no longer blinds
   reorder detection** (#659). `_probe_agrees` documented a per-block
   tolerance — each probed block judged against its own L1 scale, with

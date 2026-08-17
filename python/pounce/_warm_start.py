@@ -63,6 +63,7 @@ from ._warm_start_schema import (
     WarmStartCompatibilityError,
     WarmStartCompatibilityWarning,
     WarmStartLegacyWarning,
+    WarmStartOrderingUnverifiedWarning,
     compare,
     format_report,
     ordering_is_unverified,
@@ -75,6 +76,7 @@ __all__ = [
     "WarmStartCompatibilityError",
     "WarmStartCompatibilityWarning",
     "WarmStartLegacyWarning",
+    "WarmStartOrderingUnverifiedWarning",
 ]
 
 
@@ -422,7 +424,16 @@ class WarmStart:
         probe is best-effort: an artifact captured with ``probe=False``,
         one written before #621, or a model that will not evaluate at
         the probe point leaves the facet unrecorded, and then only
-        `var_ids` can see the reordering.
+        `var_ids` can see the reordering. When neither is available on
+        both sides the replay is still allowed — nothing disagreed — but
+        it now says so, as a
+        :class:`WarmStartOrderingUnverifiedWarning` (pounce#660).
+        Previously that caveat was rendered only inside a mismatch
+        report, so the clean-but-blind case, which is exactly the case
+        it is for, was the one case that stayed silent. Callers who
+        would rather refuse than replay unverified can promote it with
+        ``warnings.simplefilter("error",
+        WarmStartOrderingUnverifiedWarning)``.
 
         `var_ids` / `con_ids` name `problem`'s variables and constraints
         in the vocabulary this state was captured with. They remain the
@@ -470,6 +481,29 @@ class WarmStart:
             if mode == "strict":
                 raise WarmStartCompatibilityError(report)
             warnings.warn(report, WarmStartCompatibilityWarning, stacklevel=3)
+        elif unordered and self.signature is not None:
+            # gh#660. `unordered` was computed on every path but rendered
+            # only inside the `if mismatches:` arm above, so the one case
+            # the note exists for — a *clean* verdict that could not have
+            # seen a reordering — was the one case that never said it. A
+            # caller who just replays got no signal at all; only
+            # `describe_compatibility`, which you have to know to call,
+            # ever mentioned it.
+            #
+            # Scoped to signed states. An unsigned one is either read from
+            # a file, where WarmStartLegacyWarning above already says the
+            # same thing in more detail, or built in this process, which
+            # is the pre-#607 usage that stays deliberately silent.
+            #
+            # Repeats are left to the warnings module: `stacklevel=3`
+            # attributes this to the caller, so the default "once per
+            # location" filter collapses a per-rung multistart check
+            # (`_starts.py`) to a single line without a bespoke latch.
+            warnings.warn(
+                ORDERING_UNVERIFIED_NOTE,
+                WarmStartOrderingUnverifiedWarning,
+                stacklevel=3,
+            )
         return mismatches
 
     def describe_compatibility(self, problem, var_ids=None, con_ids=None) -> str:
