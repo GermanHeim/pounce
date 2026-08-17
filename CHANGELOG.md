@@ -9,6 +9,55 @@ changes.
 
 ## [Unreleased]
 
+- **CasADi plugin: solver diagnostics, and two defects found exposing
+  them** (#634).
+
+  `solver.stats()` now carries the final KKT errors (`final_inf_pr`,
+  `final_inf_du`, `final_compl_inf`), a linear-solver post-mortem
+  (`linear_solver`: the backend that actually ran, factorization counts,
+  pattern reuse, fill ratio, pivot range, final inertia) and restoration
+  activity (`restoration`: calls, inner and outer iterations, wall
+  seconds). All of it is data POUNCE already collected and had no way to
+  report through CasADi; three new C entry points —
+  `GetPounceLinearSolverStats`, `GetPounceRestorationStats`,
+  `GetPounceOptionType` — expose it, and no new instrumentation was
+  added.
+
+  Diagnostics are also readable **during** an `iteration_callback`, which
+  is where a progress display needs them. CasADi fixes the callback
+  signature at `(x, f, g, lam_x, lam_g)`, so nothing could be added
+  there; instead `stats()` is callable mid-solve, its per-iteration
+  traces end on the current iteration, and `current_violations` (Ipopt's
+  `GetIpoptCurrentViolations` field set — bound and constraint
+  violations, both complementarities, the gradient of the Lagrangian) is
+  fetched on demand while the solve is in flight. No stdout parsing, and
+  no key is ever served stale: the live ones are absent after the solve,
+  the final ones absent during it.
+
+  Two defects surfaced while wiring this up, both in the plugin:
+
+  - **The per-iteration trace accumulated across solves.** CasADi's ipopt
+    plugin clears its trace vectors at the top of `solve()`; this one
+    never did. Three calls on one solver object reported `iter_count = 7`
+    beside a 23-entry `iterations` trace — the two disagreed by however
+    many solves had run. Every receding-horizon loop hit it.
+  - **Options were typed off the Python literal, not off POUNCE's
+    registry.** `{"tol": 1}` is an `int` in Python and a number to
+    POUNCE, so it was forwarded with `AddIpoptIntOption`, which refuses
+    it: `tol` silently kept its default while the script looked like it
+    had set it. The registry now decides, on the interpreted and the
+    code-generated path alike.
+
+  Deliberately **not** shipped, with reasons in
+  `dev-notes/casadi-diagnostics-and-native-builds.md`: a per-iteration
+  restoration flag (POUNCE hardcodes `RegularMode` for every callback
+  fire, so the column would be constant zero and read as working
+  detection), linear-solver phase timings (not instrumented — absent
+  rather than reported as zero), and native non-Python plugin builds and
+  release artifacts.
+
+  23 new checks in the CasADi parity suite, 73 in total.
+
 - **The `pounce-casadi` wheel is tagged for the platform it was built
   for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
   Python, installs anywhere" — while carrying a compiled CasADi plugin and

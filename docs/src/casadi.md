@@ -126,6 +126,14 @@ solver = ca.nlpsol("solver", "pounce", nlp, {
 An unknown option name is refused by POUNCE with a message naming it,
 rather than being ignored.
 
+An option's **type** comes from POUNCE's own registry, not from the
+literal you wrote. This matters more than it sounds: `{"tol": 1}` is an
+`int` in Python and a number to POUNCE, and forwarding it as an integer
+gets it refused — leaving `tol` at its default while the script looks
+like it set it. Write `1` or `1.0` for a numeric option and either
+works. A `bool` reaches POUNCE's yes/no string options as `"yes"` /
+`"no"`.
+
 ## Results and statistics
 
 `solver.stats()` carries the usual CasADi keys plus POUNCE's
@@ -136,13 +144,57 @@ st = solver.stats()
 st["success"]        # bool
 st["return_status"]  # 'Solve_Succeeded', 'Maximum_Iterations_Exceeded', …
 st["iter_count"]
+st["t_solve_pounce"] # seconds inside POUNCE
 st["iterations"]     # dict of per-iteration lists:
                      #   inf_pr, inf_du, mu, d_norm, regularization_size,
                      #   obj, alpha_pr, alpha_du, ls_trials
+
+st["final_inf_pr"]      # final primal infeasibility
+st["final_inf_du"]      # final dual infeasibility
+st["final_compl_inf"]   # final complementarity error
+
+st["restoration"]    # {'calls', 'inner_iters', 'outer_iters', 'wall_secs'}
+st["linear_solver"]  # what the KKT backend did — see below
 ```
 
 The `iterations` dict is the same data POUNCE prints in its iteration
-table, so convergence plots need no stdout parsing.
+table, so convergence plots need no stdout parsing. It describes the
+most recent solve only: calling a solver in a loop does not concatenate
+the traces.
+
+### The linear solver
+
+`stats()["linear_solver"]` reports what the KKT backend actually did:
+
+```python
+{'solver_name': 'feral',      # the backend that ran, not the one requested
+ 'n_factors': 17,             # factorizations over the solve
+ 'n_pattern_reuse': 16,       # …that reused the symbolic factorization
+ 'n_pattern_changes': 1,
+ 'max_fill_ratio': 1.0,       # nnz(L)/nnz(A); ≫10 means ordering trouble
+ 'min_abs_pivot': 1.0, 'max_abs_pivot': 2.0,
+ 'last_inertia': [2, 1, 0],   # (positive, negative, zero)
+ 'last_nnz_a': 6, 'last_nnz_l': 6}
+```
+
+`solver_name` is the direct answer to "did my `linear_solver` option take
+effect?" — it names the backend that ran. Fields POUNCE did not measure
+are **absent** rather than zero; in particular there are no phase
+timings (symbolic analysis, numeric factorization, back-solve), because
+POUNCE does not instrument those phases separately today.
+
+### Restoration
+
+`stats()["restoration"]` counts restoration-phase entries, the
+iterations its inner solver ran, and the seconds spent there — enough to
+answer "did this solve struggle, and how much of it was restoration?"
+without raising `print_level`.
+
+It is per solve, not per iteration. POUNCE fires the intermediate
+callback only from its outer loop and always reports `RegularMode` in
+Ipopt's `alg_mod`, so no per-iteration restoration flag is published —
+a column that is constant zero would read as working restoration
+detection.
 
 `lam_p` deserves a note because its sign surprises people. CasADi's
 `Nlpsol` base class computes it — no plugin is involved, which is why
@@ -185,6 +237,36 @@ unrelated wishes, and only one of them was ever asked for.
 A callback that raises does not take the process down (see [When your
 model raises](#when-your-model-raises)); `iteration_callback_ignore_errors`
 decides whether the solve continues or stops.
+
+### Diagnostics from inside the callback
+
+CasADi fixes the callback's inputs at `x`, `f`, `g`, `lam_x`, `lam_g`,
+which leaves out most of what a progress display wants. The rest is
+reachable without parsing the solver's log: **`solver.stats()` is
+callable from inside the callback**, and mid-solve it describes the
+iteration you are in.
+
+```python
+def eval(self, arg):
+    st = solver.stats()
+    it = st["iterations"]
+    # the last entry of each trace is *this* iteration
+    print(f"mu={it['mu'][-1]:.2e} inf_pr={it['inf_pr'][-1]:.2e} "
+          f"step={it['d_norm'][-1]:.2e} ls_trials={it['ls_trials'][-1]}")
+
+    v = st["current_violations"]      # present only while solving
+    v["x_L_violation"], v["x_U_violation"]
+    v["compl_x_L"], v["compl_x_U"]
+    v["grad_lag_x"]
+    v["nlp_constraint_violation"], v["compl_g"]
+    return [0]
+```
+
+`current_violations` is Ipopt's `GetIpoptCurrentViolations` field set,
+fetched on demand: it appears only while a solve is in flight and costs
+nothing on the `stats()` call you make afterwards. Symmetrically,
+`final_inf_pr` and friends appear only once the solve has ended — no key
+is ever served with a stale or invented value.
 
 ## Warm starting
 
@@ -528,6 +610,16 @@ counterpart of CasADi's `ipopt_runtime.hpp`. Worked example:
   supported"* otherwise. Identical in both plugins; `eigen-clip` and
   `eigen-reflect` have no such restriction, and POUNCE's own
   inertia-correcting regularization is on by default regardless.
+- **Per-iteration restoration flags, and linear-solver phase timings.**
+  Both are reported at solve level instead (`stats()["restoration"]`,
+  `stats()["linear_solver"]`), because that is the granularity POUNCE
+  measures. See
+  [`dev-notes/casadi-diagnostics-and-native-builds.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/casadi-diagnostics-and-native-builds.md)
+  for what each would take.
+- **Native (non-Python) plugin builds and prebuilt plugin archives.**
+  The plugin builds against a Python-installed CasADi; there is no CMake
+  path taking a native CasADi SDK, and no per-platform archive is
+  published. Tracked in the same note.
 
 ## AMPL fallback
 

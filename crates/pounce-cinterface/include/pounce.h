@@ -248,10 +248,13 @@ enum ApplicationReturnStatus IpoptSolve(
  * Inspection (valid only during the intermediate callback)
  *
  * These mirror Ipopt 3.14's GetIpoptCurrent* functions. Pass NULL for
- * any output buffer to skip retrieving it. They return false until
- * pounce's algorithm core invokes the intermediate callback per
- * iteration (currently a follow-up — the signature is here so callers
- * can link against it today).
+ * any output buffer to skip retrieving it.
+ *
+ * Both are live: pounce's algorithm core installs the context these
+ * read from around every intermediate-callback invocation. Outside
+ * one — before the first iteration, after IpoptSolve returns, or from
+ * another thread — they return false and write nothing, which is the
+ * upstream contract.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -308,6 +311,110 @@ ipnumber GetIpoptDualInf(IpoptProblem ipopt_problem);
 
 /** Final complementarity error from the most recent solve. */
 ipnumber GetIpoptComplInf(IpoptProblem ipopt_problem);
+
+/**
+ * Restoration-phase activity in the most recent solve. Any pointer may
+ * be NULL to skip that component.
+ *
+ * `calls` is how many times restoration was entered, `inner_iters` the
+ * total iterations its inner solver ran, `outer_iters` the outer
+ * iterations driving a restoration trial step, and `wall_secs` the
+ * cumulative seconds spent there — enough to answer "did this solve
+ * struggle, and how much of it was restoration?".
+ *
+ * This is solve-level, not per-iteration: pounce fires the intermediate
+ * callback only from its outer loop and always reports
+ * `RegularMode` in `alg_mod`, so a caller cannot yet label an
+ * individual iteration as a restoration one.
+ */
+void GetPounceRestorationStats(
+    IpoptProblem ipopt_problem,
+    ipindex*     calls,
+    ipindex*     inner_iters,
+    ipindex*     outer_iters,
+    ipnumber*    wall_secs);
+
+/* -----------------------------------------------------------------
+ * Pounce extensions — linear-solver post-mortem
+ *
+ * What the KKT linear solver did during the most recent solve. The
+ * `linear_solver` option selects the backend (`feral`, pounce's own
+ * sparse LDL^T, is the default); `solver_name` reports the one that
+ * actually ran, which is the reliable way to confirm it.
+ *
+ * The struct is versioned with the library, not independently: a
+ * caller must compile against the pounce.h that ships with the
+ * libpounce_cinterface it loads. Fields pounce collects unconditionally
+ * are always set; the optional ones carry the sentinels named below
+ * when the backend did not report them.
+ * ----------------------------------------------------------------- */
+
+typedef struct {
+    /** Backend that ran, e.g. "feral". NUL-terminated, truncated to
+     *  fit; empty when no backend reported a summary. */
+    char     solver_name[32];
+    /** factor() calls completed over the solve. */
+    ipindex  n_factors;
+    /** Of `n_factors`, how many reused the previous symbolic
+     *  factorization (sparsity pattern unchanged). */
+    ipindex  n_pattern_reuse;
+    /** Of `n_factors`, how many needed a fresh symbolic factorization. */
+    ipindex  n_pattern_changes;
+    /** Maximum nnz(L)/nnz(A) over the solve; NaN when unreported. */
+    ipnumber max_fill_ratio;
+    /** Smallest |pivot| seen over the solve; NaN when unreported. */
+    ipnumber min_abs_pivot;
+    /** Largest |pivot| seen over the solve; NaN when unreported. */
+    ipnumber max_abs_pivot;
+    /** Inertia of the final factorization; each -1 when unreported. */
+    ipindex  last_inertia_positive;
+    ipindex  last_inertia_negative;
+    ipindex  last_inertia_zero;
+    /** nnz of the final factorization's matrix / factor; -1 when
+     *  unreported. */
+    ipindex  last_nnz_a;
+    ipindex  last_nnz_l;
+} PounceLinearSolverStats;
+
+/**
+ * Fill `stats` with the linear-solver post-mortem of the most recent
+ * solve. Returns false — leaving `stats` untouched — when the problem
+ * has not been solved yet or the backend reported no summary.
+ *
+ * Timings (symbolic analysis, numeric factorization, back-solve) are
+ * deliberately absent: pounce does not instrument them today, and this
+ * struct reports only what it already collects.
+ */
+Bool GetPounceLinearSolverStats(
+    IpoptProblem             ipopt_problem,
+    PounceLinearSolverStats* stats);
+
+/* -----------------------------------------------------------------
+ * Pounce extensions — option introspection
+ * ----------------------------------------------------------------- */
+
+/** Value type of a registered option, as reported by
+ *  GetPounceOptionType. */
+enum PounceOptionType {
+    POUNCE_OPTION_UNKNOWN = 0, /**< not a registered option */
+    POUNCE_OPTION_NUMBER  = 1, /**< AddIpoptNumOption */
+    POUNCE_OPTION_INTEGER = 2, /**< AddIpoptIntOption */
+    POUNCE_OPTION_STRING  = 3  /**< AddIpoptStrOption */
+};
+
+/**
+ * Which AddIpopt*Option a keyword expects, so a caller forwarding
+ * options from a differently-typed source (a scripting language's
+ * dictionary, say) can pick the right setter instead of guessing from
+ * the value it happens to hold. Returns POUNCE_OPTION_UNKNOWN for a
+ * keyword this build does not register — which also answers "is this
+ * option available here?".
+ *
+ * `ipopt_problem` may be NULL: an option's type is a property of the
+ * build, not of a problem, and a caller deciding how to forward options
+ * need not have created one yet.
+ */
+int GetPounceOptionType(IpoptProblem ipopt_problem, const char* keyword);
 
 /* -----------------------------------------------------------------
  * Pounce extensions — active-set SQP working-set warm start

@@ -630,6 +630,230 @@ def test_iteration_callback_step():
           f"{iters} recorded iterations")
 
 
+def test_repeated_solves_do_not_concatenate_the_trace():
+    """One memory object, many solves: `iterations` describes the last one.
+
+    A receding-horizon loop calls the same solver object over and over.
+    The trace vectors used to accumulate across those calls while
+    `iter_count` beside them described only the latest solve, so the two
+    disagreed by a factor of however many solves had run (gh#634).
+    """
+    nlp = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", nlp, QUIET_POUNCE)
+    lengths = []
+    for p in (1.5, 1.6, 1.7):
+        S(x0=[0.5, 0.5], p=p, lbg=-ca.inf, ubg=0)
+        st = S.stats()
+        lengths.append((st["iter_count"], len(st["iterations"]["inf_pr"])))
+    # ipopt records the initial point too, hence trace == iter_count + 1.
+    consistent = all(trace == iters + 1 for iters, trace in lengths)
+    check("repeated solves: trace describes only the last solve", consistent,
+          f"(iter_count, trace) = {lengths}")
+
+    # The same property, checked against the plugin this one is modelled
+    # on: ipopt clears its trace at the top of every solve too.
+    I = ca.nlpsol("I", "ipopt", nlp, QUIET_IPOPT)
+    ip = []
+    for p in (1.5, 1.6, 1.7):
+        I(x0=[0.5, 0.5], p=p, lbg=-ca.inf, ubg=0)
+        st = I.stats()
+        ip.append((st["iter_count"], len(st["iterations"]["inf_pr"])))
+    check("repeated solves: same trace behaviour as ipopt",
+          all(trace == iters + 1 for iters, trace in ip),
+          f"pounce={lengths} ipopt={ip}")
+
+
+def test_final_kkt_errors_in_stats():
+    """The final infeasibilities POUNCE already computes, in `stats()`."""
+    nlp = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", nlp, QUIET_POUNCE)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    st = S.stats()
+    present = {"final_inf_pr", "final_inf_du", "final_compl_inf"} <= set(st)
+    check("stats: final KKT errors present", present)
+    if present:
+        tol = 1e-6
+        converged = (st["final_inf_pr"] < tol and st["final_inf_du"] < tol
+                     and st["final_compl_inf"] < tol)
+        check("stats: final KKT errors agree with the success flag", converged,
+              f"inf_pr={st['final_inf_pr']:.2e} inf_du={st['final_inf_du']:.2e} "
+              f"compl={st['final_compl_inf']:.2e}")
+
+    # The final numbers and the end of the trace are the same quantities,
+    # and must not come from two different places. Checked on a solve cut
+    # short by `max_iter`, where they are O(1e-2) — on a converged solve
+    # both are ~1e-17 and any tolerance passes for the wrong reason.
+    T = ca.nlpsol("T", "pounce", nlp,
+                  {"print_time": False, "pounce": {"print_level": 0, "max_iter": 3}})
+    T(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    cut = T.stats()
+    big = cut["final_inf_pr"] > 1e-4 and cut["final_inf_du"] > 1e-4
+    agrees = (abs(cut["final_inf_pr"] - cut["iterations"]["inf_pr"][-1]) < 1e-12
+              and abs(cut["final_inf_du"] - cut["iterations"]["inf_du"][-1]) < 1e-12)
+    check("stats: final KKT errors match the end of the trace", big and agrees,
+          f"final=({cut['final_inf_pr']:.3e}, {cut['final_inf_du']:.3e}) "
+          f"trace=({cut['iterations']['inf_pr'][-1]:.3e}, "
+          f"{cut['iterations']['inf_du'][-1]:.3e})")
+
+
+def test_linear_solver_stats():
+    """Which KKT backend ran, and what it did — `linear_solver=feral`."""
+    nlp = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", nlp,
+                  {"print_time": False,
+                   "pounce": {"print_level": 0, "linear_solver": "feral"}})
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    st = S.stats()
+    ls = st.get("linear_solver")
+    check("stats: linear_solver post-mortem present", ls is not None)
+    if ls is None:
+        return
+    check("stats: linear_solver names the backend that ran",
+          ls["solver_name"] == "feral", ls["solver_name"])
+    check("stats: linear_solver counts factorizations",
+          ls["n_factors"] > 0
+          and ls["n_pattern_reuse"] + ls["n_pattern_changes"] == ls["n_factors"],
+          f"{ls['n_factors']} factors, {ls['n_pattern_reuse']} pattern reuses")
+    # Absent is absent: nothing pounce does not measure is reported as 0.
+    # Phase timings are the ones deliberately missing (gh#634).
+    check("stats: linear_solver omits what pounce does not measure",
+          not {"analyze_time", "factor_time", "solve_time"} & set(ls),
+          f"keys = {sorted(ls)}")
+
+
+def test_restoration_stats():
+    """Restoration is reported per solve — zero when it never ran, and
+    non-zero when it did."""
+    clean = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", clean, QUIET_POUNCE)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    quiet = S.stats().get("restoration")
+    check("stats: restoration present", quiet is not None)
+    if quiet is None:
+        return
+    check("stats: restoration is zero on a clean solve",
+          quiet["calls"] == 0 and quiet["wall_secs"] == 0.0, str(quiet))
+
+    # An equality that cannot be satisfied: the solver goes to
+    # restoration, fails to find a feasible point, and says so.
+    x = ca.MX.sym("x")
+    hard = {"x": x, "f": x**2, "g": x**2 + 1}
+    R = ca.nlpsol("R", "pounce", hard, dict(QUIET_POUNCE))
+    try:
+        R(x0=0.5, lbg=0, ubg=0)
+    except RuntimeError:
+        pass
+    st = R.stats()
+    resto = st.get("restoration", {})
+    check("stats: restoration counts a real restoration entry",
+          resto.get("calls", 0) > 0 and resto.get("inner_iters", 0) > 0
+          and resto.get("wall_secs", 0.0) > 0.0,
+          f"{st['return_status']}, {resto}")
+
+
+def test_live_diagnostics_during_the_callback():
+    """Everything an `iteration_callback` needs, without parsing the log.
+
+    CasADi fixes the callback signature at (x, f, g, lam_x, lam_g), so
+    the extra per-iteration diagnostics come through `stats()`, which is
+    callable from inside the callback: the trace's last entry is the
+    current iteration, and the current violation vectors are fetched on
+    demand while the solve is in flight (gh#634).
+    """
+    nlp = rosenbrock_nlp()
+    seen = []
+
+    class Probe(ca.Callback):
+        def __init__(self):
+            ca.Callback.__init__(self)
+            self.construct("probe", {})
+
+        def get_n_in(self):
+            return ca.nlpsol_n_out()
+
+        def get_n_out(self):
+            return 1
+
+        def get_name_in(self, i):
+            return ca.nlpsol_out(i)
+
+        def get_sparsity_in(self, i):
+            name = ca.nlpsol_out(i)
+            sizes = {"f": 1, "x": 2, "g": 1, "lam_x": 2, "lam_g": 1, "lam_p": 1}
+            return ca.Sparsity.dense(sizes[name], 1) if name in sizes else ca.Sparsity(0, 0)
+
+        def eval(self, arg):
+            seen.append(S.stats())
+            return [0]
+
+    probe = Probe()
+    S = ca.nlpsol("S", "pounce", nlp, dict(QUIET_POUNCE, iteration_callback=probe))
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    check("live: callback can read stats()", len(seen) > 1, f"{len(seen)} snapshots")
+    if not seen:
+        return
+
+    scalars = {"inf_pr", "inf_du", "mu", "d_norm", "regularization_size",
+               "obj", "alpha_pr", "alpha_du", "ls_trials"}
+    check("live: every per-iteration scalar is readable mid-solve",
+          all(scalars <= set(s["iterations"]) for s in seen))
+    # The trace grows by one per callback — its last entry is *this*
+    # iteration, not a stale one.
+    grows = [len(s["iterations"]["inf_pr"]) for s in seen]
+    check("live: the trace ends on the current iteration",
+          grows == list(range(1, len(seen) + 1)), f"lengths {grows[:5]}…")
+
+    viol = seen[-1].get("current_violations")
+    check("live: current violations are available mid-solve", viol is not None)
+    if viol is not None:
+        wanted = {"x_L_violation", "x_U_violation", "compl_x_L", "compl_x_U",
+                  "grad_lag_x", "nlp_constraint_violation", "compl_g"}
+        check("live: violations carry the full Ipopt field set", wanted <= set(viol),
+              f"keys = {sorted(viol)}")
+        check("live: violation vectors are the right shape and finite",
+              len(viol["grad_lag_x"]) == 2 and len(viol["compl_g"]) == 1
+              and all(np.isfinite(viol["grad_lag_x"])))
+
+    # Mid-solve, the final numbers do not exist yet and are not faked;
+    # once the solve ends, they do and the live ones are gone.
+    check("live: no final KKT errors mid-solve",
+          all("final_inf_pr" not in s for s in seen))
+    after = S.stats()
+    check("live: no stale violations after the solve",
+          "current_violations" not in after and "final_inf_pr" in after)
+
+
+def test_option_types_come_from_pounce_not_the_literal():
+    """`tol: 1` is an int in Python and a number to POUNCE.
+
+    Dispatching on the value's own type sent it to AddIpoptIntOption,
+    which refuses it — the option silently kept its default. The type
+    now comes from POUNCE's registry (gh#634).
+    """
+    nlp = rosenbrock_nlp()
+    kw = dict(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+
+    def iters(tol):
+        S = ca.nlpsol("S", "pounce", nlp,
+                      {"print_time": False,
+                       "pounce": {"print_level": 0, "tol": tol, "max_iter": 200}})
+        S(**kw)
+        return S.stats()["iter_count"]
+
+    loose_int, tight = iters(1), iters(1e-12)
+    check("options: an int-valued number option takes effect",
+          loose_int < tight, f"tol=1 (int) took {loose_int} iters, tol=1e-12 took {tight}")
+    # And a float-valued one still behaves, i.e. nothing regressed.
+    check("options: a float-valued number option still takes effect",
+          iters(1.0) == loose_int, f"tol=1.0 took {iters(1.0)} iters")
+    # An integer option given as an int stays an integer option.
+    S = ca.nlpsol("S", "pounce", nlp,
+                  {"print_time": False, "pounce": {"print_level": 0, "max_iter": 2}})
+    S(**kw)
+    check("options: integer options are unaffected",
+          S.stats()["return_status"] == "Maximum_Iterations_Exceeded")
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 POUNCE_INC = os.path.join(HERE, "..", "crates", "pounce-cinterface", "include")
 POUNCE_LIB = os.path.join(HERE, "..", "target", "release")
@@ -805,6 +1029,12 @@ def main():
         test_serialization_round_trip,
         test_metadata_options_are_accepted,
         test_iteration_callback_step,
+        test_repeated_solves_do_not_concatenate_the_trace,
+        test_final_kkt_errors_in_stats,
+        test_linear_solver_stats,
+        test_restoration_stats,
+        test_live_diagnostics_during_the_callback,
+        test_option_types_come_from_pounce_not_the_literal,
         test_codegen_matches_the_interpreted_solve,
         test_codegen_refuses_what_it_cannot_reproduce,
     ):

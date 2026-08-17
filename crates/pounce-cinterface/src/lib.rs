@@ -38,6 +38,7 @@ use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
+use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
@@ -1159,6 +1160,192 @@ where
             return None;
         }
         (*ipopt_problem).last_solve.as_ref().map(|ls| f(&ls.stats))
+    }
+}
+
+/// Restoration-phase activity in the most recent solve. Each output
+/// may be NULL to skip it; all yield zero before the first solve.
+///
+/// Solve-level rather than per-iteration: the intermediate callback's
+/// `alg_mod` is always `RegularMode` today (see
+/// `IpoptAlgorithm::build_iter_stats`), so these counters are what a
+/// caller can honestly say about restoration.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. Each
+/// non-NULL output pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceRestorationStats(
+    ipopt_problem: IpoptProblem,
+    calls: *mut Index,
+    inner_iters: *mut Index,
+    outer_iters: *mut Index,
+    wall_secs: *mut Number,
+) {
+    unsafe {
+        let stats = last_stat(ipopt_problem, |s| {
+            (
+                s.restoration_calls,
+                s.restoration_inner_iters,
+                s.restoration_outer_iters,
+                s.restoration_wall_secs,
+            )
+        });
+        let (c, i, o, w) = stats.unwrap_or((0, 0, 0, 0.0));
+        if !calls.is_null() {
+            *calls = c;
+        }
+        if !inner_iters.is_null() {
+            *inner_iters = i;
+        }
+        if !outer_iters.is_null() {
+            *outer_iters = o;
+        }
+        if !wall_secs.is_null() {
+            *wall_secs = w;
+        }
+    }
+}
+
+/// C mirror of [`pounce_linsol::summary::LinearSolverSummary`], laid
+/// out for `pounce.h`'s `PounceLinearSolverStats`. Optional fields
+/// carry sentinels rather than a discriminant, because a plain struct
+/// of scalars is what a C or C++ caller can consume without an
+/// accessor per field: `NaN` for absent reals, `-1` for absent counts.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceLinearSolverStats {
+    pub solver_name: [c_char; 32],
+    pub n_factors: Index,
+    pub n_pattern_reuse: Index,
+    pub n_pattern_changes: Index,
+    pub max_fill_ratio: Number,
+    pub min_abs_pivot: Number,
+    pub max_abs_pivot: Number,
+    pub last_inertia_positive: Index,
+    pub last_inertia_negative: Index,
+    pub last_inertia_zero: Index,
+    pub last_nnz_a: Index,
+    pub last_nnz_l: Index,
+}
+
+/// Post-mortem of the KKT linear solver for the most recent solve.
+///
+/// Reports what pounce already collects — factorization counts,
+/// pattern reuse, fill, pivot range, final inertia. Timings are not
+/// among them: pounce does not instrument the analyse / factor /
+/// solve phases separately, so there is nothing honest to report and
+/// the struct omits them rather than inventing zeros.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `stats`,
+/// when non-NULL, must point at a writable `PounceLinearSolverStats`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceLinearSolverStats(
+    ipopt_problem: IpoptProblem,
+    stats: *mut PounceLinearSolverStats,
+) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() || stats.is_null() {
+            return FALSE;
+        }
+        let Some(summary) = (*ipopt_problem)
+            .last_solve
+            .as_ref()
+            .and_then(|ls| ls.linear_solver.as_ref())
+        else {
+            return FALSE;
+        };
+        // Saturate rather than wrap: these are diagnostics, and a
+        // count that does not fit an `Index` is better reported as the
+        // largest representable one than as a negative.
+        let count = |v: u64| Index::try_from(v).unwrap_or(Index::MAX);
+        let size = |x: usize| Index::try_from(x).unwrap_or(Index::MAX);
+        let opt_size = |v: Option<usize>| v.map_or(-1, size);
+        let inertia = summary.last_inertia;
+        let mut out = PounceLinearSolverStats {
+            solver_name: [0; 32],
+            n_factors: count(summary.n_factors),
+            n_pattern_reuse: count(summary.n_pattern_reuse),
+            n_pattern_changes: count(summary.n_pattern_changes),
+            max_fill_ratio: summary.max_fill_ratio.unwrap_or(Number::NAN),
+            min_abs_pivot: summary.min_abs_pivot.unwrap_or(Number::NAN),
+            max_abs_pivot: summary.max_abs_pivot.unwrap_or(Number::NAN),
+            last_inertia_positive: inertia.map_or(-1, |(p, _, _)| size(p)),
+            last_inertia_negative: inertia.map_or(-1, |(_, n, _)| size(n)),
+            last_inertia_zero: inertia.map_or(-1, |(_, _, z)| size(z)),
+            last_nnz_a: opt_size(summary.last_nnz_a),
+            last_nnz_l: opt_size(summary.last_nnz_l),
+        };
+        // Truncate on a byte boundary and always leave room for the
+        // NUL; backend names are ASCII identifiers well under 31 bytes,
+        // so this is a guard rather than an expected path.
+        let name = summary.solver_name.as_bytes();
+        let keep = name.len().min(out.solver_name.len() - 1);
+        for (slot, b) in out.solver_name.iter_mut().zip(&name[..keep]) {
+            *slot = *b as c_char;
+        }
+        *stats = out;
+        TRUE
+    }
+}
+
+thread_local! {
+    /// Option registry for handle-free [`GetPounceOptionType`] queries.
+    ///
+    /// Built from a throwaway application rather than by re-running the
+    /// registration functions here, so it cannot drift from the set a
+    /// real problem carries: it *is* that set, by construction.
+    static DEFAULT_REGISTRY: Rc<pounce_common::reg_options::RegisteredOptions> =
+        Rc::clone(IpoptApplication::new().registered_options());
+}
+
+/// Which `AddIpopt*Option` setter a keyword expects.
+///
+/// Returns a `PounceOptionType` discriminant: 0 when the keyword is not
+/// registered in this build, 1 number, 2 integer, 3 string. Lets a
+/// caller forwarding options from an untyped source pick the setter
+/// from pounce's registry instead of from the value's own type — the
+/// difference between `tol: 1` reaching the solver as `1.0` and being
+/// refused as an integer.
+///
+/// `ipopt_problem` may be NULL: option types are a property of the
+/// build, not of a problem, and a caller deciding how to forward
+/// options may not have created one yet (code generators, in
+/// particular, have no handle at all).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `keyword`,
+/// when non-NULL, must be a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceOptionType(
+    ipopt_problem: IpoptProblem,
+    keyword: *const c_char,
+) -> c_int {
+    unsafe {
+        if keyword.is_null() {
+            return 0;
+        }
+        let Ok(name) = CStr::from_ptr(keyword).to_str() else {
+            return 0;
+        };
+        let registered = if ipopt_problem.is_null() {
+            DEFAULT_REGISTRY.with(|r| r.get_option(name))
+        } else {
+            (*ipopt_problem).app.registered_options().get_option(name)
+        };
+        let Some(opt) = registered else {
+            return 0;
+        };
+        match opt.option_type {
+            OptionType::OT_Number => 1,
+            OptionType::OT_Integer => 2,
+            OptionType::OT_String => 3,
+            OptionType::OT_Unknown => 0,
+        }
     }
 }
 
@@ -2676,6 +2863,117 @@ mod tests {
             assert!(GetIpoptComplInf(p).is_finite());
             FreeIpoptProblem(p);
         }
+    }
+
+    /// The linear-solver post-mortem is reported for a real solve, and
+    /// reports the backend that actually ran rather than the one the
+    /// option asked for — which is the question a caller pinning
+    /// `linear_solver` is really asking.
+    #[test]
+    fn linear_solver_stats_populated_after_solve() {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+        let mut stats = unsafe { std::mem::zeroed::<PounceLinearSolverStats>() };
+        // Nothing to report before the first solve.
+        assert_eq!(unsafe { GetPounceLinearSolverStats(p, &mut stats) }, FALSE);
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert_eq!(unsafe { GetPounceLinearSolverStats(p, &mut stats) }, TRUE);
+
+        let name = unsafe { CStr::from_ptr(stats.solver_name.as_ptr()) }
+            .to_str()
+            .expect("solver name is ASCII");
+        assert_eq!(name, "feral", "default backend should report itself");
+        assert!(stats.n_factors > 0, "n_factors = {}", stats.n_factors);
+        assert_eq!(
+            stats.n_pattern_reuse + stats.n_pattern_changes,
+            stats.n_factors,
+            "every factor is either a pattern reuse or a pattern change"
+        );
+        // Optional fields are either a real value or the documented
+        // sentinel — never a silent zero.
+        assert!(stats.max_fill_ratio.is_nan() || stats.max_fill_ratio > 0.0);
+        assert!(stats.last_nnz_l == -1 || stats.last_nnz_l > 0);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn option_type_reports_the_setter_a_keyword_expects() {
+        let p = create_unconstrained();
+        let ty = |s: &str| {
+            let c = std::ffi::CString::new(s).unwrap();
+            unsafe { GetPounceOptionType(p, c.as_ptr()) }
+        };
+        assert_eq!(ty("tol"), 1, "tol is a number");
+        assert_eq!(ty("max_iter"), 2, "max_iter is an integer");
+        assert_eq!(ty("linear_solver"), 3, "linear_solver is a string");
+        // `hessian_approximation` is the option the CasADi plugin has to
+        // set as a string while the user may well type it as one too.
+        assert_eq!(ty("hessian_approximation"), 3);
+        // Unregistered, and NULL keyword, both answer "unknown" rather
+        // than guessing a type.
+        assert_eq!(ty("no_such_option_at_all"), 0);
+        assert_eq!(unsafe { GetPounceOptionType(p, std::ptr::null()) }, 0);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    /// A NULL problem handle answers from the same registry — the case a
+    /// code generator is in, having no problem to ask.
+    #[test]
+    fn option_type_answers_without_a_problem_handle() {
+        let ty = |s: &str| {
+            let c = std::ffi::CString::new(s).unwrap();
+            unsafe { GetPounceOptionType(std::ptr::null_mut(), c.as_ptr()) }
+        };
+        assert_eq!(ty("tol"), 1);
+        assert_eq!(ty("max_iter"), 2);
+        assert_eq!(ty("linear_solver"), 3);
+        assert_eq!(ty("no_such_option_at_all"), 0);
+
+        // …and the same answers a live problem gives, which is the
+        // property that keeps the two paths from drifting apart.
+        let p = create_unconstrained();
+        for name in ["tol", "max_iter", "linear_solver", "mu_strategy", "print_level"] {
+            let c = std::ffi::CString::new(name).unwrap();
+            assert_eq!(
+                unsafe { GetPounceOptionType(std::ptr::null_mut(), c.as_ptr()) },
+                unsafe { GetPounceOptionType(p, c.as_ptr()) },
+                "handle-free and problem-bound disagree on {name}"
+            );
+        }
+        unsafe { FreeIpoptProblem(p) };
     }
 
     #[test]

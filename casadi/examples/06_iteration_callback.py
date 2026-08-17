@@ -71,6 +71,72 @@ sol = solver(x0=[-1.2, 1.0], lbg=-ca.inf, ubg=0)
 print(f"  status = {solver.stats()['return_status']}, "
       f"{len(watcher.trajectory)} callback fires")
 
+print("\nfull diagnostics from inside the callback:")
+
+
+class Diagnostic(ca.Callback):
+    """Everything POUNCE's iteration table shows, without parsing stdout.
+
+    CasADi fixes the callback's inputs at (x, f, g, lam_x, lam_g), so the
+    convergence metrics do not arrive as arguments. They are reachable
+    anyway: `stats()` is callable from inside the callback, and mid-solve
+    its per-iteration traces end on the iteration you are in.
+    """
+
+    def __init__(self, name, opts={}):
+        ca.Callback.__init__(self)
+        self.solver = None          # set after the solver is constructed
+        self.construct(name, opts)
+
+    def get_n_in(self):
+        return ca.nlpsol_n_out()
+
+    def get_n_out(self):
+        return 1
+
+    def get_name_in(self, i):
+        return ca.nlpsol_out(i)
+
+    def get_sparsity_in(self, i):
+        name = ca.nlpsol_out(i)
+        dims = {"f": 1, "x": NX, "g": NG, "lam_x": NX, "lam_g": NG, "lam_p": NP}
+        n = dims.get(name, 0)
+        return ca.Sparsity.dense(n, 1) if n else ca.Sparsity(0, 0)
+
+    def eval(self, arg):
+        it = self.solver.stats()["iterations"]
+        k = len(it["inf_pr"]) - 1        # the entry for *this* iteration
+        print(f"  iter {k:2d}: obj = {it['obj'][k]:+.6e}  inf_pr = {it['inf_pr'][k]:.2e}  "
+              f"inf_du = {it['inf_du'][k]:.2e}  mu = {it['mu'][k]:.2e}  "
+              f"|d| = {it['d_norm'][k]:.2e}  ls = {it['ls_trials'][k]}")
+
+        # Present only while a solve is running: Ipopt's current-violation
+        # field set, fetched on demand.
+        viol = self.solver.stats().get("current_violations")
+        if viol is not None and k in (0, 1):
+            print(f"          |grad_lag_x| = {max(abs(v) for v in viol['grad_lag_x']):.2e}  "
+                  f"g violation = {max((abs(v) for v in viol['nlp_constraint_violation']), default=0.0):.2e}")
+        return [0]
+
+
+diag = Diagnostic("diag")
+solver3 = ca.nlpsol("solver3", "pounce", nlp, {
+    "print_time": False,
+    "iteration_callback": diag,
+    "pounce": {"print_level": 0},
+})
+diag.solver = solver3
+solver3(x0=[-1.2, 1.0], lbg=-ca.inf, ubg=0)
+
+st = solver3.stats()
+print(f"  final: inf_pr = {st['final_inf_pr']:.2e}  inf_du = {st['final_inf_du']:.2e}  "
+      f"compl = {st['final_compl_inf']:.2e}")
+print(f"  linear solver: {st['linear_solver']['solver_name']}, "
+      f"{st['linear_solver']['n_factors']} factorizations "
+      f"({st['linear_solver']['n_pattern_reuse']} reusing the pattern)")
+print(f"  restoration: {st['restoration']['calls']} call(s), "
+      f"{st['restoration']['wall_secs']:.4f}s")
+
 print("\nearly stop at f < 0.05:")
 stopper = Watcher("stopper", stop_below=0.05)
 solver2 = ca.nlpsol("solver2", "pounce", nlp, {
