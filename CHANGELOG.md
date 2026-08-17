@@ -89,6 +89,286 @@ changes.
     the declared bounds, via a new `Nlp::declared_x_bounds()` alongside
     the existing `declared_d_bounds()`.
 
+- **CasADi plugin: solver diagnostics, and two defects found exposing
+  them** (#634).
+
+  `solver.stats()` now carries the final KKT errors (`final_inf_pr`,
+  `final_inf_du`, `final_compl_inf`), a linear-solver post-mortem
+  (`linear_solver`: the backend that actually ran, factorization counts,
+  pattern reuse, fill ratio, pivot range, final inertia) and restoration
+  activity (`restoration`: calls, inner and outer iterations, wall
+  seconds). All of it is data POUNCE already collected and had no way to
+  report through CasADi; three new C entry points —
+  `GetPounceLinearSolverStats`, `GetPounceRestorationStats`,
+  `GetPounceOptionType` — expose it, and no new instrumentation was
+  added.
+
+  Diagnostics are also readable **during** an `iteration_callback`, which
+  is where a progress display needs them. CasADi fixes the callback
+  signature at `(x, f, g, lam_x, lam_g)`, so nothing could be added
+  there; instead `stats()` is callable mid-solve, its per-iteration
+  traces end on the current iteration, and `current_violations` (Ipopt's
+  `GetIpoptCurrentViolations` field set — bound and constraint
+  violations, both complementarities, the gradient of the Lagrangian) is
+  fetched on demand while the solve is in flight. No stdout parsing, and
+  no key is ever served stale: the live ones are absent after the solve,
+  the final ones absent during it.
+
+  Two defects surfaced while wiring this up, both in the plugin:
+
+  - **The per-iteration trace accumulated across solves.** CasADi's ipopt
+    plugin clears its trace vectors at the top of `solve()`; this one
+    never did. Three calls on one solver object reported `iter_count = 7`
+    beside a 23-entry `iterations` trace — the two disagreed by however
+    many solves had run. Every receding-horizon loop hit it.
+  - **Options were typed off the Python literal, not off POUNCE's
+    registry.** `{"tol": 1}` is an `int` in Python and a number to
+    POUNCE, so it was forwarded with `AddIpoptIntOption`, which refuses
+    it: `tol` silently kept its default while the script looked like it
+    had set it. The registry now decides, on the interpreted and the
+    code-generated path alike.
+
+  Deliberately **not** shipped, with reasons in
+  `dev-notes/casadi-diagnostics-and-native-builds.md`: a per-iteration
+  restoration flag (POUNCE hardcodes `RegularMode` for every callback
+  fire, so the column would be constant zero and read as working
+  detection), linear-solver phase timings (not instrumented — absent
+  rather than reported as zero), and native non-Python plugin builds and
+  release artifacts.
+
+  23 new checks in the CasADi parity suite, 73 in total.
+
+  Also: **building the plugin against a CasADi you built yourself is now
+  documented**, for a CI that builds CasADi from source rather than
+  installing the Python package. No new build system was needed — the
+  Makefile's CasADi inputs were already overridable, so their
+  Python-derived defaults are only defaults, and a `PYTHON=/nonexistent`
+  build produces a plugin that passes the full parity suite. Two failure
+  modes on that path now say what is wrong: an empty `CASADI_VER` (which
+  used to die deep in the plugin source on `expected primary-expression
+  before ';'`), and a `CASADI_SRC` without the internal headers, which a
+  source-built CasADi does not install unless configured with
+  `-DINSTALL_INTERNAL_HEADERS=ON`.
+
+- **`solve_qp(method="active-set")` reported `success=False` at exactly
+  optimal points on large-data QPs** (#641). The driver's post-loop
+  adjudication compared the raw, unnormalized KKT error against the absolute
+  `tol`. Its complementarity term `max|zᵢsᵢ|` carries the problem-data
+  magnitude twice over — `sᵢ = hᵢ − gᵢᵀx` cannot be formed to better than
+  `‖data‖·ε`, so `zᵢsᵢ` floors at `‖z‖·‖data‖·ε` — and stationarity floors at
+  `‖P‖·‖x‖·ε` the same way. Above `‖data‖ ≈ 1e9` both floors sit over the
+  default `tol = 1e-8`, so *no* iterate could pass, however exact.
+
+  Reported on `min ½K‖x‖² − K(x₁+x₂) s.t. x₁+x₂ ≤ 1` with `K = 1e9`, where
+  `cond(P) = 1` — the problem is large, not ill-conditioned. The returned
+  point was `x = (0.5, 0.5)` to `1.1e−16` and the objective exact to
+  `1.6e−16`, labelled `optimal_inaccurate` / `success=False`, degrading to
+  `numerical_failure` when the user asked for *more* accuracy. The convex IPM
+  — the less accurate engine on the same instance — reported a clean
+  `optimal`, so the two drivers disagreed and the one claiming failure held
+  the better answer.
+
+  This is the active-set analogue of #336, whose fix (#337) made the
+  non-symmetric HSDE driver's post-loop adjudication scale-relative; the
+  `pounce-qp` path was not covered by it. The status bands now score the
+  recovered point on a scale-relative residual, reusing the same crossover
+  gate (`max_scale·ε > tol`) the HSDE stopping test uses, so it opens only
+  where absolute `tol` accuracy is unreachable in double precision and can
+  only ever lower the measured error. Well- and moderately-scaled solves are
+  untouched — both fixture sweeps (default and `solver_selection=qp-active-set`)
+  diff empty against the parent commit.
+
+  **Primal feasibility is deliberately excluded from the relaxation.** An
+  earlier draft normalized all three terms and regressed the
+  `scaled_feasible_a` fixture from an exact solve to `Optimal` printed beside
+  a `7.8e−3` constraint violation: rows with `1e6` coefficients make a real
+  violation look like `1e−9` relative to the row, and accepting the unscaled
+  attempt then skipped the equilibrated retry that actually solves it. A
+  violation of the user's constraints is reported in the user's units at any
+  scale; only the two dual-side terms are measured relatively, and only in
+  the Ruiz-equilibrated metric, so the #414 variable-scale blindness cannot
+  return through this door.
+
+  Impact was confined to the Python API's `success` / `status`, which a
+  caller gating on them would read as a failed solve. The CLI already mapped
+  this case into the solved family (`solve_result_num=100`, exit 0).
+
+- **A warm start that carries only a point is no longer charged for
+  multipliers it never claimed to have** (#622, second half). Raised on
+  the issue with a controlled table: turning on `warm_start_init_point`
+  degraded pounce on a values-only start while ipopt paid at most a few
+  iterations for the same options. It reproduced here, smaller, and the
+  mechanism was in the plumbing rather than the algorithm.
+
+  `TNLP::get_starting_point` is asked for `init_z` and may leave the
+  blocks untouched — a caller warm starting from a point alone does
+  exactly that — and the buffer behind them was pre-filled with **zero**.
+  Zero is a *legal multiplier value*, so it sailed past the "was this
+  seeded?" resolution the warm-start initializer performs on NaN and was
+  merely floored at `warm_start_mult_bound_push`: 1e-3 by default, and
+  1e-9 under the tightened pushes `pounce.WarmStart` ships. A start of
+  `z = 1e-9` declares every bound inactive and breaks complementarity
+  against μ before the first iteration — so the tighter the push, the
+  worse the start, which is the opposite of what a push is for. The
+  buffers now carry the unseeded marker, and an absent block and a block
+  written as NaN are finally the same statement.
+
+  That exposed a second half. #606's reconstruction was gated
+  wholesale on some dual having been supplied, but only half of it needs
+  one: `z = μ / slack` needs the slacks the point already determines,
+  while the least-squares `y` needs a dual to complete and from a bare
+  point is the cold path's estimate wearing the warm path's barrier
+  (the 1102 → 1211 measurement that motivated the gate). The gate is now
+  drawn between those two. μ escalation stays on the gated side: with
+  the bound blocks filled to `μ / slack`, the measured complementarity
+  *is* μ, and escalating off it is the barrier arguing with itself.
+
+  On HS071 from a transferred point, a values-only warm start went 11
+  iterations → 7 against 6 for a plain solve from the same point (→ 8
+  on aarch64 macOS; the last iteration is platform-sensitive), and
+  tightening the pushes no longer moves it at all. Restarted from its
+  own solution: 3 → 2. On the #622 receding-horizon family, a
+  values-only transfer over the eight-step loop went 49/60/67/57 →
+  44/55/55/47 at horizons 5/10/20/40.
+
+  One measured cost, named rather than buried: HS071 restarted from its
+  own solution with `warm_start_recentering=none` goes 3 → 4. The kill
+  switch keeps the constant fill, and the constant is now
+  `bound_mult_init_val` where it used to be a bound-multiplier push so
+  small it read as "every bound inactive" — which happens to be right
+  about a converged point whose bounds mostly are. It is one iteration,
+  on the kill-switch path, on a configuration that has the solution
+  already; the default path takes the same restart to 2.
+
+  **Nothing that seeded duals moved.** The `benchmarks/warmstart` corpus
+  is bit-identical across `cold-ipm`, `warm-ipm`, `pred-ipm` and
+  `predcorr-ipm` (10288 / 3404 / 1258 / 1242, 0 of 42 rows), and the CLI
+  fixture sweep is identical across all 57 models. That is also the
+  uncomfortable part — no arm of the warm-start suite supplied a
+  primal-only seed, so the corpus could not see this defect. There is
+  now a **`values-ipm` arm** that does, and across this fix it reads
+  5490 → 4385 iterations (39 of 42 rows), with `moving_bound_qp` alone
+  going 1040 → 428.
+
+  That arm also priced the one family this costs: **`degenerate_vertex`
+  220 → 396**. It holds 12 rows tight in 4 variables, so the true
+  multipliers are a mass of ties near zero and the old fill — a push
+  small enough to read as "every bound inactive" — was accidentally
+  right about them. Every honest fill loses there: capping `μ / slack`
+  at `bound_mult_init_val` costs 341 instead of 396 but regresses
+  `redundant_rows` 162 → 292, so the cap was measured and dropped. The
+  cost is inherent to filling those blocks at all, it is the price of
+  the 2.4× on `moving_bound_qp`, and the new arm is what will notice if
+  it moves again.
+
+- **A transferred warm start now beats a cold solve, and the docs stop
+  saying otherwise** (#622). `WarmStart.reindex` filled the prolongated
+  stage of a receding horizon with zero clipped into the variable's box
+  — a value chosen without reference to the point being transferred or
+  to the model. On a chain with a slew limit that enters the new
+  problem **2.25 away from feasible** (the new variable at `0` beside a
+  neighbour at `2.75`, under a limit of `0.5`), and the filter's first
+  iterations go on undoing the transfer: 11 iterations against 7 for a
+  cold solve.
+
+  `fill_x` is now a policy. The default, `"prolong"`, repeats the last
+  stage: when the identifier map is a pure shift — every matched entry
+  the same distance from its counterpart, which is what a receding
+  horizon *is* — that distance is the layout's own period, read off the
+  map rather than assumed, and each unmatched entry takes the value one
+  period behind it, clipped into its box. One variable per stage or
+  `(p, v, u)` interleaved, the value lands in the same *kind* of slot; a
+  tail longer than one stage repeats the terminal stage; a map that is
+  not a shift has no stage to repeat and degrades to the old behaviour,
+  which is still available as `fill_x="zero"`. An explicit array or
+  scalar is used as-is. Same fixture: primal residual `2.25` → `1.7e-10`
+  and 11 iterations → 8.
+
+  The issue's table is the reverse of what it was. Eight steps of a
+  receding horizon on the sinusoidal tracking family, total iterations,
+  transferred against cold: **45/67** at horizon 5, **50/75** at 10,
+  **54/77** at 20, **46/76** at 40 — where the same table before #620
+  had the transferred start *losing* by more the longer the horizon got
+  (30 against 10 at horizon 40). Most of that turn is #620's
+  residual-adaptive recentering, measured here for the first time since
+  it landed, which is what #622 asked for; the fill policy is what
+  reaches the case recentering does not, the slew fixture, where the
+  closed loop goes 27 → 21 against cold's 22.
+
+  The remaining headroom is measured rather than guessed, and recorded
+  in `docs/src/initialization.md`: seeding each window with the *next*
+  window's converged primal point runs the same loops in 21/24/26/23
+  against the shipped 45/50/54/46, so about half of what a transfer
+  spends is the zero-order prediction and not the barrier (whose own
+  floor, from a perfect primal *and* dual seed, is 9/12/18/18). Two
+  ways of collecting it were tried and both fail: a finite-difference
+  secant predictor is worse than zero-order everywhere (59/75/66/60),
+  and the KKT tangent behind the `pred-ipm` arm cannot be pointed at a
+  horizon shift at all — on the stages two windows share, theta does
+  not move, so `parametric_step` receives a delta vector of exact zeros
+  and returns a zero step. **A receding horizon is a structural change,
+  not a parametric one.** Given a parameter that does move (an MPC
+  initial-condition pin) the tangent degrades with horizon,
+  52/87/95/137 against 54/78/81/93. What is left is the freshly-entered
+  stage, which has no history to extrapolate from and can only be
+  predicted from the model — which is what `transfer()`'s mapper is for.
+
+  Two suggestions from the issue were measured. Dropping the
+  transferred multipliers so the solver rebuilds them from the primal
+  point is close to a wash once the values-only path is fixed (the
+  entry below): 44/55/55/47 against the carried 45/50/54/46 over the
+  eight-step loop. What the carried block actually buys is the
+  *equality* multipliers — those are the half #606 will not derive from
+  a bare point, and `info["warm_start"]` reports the split as
+  `eq_duals: accepted` against `unseeded`. Restarting the barrier is a wash at
+  `mu_init=1e-6` (46/53/48/47 against the carried μ's 45/50/54/46) and
+  loses steadily from there — 52/61/56/54 at `1e-4`, and by `1e-1` the
+  four horizons run 72/79/74/72, at or above the cold solve's
+  67/75/77/76. The carried μ stays the default. Recorded so the next
+  reader does not re-run them.
+
+  What is *not* claimed: a single hand-off across a large parameter step
+  on a small model is still not where warm starting wins — on the
+  five-variable slew fixture the transferred point costs 8 iterations
+  against a cold solve's 7 to 9, the cold arm's own spread over where
+  the guess is put. Python-side only; no Rust changed and no solver step
+  moved, so the CLI fixture sweep is untouched by construction.
+- **`estimate(mode="path")` applies the perturbation a little at a time,
+  and `active_set_changes()` returns the record of what changed where**
+  (#631). Roadmap item 2. `mode="fix_relax"` decides every active-set change from
+  full steps at the base point. The new mode follows the solution along
+  the perturbation: it takes the largest fraction the current active set
+  allows, applies the one change that happens there, and continues under
+  the updated set. The prediction is piecewise linear in the parameter,
+  exact for a QP (verified to 1e-10 against direct target solves on a
+  400-case random QP scan), and a variable can reach a bound partway
+  through the change and leave it again, which no decision at the base
+  point can represent. `active_set_changes()` reports each change with
+  the variable, the bound, whether it is reached or left, and the
+  fraction at which it happens. `max_iter` is the same knob it is under
+  `fix_relax`: past the cap the rest of the perturbation is one step
+  under the active set reached, with a warning.
+
+  Underneath: `parametric_step_path` on the Rust solver and the Python
+  binding, with the same information per breakpoint. Building the
+  path found three defects, each convicted by a hand-checkable QP.
+  `solve_released` folded the barrier correction of a released bound's
+  multiplier row into that variable's equation at order one (shipped
+  with #600's release machinery but unexercised, since `fix_relax`'s
+  shifted call zeroes the row first); the released rows are now zeroed
+  before the fold, and `released_sigma_x` rebuilds the released
+  diagonal entry from surviving bounds instead of differencing two
+  numbers of order `z / s`. The guard against a row changing twice at
+  one fraction barred it for a whole segment, skipping real
+  breakpoints. And the release test read accumulated values, so a
+  near-bound inactive multiplier could drift "active" mid-path and put
+  a departure in the record for a variable that was never on that
+  bound; activity of a base bound is now decided at the base point,
+  where the factorization's sigma was frozen.
+
+  `python/notebooks/36_active_set_parametric_sensitivity.ipynb` works
+  a CSTR example through all three modes, and
+  `docs/src/sensitivity.md` covers when each mode is the right one.
 - **The `pounce-casadi` wheel is tagged for the platform it was built
   for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
   Python, installs anywhere" — while carrying a compiled CasADi plugin and
@@ -134,6 +414,217 @@ changes.
   build for this CasADi version" — a hand-copied wheel used to report the
   platform mismatch as a missing CasADi version, sending the reader after
   the wrong axis.
+
+- **A reordered warm start is refused without the caller supplying
+  `var_ids`** (#621, split out of #607). Every facet the #607
+  `ProblemSignature` carries is a digest of what the model *declares*,
+  and a pure permutation of the variables changes none of them.
+  Measured on the parent commit `b4c4d32e`, permuted HS071 (uniform box
+  `[1,5]^4`, dense jacobian) with no `var_ids`: `ws.check_compatible`
+  reported **no mismatch at all**, and the replay returned objective
+  **16.0909032757** against a true **17.0140171452** — `x` off by 0.2205
+  in the inf-norm — with status `Error_In_Step_Computation` in 44
+  iterations.
+
+  The signature now also carries a **`probe`**: the model evaluated once
+  at a fixed, deterministic, index-varying point inside the bounds,
+  recorded as a small vector of order-weighted projections. A
+  permutation moves those numbers, so the reordered replay above is
+  refused with nothing supplied by the caller.
+
+  The probe is compared to a **relative tolerance** (`PROBE_RTOL`,
+  `1e-9`), not hashed and compared for equality — a hash cannot be
+  compared approximately, and a model whose evaluation is not bitwise
+  reproducible would then be refused for reproducing itself to 15 digits
+  instead of 17, which is a worse failure than the one being fixed.
+  Measured: re-associating a model's internal summation (what a
+  different BLAS or thread count does) moves the probe by `5e-18`
+  relative and is accepted; a jax model is bit-identical across fresh
+  captures; injected relative jitter is accepted 40/40 at `1e-9` and
+  refused 40/40 at `1e-6`.
+
+  Cost, measured rather than asserted: `0.15 ms` at n=4 rising to
+  `1.73 ms` at n=10 000 per capture — `1.17%` down to `0.002%` of a cold
+  solve of the same model — and a fixed 20 floats in the artifact
+  regardless of problem size. `probe=False` at capture declines it, and
+  by construction then costs nothing at replay either, because a target
+  is only probed when the artifact carries a probe to compare against.
+  The multistart ladder in `_starts.py` declines it: that path resumes
+  on the same `Problem` object in the same process, where no reordering
+  is possible, and probing once per rung spent four of the caller's own
+  evaluations per resume (racing suite `2592` → `2920` evaluations for
+  the same three answers; back to `2592` with the probe declined).
+
+  The facet is optional on both sides, so artifacts written before this
+  and models that will not evaluate at an arbitrary interior point
+  degrade to *unverifiable* rather than refused. `var_ids` remain the
+  rigorous answer — a model genuinely symmetric under the permutation is
+  invisible to arithmetic, and only IDs let `reindex` *repair* a
+  reordering instead of only refusing it — and the #607 property that
+  signing with IDs must never be worse than signing without is now
+  pinned by test. When neither route was available on both sides, the
+  report says so instead of reporting a clean "compatible".
+
+  Note for downstream readers: a signature written by this build carries
+  a facet older builds do not know, and `ProblemSignature.from_json`
+  raises on unknown facets by design (#607) rather than silently
+  weakening the artifact. Re-capture, or upgrade the reader.
+
+  Fixture sweep over all 57 CLI fixtures against a baseline binary built
+  from `origin/main`: empty diff (no Rust changed). The Python
+  warm-start path — cold solve, warm replay, replay from file, and the
+  multistart ladder, at n = 4/10/50/200 — is unchanged in status,
+  objective and iteration count.
+
+- **Warm start: a dual seed that cannot belong to its primal point is
+  refused instead of reconstructed off, and a slack the point's own
+  infeasibility swamps stops being read as an active bound** (#617,
+  #618). Both are #606 follow-ups in the residual-adaptive recentering
+  pass, and both regressions reproduce on the parent commit `b4c4d32e`
+  larger than they were first filed at. Measured on
+  `benchmarks/warmstart` at 4x scale, 14 families, summed iterations,
+  with `warm_start_recentering=none` as the pre-#606 control:
+
+  | seed | pre-#606 | `b4c4d32e` | now |
+  |---|--:|--:|--:|
+  | exact restart, full duals | 13 | 9 | **9** |
+  | exact restart, `lagrange` only | 24 | 11 | **11** |
+  | corrupted duals, full | 33 | 164 | **25** |
+  | corrupted duals, `lagrange` only | 27 | 115 | **20** |
+  | stale seed, full | 344 | 351 | **354** |
+  | stale seed, `lagrange` only | 273 | 339 | **279** |
+  | cold (no seed) | 166 | 166 | 166 |
+
+  *A corrupted dual seed escalated `mu` to the cold ceiling* (#617).
+  Multipliers corrupted by `N(0, 1e4)` noise, paired with the exact
+  primal solution, read back as an average complementarity of `1e2` to
+  `4e2`; the #606 escalation took that at face value and moved `mu`
+  eight orders — from the converged barrier to `MU_CEILING` — while
+  keeping `x` at the answer, which is the most off-centre a point can
+  be for that barrier. Every corrupted regression in the corpus had
+  `mu_out = 0.1`, and the result cost about what a cold solve costs. A
+  seeded bound block is now measured on `|z_i| · s_i` over the entries
+  the caller seeded, and refused — taking the pre-#606 constant fill —
+  when that reads ten times above both `mu_init` and the point's own
+  `inf_pr`; a seeded `y` whose stationarity residual dwarfs `∇f` and
+  the caller's own multipliers stops being an input to the split. On
+  HS071 with the same corruption: 9 iterations → **3** (cold: 8,
+  pre-#606: 3), and `mu_out` is back to `mu_in`.
+
+  *The stationarity split laundered a miss into a multiplier* (#617).
+  The split may raise a bound multiplier above `mu / slack` — the
+  push's inflation put #606's reconstructed HS071 multiplier 5.5x low,
+  so the margin is real — but it may not raise it by orders. It is now
+  capped at ten times the complementarity floor. On `nmpc_vanderpol` a
+  corrupted `lagrange` seed had been hiding behind the multipliers this
+  same pass invented: 12 iterations → **2**.
+
+  *The reconstruction read stale slacks as active bounds* (#618). Both
+  `mu / slack` and the split treat a small slack as "this bound is
+  active". On a seed carried across a parameter move, a slack smaller
+  than the point's own primal infeasibility supports neither reading,
+  and those entries now keep the pre-#606 constant. It is a per-entry
+  test, so a partly-stale seed keeps the reconstruction wherever its
+  slacks still outrun the residual, and the comparison only engages
+  once `inf_pr` clears the barrier tenfold — unguarded it fires on
+  converged points, whose `inf_pr` routinely exceeds the pushed slacks,
+  and cost the exact partial restart 11 → 15. Worst case in the corpus,
+  `mpc_horizon_40` at a stale `lagrange`-only seed: 81 → **45**.
+
+  The swamping test is armed only for a seed that *carried*
+  multipliers, which is what keeps this change inert against #622.
+  It asks whether the point's infeasibility outruns the barrier the
+  seed implies, and a values-only seed implies none: the `mu_hat` it
+  would be compared against is the caller's `mu_init`, an option
+  rather than a measurement of the seed.
+
+  The deeper reason is that the test's *input* is push-dependent. It
+  reads a slack, and the warm-start pushes move slacks, so wherever it
+  is armed the multiplier push can change which entries fire and
+  reroute the solve — exactly the property #622 established must not
+  hold for a caller who supplied no multipliers. Left armed there it
+  swamps every slack on #622's transfer fixture (`inf_pr = 1.58`
+  against `mu_init = 0.1`, every slack below 1.58), sending all four
+  bound blocks to the constant fill: HS071 values-only goes 8 → 11
+  under the tightened pushes and 8 → 7 under the defaults. No choice
+  of fallback constant repairs that. A push-independent constant
+  (`bound_mult_init_val`) is push-insensitive but lands at 10, over
+  #622's `cold + 2` ceiling of 8; reading the swamped slack as no smaller than the
+  residual (`mu_hat / swamping`) still splits 8 / 7, because which
+  entries are swamped moved with the push even though the fill did not.
+
+  Gating it costs a measured improvement, and the cost is recorded
+  rather than assumed away. Over the same 14 families at 4x scale,
+  `--contents primal`, summed iterations:
+
+  | primal seed | armed everywhere | gated (shipped) |
+  |---|--:|--:|
+  | exact | 17 | 17 |
+  | corrupted | 17 | 17 |
+  | **stale** | **262** | **334** |
+
+  Seven families move, five of them for the better (`mpc_horizon_40`
+  81 → 45, `mpc_horizon_80` 77 → 53, `nmpc_vanderpol` 37 → 23,
+  `mpc_horizon_20` 30 → 23, `mpc_horizon_10` 23 → 17) and two worse
+  (`moving_bound_qp` 12 → 22, `hanging_chain` 14 → 19). Nothing
+  *regresses* by gating — the gated build is cell-for-cell identical
+  to the pre-#617 `main` across all 84 primal and cold cells, so this
+  is an improvement declined, not a cost incurred, and a stale
+  primal-only seed is a regime no issue currently asks about. Taking
+  it would mean giving up #622's push-insensitivity, which is what
+  #622 was filed for.
+
+  *What is not fixed.* #618's first proposed remedy — a gentler `mu`
+  escalation band below the 10x trigger — was measured and is inert on
+  current `main`: every stale regression left in the corpus has a
+  measured complementarity within 1.2x to 3x of `mu_init`, so a band
+  starting at 1x has nothing to raise `mu` to. The residue is one
+  family, `degenerate_vertex`, 2 → 12 in both stale seed modes. `theta`
+  enters it through the objective, so a stale `x` is still feasible; it
+  is centred at the barrier it asked for (`avrg_compl = 2.99e-9` against
+  `mu_init = 2.51e-9`, a 1.19x overshoot), `mu` never moves, and only
+  its `y` has gone stale. No measurement available to the initializer
+  separates it from a good seed, and the conservatism both issues ask
+  for is what stops one being invented.
+
+  `cresc4` — the canary both issues name — is bit-identical, as is the
+  whole 57-fixture corpus in all three regimes the initializer reaches
+  (default options, `warm_start_init_point=yes`, and the tightened-push
+  recipe). `warm_start_recentering=none` remains bit-identical to
+  `b4c4d32e` across the whole seed-mode corpus. `info["warm_start"]`
+  grows `bound_duals_rejected` and `eq_duals_rejected`, `bound_duals`
+  gains a `rejected` verdict, and the iteration line gains `wz!` /
+  `wy!`. `benchmarks/warmstart/seedmodes.py` is the harness both
+  issues' reproduce sections assume and neither had.
+- **The 1x1 initializer blocks read the `scaling_factor` Suffix, and
+  their convergence test is measured on the row's stated scale**
+  (#632).
+  `block_initialize`'s 1x1 path called
+  `calculate_variable_from_constraint` with its absolute `eps=1e-8`,
+  the one place in the package that ignored the Suffix the gh #483
+  reader delivers everywhere else. An equation whose terms sit near
+  3e7 (IDAES energy holdups in raw SI) has a double-precision
+  evaluation floor near 1e-7, so the linesearch hit its iteration
+  limit at a residual of 7.45e-8, the block was declared failed, and
+  827 of 1001 variables kept their seeds, costing the downstream
+  dynamic optimization 137 to 225 iterations against 19 from a full
+  start. The path now reads the constraint's factor through the gh
+  #483 reader and passes `eps = 1e-8 / f`, the identical test measured
+  on the scaled row `f*g(x)`. An untagged constraint keeps the
+  absolute default, and a model without an export-enabled Suffix makes
+  the exact call the current release makes.
+
+  The test moves in **both** directions. A factor below 1 loosens it,
+  which is the failure above. A factor above 1 tightens it, and that
+  half is not cosmetic: `1e-8*x**2 == 2e-8` has a raw residual of 1e-8
+  at the seed `x=1`, so the absolute test accepts it immediately and
+  the block is reported *initialized* at a value 29% from the root,
+  with nothing failed and nothing warned. Tagged `1e8` it now solves.
+  The same tightening can newly fail a 1x1 block whose factor is
+  larger than its rows can support — a row genuinely of order one
+  tagged `1e8` gets `eps = 1e-16` and exhausts the linesearch.
+  `options=InitOptions(scaling="none")` is the way back: it means no
+  row scaling anywhere, this test included.
 
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
@@ -708,7 +1199,11 @@ changes.
   point costs 12 iterations against 7 for a cold solve, and on a longer
   sinusoidal track the gap widens with the horizon (12 vs 9 at horizon 5,
   30 vs 10 at horizon 40). That is the barrier/active-set limit
-  `docs/src/initialization.md` already describes.
+  `docs/src/initialization.md` already describes. **Superseded within
+  this same unreleased cycle by #620 and #622** (first entry above): that
+  table no longer reproduces, and a transferred start now beats a cold
+  solve at every horizon of it. The numbers here are left as they were
+  measured, not silently corrected.
 
   Python-side, plus four additive `Problem` accessors
   (`options_snapshot` / `restore_options`, `get_bounds`,
@@ -1186,15 +1681,15 @@ against 8.7e-4 at `obj_scaling_factor = 1000` before.
 
 Pinning is unchanged, as is every path that releases no bound.
 
-### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clamping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
-variable's bound it clips the value and warns. Clipping costs more than
+variable's bound it clamps the value and warns. Clamping costs more than
 the one variable. Every other variable keeps the value the step gave it,
-computed on the assumption that the clipped one was free to move where
+computed on the assumption that the clamped one was free to move where
 the step said, so the result satisfies the bounds and no longer
 satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
-its lower bound, the clipped answer is `y = -5`, which is not on the
+its lower bound, the clamped answer is `y = -5`, which is not on the
 constraint at all.
 
 `mode="fix_relax"` repairs the active set the step implies, which is
@@ -1216,19 +1711,19 @@ Checked against sIPOPT 3.14.19 itself, driven through
 pounce and sIPOPT agree to 2e-8 on the pin case and to 1e-6 on the
 release case, and both match a full re-solve. On upstream's own
 parametric example, at its own perturbation, the refinement lands within
-6e-9 of a re-solve where clipping the crossing coordinate is off by
+6e-9 of a re-solve where clamping the crossing coordinate is off by
 0.12.
 
-    estimate(m, [(m.p, 3.0)])                       # clips
+    estimate(m, [(m.p, 3.0)])                       # clamps
     estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves
 
 `mode="linear"` is the default and is unchanged.
 
 Each pass rebuilds the Schur complement over the conditions so far,
 so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
-the total grows quadratically. The default `max_passes` of 16 is 136
+the total grows quadratically. The default `max_iter` of 16 is 136
 back-solves. The factorization itself is never rebuilt, which is what
-keeps this cheaper than re-solving. `max_passes` bounds that work and
+keeps this cheaper than re-solving. `max_iter` bounds that work and
 is a budget rather than a safeguard: the refinement is only worth
 running while it stays cheaper than the re-solve it replaces.
 
@@ -1561,7 +2056,7 @@ willing to leave a converged point.
 
 ### Added — `pyomo_pounce.estimate_report()` says what the estimate's step did about the bounds (#584)
 
-`estimate()` takes the linear step, clips any variable it carries past a
+`estimate()` takes the linear step, clamps any variable it carries past a
 bound, warns, and returns. The warning names those variables and stops
 there, so a caller cannot tell how far along the perturbation the active
 set changed, whether a constraint became active before any variable did,
@@ -1680,6 +2175,80 @@ workflows and the docs deploy now gate their first job on
 `github.repository == 'jkitchin/pounce'`. Pull requests are unaffected —
 `pull_request` runs in the base repository's context, so a contributor's PR
 still gets the full CI and the Docker rot guard.
+
+- **Warm-start benchmark: coverage completed before any SOTA claim**
+  (#611). The suite could measure how *much* warm starting won but not
+  *whether* it does — every family in it had been chosen by earlier
+  warm-start work. It now carries families built to make warm starting
+  lose, and reports it when they do.
+
+  New initialization arms, completing the nine the issue lists:
+  `values-ipm` (previous primal only, no multipliers or barrier
+  parameter), `warm-ipm-norecenter` (`warm_start_recentering=none` as a
+  pre-#606 attribution control, pinned per-arm rather than per-run),
+  `cold-ipm-lsq` (`least_square_init_primal=yes`, the sparse
+  safeguarded normal step), and `race-fixed` / `race-halving` (start
+  racing, with the family's own cold start always in the field so a
+  loss is attributable to the ranking rather than to sampling). Racing
+  is charged for its tournament: `StepResult.init_time` separates
+  initialization overhead from solve time for every arm.
+
+  The primal-only arm is named `values-ipm` because #622 added an arm
+  by that name, independently and for its own reasons, while this work
+  was in flight. The two were the same arm: previous `x`, no
+  multipliers, no `mu`, no recentering override — identical seeds,
+  identical options, and so identical numbers in every row of every
+  table. Merged into one under #622's name, since that one had already
+  shipped. #611's cross-solver support for it is kept, so the arm now
+  runs under Ipopt as well; the measured tables in
+  `dev-notes/warm-start-611-composite.md` are relabelled and not
+  re-run, the arm being unchanged in everything but its name.
+
+  New problem families outside the ones earlier warm-start work chose:
+  `rastrigin_drift` and `rastrigin_scatter` (multi-basin, the second
+  with no path at all — the issue's "unrelated global/nonconvex cases
+  where continuation should not be expected to help"),
+  `elliptic_control_*` (1-D Poisson optimal control over a mesh sweep,
+  tridiagonal and symmetric rather than block-banded, conditioning
+  growing like `h⁻²`), `resistive_network_*` (flows on a
+  ring-plus-chord graph — scattered sparsity, quartic loss, so not a
+  QP), and `badly_scaled_qp` (10⁸ Hessian conditioning, 10³ row
+  scaling).
+
+  `benchmarks/warmstart/transfer.py` covers the changed-structure case
+  the fixed-shape runner cannot express: horizon shift via
+  `WarmStart.reindex` and mesh prolongation via `WarmStart.transfer`.
+  Both report negative results where they occur — the horizon shift
+  does *not* beat carrying the previous solution unshifted, on either
+  the rotating `mpc_horizon_*` path or the genuinely closed-loop
+  `nmpc_vanderpol`.
+
+  `benchmarks/warmstart/adapters/ipopt_adapter.py` is the external
+  baseline, driving Ipopt through cyipopt with the *same* callback
+  object the pounce adapter uses, so evaluation counts are comparable.
+  Arms Ipopt has no counterpart for are skipped with a recorded reason.
+  `benchmarks/warmstart/kkt.py` recomputes the KKT residual from the
+  returned point identically for both solvers, so neither one's status
+  line decides whether its own step counted.
+
+  `benchmarks/warmstart/composite.py` renders the composite report,
+  including performance and data profiles, into
+  `dev-notes/warm-start-611-composite.md` and a machine-readable
+  `.json` beside it. Every table is computed from the raw result files;
+  none is transcribed.
+
+  Fixed while checking the reproduction commands this note documents:
+  `warmstart/report.py` gated its homotopy section on `cold-sqp-hom`
+  alone but then indexed `warm-sqp` and `warm-sqp-hom` unconditionally,
+  so any narrowed `--arms` that dropped the warm twins — including the
+  `--arms cold-sqp,cold-sqp-hom` reproduction in
+  `dev-notes/warm-start-benchmark.md` — died with `KeyError:
+  'warm-sqp'` after the solves had already run. The absent arms now
+  render as `—`. The full sweep's report is byte-identical across the
+  change.
+
+  No solver code changed — this is benchmark and documentation only.
+
 
 ## [0.10.0] - 2026-08-11
 

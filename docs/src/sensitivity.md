@@ -135,6 +135,9 @@ receding-horizon pattern) does not change the answer. It also
 warns when the linear step leaves the variable bounds, and
 `mode="fix_relax"` pins those variables and re-solves instead, covered
 in [Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax)
+below. `mode="path"` applies the change a little at a time and records
+where the active set changes along it, covered in
+[Applying the change a little at a time](#applying-the-change-a-little-at-a-time-modepath)
 below. There is one exception to the warning, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `estimate_report()` measures the same step and reports where the
@@ -149,10 +152,10 @@ parameters; the first-move gradient IS the NMPC feedback gain).
 ### Bending the estimate around a bound: `mode="fix_relax"`
 
 `estimate()` takes the linear step, and where that step leaves a
-variable's bound it clips the value and warns. Clipping is all the
+variable's bound it clamps the value and warns. Clamping is all the
 linear step can do, and it costs more than the one variable: every
 other variable keeps the value the step gave it, computed on the
-assumption that the clipped one was free to move where the step said.
+assumption that the clamped one was free to move where the step said.
 The result satisfies the bounds and no longer satisfies the
 constraints.
 
@@ -164,7 +167,7 @@ that bound so the variable can move. Each adds a row to the held
 factorization and re-solves, so the other variables move with it:
 
 ```python
-estimate(m, [(m.setpoint, 3.0)])                      # clips
+estimate(m, [(m.setpoint, 3.0)])                      # clamps
 estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
 ```
 
@@ -187,9 +190,9 @@ want the barrier problem's answer.
 
 Each pass rebuilds the Schur complement over the pins so far, so pass
 `k` costs one dense `k × k` solve and `k + 1` back-solves and the total
-grows quadratically. The default `max_passes` of 16 is 136 back-solves.
+grows quadratically. The default `max_iter` of 16 is 136 back-solves.
 A pin never rebuilds the factorization, which is what keeps it cheaper
-than re-solving. `max_passes` bounds that work and is a budget rather
+than re-solving. `max_iter` bounds that work and is a budget rather
 than a safeguard: the refinement is only worth running while it stays
 cheaper than the re-solve it replaces.
 
@@ -221,9 +224,71 @@ the bound rather than past it.
 This is what `sens_boundcheck` turns on for the CLI and the Rust API,
 and it mirrors upstream sIPOPT's option of that name.
 
+### Applying the change a little at a time: `mode="path"`
+
+`mode="fix_relax"` decides every active-set change from full steps
+taken at the base point. `mode="path"` follows the solution along the
+perturbation instead: it takes the largest fraction of the change the
+current active set allows, applies the one change that happens there,
+and continues under the updated set. The prediction is piecewise
+linear in the parameter. For a QP that is the exact solution path,
+since a QP's solution is piecewise affine in the parameter. For an NLP
+the one error left is the linearization at the base point, because
+nothing is re-linearized between breakpoints.
+
+Three kinds of breakpoint end a segment. A free variable reaches a
+bound and is held there. A bound active at the base has its multiplier
+fall to zero and the variable leaves it. A bound the path itself
+started holding stops binding under a later direction and the variable
+leaves it again. That last kind is what no decision at the base point
+can represent: a variable can arrive at a bound partway through the
+change and depart before the end.
+
+`active_set_changes()` returns that record, which is the part no other
+mode produces. It takes the same perturbation argument `estimate()`
+takes:
+
+```python
+from pyomo_pounce import active_set_changes, estimate
+
+estimate(m, [(m.setpoint, 3.0)], mode="path")
+for c in active_set_changes(m, [(m.setpoint, 3.0)]):
+    print(c.fraction, c.var.name, c.bound, c.action)
+```
+
+Each entry holds the fraction of the perturbation at which the change
+happens, the variable, which bound (`"lower"` or `"upper"`), and
+whether the variable `"reaches"` it or `"leaves"` it. The first
+entry's fraction is how much of the perturbation the held solve's
+active set survives unchanged.
+
+Where the two modes settle the same active set they give the same
+prediction. Where the changes are spread out along the perturbation
+they differ: on the notebook's CSTR at a change large enough to
+release thirteen bounds, `fix_relax` decides all thirteen at once
+from base-point multipliers and its prediction lands below even
+`mode="linear"` (worst relative miss 0.950 against 0.833), while
+`mode="path"` applies each release at the fraction the record names
+and stays the most accurate of the three (0.626). At changes this
+large every first-order prediction degrades: the CSTR trajectories
+read high near the start of the horizon in every mode, which is the
+base-point linearization and not something more segments repair.
+
+`max_iter` is the same knob it is under `fix_relax`: it caps the
+active-set changes applied, and past the cap the rest of the
+perturbation is taken in one step under the active set reached, with
+the warning naming the cap. On the cost side a reach adds a Schur row
+without re-factoring, each release re-factors once, and the wall time
+grows about linearly with the changes applied, well under a re-solve.
+
+See
+[`python/notebooks/36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
+for the worked CSTR example behind those numbers, including `max_iter`
+sweeps of both modes against re-solve wall time.
+
 ### What the step did about the bounds: `estimate_report()`
 
-The clamp warning names the variables it clipped and stops there.
+The clamp warning names the variables it clamped and stops there.
 `estimate_report()` takes the same perturbation argument `estimate()`
 takes and measures the same step, so a caller can see how far along the
 perturbation the active set changes:
@@ -813,7 +878,7 @@ All three entry points are verified against upstream sIPOPT 3.14.19's
 
 The bound refinement is verified on that same example, which crosses a
 bound under upstream's own perturbation: against a full re-solve the
-refinement lands within 6e-9 where clipping the crossing coordinate is
+refinement lands within 6e-9 where clamping the crossing coordinate is
 off by 0.12. It is also checked on a model with three degrees of
 freedom, where three coordinates cross at once and all three pins hold,
 and for the refusal when the pins would exceed the degrees of freedom.

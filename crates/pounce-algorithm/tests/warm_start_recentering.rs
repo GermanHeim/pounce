@@ -363,17 +363,19 @@ fn a_partial_warm_start_reconstructs_the_block_it_is_missing() {
     );
 }
 
-/// A seed with *no* dual information is left alone, deliberately.
+/// A seed with no dual information gets its *bound* blocks filled and
+/// nothing else derived (gh#606 as amended by gh#622).
 ///
-/// Reconstruction completes a partial warm start; it does not
-/// manufacture a whole one. From a primal point alone there is nothing
-/// to derive the multipliers from, and what comes out is the cold
-/// path's estimate paired with the warm path's barrier — measured over
+/// The two halves are gated differently because they need different
+/// things. `z = mu / slack` needs only the slacks the supplied point
+/// already determines, so it runs here; the least-squares `y` needs a
+/// dual to complete, and from a primal point alone it is the cold
+/// path's estimate wearing the warm path's barrier — measured over
 /// `benchmarks/warmstart` at 1102 -> 1211 iterations across 27
-/// parametric paths when it was allowed to run. The verdict says so
-/// rather than the initializer pretending it did something.
+/// parametric paths when it was allowed to run. So: bound duals
+/// reconstructed, equality duals reported unseeded, mu untouched.
 #[test]
-fn a_primal_only_seed_is_reported_unseeded_and_left_alone() {
+fn a_primal_only_seed_gets_its_bound_blocks_and_nothing_derived() {
     let seed = cold_solve();
     let (st_legacy, it_legacy, _) = warm_solve(&seed, Seeded::Nothing, "none", None);
     let (st_resid, it_resid, diag) = warm_solve(&seed, Seeded::Nothing, "residual", None);
@@ -386,13 +388,27 @@ fn a_primal_only_seed_is_reported_unseeded_and_left_alone() {
     );
     assert!(matches!(st_legacy, ApplicationReturnStatus::SolveSucceeded));
     assert!(matches!(st_resid, ApplicationReturnStatus::SolveSucceeded));
-    assert_eq!(diag.bound_duals, BlockVerdict::Unseeded);
-    assert_eq!(diag.eq_duals, BlockVerdict::Unseeded);
-    assert_eq!(diag.bound_duals_reconstructed, 0);
+    assert_eq!(diag.bound_duals, BlockVerdict::Reconstructed);
+    assert!(
+        diag.bound_duals_reconstructed > 0,
+        "every bound block arrived unseeded, so every entry is a fill"
+    );
+    assert_eq!(
+        diag.eq_duals,
+        BlockVerdict::Unseeded,
+        "there is no dual to complete y from; it keeps the constant fill"
+    );
     assert!(!diag.stationarity_split);
     assert_eq!(
-        it_resid, it_legacy,
-        "with nothing to reconstruct from, the trajectory must not move"
+        diag.mu_in, diag.mu_out,
+        "the complementarity of a point this initializer just filled to \
+         mu / slack measures mu; escalating off it is the barrier \
+         arguing with itself"
+    );
+    assert!(
+        it_resid < it_legacy,
+        "filling the bound blocks from the barrier relation must beat \
+         the constant: residual={it_resid} vs none={it_legacy}"
     );
 }
 
@@ -930,4 +946,381 @@ fn stationarity_split_is_reported_only_when_it_runs() {
         !diag.stationarity_split,
         "the flag must track the work, not the call site"
     );
+}
+
+/// A warm start that carries only a point must not be charged for
+/// multipliers it never claimed to have (gh#622).
+///
+/// `TNLP::get_starting_point` is asked for `init_z` and may leave the
+/// blocks untouched; the buffer behind them used to arrive as a
+/// literal zero, which is a *legal multiplier value* and so skipped
+/// the unseeded resolution and was merely floored at
+/// `warm_start_mult_bound_push`. Under the tightened pushes
+/// `pounce.WarmStart` ships that is 1e-9 — a start declaring every
+/// bound inactive, with complementarity broken against μ before the
+/// first iteration. It cost this fixture 11 iterations against 7, and
+/// the tighter the pushes the worse it got, which is the opposite of
+/// what a push is for.
+///
+/// Three statements, in the order they pin the fix: an absent block is
+/// the same thing as an explicitly unseeded one; tightening the pushes
+/// does not move a start that seeded no multipliers; and the switch is
+/// not a penalty box relative to a plain solve from the same point.
+#[test]
+fn a_values_only_warm_start_is_not_taxed_by_the_tightened_pushes() {
+    let seed = cold_solve();
+    // A transferred point: the solution nudged, as a horizon shift
+    // would leave it. Every arm below starts from exactly this x.
+    let x0 = [
+        seed.x[0] * 1.05,
+        seed.x[1] * 0.95,
+        seed.x[2] * 1.02,
+        seed.x[3] * 0.98,
+    ];
+    let (st_cold, it_cold, _) = values_only_solve(x0, Switch::Off, Pushes::Default);
+    let (st_tight, it_tight, diag) = values_only_solve(x0, Switch::On, Pushes::Tight);
+    let (_, it_loose, _) = values_only_solve(x0, Switch::On, Pushes::Default);
+    let (_, it_nan, _) = values_only_solve(x0, Switch::OnSeedingNan, Pushes::Tight);
+
+    eprintln!(
+        "HS071 values-only warm start: cold={it_cold} ({st_cold:?}) \
+         switch+tight={it_tight} ({st_tight:?}) switch+default={it_loose} \
+         switch+tight, NaN-seeded={it_nan}"
+    );
+    assert!(matches!(st_cold, ApplicationReturnStatus::SolveSucceeded));
+    assert!(matches!(st_tight, ApplicationReturnStatus::SolveSucceeded));
+
+    assert_eq!(
+        it_tight, it_nan,
+        "a block the caller never wrote and one written as NaN are the \
+         same statement — 'I have no multipliers for you'"
+    );
+    assert_eq!(
+        it_tight, it_loose,
+        "with no multipliers seeded there is nothing for the multiplier \
+         push to push, so tightening it must not reroute the solve"
+    );
+    assert!(
+        it_tight <= it_cold + 2,
+        "the warm-start switch must not turn into a penalty box for a \
+         caller who only has a point: switch={it_tight} cold={it_cold} \
+         (it was 11 against 6 before gh#622)"
+    );
+
+    // The other half of the fix: the blocks are filled from the
+    // barrier relation rather than from a push, and the measurement
+    // taken against that fill is reported but never allowed to move mu.
+    let diag = diag.expect("a warm solve must report diagnostics");
+    assert_eq!(diag.bound_duals, BlockVerdict::Reconstructed);
+    assert_eq!(
+        diag.mu_in, diag.mu_out,
+        "a point this initializer just filled to mu / slack measures \
+         mu; it must not escalate off its own fill"
+    );
+}
+
+/// Is `warm_start_init_point` on, and does the caller mark its (absent)
+/// multipliers explicitly?
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    Off,
+    On,
+    /// The switch, plus `z_l`/`z_u` written as all-NaN — the explicit
+    /// spelling of what `On` leaves implicit.
+    OnSeedingNan,
+}
+
+/// `warm_start_*_push` at the defaults, or at the 1e-9 the
+/// `pounce.WarmStart` recipe sets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pushes {
+    Default,
+    Tight,
+}
+
+fn values_only_solve(
+    x0: [Number; 4],
+    switch: Switch,
+    pushes: Pushes,
+) -> (
+    ApplicationReturnStatus,
+    i32,
+    Option<pounce_algorithm::init::warm_start::WarmStartDiagnostics>,
+) {
+    let mut app = IpoptApplication::new();
+    {
+        let o = app.options_mut();
+        o.set_integer_value("print_level", 0, true, false).unwrap();
+        if switch != Switch::Off {
+            o.set_string_value("warm_start_init_point", "yes", true, false)
+                .unwrap();
+        }
+        if pushes == Pushes::Tight {
+            for k in [
+                "warm_start_bound_push",
+                "warm_start_bound_frac",
+                "warm_start_slack_bound_push",
+                "warm_start_slack_bound_frac",
+                "warm_start_mult_bound_push",
+            ] {
+                o.set_numeric_value(k, 1e-9, true, false).unwrap();
+            }
+        }
+    }
+    app.initialize().unwrap();
+    let nan = vec![Number::NAN; 4];
+    let concrete = Rc::new(RefCell::new(Hs071Seeded {
+        x0: Some(x0),
+        z_l0: (switch == Switch::OnSeedingNan).then(|| nan.clone()),
+        z_u0: (switch == Switch::OnSeedingNan).then(|| nan.clone()),
+        ..Default::default()
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    (
+        status,
+        app.statistics().iteration_count,
+        app.warm_start_diagnostics(),
+    )
+}
+
+// ---------------------------------------------------------------------
+// gh#617 / gh#618 — what the recentering pass does with a seed it should
+// not believe.
+// ---------------------------------------------------------------------
+
+/// gh#617's regime, deterministically: the exact primal solution paired
+/// with multipliers that carry no signal.
+///
+/// The issue draws the noise from `N(0, 1e4)`; a fixed alternating
+/// `±100` is the same magnitude with no RNG in a regression test, and
+/// the alternation matters — a block that is half negative is what made
+/// a signed average of `z · s` cancel to nothing and hide the
+/// corruption from a mean-based test.
+fn corrupt(seed: &Captured) -> Captured {
+    let flip = |n: usize, first: Number| -> Vec<Number> {
+        (0..n)
+            .map(|i| if i % 2 == 0 { first } else { -first })
+            .collect()
+    };
+    Captured {
+        x: seed.x,
+        lambda: flip(seed.lambda.len(), 100.0),
+        z_l: flip(seed.z_l.len(), 100.0),
+        z_u: flip(seed.z_u.len(), -100.0),
+        mu: seed.mu,
+        iters: seed.iters,
+    }
+}
+
+/// gh#617, the behavioural claim, and the one that does not need any of
+/// this change's new API to state: a dual seed that cannot belong to
+/// the primal point it arrived with must not drag μ up to the cold
+/// ceiling.
+///
+/// Before this change the corrupted multipliers were taken at face
+/// value, `avrg_compl` measured them, and the escalation in
+/// [`final_mu`] moved μ eight orders — from the converged barrier to
+/// `MU_CEILING` — while keeping `x` at the exact solution, which is the
+/// most off-centre a point can be for that barrier. The result was a
+/// warm start that cost about what a cold solve costs, against the
+/// three iterations the pre-gh#606 constants happened to get.
+#[test]
+fn a_corrupted_dual_seed_does_not_escalate_mu_to_the_ceiling() {
+    let seed = cold_solve();
+    let bad = corrupt(&seed);
+    let (status, iters, diag) = warm_solve(&bad, Seeded::All, "residual", None);
+    let diag = diag.expect("diagnostics");
+    let (st_legacy, it_legacy, _) = warm_solve(&bad, Seeded::All, "none", None);
+    eprintln!(
+        "HS071 corrupted seed: residual={iters} ({status:?}) none={it_legacy} \
+         ({st_legacy:?}) cold={} mu {:e} -> {:e} inf_pr={:e} compl={:e}",
+        seed.iters, diag.mu_in, diag.mu_out, diag.primal_residual, diag.complementarity
+    );
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+    // The fixture has to actually be the regime the issue describes:
+    // the primal point is the answer, so nothing about it is stale.
+    assert!(
+        diag.primal_residual < 1e-6,
+        "the primal seed must be exact: inf_pr={:e}",
+        diag.primal_residual
+    );
+    assert!(
+        diag.mu_out <= diag.mu_in,
+        "a refused dual seed must not move the barrier: mu_in={:e} mu_out={:e}",
+        diag.mu_in,
+        diag.mu_out
+    );
+    assert!(
+        iters <= it_legacy,
+        "reconstructing off a corrupted seed must not cost more than the \
+         pre-gh#606 constants it replaced: residual={iters} none={it_legacy}"
+    );
+    assert!(
+        iters < seed.iters,
+        "an exact primal point must still beat a cold solve however bad its \
+         duals are: warm={iters} cold={}",
+        seed.iters
+    );
+}
+
+/// gh#617, the reporting half. Needs the `Rejected` verdict and the two
+/// new counters, so unlike the test above it cannot be compiled against
+/// the parent commit at all — it pins the diagnostics, not a behaviour.
+#[test]
+fn a_refused_dual_seed_says_so_in_the_diagnostics() {
+    let seed = cold_solve();
+    let bad = corrupt(&seed);
+    let (_status, _iters, diag) = warm_solve(&bad, Seeded::All, "residual", None);
+    let diag = diag.expect("diagnostics");
+    assert_eq!(
+        diag.bound_duals,
+        BlockVerdict::Rejected,
+        "a refused block is the loudest verdict and must win the summary"
+    );
+    assert!(
+        diag.bound_duals_rejected > 0,
+        "the count must say how much was refused"
+    );
+    // The verdicts are per block, and HS071 carries both kinds at
+    // once: the two seeded variable-bound blocks are refused, while the
+    // slack-bound blocks no frontend can seed are still rebuilt from
+    // `μ̂ / slack` as gh#606 intends. The summary reports the refusal
+    // because that is the one a caller has to act on; the counters keep
+    // both numbers so the mixture stays legible.
+    assert!(
+        diag.bound_duals_reconstructed > 0,
+        "the blocks nobody seeded are still reconstructed"
+    );
+    // A refused `z` leaves nothing for the split to stand on, and the
+    // split is what would launder the corruption back in.
+    assert!(!diag.stationarity_split);
+}
+
+/// gh#617, the other block. A caller who keeps `info["mult_g"]` but not
+/// the bound multipliers is the common partial-seed shape, and a
+/// corrupted `y` reaches the reconstruction through a different door:
+/// there is no seeded `z` to refuse, so the damage is the stationarity
+/// split turning `y`'s miss into bound multipliers.
+#[test]
+fn a_corrupted_lagrange_seed_is_not_split_into_bound_multipliers() {
+    let seed = cold_solve();
+    let bad = Captured {
+        lambda: vec![100.0, -100.0],
+        ..corrupt(&seed)
+    };
+    // `BoundsOnly` inverted: seed `lagrange` and leave `z` out. The
+    // helper's three modes do not cover it, so drive it directly.
+    let (status, iters, diag) = warm_solve_lagrange_only(&bad, "residual");
+    let (_st, it_legacy, _) = warm_solve_lagrange_only(&bad, "none");
+    let diag = diag.expect("diagnostics");
+    eprintln!(
+        "HS071 corrupted lagrange: residual={iters} none={it_legacy} \
+         mu {:e} -> {:e} compl={:e} split={}",
+        diag.mu_in, diag.mu_out, diag.complementarity, diag.stationarity_split
+    );
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+    assert!(
+        diag.mu_out <= diag.mu_in,
+        "mu_in={:e} mu_out={:e}",
+        diag.mu_in,
+        diag.mu_out
+    );
+    assert!(iters <= it_legacy, "residual={iters} none={it_legacy}");
+}
+
+/// `warm_solve` with `lagrange` seeded and the bound multipliers left
+/// out — the mirror image of [`Seeded::BoundsOnly`].
+fn warm_solve_lagrange_only(
+    seed: &Captured,
+    recentering: &str,
+) -> (
+    ApplicationReturnStatus,
+    i32,
+    Option<pounce_algorithm::init::warm_start::WarmStartDiagnostics>,
+) {
+    let mut app = IpoptApplication::new();
+    let o = app.options_mut();
+    o.set_integer_value("print_level", 0, true, false).unwrap();
+    o.set_string_value("warm_start_init_point", "yes", true, false)
+        .unwrap();
+    o.set_string_value("warm_start_recentering", recentering, true, false)
+        .unwrap();
+    o.set_numeric_value("mu_init", seed.mu.clamp(1e-9, 1e-1), true, false)
+        .unwrap();
+    for k in [
+        "warm_start_bound_push",
+        "warm_start_bound_frac",
+        "warm_start_slack_bound_push",
+        "warm_start_slack_bound_frac",
+        "warm_start_mult_bound_push",
+    ] {
+        o.set_numeric_value(k, 1e-9, true, false).unwrap();
+    }
+    app.initialize().unwrap();
+    let concrete = Rc::new(RefCell::new(Hs071Seeded {
+        x0: Some(seed.x),
+        lambda0: Some(seed.lambda.clone()),
+        ..Default::default()
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    (
+        status,
+        app.statistics().iteration_count,
+        app.warm_start_diagnostics(),
+    )
+}
+
+/// gh#618. A good seed must be untouched by everything above: the whole
+/// point of the conservatism is that an exact restart's numbers are the
+/// ones gh#606 earned and this change may not spend them.
+///
+/// Stated as an equality against the parent's own behaviour rather than
+/// a bound, because "no worse" would pass on a change that quietly
+/// rerouted the trajectory somewhere else that happened to cost the
+/// same.
+#[test]
+fn an_exact_restart_is_unchanged_by_the_seed_guards() {
+    let seed = cold_solve();
+    let (status, iters, diag) = warm_solve(&seed, Seeded::All, "residual", None);
+    let diag = diag.expect("diagnostics");
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+    // Nothing was refused, and the reconstruction still ran.
+    assert_ne!(diag.bound_duals, BlockVerdict::Rejected);
+    assert_eq!(diag.bound_duals_rejected, 0);
+    assert!(!diag.eq_duals_rejected);
+    assert!(diag.bound_duals_reconstructed > 0);
+    assert!(diag.stationarity_split, "the split earns gh#606's win here");
+    let (_st, it_legacy, _) = warm_solve(&seed, Seeded::All, "none", None);
+    assert!(
+        iters < it_legacy,
+        "the exact restart must still beat the constants: residual={iters} \
+         none={it_legacy}"
+    );
+}
+
+/// gh#618. The stale point gh#606 built the escalation for still gets
+/// it. The staleness fallback added here works on the *reconstruction*,
+/// not on μ, and the two must not be confused: a point this far out
+/// wants the loose barrier.
+#[test]
+fn a_strongly_stale_point_still_gets_its_looser_barrier() {
+    let seed = cold_solve();
+    let stale = [5.0, 1.0, 1.0, 5.0];
+    let (status, _iters, diag) = warm_solve(&seed, Seeded::All, "residual", Some(stale));
+    let diag = diag.expect("diagnostics");
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+    assert!(diag.primal_residual > 1.0);
+    assert!(
+        diag.mu_out > diag.mu_in,
+        "mu_in={:e} mu_out={:e}",
+        diag.mu_in,
+        diag.mu_out
+    );
+    // And the seed was not mistaken for a corrupted one: a point that
+    // misses feasibility by `inf_pr` is *allowed* complementarity of
+    // that order, which is the `max(mu_hat, inf_pr)` half of the
+    // rejection test.
+    assert_ne!(diag.bound_duals, BlockVerdict::Rejected);
 }

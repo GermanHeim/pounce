@@ -1171,6 +1171,7 @@ fn verdict_name(v: BlockVerdict) -> &'static str {
         BlockVerdict::Reconstructed => "reconstructed",
         BlockVerdict::Discarded => "discarded",
         BlockVerdict::Unseeded => "unseeded",
+        BlockVerdict::Rejected => "rejected",
     }
 }
 
@@ -1195,6 +1196,8 @@ pub(crate) fn build_info_dict<'py>(
         d.set_item("bound_duals", verdict_name(w.bound_duals))?;
         d.set_item("eq_duals", verdict_name(w.eq_duals))?;
         d.set_item("bound_duals_reconstructed", w.bound_duals_reconstructed)?;
+        d.set_item("bound_duals_rejected", w.bound_duals_rejected)?;
+        d.set_item("eq_duals_rejected", w.eq_duals_rejected)?;
         d.set_item("stationarity_split", w.stationarity_split)?;
         d.set_item("recentering_disabled", w.recentering_disabled)?;
         info.set_item("warm_start", d)?;

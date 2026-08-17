@@ -21,6 +21,7 @@
 #include "casadi/core/nlpsol_impl.hpp"
 #include "casadi/core/convexify.hpp"
 #include "pounce_runtime.hpp"
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -49,6 +50,15 @@ namespace casadi {
     std::vector<double> inf_pr, inf_du, mu_trace, d_norm, obj_trace,
                         alpha_pr, alpha_du, regularization_size;
     std::vector<casadi_int> ls_trials;
+    /// Final KKT errors, read off the problem before it is freed —
+    /// `FreeIpoptProblem` takes the accessors with it.
+    double final_inf_pr = 0, final_inf_du = 0, final_compl_inf = 0;
+    /// Linear-solver post-mortem, harvested at the same moment.
+    PounceLinearSolverStats linsol{};
+    bool linsol_valid = false;
+    /// Restoration-phase activity, likewise.
+    ipindex resto_calls = 0, resto_inner = 0, resto_outer = 0;
+    double resto_secs = 0;
     /// Working set carried from this memory object's previous solve
     /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
     /// variable / row numbering. Empty until a solve produces one.
@@ -195,6 +205,12 @@ namespace casadi {
     static bool cb_h(ipindex n, ipnumber* x, bool new_x, ipnumber obj_factor, ipindex m,
                      ipnumber* lambda, bool new_lambda, ipindex nele,
                      ipindex* iRow, ipindex* jCol, ipnumber* values, UserDataPtr ud);
+    /// The leading `alg_mod` is unnamed on purpose: POUNCE fires this
+    /// callback only from its outer loop and always reports
+    /// `RegularMode` (`ipopt_alg.rs`, `build_iter_stats`), so recording
+    /// it would publish a column that is constant zero and reads as
+    /// working restoration detection. `stats()['restoration']` reports
+    /// what POUNCE does measure; see gh#634.
     static bool cb_iter(ipindex alg_mod, ipindex iter_count, ipnumber obj_value,
                         ipnumber inf_pr, ipnumber inf_du, ipnumber mu, ipnumber d_norm,
                         ipnumber regularization_size, ipnumber alpha_du, ipnumber alpha_pr,
@@ -595,6 +611,26 @@ namespace casadi {
     const int n = static_cast<int>(nx_);
     const int ng = static_cast<int>(ng_);
 
+    // Reset the per-iteration trace. A memory object is reused across
+    // calls — every receding-horizon loop calls the same solver
+    // repeatedly — and without this the traces concatenate, so
+    // `stats()['iterations']` describes every solve so far while
+    // `iter_count` beside it describes only the last (gh#634). CasADi's
+    // ipopt plugin clears the same vectors at the same point.
+    m->inf_pr.clear();
+    m->inf_du.clear();
+    m->mu_trace.clear();
+    m->d_norm.clear();
+    m->regularization_size.clear();
+    m->obj_trace.clear();
+    m->alpha_pr.clear();
+    m->alpha_du.clear();
+    m->ls_trials.clear();
+    m->final_inf_pr = m->final_inf_du = m->final_compl_inf = 0;
+    m->linsol_valid = false;
+    m->resto_calls = m->resto_inner = m->resto_outer = 0;
+    m->resto_secs = 0;
+
     m->xl.assign(d_nlp->lbz, d_nlp->lbz + n);
     m->xu.assign(d_nlp->ubz, d_nlp->ubz + n);
     m->gl.assign(d_nlp->lbz + n, d_nlp->lbz + n + ng);
@@ -624,20 +660,50 @@ namespace casadi {
     if (!exact_hessian_) {
       AddIpoptStrOption(prob, CC("hessian_approximation"), CC("limited-memory"));
     }
-    // Forward user options (typed dispatch by GenericType)
+    // Forward user options.
+    //
+    // The type to send is POUNCE's, not the one the value happens to
+    // carry. A `Dict` value's type comes from how the user typed the
+    // literal, and the two disagree for the commonest case there is:
+    // `{'tol': 1}` is an int in Python and a number to POUNCE, so
+    // dispatching on the value alone sent it to AddIpoptIntOption,
+    // which refuses it — the option silently kept its default. So ask
+    // the registry first (gh#634) and fall back to the value's own type
+    // only for keywords this build does not register, where POUNCE will
+    // report the unknown option itself.
     for (auto&& op : opts_) {
-      if (op.second.is_double() && !op.second.is_int()) {
-        AddIpoptNumOption(prob, CC(op.first.c_str()), op.second.to_double());
-      } else if (op.second.is_int() || op.second.is_bool()) {
-        if (op.second.is_bool()) {
-          AddIpoptStrOption(prob, CC(op.first.c_str()),
-                            CC(static_cast<bool>(op.second) ? "yes" : "no"));
+      const std::string& key = op.first;
+      const GenericType& val = op.second;
+      switch (GetPounceOptionType(prob, key.c_str())) {
+        case POUNCE_OPTION_NUMBER:
+          AddIpoptNumOption(prob, CC(key.c_str()), val.to_double());
+          continue;
+        case POUNCE_OPTION_INTEGER:
+          AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int()));
+          continue;
+        case POUNCE_OPTION_STRING: {
+          // A bool is how a Python caller most naturally writes POUNCE's
+          // yes/no string options.
+          std::string v = val.is_bool() ? (static_cast<bool>(val) ? "yes" : "no")
+                                        : val.to_string();
+          AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str()));
+          continue;
+        }
+        default:
+          break;
+      }
+      if (val.is_double() && !val.is_int()) {
+        AddIpoptNumOption(prob, CC(key.c_str()), val.to_double());
+      } else if (val.is_int() || val.is_bool()) {
+        if (val.is_bool()) {
+          AddIpoptStrOption(prob, CC(key.c_str()),
+                            CC(static_cast<bool>(val) ? "yes" : "no"));
         } else {
-          AddIpoptIntOption(prob, CC(op.first.c_str()), static_cast<int>(op.second.to_int()));
+          AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int()));
         }
       } else {
-        { std::string v = op.second.to_string();
-          AddIpoptStrOption(prob, CC(op.first.c_str()), CC(v.c_str())); }
+        { std::string v = val.to_string();
+          AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str())); }
       }
     }
     // gh#624 — hand POUNCE the variables that enter nonlinearly, so the
@@ -702,7 +768,18 @@ namespace casadi {
     m->return_status = static_cast<int>(st);
     m->iter = GetIpoptIterCount(prob);
     m->t_solve = GetIpoptSolveTime(prob);
+    // Everything below reads through `prob`, so it has to happen before
+    // the free — and `m->prob` has to stop pointing at freed memory
+    // afterwards, because `get_stats` uses it to tell a solve in flight
+    // (where the live-iterate accessors work) from one that has ended.
+    m->final_inf_pr = GetIpoptPrimalInf(prob);
+    m->final_inf_du = GetIpoptDualInf(prob);
+    m->final_compl_inf = GetIpoptComplInf(prob);
+    m->linsol_valid = GetPounceLinearSolverStats(prob, &m->linsol);
+    GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
+                              &m->resto_outer, &m->resto_secs);
     FreeIpoptProblem(prob);
+    m->prob = nullptr;
 
     // Back on the C++ side, with POUNCE's frames unwound and its handle
     // freed: now a Ctrl-C caught during a callback can be re-thrown safely.
@@ -814,6 +891,84 @@ namespace casadi {
     iterations["alpha_du"] = m->alpha_du;
     iterations["ls_trials"] = m->ls_trials;
     stats["iterations"] = iterations;
+
+    // `stats()` is callable from inside `iteration_callback`, where the
+    // trace above already carries the current iteration as its last
+    // element — the plugin records it before handing control to the
+    // callback. So the live diagnostics a caller wants mid-solve
+    // (mode, mu, step norm, regularization, line-search trials) need no
+    // second channel, and none is invented here: CasADi's `Nlpsol`
+    // callback signature is fixed at (x, f, g, lam_x, lam_g), and this
+    // keeps everything else reachable without parsing the solver log.
+    //
+    // What is *not* in the trace is the current violation vectors, so
+    // those are fetched here, and only here: they cost an evaluation
+    // and are wanted by the rare caller, not by every `stats()` call
+    // after a solve. `m->prob` is non-NULL only while a solve is in
+    // flight; POUNCE itself then reports whether an intermediate
+    // callback is actually on the stack.
+    if (m->prob) {
+      const int n = static_cast<int>(nx_);
+      const int ng = static_cast<int>(ng_);
+      std::vector<double> xlv(n), xuv(n), cxl(n), cxu(n), glag(n), gv(ng), cg(ng);
+      if (GetIpoptCurrentViolations(m->prob, false, n, xlv.data(), xuv.data(),
+                                    cxl.data(), cxu.data(), glag.data(), ng,
+                                    ng ? gv.data() : nullptr,
+                                    ng ? cg.data() : nullptr)) {
+        Dict v;
+        v["x_L_violation"] = xlv;
+        v["x_U_violation"] = xuv;
+        v["compl_x_L"] = cxl;
+        v["compl_x_U"] = cxu;
+        v["grad_lag_x"] = glag;
+        v["nlp_constraint_violation"] = gv;
+        v["compl_g"] = cg;
+        stats["current_violations"] = v;
+      }
+    } else {
+      // Final KKT errors, harvested in `solve` before the problem was
+      // freed. Only meaningful once a solve has ended, which is exactly
+      // when `m->prob` is NULL.
+      stats["final_inf_pr"] = m->final_inf_pr;
+      stats["final_inf_du"] = m->final_inf_du;
+      stats["final_compl_inf"] = m->final_compl_inf;
+
+      // Restoration is reported per solve, not per iteration: POUNCE's
+      // intermediate callback always reports RegularMode, so labelling
+      // a single iteration as a restoration one is not something this
+      // plugin can honestly do yet (gh#634).
+      Dict resto;
+      resto["calls"] = static_cast<casadi_int>(m->resto_calls);
+      resto["inner_iters"] = static_cast<casadi_int>(m->resto_inner);
+      resto["outer_iters"] = static_cast<casadi_int>(m->resto_outer);
+      resto["wall_secs"] = m->resto_secs;
+      stats["restoration"] = resto;
+    }
+
+    // What the KKT linear solver did. `solver_name` is the backend that
+    // actually ran — the answer to "did my `linear_solver` option take
+    // effect?", which no other stat reports. Absent fields are absent
+    // rather than zero: POUNCE does not instrument phase timings, and a
+    // zero there would read as "instantaneous" instead of "unmeasured".
+    if (m->linsol_valid) {
+      Dict ls;
+      ls["solver_name"] = std::string(m->linsol.solver_name);
+      ls["n_factors"] = static_cast<casadi_int>(m->linsol.n_factors);
+      ls["n_pattern_reuse"] = static_cast<casadi_int>(m->linsol.n_pattern_reuse);
+      ls["n_pattern_changes"] = static_cast<casadi_int>(m->linsol.n_pattern_changes);
+      if (!std::isnan(m->linsol.max_fill_ratio)) ls["max_fill_ratio"] = m->linsol.max_fill_ratio;
+      if (!std::isnan(m->linsol.min_abs_pivot)) ls["min_abs_pivot"] = m->linsol.min_abs_pivot;
+      if (!std::isnan(m->linsol.max_abs_pivot)) ls["max_abs_pivot"] = m->linsol.max_abs_pivot;
+      if (m->linsol.last_inertia_positive >= 0) {
+        ls["last_inertia"] = std::vector<casadi_int>{
+          static_cast<casadi_int>(m->linsol.last_inertia_positive),
+          static_cast<casadi_int>(m->linsol.last_inertia_negative),
+          static_cast<casadi_int>(m->linsol.last_inertia_zero)};
+      }
+      if (m->linsol.last_nnz_a >= 0) ls["last_nnz_a"] = static_cast<casadi_int>(m->linsol.last_nnz_a);
+      if (m->linsol.last_nnz_l >= 0) ls["last_nnz_l"] = static_cast<casadi_int>(m->linsol.last_nnz_l);
+      stats["linear_solver"] = ls;
+    }
     return stats;
   }
 
@@ -1052,24 +1207,51 @@ namespace casadi {
     if (!exact_hessian_) {
       g << "AddIpoptStrOption(d->pounce, \"hessian_approximation\", \"limited-memory\");\n";
     }
-    // The user's options, typed the same way the interpreted path types them
-    // — off the `GenericType`, not off a registry. CasADi's ipopt codegen asks
-    // Ipopt's registry for each option's type and, finding none set, writes a
-    // `linear_solver=mumps` default into the emitted code. Neither is right
-    // here: POUNCE's registry lives in Rust, and it refuses `mumps`.
+    // The user's options, typed the same way the interpreted path types
+    // them: POUNCE's registry decides, and the value's own `GenericType`
+    // is only the fallback for a keyword the registry does not know.
+    // `GetPounceOptionType` takes a NULL problem handle for exactly this
+    // caller — there is no problem at generation time — and asking it
+    // here is what keeps generated and interpreted solves from
+    // disagreeing about an option's type (gh#634).
+    //
+    // Unlike CasADi's ipopt codegen, nothing is emitted for an option
+    // the user did not set: that one asks Ipopt's registry for every
+    // option's type and writes a `linear_solver=mumps` default into the
+    // emitted code, which POUNCE would refuse.
     for (auto&& op : opts_) {
-      if (op.second.is_double() && !op.second.is_int()) {
-        g << "AddIpoptNumOption(d->pounce, \"" << op.first << "\", "
-          << op.second.to_double() << ");\n";
-      } else if (op.second.is_bool()) {
-        g << "AddIpoptStrOption(d->pounce, \"" << op.first << "\", \""
-          << (static_cast<bool>(op.second) ? "yes" : "no") << "\");\n";
-      } else if (op.second.is_int()) {
-        g << "AddIpoptIntOption(d->pounce, \"" << op.first << "\", "
-          << op.second.to_int() << ");\n";
+      const std::string& key = op.first;
+      const GenericType& val = op.second;
+      switch (GetPounceOptionType(nullptr, key.c_str())) {
+        case POUNCE_OPTION_NUMBER:
+          g << "AddIpoptNumOption(d->pounce, \"" << key << "\", "
+            << val.to_double() << ");\n";
+          continue;
+        case POUNCE_OPTION_INTEGER:
+          g << "AddIpoptIntOption(d->pounce, \"" << key << "\", "
+            << val.to_int() << ");\n";
+          continue;
+        case POUNCE_OPTION_STRING:
+          g << "AddIpoptStrOption(d->pounce, \"" << key << "\", \""
+            << (val.is_bool() ? (static_cast<bool>(val) ? "yes" : "no")
+                              : val.to_string())
+            << "\");\n";
+          continue;
+        default:
+          break;
+      }
+      if (val.is_double() && !val.is_int()) {
+        g << "AddIpoptNumOption(d->pounce, \"" << key << "\", "
+          << val.to_double() << ");\n";
+      } else if (val.is_bool()) {
+        g << "AddIpoptStrOption(d->pounce, \"" << key << "\", \""
+          << (static_cast<bool>(val) ? "yes" : "no") << "\");\n";
+      } else if (val.is_int()) {
+        g << "AddIpoptIntOption(d->pounce, \"" << key << "\", "
+          << val.to_int() << ");\n";
       } else {
-        g << "AddIpoptStrOption(d->pounce, \"" << op.first << "\", \""
-          << op.second.to_string() << "\");\n";
+        g << "AddIpoptStrOption(d->pounce, \"" << key << "\", \""
+          << val.to_string() << "\");\n";
       }
     }
 

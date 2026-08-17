@@ -960,6 +960,21 @@ def block_initialize(
     ``options.on_block_failure="stop"`` restores the pre-gh#609
     behaviour of stopping at the first failure.
 
+    A 1x1 block solves by Pyomo's ``calculate_variable_from_constraint``.
+    When the model's export-enabled ``scaling_factor`` Suffix tags the
+    block's constraint, the convergence test is measured on the row's
+    stated scale (``eps = 1e-8 / factor``), the same view
+    ``user-scaling`` gives a full-model solve. An untagged constraint
+    keeps the absolute default, and a model without the Suffix behaves
+    exactly as before.
+
+    The test moves in both directions, and both matter. A factor below
+    1 (a row in large units) *loosens* it, which is what lets a row
+    whose evaluation floor sits above 1e-8 converge at all. A factor
+    above 1 (a row in small units) *tightens* it, which is what stops a
+    row whose residual starts below 1e-8 from being declared solved at
+    its seed. ``options=InitOptions(scaling="none")`` opts out of both.
+
     Structurally square is not numerically solvable, so each block is
     also rank-checked before it is solved (gh #609). A block whose
     scaled Jacobian has a reciprocal condition number below
@@ -1002,6 +1017,8 @@ def block_initialize(
         ) from e
     from pyomo.util.calc_var_value import calculate_variable_from_constraint
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
+
+    from pyomo_pounce.scaling import read_scaling
 
     if repair not in ("auto", "off"):
         raise ValueError(
@@ -1090,6 +1107,18 @@ def block_initialize(
             solver = pyo.SolverFactory("pounce")
 
         deps = analysis.block_dependencies or [[] for _ in analysis.variable_blocks]
+
+        # Row factors from the model's `scaling_factor` Suffix, read
+        # through the same machinery the full-model solves use (gh
+        # #483), so the 1x1 convergence test below and a `user-scaling`
+        # solve of the same model see the same rows. An untagged
+        # constraint, and a model with no export-enabled Suffix, keep
+        # Pyomo's absolute default. `scaling="none"` means no row
+        # scaling anywhere, this test included -- it is the way back to
+        # the pre-#632 behaviour for a model whose factors make the
+        # test stricter than its rows can meet.
+        scaled = None if opts.scaling == "none" else read_scaling(model)
+        row_factor = {} if scaled is None else scaled[1]
 
         # The block loop is ours so every solve's verdict is checked
         # before its values are kept: a failed block restores its seed
@@ -1181,7 +1210,20 @@ def block_initialize(
                         )
                         n_sub += 1
                     elif len(vblk) == 1:
-                        calculate_variable_from_constraint(vblk[0], cblk[0])
+                        # The default eps=1e-8 is absolute, measured in
+                        # the row's raw units. An equation whose terms
+                        # sit near 3e7 has a double-precision evaluation
+                        # floor above that, so the linesearch can never
+                        # pass. eps = 1e-8 / f is the identical test
+                        # measured on the scaled row f*g(x), which is
+                        # the row the Suffix says this equation is.
+                        f_c = abs(row_factor.get(cblk[0], 0.0))
+                        if f_c > 0.0:
+                            calculate_variable_from_constraint(
+                                vblk[0], cblk[0], eps=1e-8 / f_c
+                            )
+                        else:
+                            calculate_variable_from_constraint(vblk[0], cblk[0])
                     else:
                         sub = create_subsystem_block(cblk, vblk)
                         with TemporarySubsystemManager(

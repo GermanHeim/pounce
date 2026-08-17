@@ -262,7 +262,7 @@ impl SensSolve {
 
     /// Enable single-pass bound clamping on the perturbed primal `x*
     /// + Δx`: any coordinate that would exceed its declared
-    /// `[x_l, x_u]` by more than `eps` is clipped to the bound.
+    /// `[x_l, x_u]` by more than `eps` is clamped to the bound.
     /// Mirrors the role of upstream `sens_boundcheck` (without the
     /// iterative Schur-refinement loop — see [`crate::boundcheck`]).
     /// Only applies when [`Self::with_deltas`] is also set.

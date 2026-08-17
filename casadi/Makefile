@@ -95,12 +95,24 @@ all: check-env $(PLUGIN)
 
 check-env:
 ifeq ($(strip $(CASADI_LIB)),)
-	$(error CasADi not found. `pip install casadi`, or set CASADI_LIB / CASADI_INC)
+	$(error CasADi not found. `pip install casadi`, or set CASADI_LIB / CASADI_INC / CASADI_VER / CASADI_SRC for a CasADi you built yourself — see README)
+endif
+# Every other input has a usable failure mode; this one does not. With no
+# Python to read `casadi.__version__` from, CASADI_VER is empty, the
+# version macros are defined as nothing, and the build dies deep in the
+# plugin source on `expected primary-expression before ';'` — which names
+# neither the option nor the cause. Catch it here instead (gh#634).
+ifeq ($(strip $(CASADI_VER)),)
+	$(error CASADI_VER is empty. It normally comes from `casadi.__version__`; with no Python available, pass the version of the CasADi you are building against, e.g. CASADI_VER=3.7.2)
 endif
 	@test -f "$(CASADI_SRC)/casadi/core/nlpsol_impl.hpp" || { \
 	  echo "CasADi internal headers not found under CASADI_SRC=$(CASADI_SRC)."; \
-	  echo "The pip wheel does not ship them. Run: make fetch-src"; \
-	  echo "(or point CASADI_SRC at a casadi $(CASADI_VER) source tree)"; \
+	  echo "CASADI_SRC must be the directory *containing* casadi/core/."; \
+	  echo "  - pip-installed CasADi: the wheel omits them. Run: make fetch-src"; \
+	  echo "  - CasADi built from source: point CASADI_SRC at the source"; \
+	  echo "    checkout's root, or rebuild CasADi with"; \
+	  echo "    -DINSTALL_INTERNAL_HEADERS=ON (it defaults to OFF) and use"; \
+	  echo "    its <prefix>/include for both CASADI_SRC and CASADI_INC."; \
 	  exit 1; }
 	@test -f "$(POUNCE_LIB)/libpounce_cinterface.$(SO_EXT)" || { \
 	  echo "libpounce_cinterface not found in $(POUNCE_LIB)."; \

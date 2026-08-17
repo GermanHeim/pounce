@@ -49,7 +49,9 @@
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
 use crate::debug::{ConvexDebugState, fire};
-use crate::qp::{BoxScreen, QpIterate, QpProblem, QpSolution, QpStatus, screen_variable_box};
+use crate::qp::{
+    BoxScreen, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, screen_variable_box,
+};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -587,6 +589,20 @@ const FALSE_OPTIMUM_REL_TOL: f64 = 1e-3;
 /// non-orthant cone (see [`crate::equilibrate`]), so callers must gate on the
 /// cones being nonnegative.
 fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution) -> f64 {
+    equilibrated_kkt_rel_parts(prob, sol).kkt_error()
+}
+
+/// The three components [`equilibrated_kkt_rel`] takes the max of, each already
+/// divided by its own normalizer — a [`QpResiduals`] holding *relative* numbers
+/// rather than absolute ones.
+///
+/// Exposed because the active-set driver's post-loop adjudication (gh #641)
+/// needs them separately: it relaxes only the stationarity and complementarity
+/// terms to the relative measure and keeps primal feasibility absolute, in the
+/// user's own coordinates. See `crate::active_set::adjudicated_kkt_error` for
+/// why that split is the whole safety property. That path is orthant/box by
+/// construction, satisfying the cone restriction above.
+pub(crate) fn equilibrated_kkt_rel_parts(prob: &QpProblem, sol: &QpSolution) -> QpResiduals {
     let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
     let ssol = scaling.scale_solution(sol);
     let res = ssol.kkt_residuals(&scaled);
@@ -630,9 +646,11 @@ fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution) -> f64 {
         .sum::<f64>()
         .abs()
         .max(1.0);
-    (res.dual_infeasibility / gscale)
-        .max(res.primal_infeasibility / pscale)
-        .max(res.complementarity / cscale)
+    QpResiduals {
+        primal_infeasibility: res.primal_infeasibility / pscale,
+        dual_infeasibility: res.dual_infeasibility / gscale,
+        complementarity: res.complementarity / cscale,
+    }
 }
 
 /// Whether an `Optimal` verdict is backed by a point that really is one.
