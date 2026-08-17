@@ -1601,6 +1601,59 @@ workflows and the docs deploy now gate their first job on
 `pull_request` runs in the base repository's context, so a contributor's PR
 still gets the full CI and the Docker rot guard.
 
+- **Warm-start benchmark: coverage completed before any SOTA claim**
+  (#611). The suite could measure how *much* warm starting won but not
+  *whether* it does — every family in it had been chosen by earlier
+  warm-start work. It now carries families built to make warm starting
+  lose, and reports it when they do.
+
+  New initialization arms, completing the nine the issue lists:
+  `warm-ipm-primal` (previous primal only, no multipliers or barrier
+  parameter), `warm-ipm-norecenter` (`warm_start_recentering=none` as a
+  pre-#606 attribution control, pinned per-arm rather than per-run),
+  `cold-ipm-lsq` (`least_square_init_primal=yes`, the sparse
+  safeguarded normal step), and `race-fixed` / `race-halving` (start
+  racing, with the family's own cold start always in the field so a
+  loss is attributable to the ranking rather than to sampling). Racing
+  is charged for its tournament: `StepResult.init_time` separates
+  initialization overhead from solve time for every arm.
+
+  New problem families outside the ones earlier warm-start work chose:
+  `rastrigin_drift` and `rastrigin_scatter` (multi-basin, the second
+  with no path at all — the issue's "unrelated global/nonconvex cases
+  where continuation should not be expected to help"),
+  `elliptic_control_*` (1-D Poisson optimal control over a mesh sweep,
+  tridiagonal and symmetric rather than block-banded, conditioning
+  growing like `h⁻²`), `resistive_network_*` (flows on a
+  ring-plus-chord graph — scattered sparsity, quartic loss, so not a
+  QP), and `badly_scaled_qp` (10⁸ Hessian conditioning, 10³ row
+  scaling).
+
+  `benchmarks/warmstart/transfer.py` covers the changed-structure case
+  the fixed-shape runner cannot express: horizon shift via
+  `WarmStart.reindex` and mesh prolongation via `WarmStart.transfer`.
+  Both report negative results where they occur — the horizon shift
+  does *not* beat carrying the previous solution unshifted, on either
+  the rotating `mpc_horizon_*` path or the genuinely closed-loop
+  `nmpc_vanderpol`.
+
+  `benchmarks/warmstart/adapters/ipopt_adapter.py` is the external
+  baseline, driving Ipopt through cyipopt with the *same* callback
+  object the pounce adapter uses, so evaluation counts are comparable.
+  Arms Ipopt has no counterpart for are skipped with a recorded reason.
+  `benchmarks/warmstart/kkt.py` recomputes the KKT residual from the
+  returned point identically for both solvers, so neither one's status
+  line decides whether its own step counted.
+
+  `benchmarks/warmstart/composite.py` renders the composite report,
+  including performance and data profiles, into
+  `dev-notes/warm-start-611-composite.md` and a machine-readable
+  `.json` beside it. Every table is computed from the raw result files;
+  none is transcribed.
+
+  No solver code changed — this is benchmark and documentation only.
+
+
 ## [0.10.0] - 2026-08-11
 
 ### Fixed — an ill-scaled dense Hessian column no longer costs the solve its certificate
