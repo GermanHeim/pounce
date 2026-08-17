@@ -19,7 +19,7 @@ import sys
 import time
 from typing import List
 
-from .adapters import ARMS, get_adapter
+from .adapters import ARMS, REFERENCE_ARM, get_adapter
 from .families import REGISTRY
 from .report import render
 from .runner import run_family_scale
@@ -142,6 +142,22 @@ def main(argv=None) -> int:
     if args.quick:
         families = [f for f in families if f in _QUICK_FAMILIES]
         scales = ["small"]
+
+    if REFERENCE_ARM not in arms:
+        # Correctness is scored *against the reference arm*; without it
+        # in the run, `correct` stays None for every step and every
+        # summary that reads it silently reports each step as incorrect.
+        # That is a display artifact rather than a result, and it is
+        # exactly the shape of thing that gets quoted -- so say so
+        # loudly rather than let a narrowed `--arms` produce a table of
+        # 20/20 failures that means nothing.
+        print(
+            f"warning: {REFERENCE_ARM!r} is not in --arms, so no step can "
+            "be scored for correctness.\n"
+            "         The `incorrect` / `bad` columns below are "
+            "meaningless in this run; speed columns are still valid.",
+            file=sys.stderr,
+        )
 
     adapter = get_adapter(args.solver, max_iter=args.max_iter,
                           recentering=args.recentering)
