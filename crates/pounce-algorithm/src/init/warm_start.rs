@@ -42,12 +42,39 @@
 //!    `μ̂ / slack` instead, the same complementarity relation the
 //!    solver is about to enforce. Seeded (strictly positive) entries
 //!    are left alone.
+//!
+//!    This step needs no dual to work from — only the slacks the
+//!    supplied *point* already determines — so it runs even for a
+//!    caller who seeded nothing but `x` (gh#622). That case used to
+//!    fall through to the constant, and the constant it fell through
+//!    to was `warm_start_mult_bound_push`: 1e-3 by default, and 1e-9
+//!    under the tightened pushes `pounce.WarmStart` ships, i.e. a
+//!    start declaring every bound inactive. Against the pre-gh#622
+//!    behaviour, filling it properly is worth 49 -> 44 iterations at
+//!    horizon 5 and 67 -> 55 at horizon 20 on that issue's
+//!    receding-horizon family, and takes an HS071 restart from a
+//!    transferred point with no duals from 11 iterations to 7.
+//!
+//!    It costs one iteration in one place: HS071 restarted from its
+//!    own solution under `warm_start_recentering=none`, 3 -> 4, where
+//!    the kill switch keeps the constant fill and the constant is now
+//!    `bound_mult_init_val` rather than a bound-multiplier push so
+//!    small it read as "inactive" and happened to be right about a
+//!    solution whose bounds mostly are. Under the default the same
+//!    restart is 3 -> 2.
 //! 3. **Reconstruct equality multipliers.** A `y` block that is
 //!    identically zero is likewise unseeded, and is re-derived from
 //!    stationarity by the same regularized least-squares augmented
 //!    solve the cold path uses ([`LeastSquareMults`]) — now with the
 //!    reconstructed `z` in its right-hand side, so the estimate is not
 //!    forced to absorb the bound multipliers.
+//!
+//!    Unlike step 2, this one *completes a partial seed* and is gated
+//!    on [`any_dual_seeded`]: from a point alone it is the cold path's
+//!    estimate wearing the warm path's barrier, measured over
+//!    `benchmarks/warmstart` at 1102 -> 1211 iterations across 27
+//!    parametric paths. Step 4 is gated the same way and for the same
+//!    reason.
 //! 4. **Choose μ.** With the point complete, μ is raised to the
 //!    measured `avrg_compl` when that overshoots what `mu_init` asked
 //!    for by more than [`MU_ESCALATION_TRIGGER`], clamped to
@@ -129,9 +156,12 @@ pub enum BlockVerdict {
     /// `constr_mult_init_max`, or the augmented solve failed); the
     /// block fell back to the pre-gh#606 constant fill.
     Discarded,
-    /// The caller supplied no dual information *at all*, so there was
-    /// nothing to reconstruct this block from and it kept the
-    /// pre-gh#606 constant fill. See [`any_dual_seeded`].
+    /// The caller supplied no dual information *at all*, so this block
+    /// kept the pre-gh#606 constant fill for want of anything to
+    /// derive it from. Since gh#622 only the equality multipliers
+    /// report this: the bound blocks are reconstructible from the
+    /// slacks alone and are filled whichever way the caller seeded.
+    /// See [`any_dual_seeded`].
     Unseeded,
 }
 
@@ -253,6 +283,14 @@ impl IterateInitializer for WarmStartIterateInitializer {
         // keeps the pre-gh#606 fills, and only μ is still measured.
         let dual_info =
             self.opts.recentering == WarmStartRecentering::Residual && any_dual_seeded(data);
+        // gh#622: the bound blocks are filled from the barrier relation
+        // even when the caller seeded nothing, because `mu / slack`
+        // needs no dual to derive it from — only the slacks the
+        // supplied point already determines. What stays gated on
+        // `dual_info` is everything that *does* need one: the
+        // least-squares `y`, the stationarity split, and letting the
+        // measurement move mu.
+        let bound_fill_only = !dual_info && self.opts.recentering == WarmStartRecentering::Residual;
         let mu_hat = if dual_info {
             let (mu_hat, unseeded) = recenter_from_residuals(data, cq, &self.opts, &mut diag);
             reconstruct_eq_duals(data, cq, nlp, aug_solver, &self.opts, &mut diag);
@@ -272,18 +310,29 @@ impl IterateInitializer for WarmStartIterateInitializer {
                 );
             }
             Some(mu_hat)
-        } else if self.opts.recentering == WarmStartRecentering::Residual {
-            diag.primal_residual = cq.borrow().curr_primal_infeasibility_max();
-            diag.bound_duals = BlockVerdict::Unseeded;
+        } else if bound_fill_only {
+            let (mu_hat, _unseeded) = recenter_from_residuals(data, cq, &self.opts, &mut diag);
+            // Left alone deliberately: with no `y` and no `z` supplied,
+            // a least-squares `y` would be the cold path's estimate
+            // wearing the warm path's barrier, which is the case gh#606
+            // measured at 1102 -> 1211 iterations and gated off.
             diag.eq_duals = BlockVerdict::Unseeded;
-            // Only the `is_some()` is read on this path — `final_mu`
-            // re-reads `curr_mu` itself — so this carried a clamp that
-            // was computed and thrown away. Left as the plain value so
-            // it does not read as a policy it never was.
-            Some(data.borrow().curr_mu)
+            Some(mu_hat)
         } else {
             None
         };
+        // Whether the measurement is allowed to *move* mu. Not on a
+        // seed with no duals in it: `final_mu` reads the
+        // complementarity of the iterate the solve starts from, and on
+        // that path every multiplier in it was just written by this
+        // initializer as `mu / slack` — so the measurement returns the
+        // mu it was handed, and any escalation off it is the barrier
+        // arguing with itself. It stayed academic while an unsupplied
+        // block arrived as a literal 0 floored at
+        // `warm_start_mult_bound_push`, a fill so small `avrg_compl`
+        // never cleared the trigger, and became load bearing the
+        // moment gh#622 gave those blocks an honest one.
+        let mu_may_move = dual_info;
 
         {
             // Rebuild `curr` with clamped multipliers. Components are
@@ -334,7 +383,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         if self.opts.target_mu > 0.0 {
             data.borrow_mut().curr_mu = self.opts.target_mu;
         } else if mu_hat.is_some() {
-            let mu = final_mu(data, cq, &mut diag);
+            let mu = final_mu(data, cq, &mut diag, mu_may_move);
             data.borrow_mut().curr_mu = mu;
         }
 
@@ -782,7 +831,18 @@ fn reconstruct_eq_duals(
 /// is here to catch a point that cannot support it, not to
 /// second-guess a good one downward. It also has to miss by
 /// [`MU_ESCALATION_TRIGGER`] before it is overridden at all.
-fn final_mu(data: &IpoptDataHandle, cq: &IpoptCqHandle, diag: &mut WarmStartDiagnostics) -> Number {
+/// `may_move` is false when the caller seeded no duals at all. The
+/// measurements are still recorded — they describe the iterate the
+/// solve really starts from, which is what `info["warm_start"]` is for
+/// — but they describe *this initializer's own fill*, so they do not
+/// get to reroute the solve. See the `mu_may_move` note at the call
+/// site (gh#622).
+fn final_mu(
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    diag: &mut WarmStartDiagnostics,
+    may_move: bool,
+) -> Number {
     let (compl, inf_du) = {
         let cq_ref = cq.borrow();
         (
@@ -809,7 +869,7 @@ fn final_mu(data: &IpoptDataHandle, cq: &IpoptCqHandle, diag: &mut WarmStartDiag
     // when μ goes up. `.max(mu_in)` keeps the floor semantics this
     // function documents without capping a barrier the caller chose on
     // purpose.
-    if compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
+    if may_move && compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
         safe_mu(compl).max(mu_in)
     } else {
         mu_in
@@ -963,8 +1023,22 @@ fn seed_from_nlp(
     let mut z_u = DenseVectorSpace::new(n_zu).make_new_dense();
     let mut v_l = DenseVectorSpace::new(n_vl).make_new_dense();
     let mut v_u = DenseVectorSpace::new(n_vu).make_new_dense();
-    z_l.set(0.0);
-    z_u.set(0.0);
+    // Unseeded, not zero (gh#622): whatever `get_starting_z` declines
+    // to write is a block the caller never seeded, and the clamp block
+    // below resolves NaN to `bound_mult_init_val` where a literal 0
+    // would pass for a supplied multiplier and be floored at
+    // `warm_start_mult_bound_push` — 1e-9 under the pushes
+    // `pounce.WarmStart` ships, which declares every bound inactive.
+    // `OrigIpoptNlp::fetch_warm_start_snapshot` carries the same
+    // marker and the full reasoning; this pre-fill is what survives if
+    // the NLP declines the request outright.
+    //
+    // `v_l` / `v_u` keep the zero fill: `TNLP::get_starting_point` has
+    // no field for the slack-bound multipliers, so they are not blocks
+    // a caller left out — they were never on offer, and gh#606's
+    // reconstruction is what fills them whenever any dual is seeded.
+    z_l.set(Number::NAN);
+    z_u.set(Number::NAN);
     v_l.set(0.0);
     v_u.set(0.0);
     nlp.borrow_mut()

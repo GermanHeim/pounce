@@ -9,6 +9,60 @@ changes.
 
 ## [Unreleased]
 
+- **A warm start that carries only a point is no longer charged for
+  multipliers it never claimed to have** (#622, second half). Raised on
+  the issue with a controlled table: turning on `warm_start_init_point`
+  degraded pounce on a values-only start while ipopt paid at most a few
+  iterations for the same options. It reproduced here, smaller, and the
+  mechanism was in the plumbing rather than the algorithm.
+
+  `TNLP::get_starting_point` is asked for `init_z` and may leave the
+  blocks untouched — a caller warm starting from a point alone does
+  exactly that — and the buffer behind them was pre-filled with **zero**.
+  Zero is a *legal multiplier value*, so it sailed past the "was this
+  seeded?" resolution the warm-start initializer performs on NaN and was
+  merely floored at `warm_start_mult_bound_push`: 1e-3 by default, and
+  1e-9 under the tightened pushes `pounce.WarmStart` ships. A start of
+  `z = 1e-9` declares every bound inactive and breaks complementarity
+  against μ before the first iteration — so the tighter the push, the
+  worse the start, which is the opposite of what a push is for. The
+  buffers now carry the unseeded marker, and an absent block and a block
+  written as NaN are finally the same statement.
+
+  That exposed a second half. #606's reconstruction was gated
+  wholesale on some dual having been supplied, but only half of it needs
+  one: `z = μ / slack` needs the slacks the point already determines,
+  while the least-squares `y` needs a dual to complete and from a bare
+  point is the cold path's estimate wearing the warm path's barrier
+  (the 1102 → 1211 measurement that motivated the gate). The gate is now
+  drawn between those two. μ escalation stays on the gated side: with
+  the bound blocks filled to `μ / slack`, the measured complementarity
+  *is* μ, and escalating off it is the barrier arguing with itself.
+
+  On HS071 from a transferred point, a values-only warm start went 11
+  iterations → 7 against 6 for a plain solve from the same point, and
+  tightening the pushes no longer moves it at all. Restarted from its
+  own solution: 3 → 2. On the #622 receding-horizon family, a
+  values-only transfer over the eight-step loop went 49/60/67/57 →
+  44/55/55/47 at horizons 5/10/20/40.
+
+  One measured cost, named rather than buried: HS071 restarted from its
+  own solution with `warm_start_recentering=none` goes 3 → 4. The kill
+  switch keeps the constant fill, and the constant is now
+  `bound_mult_init_val` where it used to be a bound-multiplier push so
+  small it read as "every bound inactive" — which happens to be right
+  about a converged point whose bounds mostly are. It is one iteration,
+  on the kill-switch path, on a configuration that has the solution
+  already; the default path takes the same restart to 2.
+
+  **Nothing that seeded duals moved.** The `benchmarks/warmstart` corpus
+  is bit-identical across `cold-ipm`, `warm-ipm`, `pred-ipm` and
+  `predcorr-ipm` (10288 / 3404 / 1258 / 1242, 0 of 42 rows), and the CLI
+  fixture sweep is identical across all 57 models. That is also the
+  uncomfortable part: **no arm of the warm-start suite supplies a
+  primal-only seed**, so the corpus could not see this defect and cannot
+  see the fix. A `values-ipm` arm is the missing coverage.
+
 - **A transferred warm start now beats a cold solve, and the docs stop
   saying otherwise** (#622). `WarmStart.reindex` filled the prolongated
   stage of a receding horizon with zero clipped into the variable's box
@@ -43,17 +97,14 @@ changes.
   reaches the case recentering does not, the slew fixture, where the
   closed loop goes 27 → 21 against cold's 22.
 
-  Two suggestions from the issue were measured and **rejected**.
-  Dropping the transferred multipliers so the solver rebuilds them from
-  the primal point costs 49 iterations against 45 at horizon 5 and 67
-  against 54 at horizon 20 — and the mechanism is the opposite of the
-  one it assumes: #606's reconstruction *completes a partial seed* and
-  is gated on some dual block having been supplied, so a seed with no
-  duals in it does not get rebuilt multipliers, it gets the pre-#606
-  constant fills at the warm barrier. The carried multipliers are what
-  put the new stage's own multipliers on the reconstruction path
-  (`info["warm_start"]`: `bound_duals: reconstructed`, against
-  `unseeded` for a values-only start). Restarting the barrier is a wash at
+  Two suggestions from the issue were measured. Dropping the
+  transferred multipliers so the solver rebuilds them from the primal
+  point is close to a wash once the values-only path is fixed (the
+  entry below): 44/55/55/47 against the carried 45/50/54/46 over the
+  eight-step loop. What the carried block actually buys is the
+  *equality* multipliers — those are the half #606 will not derive from
+  a bare point, and `info["warm_start"]` reports the split as
+  `eq_duals: accepted` against `unseeded`. Restarting the barrier is a wash at
   `mu_init=1e-6` (46/53/48/47 against the carried μ's 45/50/54/46) and
   loses steadily from there — 52/61/56/54 at `1e-4`, and by `1e-1` the
   four horizons run 72/79/74/72, at or above the cold solve's

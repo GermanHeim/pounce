@@ -637,15 +637,17 @@ def test_prolong_falls_back_when_the_map_is_not_a_shift():
     np.testing.assert_allclose(moved.x, [3.0, 1.0, 2.0])   # 0 clipped into [2, 10]
 
 
-def test_a_mapped_replay_arms_the_reconstruction_a_bare_point_does_not():
-    """Why the carried multipliers stay carried (gh#622).
+def test_a_mapped_replay_carries_the_equality_multipliers_a_bare_point_cannot():
+    """What the carried multipliers are actually worth (gh#622).
 
-    gh#606's reconstruction *completes a partial seed* — it is gated on
-    some dual block having been supplied, because a seed with no duals
-    has nothing to derive them from. So the multipliers that survive the
-    map are what put the freshly-entered stage's own multipliers on the
-    reconstruction path; drop them all and the point silently falls back
-    to the pre-#606 constant fills at the warm barrier.
+    The *bound* blocks are reconstructible from the slacks the point
+    already determines (`z = mu / slack`), so the solver fills them
+    whichever way the state arrives — dropping them costs nothing it
+    cannot rebuild. The *equality* multipliers are the ones that need a
+    dual to complete: from a point alone the solver reports them
+    unseeded and leaves them at the constant fill, deliberately. That
+    is the asymmetry `reindex` is built around, and the reason it
+    carries what it matched instead of handing over a bare point.
     """
     p0, v0, c0 = window(0)
     x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
@@ -654,12 +656,12 @@ def test_a_mapped_replay_arms_the_reconstruction_a_bare_point_does_not():
 
     _, info = window(1)[0].solve(warm_start=moved)
     assert info["warm_start"]["bound_duals"] == "reconstructed"
-    assert info["warm_start"]["bound_duals_reconstructed"] > 0
+    assert info["warm_start"]["eq_duals"] == "accepted"
 
     bare = dataclasses.replace(moved, lagrange=None, zl=None, zu=None)
     _, bare_info = window(1)[0].solve(warm_start=bare)
-    assert bare_info["warm_start"]["bound_duals"] == "unseeded"
-    assert bare_info["warm_start"]["bound_duals_reconstructed"] == 0
+    assert bare_info["warm_start"]["bound_duals"] == "reconstructed"
+    assert bare_info["warm_start"]["eq_duals"] == "unseeded"
 
 
 # The sinusoidal track of the gh#622 table: a receding horizon with

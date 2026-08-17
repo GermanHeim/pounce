@@ -363,17 +363,19 @@ fn a_partial_warm_start_reconstructs_the_block_it_is_missing() {
     );
 }
 
-/// A seed with *no* dual information is left alone, deliberately.
+/// A seed with no dual information gets its *bound* blocks filled and
+/// nothing else derived (gh#606 as amended by gh#622).
 ///
-/// Reconstruction completes a partial warm start; it does not
-/// manufacture a whole one. From a primal point alone there is nothing
-/// to derive the multipliers from, and what comes out is the cold
-/// path's estimate paired with the warm path's barrier — measured over
+/// The two halves are gated differently because they need different
+/// things. `z = mu / slack` needs only the slacks the supplied point
+/// already determines, so it runs here; the least-squares `y` needs a
+/// dual to complete, and from a primal point alone it is the cold
+/// path's estimate wearing the warm path's barrier — measured over
 /// `benchmarks/warmstart` at 1102 -> 1211 iterations across 27
-/// parametric paths when it was allowed to run. The verdict says so
-/// rather than the initializer pretending it did something.
+/// parametric paths when it was allowed to run. So: bound duals
+/// reconstructed, equality duals reported unseeded, mu untouched.
 #[test]
-fn a_primal_only_seed_is_reported_unseeded_and_left_alone() {
+fn a_primal_only_seed_gets_its_bound_blocks_and_nothing_derived() {
     let seed = cold_solve();
     let (st_legacy, it_legacy, _) = warm_solve(&seed, Seeded::Nothing, "none", None);
     let (st_resid, it_resid, diag) = warm_solve(&seed, Seeded::Nothing, "residual", None);
@@ -386,13 +388,27 @@ fn a_primal_only_seed_is_reported_unseeded_and_left_alone() {
     );
     assert!(matches!(st_legacy, ApplicationReturnStatus::SolveSucceeded));
     assert!(matches!(st_resid, ApplicationReturnStatus::SolveSucceeded));
-    assert_eq!(diag.bound_duals, BlockVerdict::Unseeded);
-    assert_eq!(diag.eq_duals, BlockVerdict::Unseeded);
-    assert_eq!(diag.bound_duals_reconstructed, 0);
+    assert_eq!(diag.bound_duals, BlockVerdict::Reconstructed);
+    assert!(
+        diag.bound_duals_reconstructed > 0,
+        "every bound block arrived unseeded, so every entry is a fill"
+    );
+    assert_eq!(
+        diag.eq_duals,
+        BlockVerdict::Unseeded,
+        "there is no dual to complete y from; it keeps the constant fill"
+    );
     assert!(!diag.stationarity_split);
     assert_eq!(
-        it_resid, it_legacy,
-        "with nothing to reconstruct from, the trajectory must not move"
+        diag.mu_in, diag.mu_out,
+        "the complementarity of a point this initializer just filled to \
+         mu / slack measures mu; escalating off it is the barrier \
+         arguing with itself"
+    );
+    assert!(
+        it_resid < it_legacy,
+        "filling the bound blocks from the barrier relation must beat \
+         the constant: residual={it_resid} vs none={it_legacy}"
     );
 }
 
@@ -930,4 +946,140 @@ fn stationarity_split_is_reported_only_when_it_runs() {
         !diag.stationarity_split,
         "the flag must track the work, not the call site"
     );
+}
+
+/// A warm start that carries only a point must not be charged for
+/// multipliers it never claimed to have (gh#622).
+///
+/// `TNLP::get_starting_point` is asked for `init_z` and may leave the
+/// blocks untouched; the buffer behind them used to arrive as a
+/// literal zero, which is a *legal multiplier value* and so skipped
+/// the unseeded resolution and was merely floored at
+/// `warm_start_mult_bound_push`. Under the tightened pushes
+/// `pounce.WarmStart` ships that is 1e-9 — a start declaring every
+/// bound inactive, with complementarity broken against μ before the
+/// first iteration. It cost this fixture 11 iterations against 7, and
+/// the tighter the pushes the worse it got, which is the opposite of
+/// what a push is for.
+///
+/// Three statements, in the order they pin the fix: an absent block is
+/// the same thing as an explicitly unseeded one; tightening the pushes
+/// does not move a start that seeded no multipliers; and the switch is
+/// not a penalty box relative to a plain solve from the same point.
+#[test]
+fn a_values_only_warm_start_is_not_taxed_by_the_tightened_pushes() {
+    let seed = cold_solve();
+    // A transferred point: the solution nudged, as a horizon shift
+    // would leave it. Every arm below starts from exactly this x.
+    let x0 = [
+        seed.x[0] * 1.05,
+        seed.x[1] * 0.95,
+        seed.x[2] * 1.02,
+        seed.x[3] * 0.98,
+    ];
+    let (st_cold, it_cold, _) = values_only_solve(x0, Switch::Off, Pushes::Default);
+    let (st_tight, it_tight, diag) = values_only_solve(x0, Switch::On, Pushes::Tight);
+    let (_, it_loose, _) = values_only_solve(x0, Switch::On, Pushes::Default);
+    let (_, it_nan, _) = values_only_solve(x0, Switch::OnSeedingNan, Pushes::Tight);
+
+    eprintln!(
+        "HS071 values-only warm start: cold={it_cold} ({st_cold:?}) \
+         switch+tight={it_tight} ({st_tight:?}) switch+default={it_loose} \
+         switch+tight, NaN-seeded={it_nan}"
+    );
+    assert!(matches!(st_cold, ApplicationReturnStatus::SolveSucceeded));
+    assert!(matches!(st_tight, ApplicationReturnStatus::SolveSucceeded));
+
+    assert_eq!(
+        it_tight, it_nan,
+        "a block the caller never wrote and one written as NaN are the \
+         same statement — 'I have no multipliers for you'"
+    );
+    assert_eq!(
+        it_tight, it_loose,
+        "with no multipliers seeded there is nothing for the multiplier \
+         push to push, so tightening it must not reroute the solve"
+    );
+    assert!(
+        it_tight <= it_cold + 2,
+        "the warm-start switch must not turn into a penalty box for a \
+         caller who only has a point: switch={it_tight} cold={it_cold} \
+         (it was 11 against 6 before gh#622)"
+    );
+
+    // The other half of the fix: the blocks are filled from the
+    // barrier relation rather than from a push, and the measurement
+    // taken against that fill is reported but never allowed to move mu.
+    let diag = diag.expect("a warm solve must report diagnostics");
+    assert_eq!(diag.bound_duals, BlockVerdict::Reconstructed);
+    assert_eq!(
+        diag.mu_in, diag.mu_out,
+        "a point this initializer just filled to mu / slack measures \
+         mu; it must not escalate off its own fill"
+    );
+}
+
+/// Is `warm_start_init_point` on, and does the caller mark its (absent)
+/// multipliers explicitly?
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    Off,
+    On,
+    /// The switch, plus `z_l`/`z_u` written as all-NaN — the explicit
+    /// spelling of what `On` leaves implicit.
+    OnSeedingNan,
+}
+
+/// `warm_start_*_push` at the defaults, or at the 1e-9 the
+/// `pounce.WarmStart` recipe sets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pushes {
+    Default,
+    Tight,
+}
+
+fn values_only_solve(
+    x0: [Number; 4],
+    switch: Switch,
+    pushes: Pushes,
+) -> (
+    ApplicationReturnStatus,
+    i32,
+    Option<pounce_algorithm::init::warm_start::WarmStartDiagnostics>,
+) {
+    let mut app = IpoptApplication::new();
+    {
+        let o = app.options_mut();
+        o.set_integer_value("print_level", 0, true, false).unwrap();
+        if switch != Switch::Off {
+            o.set_string_value("warm_start_init_point", "yes", true, false)
+                .unwrap();
+        }
+        if pushes == Pushes::Tight {
+            for k in [
+                "warm_start_bound_push",
+                "warm_start_bound_frac",
+                "warm_start_slack_bound_push",
+                "warm_start_slack_bound_frac",
+                "warm_start_mult_bound_push",
+            ] {
+                o.set_numeric_value(k, 1e-9, true, false).unwrap();
+            }
+        }
+    }
+    app.initialize().unwrap();
+    let nan = vec![Number::NAN; 4];
+    let concrete = Rc::new(RefCell::new(Hs071Seeded {
+        x0: Some(x0),
+        z_l0: (switch == Switch::OnSeedingNan).then(|| nan.clone()),
+        z_u0: (switch == Switch::OnSeedingNan).then(|| nan.clone()),
+        ..Default::default()
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    (
+        status,
+        app.statistics().iteration_count,
+        app.warm_start_diagnostics(),
+    )
 }

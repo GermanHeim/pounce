@@ -373,26 +373,28 @@ answers were measured (pounce#622).
 
 Its **multipliers** are left *unseeded* — `NaN`, which the warm
 initializer reads as "you decide" — rather than fabricated. Since
-pounce#606 the solver reconstructs each unseeded bound multiplier from
-`μ̂ / slack`, the complementarity relation it is about to enforce, which
-is a better number than anything this side can invent.
+pounce#606 the solver reconstructs each unseeded *bound* multiplier
+from `μ̂ / slack`, the complementarity relation it is about to enforce,
+which is a better number than anything this side can invent. That
+reconstruction needs no dual to work from, only the slacks the point
+already determines, so it runs however much or little you seeded
+(pounce#622).
 
-Note what arms that pass: it **completes a partial seed**, and it is
-gated on at least one multiplier block having been supplied. A seed
-carrying no duals at all has nothing to derive them from, so it keeps
-the pre-#606 constant fills while still starting at the warm barrier —
-deliberately, and with its own measurement behind it (reconstructing
-from a primal-only seed cost 1102 → 1211 iterations across the 27
-parametric paths in `benchmarks/warmstart`).
+The *equality* multipliers are the asymmetric half. Completing those
+takes a least-squares solve that a partial seed can support and a bare
+point cannot, so a state carrying no duals at all gets them reported
+`unseeded` and left at the constant fill — deliberately, with its own
+measurement behind it (deriving them from a primal-only seed cost
+1102 → 1211 iterations across the 27 parametric paths in
+`benchmarks/warmstart`). `info["warm_start"]` reports the split
+directly: `eq_duals: accepted` for a mapped replay against `unseeded`
+for a values-only one.
 
-So the carried multipliers are not merely harmless here, they are what
-puts the *new* stage's multipliers on the reconstruction path:
-`info["warm_start"]` reports `bound_duals: reconstructed` for a mapped
-replay and `unseeded` for a values-only one. Dropping the multipliers
-you *do* have, in favour of letting the solver rebuild those too, lands
-in the second case and is measurably worse — 49 iterations against 45
-at horizon 5, and 67 against 54 at horizon 20, over the eight-step loop
-tabulated below.
+So what the carried multipliers buy is that equality block, not the
+bound blocks. Dropping them is close to a wash on iteration count here
+— 44/55/55/47 against 45/50/54/46 over the eight-step loop tabulated
+below — and the reason to carry them is that they are the only thing
+that *can* carry `y` across the shift.
 
 Its **primal values** are the `fill_x` argument, and they matter more
 than they look:
