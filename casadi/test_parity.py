@@ -10,6 +10,7 @@ same model, so a failure says "the two solvers disagree", not "the
 number moved".
 """
 
+import itertools
 import os
 import shutil
 import subprocess
@@ -663,6 +664,76 @@ def test_repeated_solves_do_not_concatenate_the_trace():
           f"pounce={lengths} ipopt={ip}")
 
 
+def test_restoration_iterations_are_labelled():
+    """`iterations['alg_mod']` separates outer rows from restoration ones.
+
+    POUNCE used to fire the intermediate callback only from its outer
+    loop, so this column would have been constant zero and #637 declined
+    to publish it. gh#645 made the restoration inner solver fire too,
+    which is what gives the column something to say — and what makes it
+    load-bearing: on a restoration row the other vectors describe the
+    min-||c||_1 feasibility subproblem, not this NLP.
+    """
+    clean = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", clean, QUIET_POUNCE)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    it = S.stats()["iterations"]
+    check("stats: iterations carries alg_mod", "alg_mod" in it,
+          f"keys = {sorted(it)}")
+    if "alg_mod" not in it:
+        return
+    check("stats: alg_mod is as long as the other traces",
+          len(it["alg_mod"]) == len(it["inf_pr"]),
+          f"{len(it['alg_mod'])} vs {len(it['inf_pr'])}")
+    check("stats: a clean solve is all regular iterations",
+          set(it["alg_mod"]) <= {0}, f"{sorted(set(it['alg_mod']))}")
+
+    # The infeasible equality from `test_restoration_stats`: this one
+    # actually restores.
+    x = ca.MX.sym("x")
+    hard = {"x": x, "f": x**2, "g": x**2 + 1}
+    R = ca.nlpsol("R", "pounce", hard, dict(QUIET_POUNCE))
+    try:
+        R(x0=0.5, lbg=0, ubg=0)
+    except RuntimeError:
+        pass
+    st = R.stats()
+    modes = st["iterations"]["alg_mod"]
+    check("stats: restoration iterations are labelled 1",
+          any(m == 1 for m in modes),
+          f"{st['return_status']}, alg_mod = {modes}")
+
+    # The column has to stay usable as an index into the others.
+    check("stats: alg_mod still aligns with the traces under restoration",
+          len(modes) == len(st["iterations"]["inf_pr"]),
+          f"{len(modes)} vs {len(st['iterations']['inf_pr'])}")
+
+    # `iter_count` must keep describing the outer solve. The inner
+    # solver restarts its own counter from zero on every restoration
+    # entry, so recording those would leave `iter_count` reporting
+    # whatever the last episode happened to reach — the same class of
+    # disagreement #637 fixed for the accumulating trace, one level down.
+    #
+    # Necessary rather than sufficient, but it is the part an outside
+    # caller can see: a clobbered `iter_count` could not exceed the
+    # longest run of restoration rows, because that run is what would
+    # have written it.
+    longest_resto_run = max((len(list(g)) for m, g in
+                             itertools.groupby(modes) if m == 1), default=0)
+    check("stats: iter_count is the outer count, not the inner one",
+          st["iter_count"] > longest_resto_run,
+          f"iter_count {st['iter_count']} vs longest restoration run "
+          f"{longest_resto_run}")
+
+    # Note for anyone reading the two side by side: `iter_count` counts
+    # more than the regular rows here (the outer counter advances across
+    # a restoration episode, as upstream's does — its `r`-suffixed rows
+    # share the same counter). That predates gh#645 and is unchanged by
+    # it; `test_repeated_solves_do_not_concatenate_the_trace` is where
+    # the exact trace/`iter_count` agreement is pinned, on solves that
+    # never restore.
+
+
 def test_final_kkt_errors_in_stats():
     """The final infeasibilities POUNCE already computes, in `stats()`."""
     nlp = rosenbrock_nlp()
@@ -1038,6 +1109,7 @@ def main():
         test_final_kkt_errors_in_stats,
         test_linear_solver_stats,
         test_restoration_stats,
+        test_restoration_iterations_are_labelled,
         test_live_diagnostics_during_the_callback,
         test_option_types_come_from_pounce_not_the_literal,
         test_codegen_matches_the_interpreted_solve,
