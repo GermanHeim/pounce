@@ -191,7 +191,8 @@ impl<B: SensBacksolver> SensApplication<B> {
             return false;
         }
         let step = StdStepCalc::new(&driver, driver.pcalc());
-        step.compute_step(rhs_u, du, dx_full)
+        let ok = step.compute_step(rhs_u, du, dx_full);
+        ok
     }
 
     /// Compute the **parametric** sensitivity step

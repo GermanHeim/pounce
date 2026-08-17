@@ -149,6 +149,42 @@ changes.
   against a cold solve's 7 to 9, the cold arm's own spread over where
   the guess is put. Python-side only; no Rust changed and no solver step
   moved, so the CLI fixture sweep is untouched by construction.
+- **`estimate(mode="path")` applies the perturbation a little at a time,
+  and `active_set_changes()` returns the record of what changed where**
+  (#631). Roadmap item 2. `mode="fix_relax"` decides every active-set change from
+  full steps at the base point. The new mode follows the solution along
+  the perturbation: it takes the largest fraction the current active set
+  allows, applies the one change that happens there, and continues under
+  the updated set. The prediction is piecewise linear in the parameter,
+  exact for a QP (verified to 1e-10 against direct target solves on a
+  400-case random QP scan), and a variable can reach a bound partway
+  through the change and leave it again, which no decision at the base
+  point can represent. `active_set_changes()` reports each change with
+  the variable, the bound, whether it is reached or left, and the
+  fraction at which it happens. `max_iter` is the same knob it is under
+  `fix_relax`: past the cap the rest of the perturbation is one step
+  under the active set reached, with a warning.
+
+  Underneath: `parametric_step_path` on the Rust solver and the Python
+  binding, with the same information per breakpoint. Building the
+  path found three defects, each convicted by a hand-checkable QP.
+  `solve_released` folded the barrier correction of a released bound's
+  multiplier row into that variable's equation at order one (shipped
+  with #600's release machinery but unexercised, since `fix_relax`'s
+  shifted call zeroes the row first); the released rows are now zeroed
+  before the fold, and `released_sigma_x` rebuilds the released
+  diagonal entry from surviving bounds instead of differencing two
+  numbers of order `z / s`. The guard against a row changing twice at
+  one fraction barred it for a whole segment, skipping real
+  breakpoints. And the release test read accumulated values, so a
+  near-bound inactive multiplier could drift "active" mid-path and put
+  a departure in the record for a variable that was never on that
+  bound; activity of a base bound is now decided at the base point,
+  where the factorization's sigma was frozen.
+
+  `python/notebooks/36_active_set_parametric_sensitivity.ipynb` works
+  a CSTR example through all three modes, and
+  `docs/src/sensitivity.md` covers when each mode is the right one.
 - **The `pounce-casadi` wheel is tagged for the platform it was built
   for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
   Python, installs anywhere" — while carrying a compiled CasADi plugin and
@@ -1280,15 +1316,15 @@ against 8.7e-4 at `obj_scaling_factor = 1000` before.
 
 Pinning is unchanged, as is every path that releases no bound.
 
-### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clipping it (#587)
+### Added — `estimate(mode="fix_relax")` bends the estimate around a bound instead of clamping it (#587)
 
 `estimate()` takes the linear step, and where that step leaves a
-variable's bound it clips the value and warns. Clipping costs more than
+variable's bound it clamps the value and warns. Clamping costs more than
 the one variable. Every other variable keeps the value the step gave it,
-computed on the assumption that the clipped one was free to move where
+computed on the assumption that the clamped one was free to move where
 the step said, so the result satisfies the bounds and no longer
 satisfies the constraints. On a model where `y = 2x + 1` and `x` hits
-its lower bound, the clipped answer is `y = -5`, which is not on the
+its lower bound, the clamped answer is `y = -5`, which is not on the
 constraint at all.
 
 `mode="fix_relax"` repairs the active set the step implies, which is
@@ -1310,19 +1346,19 @@ Checked against sIPOPT 3.14.19 itself, driven through
 pounce and sIPOPT agree to 2e-8 on the pin case and to 1e-6 on the
 release case, and both match a full re-solve. On upstream's own
 parametric example, at its own perturbation, the refinement lands within
-6e-9 of a re-solve where clipping the crossing coordinate is off by
+6e-9 of a re-solve where clamping the crossing coordinate is off by
 0.12.
 
-    estimate(m, [(m.p, 3.0)])                       # clips
+    estimate(m, [(m.p, 3.0)])                       # clamps
     estimate(m, [(m.p, 3.0)], mode="fix_relax")     # pins and re-solves
 
 `mode="linear"` is the default and is unchanged.
 
 Each pass rebuilds the Schur complement over the conditions so far,
 so pass `k` costs one dense `k × k` solve and `k + 1` back-solves and
-the total grows quadratically. The default `max_passes` of 16 is 136
+the total grows quadratically. The default `max_iter` of 16 is 136
 back-solves. The factorization itself is never rebuilt, which is what
-keeps this cheaper than re-solving. `max_passes` bounds that work and
+keeps this cheaper than re-solving. `max_iter` bounds that work and
 is a budget rather than a safeguard: the refinement is only worth
 running while it stays cheaper than the re-solve it replaces.
 
@@ -1655,7 +1691,7 @@ willing to leave a converged point.
 
 ### Added — `pyomo_pounce.estimate_report()` says what the estimate's step did about the bounds (#584)
 
-`estimate()` takes the linear step, clips any variable it carries past a
+`estimate()` takes the linear step, clamps any variable it carries past a
 bound, warns, and returns. The warning names those variables and stops
 there, so a caller cannot tell how far along the perturbation the active
 set changed, whether a constraint became active before any variable did,
