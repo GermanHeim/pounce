@@ -13,7 +13,7 @@ Status of the ask, item by item:
 | Final statistics in `stats()` | **Shipped** — `final_inf_pr` / `final_inf_du` / `final_compl_inf` |
 | FERAL / linear-solver statistics | **Shipped, minus timings** — `stats()["linear_solver"]` |
 | Richer live iteration information | **Shipped** — `stats()` is callable mid-callback; `current_violations` |
-| Native GCC/MinGW plugin builds | **Not done** — see below |
+| Native GCC plugin builds | **Documented** — the Makefile already builds Python-free; MinGW/Windows declined |
 | Prebuilt native release artifacts | **Not done** — see below |
 
 ## What shipped, and the two defects found on the way
@@ -88,14 +88,34 @@ that it costs nothing.
 The two big items, and they are a maintenance commitment rather than a
 one-time build.
 
-**Native CMake build.** Today `casadi/Makefile` derives everything from
-a *Python-installed* CasADi (`CASADI_LIB`, `CASADI_INC`, `CASADI_VER`
-all come from `import casadi`), and needs a matching CasADi source tree
-for the internal headers a plugin subclasses. The ask is a CMake path
-taking `CASADI_ROOT` / `CASADI_DIR` / `CMAKE_PREFIX_PATH` with no Python
-in the loop. That is a second build system for the same target, and both
-have to keep producing ABI-identical plugins — CasADi's loader does no
-version handshake, so a mismatch is a silent misbehaviour, not an error.
+**Native CMake build.** Partly answered, cheaply, after the issue
+author clarified on the PR that what their CI actually needs is a
+documented way to build against a CasADi they build from source — not
+maintained artifacts.
+
+It turned out the Makefile already did this: `CASADI_LIB`, `CASADI_INC`,
+`CASADI_VER` and `CASADI_SRC` are all `?=`, so their Python-derived
+defaults are only defaults. Verified by building with
+`PYTHON=/nonexistent` and explicit paths; the resulting plugin passes
+all 73 parity checks. So the gap was documentation, plus two failure
+modes worth catching:
+
+* `CASADI_VER` empty (no Python to read `casadi.__version__` from) defined
+  the version macros as nothing and died deep in the plugin source on
+  `expected primary-expression before ';'`, naming neither the option
+  nor the cause. `check-env` now stops with a message that does.
+* CasADi's `INSTALL_INTERNAL_HEADERS` defaults to **OFF**, so a
+  source-built CasADi's `make install` does not ship the internal
+  headers a plugin subclasses — the `CASADI_SRC` error now says so and
+  names both ways out.
+
+What is still not done is the CMake *idiom*: a `find_package`-style
+build taking `CASADI_ROOT` / `CASADI_DIR` / `CMAKE_PREFIX_PATH`. That is
+a second build system for the same target, and both would have to keep
+producing ABI-identical plugins — CasADi's loader does no version
+handshake, so drift between them is a silent misbehaviour, not an error.
+Worth doing only if the documented Makefile path proves awkward in a
+real native CI.
 
 **Windows is out of scope for this project.** The maintainer does not
 support a Windows build, so the MinGW half of the request is declined

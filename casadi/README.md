@@ -53,6 +53,56 @@ make
 `make fetch-src` clones into `casadi-src/`. If you already have a source
 tree, point at it instead: `make CASADI_SRC=/path/to/casadi`.
 
+### Against a CasADi you built yourself, with no Python
+
+The defaults above read the installed *Python* CasADi, but nothing in
+the build requires Python — every input is overridable, so a CI that
+builds CasADi from source can build the plugin against it directly
+(gh#634):
+
+```bash
+cargo build --release -p pounce-cinterface
+
+make -C casadi \
+  CASADI_LIB=/opt/casadi/lib \        # holds libcasadi.so
+  CASADI_INC=/opt/casadi/include \    # public headers
+  CASADI_SRC=/src/casadi \            # internal headers — see below
+  CASADI_VER=3.7.2 \                  # no Python to ask, so say it
+  CXX11_ABI=1
+```
+
+Four things to get right:
+
+1. **`CASADI_SRC` is an include root, not a source tree per se** — it
+   has to be the directory *containing* `casadi/core/nlpsol_impl.hpp`.
+   CasADi's `INSTALL_INTERNAL_HEADERS` option defaults to **OFF**, so a
+   stock `make install` of CasADi does *not* give you the internal
+   headers a plugin subclasses. Either point `CASADI_SRC` at your CasADi
+   source checkout (its repo root), or configure CasADi with
+   `-DINSTALL_INTERNAL_HEADERS=ON` and point both `CASADI_SRC` and
+   `CASADI_INC` at `<prefix>/include`.
+2. **`CASADI_VER` must be set explicitly.** It normally comes from
+   `casadi.__version__`, and with no Python it is empty. `check-env`
+   stops the build and says so; left to run, it used to die deep in the
+   plugin source on `expected primary-expression before ';'`, which
+   names neither the option nor the cause.
+3. **`CXX11_ABI=1` for a self-built CasADi.** The default is `0` to
+   match the pip wheels' pre-C++11 libstdc++ string ABI. Getting this
+   wrong shows up as an undefined-symbol error at link time — see
+   [ABI](#abi-what-has-to-match-and-why).
+4. `make abi-flags` prints the `-D` set the CasADi you are pointing at
+   was actually built with, for comparison with `DEFS` in the Makefile.
+
+`make install` targets the Python package's directory, so it does not
+apply here: put the plugin on `CASADIPATH`, or beside the CasADi runtime
+that will load it, and make `libpounce_cinterface` visible to the loader
+(the build already adds both `-rpath` entries).
+
+`make test` and `make examples` drive the plugin through CasADi's Python
+bindings, so they run only on the pip-installed path. CI builds and
+tests that path only; this one is verified by hand, most recently
+against casadi 3.7.2 on Linux x86-64.
+
 ## Install
 
 CasADi's plugin loader searches its own package directory first, so the

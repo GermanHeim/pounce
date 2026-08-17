@@ -77,7 +77,27 @@ write, skip `make install` and set `CASADIPATH` to the `casadi/`
 directory instead.
 
 Verify with `make test`, which cross-checks POUNCE against CasADi's
-bundled Ipopt on the same models (50 checks, also run in CI).
+bundled Ipopt on the same models (73 checks, also run in CI).
+
+**Against a CasADi you built yourself.** The defaults above read the
+installed *Python* CasADi, but nothing in the build requires Python —
+every input is overridable, so a CI that builds CasADi from source can
+build the plugin against it:
+
+```bash
+make -C casadi \
+  CASADI_LIB=/opt/casadi/lib CASADI_INC=/opt/casadi/include \
+  CASADI_SRC=/src/casadi CASADI_VER=3.7.2 CXX11_ABI=1
+```
+
+`CASADI_SRC` must be the directory *containing* `casadi/core/`, and
+CasADi's `INSTALL_INTERNAL_HEADERS` defaults to **OFF**, so point it at
+your CasADi source checkout — or build CasADi with
+`-DINSTALL_INTERNAL_HEADERS=ON` and use `<prefix>/include` for both it
+and `CASADI_INC`. `CXX11_ABI=1` matches a self-built CasADi's modern
+libstdc++ string ABI. There is no CMake package for this yet; the full
+recipe and its failure signatures are in [`casadi/README.md`](
+https://github.com/jkitchin/pounce/blob/main/casadi/README.md).
 
 Two constraints are worth knowing before you file a bug: the plugin must
 be rebuilt for each CasADi **minor** version, and it must match CasADi's

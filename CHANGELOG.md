@@ -58,6 +58,18 @@ changes.
 
   23 new checks in the CasADi parity suite, 73 in total.
 
+  Also: **building the plugin against a CasADi you built yourself is now
+  documented**, for a CI that builds CasADi from source rather than
+  installing the Python package. No new build system was needed — the
+  Makefile's CasADi inputs were already overridable, so their
+  Python-derived defaults are only defaults, and a `PYTHON=/nonexistent`
+  build produces a plugin that passes the full parity suite. Two failure
+  modes on that path now say what is wrong: an empty `CASADI_VER` (which
+  used to die deep in the plugin source on `expected primary-expression
+  before ';'`), and a `CASADI_SRC` without the internal headers, which a
+  source-built CasADi does not install unless configured with
+  `-DINSTALL_INTERNAL_HEADERS=ON`.
+
 - **The `pounce-casadi` wheel is tagged for the platform it was built
   for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
   Python, installs anywhere" — while carrying a compiled CasADi plugin and
