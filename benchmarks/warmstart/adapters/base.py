@@ -101,7 +101,44 @@ ARMS: List[str] = [
     "predcorr-ipm",
     "cold-qp-ipm",
     "warm-qp-ipm",
+    # pounce#611 additions, completing the issue's initialization list.
+    "warm-ipm-norecenter",
+    "cold-ipm-lsq",
+    "race-fixed",
+    "race-halving",
 ]
+
+#: Arms seeded with the previous **primal point only** — no
+#: multipliers, no barrier parameter. The issue lists this separately
+#: from the complete primal-dual-barrier warm start because it is what
+#: a caller gets for free from any solver (and all an external solver
+#: without a dual warm-start API can accept), and the gap between it
+#: and ``warm-ipm`` is the value of carrying the dual state at all.
+#: It is also the only arm that reaches the warm-start initializer's
+#: unseeded-dual path (gh#622), which is why gh#622's absence of it hid
+#: a defect.
+PRIMAL_ONLY_ARMS = ("values-ipm",)
+
+#: Arms that pin ``warm_start_recentering=none`` regardless of the
+#: run's ``--recentering`` setting. This is the pre-#606 attribution
+#: control: paired against ``warm-ipm``, the difference is exactly what
+#: residual-adaptive recentering bought (or cost).
+NO_RECENTER_ARMS = ("warm-ipm-norecenter",)
+
+#: Arms using the safeguarded least-squares normal step for the primal
+#: initialization (``least_square_init_primal=yes``, off by default).
+#: A *cold* arm: the option chooses where a cold solve starts, so it is
+#: paired against ``cold-ipm`` and means nothing next to a warm seed,
+#: which supplies the primal point directly.
+LSQ_INIT_ARMS = ("cold-ipm-lsq",)
+
+#: Start-racing arms: generate a field of candidate starts, spend a
+#: bounded budget ranking them, then solve to convergence from the
+#: winner. ``race-fixed`` gives every candidate the same budget;
+#: ``race-halving`` runs the pounce#610 successive-halving ladder.
+#: Both are *cold* in the sense that they carry nothing from the
+#: previous step — the racing replaces the start, it does not reuse one.
+RACE_ARMS = ("race-fixed", "race-halving")
 
 #: Arms that run the active-set SQP driver (either inner-QP variant).
 SQP_ARMS = ("cold-sqp", "warm-sqp", "cold-sqp-hom", "warm-sqp-hom")
@@ -115,10 +152,10 @@ HOMOTOPY_ARMS = ("cold-sqp-hom", "warm-sqp-hom")
 QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
 
 #: The arm that seeds the primal point alone — no multipliers, no mu.
-#: Warm in the sense that it carries state forward, and the only arm
-#: that exercises the unseeded-dual path through the warm-start
-#: initializer (gh#622).
-VALUES_ARM = "values-ipm"
+#: Warm in the sense that it carries state forward. The sole member of
+#: `PRIMAL_ONLY_ARMS`; named separately because several call sites want
+#: the arm rather than the group.
+VALUES_ARM = PRIMAL_ONLY_ARMS[0]
 
 #: Arms whose primal seed is a held-factor tangent predictor rather than
 #: the previous solution (pounce#608). They need the family to declare
@@ -138,8 +175,40 @@ def is_warm(arm: str) -> bool:
     step that seed along the sensitivity, so they are warm arms with a
     better seed, not a separate category. `values-ipm` does too, with a
     *worse* seed — the point without its duals.
+
+    The race arms do **not**, even though they are elaborate
+    initializations: they build their start from a fresh sample of the
+    box every step. That is the point of having them here — they are
+    the "spend effort choosing a cold start" alternative to "reuse the
+    previous answer", and the comparison is only meaningful if the
+    runner does not hand them the previous answer as well.
     """
     return arm.startswith("warm") or arm in PREDICTOR_ARMS or arm == VALUES_ARM
+
+
+def is_primal_only(arm: str) -> bool:
+    return arm in PRIMAL_ONLY_ARMS
+
+
+def recentering_override(arm: str) -> Optional[str]:
+    """``"none"`` for the attribution-control arm, else ``None``.
+
+    ``None`` means "use whatever the run was configured with", so the
+    ``--recentering`` sweep still moves every other warm arm.
+    """
+    return "none" if arm in NO_RECENTER_ARMS else None
+
+
+def uses_lsq_init(arm: str) -> bool:
+    return arm in LSQ_INIT_ARMS
+
+
+def is_race(arm: str) -> bool:
+    return arm in RACE_ARMS
+
+
+def race_policy(arm: str) -> str:
+    return "halving" if arm == "race-halving" else "fixed"
 
 
 def uses_predictor(arm: str) -> bool:
