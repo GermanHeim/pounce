@@ -198,8 +198,9 @@ a mechanism:
   taken a step from an already-feasible point; both routes return
   `DivergingIterates` on a model that is genuinely unbounded.
 * **Declined.** `csfi2`, `deb7`, `pooling_rt2stp`,
-  `linear_eq_aggregation`, `issue_372_infeasible_bounds`: every trial
-  is worse than `theta_0`, so the user's point is kept.
+  `linear_eq_aggregation`, `linear_eq_aggregation_row_constant`,
+  `issue_372_infeasible_bounds`: every trial is worse than `theta_0`,
+  so the user's point is kept.
 * **Backtracked accept.** `eigena2`, `eigenb2`, `hs71_obj1e8`,
   `user_scaling_suffix`, `user_scaling_var_suffix` accept at
   `alpha < 1`.
