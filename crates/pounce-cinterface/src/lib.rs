@@ -2965,7 +2965,13 @@ mod tests {
         // …and the same answers a live problem gives, which is the
         // property that keeps the two paths from drifting apart.
         let p = create_unconstrained();
-        for name in ["tol", "max_iter", "linear_solver", "mu_strategy", "print_level"] {
+        for name in [
+            "tol",
+            "max_iter",
+            "linear_solver",
+            "mu_strategy",
+            "print_level",
+        ] {
             let c = std::ffi::CString::new(name).unwrap();
             assert_eq!(
                 unsafe { GetPounceOptionType(std::ptr::null_mut(), c.as_ptr()) },

@@ -840,12 +840,17 @@ def test_option_types_come_from_pounce_not_the_literal():
         S(**kw)
         return S.stats()["iter_count"]
 
-    loose_int, tight = iters(1), iters(1e-12)
-    check("options: an int-valued number option takes effect",
-          loose_int < tight, f"tol=1 (int) took {loose_int} iters, tol=1e-12 took {tight}")
-    # And a float-valued one still behaves, i.e. nothing regressed.
-    check("options: a float-valued number option still takes effect",
-          iters(1.0) == loose_int, f"tol=1.0 took {iters(1.0)} iters")
+    # `1` and `1.0` are the same tolerance and must give the same solve.
+    # This is the check that bites: an int-valued `tol` was refused and
+    # left the default in place, so the two spellings disagreed. Note
+    # "int takes fewer iterations than 1e-12" does *not* bite — the
+    # default tolerance also takes fewer, so it passes pre-fix.
+    as_int, as_float, tight = iters(1), iters(1.0), iters(1e-12)
+    check("options: int and float spellings of a number option agree",
+          as_int == as_float,
+          f"tol=1 took {as_int} iters, tol=1.0 took {as_float}")
+    check("options: a loose tolerance really is looser",
+          as_int < tight, f"tol=1 took {as_int} iters, tol=1e-12 took {tight}")
     # An integer option given as an int stays an integer option.
     S = ca.nlpsol("S", "pounce", nlp,
                   {"print_time": False, "pounce": {"print_level": 0, "max_iter": 2}})
