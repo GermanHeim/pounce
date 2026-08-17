@@ -190,6 +190,60 @@ already decided, and it applies solely to a point the never-regress gate
 accepted on its declared-bound residuals, so it cannot dress up a worse
 iterate — the reading it replaces is the artifact, not the point.
 
+## What it does to a downstream sensitivity result
+
+Crossover moves the iterate onto its active bounds, which changes the
+barrier diagonal `Σ = z/s` the sensitivity path factorizes. That was
+expected to be a hazard — a slack driven to zero divides badly — and it
+is the opposite. `Σ` is the stiffness with which the barrier pins a
+bounded variable, and a reduced Hessian read off the held KKT factor
+carries a residual error of exactly `O(1/Σ)`: the leftover of that pin
+being finite rather than exact. A **larger** `Σ` is a sharper pin and a
+more accurate answer.
+
+Measured on `min ½xᵀQx − qᵀx` with two parameters held by pin rows and a
+third variable capped by a bound that binds with multiplier `4.5`. The
+reduced Hessian over the pins has an `O(1)` gap between the
+bound-pinned answer and the free one, so drift is unmissable:
+
+| | `Σ` at the active bound | reduced-Hessian error |
+|---|---|---|
+| `crossover=no` | `8.1e+09` | `4.95e-10` |
+| `crossover=yes`, `bound_relax_factor=0` | `2.5e+12` | **`1.62e-12`** |
+| `crossover=yes`, default relaxation | `4.5e+08` | **`8.89e-09`** |
+
+Two things follow, and they point in opposite directions.
+
+- **Against the bounds as declared, crossover sharpens the result by
+  exactly the factor `Σ` grew** — 306× here. The error is `Q_aw²/Σ`, the
+  bound block's Schur complement, which matches the measurement to every
+  printed digit at both ends of that range. This is the combination
+  [Sensitivity Analysis](sensitivity.md) steers you into, because
+  `classify_activity()` requires `bound_relax_factor = 0` anyway.
+- **Under a nonzero `bound_relax_factor`, crossover makes it worse than
+  not crossing over at all** — 18× worse here. The crossed-over point
+  sits exactly `δ = bound_relax_factor` inside the live relaxed bound,
+  so the barrier sees a slack of `δ` where an interior iterate would
+  have carried `μ/z`. `Σ` becomes `z/δ` instead of `z²/μ`, and the pin
+  *loosens*. The degradation factor is `z·δ/μ`, so it grows with the
+  bound's multiplier — around 400× by a multiplier of 1000.
+
+This is the same frame mismatch as
+[#646](https://github.com/jkitchin/pounce/issues/646), reaching the
+numerics rather than the printed residuals; the fix there was to the
+reporting only. Tracked as
+[#654](https://github.com/jkitchin/pounce/issues/654). If you combine
+crossover with any sensitivity result — `covariance()`,
+`compute_reduced_hessian`, `parametric_step` — set
+`bound_relax_factor = 0`.
+
+`Σ` never becomes infinite along this path. `CalculateSafeSlack` floors
+a slack below `eps·min(1, μ)` up to about `μ/z`, so even a slack landing
+at exactly zero degrades gracefully back to the pre-crossover `Σ = z²/μ`
+rather than dividing by nothing. The crossed-over slack measured here
+bottoms out at `1.8e-12` — the residual of the QP step plus line search
+— and never reaches the floor at all.
+
 ## Reading the result
 
 The returned solution — `x`, the objective, `g`, and every multiplier — is
