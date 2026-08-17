@@ -181,7 +181,8 @@ Two practical consequences:
 
 This is a reporting-frame mismatch rather than a property of the returned
 point, and fixing it means teaching the summary which frame a crossed-over
-solve lives in — tracked separately from this feature.
+solve lives in — tracked in [#646](https://github.com/jkitchin/pounce/issues/646),
+separately from this feature.
 
 ## Reading the result
 

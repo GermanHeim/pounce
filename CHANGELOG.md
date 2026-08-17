@@ -68,7 +68,7 @@ changes.
   runs), but `Overall NLP error` in the summary can exceed `tol`, and the
   opt-in `kkt_fidelity_tol` gate — applied *after* crossover — will
   downgrade a threshold set between the two figures. Tracked as a
-  reporting-frame defect separately from this feature.
+  reporting-frame defect in #646, separately from this feature.
 
   Two defects surfaced while building it, both of which would have made
   the phase report the opposite of the truth:
