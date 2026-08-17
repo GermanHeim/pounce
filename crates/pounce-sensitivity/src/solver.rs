@@ -734,6 +734,89 @@ impl Solver {
         Ok((dx[..ctx.n_x].to_vec(), segments))
     }
 
+    /// The bounds the activity classifier could not call at the base
+    /// point: on the bound with a multiplier of the same order as the
+    /// slack. Each entry is a bound row present in the held
+    /// factorization, with the side taken from the smaller slack,
+    /// which is the only side an ambiguous label can come from.
+    ///
+    /// The classifier reports per user variable while the bound
+    /// context is in the factor's var-x block. The two index spaces
+    /// agree up to the first fixed variable; a fixed variable is a
+    /// constant with no bound row in the factor, so a status past one
+    /// cannot produce an entry here, only miss one, and the callers
+    /// treat an empty result as "no degeneracy" in either case.
+    pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
+        use crate::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
+
+        let report = self.classify_activity()?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let Some(rows) = state.backsolver.bound_rows() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for (i, &st) in report.var_status.iter().enumerate() {
+            if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
+                continue;
+            }
+            if i >= ctx.n_x {
+                continue;
+            }
+            let s_lo = ctx.x_curr[i] - ctx.lo[i];
+            let s_hi = ctx.hi[i] - ctx.x_curr[i];
+            let lower = s_lo <= s_hi;
+            if let Some(br) = rows.iter().find(|b| b.var_row == i && b.lower == lower) {
+                out.push(crate::boundcheck::WeakBound {
+                    row: br.row,
+                    var_row: i,
+                    lower,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The parametric step with the directional-derivative correction
+    /// at a degenerate base point (the 2012 paper's eq. 14 QP).
+    ///
+    /// With no weakly active bounds this is exactly
+    /// [`Self::parametric_step`]. Otherwise the weakly active rows are
+    /// released and an active-set search over them decides which
+    /// variables the direction holds on their bounds, so the returned
+    /// step is the one-sided derivative for the side the perturbation
+    /// asks about. Returns the primal step, the var-x rows the
+    /// accepted working set pinned, and the trials the search spent
+    /// against `max_iter`.
+    ///
+    /// Errors from the search (budget exhausted, no sign-consistent
+    /// working set) surface as [`SolverError::SensComputationFailed`];
+    /// the caller owns the fallback to the plain step and its warning.
+    pub fn parametric_step_directional(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<usize>, usize), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let weak = self.weakly_active_bounds()?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        if weak.is_empty() {
+            let mut d = vec![0.0; state.backsolver.dim()];
+            if !state.backsolver.solve(&rhs_plain, &mut d) {
+                return Err(SolverError::BacksolveFailed);
+            }
+            return Ok((d[..ctx.n_x].to_vec(), Vec::new(), 0));
+        }
+        let (d, pinned, trials) =
+            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
+                .map_err(SolverError::SensComputationFailed)?;
+        Ok((d[..ctx.n_x].to_vec(), pinned, trials))
+    }
+
     /// The bound geometry both bound-aware steps read: the primal
     /// block's size and base point, its bounds in the model's own
     /// units, the tolerance that decides what counts as on a bound, and

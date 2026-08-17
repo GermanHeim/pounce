@@ -854,6 +854,132 @@ where
 /// without the constraint the released direction is measurably wrong:
 /// on a two-variable QP the free direction after a release came back
 /// [1.154, 0.194] against the analytic [1.227, 0.454].
+/// A bound the classifier could not call active or inactive at the
+/// base point: variable on the bound with a multiplier of the same
+/// order as the slack, both order sqrt(mu). The solution map has a
+/// kink there, and no single linear step is right for both sides.
+#[derive(Clone, Copy, Debug)]
+pub struct WeakBound {
+    /// Bound-multiplier row in the compound KKT vector.
+    pub row: usize,
+    /// Var-x row of the variable the bound covers.
+    pub var_row: usize,
+    /// `true` when the bound is the variable's lower bound.
+    pub lower: bool,
+}
+
+/// The directional derivative at a degenerate base point: the QP of
+/// Pirnay, Lopez-Negrete and Biegler 2012, eq. 14, solved as an
+/// active-set search over the weakly active rows on the held
+/// factorization.
+///
+/// Every weakly active row is released in every trial, because its
+/// sigma is `z / s` with both of order sqrt(mu), an order-one term
+/// that half-enforces a bound the direction may need to leave, and it
+/// is wrong for both sides of the kink. A candidate working set then
+/// pins its variable rows to zero movement through Schur rows. The
+/// candidate is accepted when
+///
+/// 1. every out variable moves into its feasible side, and
+/// 2. every pin is necessary: removing it alone makes its variable
+///    move into violation.
+///
+/// The necessity probe stands in for the dual-feasibility sign test
+/// on the pin's Schur multiplier, whose sign convention the rest of
+/// this file deliberately never names. The two tests agree wherever
+/// the returned direction differs: a pin whose multiplier is exactly
+/// zero at a doubly degenerate QP can be in or out, and both answers
+/// give the same direction.
+///
+/// Candidates are enumerated by size and then by least index, so the
+/// result is deterministic, and every trial counts against
+/// `max_iter`, the shared budget. Returns the direction, the var rows
+/// pinned in the accepted set, and the trials spent. `Err` when no
+/// candidate fits the budget or none is sign-consistent, and the
+/// caller falls back to the plain direction and says so.
+pub fn directional_step<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    weak: &[WeakBound],
+    max_iter: usize,
+) -> Result<(Vec<Number>, Vec<usize>, usize), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+    let mut trials = 0usize;
+    // dx tolerance: zero movement of a pinned variable is exact up to
+    // the augmented solve's roundoff, so the feasibility comparisons
+    // only need to clear that.
+    const EPS: Number = 1e-9;
+    let feasible =
+        |w: &WeakBound, di: Number| -> bool { if w.lower { di >= -EPS } else { di <= EPS } };
+    let violates =
+        |w: &WeakBound, di: Number| -> bool { if w.lower { di < -EPS } else { di > EPS } };
+
+    let n = weak.len();
+    // Subsets ordered by size then least index: subset bits over the
+    // weak list, sizes 0..=n.
+    let mut candidates: Vec<u32> = (0u32..(1 << n)).collect();
+    candidates.sort_by_key(|s| (s.count_ones(), *s));
+    for s in candidates {
+        if trials >= max_iter {
+            return Err(format!(
+                "directional derivative: the budget of {max_iter} trials \
+                 ran out over {n} weakly active bound(s)"
+            ));
+        }
+        let pinned: Vec<usize> = weak
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| s >> k & 1 == 1)
+            .map(|(_, w)| w.var_row)
+            .collect();
+        let (d, _) = path_direction(backsolver, rhs_plain, &released, &pinned)?;
+        trials += 1;
+        let out_ok = weak
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| s >> k & 1 == 0)
+            .all(|(_, w)| feasible(w, d[w.var_row]));
+        if !out_ok {
+            continue;
+        }
+        // Necessity of each pin, one removal probe per member.
+        let mut all_needed = true;
+        for k in 0..n {
+            if s >> k & 1 == 0 {
+                continue;
+            }
+            if trials >= max_iter {
+                return Err(format!(
+                    "directional derivative: the budget of {max_iter} trials \
+                     ran out over {n} weakly active bound(s)"
+                ));
+            }
+            let probe: Vec<usize> = weak
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != k && s >> j & 1 == 1)
+                .map(|(_, w)| w.var_row)
+                .collect();
+            let (dp, _) = path_direction(backsolver, rhs_plain, &released, &probe)?;
+            trials += 1;
+            if !violates(&weak[k], dp[weak[k].var_row]) {
+                all_needed = false;
+                break;
+            }
+        }
+        if all_needed {
+            return Ok((d, pinned, trials));
+        }
+    }
+    Err(format!(
+        "directional derivative: no sign-consistent working set over \
+         {n} weakly active bound(s)"
+    ))
+}
+
 fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
