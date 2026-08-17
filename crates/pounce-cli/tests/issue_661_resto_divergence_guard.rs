@@ -30,6 +30,24 @@
 //! than 19, and the gate carries an `iter >= 30` floor — identical
 //! divergence on either side of #619, opposite verdict, decided by an
 //! iteration count.
+//!
+//! Scope. These are behavioural tests only — they assert what the user is
+//! told, not how the guard reached it. The guard's decision rule is a pure
+//! function, `diverged_from_restoration_entry`, unit-tested directly in
+//! `pounce-restoration::resto_inner_solver`; that is where the plateau /
+//! blow-up discrimination, the stall waiver and the boundaries are pinned.
+//! An earlier revision of this file asserted the mechanism end-to-end by
+//! parsing the `POUNCE_DBG_RESTO_LOCINF` trace, and it did not survive
+//! contact with a second platform: on x86_64-linux this restoration
+//! explodes at inner iteration 15 rather than 32, so it never clears the
+//! `step_failure` gate's `iter >= 30` floor and the trace legitimately
+//! shows no gate firing at all. *Which* gate a trajectory reaches is not a
+//! property this fix owns, and asserting it made the test a trajectory
+//! detector rather than a regression test. Whether these end-to-end cases
+//! are non-vacuous on a given platform therefore varies — they are
+//! provably non-vacuous on aarch64-darwin, where a baseline binary prints
+//! the false verdict — which is the other reason the mechanism is pinned
+//! in unit tests.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,26 +82,6 @@ fn run_with_locinf_trace(fixture: &str, opts: &[&str]) -> String {
     )
 }
 
-/// Parse the `key=value` fields of every `[PN_RESTO_LOCINF]` line.
-fn locinf_lines(combined: &str) -> Vec<Vec<(String, String)>> {
-    combined
-        .lines()
-        .filter_map(|l| l.split("[PN_RESTO_LOCINF] ").nth(1))
-        .map(|rest| {
-            rest.split_whitespace()
-                .filter_map(|tok| {
-                    let (k, v) = tok.split_once('=')?;
-                    Some((k.to_string(), v.to_string()))
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn field<'a>(line: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    line.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
-}
-
 /// The user-facing half of #661: a model that solves at default options
 /// must never be reported as possibly infeasible just because one
 /// option cascade sends its restoration divergent.
@@ -100,97 +98,23 @@ fn a_diverging_restoration_is_not_reported_as_an_infeasible_model() {
     );
 }
 
-/// The mechanism, pinned rather than inferred from the exit line: the
-/// gate does fire on its own terms, and the divergence guard is what
-/// withholds the verdict.
+/// A second, independent instance of the same defect, on a different
+/// model. `hs71_obj1e8` is plain HS071 with its objective scaled by 1e8;
+/// it solves in 11 iterations at default options. Under the same option
+/// cascade its restoration was entered at `1.04e2` and rendered the
+/// verdict at `6.79e9`, while still *reducing* the original violation
+/// (`4.48e1` -> `2.25e1`) shortly before it diverged — a sub-solve making
+/// progress, not one out of room.
 #[test]
-fn the_guard_is_what_withholds_the_verdict_on_the_diverging_call() {
-    let combined = run_with_locinf_trace("pooling_rt2stp.nl", &["mehrotra_algorithm=yes"]);
-    let lines = locinf_lines(&combined);
+fn a_second_feasible_model_is_not_reported_infeasible_either() {
+    let combined = run_with_locinf_trace("hs71_obj1e8.nl", &["mehrotra_algorithm=yes"]);
     assert!(
-        !lines.is_empty(),
-        "expected the gate trace to be emitted\n--- output ---\n{combined}",
-    );
-
-    let guarded: Vec<_> = lines
-        .iter()
-        .filter(|l| field(l, "diverged_from_entry") == Some("true"))
-        .collect();
-    assert!(
-        !guarded.is_empty(),
-        "pounce#661: expected at least one restoration call on this model \
-         to be recognised as diverged from its entry violation\n--- output \
+        !combined.contains("local infeasibility"),
+        "pounce#661: `hs71_obj1e8.nl` is feasible — it solves in 11 \
+         iterations at default options — so no option cascade may lead the \
+         solver to report it as possibly infeasible.\n--- output \
          ---\n{combined}",
     );
-
-    for line in &guarded {
-        // A gate did want to render the verdict — otherwise the guard is
-        // not the thing being tested and this test would silently stop
-        // covering the regression.
-        let any_reconstructed_gate = ["strict", "alt", "cycle", "step_fail", "tiny_step"]
-            .iter()
-            .any(|g| field(line, g) == Some("true"));
-        assert!(
-            any_reconstructed_gate,
-            "expected a reconstructed gate to have fired on the diverged \
-             call, so the guard is what suppresses it: {line:?}",
-        );
-        assert_eq!(
-            field(line, "loc_inf"),
-            Some("false"),
-            "pounce#661: the divergence guard must withhold the verdict on \
-             a call whose recovered violation is far worse than the one \
-             restoration was entered at: {line:?}",
-        );
-    }
-}
-
-/// The guard defers to `RESTO_STALL_EVIDENCE_ITERS`. A sub-solve that
-/// spent 1016 inner iterations pinned at the violation it entered
-/// restoration at — `1.04e-2`, to the digit, which is the infeasibility
-/// gap this fixture is built around — and only then blew up over its
-/// last three has demonstrated exactly the floor the gates look for. The
-/// large final ratio describes those three iterations, not the run, and
-/// the verdict must survive it.
-///
-/// This is the discriminator between the two shapes: `pooling_rt2stp`
-/// and `hs71_obj1e8` exit after ~30 inner iterations with no plateau at
-/// all, and `hs71_obj1e8` was still *reducing* the original violation
-/// (`4.48e1` -> `2.25e1`) shortly before it diverged.
-#[test]
-fn a_long_stalled_sub_solve_keeps_its_verdict_despite_a_terminal_blow_up() {
-    let combined = run_with_locinf_trace(
-        "issue_508_infeasible_gap_1em2.nl",
-        &["mehrotra_algorithm=yes"],
-    );
-    assert!(
-        combined.contains("local infeasibility"),
-        "pounce#661: this model is infeasible by a constructed 1e-2 gap,          and its restoration stalls at that gap for 1000+ inner iterations          before a terminal blow-up. The divergence guard must not read          those last few iterations as grounds to withhold the          verdict.\n--- output ---\n{combined}",
-    );
-
-    let lines = locinf_lines(&combined);
-    let long_stalls: Vec<_> = lines
-        .iter()
-        .filter(|l| {
-            field(l, "iter")
-                .and_then(|v| v.parse::<i64>().ok())
-                .is_some_and(|n| n >= 1000)
-        })
-        .collect();
-    assert!(
-        !long_stalls.is_empty(),
-        "expected a restoration call that burned the stall-evidence \
-         budget\n--- output ---\n{combined}",
-    );
-    for line in &long_stalls {
-        assert_eq!(
-            field(line, "diverged_from_entry"),
-            Some("false"),
-            "the divergence guard must stand down once the sub-solve has \
-             burned the same iteration budget the `cycle` gate accepts as \
-             stall evidence on its own: {line:?}",
-        );
-    }
 }
 
 /// The guard must not cost genuine detection. A one-inequality
