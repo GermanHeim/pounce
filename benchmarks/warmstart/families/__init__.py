@@ -13,9 +13,13 @@ from typing import Dict, List, Type
 from ..spec import ParametricFamily
 from .control import VanDerPolNMPC
 from .degenerate import DegenerateVertex, RedundantRows
+from .global_nonconvex import RastriginDrift, RastriginScatter
 from .mpc_horizon import HORIZON_FAMILIES
+from .network import NETWORK_FAMILIES
 from .nonlinear import HangingChain, RosenbrockRing, RosenbrockRingRoundTrip
+from .pde import PDE_FAMILIES
 from .quadratic import DegenerateCorner, MovingBoundQP, SimplexProjection
+from .scaling import BadlyScaledQP
 from .unconstrained import DoubleWellChain
 
 _FAMILIES: List[Type[ParametricFamily]] = [
@@ -30,6 +34,13 @@ _FAMILIES: List[Type[ParametricFamily]] = [
     DoubleWellChain,
     VanDerPolNMPC,
     *HORIZON_FAMILIES,
+    # pounce#611: families chosen to *not* be warm-start-friendly, and
+    # families whose sparsity and conditioning differ from the MPC sweep.
+    BadlyScaledQP,
+    RastriginDrift,
+    RastriginScatter,
+    *PDE_FAMILIES,
+    *NETWORK_FAMILIES,
 ]
 
 REGISTRY: Dict[str, Type[ParametricFamily]] = {f.name: f for f in _FAMILIES}

@@ -468,8 +468,9 @@ answer, or the right answer down a much longer trajectory.
 
 Pass `problem=` when you capture, and the object records a
 **signature** of the model as well: dimensions, the bound signature, the
-declared sparsity, the scaling convention, the algorithm/backend, and
-the model-defining options.
+declared sparsity, the scaling convention, the algorithm/backend, the
+model-defining options, and an order-sensitive probe of the model
+itself.
 
 ```python
 ws = pounce.WarmStart.from_info(x, info, problem=prob)
@@ -502,15 +503,75 @@ per call: `prob.solve(warm_start=ws, compat="warn")`.
 `ws.describe_compatibility(prob)` returns the report as a string without
 raising, which is the dry run for a replay you are unsure of.
 
-One structural change a fingerprint cannot see is a **reordering**:
-permuting a model with a uniform box and a dense jacobian leaves every
-digest bit-identical. Ordering is knowledge only you have, so name it:
+#### Reordered variables
+
+Every facet listed above is a digest of what the model *declares*, and
+none of them can see a **reordering**: permuting a model with a uniform
+box and a dense jacobian leaves the bound digest and the sparsity digest
+bit-identical. Replaying through one produced objective 16.0909 against
+a true 17.0140 on permuted HS071, with nothing raised (#621).
+
+So the signature also records a **probe**: the model evaluated once at a
+fixed point inside the bounds, summarized order-sensitively. A
+permutation moves those numbers, so it is refused with no help from you:
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob)
+reordered_prob.solve(warm_start=ws)        # refused — no var_ids needed
+```
+
+```text
+warm start is not compatible with this problem (1 mismatch,
+exact-structure replay, schema v2):
+  - probe: this problem's model does not evaluate to the same numbers as
+    the one the warm start was captured against (a reordering of the
+    variables looks exactly like this; so does a different model of the
+    same shape)
+```
+
+The probe costs one model evaluation at capture, and one at replay only
+when the artifact carries a probe to compare against — 0.15 ms on a
+4-variable model and 1.7 ms at 10 000 variables, or 1.2% and 0.002% of a
+cold solve of the same model. It is a fixed 20 floats in the artifact
+whatever the problem size. Decline it with `probe=False` for a model
+whose evaluation is expensive or has side effects:
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob, probe=False)
+```
+
+The comparison is to a **relative tolerance** (`PROBE_RTOL`, 1e-9), not a
+hash equality: a model does not have to be bitwise reproducible to
+replay. Re-associating a model's internal sums — what a different BLAS
+or thread count does — moves the probe by 5e-18 relative and is
+accepted.
+
+**Stable IDs remain the rigorous answer**, for two reasons. The probe
+infers ordering from arithmetic, so a model that is genuinely symmetric
+under the permutation looks unchanged to it; and the probe can only
+*refuse* a reordering, where IDs let `reindex` repair it:
 
 ```python
 ws = pounce.WarmStart.from_info(x, info, problem=prob,
                                 var_ids=names, con_ids=con_names)
 ...
-prob2.solve(warm_start=ws, var_ids=names_in_prob2_order)   # refused
+prob2.solve(warm_start=ws, var_ids=names_in_prob2_order)   # refused, by name
+ws.reindex(prob2, var_ids=names_in_prob2_order)            # ...or repaired
+```
+
+The probe is best-effort, and unavailable in three cases: an artifact
+captured with `probe=False`, an artifact written before #621, and a
+model that will not evaluate at an arbitrary interior point or answers
+with a NaN. Each leaves the facet unrecorded, which reads as
+*unverifiable* rather than incompatible — the replay still proceeds. When
+neither the probe nor IDs were available on both sides, the report says
+so rather than claiming a clean bill of health:
+
+```text
+warm start is compatible with this problem
+  (note: neither a model probe nor stable IDs were available on both
+  sides, so a pure reordering of the variables would not have been
+  caught here (pounce#621). ...)
 ```
 
 ### Transferring a warm start: horizon shifts and reindexing

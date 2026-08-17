@@ -57,6 +57,7 @@ import numpy as np
 from . import _pounce
 from ._warm_start_schema import (
     COMPAT_MODES,
+    ORDERING_UNVERIFIED_NOTE,
     WARM_START_SCHEMA_VERSION,
     ProblemSignature,
     WarmStartCompatibilityError,
@@ -64,6 +65,7 @@ from ._warm_start_schema import (
     WarmStartLegacyWarning,
     compare,
     format_report,
+    ordering_is_unverified,
 )
 
 __all__ = [
@@ -181,7 +183,8 @@ class WarmStart:
 
     @classmethod
     def from_info(
-        cls, x, info, problem=None, var_ids=None, con_ids=None, **overrides
+        cls, x, info, problem=None, var_ids=None, con_ids=None, probe=True,
+        **overrides
     ) -> "WarmStart":
         """Capture a warm start from a solve's ``(x, info)`` result.
 
@@ -196,13 +199,23 @@ class WarmStart:
         identifiers for the variables and constraints; supply them and
         :meth:`reindex` can carry the state across a reordering or a
         horizon shift.
+
+        `probe` (default ``True``) additionally evaluates the model once
+        at a fixed interior point and records an order-sensitive sketch
+        of the result, which is what lets a later replay refuse a
+        *reordered* model without the caller having named anything
+        (pounce#621). Pass ``probe=False`` for a model whose evaluation
+        is expensive enough to notice or has side effects — the replay
+        then costs nothing either, since the target is only probed when
+        the artifact carries a probe to compare it against.
         """
         mu = info.get("mu")
         mu = float(mu) if mu is not None and float(mu) > 0.0 else None
         if problem is not None:
             overrides.setdefault(
                 "signature",
-                ProblemSignature.from_problem(problem, var_ids, con_ids),
+                ProblemSignature.from_problem(problem, var_ids, con_ids,
+                                              probe=probe),
             )
         elif var_ids is not None or con_ids is not None:
             raise TypeError(
@@ -399,13 +412,24 @@ class WarmStart:
         and names :meth:`migrate`; an unsigned state built in this
         process is the pre-#607 usage and stays silent.
 
+        A **reordering** is the one structural change no digest of the
+        model's *declarations* can see: permuting a model with a uniform
+        box and a dense jacobian leaves the bound and sparsity digests
+        bit-identical. Since pounce#621 a signed artifact carries a
+        model *probe* as well — the model evaluated once at a fixed
+        interior point — and that does move under a permutation, so a
+        reordered replay is refused with no help from the caller. The
+        probe is best-effort: an artifact captured with ``probe=False``,
+        one written before #621, or a model that will not evaluate at
+        the probe point leaves the facet unrecorded, and then only
+        `var_ids` can see the reordering.
+
         `var_ids` / `con_ids` name `problem`'s variables and constraints
-        in the vocabulary this state was captured with. Supply them to
-        catch a **reordering**: a permutation is the one structural
-        change a fingerprint cannot see on its own, because permuting a
-        model with a uniform box and a dense jacobian leaves the bound
-        and sparsity digests bit-identical. Ordering is knowledge only
-        the caller has; the digests cover everything else.
+        in the vocabulary this state was captured with. They remain the
+        *rigorous* answer — they say which variable is which rather than
+        inferring it from arithmetic — and they are what
+        :meth:`reindex` needs to repair a reordering instead of only
+        refusing it.
         """
         mode = self.compat if compat is None else compat
         if mode not in COMPAT_MODES:
@@ -416,7 +440,7 @@ class WarmStart:
         if mode == "unsafe":
             return []
 
-        mismatches = self._mismatches(problem, var_ids, con_ids)
+        mismatches, unordered = self._compare(problem, var_ids, con_ids)
         if self.signature is None and self.origin == "file" and not mismatches:
             # A *persisted* artifact with nothing to check it against.
             # Refusing outright would break every archive written before
@@ -441,6 +465,7 @@ class WarmStart:
                 replay=self.replay,
                 schema_version=self.schema_version,
                 source=self.source_signature,
+                ordering_unverified=unordered,
             )
             if mode == "strict":
                 raise WarmStartCompatibilityError(report)
@@ -450,30 +475,44 @@ class WarmStart:
     def describe_compatibility(self, problem, var_ids=None, con_ids=None) -> str:
         """The mismatch report against `problem` as a string, without
         raising or warning. The dry run for a replay you are unsure of.
+
+        A clean verdict says so, and — when the comparison could not
+        have seen a reordering — says that too. "Compatible" on its own
+        would otherwise read as a stronger claim than the check made
+        (pounce#621).
         """
-        mismatches = self._mismatches(problem, var_ids, con_ids)
+        mismatches, unordered = self._compare(problem, var_ids, con_ids)
         if not mismatches:
-            return "warm start is compatible with this problem"
+            ok = "warm start is compatible with this problem"
+            return f"{ok}\n  ({ORDERING_UNVERIFIED_NOTE})" if unordered else ok
         return format_report(
             mismatches,
             replay=self.replay,
             schema_version=self.schema_version,
             source=self.source_signature,
+            ordering_unverified=unordered,
         )
 
     def _mismatches(self, problem, var_ids=None, con_ids=None) -> list:
-        """The facets on which this state and `problem` disagree.
+        """The facets on which this state and `problem` disagree."""
+        return self._compare(problem, var_ids, con_ids)[0]
+
+    def _compare(self, problem, var_ids=None, con_ids=None) -> tuple:
+        """``(mismatches, ordering_unverified)`` against `problem`.
 
         A signed state is compared facet by facet. An unsigned one is
         compared on the only facets its own arrays witness — the
         dimensions — which is what keeps a legacy artifact from being
         replayed at the wrong size.
+
+        The second element says whether anything in that comparison
+        *could* have seen a reordering; it is always ``True`` for an
+        unsigned state, which witnesses nothing but its own lengths.
         """
         if self.signature is not None:
-            return compare(
-                self.signature,
-                ProblemSignature.from_problem(problem, var_ids, con_ids),
-            )
+            target = self._target_signature(problem, var_ids, con_ids)
+            return (compare(self.signature, target),
+                    ordering_is_unverified(self.signature, target))
         if var_ids is not None or con_ids is not None:
             raise WarmStartCompatibilityError(
                 "this warm start carries no model signature, so there is "
@@ -487,12 +526,33 @@ class WarmStart:
         # unverifiable facet out of the target's `m`. (An unconstrained
         # solve reports an empty `mult_g`, which `_opt_array` normalizes
         # to None — that is the common case here, not an exotic one.)
-        return compare(
-            arrays,
-            ProblemSignature(
-                n=int(problem.n),
-                m=int(problem.m) if arrays.m is not None else None,
+        return (
+            compare(
+                arrays,
+                ProblemSignature(
+                    n=int(problem.n),
+                    m=int(problem.m) if arrays.m is not None else None,
+                ),
             ),
+            True,
+        )
+
+    def _target_signature(self, problem, var_ids=None, con_ids=None):
+        """Fingerprint `problem` for a comparison against this state.
+
+        The target is probed only when *this* state carries a probe to
+        compare it against. That is what keeps the pounce#621 facet from
+        charging an extra model evaluation to callers who never bought
+        into it — an artifact captured with ``probe=False``, and every
+        artifact written before #621, replay at exactly their old cost.
+        It matters most on the repeated-check paths (`_starts.py` checks
+        once per multistart rung), where the alternative would be one
+        wasted evaluation per rung for a facet that is going to be
+        skipped anyway.
+        """
+        return ProblemSignature.from_problem(
+            problem, var_ids, con_ids,
+            probe=self.signature is not None and self.signature.probe is not None,
         )
 
     def _array_signature(self) -> ProblemSignature:
@@ -590,7 +650,19 @@ class WarmStart:
         and remembers where it came from, so replaying it on a *third*
         problem is refused exactly like an unmapped one.
         """
-        target = ProblemSignature.from_problem(problem, var_ids, con_ids)
+        # Probed on the same terms as :meth:`_target_signature`: only
+        # when *this* state carries a probe. Signing the target
+        # unconditionally would charge an extra model evaluation to a
+        # caller who passed ``probe=False``, and `transfer` is the
+        # per-step call in a receding-horizon loop (pounce#622), so that
+        # is four of the user's evaluations every step for a facet they
+        # declined. A source without a probe produces a mapped result
+        # without one, which is the same trade `probe=False` already
+        # makes everywhere else.
+        target = ProblemSignature.from_problem(
+            problem, var_ids, con_ids,
+            probe=self.signature is not None and self.signature.probe is not None,
+        )
         n, m = target.n, target.m
         if mapper is None:
             mapper = _reindex_mapper(fill_x)

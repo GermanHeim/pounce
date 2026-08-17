@@ -243,7 +243,16 @@ def render(payload: dict) -> str:
         w("")
 
     # -- parametric homotopy vs the conventional inner solve ---------
-    hom_runs = [r for r in runs if "cold-sqp-hom" in r["arms"]]
+    # The cold pair is what this section is about; the warm pair is a
+    # secondary column. A narrowed `--arms` — `cold-sqp,cold-sqp-hom` is
+    # the reproduction in dev-notes/warm-start-benchmark.md — leaves the
+    # warm twins absent, so they are looked up defensively below rather
+    # than indexed.
+    hom_runs = [
+        r
+        for r in runs
+        if "cold-sqp-hom" in r["arms"] and "cold-sqp" in r["arms"]
+    ]
     if hom_runs:
         w("## Parametric homotopy vs the conventional inner QP")
         w("")
@@ -267,23 +276,29 @@ def render(payload: dict) -> str:
             a = run["arms"]
 
             def ws(arm):
+                if arm not in a:
+                    return None
                 return sum(s["n_qp_ws_changes"] or 0 for s in a[arm])
 
             cc, ch, wc, wh = (
                 ws("cold-sqp"), ws("cold-sqp-hom"), ws("warm-sqp"), ws("warm-sqp-hom")
             )
             for k, v in (("cc", cc), ("ch", ch), ("wc", wc), ("wh", wh)):
-                tot[k] += v
+                if v is not None:
+                    tot[k] += v
             w(
-                f"| `{run['family']}` | {run['scale']} | {cc} → {ch} "
+                f"| `{run['family']}` | {run['scale']} "
+                f"| {_fmt(cc, 'd')} → {_fmt(ch, 'd')} "
                 f"| {_fmt(cc / ch if ch else None, '.2f')}× "
-                f"| {wc} → {wh} | {_fmt(wc / wh if wh else None, '.2f')}× |"
+                f"| {_fmt(wc, 'd')} → {_fmt(wh, 'd')} "
+                f"| {_fmt(wc / wh if wc is not None and wh else None, '.2f')}× |"
             )
         w(
             f"| **total** | | **{tot['cc']} → {tot['ch']}** "
-            f"| **{tot['cc'] / tot['ch']:.2f}×** | **{tot['wc']} → {tot['wh']}** "
-            f"| **{tot['wc'] / tot['wh']:.2f}×** |"
-            if tot["ch"] and tot["wh"]
+            f"| **{_fmt(tot['cc'] / tot['ch'] if tot['ch'] else None, '.2f')}×** "
+            f"| **{_fmt(tot['wc'], 'd')} → {_fmt(tot['wh'], 'd')}** "
+            f"| **{_fmt(tot['wc'] / tot['wh'] if tot['wh'] else None, '.2f')}×** |"
+            if tot["ch"]
             else ""
         )
         w("")

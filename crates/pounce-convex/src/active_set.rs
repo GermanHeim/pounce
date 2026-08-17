@@ -825,16 +825,128 @@ fn reverify_after_unscale(
     ) {
         return scaled_status;
     }
-    let err = sol.kkt_residuals(prob).kkt_error();
+    solved_band(adjudicated_kkt_error(prob, sol, opts.tol), opts.tol)
+        .unwrap_or(QpStatus::NumericalFailure)
+}
+
+/// Multiple of `tol` inside which a solve is downgraded to "acceptable" rather
+/// than rejected — the IPM's `1e3·tol` band.
+const ACCEPTABLE_FACTOR: f64 = 1e3;
+
+/// Band a KKT error into the reported success statuses: within `tol` is a clean
+/// [`QpStatus::Optimal`], within [`ACCEPTABLE_FACTOR`]`·tol` the "solved to
+/// acceptable level" tier, anything worse (or non-finite) is not a solve and the
+/// caller decides which failure status to report.
+fn solved_band(err: f64, tol: f64) -> Option<QpStatus> {
     if !err.is_finite() {
-        QpStatus::NumericalFailure
-    } else if err <= opts.tol {
-        QpStatus::Optimal
-    } else if err <= 1e3 * opts.tol {
-        QpStatus::OptimalInaccurate
+        None
+    } else if err <= tol {
+        Some(QpStatus::Optimal)
+    } else if err <= ACCEPTABLE_FACTOR * tol {
+        Some(QpStatus::OptimalInaccurate)
     } else {
-        QpStatus::NumericalFailure
+        None
     }
+}
+
+/// The natural scale of `prob` at the point `sol` — the largest of the term
+/// magnitudes that compose the three KKT residuals, and hence the size the
+/// finite-precision floor on an *absolute* residual is proportional to.
+fn natural_scale(prob: &QpProblem, sol: &QpSolution) -> f64 {
+    let mut px = vec![0.0; prob.n];
+    prob.p_mul(&sol.x, &mut px);
+    // `at_mul`/`gt_mul` accumulate, so a zeroed target yields the product itself.
+    let mut aty = vec![0.0; prob.n];
+    prob.at_mul(&sol.y, &mut aty);
+    let mut gtz = vec![0.0; prob.n];
+    prob.gt_mul(&sol.z, &mut gtz);
+    inf_norm(&px)
+        .max(inf_norm(&prob.c))
+        .max(inf_norm(&aty))
+        .max(inf_norm(&gtz))
+        .max(inf_norm(&sol.z_lb))
+        .max(inf_norm(&sol.z_ub))
+        .max(inf_norm(&prob.b))
+        .max(inf_norm(&prob.h))
+        .max(sol.obj.abs())
+}
+
+/// The KKT error the status bands are measured against: the **absolute**
+/// residual in the original coordinates, with the *stationarity* and
+/// *complementarity* terms relaxed to their scale-relative counterparts where
+/// the absolute test is unreachable in double precision (gh #641).
+///
+/// # The defect
+///
+/// [`QpResiduals::kkt_error`](crate::qp::QpResiduals::kkt_error) is unnormalized
+/// — in particular its complementarity term `max|zᵢsᵢ|` carries the magnitude of
+/// the problem data twice over. On a QP that is merely *large* rather than
+/// ill-conditioned, `sᵢ = hᵢ − gᵢᵀx` cannot be computed to better than
+/// `‖data‖·ε` even at an exactly optimal point, so `zᵢsᵢ` floors at
+/// `‖z‖·‖data‖·ε`; stationarity floors at `‖P‖·‖x‖·ε` the same way. For
+/// `‖data‖ ≳ 1e9` both sit above the default `tol = 1e-8`. Comparing that floor
+/// to `tol` labelled a machine-precision-exact solution `OptimalInaccurate` (or
+/// `NumericalFailure` at a tightened `tol`) while the convex IPM — the *less*
+/// accurate engine on the same instance — reported a clean `Optimal`. That is
+/// the active-set analogue of gh #336, whose fix (#337) made the non-symmetric
+/// HSDE driver's post-loop adjudication scale-relative and never reached here.
+///
+/// # Why primal feasibility stays absolute
+///
+/// The relaxation is deliberately confined to the two dual-side terms. A primal
+/// residual is a violation of the user's own constraints, in the user's own
+/// units, and it is what the solve report prints as "Constraint violation" —
+/// there is no metric in which reporting `Optimal` beside a visible violation is
+/// honest. It also does not have the same finite-precision floor: on the
+/// reported instance primal infeasibility is `2.2e−16` while complementarity is
+/// `1.1e−7`, five decades of daylight, because `‖G‖` is `O(1)` even when `‖P‖`
+/// is `1e9`.
+///
+/// This is not hypothetical. Relaxing the primal term as well — via the same
+/// equilibrated normalizer — regressed the `scaled_feasible_a` CLI fixture from
+/// an exact solve to `Optimal` at a constraint violation of `7.8e−3`: a row with
+/// huge coefficients makes that violation look like `1e−9` *relative to the
+/// row*, and the driver then accepted the unscaled attempt instead of falling
+/// through to the equilibrated retry that actually solves it. Keeping the primal
+/// term absolute leaves that fixture bit-identical.
+///
+/// # Why it cannot loosen anything else
+///
+/// * The `err <= tol` short-circuit means every solve that already passes the
+///   tight absolute test is untouched, and pays nothing for this check.
+/// * [`relative_stop_permitted`](crate::hsde::relative_stop_permitted) — the
+///   same gate, and the same crossover `max_scale·ε > tol`, the HSDE stopping
+///   test uses — keeps the relative arm shut for well- and moderately-scaled
+///   problems, where a `tol`-accurate answer is reachable and demanding it is
+///   right. At the default `tol` the crossover is `‖data‖ ≈ 4.5e7`, matching the
+///   reported threshold (`K = 1e8` still certifies absolutely, `K = 1e9` does not).
+/// * `err.min(..)` means the relative arm can only lower the error, never raise
+///   it, so no solve that used to be reported as solved can start failing.
+///
+/// The relative terms come from
+/// [`equilibrated_kkt_rel_parts`](crate::ipm::equilibrated_kkt_rel_parts): each
+/// residual over the magnitude of its own terms, measured in the
+/// Ruiz-equilibrated metric. The metric is load-bearing rather than incidental —
+/// normalizing by *global* ∞-norms in the original coordinates is blind to a
+/// spread in the **variable** scales, and gh #414 is a family of QPs where that
+/// blindness certifies a badly wrong point as optimal. Equilibration is the
+/// diagonal change of variables that removes the spread, so no column can mask
+/// another's violation.
+fn adjudicated_kkt_error(prob: &QpProblem, sol: &QpSolution, tol: f64) -> f64 {
+    let res = sol.kkt_residuals(prob);
+    let err = res.kkt_error();
+    if !err.is_finite() || err <= tol {
+        return err;
+    }
+    if !crate::hsde::relative_stop_permitted(natural_scale(prob, sol), tol) {
+        return err;
+    }
+    let rel = crate::ipm::equilibrated_kkt_rel_parts(prob, sol);
+    err.min(
+        res.primal_infeasibility
+            .max(rel.dual_infeasibility)
+            .max(rel.complementarity),
+    )
 }
 
 /// Decide the reported status from the engine's verdict **and** the measured
@@ -864,7 +976,10 @@ fn reverify_after_unscale(
 ///
 /// The `Optimal` / `OptimalInaccurate` / fail banding mirrors the IPM's
 /// post-loop verdict (`hsde.rs`): within `tol` is clean, within `1e3·tol` is
-/// the "acceptable level" tier, anything worse is not a solve.
+/// the "acceptable level" tier, anything worse is not a solve. What is banded is
+/// [`adjudicated_kkt_error`] rather than the raw `kkt_error()` — see there for
+/// why an unnormalized residual cannot be compared to an absolute `tol` on a
+/// large-data QP (gh #641).
 fn verify_status(
     engine: ActiveSetStatus,
     ray: Option<&[f64]>,
@@ -872,22 +987,8 @@ fn verify_status(
     prob: &QpProblem,
     opts: &QpOptions,
 ) -> QpStatus {
-    /// Multiple of `tol` inside which a solve is downgraded to "acceptable"
-    /// rather than rejected — the IPM's `1e3·tol` band.
-    const ACCEPTABLE_FACTOR: f64 = 1e3;
-
-    let err = sol.kkt_residuals(prob).kkt_error();
-    let solved_to = |e: f64| {
-        if !e.is_finite() {
-            None
-        } else if e <= opts.tol {
-            Some(QpStatus::Optimal)
-        } else if e <= ACCEPTABLE_FACTOR * opts.tol {
-            Some(QpStatus::OptimalInaccurate)
-        } else {
-            None
-        }
-    };
+    let err = adjudicated_kkt_error(prob, sol, opts.tol);
+    let solved_to = |e: f64| solved_band(e, opts.tol);
 
     match engine {
         // Trust, but verify.
@@ -1693,6 +1794,185 @@ mod tests {
         assert_eq!(
             verify_status(ActiveSetStatus::TimeLimit, None, &sol, &prob, &opts),
             QpStatus::TimeLimit
+        );
+    }
+
+    /// `min ½K‖x‖² − K(x₀+x₁)  s.t.  x₀ + x₁ ≤ 1` — the gh #641 minimal case.
+    /// The row binds, so by symmetry `x* = (½, ½)`, `obj* = −0.75K`, and
+    /// stationarity `Kx − K + z(1,1) = 0` gives `z = K/2`.
+    fn scaled_projection_qp(k: f64) -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, k), Triplet::new(1, 1, k)],
+            c: vec![-k, -k],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    fn scaled_projection_point(k: f64, x: [f64; 2]) -> QpSolution {
+        let obj = 0.5 * k * (x[0] * x[0] + x[1] * x[1]) - k * (x[0] + x[1]);
+        QpSolution {
+            status: QpStatus::Optimal,
+            x: x.to_vec(),
+            y: vec![],
+            z: vec![k / 2.0],
+            z_lb: vec![0.0; 2],
+            z_ub: vec![0.0; 2],
+            obj,
+            iters: 0,
+            iterates: Vec::new(),
+        }
+    }
+
+    /// gh #641: the scale-relative arm only ever *relaxes*, and only where the
+    /// absolute test is unreachable. Below the crossover the tight absolute test
+    /// must still govern, so a point whose residual sits between `tol` and
+    /// `1e3·tol` on a moderately-scaled QP stays `OptimalInaccurate` — the arm
+    /// must not quietly promote every near-miss to a clean `Optimal`.
+    #[test]
+    fn moderate_scale_keeps_the_absolute_test() {
+        let prob = projection_qp();
+        let opts = QpOptions::default();
+        // Perturb `x` off the optimum by enough to put the KKT error inside the
+        // reduced-accuracy band (‖P‖ = 2, so the stationarity residual is 2δ).
+        let sol = QpSolution {
+            x: vec![2.5 + 5e-8, 1.5],
+            ..projection_optimum()
+        };
+        let err = sol.kkt_residuals(&prob).kkt_error();
+        assert!(
+            err > opts.tol && err <= ACCEPTABLE_FACTOR * opts.tol,
+            "test setup: {err:.3e} must land in the acceptable band"
+        );
+        assert_eq!(
+            adjudicated_kkt_error(&prob, &sol, opts.tol),
+            err,
+            "below the crossover the absolute residual must be used unchanged"
+        );
+        assert_eq!(
+            verify_status(ActiveSetStatus::Optimal, None, &sol, &prob, &opts),
+            QpStatus::OptimalInaccurate
+        );
+    }
+
+    /// gh #641: above the crossover the arm opens, and an *exactly* optimal
+    /// point — whose absolute residual cannot go below the `‖z‖·‖data‖·ε`
+    /// complementarity floor — is certified `Optimal` rather than demoted.
+    ///
+    /// The point is the exact optimum's nearest representable neighbour (one ulp
+    /// out in `x₀`), which is what the engine actually returns: `0.5` itself is
+    /// representable and lands the residual at a clean zero, so testing that
+    /// would test nothing. One ulp of `x` is `K·ε` of stationarity — `1.1e−4`
+    /// here — which is the whole defect: no iterate can do better, and the
+    /// absolute test rejects all of them.
+    #[test]
+    fn large_scale_exact_optimum_is_certified_optimal() {
+        let k = 1e12;
+        let prob = scaled_projection_qp(k);
+        let opts = QpOptions::default();
+        let sol = scaled_projection_point(k, [0.5 + f64::EPSILON / 2.0, 0.5]);
+        assert!(
+            sol.kkt_residuals(&prob).kkt_error() > ACCEPTABLE_FACTOR * opts.tol,
+            "test setup: the absolute residual must be outside every band"
+        );
+        assert_eq!(
+            verify_status(ActiveSetStatus::Optimal, None, &sol, &prob, &opts),
+            QpStatus::Optimal
+        );
+    }
+
+    /// The safety half of gh #641: relaxing the *measure* must not relax the
+    /// *verdict*. A point that is genuinely not optimal — here one that violates
+    /// the binding row outright — is rejected at the same scale where the arm is
+    /// open, so the fix cannot manufacture a success out of a wrong answer.
+    #[test]
+    fn large_scale_wrong_point_is_still_rejected() {
+        let k = 1e10;
+        let prob = scaled_projection_qp(k);
+        let opts = QpOptions::default();
+        // Both components at 1: primal-infeasible (x₀+x₁ = 2 > 1) and far from
+        // stationary. Its *relative* residual is O(1), not merely above `tol`.
+        let sol = scaled_projection_point(k, [1.0, 1.0]);
+        assert!(
+            adjudicated_kkt_error(&prob, &sol, opts.tol) > ACCEPTABLE_FACTOR * opts.tol,
+            "a non-optimal point must not be rescued by the scale-relative arm"
+        );
+        assert_eq!(
+            verify_status(ActiveSetStatus::Optimal, None, &sol, &prob, &opts),
+            QpStatus::NumericalFailure
+        );
+    }
+
+    /// gh #641, the sharp edge of the fix: primal feasibility is **not** relaxed
+    /// to the relative measure, however large the problem.
+    ///
+    /// The point below is stationary and exactly complementary — its only defect
+    /// is that it violates a constraint row by `7.8e−3`. Because that row's
+    /// coefficients are `1e6`, the violation is a mere `7.8e−9` *relative to the
+    /// row*, so an equilibrated relative primal residual waves it through. That
+    /// is not a hypothetical: an earlier draft of this fix normalized all three
+    /// terms and turned the `scaled_feasible_a` CLI fixture from an exact solve
+    /// into `Optimal` printed beside a visible constraint violation, because
+    /// accepting the unscaled attempt skipped the equilibrated retry that
+    /// actually solves it.
+    #[test]
+    fn primal_feasibility_is_never_relaxed() {
+        const K: f64 = 1e10; // objective scale — opens the relative arm
+        const R: f64 = 1e6; // row scale — hides the violation if normalized
+        const GAP: f64 = 7.8e-9; // x₀'s true distance from the candidate point
+
+        // `min ½K‖x‖² − K(x₀+x₁)  s.t.  R·x₀ ≤ R(1 − GAP)`. The unconstrained
+        // minimizer is `(1, 1)`; the row binds just short of it.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, K), Triplet::new(1, 1, K)],
+            c: vec![-K, -K],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, R)],
+            h: vec![R * (1.0 - GAP)],
+            lb: vec![],
+            ub: vec![],
+        };
+        // The *unconstrained* minimizer, offered with a zero multiplier: exactly
+        // stationary, exactly complementary, and infeasible.
+        let sol = QpSolution {
+            status: QpStatus::Optimal,
+            x: vec![1.0, 1.0],
+            y: vec![],
+            z: vec![0.0],
+            z_lb: vec![0.0; 2],
+            z_ub: vec![0.0; 2],
+            obj: -K,
+            iters: 0,
+            iterates: Vec::new(),
+        };
+
+        let res = sol.kkt_residuals(&prob);
+        let opts = QpOptions::default();
+        assert!(
+            res.dual_infeasibility <= opts.tol && res.complementarity <= opts.tol,
+            "test setup: only the primal term may be at fault ({res:?})"
+        );
+        assert!(
+            res.primal_infeasibility > ACCEPTABLE_FACTOR * opts.tol,
+            "test setup: the violation must be plainly outside every band"
+        );
+        // The trap: measured relatively, this violation looks converged.
+        assert!(
+            crate::ipm::equilibrated_kkt_rel_parts(&prob, &sol).primal_infeasibility <= opts.tol,
+            "test setup: a relative primal residual would accept this point"
+        );
+
+        assert_eq!(
+            verify_status(ActiveSetStatus::Optimal, None, &sol, &prob, &opts),
+            QpStatus::NumericalFailure,
+            "a constraint violation is a constraint violation at any scale"
         );
     }
 }

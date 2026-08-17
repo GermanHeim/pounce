@@ -39,6 +39,36 @@ nearest public things and why each does not cover it:
 | `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous step's working set and point | every family |
 | `cold-qp-ipm` | dedicated convex QP IPM (`pounce.solve_qp`) | nothing | QP families only |
 | `warm-qp-ipm` | dedicated convex QP IPM | previous step's primal-dual point | QP families only |
+| `warm-ipm-norecenter` | general NLP filter-IPM | as `warm-ipm`, with `warm_start_recentering=none` | every family |
+| `cold-ipm-lsq` | general NLP filter-IPM, `least_square_init_primal=yes` | nothing | every family |
+| `race-fixed` | general NLP filter-IPM | winner of a fixed-budget start race | every family |
+| `race-halving` | general NLP filter-IPM | winner of a successive-halving race | every family |
+
+The last four are pounce#611's; with `values-ipm`, which pounce#622
+added for its own reasons, they complete the nine initializations that
+issue lists. Three are paired controls rather than candidates for
+"best":
+
+- **`values-ipm` vs `warm-ipm`** is the value of carrying the
+  *dual* state. Both start at the same primal point; only one is handed
+  the multipliers and μ.
+- **`warm-ipm-norecenter` vs `warm-ipm`** is the pre-#606 attribution
+  control. It pins `warm_start_recentering=none` per-arm, so both
+  settings appear in a single run rather than needing two sweeps to
+  compare — which also means a recentering change shows up as a moving
+  *gap* rather than as two numbers taken at different times.
+- **`cold-ipm-lsq` vs `cold-ipm`** isolates the safeguarded
+  least-squares normal step. It is a *cold* arm on purpose: the option
+  decides where a cold solve starts, and means nothing next to a warm
+  seed that supplies the primal point directly.
+
+The two racing arms are cold too — they choose a start rather than
+reuse one, which is the alternative strategy to warm starting rather
+than a variant of it. The family's own cold start is always candidate 0
+in the field, so an arm that still finishes behind `cold-ipm` was beaten
+by its own ranking rule and not by unlucky sampling. Their tournament
+cost is charged to `init_time`, reported separately from `solve_time`,
+so an arm that wins the solve and loses on the total is visible as such.
 
 Both cold arms are there so the warm-start effect can be separated
 from the algorithm change. `warm-sqp` beating `cold-ipm` proves
@@ -118,6 +148,43 @@ the mean speedup hides the failure mode that matters most.
 | `nmpc_vanderpol` | 47 | 32 | closed-loop | rhs | nonconvex |
 | `mpc_horizon_10/20/40/80` | 32–242 | 22–162 | saturation | rhs | convex |
 | `mpc_horizon_200/400/800` | 602–2402 | 402–1602 | saturation | rhs | convex |
+| `badly_scaled_qp` | 12 | 4 | scaling | objective | convex |
+| `rastrigin_drift` | 10 | 1 | multi-basin | objective | nonconvex |
+| `rastrigin_scatter` | 10 | 1 | **unrelated** | objective | nonconvex |
+| `elliptic_control_40/80/160` | 82–322 | 42–162 | moving band | rhs | convex |
+| `elliptic_control_600` | 1202 | 602 | moving band | rhs | convex |
+| `resistive_network_60/120` | 90–180 | 59–119 | congestion | rhs | convex |
+| `resistive_network_800` | 1200 | 799 | congestion | rhs | convex |
+
+The last block is pounce#611's. Three of them exist because the suite
+had a structural blind spot rather than a missing data point:
+
+- **`rastrigin_drift` / `rastrigin_scatter` are the falsification
+  arm.** Every family above them was chosen by warm-start work, so the
+  suite could measure how much warm starting won but never whether it
+  did. These are shifted Rastrigin problems — a global minimum in a
+  lattice of local minima spaced 1 apart — where the seed's basin is
+  something the benchmark controls directly. `drift` walks a path with
+  a per-coordinate step of `0.3 x scale`, so `tiny` and `small` stay in
+  one basin and `large` does not; `scatter` is not a path at all, just
+  independent draws, which is the issue's "unrelated global/nonconvex
+  cases where continuation should not be expected to help". **A
+  wrong-basin step converges cleanly and lands on a worse optimum**, so
+  it appears in the `bad` column and never in a status code — and the
+  arm can look *faster* on exactly the steps it got wrong.
+- **`elliptic_control_*` and `resistive_network_*` are the sparsity
+  and conditioning axes.** Before them the only family that reached
+  size was linear-quadratic MPC: block-banded, constant Hessian, large
+  active set that barely moves. The elliptic family is tridiagonal and
+  symmetric with conditioning growing like `h⁻²`, so refining its mesh
+  makes it harder for a reason unrelated to its size; the network
+  family's incidence pattern has two entries per column with endpoints
+  a third of the graph apart, so no permutation makes it banded, and
+  its quartic loss means the Hessian actually changes between
+  iterations.
+- **`badly_scaled_qp`** spans 10⁸ in Hessian conditioning and 10³ in
+  row scaling, which is the axis every initialization heuristic is
+  implicitly assuming something about.
 
 The last row is the opt-in **`large` tier** (`--tier large`; `--tier
 all` runs both). It is out of the default sweep because one active-set
@@ -239,6 +306,51 @@ or directly, for a narrower run:
 
 `results.json` (every step of every arm) and `results.md` are
 regenerated per run and gitignored, like every other suite's outputs.
+
+### The external-solver arm
+
+    python -m warmstart.run --solver ipopt --out warmstart/results-ipopt.json
+
+needs cyipopt, which has no PyPI wheel and builds against a system
+Ipopt. On Debian/Ubuntu:
+
+    apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev
+    pip install cython && pip install --no-build-isolation cyipopt
+
+`--solver ipopt` without it exits with those instructions rather than
+"unknown solver". Ipopt has no active-set, QP-matrix or sensitivity
+path, so those arms are skipped with a recorded reason; the three it
+does run (`cold-ipm`, `warm-ipm`, `values-ipm`) go through the
+*same* callback object pounce is given, so evaluation counts compare.
+
+### Changed structure
+
+The sweep above holds each family's shape fixed, which is what an
+ordinary warm start assumes. Horizon shifts and mesh refinement do not:
+
+    python -m warmstart.transfer --experiment all --out warmstart/transfer.json
+
+`shift` reindexes the previous horizon by one stage
+(`WarmStart.reindex`) on `mpc_horizon_*`; `shift-cl` does the same on
+the genuinely closed-loop `nmpc_vanderpol`; `mesh` prolongs an elliptic
+control solution onto a mesh of twice the resolution
+(`WarmStart.transfer` with an interpolation mapper), with and without
+the mesh-dependent multiplier scaling.
+
+### The composite report
+
+    python -m warmstart.composite --results warmstart/results.json \
+        --ipopt warmstart/results-ipopt.json \
+        --transfer warmstart/transfer.json \
+        -o ../dev-notes/warm-start-611-composite.md \
+        --json-out ../dev-notes/warm-start-611-composite.json
+
+Every table in that document — including the performance and data
+profiles — is computed from those three JSON files. None is
+transcribed, so re-measuring after a solver change is a re-run rather
+than an editing pass. Sections whose input is missing say so instead of
+vanishing: an absent section and an empty one mean different things to
+a reader deciding whether a claim is supported.
 
 ## Adding a family
 

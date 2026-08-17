@@ -70,6 +70,49 @@ changes.
   source-built CasADi does not install unless configured with
   `-DINSTALL_INTERNAL_HEADERS=ON`.
 
+- **`solve_qp(method="active-set")` reported `success=False` at exactly
+  optimal points on large-data QPs** (#641). The driver's post-loop
+  adjudication compared the raw, unnormalized KKT error against the absolute
+  `tol`. Its complementarity term `max|zᵢsᵢ|` carries the problem-data
+  magnitude twice over — `sᵢ = hᵢ − gᵢᵀx` cannot be formed to better than
+  `‖data‖·ε`, so `zᵢsᵢ` floors at `‖z‖·‖data‖·ε` — and stationarity floors at
+  `‖P‖·‖x‖·ε` the same way. Above `‖data‖ ≈ 1e9` both floors sit over the
+  default `tol = 1e-8`, so *no* iterate could pass, however exact.
+
+  Reported on `min ½K‖x‖² − K(x₁+x₂) s.t. x₁+x₂ ≤ 1` with `K = 1e9`, where
+  `cond(P) = 1` — the problem is large, not ill-conditioned. The returned
+  point was `x = (0.5, 0.5)` to `1.1e−16` and the objective exact to
+  `1.6e−16`, labelled `optimal_inaccurate` / `success=False`, degrading to
+  `numerical_failure` when the user asked for *more* accuracy. The convex IPM
+  — the less accurate engine on the same instance — reported a clean
+  `optimal`, so the two drivers disagreed and the one claiming failure held
+  the better answer.
+
+  This is the active-set analogue of #336, whose fix (#337) made the
+  non-symmetric HSDE driver's post-loop adjudication scale-relative; the
+  `pounce-qp` path was not covered by it. The status bands now score the
+  recovered point on a scale-relative residual, reusing the same crossover
+  gate (`max_scale·ε > tol`) the HSDE stopping test uses, so it opens only
+  where absolute `tol` accuracy is unreachable in double precision and can
+  only ever lower the measured error. Well- and moderately-scaled solves are
+  untouched — both fixture sweeps (default and `solver_selection=qp-active-set`)
+  diff empty against the parent commit.
+
+  **Primal feasibility is deliberately excluded from the relaxation.** An
+  earlier draft normalized all three terms and regressed the
+  `scaled_feasible_a` fixture from an exact solve to `Optimal` printed beside
+  a `7.8e−3` constraint violation: rows with `1e6` coefficients make a real
+  violation look like `1e−9` relative to the row, and accepting the unscaled
+  attempt then skipped the equilibrated retry that actually solves it. A
+  violation of the user's constraints is reported in the user's units at any
+  scale; only the two dual-side terms are measured relatively, and only in
+  the Ruiz-equilibrated metric, so the #414 variable-scale blindness cannot
+  return through this door.
+
+  Impact was confined to the Python API's `success` / `status`, which a
+  caller gating on them would read as a failed solve. The CLI already mapped
+  this case into the solved family (`solve_result_num=100`, exit 0).
+
 - **A warm start that carries only a point is no longer charged for
   multipliers it never claimed to have** (#622, second half). Raised on
   the issue with a controlled table: turning on `warm_start_init_point`
@@ -291,6 +334,67 @@ changes.
   build for this CasADi version" — a hand-copied wheel used to report the
   platform mismatch as a missing CasADi version, sending the reader after
   the wrong axis.
+
+- **A reordered warm start is refused without the caller supplying
+  `var_ids`** (#621, split out of #607). Every facet the #607
+  `ProblemSignature` carries is a digest of what the model *declares*,
+  and a pure permutation of the variables changes none of them.
+  Measured on the parent commit `b4c4d32e`, permuted HS071 (uniform box
+  `[1,5]^4`, dense jacobian) with no `var_ids`: `ws.check_compatible`
+  reported **no mismatch at all**, and the replay returned objective
+  **16.0909032757** against a true **17.0140171452** — `x` off by 0.2205
+  in the inf-norm — with status `Error_In_Step_Computation` in 44
+  iterations.
+
+  The signature now also carries a **`probe`**: the model evaluated once
+  at a fixed, deterministic, index-varying point inside the bounds,
+  recorded as a small vector of order-weighted projections. A
+  permutation moves those numbers, so the reordered replay above is
+  refused with nothing supplied by the caller.
+
+  The probe is compared to a **relative tolerance** (`PROBE_RTOL`,
+  `1e-9`), not hashed and compared for equality — a hash cannot be
+  compared approximately, and a model whose evaluation is not bitwise
+  reproducible would then be refused for reproducing itself to 15 digits
+  instead of 17, which is a worse failure than the one being fixed.
+  Measured: re-associating a model's internal summation (what a
+  different BLAS or thread count does) moves the probe by `5e-18`
+  relative and is accepted; a jax model is bit-identical across fresh
+  captures; injected relative jitter is accepted 40/40 at `1e-9` and
+  refused 40/40 at `1e-6`.
+
+  Cost, measured rather than asserted: `0.15 ms` at n=4 rising to
+  `1.73 ms` at n=10 000 per capture — `1.17%` down to `0.002%` of a cold
+  solve of the same model — and a fixed 20 floats in the artifact
+  regardless of problem size. `probe=False` at capture declines it, and
+  by construction then costs nothing at replay either, because a target
+  is only probed when the artifact carries a probe to compare against.
+  The multistart ladder in `_starts.py` declines it: that path resumes
+  on the same `Problem` object in the same process, where no reordering
+  is possible, and probing once per rung spent four of the caller's own
+  evaluations per resume (racing suite `2592` → `2920` evaluations for
+  the same three answers; back to `2592` with the probe declined).
+
+  The facet is optional on both sides, so artifacts written before this
+  and models that will not evaluate at an arbitrary interior point
+  degrade to *unverifiable* rather than refused. `var_ids` remain the
+  rigorous answer — a model genuinely symmetric under the permutation is
+  invisible to arithmetic, and only IDs let `reindex` *repair* a
+  reordering instead of only refusing it — and the #607 property that
+  signing with IDs must never be worse than signing without is now
+  pinned by test. When neither route was available on both sides, the
+  report says so instead of reporting a clean "compatible".
+
+  Note for downstream readers: a signature written by this build carries
+  a facet older builds do not know, and `ProblemSignature.from_json`
+  raises on unknown facets by design (#607) rather than silently
+  weakening the artifact. Re-capture, or upgrade the reader.
+
+  Fixture sweep over all 57 CLI fixtures against a baseline binary built
+  from `origin/main`: empty diff (no Rust changed). The Python
+  warm-start path — cold solve, warm replay, replay from file, and the
+  multistart ladder, at n = 4/10/50/200 — is unchanged in status,
+  objective and iteration count.
 
 - **Warm start: a dual seed that cannot belong to its primal point is
   refused instead of reconstructed off, and a slack the point's own
@@ -1991,6 +2095,80 @@ workflows and the docs deploy now gate their first job on
 `github.repository == 'jkitchin/pounce'`. Pull requests are unaffected —
 `pull_request` runs in the base repository's context, so a contributor's PR
 still gets the full CI and the Docker rot guard.
+
+- **Warm-start benchmark: coverage completed before any SOTA claim**
+  (#611). The suite could measure how *much* warm starting won but not
+  *whether* it does — every family in it had been chosen by earlier
+  warm-start work. It now carries families built to make warm starting
+  lose, and reports it when they do.
+
+  New initialization arms, completing the nine the issue lists:
+  `values-ipm` (previous primal only, no multipliers or barrier
+  parameter), `warm-ipm-norecenter` (`warm_start_recentering=none` as a
+  pre-#606 attribution control, pinned per-arm rather than per-run),
+  `cold-ipm-lsq` (`least_square_init_primal=yes`, the sparse
+  safeguarded normal step), and `race-fixed` / `race-halving` (start
+  racing, with the family's own cold start always in the field so a
+  loss is attributable to the ranking rather than to sampling). Racing
+  is charged for its tournament: `StepResult.init_time` separates
+  initialization overhead from solve time for every arm.
+
+  The primal-only arm is named `values-ipm` because #622 added an arm
+  by that name, independently and for its own reasons, while this work
+  was in flight. The two were the same arm: previous `x`, no
+  multipliers, no `mu`, no recentering override — identical seeds,
+  identical options, and so identical numbers in every row of every
+  table. Merged into one under #622's name, since that one had already
+  shipped. #611's cross-solver support for it is kept, so the arm now
+  runs under Ipopt as well; the measured tables in
+  `dev-notes/warm-start-611-composite.md` are relabelled and not
+  re-run, the arm being unchanged in everything but its name.
+
+  New problem families outside the ones earlier warm-start work chose:
+  `rastrigin_drift` and `rastrigin_scatter` (multi-basin, the second
+  with no path at all — the issue's "unrelated global/nonconvex cases
+  where continuation should not be expected to help"),
+  `elliptic_control_*` (1-D Poisson optimal control over a mesh sweep,
+  tridiagonal and symmetric rather than block-banded, conditioning
+  growing like `h⁻²`), `resistive_network_*` (flows on a
+  ring-plus-chord graph — scattered sparsity, quartic loss, so not a
+  QP), and `badly_scaled_qp` (10⁸ Hessian conditioning, 10³ row
+  scaling).
+
+  `benchmarks/warmstart/transfer.py` covers the changed-structure case
+  the fixed-shape runner cannot express: horizon shift via
+  `WarmStart.reindex` and mesh prolongation via `WarmStart.transfer`.
+  Both report negative results where they occur — the horizon shift
+  does *not* beat carrying the previous solution unshifted, on either
+  the rotating `mpc_horizon_*` path or the genuinely closed-loop
+  `nmpc_vanderpol`.
+
+  `benchmarks/warmstart/adapters/ipopt_adapter.py` is the external
+  baseline, driving Ipopt through cyipopt with the *same* callback
+  object the pounce adapter uses, so evaluation counts are comparable.
+  Arms Ipopt has no counterpart for are skipped with a recorded reason.
+  `benchmarks/warmstart/kkt.py` recomputes the KKT residual from the
+  returned point identically for both solvers, so neither one's status
+  line decides whether its own step counted.
+
+  `benchmarks/warmstart/composite.py` renders the composite report,
+  including performance and data profiles, into
+  `dev-notes/warm-start-611-composite.md` and a machine-readable
+  `.json` beside it. Every table is computed from the raw result files;
+  none is transcribed.
+
+  Fixed while checking the reproduction commands this note documents:
+  `warmstart/report.py` gated its homotopy section on `cold-sqp-hom`
+  alone but then indexed `warm-sqp` and `warm-sqp-hom` unconditionally,
+  so any narrowed `--arms` that dropped the warm twins — including the
+  `--arms cold-sqp,cold-sqp-hom` reproduction in
+  `dev-notes/warm-start-benchmark.md` — died with `KeyError:
+  'warm-sqp'` after the solves had already run. The absent arms now
+  render as `—`. The full sweep's report is byte-identical across the
+  change.
+
+  No solver code changed — this is benchmark and documentation only.
+
 
 ## [0.10.0] - 2026-08-11
 

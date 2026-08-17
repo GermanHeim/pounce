@@ -108,6 +108,16 @@ class StepResult:
     # only measurement that responds to a warm start at all.
     n_qp_solves: Optional[int] = None
     n_qp_ws_changes: Optional[int] = None
+    #: Initialization overhead: wall time spent *building the seed*,
+    #: outside the solve itself (pounce#611 asks for it as a metric).
+    #: The tangent back-solve for a predictor arm, the whole tournament
+    #: for a racing arm, the transfer mapper for a prolongation arm.
+    #: Zero for arms whose seed is the previous solution verbatim, which
+    #: costs nothing to form. ``solve_time`` never includes this, so
+    #: total cost is the sum and the two are separable in the report --
+    #: an arm that wins on ``solve_time`` and loses on the sum is a
+    #: result worth seeing rather than one worth hiding.
+    init_time: float = 0.0
     # Active-set descriptors, present only when the solver returned a
     # working set (i.e. the active-set path).
     n_active: Optional[int] = None
