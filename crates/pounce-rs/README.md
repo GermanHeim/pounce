@@ -61,7 +61,17 @@ to a limited-memory (L-BFGS) approximation. This keeps simple problems concise
 without sacrificing access to exact derivatives when needed.
 
 Solver options use the same names as upstream Ipopt
-(`option_num`, `option_int`, `option_str`).
+(`option_num`, `option_int`, `option_str`). Names, value types, ranges, and
+choices are validated against the option registry. A rejected option is
+never applied silently: `solve` panics, and `try_solve` returns
+`Err(NlpError::InvalidOption { .. })` naming the option and the reason.
+
+```rust
+let sol = Nlp::new(P)
+    .x0(&[0.0, 0.0])
+    .option_str("mu_strategy", "adaptive")
+    .try_solve()?;                        // Result<Solution, NlpError>
+```
 
 ## Result
 

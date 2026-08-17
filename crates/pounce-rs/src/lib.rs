@@ -225,7 +225,7 @@ pub use pounce_observability;
 
 // --- ergonomic builder API (argmin-style small trait + builder; #168) -------
 pub mod builder;
-pub use builder::{Nlp, Problem, Solution as NlpSolution};
+pub use builder::{Nlp, NlpError, Problem, Solution as NlpSolution};
 
 // --- feature-gated facets (gh #561) -----------------------------------------
 // Each path gets its own module rather than a flat re-export: `pounce-convex`
@@ -254,7 +254,7 @@ pub mod sqp;
 /// use pounce_rs::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::builder::{Nlp, Problem};
+    pub use crate::builder::{Nlp, NlpError, Problem};
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
