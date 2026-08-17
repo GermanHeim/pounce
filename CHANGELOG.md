@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+- **The iteration callback now fires during feasibility restoration, and
+  can stop the solve from there** (#645).
+
+  Previously it fired only from the outer loop, so a caller went silent
+  for the whole of a restoration episode and could not interrupt one.
+  That is the phase most likely to overrun a real-time budget, which
+  makes it the phase a controller most needs to be able to abort in —
+  and it is why the C API's `alg_mod` argument was, until now, always
+  `0`: not merely untracked, but unreachable, because no fire happened
+  from anywhere that could have set it.
+
+  Restoration iterations arrive with `alg_mod = 1`
+  (`RestorationPhaseMode`), matching Ipopt, and reach CasADi as
+  `stats()["iterations"]["alg_mod"]`.
+
+  **The label is not decoration — read it before reading anything
+  beside it.** On a restoration iteration every other value describes
+  the min-‖c‖₁ *feasibility subproblem*, not your problem: the objective
+  is the constraint-violation penalty, and `inf_pr` falls to zero as the
+  subproblem converges while your own violation sits unchanged. Plotted
+  on one axis without splitting on `alg_mod`, an episode reads as the
+  objective exploding and the infeasibility being solved, and neither
+  happened.
+
+  Two deliberate silences on those fires. The `GetIpoptCurrent*`
+  inspectors report no data: the restoration iterate is a point of the
+  subproblem and does not have your problem's dimensions, so there is
+  nothing truthful to hand back. And CasADi's `iteration_callback` is
+  not called at all, because its signature is fixed at
+  `(x, f, g, lam_x, lam_g)` and a restoration iterate supplies none of
+  them; the trace still records the iteration, so nothing is hidden.
+
+  Returning `false` from a restoration fire ends the solve at the last
+  iterate accepted for **your** NLP, not at the subproblem's iterate —
+  so a caller aborting on a deadline gets back a point it can actually
+  use. The status is `User_Requested_Stop`, as from any other fire.
+
+  Existing callbacks fire more often than before on solves that enter
+  restoration. Anything counting fires, sampling for a plot, or driving
+  a progress bar will see the difference; upstream Ipopt fires from
+  restoration too, so a callback ported from it was already written
+  expecting these.
+
 - **CasADi plugin: solver diagnostics, and two defects found exposing
   them** (#634).
 
