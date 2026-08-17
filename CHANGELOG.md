@@ -148,6 +148,81 @@ changes.
   against a cold solve's 7 to 9, the cold arm's own spread over where
   the guess is put. Python-side only; no Rust changed and no solver step
   moved, so the CLI fixture sweep is untouched by construction.
+- **The `pounce-casadi` wheel is tagged for the platform it was built
+  for** (#626 follow-up). It was `py3-none-any` — pip's tag for "pure
+  Python, installs anywhere" — while carrying a compiled CasADi plugin and
+  the POUNCE solver library under `pounce_casadi/_plugins/<minor>/`.
+  setuptools reaches that conclusion because the package defines no
+  `ext_modules`: it loads its payload with `ctypes`, and package data is
+  not something setuptools inspects. So a wheel built on macOS installed
+  cleanly on Linux and failed at `import pounce_casadi`, looking for a
+  `.dylib` that platform cannot load.
+
+  Measured on the wheel `build.sh` produced before this change, offered to
+  a Linux target: `pip install --platform manylinux_2_28_x86_64` accepted
+  it and unpacked `libcasadi_nlpsol_pounce.dylib` into place. After: `pip`
+  refuses it — *"not a supported wheel on this platform"* — which is where
+  that decision belongs.
+
+  Nothing was published, so no user hit this; it was a defect in the
+  release path rather than in a release.
+
+  The tag is now `py3-none-<platform>`. Platform-specific in one direction
+  and *not* CPython-specific in the other: an impure wheel defaults to
+  `cp311-cp311-…`, which would be wrong the other way round, since nothing
+  here links the CPython ABI and one build per platform serves every
+  Python 3. `POUNCE_CASADI_PLAT_NAME` overrides the platform half for
+  manylinux and macOS cross builds — worth noting that `auditwheel repair`
+  refuses a `py3-none-any` wheel outright, so the documented Linux release
+  step could not have run before this.
+
+  The CasADi axis of the matrix stays where it was, inside the wheel: no
+  wheel tag can express "built against casadi 3.7.x", so one wheel per
+  platform carries a build per supported minor and selects on
+  `casadi.__version__` at import. `POUNCE_CASADI_STAGE_ONLY=1` stages a
+  minor without building, which is what makes the documented
+  once-per-(minor × platform) release loop expressible as a script.
+
+  Three supporting changes, each for a failure that was silent:
+  `build.sh` and CI now *assert* the built tag rather than trust it, since
+  a packaging regression here shows up only on a machine the packager does
+  not have; `build.sh` treats a missing solver library as fatal instead of
+  a warning, because staging without it produces exactly the
+  installs-then-fails-at-import artefact this entry is about; and
+  `plugin_path` now distinguishes "no build for this platform" from "no
+  build for this CasADi version" — a hand-copied wheel used to report the
+  platform mismatch as a missing CasADi version, sending the reader after
+  the wrong axis.
+
+- **The 1x1 initializer blocks read the `scaling_factor` Suffix, and
+  their convergence test is measured on the row's stated scale**
+  (#632).
+  `block_initialize`'s 1x1 path called
+  `calculate_variable_from_constraint` with its absolute `eps=1e-8`,
+  the one place in the package that ignored the Suffix the gh #483
+  reader delivers everywhere else. An equation whose terms sit near
+  3e7 (IDAES energy holdups in raw SI) has a double-precision
+  evaluation floor near 1e-7, so the linesearch hit its iteration
+  limit at a residual of 7.45e-8, the block was declared failed, and
+  827 of 1001 variables kept their seeds, costing the downstream
+  dynamic optimization 137 to 225 iterations against 19 from a full
+  start. The path now reads the constraint's factor through the gh
+  #483 reader and passes `eps = 1e-8 / f`, the identical test measured
+  on the scaled row `f*g(x)`. An untagged constraint keeps the
+  absolute default, and a model without an export-enabled Suffix makes
+  the exact call the current release makes.
+
+  The test moves in **both** directions. A factor below 1 loosens it,
+  which is the failure above. A factor above 1 tightens it, and that
+  half is not cosmetic: `1e-8*x**2 == 2e-8` has a raw residual of 1e-8
+  at the seed `x=1`, so the absolute test accepts it immediately and
+  the block is reported *initialized* at a value 29% from the root,
+  with nothing failed and nothing warned. Tagged `1e8` it now solves.
+  The same tightening can newly fail a 1x1 block whose factor is
+  larger than its rows can support — a row genuinely of order one
+  tagged `1e8` gets `eps = 1e-16` and exhausts the linesearch.
+  `options=InitOptions(scaling="none")` is the way back: it means no
+  row scaling anywhere, this test included.
 
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
@@ -204,6 +279,147 @@ changes.
   unchanged: the block DAG is read off the graph already built, and the
   conditioning check differentiates per block rather than rebuilding it.
   No Rust changed; the CLI fixture sweep is bit-identical.
+- **`race_starts` can race adaptively instead of paying full price for
+  every candidate** (#610). The existing policy gives each of N starts
+  the same truncated solve from a cold start, ranks the field once on
+  terminal violation and objective, returns the best `top`, and reports
+  nothing — so the candidate that was hopeless after two iterations is
+  still charged for ten, and the solver state it had built is discarded
+  between rounds.
+
+  `policy="halving"` is a new, **opt-in** successive-halving ladder.
+  Every candidate runs for a small budget; the field is ranked; the
+  weakest fraction is eliminated; the survivors are **resumed from their
+  held solver state** with a budget `eta` times larger. The winner ends
+  with about the effort `iters` would have bought it before; what
+  changes is what the losers cost. Over
+  `benchmarks/scripts/race_starts_bench.py` (six multi-basin models × three
+  field sizes, eighteen configurations): **17.9% fewer user-callable
+  evaluations with no quality regression on that set**, from 43.8% fewer
+  on HS71 with 27 starts to 5.5% *more* on a two-variable model where a
+  rung boundary costs more than the iterations it saves. Solver
+  iterations fall in all eighteen.
+
+  **The default stays `policy="fixed"`, and the reason is measured.**
+  The ladder's early rungs rank on a handful of iterations, and on a
+  strongly multimodal model that ranking says little about which basin
+  ends lowest — so rung 0 cuts the eventual winner. On 2-D Ackley from
+  27 Sobol starts with `iters=40` (rung 0 is four iterations, and cuts
+  the field from 27 to 9) the start that reaches the global minimum at
+  full effort is cut at rung 0 in every seed tried, ranked 19th, 13th
+  and 24th of 27; the fixed policy returns 4e-16 on all three seeds and
+  the ladder returns 3.57, 5.38, 3.57. Across an independent five-model
+  set the ladder was 30% cheaper and worse in 13 of 45 configurations,
+  and the gap widened with more starts. `explore` does not recover it —
+  it retains the *farthest* candidate, not the winner — and the one
+  setting that does, `min_rung_iters=20`, costs more than the fixed
+  policy. On a genuinely multimodal problem the ladder's saving is the
+  quality loss, so it may not become an existing caller's policy by
+  their doing nothing.
+  `test_starts_racing.py::test_the_ladder_can_cut_the_winner_at_rung_zero`
+  pins that failure mode: if the rung-0 ranking ever becomes informative
+  there, the test fails and the default is worth revisiting.
+
+  What a pause carries is worth being precise about, because it is the
+  difference between a resume and a cold restart wearing a warm coat.
+  POUNCE has no API for suspending an IPM mid-iteration and re-entering
+  the same algorithm object — every `Solver.solve` builds its application
+  afresh. What travels is the whole interior-point iterate: the primal
+  point, the constraint multipliers, both bound-multiplier blocks, and the
+  barrier parameter μ, replayed through #607's warm-start path so #606's
+  recentering measures the point it is handed. Measured on the racing
+  fixtures, eight candidates paused at five iterations reach the same
+  answers in 17 iterations when resumed and 43 when restarted from their
+  own iterates. What does *not* travel is the filter history and the
+  line-search state; carrying those needs a `Solver.resolve()`, which does
+  not exist yet.
+
+  Eliminations are ranked on five rank-normalized signals — violation,
+  feasibility reduction, scaled KKT residual, objective progress per
+  evaluation, and numerical health (restoration share, non-finite
+  objective, failed exit) — weighted so feasibility dominates, because an
+  infeasible candidate's objective is not a number about the problem being
+  solved. Diversity is protected by collapsing survivors that have fallen
+  into the same basin and by an exploration quota that retains candidates
+  from outside the cut, chosen farthest-first. The ladder's resource is
+  **evaluations**: rung 0 calibrates what a solve of this model costs and
+  every later rung is a multiple of that, with each candidate converting
+  its budget to an iteration cap through its own measured
+  evaluations-per-iteration.
+
+  `return_report=True` returns a `RaceReport` alongside the results, with
+  per-rung resource use, per-candidate spend, and a reason for every
+  elimination — none of which the old function could report, because it
+  discarded every candidate outside `top`. The default `policy="fixed"`
+  is the pre-#610 policy kept verbatim; `test_starts_racing.py` pins it
+  against a transcription of the 0.10.0 body, result for result — both
+  as `policy="fixed"` and as the default with no `policy=` at all. The
+  ladder is
+  deterministic — it draws no random numbers — and the whole per-round
+  record, not just the winner, is asserted to repeat.
+
+  Also new in `info`, and useful well outside racing: the solver's own
+  callback tallies (`n_obj_evals`, `n_grad_evals`, `n_constr_evals`,
+  `n_jac_evals`, `n_hess_evals`) and the restoration audit counters
+  (`restoration_calls`, `restoration_outer_iters`,
+  `restoration_inner_iters`), which were previously reachable only by
+  writing a solve report to a file.
+
+  Docs: `docs/src/initialization.md`.
+
+- **The two tolerance downgrades the least-square-init safeguard costs
+  are explained, measured and pinned** (#616, follow-up to #605). With
+  `least_square_init_primal=yes` — off by default — `csfi2` and
+  `eigenb2` finish at `SolvedToAcceptableLevel` where the unsafeguarded
+  step reached `SolveSucceeded`. That cost was recorded in a PR body and
+  nowhere else, which `CLAUDE.md` names as the way a real regression
+  becomes indistinguishable from noise. It is now documented in
+  `docs/src/initialization.md` with the sweep behind it, and pinned by
+  tests, and the decision is that it stays.
+
+  The three moving behaviours turn out not to share a mechanism, which
+  was the open question. Attributing every one of the fourteen fixtures
+  that move puts them in three different arms of the safeguard: three
+  start already feasible and never compute a step (`unbounded_cubic`'s
+  91 → 290 iterations, both `DivergingIterates`); six decline every
+  trial (`csfi2`, `pooling_rt2stp`, `deb7`); five accept a backtracked
+  step (`eigenb2`, and `eigena2`).
+
+  Neither downgrade is reachable by tightening the accept test.
+  `csfi2` already *declines* — recovering its old status would mean
+  accepting a step that raises the true violation, which is the one
+  thing the safeguard exists to refuse. `eigenb2` accepts on numbers
+  bit-identical to `eigena2`'s — same `θ₀`, same `θ`, same `α`, same
+  step norm — and `eigena2` improves, so no criterion computed from the
+  safeguard's inputs can separate them. Three candidate criteria were
+  measured and all fail: no `least_square_init_accept_ratio` in its
+  meaningful range rejects `eigenb2`'s step, its 4× violation reduction
+  is the median of the sixteen accepted steps in the corpus rather than
+  a marginal one, and its iteration-0 dual infeasibility *improves*
+  (100 → 47.7), so a dual-residual gate would accept it too.
+
+  Also documented, because it surprises people and is not what the old
+  wording implied: a **declined** step is not the same as never asking.
+  It restores your `x` exactly, but the augmented-system solve that
+  computed the rejected direction has already driven the first
+  factorization, and that carries. Forcing a decline on either side of
+  that call isolates it — before is bit-identical to
+  `least_square_init_primal=no` everywhere, after is bit-identical to
+  the real safeguard. It is visible on two fixtures: `pooling_rt2stp`
+  (298 iterations off, 81 declined) and `deb7` (154 against 202).
+
+  Two supporting changes. The safeguard's decision now also goes out
+  once per solve at `debug` level on `pounce::algorithm`, so a fixture
+  sweep can attribute a moving model with
+  `RUST_LOG=pounce::algorithm=debug` instead of patching the source and
+  rebuilding, which is what taking this measurement required. And the
+  accept test is a named predicate, `DefaultIterateInitializer::
+  accepts_trial`, so the argument above is pinned as executable
+  properties rather than prose. Solver behaviour is unchanged: the 57
+  fixtures are bit-identical to the parent commit under default options,
+  under `least_square_init_primal=yes`, and under
+  `mehrotra_algorithm=yes`.
+
 - **`Bool` in the C API is one byte again, matching the header** (#624
   follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
   which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the
