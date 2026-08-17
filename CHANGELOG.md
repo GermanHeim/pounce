@@ -55,6 +55,36 @@ changes.
   platform mismatch as a missing CasADi version, sending the reader after
   the wrong axis.
 
+- **The 1x1 initializer blocks read the `scaling_factor` Suffix, and
+  their convergence test is measured on the row's stated scale**
+  (#632).
+  `block_initialize`'s 1x1 path called
+  `calculate_variable_from_constraint` with its absolute `eps=1e-8`,
+  the one place in the package that ignored the Suffix the gh #483
+  reader delivers everywhere else. An equation whose terms sit near
+  3e7 (IDAES energy holdups in raw SI) has a double-precision
+  evaluation floor near 1e-7, so the linesearch hit its iteration
+  limit at a residual of 7.45e-8, the block was declared failed, and
+  827 of 1001 variables kept their seeds, costing the downstream
+  dynamic optimization 137 to 225 iterations against 19 from a full
+  start. The path now reads the constraint's factor through the gh
+  #483 reader and passes `eps = 1e-8 / f`, the identical test measured
+  on the scaled row `f*g(x)`. An untagged constraint keeps the
+  absolute default, and a model without an export-enabled Suffix makes
+  the exact call the current release makes.
+
+  The test moves in **both** directions. A factor below 1 loosens it,
+  which is the failure above. A factor above 1 tightens it, and that
+  half is not cosmetic: `1e-8*x**2 == 2e-8` has a raw residual of 1e-8
+  at the seed `x=1`, so the absolute test accepts it immediately and
+  the block is reported *initialized* at a value 29% from the root,
+  with nothing failed and nothing warned. Tagged `1e8` it now solves.
+  The same tightening can newly fail a 1x1 block whose factor is
+  larger than its rows can support — a row genuinely of order one
+  tagged `1e8` gets `eps = 1e-16` and exhausts the linesearch.
+  `options=InitOptions(scaling="none")` is the way back: it means no
+  row scaling anywhere, this test included.
+
 - **Pyomo initialization: scaled projection, options that reach every
   stage, and a failed block that no longer takes independent branches
   down with it** (#609). Four measurements on the parent commit
