@@ -375,12 +375,24 @@ Its **multipliers** are left *unseeded* — `NaN`, which the warm
 initializer reads as "you decide" — rather than fabricated. Since
 pounce#606 the solver reconstructs each unseeded bound multiplier from
 `μ̂ / slack`, the complementarity relation it is about to enforce, which
-is a better number than anything this side can invent. Dropping the
-multipliers you *do* have, in favour of letting the solver rebuild
-those too, is measurably worse here — 49 iterations against 45 at
-horizon 5, and 67 against 54 at horizon 20, over the eight-step loop
-tabulated below. That recipe belongs to solvers without the
-reconstruction pass, not to this one.
+is a better number than anything this side can invent.
+
+Note what arms that pass: it **completes a partial seed**, and it is
+gated on at least one multiplier block having been supplied. A seed
+carrying no duals at all has nothing to derive them from, so it keeps
+the pre-#606 constant fills while still starting at the warm barrier —
+deliberately, and with its own measurement behind it (reconstructing
+from a primal-only seed cost 1102 → 1211 iterations across the 27
+parametric paths in `benchmarks/warmstart`).
+
+So the carried multipliers are not merely harmless here, they are what
+puts the *new* stage's multipliers on the reconstruction path:
+`info["warm_start"]` reports `bound_duals: reconstructed` for a mapped
+replay and `unseeded` for a values-only one. Dropping the multipliers
+you *do* have, in favour of letting the solver rebuild those too, lands
+in the second case and is measurably worse — 49 iterations against 45
+at horizon 5, and 67 against 54 at horizon 20, over the eight-step loop
+tabulated below.
 
 Its **primal values** are the `fill_x` argument, and they matter more
 than they look:

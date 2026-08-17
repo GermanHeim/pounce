@@ -43,11 +43,17 @@ changes.
   reaches the case recentering does not, the slew fixture, where the
   closed loop goes 27 → 21 against cold's 22.
 
-  Two suggestions from the issue were measured and **rejected**, both
-  because #606/#620 already does the job they were reaching for.
+  Two suggestions from the issue were measured and **rejected**.
   Dropping the transferred multipliers so the solver rebuilds them from
   the primal point costs 49 iterations against 45 at horizon 5 and 67
-  against 54 at horizon 20. Restarting the barrier is a wash at
+  against 54 at horizon 20 — and the mechanism is the opposite of the
+  one it assumes: #606's reconstruction *completes a partial seed* and
+  is gated on some dual block having been supplied, so a seed with no
+  duals in it does not get rebuilt multipliers, it gets the pre-#606
+  constant fills at the warm barrier. The carried multipliers are what
+  put the new stage's own multipliers on the reconstruction path
+  (`info["warm_start"]`: `bound_duals: reconstructed`, against
+  `unseeded` for a values-only start). Restarting the barrier is a wash at
   `mu_init=1e-6` (46/53/48/47 against the carried μ's 45/50/54/46) and
   loses steadily from there — 52/61/56/54 at `1e-4`, and by `1e-1` the
   four horizons run 72/79/74/72, at or above the cold solve's

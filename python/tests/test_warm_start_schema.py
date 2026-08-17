@@ -637,6 +637,31 @@ def test_prolong_falls_back_when_the_map_is_not_a_shift():
     np.testing.assert_allclose(moved.x, [3.0, 1.0, 2.0])   # 0 clipped into [2, 10]
 
 
+def test_a_mapped_replay_arms_the_reconstruction_a_bare_point_does_not():
+    """Why the carried multipliers stay carried (gh#622).
+
+    gh#606's reconstruction *completes a partial seed* — it is gated on
+    some dual block having been supplied, because a seed with no duals
+    has nothing to derive them from. So the multipliers that survive the
+    map are what put the freshly-entered stage's own multipliers on the
+    reconstruction path; drop them all and the point silently falls back
+    to the pre-#606 constant fills at the warm barrier.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    moved = ws.reindex(window(1)[0], var_ids=window(1)[1], con_ids=window(1)[2])
+
+    _, info = window(1)[0].solve(warm_start=moved)
+    assert info["warm_start"]["bound_duals"] == "reconstructed"
+    assert info["warm_start"]["bound_duals_reconstructed"] > 0
+
+    bare = dataclasses.replace(moved, lagrange=None, zl=None, zu=None)
+    _, bare_info = window(1)[0].solve(warm_start=bare)
+    assert bare_info["warm_start"]["bound_duals"] == "unseeded"
+    assert bare_info["warm_start"]["bound_duals_reconstructed"] == 0
+
+
 # The sinusoidal track of the gh#622 table: a receding horizon with
 # enough history to be worth carrying.
 SINE = 5.0 + 4.0 * np.sin(np.arange(64) * 0.35)
