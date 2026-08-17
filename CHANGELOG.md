@@ -59,12 +59,12 @@ changes.
   refused instead of reconstructed off, and a slack the point's own
   infeasibility swamps stops being read as an active bound** (#617,
   #618). Both are #606 follow-ups in the residual-adaptive recentering
-  pass, and both regressions reproduce on the parent commit `66cc1d41`
+  pass, and both regressions reproduce on the parent commit `b4c4d32e`
   larger than they were first filed at. Measured on
   `benchmarks/warmstart` at 4x scale, 14 families, summed iterations,
   with `warm_start_recentering=none` as the pre-#606 control:
 
-  | seed | pre-#606 | `66cc1d41` | now |
+  | seed | pre-#606 | `b4c4d32e` | now |
   |---|--:|--:|--:|
   | exact restart, full duals | 13 | 9 | **9** |
   | exact restart, `lagrange` only | 24 | 11 | **11** |
@@ -115,17 +115,19 @@ changes.
   current `main`: every stale regression left in the corpus has a
   measured complementarity within 1.2x to 3x of `mu_init`, so a band
   starting at 1x has nothing to raise `mu` to. The residue is one
-  family, `degenerate_vertex`, 2 → 12 in both stale seed modes. It is
-  feasible (`inf_pr = 8.4e-9`), centred (`avrg_compl = 3.0e-9` against
-  `mu_init = 2.5e-9`), and only its `y` has moved; no measurement
-  available to the initializer separates it from a good seed, and the
-  conservatism both issues ask for is what stops one being invented.
+  family, `degenerate_vertex`, 2 → 12 in both stale seed modes. `theta`
+  enters it through the objective, so a stale `x` is still feasible; it
+  is centred at the barrier it asked for (`avrg_compl = 2.99e-9` against
+  `mu_init = 2.51e-9`, a 1.19x overshoot), `mu` never moves, and only
+  its `y` has gone stale. No measurement available to the initializer
+  separates it from a good seed, and the conservatism both issues ask
+  for is what stops one being invented.
 
   `cresc4` — the canary both issues name — is bit-identical, as is the
   whole 57-fixture corpus in all three regimes the initializer reaches
   (default options, `warm_start_init_point=yes`, and the tightened-push
   recipe). `warm_start_recentering=none` remains bit-identical to
-  `66cc1d41` across the whole seed-mode corpus. `info["warm_start"]`
+  `b4c4d32e` across the whole seed-mode corpus. `info["warm_start"]`
   grows `bound_duals_rejected` and `eq_duals_rejected`, `bound_duals`
   gains a `rejected` verdict, and the iteration line gains `wz!` /
   `wy!`. `benchmarks/warmstart/seedmodes.py` is the harness both
