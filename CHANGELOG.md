@@ -67,6 +67,54 @@ changes.
   models, both with iteration count and objective unchanged. No fixture
   loses a correct verdict on any arm.
 
+- **A warm-start check that could not have seen a reordering now says
+  so** (#660). `check_compatible()` computed the "ordering unverified"
+  caveat on every path but rendered it only inside its
+  `if mismatches:` arm. The one case the caveat exists for — nothing
+  disagreed, *and* nothing in the comparison could have caught a
+  permutation — was therefore the one case that stayed silent. Only
+  `describe_compatibility()`, the opt-in dry run, ever mentioned it,
+  so the safe-looking path (just replay it) was the uninformative one.
+
+  That happens without anything exotic: an artifact captured with
+  `probe=False`, one written before #621, or a model with a domain
+  restriction that will not evaluate at the schema's interior probe
+  point. With no `var_ids` on both sides, a uniform box and a dense
+  jacobian leave the structural digests bit-identical under a
+  permutation, and the reordered seed goes into the solve.
+
+  It is now a `WarmStartOrderingUnverifiedWarning` — a warning, not a
+  refusal, because nothing actually disagreed. Callers who would rather
+  refuse than replay unverified can promote it with
+  `warnings.simplefilter("error",
+  pounce.WarmStartOrderingUnverifiedWarning)`.
+
+  The multistart ladder is exempt and stays quiet: it captures with
+  `probe=False` precisely because it resumes on the same `Problem`
+  object a moment later, so there is no reordering for the check to have
+  missed and the caveat would fire on every rung of every race.
+
+- **Warm-start probe: an inert objective constant no longer blinds
+  reorder detection** (#659). `_probe_agrees` documented a per-block
+  tolerance — each probed block judged against its own L1 scale, with
+  the largest block's scale as a floor — but computed
+  `floor = max(scales)`, which makes `max(scales[block], floor)` equal
+  `floor` for every block. Every block was therefore judged against the
+  *largest* block's magnitude, and the per-block half never took effect.
+
+  Adding an additive constant to the objective — inert to the
+  optimization: no derivative, no constraint and no solution changes —
+  inflated the objective block's scale and with it the gradient,
+  constraint and jacobian tolerances. Past roughly 1e9 that was enough
+  to swallow a single variable transposition, so
+  `ws.check_compatible(reordered_problem)` returned cleanly where it had
+  previously raised, and the replayed seed went into the solve permuted.
+  This was the *enforcing* gate, not just `describe_compatibility`.
+
+  The floor is now `_PROBE_FLOOR_FRAC` (1e-6) of the largest scale
+  rather than the bare maximum. That keeps what the floor was for — a
+  block computing to ~0 out of cancellation of large terms is still not
+  held to bit equality — while letting a healthy block's own scale win.
 - **Crossover: the sensitivity path reads the barrier diagonal in the
   frame crossover solved in** (#654).
 

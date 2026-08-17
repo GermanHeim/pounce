@@ -27,6 +27,7 @@ from ._warm_start import (
     WarmStartCompatibilityError,
     WarmStartCompatibilityWarning,
     WarmStartLegacyWarning,
+    WarmStartOrderingUnverifiedWarning,
 )
 from ._continuation import (
     Continuation,
@@ -115,6 +116,7 @@ __all__ = [
     "WarmStartCompatibilityError",
     "WarmStartCompatibilityWarning",
     "WarmStartLegacyWarning",
+    "WarmStartOrderingUnverifiedWarning",
     # Predictor--corrector continuation over a repeated-NLP sequence
     # (see docs: continuation.md)
     "Continuation",

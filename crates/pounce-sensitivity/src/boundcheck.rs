@@ -607,6 +607,59 @@ where
         backsolver.bound_rows().map(|b| b.to_vec());
     let can_release = backsolver.supports_release();
 
+    // Which bounds the factorization enforces, decided once. Active
+    // means the multiplier dominates the slack. A converged interior
+    // point never sits ON a bound: an active bound's slack is order mu
+    // over the multiplier, so testing slack against `eps` calls every
+    // active bound inactive and the path never releases anything.
+    // Complementarity splits the two sides cleanly, z of order one
+    // against slack of order mu on the active side and the reverse on
+    // the inactive, which is the same split the activity classifier
+    // draws.
+    //
+    // The split is evaluated at the BASE point, which is what makes
+    // deciding it here, before the loop, correct rather than a cache:
+    // activity of a multiplier row is a property of the factorization,
+    // whose sigma for this bound was frozen at the base, and a bound
+    // inactive there is represented by a Schur-row hold if the path
+    // reaches it, never by its multiplier row. Testing accumulated
+    // values instead let a near-bound inactive multiplier drift past
+    // its shrinking slack mid-path and "release" a bound that was
+    // never held, putting a departure in the record for a variable
+    // that was not on that bound.
+    //
+    // What stays live at every consumer is the released list: a
+    // base-active bound whose row has been released is no longer in
+    // the factorization, from that fraction on.
+    let mut base_active_row: Vec<[Option<usize>; 2]> = vec![[None, None]; n_x];
+    if let Some(rows) = bound_rows.as_ref() {
+        for br in rows {
+            if br.var_row >= n_x {
+                continue;
+            }
+            let slack_base = if br.lower {
+                x_curr[br.var_row] - lo[br.var_row]
+            } else {
+                hi[br.var_row] - x_curr[br.var_row]
+            };
+            if !slack_base.is_finite() {
+                continue;
+            }
+            if mult_nat
+                .iter()
+                .any(|m| m.row == br.row && m.base > slack_base)
+            {
+                let side = if br.lower { 0 } else { 1 };
+                base_active_row[br.var_row][side] = Some(br.row);
+            }
+        }
+    }
+    let base_active_rows: Vec<usize> = base_active_row
+        .iter()
+        .flatten()
+        .filter_map(|slot| *slot)
+        .collect();
+
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
     let mut holds: Vec<PathHold> = Vec::new();
@@ -663,32 +716,12 @@ where
             if holds.iter().any(|h| h.row == i) || changed_here.contains(&i) {
                 continue;
             }
+            // Base activity was decided once, at the table above; only
+            // the released exclusion is live, since a released bound
+            // left the factorization mid-path.
             let factor_holds = |lower_side: bool| -> bool {
-                let Some(rows) = bound_rows.as_ref() else {
-                    return false;
-                };
-                // The same base-point activity test the release scan
-                // below applies, and for the same reason: an active
-                // bound's multiplier dominates its slack. It depends
-                // only on the variable and the side, not on the
-                // multiplier row being scanned, so it is decided once
-                // here rather than inside the inner search.
-                let slack_base = if lower_side {
-                    x_curr[i] - lo[i]
-                } else {
-                    hi[i] - x_curr[i]
-                };
-                if !slack_base.is_finite() {
-                    return false;
-                }
-                rows.iter().any(|b| {
-                    b.var_row == i
-                        && b.lower == lower_side
-                        && !released.contains(&b.row)
-                        && mult_nat
-                            .iter()
-                            .any(|m| m.row == b.row && m.base > slack_base)
-                })
+                let side = if lower_side { 0 } else { 1 };
+                base_active_row[i][side].is_some_and(|r| !released.contains(&r))
             };
             let v = x_curr[i] + acc[i];
             if d[i] < 0.0 && lo[i] > NO_BOUND_LO && !factor_holds(true) {
@@ -699,46 +732,14 @@ where
             }
         }
         // A bound active at the base whose multiplier reaches zero.
+        // Base activity comes from the table above; which rows have
+        // since been released stays a live check.
         if can_release {
             for m in &mult_nat {
-                if released.contains(&m.row) || changed_here.contains(&m.row) {
-                    continue;
-                }
-                // Active means the multiplier dominates the slack. A
-                // converged interior point never sits ON a bound: an
-                // active bound's slack is order mu over the multiplier,
-                // so testing slack against `eps` calls every active
-                // bound inactive and the path never releases anything.
-                // Complementarity splits the two sides cleanly, z of
-                // order one against slack of order mu on the active
-                // side and the reverse on the inactive, which is the
-                // same split the activity classifier draws.
-                //
-                // The split is evaluated at the BASE point. Activity of
-                // a multiplier row is a property of the factorization,
-                // whose sigma for this bound was frozen at the base,
-                // and a bound inactive there is represented by a
-                // Schur-row hold if the path reaches it, never by this
-                // row. Testing accumulated values instead let a
-                // near-bound inactive multiplier drift past its
-                // shrinking slack mid-path and "release" a bound that
-                // was never held, putting a departure in the record for
-                // a variable that was not on that bound.
-                let Some(br) = bound_rows
-                    .as_ref()
-                    .and_then(|rows| rows.iter().find(|b| b.row == m.row))
-                else {
-                    continue;
-                };
-                if br.var_row >= n_x {
-                    continue;
-                }
-                let slack_base = if br.lower {
-                    x_curr[br.var_row] - lo[br.var_row]
-                } else {
-                    hi[br.var_row] - x_curr[br.var_row]
-                };
-                if !slack_base.is_finite() || m.base <= slack_base {
+                if released.contains(&m.row)
+                    || changed_here.contains(&m.row)
+                    || !base_active_rows.contains(&m.row)
+                {
                     continue;
                 }
                 let z_curr = m.base + acc[m.row];
