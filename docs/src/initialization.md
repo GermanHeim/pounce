@@ -517,12 +517,12 @@ res = pounce.minimize(fun, best.x,
 
 ### Racing starts: the successive-halving ladder
 
-`race_starts` used to spend the same budget on every candidate, from a
-cold start, and rank the field once at the end. That kept most of
-multistart's cost — the candidate that was hopeless after two iterations
-was still charged for ten — and threw away the solver state between
-rounds. Since pounce#610 the default policy is an adaptive
-**successive-halving ladder**:
+The default policy, `policy="fixed"`, spends the same budget on every
+candidate from a cold start and ranks the field once at the end. That
+keeps most of multistart's cost — the candidate that was hopeless after
+two iterations is still charged for ten — and throws away the solver
+state between rounds. pounce#610 adds an opt-in alternative,
+`policy="halving"`, an adaptive **successive-halving ladder**:
 
 1. every candidate runs for a small budget;
 2. the field is ranked on five signals (below);
@@ -531,13 +531,40 @@ rounds. Since pounce#610 the default policy is an adaptive
    budget `eta` times larger, and the ladder repeats.
 
 The winner ends up with about the effort `iters` would have given it
-under the old policy, so the two are comparable on quality; what changes
-is what the losers cost.
+under the fixed policy; what changes is what the losers cost.
+
+**It is opt-in, and the reason is measured — read this before using
+it.** The ladder's early rungs rank the field on a handful of
+iterations. On a strongly multimodal model that ranking carries almost
+no information about which basin ends lowest, so rung 0 discards the
+eventual winner. On 2-D Ackley from 27 Sobol starts with `iters=40` —
+so rung 0 is four iterations and cuts 27 candidates to 9 — the start
+that reaches the global minimum at full effort is cut at rung 0 in
+every seed tried, ranked 19th, 13th and 24th of 27. The fixed policy
+returns 4e-16 on all three seeds; the ladder returns 3.57, 5.38 and
+3.57. Across an independent five-model set the ladder was 30% cheaper
+overall and returned a worse answer in 13 of 45 configurations, and the
+gap *widened* with more starts, because a larger field is culled harder
+on the same weak signal.
+
+Nor is that a tuning accident. `explore` does not help — it retains the
+candidate *farthest* from those kept, which is not the winner — and the
+only setting that recovered the answer, `min_rung_iters=20` (half the
+total budget, i.e. a single cut), cost slightly more than the fixed
+policy on both models. On a genuinely multimodal problem the ladder's
+saving *is* the quality loss.
+
+Reach for `policy="halving"` when a solver iteration is expensive and
+the basins are few or well separated, and check the answer against the
+default before relying on it. `python/tests/test_starts_racing.py::`
+`test_the_ladder_can_cut_the_winner_at_rung_zero` pins the failure
+mode, so if the rung-0 ranking ever becomes informative on that model
+the test fails and the default is worth revisiting.
 
 ```python
 best, race = pounce.race_starts(fun, starts, jac=jac, bounds=bounds,
                                 constraints=cons, iters=20,
-                                return_report=True)
+                                policy="halving", return_report=True)
 print(race.report())
 # race: policy=halving eta=3 candidates=16 rungs=2
 #   rung 0: budget=37 evals entrants=16 -> survivors=7 spent=530 evals / 112 iters (0 resumed, 16 started)
@@ -624,15 +651,18 @@ handful of evaluations per iteration — the ladder cuts iterations but
 comes out level or slightly up on evaluations. Measured over
 `benchmarks/scripts/race_starts_bench.py` (six multi-basin models × three
 field sizes): **17.9% fewer** user-callable evaluations overall with no
-quality regression anywhere, ranging from **43.8% fewer** on HS71 with 27
-starts to **5.5% more** on the two-variable `himmelblau_disc` with 16.
-Iterations fall in every one of the eighteen configurations. Where the
-ladder does not pay, `policy="fixed"` is the pre-#610 policy, kept
-verbatim and reproducing its old answers exactly:
+quality regression *on that set*, ranging from **43.8% fewer** on HS71
+with 27 starts to **5.5% more** on the two-variable `himmelblau_disc`
+with 16. Iterations fall in every one of the eighteen configurations.
+That set is not a promise about your model — see the quality caveat
+above. Where the ladder does not pay, the default `policy="fixed"` is
+the pre-#610 policy, kept verbatim and reproducing its old answers
+exactly:
 
 ```python
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10)  # fixed
 best = pounce.race_starts(fun, starts, bounds=bounds, iters=10,
-                          policy="fixed")
+                          policy="halving")                      # the ladder
 ```
 
 `policy="halving"` runs on the NLP path only — it holds a

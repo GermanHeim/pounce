@@ -9,10 +9,11 @@ Three composable building blocks (see ``docs/src/initialization.md``):
   onto the linearized constraints and bounds (one convex QP).
 * :func:`race_starts` — run a few solver iterations from each of N
   starts and rank them, so the full-effort solve continues only from
-  the most promising one(s). Two policies: ``"halving"`` (the default
-  since pounce#610 — an adaptive successive-halving ladder that pauses
-  and resumes candidates instead of re-running them) and ``"fixed"``
-  (the pre-#610 policy, kept verbatim as a reproducible baseline).
+  the most promising one(s). Two policies: ``"fixed"`` (the default —
+  every candidate gets the same truncated budget) and ``"halving"``
+  (pounce#610, opt-in — an adaptive successive-halving ladder that
+  pauses and resumes candidates instead of re-running them, much
+  cheaper, but see the quality caveat in :func:`race_starts`).
 
 The sampling internals here are also imported by ``pounce._minima``;
 keep the private helpers' signatures stable.
@@ -1386,7 +1387,7 @@ def race_starts(
     iters: int = 10,
     top: int = 1,
     options: Optional[dict] = None,
-    policy: str = "halving",
+    policy: str = "fixed",
     eta: int = 3,
     rungs: Optional[int] = None,
     eval_budget: Optional[float] = None,
@@ -1406,19 +1407,46 @@ def race_starts(
 
     Two policies:
 
-    ``"halving"`` (default, pounce#610)
+    ``"fixed"`` (default)
+        Every candidate gets exactly ``max_iter=iters`` from a cold
+        start, and the field is ranked once on terminal violation and
+        objective. Every start is measured on the same budget, so the
+        ranking is as good as that budget allows and no start is
+        discarded on a partial one.
+
+    ``"halving"`` (pounce#610, opt-in)
         An adaptive successive-halving ladder. Every candidate gets a
         small evaluation budget; the field is ranked and the weakest
         fraction eliminated; the survivors are **resumed from their held
         solver state** with a budget ``eta`` times larger, and so on.
         The winner ends with about the same effort a fixed race would
-        have given it, and the losers cost a fraction of it.
+        have given it, and the losers cost a fraction of it — measured
+        over ``benchmarks/scripts/race_starts_bench.py``, 17.9% fewer
+        user-callable evaluations and 34.9% fewer solver iterations.
 
-    ``"fixed"``
-        The pre-#610 policy, kept verbatim as a reproducible baseline:
-        every candidate gets exactly ``max_iter=iters`` from a cold
-        start, and the field is ranked once on terminal violation and
-        objective.
+        **It is not the default, and the reason is measured.** The
+        ladder's early rungs rank the field on a handful of iterations,
+        and on a strongly multimodal model that ranking carries almost
+        no information about which basin ends lowest — so rung 0
+        discards the eventual winner. On 2-D Ackley from 27 Sobol
+        starts (``iters=40``, so rung 0 is four iterations) the
+        eventual global winner is cut at rung 0 in every seed tried,
+        ranked 19th, 13th and 24th of 27; the fixed policy reaches
+        4e-16 on all three and the ladder reaches 3.57 / 5.38 / 3.57.
+        Across an independent five-model set the ladder was 30% cheaper
+        and returned a worse answer in 13 of 45 configurations, and it
+        got *worse* with more starts, because a larger field is culled
+        harder on the same weak signal.
+
+        Nor is it a tuning accident. ``explore`` does not help — it
+        retains the *farthest* candidate, which is not the winner —
+        and the only setting that recovered the answer,
+        ``min_rung_iters=20`` (half the total budget, i.e. one cut),
+        cost slightly *more* than the fixed policy on both models. On a
+        genuinely multimodal problem the ladder's saving is the quality
+        loss. Reach for it when a solver iteration is expensive and the
+        basins are few or well separated, and check the answer against
+        ``policy="fixed"`` before relying on it.
 
     **What "resumed" means here.** POUNCE has no API for suspending an
     IPM mid-iteration and re-entering the same algorithm object — each
@@ -1451,7 +1479,8 @@ def race_starts(
             ``policy="halving"`` runs on the NLP path only and rejects a
             non-``"nlp"`` ``solver_selection`` rather than quietly
             losing the session it needs.
-        policy: ``"halving"`` or ``"fixed"``.
+        policy: ``"fixed"`` (default) or ``"halving"``. Every argument
+            below applies to ``"halving"`` only.
         eta: Elimination factor — each rung keeps about ``1/eta`` of the
             field and multiplies the survivors' budget by ``eta``.
         rungs: Number of ladder rungs. Default: just enough to walk

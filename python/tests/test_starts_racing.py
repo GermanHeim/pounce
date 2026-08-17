@@ -18,6 +18,19 @@ import pytest
 import pounce
 
 
+def _halving(*args, **kwargs):
+    """``race_starts`` with the ladder selected.
+
+    ``policy="fixed"`` is the default (see the quality caveat in
+    ``race_starts``' docstring), so every test below that is *about* the
+    ladder has to opt in. Routing them through one wrapper keeps that
+    fact in one place; ``test_the_default_policy_is_the_fixed_baseline``
+    is what pins the default itself.
+    """
+    kwargs.setdefault("policy", "halving")
+    return pounce.race_starts(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -212,7 +225,7 @@ def test_survivors_are_resumed_rather_than_restarted():
     """Every rung past the first must resume its entrants from held state."""
     f, g, bounds, cons = _hs71()
     starts = pounce.generate_starts(9, bounds=bounds, seed=0)
-    _best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    _best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                     constraints=cons, iters=12,
                                     return_report=True)
     assert rep.n_rounds >= 2, "the ladder collapsed to a single rung"
@@ -256,7 +269,7 @@ def test_the_whole_race_is_reproducible_round_for_round():
     starts = pounce.generate_starts(12, bounds=bounds, seed=20250610)
 
     def race():
-        best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+        best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                        constraints=cons, iters=15, top=3,
                                        return_report=True)
         return [np.asarray(b.x) for b in best], _record(rep)
@@ -277,12 +290,12 @@ def test_determinism_survives_a_different_call_order():
     kw = dict(jac=g, bounds=bounds, constraints=cons, iters=12,
               return_report=True)
 
-    _, first = pounce.race_starts(f, starts, **kw)
+    _, first = _halving(f, starts, **kw)
     # Run an unrelated race in between; the second run of the first race
     # must still match.
-    pounce.race_starts(f, pounce.generate_starts(6, bounds=bounds, seed=99),
+    _halving(f, pounce.generate_starts(6, bounds=bounds, seed=99),
                        **kw)
-    _, again = pounce.race_starts(f, starts, **kw)
+    _, again = _halving(f, starts, **kw)
     assert _record(first) == _record(again)
 
 
@@ -294,7 +307,7 @@ def test_determinism_survives_a_different_call_order():
 def test_every_candidate_has_a_reason_and_every_rung_has_a_cost():
     f, g, bounds, cons = _hs71()
     starts = pounce.generate_starts(12, bounds=bounds, seed=3)
-    best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                    constraints=cons, iters=15,
                                    return_report=True)
     assert len(rep.candidates) == len(starts)
@@ -386,22 +399,21 @@ def test_halving_matches_the_fixed_answer_on_every_problem(
     )
 
 
-def test_the_default_policy_beats_the_pre_610_cost():
+def test_the_ladder_beats_the_pre_610_cost():
     """The behavioural bite against the parent commit.
 
-    Every call below uses the pre-#610 signature only — no ``policy=``,
-    no ``return_report=`` — so this test runs unmodified on the parent,
-    where it fails on cost: the fixed budget spends 3077 user-callable
-    evaluations across this suite to reach these three answers. The
-    threshold is set at 2800 so the test is about the change and not
-    about the last few evaluations either way.
+    Apart from ``policy="halving"`` every call below uses the pre-#610
+    signature, so this measures the ladder against what the fixed budget
+    spends: 3077 user-callable evaluations across this suite to reach
+    these three answers. The threshold is set at 2800 so the test is
+    about the change and not about the last few evaluations either way.
     """
     total, objs = 0, {}
     for case, n_starts, iters in _SUITE:
         f, g, bounds, cons = case()
         starts = pounce.generate_starts(n_starts, bounds=bounds, seed=0)
         c = _Counter()
-        best = pounce.race_starts(c.wrap(f), starts, jac=c.wrap(g),
+        best = _halving(c.wrap(f), starts, jac=c.wrap(g),
                                   bounds=bounds,
                                   constraints=c.wrap_cons(cons), iters=iters)
         fin = _finish(best[0], c.wrap(f), c.wrap(g), bounds,
@@ -415,7 +427,7 @@ def test_the_default_policy_beats_the_pre_610_cost():
     assert objs["_rastrigin_eq"] == pytest.approx(0.99747969, abs=1e-4)
     assert objs["_double_well"] == pytest.approx(-0.0037912372, abs=1e-6)
     assert total < 2800, (
-        f"the default racing policy spent {total} evaluations; the pre-#610 "
+        f"the halving policy spent {total} evaluations; the pre-#610 "
         "fixed budget spent 3077 for the same three answers"
     )
 
@@ -463,7 +475,7 @@ def test_early_objective_progress_misleads_but_the_race_still_wins():
     # eventual winner really does not.
     assert f(starts[0]) < f(starts[5]) - 10.0
 
-    best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                    constraints=cons, iters=9, explore=0,
                                    return_report=True)
     fin = _finish(best[0], f, g, bounds, cons)
@@ -484,7 +496,7 @@ def test_ranking_on_objective_alone_eliminates_the_eventual_winner():
     f, g, bounds, cons, starts = _deceptive_circle()
     objective_only = {"violation": 0.0, "feasibility_progress": 0.0,
                       "kkt": 0.0, "objective_progress": 1.0, "health": 0.0}
-    best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                    constraints=cons, iters=9, explore=0,
                                    weights=objective_only, return_report=True)
     fin = _finish(best[0], f, g, bounds, cons)
@@ -519,7 +531,7 @@ def test_near_identical_survivors_are_collapsed():
     f, g, bounds, cons = _double_well()
     # Four starts, in two tight pairs.
     starts = np.array([[1.40], [1.4000001], [-1.40], [-1.4000001]])
-    _best, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    _best, rep = _halving(f, starts, jac=g, bounds=bounds,
                                     constraints=cons, iters=9, top=2,
                                     explore=0, cluster_tol=1e-2,
                                     return_report=True)
@@ -540,17 +552,17 @@ def test_dedup_never_returns_fewer_results_than_asked_for():
 
     starts = np.array([[5.0, 5.0], [-5.0, -5.0], [0.0, 0.0], [9.0, -9.0]])
     for top in (1, 2, 3):
-        best = pounce.race_starts(f, starts, jac=g, iters=10, top=top)
+        best = _halving(f, starts, jac=g, iters=10, top=top)
         assert len(best) == top, f"top={top} returned {len(best)} results"
 
 
 def test_the_exploration_quota_keeps_an_outsider():
     f, g, bounds, cons = _hs71()
     starts = pounce.generate_starts(12, bounds=bounds, seed=11)
-    _b, with_quota = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    _b, with_quota = _halving(f, starts, jac=g, bounds=bounds,
                                         constraints=cons, iters=15, explore=2,
                                         return_report=True)
-    _b, without = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    _b, without = _halving(f, starts, jac=g, bounds=bounds,
                                      constraints=cons, iters=15, explore=0,
                                      return_report=True)
     kept = [c.index for c in with_quota.candidates
@@ -573,8 +585,8 @@ def test_the_evaluation_budget_can_bind_before_the_iteration_ceiling():
     starts = pounce.generate_starts(9, bounds=bounds, seed=5)
     kw = dict(jac=g, bounds=bounds, constraints=cons, iters=30,
               return_report=True)
-    _b, tight = pounce.race_starts(f, starts, eval_budget=8, **kw)
-    _b, loose = pounce.race_starts(f, starts, eval_budget=400, **kw)
+    _b, tight = _halving(f, starts, eval_budget=8, **kw)
+    _b, loose = _halving(f, starts, eval_budget=400, **kw)
     assert tight.total_evals < loose.total_evals
     assert tight.total_iters < loose.total_iters
     # Under the tight unit, the last rung's entrants are held below the
@@ -589,7 +601,7 @@ def test_the_evaluation_budget_can_bind_before_the_iteration_ceiling():
 def test_evaluation_counts_are_the_solvers_own():
     f, g, bounds, cons = _double_well()
     starts = np.array([[1.4], [-1.4], [0.2], [2.6]])
-    _b, rep = pounce.race_starts(f, starts, jac=g, bounds=bounds,
+    _b, rep = _halving(f, starts, jac=g, bounds=bounds,
                                  constraints=cons, iters=9,
                                  return_report=True)
     for c in rep.candidates:
@@ -650,14 +662,87 @@ def test_fixed_policy_reproduces_the_pre_610_baseline(case, iters, top):
         assert a.info["final_constr_viol"] == b.info["final_constr_viol"]
 
 
+def test_the_default_policy_is_the_fixed_baseline():
+    """The ladder is opt-in, and this is where that is decided.
+
+    ``policy="halving"`` is cheaper on average and worse on some
+    multimodal problems (see the test below), so it may not become an
+    existing caller's policy by their doing nothing. A default call has
+    to be the pre-#610 policy, byte for byte.
+    """
+    import inspect
+
+    assert (inspect.signature(pounce.race_starts)
+            .parameters["policy"].default == "fixed")
+
+    f, g, bounds, cons = _hs71()
+    starts = pounce.generate_starts(8, bounds=bounds, seed=1)
+    kw = dict(jac=g, bounds=bounds, constraints=cons, iters=10, top=3)
+
+    old = _pre_610_race_starts(f, starts, **kw)
+    default = pounce.race_starts(f, starts, **kw)
+    assert len(old) == len(default)
+    for a, b in zip(old, default):
+        assert np.array_equal(np.asarray(a.x), np.asarray(b.x))
+        assert a.fun == b.fun and a.nit == b.nit and a.status == b.status
+
+    _b, rep = pounce.race_starts(f, starts, return_report=True, **kw)
+    assert rep.policy == "fixed"
+
+
+def test_the_ladder_can_cut_the_winner_at_rung_zero():
+    """Why ``"halving"`` is not the default, pinned as a measurement.
+
+    2-D Ackley: hundreds of local minima on a near-flat plate with the
+    global one in a narrow funnel, so where a start *ends* is close to
+    uncorrelated with how it looks after four iterations. The ladder
+    ranks on exactly that and discards two thirds of the field on it.
+
+    The assertion is not "the ladder is bad" — it is that on this class
+    of model the rung-0 ranking carries no signal about the eventual
+    winner, which is the fact the docstring's recommendation rests on.
+    Were that to stop being true, this test should fail and the default
+    should be revisited, not the test relaxed.
+    """
+    def f(x):
+        return float(
+            -20.0 * np.exp(-0.2 * np.sqrt(np.sum(x ** 2) / 2.0))
+            - np.exp(np.sum(np.cos(2.0 * np.pi * x)) / 2.0)
+            + 20.0 + np.e
+        )
+
+    bounds = [(-5.0, 5.0)] * 2
+    starts = pounce.generate_starts(27, bounds=bounds, seed=0)
+
+    # Ground truth: run every start to convergence and see which wins.
+    finals = [float(pounce.minimize(f, s, bounds=bounds).fun) for s in starts]
+    winner = int(np.argmin(finals))
+    assert finals[winner] < 1e-8, "no start reached the global minimum"
+
+    _best, rep = _halving(f, starts, bounds=bounds, iters=40, top=1,
+                          return_report=True)
+    cut = rep.candidates[winner]
+    assert cut.eliminated_round == 0, (
+        f"candidate {winner} reaches {finals[winner]:.3g} at full effort but "
+        f"the ladder kept it past rung 0 ({cut.reason!r}) — if the rung-0 "
+        "ranking has become informative here, revisit the default policy"
+    )
+    assert "below halving cut" in cut.reason
+
+    # And the default policy does not have this failure mode: it spends
+    # the same budget on every start, so the winner is still in the field.
+    best_fixed = pounce.race_starts(f, starts, bounds=bounds, iters=40, top=1)
+    assert float(pounce.minimize(f, best_fixed[0].x, bounds=bounds).fun) < 1e-8
+
+
 def test_fixed_policy_refuses_the_post_610_arguments():
     """``hess=`` / ``args=`` are #610 additions. Accepting them on the
     frozen policy and quietly ignoring them would make "reproducible
     baseline" false in the one situation where it matters."""
     f, g, bounds, cons = _double_well()
     with pytest.raises(TypeError, match="frozen baseline"):
-        pounce.race_starts(f, np.array([[1.4], [-1.4]]), jac=g, bounds=bounds,
-                           constraints=cons, policy="fixed",
+        pounce.race_starts(f, np.array([[1.4], [-1.4]]), jac=g,
+                           bounds=bounds, constraints=cons, policy="fixed",
                            hess=lambda x: np.array([[1.0]]))
 
 
@@ -676,13 +761,13 @@ def test_unknown_policy_is_rejected():
 def test_halving_refuses_convex_routing_instead_of_losing_the_session():
     f, g, bounds, _ = _double_well()
     with pytest.raises(ValueError, match="NLP path"):
-        pounce.race_starts(f, np.array([[1.4], [-1.4]]), jac=g, bounds=bounds,
+        _halving(f, np.array([[1.4], [-1.4]]), jac=g, bounds=bounds,
                            options={"solver_selection": "auto"})
 
 
 def test_a_single_start_still_works():
     f, g, bounds, _ = _double_well()
-    best, rep = pounce.race_starts(f, np.array([[1.4]]), jac=g, bounds=bounds,
+    best, rep = _halving(f, np.array([[1.4]]), jac=g, bounds=bounds,
                                    iters=8, return_report=True)
     assert len(best) == 1
     assert rep.n_rounds >= 1
