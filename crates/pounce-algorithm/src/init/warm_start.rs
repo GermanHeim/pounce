@@ -735,6 +735,16 @@ fn seed_is_incoherent(vals: &[Number], sl: &[Number], mu_hat: Number, inf_pr: Nu
 /// identity is not the `y` of this point, and splitting `r_x` by sign
 /// then manufactures bound multipliers out of the miss.
 ///
+/// The scale is `max(‖∇f‖∞, ‖z_seeded‖∞, mu_hat)`, which assumes the
+/// true multipliers are not orders of magnitude larger than the
+/// gradient they balance — for a nonbasic block that is a statement
+/// about the conditioning of the basis, not about the `y`. A badly
+/// conditioned model can therefore have a legitimate `y` refused. It
+/// is deliberate that `‖Jᵀy‖∞` is *not* in the scale: adding the very
+/// quantity under test would make the comparison vacuous. This bound
+/// is derived, not measured; the mitigation is that a refusal only
+/// declines to *derive* from the `y`, never discards it.
+///
 /// Unlike a rejected `z` block the `y` is **not** overwritten: the
 /// pre-gh#606 path keeps a supplied `y` (clamped) and there is no
 /// constant fill to fall back to. What the rejection buys is that
