@@ -49,7 +49,7 @@ namespace casadi {
     // per-iteration trace, mirroring casadi's ipopt `iterations` stats
     std::vector<double> inf_pr, inf_du, mu_trace, d_norm, obj_trace,
                         alpha_pr, alpha_du, regularization_size;
-    std::vector<casadi_int> ls_trials;
+    std::vector<casadi_int> ls_trials, alg_mod;
     /// Final KKT errors, read off the problem before it is freed —
     /// `FreeIpoptProblem` takes the accessors with it.
     double final_inf_pr = 0, final_inf_du = 0, final_compl_inf = 0;
@@ -223,12 +223,14 @@ namespace casadi {
     static bool cb_h(ipindex n, ipnumber* x, bool new_x, ipnumber obj_factor, ipindex m,
                      ipnumber* lambda, bool new_lambda, ipindex nele,
                      ipindex* iRow, ipindex* jCol, ipnumber* values, UserDataPtr ud);
-    /// The leading `alg_mod` is unnamed on purpose: POUNCE fires this
-    /// callback only from its outer loop and always reports
-    /// `RegularMode` (`ipopt_alg.rs`, `build_iter_stats`), so recording
-    /// it would publish a column that is constant zero and reads as
-    /// working restoration detection. `stats()['restoration']` reports
-    /// what POUNCE does measure; see gh#634.
+    /// `alg_mod` is 0 for an outer-loop iteration and 1 for one of the
+    /// feasibility-restoration subproblem (gh#645 made the second kind
+    /// fire at all; before that it was constant 0 and deliberately not
+    /// recorded). It is published in `stats()['iterations']['alg_mod']`
+    /// because without it the other columns of a restoration row are
+    /// unreadable — they describe the min-||c||_1 subproblem, not this
+    /// NLP. `stats()['restoration']` still carries the solve-level
+    /// totals; see gh#634.
     static bool cb_iter(ipindex alg_mod, ipindex iter_count, ipnumber obj_value,
                         ipnumber inf_pr, ipnumber inf_du, ipnumber mu, ipnumber d_norm,
                         ipnumber regularization_size, ipnumber alpha_du, ipnumber alpha_pr,
@@ -577,12 +579,13 @@ namespace casadi {
     return true;
   }
 
-  bool PounceInterface::cb_iter(ipindex, ipindex iter_count, ipnumber obj_value,
+  bool PounceInterface::cb_iter(ipindex alg_mod, ipindex iter_count, ipnumber obj_value,
                                 ipnumber inf_pr, ipnumber inf_du, ipnumber mu,
                                 ipnumber d_norm, ipnumber regularization_size,
                                 ipnumber alpha_du, ipnumber alpha_pr, ipindex ls_trials,
                                 UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
+    m->alg_mod.push_back(alg_mod);
     m->inf_pr.push_back(inf_pr);
     m->inf_du.push_back(inf_du);
     m->mu_trace.push_back(mu);
@@ -592,12 +595,28 @@ namespace casadi {
     m->alpha_pr.push_back(alpha_pr);
     m->alpha_du.push_back(alpha_du);
     m->ls_trials.push_back(ls_trials);
-    m->iter = iter_count;
+    // On a restoration fire `iter_count` counts the *subproblem's* inner
+    // iterations and restarts from 0 on every entry, so letting it
+    // through here would make `stats()['iter_count']` report whatever
+    // the last restoration episode happened to reach. Outer fires only.
+    if (alg_mod == 0) m->iter = iter_count;
 
     // A Ctrl-C caught in an oracle callback stops the solve here: returning
     // false is `User_Requested_Stop`, the one channel POUNCE offers for
     // "stop now" that does not involve unwinding through it.
     if (m->interrupted) return false;
+
+    // Restoration fires stop here. CasADi fixes the callback signature
+    // at `(x, f, g, lam_x, lam_g)` and a restoration iterate supplies
+    // none of them: it is a point of the min-||c||_1 subproblem, in the
+    // subproblem's own variable space, and POUNCE's `GetIpoptCurrent*`
+    // inspectors report no data for its duration by design. Handing the
+    // user's callback a stale `x` from the previous outer iteration
+    // beside a fresh restoration `f` would be worse than not calling it.
+    // The trace above still records the iteration, tagged `alg_mod = 1`,
+    // so the episode is visible in `stats()` without being fed to user
+    // code as if it were a solution estimate.
+    if (alg_mod != 0) return true;
 
     // Full callback: pull the current iterate out of POUNCE and drive
     // casadi's `iteration_callback` with it.
@@ -667,6 +686,7 @@ namespace casadi {
     m->alpha_pr.clear();
     m->alpha_du.clear();
     m->ls_trials.clear();
+    m->alg_mod.clear();
     m->final_inf_pr = m->final_inf_du = m->final_compl_inf = 0;
     m->report_written = false;
     m->linsol_valid = false;
@@ -963,6 +983,9 @@ namespace casadi {
     iterations["alpha_pr"] = m->alpha_pr;
     iterations["alpha_du"] = m->alpha_du;
     iterations["ls_trials"] = m->ls_trials;
+    // 0 = outer iteration, 1 = restoration subproblem iteration. Every
+    // other vector here is only interpretable against it.
+    iterations["alg_mod"] = m->alg_mod;
     stats["iterations"] = iterations;
 
     // `stats()` is callable from inside `iteration_callback`, where the
@@ -1006,10 +1029,10 @@ namespace casadi {
       stats["final_inf_du"] = m->final_inf_du;
       stats["final_compl_inf"] = m->final_compl_inf;
 
-      // Restoration is reported per solve, not per iteration: POUNCE's
-      // intermediate callback always reports RegularMode, so labelling
-      // a single iteration as a restoration one is not something this
-      // plugin can honestly do yet (gh#634).
+      // Solve-level restoration totals. Per-iteration labelling now
+      // exists too — see `iterations['alg_mod']` (gh#645) — but these
+      // are the only source for the inner iteration count and the wall
+      // time, and they answer "how much restoration?" in one read.
       Dict resto;
       resto["calls"] = static_cast<casadi_int>(m->resto_calls);
       resto["inner_iters"] = static_cast<casadi_int>(m->resto_inner);

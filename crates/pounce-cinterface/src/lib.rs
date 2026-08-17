@@ -1166,10 +1166,12 @@ where
 /// Restoration-phase activity in the most recent solve. Each output
 /// may be NULL to skip it; all yield zero before the first solve.
 ///
-/// Solve-level rather than per-iteration: the intermediate callback's
-/// `alg_mod` is always `RegularMode` today (see
-/// `IpoptAlgorithm::build_iter_stats`), so these counters are what a
-/// caller can honestly say about restoration.
+/// Solve-level, and still worth having now that the intermediate
+/// callback also fires from restoration with `alg_mod = 1` (gh#645):
+/// these counters answer "how much restoration did this solve do?"
+/// without the caller having to install a callback and tally fires,
+/// and they are the only source for the inner iteration count and
+/// wall time.
 ///
 /// # Safety
 ///
