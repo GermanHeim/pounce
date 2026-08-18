@@ -3,6 +3,8 @@
 #   make                 build libcasadi_nlpsol_pounce.so
 #   make test            build, then run the parity checks against ipopt
 #   make examples        run every script in examples/
+#   make compat          compile the convexify name shim against every
+#                        CasADi spelling (needs no CasADi at all)
 #   make clean
 #
 # Two inputs are needed and both are auto-detected where possible:
@@ -89,7 +91,7 @@ CXXFLAGS ?= -O2 -std=c++17 -fPIC -Wall
 INCLUDES  = -I$(CASADI_SRC) -I$(CASADI_INC) -I$(POUNCE_INC)
 LDFLAGS   = -L$(CASADI_LIB) -lcasadi -L$(POUNCE_LIB) -lpounce_cinterface $(RPATH)
 
-.PHONY: all check-env fetch-src abi-flags install uninstall test examples clean
+.PHONY: all check-env fetch-src abi-flags install uninstall test examples compat clean
 
 all: check-env $(PLUGIN)
 
@@ -131,7 +133,7 @@ abi-flags:
 	@echo "installed casadi $(CASADI_VER) at $(CASADI_LIB)"
 	@$(PYTHON) -c "import casadi; print(casadi.CasadiMeta.compiler_flags())"
 
-$(PLUGIN): casadi_nlpsol_pounce.cpp pounce_runtime.hpp
+$(PLUGIN): casadi_nlpsol_pounce.cpp pounce_runtime.hpp convexify_compat.hpp
 	$(CXX) -shared $(CXXFLAGS) $(DEFS) $(INCLUDES) $< -o $@ $(LDFLAGS)
 	@$(FIXUP)
 
@@ -157,6 +159,13 @@ examples: all
 	  echo "=== $$f"; \
 	  CASADIPATH=$(CURDIR) $(PYTHON) $$f || exit 1; \
 	done
+
+## Compile `convexify_compat.hpp` against every spelling of CasADi's
+## convexify runtime helper (gh#668). Needs no CasADi and no solver
+## library -- mock declarations and a compiler -- so it runs anywhere,
+## and it covers the overload the installed CasADi does not exercise.
+compat:
+	$(PYTHON) tests/convexify_compat/run.py
 
 clean:
 	rm -f $(PLUGIN)

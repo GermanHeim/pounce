@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+- **The CasADi plugin builds against CasADi master again** (#668).
+
+  CasADi renamed the runtime helper `convexify_eval` to
+  `casadi_convexify_eval` after 3.7.2. The plugin calls it from `cb_h`,
+  which is compiled whether or not `convexify_strategy` is ever used, so
+  the failure was unconditional: a plugin built against master or any
+  nightly made from it did not compile, for users who never convexify
+  anything. Reported with a diagnosis and a working patch by
+  @srikanth-gm.
+
+  Renaming the call site would fix master and break 3.7.2 — and 3.6,
+  which the wheel also ships a build for. No version macro separates the
+  two: the nightly carrying the rename reports the same
+  `CASADI_MAJOR/MINOR/PATCH` as 3.7.2, differing only in
+  `CASADI_IS_RELEASE`, which the next release will flip back while
+  keeping the new name. What distinguishes them is not a version, it is
+  which name the installed CasADi declares, so `convexify_compat.hpp`
+  detects that by overload resolution. One source tree, no build flags,
+  no configure probe, and no version test to revise at the next CasADi
+  release. The codegen SYMBOL name is unchanged and generated code never
+  reaches this helper (the plugin refuses to code generate
+  `convexify_strategy` at all), so nothing about the emitted C moves.
+
+  The shim has two overloads and any one CasADi declares exactly one of
+  the names, so building against a real CasADi compiles one of them and
+  leaves the other unchecked — and the unchecked one is what most users
+  get, since the wheel's 3.6 and 3.7 builds both take the fallback. That
+  is what `casadi/tests/convexify_compat/` is for: it compiles both
+  against mock declarations, with no CasADi installed and nothing linked,
+  asserts which overload ran and that the arguments arrive intact, and
+  checks that a CasADi declaring *neither* name is rejected rather than
+  silently resolved. `make -C casadi compat`, and the `CasADi convexify
+  name shim` CI job — which is also the only place in CI the plugin
+  source meets MSVC, the toolchain the Windows wheel is built with.
+
 - **The restoration divergence guard's waiver now measures a floor
   instead of counting iterations** (#661, #664).
 
