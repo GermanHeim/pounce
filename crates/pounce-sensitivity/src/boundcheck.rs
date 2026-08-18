@@ -169,6 +169,37 @@ mod tests {
     }
 
     #[test]
+    fn combinations_advance_in_lexicographic_order_and_terminate() {
+        // The enumeration order is the determinism promise of the
+        // directional search: size first, least index within a size.
+        let n = 4;
+        let mut seen: Vec<Vec<usize>> = Vec::new();
+        for size in 0..=n {
+            let mut combo: Vec<usize> = (0..size).collect();
+            loop {
+                seen.push(combo.clone());
+                if !next_combination(&mut combo, n) {
+                    break;
+                }
+            }
+        }
+        assert_eq!(seen.len(), 16, "2^4 subsets in total");
+        let expected_size_2: Vec<Vec<usize>> = vec![
+            vec![0, 1],
+            vec![0, 2],
+            vec![0, 3],
+            vec![1, 2],
+            vec![1, 3],
+            vec![2, 3],
+        ];
+        let got_size_2: Vec<Vec<usize>> = seen.iter().filter(|c| c.len() == 2).cloned().collect();
+        assert_eq!(got_size_2, expected_size_2);
+        for w in seen.windows(2) {
+            assert!(w[0].len() <= w[1].len(), "sizes never decrease");
+        }
+    }
+
+    #[test]
     fn expand_bounds_puts_infinity_where_a_bound_is_absent() {
         // only x1 has a lower bound, only x2 an upper one
         let (lo, hi) = expand_bounds(

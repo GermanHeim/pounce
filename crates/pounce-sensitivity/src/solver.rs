@@ -760,7 +760,17 @@ impl Solver {
                 self.parametric_step_path(pin_constraint_indices, deltas, max_iter)?;
             return Ok((dx, segments, 0));
         }
-        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let mut rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        // The barrier correction on a bound row assumes the bound is
+        // enforced by its sigma. A weak row's sigma is order one, so
+        // the correction folds into the variable's equation at order
+        // sqrt(mu), a constant offset the perturbation does not scale,
+        // which dominated steps of 1e-10. Released rows get their rhs
+        // zeroed inside solve_released; this does the same for the
+        // weak rows the walk carries in its table instead.
+        for w in &weak {
+            rhs_plain[w.row] = 0.0;
+        }
         let ctx = self.bound_context()?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;

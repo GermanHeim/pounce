@@ -156,15 +156,29 @@ def test_the_decision_is_invariant_to_the_perturbation_scale():
     the working set decided at a perturbation of 1e-10 is the same one
     decided at 1. An absolute tolerance accepted the all-released set
     on the holding side at tiny perturbations, reading the derivative
-    as -1 instead of 0."""
+    as -1 instead of 0, and the barrier correction on a weak row is
+    constant-sized, so before it was zeroed it left an offset of
+    order sqrt(mu) that dominated tiny steps.
+
+    The holding side is exact in every mode. On the releasing side the
+    path's answer is bounded by the step rather than pinned to it,
+    because the release fraction is a quotient of solve quantities and
+    at a weak bound the multiplier's uncertainty equals its magnitude,
+    so a step below that precision cannot be resolved against it."""
     m = kink()
     base_val = pyo.value(m.x)
-    tiny_down = estimate(m, [(m.p, -1e-10)], clamp=False)
-    assert tiny_down[m.x] - base_val == pytest.approx(0.0, abs=1e-12), (
-        "the holding side holds at any scale")
-    tiny_up = estimate(m, [(m.p, 1e-10)], clamp=False)
-    assert tiny_up[m.x] - base_val == pytest.approx(1e-10, rel=1e-3), (
-        "the releasing side releases at any scale")
+    for mode in MODES:
+        tiny_down = estimate(m, [(m.p, -1e-10)], mode=mode, clamp=False)
+        assert tiny_down[m.x] - base_val == pytest.approx(0.0, abs=1e-12), (
+            f"mode={mode}: the holding side holds at any scale")
+        tiny_up = estimate(m, [(m.p, 1e-10)], mode=mode, clamp=False)
+        moved = tiny_up[m.x] - base_val
+        if mode == "path":
+            assert -1e-12 <= moved <= 1e-10 + 1e-12, (
+                f"mode={mode}: bounded by the step, got {moved}")
+        else:
+            assert moved == pytest.approx(1e-10, rel=1e-3), (
+                f"mode={mode}: the releasing side releases at any scale")
 
 
 def test_gradient_warns_at_a_kink_and_not_at_a_clean_point():
