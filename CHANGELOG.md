@@ -125,8 +125,47 @@ changes.
   and the *degree* answer correct while the read-out is still short an
   entire `x²`.
 
-  Part 2 of #685 — a model of this shape being classified LP — predates
-  this work and is unchanged here.
+- **…and a model of that shape is no longer *classified* an LP**
+  (#685 part 2).
+
+  The third consumer of the cancelled map is the classifier, and it is
+  the one that decides which solver sees the model at all.
+  `classify_problem` read the row's Hessian, found it empty, and took the
+  "purely linear after all" arm; with no other nonlinearity in the model
+  that is an **LP**, and `qp_extract` then folded the row's empty linear
+  part into `G` and the constraint left the model altogether. The
+  reproduction — `min −x₀` subject to `2⁵³·x₀² + x₀² − 2⁵³·x₀² ≤ 5`,
+  `0 ≤ x₀ ≤ 10⁶` — printed `problem class LP` and `Objective:
+  -1.0000000000000000e+06`, the bound, reported `Optimal`.
+
+  The gate now sits on `NlBody::analyze_quadratic_full` itself rather
+  than on each caller, because every caller past it reads coefficients
+  *out*: the classifier tests a Hessian's definiteness, and both
+  extractors build `P`, `c`, `A` and `G` from all three parts. A form
+  that dropped a term is not the body, so none of them may have it. Such
+  a model routes NLP, where the row is evaluated from its own tape, and
+  `POUNCE_DBG_CLASSIFY=1` names the finding (two new `ClassReason`
+  variants) instead of reporting it as "not a degree-2 polynomial".
+
+  What this does **not** claim is a true optimum for a row like that: a
+  body whose coefficients cancel in the recognizer's arithmetic cancels
+  in the tape's too, so neither route computes the mathematical
+  `x₀² + x₁²`. What goes away is the six-order-of-magnitude gap between
+  a vanished constraint and an evaluated one, and the confident
+  `Optimal` beside it.
+
+  Measured to be a routing change and nothing else: the 57-model fixture
+  sweep is byte-identical, and `Problem class:` over all 61 loadable
+  `.nl` files in the tree is unchanged.
+
+  The cost is reach, and it is real: `x − x` in a nonlinear part is an
+  *exact* cancellation, and it now routes NLP too, because the flag
+  records that a term was dropped and not whether the arithmetic that
+  dropped it was exact. Nothing in the corpus is affected — no fixture
+  body drops a term — but a model that spells a linear row that way loses
+  the LP path. #687 tracks the sharper gate (flag the inexact *fold*,
+  which is where `2⁵³ + 1` loses the `1`, rather than the drop it leads
+  to), which would give those models their fast path back.
 
 - **…and a row whose coefficients cancel *exactly* keeps both fast paths**
   (#687, sharpening the two above).
