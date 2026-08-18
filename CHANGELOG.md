@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+- **`recalc_y` no longer degrades the multipliers it exists to sharpen**
+  (#688).
+
+  The least-squares multiplier solve perturbed its `(3,3)`/`(4,4)` blocks
+  by `1e-8` where Ipopt passes `0`. Eliminating `w` from that system gives
+  `y = −(J Jᵀ + δ I)⁻¹ J·rhs_x`, so the perturbation returns a
+  Tikhonov-regularized multiplier rather than the least-squares one,
+  damped by `O(δ / σ_min(J)²)`. That is invisible while
+  `σ_min(J)² ≫ δ` — true of every problem in this repo — and `O(1)` on a
+  ~59,000-variable collocation NLP, where it was reported. Because
+  `recalc_y` recomputes `y` the same way every iteration the bias is a
+  fixed point rather than a transient, and it lands directly in
+  `inf_du`: `recalc_y=yes` stalled at `1.55e-01`, *worse* than
+  `recalc_y=no` at `1.73e-02`. At `δ=0` that model converges on both MA57
+  and FERAL.
+
+  The fix is scoped to the `recalc_y` path, which is the only caller that
+  overwrites `y` every iteration. The three callers that compute `y` once
+  — the dual initializer, the warm-start initializer and the restoration
+  inner solve — keep the perturbation: there a bias is transient and
+  corrected by the following Newton steps, while a *failed* solve costs a
+  fallback to `y = 0` and an iteration-0 `inf_du` blow-up, which is the
+  failure the perturbation was added for. On the `recalc_y` path the
+  trade runs the other way, and a failed solve is benign because the
+  Newton multipliers simply stand.
+
+  Default runs are untouched — `recalc_y` is off by default and the
+  fixture corpus is identical on both legs. With it on, `cresc4` under
+  limited-memory goes from `Infeasible_Problem_Detected` at 32 iterations
+  — a false verdict on a feasible model — to `Solve_Succeeded` at 109,
+  objective `0.8718975283` against the exact-Hessian path's
+  `0.8718975273`.
+
 - **`limited_memory_initialization` and `limited_memory_init_val` now do
   something** (#677).
 
