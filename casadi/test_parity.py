@@ -959,6 +959,38 @@ def _compile_generated(solver, workdir, stem):
     return ca.external(solver.name(), so)
 
 
+def test_output_does_not_tear_embedder_lines():
+    """gh#667: POUNCE's log must not split a line the embedder is printing
+    from inside a callback.
+
+    Driven by a C++ host (`test_output_interleaving.cpp`), not from here.
+    CasADi's Python bindings point `Logger::writeFun` at `PySys_WriteStdout`
+    but leave `Logger::flush` at `flushDefault`, so the plugin's flush drains
+    `std::cout` while the bytes are sitting in Python's `sys.stdout`. Run
+    from Python this would report on CasADi's buffering, not on the plugin's
+    flushing, and would keep passing however broken the plugin got.
+
+    The driver prints a long line in chunks from `iteration_callback` while
+    POUNCE writes its iteration rows to the same descriptor. Pre-fix every
+    such line arrives without its terminator.
+    """
+    exe = os.path.join(HERE, "test_output_interleaving")
+    if not os.path.exists(exe):
+        print("SKIP  output interleaving (driver not built; run `make`)")
+        return
+    env = dict(os.environ, CASADIPATH=HERE)
+    # stdout must be a pipe: on a tty the competing buffer is line-buffered
+    # and the tear cannot happen in the first place.
+    out = subprocess.run([exe], env=env, capture_output=True, text=True,
+                         timeout=300).stdout
+    host = [ln for ln in out.splitlines() if ln.startswith("HOST ")]
+    torn = [ln for ln in host if not ln.endswith(" END")]
+    check("output: the embedder actually printed", len(host) > 1,
+          f"{len(host)} lines from the callback")
+    check("output: POUNCE does not tear embedder lines (gh#667)",
+          not torn, f"{len(torn)}/{len(host)} lines torn")
+
+
 def test_solve_report_option():
     """`solve_report` writes POUNCE's structured report (gh#644).
 
@@ -1209,6 +1241,7 @@ def main():
         test_solve_report_option,
         test_codegen_matches_the_interpreted_solve,
         test_codegen_refuses_what_it_cannot_reproduce,
+        test_output_does_not_tear_embedder_lines,
     ):
         t()
     print()

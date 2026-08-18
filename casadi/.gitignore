@@ -2,3 +2,4 @@
 casadi-src
 *.so
 *.dylib
+test_output_interleaving

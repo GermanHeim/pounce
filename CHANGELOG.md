@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+- **CasADi plugin: POUNCE's log no longer tears output an embedder
+  prints from inside a callback** (#667).
+
+  If your own code printed from `iteration_callback` — or from a model
+  that logs during function evaluation — a POUNCE iteration row could
+  land in the middle of your line. A line-oriented consumer saw a line
+  arrive without its terminator and the remainder show up several rows
+  later. Reported against a 2400-variable collocation problem emitting a
+  multi-kilobyte line per iteration.
+
+  Two writers share stdout and neither knows about the other. POUNCE
+  journals from Rust, where the stream goes out on every newline; a C++
+  embedder writes through CasADi's `uout()`, which leaves the buffering
+  to `std::cout`/stdio — fully buffered behind a pipe, so a line long
+  enough to straddle that buffer leaves its tail pending. The plugin now
+  drains CasADi's streams on every exit from a callback and once before
+  the solve starts, which are the only moments it can know POUNCE is not
+  writing. That brings a C++ host to parity with `nlpsol(..., 'ipopt',
+  ...)`, whose journal shares the stream it competes with.
+
+  A **Python** host is not covered and cannot be from the plugin:
+  CasADi's bindings route output to Python's `sys.stdout` but leave the
+  flush hook at its default, so a flush issued from C++ drains a
+  different buffer. Set `sys.stdout.reconfigure(line_buffering=True)`
+  (or run `python -u`); this is sufficient, because your callback runs
+  while POUNCE is blocked. See `docs/src/casadi.md`. Routing POUNCE's
+  journal through `uout()` would remove the hazard by construction for
+  both, and is filed separately.
+
+  No solver behaviour changes: iterates, iteration counts and timings
+  are unaffected.
+
 - **The restoration divergence guard's waiver now measures a floor
   instead of counting iterations** (#661, #664).
 
