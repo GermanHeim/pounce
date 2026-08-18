@@ -1509,6 +1509,85 @@ mod tests {
         );
     }
 
+    /// The W=0 saddle-point shape, unregularized: feral reports the
+    /// inertia correctly, flags a wrong count, and calls a structurally
+    /// singular system singular rather than inventing a count.
+    ///
+    /// This is the structure review item M3 was concerned about — the
+    /// least-squares multiplier system `[A Bᵀ; B 0]` with a
+    /// structurally-zero `(2,2)` block and `δ = 0` — and the reason it
+    /// is pinned here is #688, which removed M3's blanket `1e-8`
+    /// perturbation from the `recalc_y` caller. M3's justification was
+    /// that feral mis-reports the inertia of exactly this shape (0
+    /// negatives on `nuffield2_trap` against a true `n_c + n_d`). That
+    /// matrix is not in this repo, so the claim cannot be reproduced
+    /// directly; what can be established is the well-conditioned case,
+    /// which is where a defect would be unambiguous.
+    ///
+    /// `[[1,0,1],[0,1,1],[1,1,0]]`: `A = I` (SPD, n=2), `B = [1 1]`
+    /// (full row rank, m=1). Saddle-point inertia theory gives exactly
+    /// `n` positive and `m` negative, so the true negative count is 1.
+    /// Eigenvalues are 1, 2 and −1 — no pivot anywhere near the
+    /// working-precision floor, so the count is a measurement rather
+    /// than noise, and `inertia_trust_floor` has nothing to say about
+    /// it.
+    ///
+    /// A failure here would mean feral cannot count the inertia of a
+    /// healthy saddle-point system, which would be a defect worth its
+    /// own issue. It passes, which is evidence the other way: whatever
+    /// M3 saw was on a factorization whose pivots had lost their sign,
+    /// the case gh#540 and gh#592 addressed at source by routing to
+    /// `Singular` and `δ_c`.
+    #[test]
+    fn saddle_point_inertia_is_correct_without_regularization() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 5] = [1, 2, 3, 3, 3];
+        let jcn: [Index; 5] = [1, 2, 1, 2, 3];
+        assert_eq!(
+            s.initialize_structure(3, 5, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut()
+            .copy_from_slice(&[1.0, 1.0, 1.0, 1.0, 0.0]);
+        let mut rhs = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::Success,
+            "feral disagreed with the true saddle-point inertia (n=2, m=1) \
+             on a well-conditioned system — that would be a real defect",
+        );
+
+        // The check is live, not vacuously passing.
+        let mut s2 = FeralSolverInterface::new();
+        assert_eq!(
+            s2.initialize_structure(3, 5, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s2.values_array_mut()
+            .copy_from_slice(&[1.0, 1.0, 1.0, 1.0, 0.0]);
+        let mut rhs2 = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s2.multi_solve(true, &irn, &jcn, 1, &mut rhs2, true, 2),
+            ESymSolverStatus::WrongInertia,
+        );
+
+        // And a structurally singular system is called singular rather
+        // than answered with a fabricated count.
+        let mut s3 = FeralSolverInterface::new();
+        let irn3: [Index; 3] = [1, 2, 3];
+        let jcn3: [Index; 3] = [1, 2, 3];
+        assert_eq!(
+            s3.initialize_structure(3, 3, &irn3, &jcn3),
+            ESymSolverStatus::Success
+        );
+        s3.values_array_mut().copy_from_slice(&[1.0, 1.0, 0.0]);
+        let mut rhs3 = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s3.multi_solve(true, &irn3, &jcn3, 1, &mut rhs3, true, 1),
+            ESymSolverStatus::Singular,
+        );
+    }
+
     /// `increase_quality` then resolve with `new_matrix=false`
     /// returns `CallAgain`; refilling values and retrying succeeds.
     #[test]
