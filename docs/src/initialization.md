@@ -239,6 +239,47 @@ default, and the corpus measurement is pinned by
 `crates/pounce-cli/tests/issue_616_ls_init_downgrades.rs` rather than
 left in a PR body.
 
+#### One of the two downgrades has since gone away (gh#681)
+
+Everything above is the measurement on `a44f4e8b` and is left as it was
+taken. On current `main` plus gh#588's quadratic-structure work, the
+cost is **one** downgrade, not two: `eigenb2` reaches `SolveSucceeded`
+at 1.5999999999925176 in 54 iterations. `csfi2` does not move at all,
+to the bit — it is in the declined group, and a decline is not a step,
+so there is no trajectory for anything downstream to perturb.
+
+Nothing about the safeguard changed. gh#588's Q4 evaluates a recognized
+degree-≤2 row from its stored constant matrix instead of rebuilding an
+AD tape each iteration, and that reassociates the sums in `eval_g` and
+`eval_jac_g` — a difference that phase declares non-bitwise in advance,
+because the tape adds one summand at a time in file order while the
+matvec adds a merged row. `eigenb2` sat close enough to the acceptable
+band for the reassociation to carry it across.
+
+The pairing argument above is **strengthened**, not weakened, and it is
+worth being explicit about why, because the obvious reading is that
+gh#616 lost its evidence. `eigena2` and `eigenb2` still hand the
+safeguard bit-identical numbers, and the safeguard still takes the same
+decision on both: `theta_0 = 1.0`, `alpha = 0.5`, step norm
+`3.2596011939729705`, one rejected trial, accepted. The only thing that
+moved in that report is **two ulps** of the reported `violation_final`
+(`0.2500000062500001` → `0.2500000062500003`), on both models together,
+and it is a diagnostic rather than an input to the accept test.
+
+So `eigenb2` crossed a tolerance band while every number the accept
+test reads stayed put. Its downgrade was never a property of that test:
+it was decided downstream, by where the iteration *after* the safeguard
+landed relative to the acceptable band, and one reassociated sum was
+enough to move it. An accept test retuned to chase `eigenb2` — either
+of the two proposals rejected above — would have been tuned against
+round-off. The conclusion is the same one gh#616 reached, now resting
+on a mechanism rather than on a two-model coincidence.
+
+The test file pins both legs: the fast path's verdict, and the tape's
+under `POUNCE_DBG_NO_QUAD=1`, which still reproduces gh#616's
+downgrade exactly. That is what makes a future move attributable to one
+of them instead of being absorbed as noise.
+
 ### A declined step is not the same as never asking
 
 Worth knowing before you read `least_square_init_primal=yes` results:
