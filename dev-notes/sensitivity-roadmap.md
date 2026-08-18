@@ -266,6 +266,84 @@ stagnation guard. The residual tolerance is a numerical stopping criterion
 the solver owns; a budget or deadline stop stays with the caller and uses
 the raw step. Cost is ~1 backsolve per iteration.
 
+### Measured: corrector refactorization policies on the double column
+
+A study (2026-08-18) settles the refactorization question for item 4.
+Model: the double column DAE stack, N=25 Radau, 62,167 variables,
+61,967 equalities, base solve 93 iterations, final `μ` 2.5e-9, 792
+weakly active bounds. The corrector iterated the primal-dual barrier
+system at the held final `μ`: residuals from the NL evaluators at the
+moving iterate, backsolves through the held factorization, fraction to
+the boundary at 0.9995. The perturbation is a fixed random direction
+over all 246 initial-state parameters (the advanced-step scenario),
+each entry scaled by its distance to the nearer bound, one knob
+scaling the vector. Knob 1 to 2 percent corresponds to realistic
+estimator mismatch. The predictor is the linear sensitivity step. Truth
+per knob is a warm re-solve at tol 1e-10. The floor is the offset
+between the barrier solution at the held `μ` and that truth, 7.2e-7 to
+7.6e-7 on rows away from the weakly active set. It is the base solve's
+own solution quality, and it appears only against the tighter truth:
+the corrector's residual itself converges to 1e-13.
+
+The floor statement describes the corrector's converged fixed point,
+the perturbed problem's central-path point at the held `μ`. The
+barrier system carries no active-set choice, so a predictor that
+misjudged the active set does not move that fixed point. What it
+affects is convergence to it: larger drift, slower contraction, and in
+the worst measured case the residual cycle noted below. The converged
+residual is the certificate that the fixed point was reached. Without
+it the point can still be good (the cycling case below sits at the
+floor) but nothing certifies it, and on a nonconvex problem a far
+enough start could in principle converge to a different local branch.
+
+Iterations to the floor (error is the inf norm over rows away from the
+weakly active set):
+
+| knob | predictor error | chord on held factors | factor once at the predictor, then chord | refactor every iteration |
+|------|-----------------|-----------------------|------------------------------------------|--------------------------|
+| 1%   | 3.2e-3          | 1 (0.09 s)            | 1 (0.53 s)                               | 1 (0.59 s)               |
+| 2%   | 1.3e-2          | 2 (0.18 s)            | 1 (0.57 s)                               | 1 (0.72 s)               |
+| 5%   | 8.1e-2          | 3 (0.33 s)            | 2 (0.71 s)                               | 2 (1.30 s)               |
+| 10%  | 3.2e-1          | 3 (0.30 s)            | 2 (0.72 s)                               | 2 (1.38 s)               |
+| 20%  | 1.3e0           | 5 (0.50 s)            | 2 (0.70 s)                               | 2 (1.30 s)               |
+
+Per-iteration costs on the study machine: 0.07 to 0.095 s for a
+held-factor backsolve plus residual evaluation, 0.6 to 0.7 s for an
+iteration containing a factorization, 3 to 4.3 s for a full warm
+re-solve.
+
+Findings:
+
+- Chord on the held factors wins every cell. Refactorizing every
+  iteration is dominated everywhere: the matrix barely changes between
+  corrector iterates, so the extra factorizations buy residual polish
+  below the floor and nothing else.
+- One factorization at the predictor point gives contraction near
+  1/200 per iteration independent of step size, because the chord
+  drift is then the predictor error, which is quadratic in the step.
+  It is the robust variant but its first iteration alone costs more
+  than chord's whole path at every knob here.
+- A second direction, a persistent feed-composition parameter swept +1
+  to +20 percent, reproduces all of the above through +10 percent. At
+  +20 percent chord needs 9 backsolves to the floor and then enters a
+  bounded residual two-cycle driven by the fraction-to-the-boundary
+  damping (error stays at the floor, residual oscillates between
+  5.9e-8 and 2.6e-6). One refactorization at the current iterate
+  removes the cycle. Non-monotone residual is the stagnation signal.
+- The fix_relax and path predictors produced corrected trajectories
+  identical to the linear predictor's in the state direction, at 37 to
+  72 s per estimate call (dominated by the directional QP exhausting
+  its trial budget over the 792 weakly active bounds). With a
+  corrector, the linear predictor dominates the expensive modes.
+
+Design consequence: the corrector is chord on the held factorization
+with an iteration cap and a residual-tolerance early exit at the base
+solve's own tolerance. Refactorization is not a policy knob. The one
+escalation worth building is a single refactorization at the current
+iterate when the residual stops decreasing monotonically, which
+reproduces the factor-once behavior exactly where it is needed and
+nowhere else.
+
 ## API surface
 
 Three **modes** of `estimate()`, an ordered ladder on a single `mode`
