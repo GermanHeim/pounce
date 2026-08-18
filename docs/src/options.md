@@ -696,6 +696,43 @@ adaptive oracle stops making progress. Defaults mirror upstream
 | `adaptive_mu_kkterror_red_fact`         | `0.9999`| Required relative KKT-error reduction over that window.                                       |
 | `adaptive_mu_kkt_norm_type`             | `2-norm-squared` | Norm used to score the iterate in adaptive globalization decisions.                  |
 
+## Limited-memory Hessian (L-BFGS) initialization
+
+Under `hessian_approximation=limited-memory` the Hessian model is
+`B = σ I + V Vᵀ − U Uᵀ`. The rank-2 corrections come from the curvature
+history; `σ` is the diagonal they are built on, and
+`limited_memory_initialization` chooses the formula for it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `limited_memory_initialization` | `scalar2` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`). |
+| `limited_memory_init_val` | `1.0` | `σ` on the first iteration, before any curvature pair exists — and every iteration under `constant`. |
+| `limited_memory_init_val_min` / `_max` | `1e-8` / `1e8` | Clamp applied to `σ` however it was computed. |
+
+**POUNCE's default differs from Ipopt's here.** Ipopt defaults to
+`scalar1`; POUNCE defaults to `scalar2`. The two are related by
+σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)², which is ≥ 1 by Cauchy–Schwarz
+and grows without bound as the curvature pair becomes ill-conditioned, so
+on a badly scaled problem they are not close. If you are comparing a
+POUNCE L-BFGS run against an Ipopt one and the trajectories separate at
+the iteration where the first curvature pair lands, set
+
+```
+limited_memory_initialization scalar1
+```
+
+to match. Aligning this default with Ipopt's is tracked on
+[#677](https://github.com/jkitchin/pounce/issues/677); until then the
+option is how you get parity. Before #677 the option was registered but
+never read, so on any earlier release setting it has no effect and no
+warning.
+
+`σ` cannot be observed directly, but the symptom of a badly chosen one is
+recognisable: a search direction much larger than the problem's scale,
+primal step sizes collapsing to `1e-3` or below, primal infeasibility
+that barely moves, and dual infeasibility climbing by orders of magnitude
+while the objective drifts.
+
 ## ℓ₁ penalty-barrier wrapper options
 
 These tune the degenerate-NLP wrapper described in

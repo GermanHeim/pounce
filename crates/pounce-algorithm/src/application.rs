@@ -3277,6 +3277,43 @@ impl IpoptApplication {
                 builder.limited_memory_max_history = v as Index;
             }
         }
+        // `limited_memory_initialization` — which formula picks the
+        // initial Hessian scalar σ. Registered since the option port with
+        // upstream's `scalar1` default and read nowhere until #677, so
+        // the updater's own `Scalar2` default was the only value any
+        // solve ever used: setting the option did nothing, and it warned
+        // nothing. Same miss as gh#483 / #191 round 2 (which wired
+        // `limited_memory_init_val_max`/`_min`) — this is the third
+        // argument to that same `initial_hessian_scalar` call.
+        //
+        // The *effective* default is deliberately left at `Scalar2` here
+        // rather than following the registry's `scalar1`: moving it
+        // reroutes every limited-memory solve and is a trajectory change
+        // owed a fixture sweep. Tracked on #677.
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("limited_memory_initialization", "")
+        {
+            if found {
+                use crate::hess::lim_mem_quasi_newton::InitialApprox;
+                builder.limited_memory_initialization = match v.as_str() {
+                    "scalar1" => InitialApprox::Scalar1,
+                    "scalar3" => InitialApprox::Scalar3,
+                    "scalar4" => InitialApprox::Scalar4,
+                    "constant" => InitialApprox::Constant,
+                    _ => InitialApprox::Scalar2,
+                };
+            }
+        }
+        // `limited_memory_init_val` — σ before any curvature pair exists,
+        // and every iteration under `constant`. Also unread until #677;
+        // the empty-history branch hard-coded the same `1.0`.
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("limited_memory_init_val", "")
+        {
+            builder.limited_memory_init_val = v;
+        }
         if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
             if found {
                 builder.line_search_method = match v.as_str() {
@@ -5103,6 +5140,62 @@ mod tests {
         let snap = app.algorithm_builder_from_options();
         assert_eq!(snap.limited_memory_update_type, UpdateType::Sr1);
         assert_eq!(snap.limited_memory_max_history, 9);
+    }
+
+    #[test]
+    fn application_limited_memory_initialization_propagates_to_builder() {
+        use crate::hess::lim_mem_quasi_newton::InitialApprox;
+
+        // #677: registered with upstream's `scalar1` default and read
+        // nowhere, so every limited-memory solve ran `scalar2` and
+        // setting the option was a silent no-op. Each keyword must now
+        // reach the builder.
+        for (kw, want) in [
+            ("scalar1", InitialApprox::Scalar1),
+            ("scalar2", InitialApprox::Scalar2),
+            ("scalar3", InitialApprox::Scalar3),
+            ("scalar4", InitialApprox::Scalar4),
+            ("constant", InitialApprox::Constant),
+        ] {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!(
+                "hessian_approximation limited-memory\n\
+                 limited_memory_initialization {kw}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                app.algorithm_builder_from_options()
+                    .limited_memory_initialization,
+                want,
+                "limited_memory_initialization={kw} did not reach the builder"
+            );
+        }
+
+        // `limited_memory_init_val` was unread too — the empty-history
+        // branch hard-coded the same 1.0, so the miss was invisible.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             limited_memory_init_val 4.5\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().limited_memory_init_val,
+            4.5
+        );
+
+        // The *effective* default deliberately stays `scalar2` even
+        // though the registry advertises `scalar1`: moving it is a
+        // trajectory change owed a fixture sweep (#677). If this
+        // assertion is what fails after that lands, update it — do not
+        // reach for it to make an unrelated change pass.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let def = app.algorithm_builder_from_options();
+        assert_eq!(def.limited_memory_initialization, InitialApprox::Scalar2);
+        assert_eq!(def.limited_memory_init_val, 1.0);
     }
 
     #[test]

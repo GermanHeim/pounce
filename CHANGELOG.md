@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+- **`limited_memory_initialization` and `limited_memory_init_val` now do
+  something** (#677).
+
+  Both were registered with upstream's defaults and read nowhere, so
+  setting either was a silent no-op — no effect, and no warning. Every
+  limited-memory solve used `scalar2` (σ = yᵀy/sᵀy) for the initial
+  Hessian scalar, because that is what the updater's own default happened
+  to be. Ipopt uses `scalar1` (σ = sᵀy/sᵀs). The two differ by
+  (yᵀy·sᵀs)/(sᵀy)², which is ≥ 1 and unbounded as conditioning degrades,
+  so on a badly scaled problem an L-BFGS run could not be made to match
+  Ipopt's and there was no option that would fix it. Found while
+  diagnosing a 59,939-variable CasADi model whose duals diverged under
+  POUNCE + L-BFGS but not Ipopt + L-BFGS.
+
+  All five upstream keywords are now honored — `scalar1`, `scalar2`,
+  `scalar3` (arithmetic mean), `scalar4` (geometric mean) and `constant`;
+  the last three were not implemented at all. `limited_memory_init_val`
+  now sets σ on the first iteration, where a hard-coded `1.0` — the same
+  value as the default, which is what kept the omission invisible — used
+  to be.
+
+  **The effective default does not change**: it stays `scalar2`, so no
+  solve moves. Both fixture sweeps (default and forced
+  `hessian_approximation=limited-memory`) are identical to the previous
+  release, and `limited_memory_initialization=scalar1` reproduces a
+  hard-patched scalar1 build exactly across all 57 fixtures. Moving the
+  default to Ipopt's `scalar1` is a trajectory change and is tracked
+  separately on #677 — the measured effect is large in both directions.
+  Set the option explicitly to get Ipopt parity today.
+
 - **The CasADi plugin builds against CasADi master again** (#668).
 
   CasADi renamed the runtime helper `convexify_eval` to
