@@ -587,6 +587,43 @@ language boundary. `iteration_callback_ignore_errors` (CasADi's base
 option) decides whether a *throwing iteration callback* stops the solve
 or is shrugged off.
 
+## Printing from a callback
+
+If your own code prints from inside `iteration_callback` — or from a
+model that logs during function evaluation — be aware that two writers
+share stdout. POUNCE journals from Rust, where the stream goes out on
+every newline; CasADi writes through `uout()` and leaves the buffering to
+whatever sits behind it, which behind a pipe is a fully buffered stream.
+A line long enough to straddle that buffer can therefore be split in two
+by a POUNCE iteration row landing in the middle of it. A line-oriented
+protocol reading its own stdout sees a line arrive without its
+terminator, and the remainder show up several lines later.
+
+For a **C++ host** the plugin handles this: it drains CasADi's streams on
+every exit from a callback and once more before the solve starts, which
+are the only moments it can know POUNCE is not writing (gh#667). Pinned
+by `test_output_interleaving.cpp` in the parity suite.
+
+For a **Python host** the plugin cannot help, and this is worth
+understanding rather than working around blindly. CasADi's bindings point
+`Logger::writeFun` at `PySys_WriteStdout` but leave `Logger::flush` at its
+default, so output lands in Python's `sys.stdout` while a flush from the
+plugin drains `std::cout` — a different buffer. Nothing the plugin does
+from C++ reaches Python's. Until POUNCE's journal is routed through
+`uout()` (gh#667 again — the general fix), make the buffer stop holding
+partial lines:
+
+```python
+import sys
+sys.stdout.reconfigure(line_buffering=True)     # or run python -u
+```
+
+That is sufficient, not just a mitigation: your callback runs while
+POUNCE is blocked, so a line that is flushed by the time the callback
+returns cannot be torn. The same applies to Ipopt — this is a property of
+printing from callbacks, not something specific to POUNCE, and the
+plugin's C++-side flushing brings the two to parity.
+
 ## Threads
 
 `Function.map(N, "thread")` works. CasADi hands each worker its own
