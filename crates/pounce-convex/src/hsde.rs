@@ -35,6 +35,7 @@
 //! module is validated to reproduce their optima and certificates.
 
 use crate::cones::{CompositeCone, Cone};
+use crate::correctors;
 use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{
     QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step,
@@ -102,25 +103,6 @@ const DELTA_C_FACTOR: f64 = 10.0;
 const DELTA_C_MAX: f64 = 1e-1;
 const INERTIA_MAX_TRIES: usize = 20;
 
-/// Gondzio multiple centrality correctors (Gondzio 1996, "Multiple centrality
-/// corrections in a primal–dual method for linear programming"). After the
-/// Mehrotra corrector, up to [`GONDZIO_MAX_CORR`] additional corrections are
-/// computed through the *same* factorization (each is one extra back-solve):
-/// a trial step enlarged by [`GONDZIO_DELTA`] is formed, and any
-/// complementarity product it would push outside the centered box
-/// `[β_lo·μ, β_hi·μ]` is corrected back toward the box. Each corrector is
-/// accepted only if it lengthens the fraction-to-boundary step by at least
-/// `GONDZIO_GAMMA·GONDZIO_DELTA`; otherwise correction stops. Lengthening the
-/// step is exactly the documented purpose of the scheme — and it is what
-/// breaks the degenerate-face step collapse (σ→1 centering freezing μ) on the
-/// NETLIB GEN family, where the Mehrotra corrector alone stalls. β_lo = 0.1,
-/// β_hi = 10 is Gondzio's recommended symmetric box.
-const GONDZIO_MAX_CORR: usize = 3;
-const GONDZIO_DELTA: f64 = 0.1;
-const GONDZIO_GAMMA: f64 = 0.1;
-const GONDZIO_BETA_LO: f64 = 0.1;
-const GONDZIO_BETA_HI: f64 = 10.0;
-
 /// Centering fallback for a collapsing step (gh #218).
 ///
 /// Mehrotra's centering parameter `σ = (μ_aff/μ)³` is inferred from how far the
@@ -144,7 +126,8 @@ const GONDZIO_BETA_HI: f64 = 10.0;
 /// clears the bar, since a near-pure centering direction is the one most likely
 /// to admit a step.
 ///
-/// This is the PSD-cone counterpart of what the Gondzio correctors below do on
+/// This is the PSD-cone counterpart of what the Gondzio correctors
+/// ([`crate::correctors`]) do on
 /// the orthant — they lengthen the step by re-centering — and it is deliberately
 /// step-length-triggered so that a healthy iteration never pays for it.
 const CENTERING_MIN_STEP: f64 = 1e-2;
@@ -873,25 +856,23 @@ where
         // RHS), and accepts the extra direction only if it lengthens the step
         // by at least GONDZIO_GAMMA·GONDZIO_DELTA — otherwise the loop stops.
         if cone.is_orthant() && m_ineq > 0 && mu > 0.0 {
-            let lo = GONDZIO_BETA_LO * mu;
-            let hi = GONDZIO_BETA_HI * mu;
-            for _ in 0..GONDZIO_MAX_CORR {
-                let a_trial = (alpha + GONDZIO_DELTA).min(1.0);
+            let band = correctors::Band::around(mu);
+            for _ in 0..correctors::MAX_CORR {
+                let a_trial = correctors::trial_step(alpha);
                 // Cone complementarity targets: project the trial products into
                 // the band; r_c holds the deviation ṽ − t so that recover_ds
-                // yields a correction with z∘cds + s∘cdz = t − ṽ.
-                let mut active = false;
-                for i in 0..m_ineq {
-                    let v = (s[i] + a_trial * ds[i]) * (z[i] + a_trial * dz[i]);
-                    let t = v.clamp(lo, hi);
-                    r_c[i] = v - t;
-                    if r_c[i] != 0.0 {
-                        active = true;
-                    }
-                }
+                // yields a correction with z∘cds + s∘cdz = t − ṽ. The step is
+                // symmetric here, so the same trial length scales both blocks.
+                let active = correctors::project_products(
+                    band,
+                    (&s, &ds),
+                    (&z, &dz),
+                    (a_trial, a_trial),
+                    &mut r_c[..m_ineq],
+                );
                 // τ/κ complementarity target (same band).
                 let v_tk = (tau + a_trial * dtau) * (kappa + a_trial * dkappa);
-                let t_tk = v_tk.clamp(lo, hi);
+                let t_tk = band.project(v_tk);
                 if !active && (v_tk - t_tk) == 0.0 {
                     break;
                 }
@@ -936,7 +917,7 @@ where
                     .min(ray_step(kappa, dkappa + dkappa_c, opts.tau))
                     .min(cone.max_step(&s, &step_s, opts.tau))
                     .min(cone.max_step(&z, &step_z, opts.tau));
-                if a_new >= alpha + GONDZIO_GAMMA * GONDZIO_DELTA {
+                if correctors::accepts(a_new, alpha) {
                     for i in 0..n {
                         dx[i] += cdx[i];
                     }
