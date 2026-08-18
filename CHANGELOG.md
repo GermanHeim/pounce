@@ -93,15 +93,36 @@ changes.
   explanation instead of asking the allocator for something no machine
   will give.
 
-  Six L-BFGS-leg fixtures move, none on the default path. `eigenb2`
+  Five L-BFGS-leg fixtures move, none on the default path. `eigenb2`
   69→56 iterations and `eigena2` 178→163 to the same answers; `deb7`
-  597→593 with the objective identical to nine digits. **`cresc4`
-  changes failure mode for the worse** — `RestorationFailed` at 1692
-  iterations becomes `InfeasibleProblemDetected` at 976 on a problem
-  that is feasible, and a false infeasibility claim is worse than an
-  honest failure even though it is faster. It fails under plain L-BFGS
-  either way (the exact-Hessian path solves it, as does L-BFGS with
-  `mu_strategy=adaptive`), but the regression is real and tracked.
+  597→593 with the objective identical to nine digits.
+
+- **A feasible model is no longer reported infeasible after restoration
+  blows up** (#684).
+
+  Chasing the fixture above turned up a real defect. `cresc4` under
+  limited-memory reported `Infeasible_Problem_Detected` for a model the
+  exact-Hessian path solves to `0.8719`, at a point whose constraint
+  violation was `13.47` and whose restoration KKT error was `1.95e2` —
+  nowhere near the stationary point of the violation that a local
+  infeasibility certificate is a claim about.
+
+  The existing divergence guard measures a restoration call against its
+  own *entry*, which leaves it blind when the blow-up happened before
+  restoration was entered: entry and final agree, the ratio is 1, and
+  the step-failure gate certifies at the ruined point. There is now an
+  absolute companion — a point far worse than a violation this same
+  solve has already reached is not the best feasibility available near
+  here, because the solve has itself exhibited better. `cresc4` returns
+  the honest `Restoration_Failed`.
+
+  One certification is lost with it, and it was never sound:
+  `issue_508_infeasible_gap_1em2` on the L-BFGS leg was reaching the
+  right verdict from the wrong point — a blown-up iterate with inner KKT
+  error `1.5e2`, rather than the converged one at the model's true `1e-2`
+  gap two calls earlier. That fixture still certifies correctly on the
+  exact-Hessian path, which is where its detection was ever meaningful.
+  Every other infeasible fixture is unaffected on both legs.
 
 - **`linear_system_scaling=slack-based` is implemented** (#677).
 

@@ -165,6 +165,45 @@ fn diverged_from_restoration_entry(
         && orig_inf_pr_scaled > RESTO_DIVERGENCE_HEADROOM * orig_curr_inf_pr
 }
 
+/// Is the recovered point far worse than a constraint violation this
+/// same outer solve has already achieved?
+///
+/// [`diverged_from_restoration_entry`] measures divergence *within* one
+/// restoration call — final against entry. That leaves it blind to the
+/// case where the blow-up happened before restoration was entered: the
+/// sub-solve then starts at a ruined point, ends at the same ruined
+/// point, shows no within-call divergence, and the step-failure gate
+/// certifies local infeasibility there.
+///
+/// Measured on `cresc4` under `hessian_approximation=limited-memory`:
+/// entry and final violation both `5.182259e6`, so the entry-relative
+/// guard sees a ratio of 1 and stays silent, while the outer solve's own
+/// `inf_pr_floor` stood at `1.431947e0` — the solve had itself reached a
+/// point three-and-a-half million times better. `Infeasible_Problem_Detected`
+/// was reported for a model whose exact-Hessian solve converges to
+/// `0.8719`. The inner's own KKT error at that point was `8.179745e5`,
+/// nowhere near the stationary point of the violation that a local
+/// infeasibility certificate is a claim about.
+///
+/// So this is the absolute counterpart to the entry-relative test: a
+/// point cannot be "the best feasibility available near here" when this
+/// very solve has exhibited a much better one. It reuses
+/// [`RESTO_DIVERGENCE_HEADROOM`] so the two guards agree on what "far
+/// worse" means.
+///
+/// Deliberately *not* gated on [`RESTO_STALL_EVIDENCE_ITERS`]: a floor
+/// is evidence about the model whether or not the outer has sat at it
+/// long enough to be sure it is unimprovable. The correct verdicts this
+/// must not disturb — `issue_508_infeasible_gap_1em2`,
+/// `infeasible_equalities` — render at points that *are* their floor, so
+/// their ratio is ~1 and this never fires on them.
+fn worse_than_demonstrated_feasibility(orig_inf_pr_scaled: f64, outer_inf_pr_floor: f64) -> bool {
+    outer_inf_pr_floor.is_finite()
+        && outer_inf_pr_floor > 0.0
+        && orig_inf_pr_scaled.is_finite()
+        && orig_inf_pr_scaled > RESTO_DIVERGENCE_HEADROOM * outer_inf_pr_floor
+}
+
 /// Build the restoration convergence-check adapter, threading the inner
 /// IPM's *user-derived* stationarity tolerances (`tol`,
 /// `acceptable_tol`, `acceptable_iter`) through to the sub-solve.
@@ -1001,7 +1040,19 @@ pub fn run_inner_resto(
     let diverged_from_entry =
         diverged_from_restoration_entry(orig_curr_inf_pr, orig_inf_pr_scaled, outer_iters_at_floor);
 
+    // The absolute companion to `diverged_from_entry` — see
+    // `worse_than_demonstrated_feasibility`. Applied to the same
+    // reconstructed gates, and for the same reason: those gates infer
+    // "stalled at the best available point" from a terminal status plus
+    // a large violation, and a large violation is equally consistent
+    // with the opposite.
+    let worse_than_best_seen = worse_than_demonstrated_feasibility(
+        orig_inf_pr_scaled,
+        outer_data.borrow().inf_pr_floor.floor(),
+    );
+
     let reconstructed_locally_infeasible = !diverged_from_entry
+        && !worse_than_best_seen
         && (strict_locally_infeasible
             || alt_locally_infeasible
             || cycle_locally_infeasible
@@ -1013,7 +1064,7 @@ pub fn run_inner_resto(
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} at_floor={} floor={:.6e} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} worse_than_best={} at_floor={} floor={:.6e} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
@@ -1028,6 +1079,7 @@ pub fn run_inner_resto(
             step_failure_locally_infeasible,
             tiny_step_locally_infeasible,
             diverged_from_entry,
+            worse_than_best_seen,
             outer_iters_at_floor,
             outer_data.borrow().inf_pr_floor.floor(),
             locally_infeasible
@@ -1296,6 +1348,30 @@ fn downcast_dense_mut(v: &mut dyn Vector) -> &mut DenseVector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point far worse than a violation this solve already reached is
+    /// not a point of local infeasibility (#684 follow-up).
+    ///
+    /// The entry-relative guard cannot see this case: when the blow-up
+    /// happens before restoration is entered, entry and final agree and
+    /// the ratio is 1. Measured on `cresc4` under limited-memory —
+    /// entry and final both `5.182259e6` against a floor of
+    /// `1.431947e0` — where `Infeasible_Problem_Detected` was reported
+    /// for a model the exact-Hessian path solves to `0.8719`.
+    #[test]
+    fn a_point_worse_than_the_demonstrated_floor_is_not_infeasibility() {
+        // cresc4's numbers: three-and-a-half million times the floor.
+        assert!(worse_than_demonstrated_feasibility(5.182259e6, 1.431947e0));
+        // At the floor, which is where a sound verdict renders.
+        assert!(!worse_than_demonstrated_feasibility(1.0e-2, 1.953316e-2));
+        // Within the shared headroom, so the two guards agree on "far".
+        assert!(!worse_than_demonstrated_feasibility(9.0e-2, 1.0e-2));
+        assert!(worse_than_demonstrated_feasibility(1.1e-1, 1.0e-2));
+        // No usable floor: say nothing rather than guess.
+        assert!(!worse_than_demonstrated_feasibility(1.0e6, 0.0));
+        assert!(!worse_than_demonstrated_feasibility(1.0e6, f64::INFINITY));
+        assert!(!worse_than_demonstrated_feasibility(f64::INFINITY, 1.0));
+    }
 
     #[test]
     fn apply_outer_resto_options_propagates_overrides() {
