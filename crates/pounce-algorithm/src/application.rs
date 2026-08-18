@@ -3772,6 +3772,11 @@ impl IpoptApplication {
         if let Some(v) = read_int("filter_reset_trigger") {
             builder.line_search.filter_reset_trigger = v;
         }
+        // Backtracking reduction factor (#678), consumed by
+        // `BacktrackingLineSearch` to scale alpha on every trial step.
+        if let Some(v) = read_num("alpha_red_factor") {
+            builder.line_search.alpha_red_factor = v;
+        }
         // Second-order-correction constants (#191), consumed by
         // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
         if let Some(v) = read_int("max_soc") {

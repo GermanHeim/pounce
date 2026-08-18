@@ -286,6 +286,75 @@ See
 for the worked CSTR example behind those numbers, including `max_iter`
 sweeps of both modes against re-solve wall time.
 
+### A held solve at a kink: `degeneracy`
+
+A solve can converge with a bound weakly active, the variable on the
+bound with a multiplier of the same order as the slack, both of order
+the square root of the barrier parameter. The solution as a function
+of the parameter has a kink there, with a different one-sided
+derivative on each side, and no single linear step is right for both.
+The activity classifier reports such a bound as ambiguous, which is
+its honest answer.
+
+The factorization carries every bound as `sigma = z / s` on the
+variable's diagonal. At a strongly active bound that is around 1e8
+and the variable cannot move, at an inactive one around 1e-8 and the
+bound imposes nothing, and at a kink it is of order one, so the bound
+is only partly enforced, which is wrong for both sides. The thresholds that
+decide activity elsewhere have no answer at a kink, since the two
+quantities they compare are the same size.
+
+`degeneracy` on `estimate()`, `estimate_report()`, and
+`active_set_changes()` selects what happens then:
+
+```python
+estimate(m, [(m.p, 2.5)], degeneracy="directional")   # the default
+estimate(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
+```
+
+`"directional"` decides each weakly active bound for the
+perturbation's own direction by the directional-derivative QP (the
+sIPOPT paper's eq. 14), solved as an active-set search over those
+bounds on the held factorization. The weakly active rows are released,
+removing the order-one `sigma`, a candidate working set pins their
+variables through Schur rows, and a candidate is accepted when every
+variable left out moves into its feasible side and every pin is
+necessary, meaning its removal alone makes its variable violate. The
+accepted direction is unique even when the working set is not, by the
+QP's strict convexity. All three modes consume the decision: `linear`
+takes the QP direction itself, `fix_relax` takes it as the predictor
+its refinement iterates from, and `path` starts with the held rows
+pinned and the left rows in its base-activity table, so a bound that
+is genuinely active for the first stretch of the perturbation, which
+happens when the held solve sits inside the ambiguous band rather
+than exactly at the kink, releases at the fraction where its
+multiplier reaches zero rather than at the start. The record then
+carries that departure at its measured fraction.
+
+`"one_sided"` takes the single-sided value the thresholds produce,
+bit-identical to the behavior without the argument. On the CSTR held
+at the record's first breakpoint, a 2% step toward the steady state
+puts the thresholds on the wrong side: `linear` and `path` miss by
+0.0077 with an empty record where `directional` puts all three modes
+at 0.0018, and `fix_relax` reaches 0.0018 either way because its own
+release test happens to read the right sign there, a favorable read
+that `directional` replaces with a guarantee.
+
+The cost is gated by the condition. Detection is a scan over the
+bound rows, orders of magnitude below the backsolve every call
+already pays, and the QP runs only at a degenerate base point, at
+roughly one Schur trial per candidate working set with both the
+trials and the size of the attempt bounded by the shared `max_iter`.
+Past the budget, or when no candidate is sign-consistent, the call
+falls back to the one-sided step and warns. Detection also returns
+nothing on a solve with relaxed bounds, where the classifier cannot
+read the slacks.
+
+`gradient()` cannot take a side, since it is asked for a derivative
+without a direction, so at a degenerate base point it warns, names
+the variables and bounds, and returns the one-sided value. The
+direction-aware answer is `estimate()`'s.
+
 ### What the step did about the bounds: `estimate_report()`
 
 The clamp warning names the variables it clamped and stops there.

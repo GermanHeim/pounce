@@ -147,6 +147,76 @@ changes.
   `issue_616_ls_init_downgrades.rs` — the fast path's verdict and the
   tape's under `POUNCE_DBG_NO_QUAD=1` — so a future move is attributable
   to one of them.
+- **`estimate()` decides a degenerate base point for the perturbation's
+  own direction** (#672). A solve can converge with a bound weakly active, on
+  the bound with a multiplier of the same order as the slack, and the
+  solution has a kink there with a different one-sided derivative on
+  each side. The activity thresholds have no answer at a kink, and the
+  factorization carries the bound as an order-one diagonal term that is
+  wrong for both sides. Measured on the CSTR held at its record's first
+  breakpoint, the thresholds land on the wrong side of a 2% step toward
+  the steady state. `linear` and `path` miss by 0.0077 with an empty
+  record, four times `fix_relax`'s 0.0018, which its own sign-based
+  release test reaches by a favorable read rather than by construction.
+
+  `estimate()`, `estimate_report()`, and `active_set_changes()` gain
+  `degeneracy="directional"` (the default). The weakly active bounds
+  are decided by the directional-derivative QP (the sIPOPT paper's
+  eq. 14), an active-set search on the held factorization whose
+  candidate is accepted when every variable left out moves into its
+  feasible side and every pin is necessary. All three modes consume
+  the decision, and all three land at 0.0018 on the case above. The
+  path starts the rows the QP leaves in its base-activity table, so a
+  bound genuinely active for the first stretch, the held solve inside
+  the ambiguous band rather than at the kink, releases at the fraction
+  where its multiplier reaches zero. Deciding those at fraction zero
+  overshot tenfold at 75% of the breakpoint fraction, and the record
+  carries the measured fraction. `degeneracy="one_sided"` is
+  bit-identical to the previous behavior. Detection is a scan, the QP
+  runs only at a degenerate base point under the shared `max_iter`
+  budget, and past it the call falls back to the one-sided step with a
+  warning. `gradient()` has no direction to decide with, so it warns
+  at a degenerate base point and names the variables and bounds.
+  Roadmap item 3.
+- **`alpha_red_factor` reaches the line search** (#678).
+
+  The option was registered, range-checked against its bounds `(0,1)`,
+  accepted without complaint — and never read. `LineSearchOptions` had
+  no such field, `application.rs` never asked the `OptionsList` for it,
+  and `alg_builder.rs` never assigned it, so the backtracking line
+  search kept the hard-coded 0.5 it gets from
+  `BacktrackingLineSearch::new` no matter what the user set. Asking it
+  to backtrack by 0.2 produced no error, no warning, and a bit-identical
+  trajectory.
+
+  It was the last unwired field of the ten on `BacktrackingLineSearch`;
+  the nine around it — including the `max_soc` block immediately
+  adjacent, which #191 fixed as its worked example of exactly this bug —
+  were already wired, which is why the block read as finished. The field
+  is genuinely consumed by the algorithm (it scales alpha at every
+  backtracking step) and the option name has eleven hits in
+  `backtracking.rs`, so neither a grep nor the compiler could see the
+  gap; only tracing the assignment path finds it.
+
+  **No default trajectory moves.** The registered default and the
+  hard-coded one are both 0.5, so an unset run is unchanged.
+  `scripts/sweep-fixtures.sh` over all 57 fixtures diffs empty against
+  the parent commit, and an explicit `alpha_red_factor=0.5` sweep also
+  diffs empty against the *pre-fix* binary. The same sweep at 0.2 moves
+  12 fixtures — that is what makes the two empty diffs mean "default
+  preserved" rather than "still unwired".
+
+  Per #551 the deliverable is a test that proves the option changes
+  behaviour, not one that proves the field is assigned:
+  `crates/pounce-cli/tests/issue_678_alpha_red_factor.rs` drives the CLI
+  and pins both halves. Note that `hs71_obj1e8`, the fixture in the
+  report, cannot serve — it accepts nearly every trial step at full
+  alpha, so it reads identical across the whole legal range even after
+  the fix. It demonstrated the bug; it cannot demonstrate the repair.
+  `hs13_bigstart` backtracks hard and does.
+
+  This is one option. The remaining registered names with no located
+  consumer are #551's ongoing work.
 
 - **The CasADi plugin builds against CasADi master again** (#668).
 
