@@ -71,11 +71,27 @@ pub type QuadForm = (QuadHessian, Vec<(usize, f64)>, f64);
 /// both `0.0` and `-0.0` in that field mean "no constant term", every
 /// consumer guards on `!= 0.0`, and [`analyze_quadratic_full`] normalizes
 /// the sign on the way out.
+///
+/// ### …and what dropping one costs
+///
+/// Dropping is right for the *storage* question and wrong for the *degree*
+/// question, and [`dropped_terms`](Quad2::dropped_terms) is the difference
+/// (gh #683). A coefficient that reaches zero is a coefficient that was
+/// **summed**, not one that was proven absent: `2⁵³·x² + x² − 2⁵³·x²` folds
+/// to an empty `quadratic` map even though the body is degree 2, and so
+/// does `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)`, whose one coefficient underflows. The maps
+/// therefore record a *lower bound* on the degree, and the flag records
+/// whether that bound is tight.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Quad2 {
     constant: f64,
     linear: BTreeMap<usize, f64>,
     quadratic: QuadHessian,
+    /// Set when a term was dropped as exactly zero (or as `NaN`) rather
+    /// than proven absent — see the type docs. Sticky: it survives every
+    /// operation the form takes part in, because a term that cancelled
+    /// three additions ago is no less missing now.
+    dropped_terms: bool,
 }
 
 impl Quad2 {
@@ -94,6 +110,34 @@ impl Quad2 {
     /// a factor of 2 on the diagonal; [`analyze_quadratic_full`] applies it).
     pub fn quadratic(&self) -> &QuadHessian {
         &self.quadratic
+    }
+
+    /// Whether some term of this form was **dropped as zero** (or as `NaN`)
+    /// on the way here, rather than shown to be absent.
+    ///
+    /// This is what turns the term maps from an answer about degree into a
+    /// lower bound on it (gh #683). When it is set, an empty
+    /// [`quadratic`](Quad2::quadratic) map is no longer evidence that the
+    /// body is affine, and a consumer asking a *degree* question — as
+    /// opposed to a storage or evaluation question — must say "not
+    /// established" instead of "affine". The two questions used to share
+    /// one predicate, which is how a genuinely quadratic row came to be
+    /// reported as proved affine and had its Jacobian frozen for a whole
+    /// solve.
+    ///
+    /// It is deliberately one bit for the whole form rather than a record
+    /// per monomial: the consumer's question is about the form, and Q3's
+    /// point was that a `Quad2` allocates nothing per term (gh #588, Q3).
+    ///
+    /// A *linear* or constant term that dropped sets it too, even though
+    /// dropping one cannot understate an affine body's degree by itself: it
+    /// can once the form is **multiplied**, because
+    /// [`mul`](Quad2::mul)'s degree guard reads the same maps —
+    /// `(2⁵³ + 1 − 2⁵³)·x · x²` is degree 3 and folds to an apparent
+    /// degree 0. Distinguishing the two would take a second flag to buy
+    /// back reach that the corpus does not contain.
+    pub fn dropped_terms(&self) -> bool {
+        self.dropped_terms
     }
 
     pub(crate) fn of_constant(c: f64) -> Self {
@@ -149,15 +193,24 @@ impl Quad2 {
         } else {
             (b, a)
         };
+        let mut dropped = small.dropped_terms;
         if small.constant != 0.0 {
+            let was = acc.constant;
             acc.constant += small.constant;
+            // Same rule as a coefficient, for the same reason: the degree-0
+            // term is exempt from the "no stored zeros" invariant but not
+            // from arithmetic, and `mul` reads `constant == 0.0` as
+            // *annihilates*. A constant that cancelled is not one that was
+            // proven absent (gh #683).
+            dropped |= was != 0.0 && acc.constant == 0.0;
         }
         for (i, c) in &small.linear {
-            merge(&mut acc.linear, *i, *c);
+            dropped |= merge(&mut acc.linear, *i, *c);
         }
         for (k, c) in &small.quadratic {
-            merge(&mut acc.quadratic, *k, *c);
+            dropped |= merge(&mut acc.quadratic, *k, *c);
         }
+        acc.dropped_terms |= dropped;
         acc
     }
 
@@ -174,16 +227,38 @@ impl Quad2 {
 
     pub(crate) fn scale(mut self, s: f64) -> Quad2 {
         if s == 0.0 {
-            return Quad2::default();
+            // An exact zero annihilates every term, so this is a proof of
+            // degree 0 rather than a drop — nothing is being discarded that
+            // survived the multiplication. The flag still rides along: the
+            // one route here is division by an infinity, and `0 · NaN` is
+            // not zero.
+            return Quad2 {
+                dropped_terms: self.dropped_terms,
+                ..Quad2::default()
+            };
         }
+        let was = self.constant;
         self.constant *= s;
+        self.dropped_terms |= was != 0.0 && self.constant == 0.0;
         for c in self.linear.values_mut() {
             *c *= s;
         }
         for c in self.quadratic.values_mut() {
             *c *= s;
         }
+        // A scale can underflow a live coefficient to zero, which is a
+        // dropped term like any other and used to be stored as a zero.
+        self.prune();
         self
+    }
+
+    /// Restore the "no stored zeros" invariant after an operation wrote
+    /// coefficients in bulk, recording that something was dropped.
+    fn prune(&mut self) {
+        let before = self.width();
+        self.linear.retain(|_, c| is_live(*c));
+        self.quadratic.retain(|_, c| is_live(*c));
+        self.dropped_terms |= self.width() != before;
     }
 
     /// `self · other`, or `None` when the product would exceed total
@@ -196,6 +271,10 @@ impl Quad2 {
         let mut out = Quad2::default();
         if self.constant != 0.0 && other.constant != 0.0 {
             out.constant = self.constant * other.constant;
+            // `10⁻²⁰⁰ · 10⁻²⁰⁰` is not zero, and the branches below read a
+            // zero constant as an annihilating one — which would take a
+            // degree-2 product down to nothing without a trace (gh #683).
+            out.dropped_terms = out.constant == 0.0;
         }
         // constant × (linear, quadratic), both ways round.
         for (a, b) in [(self, other), (other, self)] {
@@ -218,38 +297,58 @@ impl Quad2 {
                 *out.quadratic.entry(key).or_insert(0.0) += a * b;
             }
         }
-        out.linear.retain(|_, c| is_live(*c));
-        out.quadratic.retain(|_, c| is_live(*c));
+        // Either operand's missing term is missing from the product too,
+        // and a product of two live coefficients can underflow to zero —
+        // `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)` is one monomial whose coefficient is not
+        // representable (gh #683).
+        out.dropped_terms |= self.dropped_terms || other.dropped_terms;
+        out.prune();
         Some(out)
     }
 }
 
-/// Add `c` to `map[key]`, keeping the "no stored zeros" invariant.
+/// Add `c` to `map[key]`, keeping the "no stored zeros" invariant. Returns
+/// whether a term was **dropped** doing so.
 ///
 /// Only the touched key can have become zero, which is what keeps a merge
 /// proportional to what it merged rather than to what it merged *into*.
-fn merge<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, c: f64) {
+fn merge<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, c: f64) -> bool {
     use std::collections::btree_map::Entry;
     match map.entry(key) {
         Entry::Occupied(mut e) => {
             let v = *e.get() + c;
             if is_live(v) {
                 e.insert(v);
+                false
             } else {
                 e.remove();
+                true
             }
         }
         Entry::Vacant(e) => {
             if is_live(c) {
                 e.insert(c);
+                false
+            } else {
+                true
             }
         }
     }
 }
 
-/// Is this coefficient worth storing? Exact zeros are dropped so that
-/// "has a quadratic term" is a structural question; `NaN` is dropped for
-/// the same reason its predecessor's `c.abs() > 0.0` retention dropped it.
+/// Is this coefficient worth **storing**? Exact zeros are dropped so that
+/// [`Quad2::degree`] and [`Quad2::as_constant`] stay `O(1)`, and so that a
+/// term that cancelled cannot make a later product look like degree 3.
+/// `NaN` is dropped for the same reason its predecessor's `c.abs() > 0.0`
+/// retention dropped it.
+///
+/// This is the *storage* question only. It used to be documented as making
+/// "has a quadratic term" a structural question, and it does not: it is
+/// applied to a **sum** of coefficients, so a degree-2 body whose
+/// coefficients cancel — or whose one coefficient underflows — stores
+/// nothing and looks affine. That is gh #683, and it is why every caller
+/// records the drop in [`Quad2::dropped_terms`]; the degree question is
+/// answered from *that*, not from this predicate.
 fn is_live(c: f64) -> bool {
     c.abs() > 0.0
 }

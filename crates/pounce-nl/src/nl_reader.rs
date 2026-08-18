@@ -409,6 +409,24 @@ impl NlBody {
     /// `2·(x + 1)`, which is affine. Consumers must treat it as "not
     /// established".
     ///
+    /// ## What the exactness argument above still does not buy
+    ///
+    /// It is true that nothing is *evaluated* from the coefficients here.
+    /// What the argument missed is that the **degree answer is itself
+    /// computed by the coefficient arithmetic**: the recognizer sums a
+    /// row's quadratic coefficients in floating point and drops the ones
+    /// that reach exactly zero, so `2⁵³·x² + x² − 2⁵³·x²` — and
+    /// `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)`, by underflow — folded to an empty
+    /// quadratic map and were reported *proved affine*. Q6's consumer then
+    /// froze those rows' Jacobians for the whole solve (gh #683).
+    ///
+    /// So an empty quadratic map is a proof of degree ≤ 1 only when no term
+    /// was dropped getting there, which is what
+    /// [`Quad2::dropped_terms`](crate::nl_quadratic::Quad2::dropped_terms)
+    /// records. When one was, this answers `None` — the state the contract
+    /// already reserved for "not established", which is why the fix needs
+    /// nothing of its consumer.
+    ///
     /// Deliberately answers from the term maps rather than from
     /// [`Self::analyze_quadratic_full`]'s triplets: on `qssp180` that is
     /// 65 341 recognized rows, and materializing a `QuadHessian` per row
@@ -420,9 +438,9 @@ impl NlBody {
                 if is_trivially_zero(e) {
                     return Some(true);
                 }
-                recognize_expr(e).map(|q| q.quadratic().is_empty())
+                affine_from_form(&recognize_expr(e)?)
             }
-            NlBody::Quad(q) => Some(q.form.quadratic().is_empty()),
+            NlBody::Quad(q) => affine_from_form(&q.form),
         }
     }
 
@@ -432,6 +450,20 @@ impl NlBody {
             NlBody::Tree(e) => collect_vars(e, out),
             NlBody::Quad(q) => out.extend(q.vars.iter().map(|&v| v as usize)),
         }
+    }
+}
+
+/// The degree read-out [`NlBody::provably_affine`] makes of a recognized
+/// form, in one place so both arms answer it the same way.
+///
+/// A stored quadratic coefficient is a witness that the body is degree 2.
+/// An *absent* one is only a witness of the opposite when nothing was
+/// dropped on the way — see [`Quad2::dropped_terms`] and gh #683.
+fn affine_from_form(q: &Quad2) -> Option<bool> {
+    if q.quadratic().is_empty() {
+        (!q.dropped_terms()).then_some(true)
+    } else {
+        Some(false)
     }
 }
 
