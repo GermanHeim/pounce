@@ -35,7 +35,9 @@
 //! told, not how the guard reached it. The guard's decision rule is a pure
 //! function, `diverged_from_restoration_entry`, unit-tested directly in
 //! `pounce-restoration::resto_inner_solver`; that is where the plateau /
-//! blow-up discrimination, the stall waiver and the boundaries are pinned.
+//! blow-up discrimination, the floor waiver and the boundaries are pinned,
+//! and `pounce_algorithm::inf_pr_floor` is where the floor evidence the
+//! waiver reads is measured and tested.
 //! An earlier revision of this file asserted the mechanism end-to-end by
 //! parsing the `POUNCE_DBG_RESTO_LOCINF` trace, and it did not survive
 //! contact with a second platform: on x86_64-linux this restoration

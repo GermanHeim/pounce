@@ -10,6 +10,7 @@
 //! search, mu update, etc.) read/write fields here as their inputs
 //! and outputs.
 
+use crate::inf_pr_floor::InfPrFloor;
 use crate::init::warm_start::WarmStartDiagnostics;
 use crate::iterates_vector::IteratesVector;
 use pounce_common::timing::{Deadline, TimingStatistics};
@@ -118,6 +119,19 @@ pub struct IpoptData {
     /// many orders of magnitude. Pounce-specific guard; no upstream
     /// counterpart. See pounce#58.
     pub request_resto: bool,
+
+    /// How long this solve has sat at a constraint violation it could
+    /// not get below (gh#661, gh#664). Fed once per outer iteration from
+    /// the `inf_pr` the iteration output already computes.
+    ///
+    /// Read by restoration's divergence guard, which needs to know
+    /// whether the solve had *demonstrated* a floor before its
+    /// restoration sub-solve blew up — the premise the reconstructed
+    /// locally-infeasible gates assert and never tested. The evidence
+    /// lives here rather than in restoration because the trajectory that
+    /// carries it is the outer one: the sub-solves themselves run a
+    /// handful of iterations. Pounce-specific; no upstream counterpart.
+    pub inf_pr_floor: InfPrFloor,
 
     /// What the warm-start initializer accepted, reconstructed, or
     /// discarded from the supplied iterate, and the residuals it based
@@ -242,6 +256,7 @@ impl IpoptData {
             info_string: String::new(),
             tiny_step_flag: false,
             request_resto: false,
+            inf_pr_floor: InfPrFloor::default(),
             warm_start_diagnostics: None,
             curr_from_crossover: false,
             request_ls_reset: false,

@@ -3621,6 +3621,18 @@ impl IpoptAlgorithm {
                     // returns either `Converged`/`ConvergedToAcceptable` or
                     // `MaxIterExceeded`, never `Continue` (L1).
                     self.data.borrow_mut().iter_count = iter_count;
+                    // Floor evidence for restoration's gh#661 divergence
+                    // guard: how long this solve has sat at a violation
+                    // it could not get below. Sampled here, once per
+                    // accepted iterate, from the same quantity the
+                    // `inf_pr` column reports — so it is free, and it
+                    // sees the whole outer trajectory rather than the
+                    // handful of iterations a restoration sub-solve runs.
+                    // The nested restoration IPM reaches this line too,
+                    // but writes its own `IpoptData`, so the two
+                    // trajectories never mix.
+                    let inf_pr_now = self.cq.borrow().curr_primal_infeasibility_max();
+                    self.data.borrow_mut().inf_pr_floor.observe(inf_pr_now);
                     // Keep the diagnostics counter in lock-step with
                     // `data.iter_count` so KKT-dump gating reflects the
                     // about-to-execute iteration.
