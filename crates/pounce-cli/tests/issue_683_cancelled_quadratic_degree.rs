@@ -21,10 +21,13 @@
 //! The models are built here rather than committed under `tests/fixtures`
 //! on purpose. The cancelling row is *also* admitted by Q4's exactness gate
 //! (it is a flat sum of monomials), so evaluating it from its stored
-//! coefficients gives `g = 0` where its own tape gives 16 — a second,
+//! coefficients gave `g = 0` where its own tape gives 16 — a second,
 //! separate defect on the *storage* side of the same cancellation, reported
-//! as gh #685 rather than fixed here. Dropping the model into the corpus would fail
-//! `quad_evaluator_differential` for that reason instead of this one.
+//! as gh #685 and fixed alongside this one in
+//! `issue_685_cancelled_quadratic_evaluation`. Dropping the model into the
+//! corpus would still be the wrong home for it: the row is chaotic on
+//! either route, and the corpus is not the place to assert that two kinds
+//! of wrong agree.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -171,13 +174,14 @@ fn an_ordinary_quadratic_row_still_proves_its_degree() {
 /// points, and a `Constant` proof would therefore have been a lie.
 ///
 /// The tape and not the default route, and the distinction is not
-/// bookkeeping. Q4's constant-structure evaluator reads the *same* cancelled
-/// coefficients (`is_expanded_quadratic` admits a flat sum of monomials, and
-/// this row is one), so on the default route the row is evaluated as
-/// identically zero — its Jacobian really is constant there, because the
-/// evaluator has replaced the row. That is the separate storage-side defect
-/// this test's module docs record; what is fixed here is the proof, and the
-/// proof is about the body, not about Q4's stand-in for it.
+/// bookkeeping. Q4's constant-structure evaluator used to read the *same*
+/// cancelled coefficients (`is_expanded_quadratic` admits a flat sum of
+/// monomials, and this row is one), so on the default route the row was
+/// evaluated as identically zero — its Jacobian really was constant there,
+/// because the evaluator had replaced the row. That is gh #685, fixed
+/// separately; what is fixed *here* is the proof, and the proof is about
+/// the body, not about Q4's stand-in for it. Asking the tape keeps this
+/// test answering its own question either way.
 #[test]
 fn the_row_jacobian_is_not_frozen() {
     // Probe points per model. The underflowing row needs a large `x`: its

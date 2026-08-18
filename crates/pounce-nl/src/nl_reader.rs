@@ -379,15 +379,45 @@ impl NlBody {
     /// Reading a factored form out of stored coefficients cancels — five
     /// digits on `(x − 500000)²` — so the gate is on both arms or on
     /// neither (gh #588, Q4; gh #673).
+    ///
+    /// ## The second gate: a term that was dropped is a term that is missing
+    ///
+    /// `is_expanded_quadratic` is a gate on the *shape* the coefficients
+    /// were derived from. It says nothing about whether the derivation kept
+    /// them. A flat sum of monomials passes it and still folds to a form
+    /// with an entry missing, because the fold is floating-point addition:
+    /// `2⁵³·x₀² + x₀² − 2⁵³·x₀²` is `x₀²` and stores nothing, and
+    /// `(10⁻²⁰⁰·x₀)·(10⁻²⁰⁰·x₀)` underflows the same way (gh #683).
+    ///
+    /// Evaluating **that** form is not a five-digit cancellation, it is a
+    /// missing term. At `x₀ = 3` the row reads `0` where its own tape reads
+    /// `16`, and `∂g/∂x` reads `[0, 0]` where the tape reads `[8, 0]` — so
+    /// the `≤` the row sits under stops constraining anything at all. In the
+    /// reproduction (`issue_685_cancelled_quadratic_evaluation`) the solve
+    /// then walks the objective variable to its `-10⁶` floor and reports
+    /// `Optimal`, where the same bytes down the tape stop at `-0.281`. On
+    /// the default route, with no option set. So the form is admitted only
+    /// when [`Quad2::dropped_terms`] is clear (gh #685 part 1).
+    ///
+    /// It has to be that flag and not an emptiness test. Partial
+    /// cancellation is the same defect wearing a different face:
+    /// `2⁵³·x₀² + x₀² − 2⁵³·x₀² + x₁²` keeps `x₁²`, so the map is not empty
+    /// and [`Self::provably_affine`] answers `Some(false)` quite correctly —
+    /// while the read-out is still short an entire `x₀²`. A gate that looked
+    /// at emptiness would pass this and stay wrong.
+    ///
+    /// The cost is reach, not correctness: a dropped term sends the row back
+    /// to the AD tape, which is where it was before Q4.
     pub fn admitted_quad_form(&self) -> Option<QuadForm> {
         match self {
             NlBody::Tree(e) => {
                 if is_trivially_zero(e) || !is_expanded_quadratic(e) {
                     return None;
                 }
-                analyze_quadratic_full(e)
+                let form = recognize_expr(e)?;
+                (!form.dropped_terms()).then(|| quad_form_readout(&form))
             }
-            NlBody::Quad(q) => Some(quad_form_readout(&q.form)),
+            NlBody::Quad(q) => (!q.form.dropped_terms()).then(|| quad_form_readout(&q.form)),
         }
     }
 
