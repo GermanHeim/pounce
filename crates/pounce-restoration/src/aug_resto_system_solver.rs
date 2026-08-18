@@ -57,6 +57,8 @@ use pounce_algorithm::kkt::aug_system_solver::{
 use pounce_common::types::{Index, Number};
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
+use pounce_linalg::multi_vector_matrix::MultiVectorMatrixSpace;
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linalg::{LowRankUpdateSymMatrix, Matrix, MultiVectorMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
@@ -83,6 +85,10 @@ pub struct AugRestoSystemSolver {
     /// as the flat resto `W` (which contains only rows/cols in
     /// `1..=n_orig`).
     h_orig: Option<SymTMatrix>,
+    /// The orig block in factored form, when `W` arrived low-rank and
+    /// the inner solver can apply it that way (#684). Mutually exclusive
+    /// with `h_orig` being meaningful on that solve.
+    w_lowrank_orig: Option<LowRankUpdateSymMatrix>,
     j_c_orig: Option<GenTMatrix>,
     j_d_orig: Option<GenTMatrix>,
 
@@ -106,6 +112,7 @@ impl AugRestoSystemSolver {
     pub fn new(inner: Box<dyn AugSystemSolver>) -> Self {
         Self {
             inner,
+            w_lowrank_orig: None,
             initialized: false,
             n_orig: 0,
             m_eq: 0,
@@ -120,7 +127,10 @@ impl AugRestoSystemSolver {
         }
     }
 
-    fn build_structure(&mut self, w: &SymTMatrix, j_c: &GenTMatrix, j_d: &GenTMatrix) {
+    /// `w` is `None` when the orig block is being carried in factored
+    /// form (#684) — there are no triplets to pin, and `h_orig` stays
+    /// unset. Everything else about the structure is unchanged.
+    fn build_structure(&mut self, w: Option<&SymTMatrix>, j_c: &GenTMatrix, j_d: &GenTMatrix) {
         let m_eq = j_c.n_rows();
         let m_ineq = j_d.n_rows();
         let n_total = j_c.n_cols();
@@ -130,8 +140,10 @@ impl AugRestoSystemSolver {
         // (eval_h emits the orig Hessian + diagonal proximity term;
         // slack rows/cols are zero), so we can reuse the same
         // (irows, jcols) at dim n_orig.
-        let h_space = SymTMatrixSpace::new(n_orig, w.irows().to_vec(), w.jcols().to_vec());
-        self.h_orig = Some(SymTMatrix::new(h_space));
+        self.h_orig = w.map(|w| {
+            let h_space = SymTMatrixSpace::new(n_orig, w.irows().to_vec(), w.jcols().to_vec());
+            SymTMatrix::new(h_space)
+        });
 
         // Orig J_c: take the leading `nz_jc_orig` triplets (columns
         // 1..=n_orig). The trailing 2·m_eq triplets are the ±I slack
@@ -168,6 +180,12 @@ impl AugRestoSystemSolver {
         // Hessian: same triplet count as W (slack triplets are absent).
         let h_dst = self.h_orig.as_mut().unwrap().values_mut();
         h_dst.copy_from_slice(w.values());
+        self.refill_jacobians(j_c, j_d);
+    }
+
+    /// The Jacobian half of [`Self::refill_values`], for the factored
+    /// path where there is no `h_orig` to fill (#684).
+    fn refill_jacobians(&mut self, j_c: &GenTMatrix, j_d: &GenTMatrix) {
         // J_c / J_d: copy only the orig prefix.
         let jc_dst = self.j_c_orig.as_mut().unwrap().values_mut();
         jc_dst.copy_from_slice(&j_c.values()[..self.nz_jc_orig]);
@@ -241,19 +259,51 @@ impl AugSystemSolver for AugRestoSystemSolver {
             .expect("AugRestoSystemSolver: D_x must be a CompoundVector");
         debug_assert_eq!(dx_compound.n_comps(), 5);
 
+        // Three ways to get the orig block to the inner solver, in
+        // order of preference.
+        //
+        // 1. `W` is already a `SymTMatrix` (the exact-Hessian path) —
+        //    use its triplets as they stand.
+        // 2. `W` is low-rank and the inner solver applies low-rank `W`
+        //    by Sherman-Morrison-Woodbury — hand it over factored. This
+        //    is `O(n·rank)`.
+        // 3. `W` is low-rank and the inner solver cannot — densify, as
+        //    restoration always did. `O(n²)`, and the reason #684
+        //    aborted a 60k-variable solve, so it is now the last resort
+        //    rather than the only option.
+        self.w_lowrank_orig = None;
         let w_owned;
-        let w = match w_dyn.as_any().downcast_ref::<SymTMatrix>() {
-            Some(w) => w,
+        let w: Option<&SymTMatrix> = match w_dyn.as_any().downcast_ref::<SymTMatrix>() {
+            Some(w) => Some(w),
             None => {
-                w_owned = materialize_orig_block(w_dyn, n_orig);
-                &w_owned
+                if self.inner.handles_low_rank_w() {
+                    self.w_lowrank_orig = low_rank_orig_block(w_dyn, n_orig);
+                }
+                if self.w_lowrank_orig.is_some() {
+                    tracing::debug!(target: "pounce::restoration",
+                        "[resto-aug] orig block carried in factored low-rank form (n_orig={})",
+                        n_orig,
+                    );
+                    None
+                } else {
+                    tracing::debug!(target: "pounce::restoration",
+                        "[resto-aug] densifying orig block, {} entries (n_orig={})",
+                        (n_orig as u128) * (n_orig as u128 + 1) / 2, n_orig,
+                    );
+                    w_owned = materialize_orig_block(w_dyn, n_orig);
+                    Some(&w_owned)
+                }
             }
         };
 
         if !self.initialized {
             self.build_structure(w, j_c, j_d);
         }
-        self.refill_values(w, j_c, j_d);
+        if let Some(w) = w {
+            self.refill_values(w, j_c, j_d);
+        } else {
+            self.refill_jacobians(j_c, j_d);
+        }
 
         let m_eq = self.m_eq as usize;
         let m_ineq = self.m_ineq as usize;
@@ -270,9 +320,13 @@ impl AugSystemSolver for AugRestoSystemSolver {
             std::env::var("POUNCE_DBG_RESTO").is_ok() || std::env::var("POUNCE_RESTO_DBG").is_ok();
         if dbg {
             tracing::debug!(target: "pounce::restoration",
-                "[resto-aug] n_orig={} m_eq={} m_ineq={} W.nz={} J_c.nz={} J_d.nz={} delta_x={:.3e} delta_c={:.3e} delta_d={:.3e}",
+                "[resto-aug] n_orig={} m_eq={} m_ineq={} W={} J_c.nz={} J_d.nz={} delta_x={:.3e} delta_c={:.3e} delta_d={:.3e}",
                 self.n_orig, self.m_eq, self.m_ineq,
-                w.nonzeros(), j_c.nonzeros(), j_d.nonzeros(),
+                match w {
+                    Some(w) => format!("nz={}", w.nonzeros()),
+                    None => "low-rank (factored)".to_string(),
+                },
+                j_c.nonzeros(), j_d.nonzeros(),
                 coeffs.delta_x, coeffs.delta_c, coeffs.delta_d,
             );
         }
@@ -396,7 +450,10 @@ impl AugSystemSolver for AugRestoSystemSolver {
         let status = {
             let sol_x_r = sol_x_compound.comp_mut(0);
             let inner_coeffs = AugSysCoeffs {
-                w: Some(self.h_orig.as_ref().unwrap()),
+                w: match self.w_lowrank_orig.as_ref() {
+                    Some(lr) => Some(lr as &dyn pounce_linalg::SymMatrix),
+                    None => Some(self.h_orig.as_ref().unwrap()),
+                },
                 w_factor: coeffs.w_factor,
                 d_x: Some(sigma_orig_dyn),
                 delta_x: coeffs.delta_x,
@@ -531,6 +588,72 @@ fn downcast_dense_mut(v: &mut dyn Vector) -> &mut DenseVector {
 /// i.e. if a future code path hands restoration a low-rank `W` with a
 /// `p_lowrank` expansion or `reduced_diag`, which this closed form does
 /// not cover (pounce#102).
+/// The orig block of a low-rank resto `W`, kept in **factored** form.
+///
+/// `materialize_orig_block` below builds the same operator as a dense
+/// lower triangle, which is `O(n²)` and was the only thing restoration
+/// could do with a limited-memory `W`. On a 59,939-variable collocation
+/// model that reserved 14 GB in a single allocation and aborted the
+/// process the moment restoration was entered (#684). The dense form is
+/// also wasteful on its own terms: `B = σI + VVᵀ − UUᵀ` carries
+/// `O(n·rank)` of information with `rank ≤ 2·limited_memory_max_history`
+/// (12 by default), and squaring it up throws none of that away — it
+/// just spends `n²` to store it.
+///
+/// So when the inner solver can consume a low-rank `W` directly — the
+/// Sherman-Morrison-Woodbury path that the main iteration has used all
+/// along — hand it one. Reuses the same `orig_rows` /
+/// `multi_vector_orig_cols` extraction the dense path already performed,
+/// so the cost is the extraction alone.
+///
+/// Returns `None` when `W` is not a plain-configuration
+/// `LowRankUpdateSymMatrix`, leaving the caller on the dense path rather
+/// than guessing at a form this does not cover (pounce#102).
+fn low_rank_orig_block(w: &dyn Matrix, n_orig: Index) -> Option<LowRankUpdateSymMatrix> {
+    let n = n_orig as usize;
+    let lr = w.as_any().downcast_ref::<LowRankUpdateSymMatrix>()?;
+    if lr.p_lowrank().is_some() || lr.reduced_diag() {
+        return None;
+    }
+
+    let space = LowRankUpdateSymMatrixSpace::new(n_orig, None, false);
+    let mut out = LowRankUpdateSymMatrix::new(space);
+
+    let diag = lr
+        .get_diag()
+        .map(|d| orig_rows(d.as_ref(), n))
+        .unwrap_or_else(|| vec![0.0; n]);
+    let dspace = DenseVectorSpace::new(n_orig);
+    let mut dvec = dspace.make_new_dense();
+    dvec.set_values(&diag);
+    out.set_diag(Rc::new(dvec) as Rc<dyn Vector>);
+
+    // `V` and `U` are restricted to their orig rows and re-hung in a
+    // flat dense space: the resto `W` stores them as 5-block resto
+    // `CompoundVector`s, which the inner solver's SMW path cannot
+    // multiply against an orig-sized iterate.
+    let mut pack = |cols: Vec<Vec<Number>>| -> Option<Rc<MultiVectorMatrix>> {
+        if cols.is_empty() {
+            return None;
+        }
+        let mv_space = MultiVectorMatrixSpace::new(cols.len() as Index, dspace.clone());
+        let mut mv = MultiVectorMatrix::new(mv_space);
+        for (k, c) in cols.iter().enumerate() {
+            let mut col = dspace.make_new_dense();
+            col.set_values(c);
+            mv.set_vector(k as Index, Rc::new(col) as Rc<dyn Vector>);
+        }
+        Some(Rc::new(mv))
+    };
+    if let Some(v) = pack(multi_vector_orig_cols(lr.get_v(), n)) {
+        out.set_v(v);
+    }
+    if let Some(u) = pack(multi_vector_orig_cols(lr.get_u(), n)) {
+        out.set_u(u);
+    }
+    Some(out)
+}
+
 fn materialize_orig_block(w: &dyn Matrix, n_orig: Index) -> SymTMatrix {
     let n = n_orig as usize;
     let lr = w
@@ -544,8 +667,29 @@ fn materialize_orig_block(w: &dyn Matrix, n_orig: Index) -> SymTMatrix {
     );
 
     // Dense lower-triangle sparsity (1-based, row-major).
-    let mut irows = Vec::with_capacity(n * (n + 1) / 2);
-    let mut jcols = Vec::with_capacity(n * (n + 1) / 2);
+    //
+    // `n(n+1)/2` entries in each of three arrays. At n = 59,956 that is
+    // 1.8e9 entries and a 14 GB `vals` allocation, which aborts the
+    // process rather than failing the solve (#684). The caller prefers
+    // the factored path and only lands here when the inner solver cannot
+    // take one, so refuse loudly instead of asking the allocator for
+    // something no machine will give.
+    //
+    // The cap is on the entry count, not on bytes: 2^31 entries already
+    // exceeds `Index`'s range for the triplet indices, so beyond it the
+    // dense form is not merely large but unrepresentable.
+    let tri = (n as u128) * (n as u128 + 1) / 2;
+    assert!(
+        tri < i32::MAX as u128,
+        "AugRestoSystemSolver: restoration cannot densify a limited-memory Hessian \
+         at n_orig={n} — the dense lower triangle needs {tri} entries, past what the \
+         triplet index type can address. This solve needs an inner solver that \
+         applies a low-rank W directly (see #684); the low-rank path is taken \
+         automatically when one is installed."
+    );
+    let tri = tri as usize;
+    let mut irows = Vec::with_capacity(tri);
+    let mut jcols = Vec::with_capacity(tri);
     for i in 1..=n_orig {
         for j in 1..=i {
             irows.push(i);
@@ -698,6 +842,94 @@ pub fn expand_sol_p_c_elem(rhs_p_c: f64, sol_y_c: f64, sigma_tilde_p_inv: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The factored and densified orig blocks must be the *same
+    /// operator* (#684).
+    ///
+    /// This is the correctness claim the fix rests on: restoration now
+    /// hands the inner solver `B = D + VVᵀ − UUᵀ` in factored form
+    /// instead of a dense lower triangle, and the two must act
+    /// identically on every vector. Comparing solver outcomes on
+    /// fixtures cannot establish that — a fixture that fails either way
+    /// tells you nothing, and one that solves both ways would still
+    /// agree if the factored form were subtly wrong in a direction the
+    /// step never explored. So compare the operators directly.
+    #[test]
+    fn factored_and_densified_orig_blocks_are_the_same_operator() {
+        use pounce_linalg::SymMatrix;
+
+        let n: Index = 7;
+        let nu = n as usize;
+        let space = LowRankUpdateSymMatrixSpace::new(n, None, false);
+        let mut w = LowRankUpdateSymMatrix::new(space);
+
+        let dspace = DenseVectorSpace::new(n);
+        let mut d = dspace.make_new_dense();
+        d.set_values(&[2.0, 3.0, 0.5, 1.25, 4.0, 0.75, 1.5]);
+        w.set_diag(Rc::new(d) as Rc<dyn Vector>);
+
+        // Two positive columns and one negative, so both the V and the U
+        // branch are exercised and the result is genuinely indefinite —
+        // a test with V only would pass on a sign error in U.
+        let mk = |cols: &[&[Number]]| -> Rc<MultiVectorMatrix> {
+            let mv_space = MultiVectorMatrixSpace::new(cols.len() as Index, dspace.clone());
+            let mut mv = MultiVectorMatrix::new(mv_space);
+            for (k, c) in cols.iter().enumerate() {
+                let mut col = dspace.make_new_dense();
+                col.set_values(c);
+                mv.set_vector(k as Index, Rc::new(col) as Rc<dyn Vector>);
+            }
+            Rc::new(mv)
+        };
+        w.set_v(mk(&[
+            &[1.0, -0.5, 0.25, 0.0, 2.0, -1.0, 0.5],
+            &[0.3, 0.7, -1.2, 0.9, 0.1, 0.4, -0.6],
+        ]));
+        w.set_u(mk(&[&[-0.8, 0.2, 0.6, -0.4, 1.1, 0.05, 0.9]]));
+
+        let dense = materialize_orig_block(&w, n);
+        let factored = low_rank_orig_block(&w, n).expect("plain low-rank W must convert");
+
+        // Probe every basis direction: agreement on all of them is
+        // agreement on the whole operator, since both are linear.
+        for j in 0..nu {
+            let mut x = dspace.make_new_dense();
+            let mut xv = vec![0.0; nu];
+            xv[j] = 1.0;
+            x.set_values(&xv);
+
+            let mut y_dense = dspace.make_new_dense();
+            let mut y_fact = dspace.make_new_dense();
+            dense.mult_vector(1.0, &x, 0.0, &mut y_dense);
+            factored.mult_vector(1.0, &x, 0.0, &mut y_fact);
+
+            let a = y_dense.expanded_values();
+            let b = y_fact.expanded_values();
+            for i in 0..nu {
+                assert!(
+                    (a[i] - b[i]).abs() < 1e-12,
+                    "column {j}, row {i}: dense {} vs factored {}",
+                    a[i],
+                    b[i],
+                );
+            }
+        }
+    }
+
+    /// A `W` the closed form does not cover must decline, not guess.
+    /// The dense path has the same restriction and asserts on it; the
+    /// factored path returns `None` so the caller falls back rather than
+    /// silently producing a different operator.
+    #[test]
+    fn factored_orig_block_declines_a_shape_it_does_not_cover() {
+        let n: Index = 3;
+        let space = LowRankUpdateSymMatrixSpace::new(n, None, true);
+        let w = LowRankUpdateSymMatrix::new(space);
+        assert!(
+            low_rank_orig_block(&w, n).is_none(),
+            "reduced_diag form must decline",
+        );
+    }
 
     #[test]
     fn sigma_tilde_inv_combines_sigma_and_delta() {

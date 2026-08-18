@@ -73,6 +73,36 @@ changes.
   their own when no exact Hessian is available, so that leg is what an
   embedder gets by default.
 
+- **Restoration no longer densifies the L-BFGS Hessian** (#684).
+
+  Entering restoration under `hessian_approximation=limited-memory`
+  built a dense lower triangle of the full Hessian to hand the inner
+  solver. At 59,956 variables that is a single 14 GB allocation, which
+  aborts the process rather than failing the solve — reported on a
+  direct-collocation model where the solve stalled, restoration
+  triggered, and POUNCE died with `memory allocation of 14379225712
+  bytes failed`.
+
+  The dense form was wasteful on its own terms: `B = σI + VVᵀ − UUᵀ`
+  carries `O(n·rank)` of information with `rank ≤ 2·limited_memory_max_history`,
+  and squaring it up spends `n²` to store the same thing. Restoration
+  now hands the orig block over in factored form whenever the inner
+  solver applies a low-rank `W` by Sherman-Morrison-Woodbury — which is
+  what the main iteration has always done. The densification remains
+  as a fallback for inner solvers that cannot, and now refuses with an
+  explanation instead of asking the allocator for something no machine
+  will give.
+
+  Six L-BFGS-leg fixtures move, none on the default path. `eigenb2`
+  69→56 iterations and `eigena2` 178→163 to the same answers; `deb7`
+  597→593 with the objective identical to nine digits. **`cresc4`
+  changes failure mode for the worse** — `RestorationFailed` at 1692
+  iterations becomes `InfeasibleProblemDetected` at 976 on a problem
+  that is feasible, and a false infeasibility claim is worse than an
+  honest failure even though it is faster. It fails under plain L-BFGS
+  either way (the exact-Hessian path solves it, as does L-BFGS with
+  `mu_strategy=adaptive`), but the regression is real and tracked.
+
 - **`linear_system_scaling=slack-based` is implemented** (#677).
 
   The value was registered, so it was accepted, but it reached the
