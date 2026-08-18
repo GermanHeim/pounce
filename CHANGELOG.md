@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+- **Gondzio multiple centrality correctors reach the direct convex IPM,
+  and are now switchable** (#588, phase Q9, corrector half).
+
+  New option `qp_gondzio_corr` (integer 0–10, **default 3**) bounds the
+  Gondzio multiple centrality corrections computed after the Mehrotra
+  corrector on nonnegative-orthant blocks. Each is one extra back-solve
+  through the factorization the iteration already paid for — never a
+  refactorization — and is kept only if it lengthens the
+  fraction-to-boundary step, so a well-centered solve stops after the
+  first trial.
+
+  The scheme itself is not new: the HSDE driver has run it since the
+  NETLIB GEN degenerate-face work. What is new is that it also runs on
+  the **direct** driver — the route taken by warm starts, the
+  build-once `QpFactorization` handle, the dual-infeasibility reverify
+  guard and `qp_hsde=no` — and that both drivers read the same knob, so
+  a corrector regression in the field now has a bisection handle. The
+  default is the value HSDE hard-coded before, so an unset run is
+  bit-for-bit unchanged: the fixture sweep over all 57 models diffs
+  empty against the previous release at default options, at
+  `nlp_scaling_method=none` and at `mu_strategy=adaptive`.
+
+  On NETLIB `afiro` the direct driver goes 135 → 118 iterations with
+  the final KKT error improving 2.10e-7 → 1.35e-8, and HSDE goes
+  15 → 13. On a generated 400-variable convex QP the direct driver goes
+  12 → 10 and HSDE 17 → 15, with 71–77% of the correctors accepted.
+  Wall clock does not move measurably on either — this is an
+  iteration-count change, and the machine's wall-clock noise floor is
+  larger than the effect.
+
+  Two things it deliberately does **not** do. It cannot fire on a
+  second-order or PSD block, because the complementarity product there
+  is not elementwise and cannot be box-projected componentwise; and the
+  Mittelmann `qcqp*` family that motivated the phase does not reach
+  either convex driver in the first place (it is routed to the NLP
+  solver by the reformulation-cost guards, and the members that do route
+  conic carry SOC blocks). `POUNCE_DBG_GONDZIO=1` prints the per-solve
+  corrector tally so this is checkable rather than assumed.
+
 - **Quadratic `.nl` rows are solved from their constant matrices instead
   of being re-derived every iteration** (#588, phases Q0–Q6).
 

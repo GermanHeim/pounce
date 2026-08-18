@@ -430,6 +430,21 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          warm starting a sequence of nearby QPs. Set equal to qp_tau to pin τ \
          flat (the most conservative setting). Default 1 − 1e-12.",
     )?;
+    r.add_bounded_integer_option(
+        "qp_gondzio_corr",
+        "Convex IPM Gondzio centrality correctors per iteration.",
+        0,
+        10,
+        3,
+        "Convex LP/QP interior-point only. Maximum Gondzio multiple centrality \
+         corrections computed after the Mehrotra corrector, on \
+         nonnegative-orthant blocks only. Each is one extra back-solve through \
+         the factorization the iteration already paid for — never a \
+         refactorization — and is kept only if it lengthens the \
+         fraction-to-boundary step, so a well-centered solve stops after the \
+         first trial. It is the standard answer to steps that are accepted but \
+         short. Set 0 to disable. Default 3.",
+    )?;
     r.add_lower_bounded_number_option(
         "qp_reg",
         "Convex IPM static KKT regularization δ ≥ 0.",

@@ -48,6 +48,7 @@
 //! that Phases 4–6 extend rather than rewrite this driver.
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
+use crate::correctors;
 use crate::debug::{ConvexDebugState, fire};
 use crate::qp::{
     BoxScreen, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, screen_variable_box,
@@ -248,6 +249,24 @@ pub struct QpOptions {
     /// field — for callers who want exact-vertex refinement on small,
     /// well-behaved LPs and can absorb the cost.
     pub crossover: bool,
+    /// Maximum Gondzio multiple centrality correctors per iteration, on
+    /// **nonnegative-orthant** blocks only (see [`crate::correctors`]). `0`
+    /// disables them.
+    ///
+    /// Each corrector is one extra back-solve through the factorization the
+    /// iteration already paid for — never a refactorization — and is kept only
+    /// if it lengthens the fraction-to-boundary step. It is the standard answer
+    /// to an iterate whose steps are *accepted but short*: the products `sᵢzᵢ`
+    /// have spread out, the blocking component stops the step far from the
+    /// boundary, and re-centering the spread-out products buys back the step
+    /// length that poor centrality took away.
+    ///
+    /// Both symmetric drivers honour this: the HSDE loop, which has had the
+    /// scheme since the NETLIB GEN degenerate-face work, and the direct
+    /// `run_ipm`, which gained it in gh #588. Default 3 — Gondzio's own
+    /// recommendation and the value the HSDE driver has always used, so the
+    /// default leaves that driver bit-for-bit unchanged.
+    pub gondzio_max_corr: usize,
 }
 
 impl Default for QpOptions {
@@ -273,6 +292,7 @@ impl Default for QpOptions {
             // Opt-in: off by default. See the field doc — correct but slow on
             // the LPs it targets, and does not yet reach Optimal on GEN (#133).
             crossover: false,
+            gondzio_max_corr: crate::correctors::MAX_CORR,
         }
     }
 }
@@ -2270,6 +2290,18 @@ fn run_ipm(
     let mut dz_aff = vec![0.0; m_ineq];
     let mut kkt_vals = kkt.values.clone();
 
+    // Gondzio centrality-corrector scratch: one extra direction plus the
+    // trial combined step, and the zero linear residual a corrector solve
+    // takes. Allocated only when correctors can actually fire — the scheme is
+    // orthant-only (`crate::correctors`), so a SOCP/PSD solve pays nothing.
+    let correcting = opts.gondzio_max_corr > 0 && m_ineq != 0 && cone.is_orthant();
+    let scratch = |k: usize| vec![0.0; if correcting { k } else { 0 }];
+    let (mut cdx, mut cdy, mut cdz, mut cds) =
+        (scratch(n), scratch(m_eq), scratch(m_ineq), scratch(m_ineq));
+    let (mut step_s, mut step_z) = (scratch(m_ineq), scratch(m_ineq));
+    let (zeros_n, zeros_meq, zeros_m) = (scratch(n), scratch(m_eq), scratch(m_ineq));
+    let mut tally = correctors::Tally::default();
+
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
     let mut iterates: Vec<QpIterate> = Vec::new();
@@ -2487,6 +2519,75 @@ fn run_ipm(
                 status = QpStatus::NumericalFailure;
                 break;
             }
+
+            // === Gondzio multiple centrality correctors ===
+            // The same scheme the HSDE driver runs (`crate::correctors` holds
+            // the shared half), fitted to this driver's *split* primal/dual
+            // step. Each pass enlarges each length by δ, projects the
+            // complementarity products that trial step would produce into the
+            // band `[β_lo·μ, β_hi·μ]`, and solves for the correction through
+            // the factor already in hand — zero linear residual, complementarity
+            // right-hand side only, so it costs one back-solve and no
+            // refactorization.
+            //
+            // Accepted only when **both** lengths grow by at least γδ. Gondzio's
+            // rule is stated per-length and a split step has two of them; taking
+            // a corrector that lengthens one while shortening the other trades a
+            // known gain for an unknown loss, and this driver's residuals are
+            // not symmetric in the two, so the conservative conjunction is what
+            // ships.
+            if correcting && mu > 0.0 {
+                let band = correctors::Band::around(mu);
+                let taus = (adaptive_tau(mu, opts), opts.tau);
+                tally.iters += 1;
+                for _ in 0..opts.gondzio_max_corr {
+                    let trial = (
+                        correctors::trial_step(step_p),
+                        correctors::trial_step(step_d),
+                    );
+                    // r_c holds the deviation ṽ − t, so `recover_ds` yields a
+                    // correction with z∘cds + s∘cdz = t − ṽ.
+                    if !correctors::project_products(band, (&s, &ds), (&z, &dz), trial, &mut r_c) {
+                        // Every product already centered: nothing to correct,
+                        // and no back-solve spent finding that out.
+                        break;
+                    }
+                    cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
+                    build_rhs(
+                        &zeros_n, &zeros_meq, &zeros_m, &rhs_term, n, m_eq, m_ineq, &mut rhs,
+                    );
+                    if fact.solve_one(&mut rhs).is_err() {
+                        // A failed corrector is not a failed iteration: the
+                        // Mehrotra direction in hand is still usable, so drop
+                        // the correction and step with it.
+                        break;
+                    }
+                    split_step(&rhs, n, m_eq, m_ineq, &mut cdx, &mut cdy, &mut cdz);
+                    cone.recover_ds(&s, &z, &r_c, &cdz, &mut cds);
+                    for i in 0..m_ineq {
+                        step_s[i] = ds[i] + cds[i];
+                        step_z[i] = dz[i] + cdz[i];
+                    }
+                    let (a_p, a_d) = step_lengths(cone, &s, &step_s, &z, &step_z, taus, m_ineq);
+                    let keep = correctors::accepts(a_p, step_p) && correctors::accepts(a_d, step_d);
+                    tally.record(keep, (a_p - step_p).min(a_d - step_d));
+                    if !keep {
+                        break;
+                    }
+                    for i in 0..n {
+                        dx[i] += cdx[i];
+                    }
+                    for i in 0..m_eq {
+                        dy[i] += cdy[i];
+                    }
+                    for i in 0..m_ineq {
+                        dz[i] += cdz[i];
+                        ds[i] += cds[i];
+                    }
+                    step_p = a_p;
+                    step_d = a_d;
+                }
+            }
         }
 
         // Debugger checkpoint: the Newton step and its fraction-to-boundary
@@ -2656,6 +2757,7 @@ fn run_ipm(
     }
 
     let nn = n;
+    tally.report("direct", iters);
     // Never hand back a success verdict without a usable solution (gh #222).
     let status = demote_unusable(status, &x, obj);
     QpSolution {

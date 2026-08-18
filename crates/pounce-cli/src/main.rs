@@ -160,6 +160,7 @@ pub fn main() -> ExitCode {
     app.set_convex_routing_available(true);
 
     // NOTE: the convex LP/QP knobs (`qp_tau`, `qp_tau_max`, `qp_reg`,
+    // `qp_gondzio_corr`,
     // `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate`, `qp_crossover`) and the
     // active-set SQP QP-subproblem knobs (`sqp_qp_feas_tol`, `sqp_qp_opt_tol`,
     // `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`) used to
@@ -2313,6 +2314,9 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     }
     if let Ok((v, true)) = opt.get_numeric_value("qp_reg", "") {
         o.reg = v;
+    }
+    if let Ok((v, true)) = opt.get_integer_value("qp_gondzio_corr", "") {
+        o.gondzio_max_corr = v.max(0) as usize;
     }
     if let Ok((v, true)) = opt.get_numeric_value("qp_infeas_tol", "") {
         o.infeas_tol = v;

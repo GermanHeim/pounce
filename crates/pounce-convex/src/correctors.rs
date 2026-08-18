@@ -114,6 +114,67 @@ pub(crate) fn project_products(
     active
 }
 
+/// Per-solve corrector tally, reported when `POUNCE_DBG_GONDZIO` is set.
+///
+/// A corrector change is judged by counters, not by the stopwatch: this
+/// machine's wall-clock noise floor is ~1.3×, and the scheme's whole claim is
+/// about step length and iteration count. So the two numbers that decide
+/// whether it is doing anything — how many back-solves were spent and how many
+/// of them were kept — are observable without a profiler and without a
+/// benchmark corpus.
+///
+/// Accumulating costs three adds per corrector; only the report reads the
+/// environment.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Tally {
+    /// Iterations that entered the corrector loop at all.
+    pub(crate) iters: usize,
+    /// Corrector systems solved.
+    pub(crate) attempted: usize,
+    /// Correctors that cleared [`accepts`] and were folded into the step.
+    pub(crate) accepted: usize,
+    /// Summed step-length gain over the accepted correctors, so an "accepted
+    /// but worthless" regime is distinguishable from a working one.
+    pub(crate) gain: f64,
+}
+
+impl Tally {
+    /// Record one attempted corrector and, if it was kept, its step gain.
+    pub(crate) fn record(&mut self, accepted: bool, gain: f64) {
+        self.attempted += 1;
+        if accepted {
+            self.accepted += 1;
+            self.gain += gain;
+        }
+    }
+
+    /// Print the tally for `driver` when `POUNCE_DBG_GONDZIO` is set.
+    /// A solve that never entered the loop still reports, so "the correctors
+    /// did not fire" is a visible answer rather than silence.
+    pub(crate) fn report(&self, driver: &str, solver_iters: usize) {
+        if std::env::var_os("POUNCE_DBG_GONDZIO").is_none() {
+            return;
+        }
+        let rate = if self.attempted > 0 {
+            100.0 * self.accepted as f64 / self.attempted as f64
+        } else {
+            0.0
+        };
+        eprintln!(
+            "pounce: gondzio[{driver}] iters={solver_iters} corrected_iters={} \
+attempted={} accepted={} ({rate:.1}%) mean_alpha_gain={:.3e}",
+            self.iters,
+            self.attempted,
+            self.accepted,
+            if self.accepted > 0 {
+                self.gain / self.accepted as f64
+            } else {
+                0.0
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +230,16 @@ mod tests {
         assert!(project_products(band, (&s, &ds), (&z, &dz), a, &mut out));
         assert!(out[0] > 0.0);
         assert_eq!(out[1], 0.0);
+    }
+
+    #[test]
+    fn the_tally_separates_attempted_from_accepted() {
+        let mut t = Tally::default();
+        t.record(true, 0.2);
+        t.record(false, 0.0);
+        t.record(true, 0.4);
+        assert_eq!((t.attempted, t.accepted), (3, 2));
+        assert!((t.gain - 0.6).abs() < 1e-15);
     }
 
     /// The split pair is what the direct driver needs; passing it twice must

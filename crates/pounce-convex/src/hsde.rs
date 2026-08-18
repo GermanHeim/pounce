@@ -410,6 +410,7 @@ where
 
     let mut status = QpStatus::IterationLimit;
     let mut iters = 0;
+    let mut tally = correctors::Tally::default();
     // Opt-in per-iteration convergence trace (mirrors the direct path's
     // `collect_iterates`): one record per stepping iteration plus a terminal
     // record at the converged iterate (α = 0).
@@ -855,9 +856,10 @@ where
         // factor (zero linear residual, only the re-centered complementarity
         // RHS), and accepts the extra direction only if it lengthens the step
         // by at least GONDZIO_GAMMA·GONDZIO_DELTA — otherwise the loop stops.
-        if cone.is_orthant() && m_ineq > 0 && mu > 0.0 {
+        if opts.gondzio_max_corr > 0 && cone.is_orthant() && m_ineq > 0 && mu > 0.0 {
             let band = correctors::Band::around(mu);
-            for _ in 0..correctors::MAX_CORR {
+            tally.iters += 1;
+            for _ in 0..opts.gondzio_max_corr {
                 let a_trial = correctors::trial_step(alpha);
                 // Cone complementarity targets: project the trial products into
                 // the band; r_c holds the deviation ṽ − t so that recover_ds
@@ -917,7 +919,9 @@ where
                     .min(ray_step(kappa, dkappa + dkappa_c, opts.tau))
                     .min(cone.max_step(&s, &step_s, opts.tau))
                     .min(cone.max_step(&z, &step_z, opts.tau));
-                if correctors::accepts(a_new, alpha) {
+                let keep = correctors::accepts(a_new, alpha);
+                tally.record(keep, a_new - alpha);
+                if keep {
                     for i in 0..n {
                         dx[i] += cdx[i];
                     }
@@ -1121,6 +1125,7 @@ where
         let _ = fire(&mut hook, &mut st);
     }
 
+    tally.report("hsde", iters);
     // Never hand back a success verdict without a usable solution (gh #222).
     let status = crate::ipm::demote_unusable(status, &x, obj);
     QpSolution {
