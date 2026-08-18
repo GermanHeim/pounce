@@ -150,6 +150,44 @@ changes.
   69→56 iterations and `eigena2` 178→163 to the same answers; `deb7`
   597→593 with the objective identical to nine digits.
 
+- **L-BFGS no longer damps the curvature pairs it stores** (#686).
+
+  `build_low_rank` blended each accepted `y` toward `B·s` by a Powell
+  damping factor whenever `sᵀy < 0.2·sᵀBs`, citing
+  `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping`. No such function
+  exists. Upstream's `CheckSkippingBFGS` takes `const Vector&` for both
+  `s_new` and `y_new` and returns a bool, so it cannot modify a pair,
+  and nothing else in that file does either: upstream forms
+  `v_new = y_new / sqrt(sᵀy)` from the measured `y` and either stores a
+  pair as it stands or skips it. pounce now does the same.
+
+  This was never a documented deviation. It was present in the file's
+  first commit under a comment claiming to mirror upstream, no
+  registered option controlled it, and
+  `dev-notes/issue-131-monotone-lbfgs-stall.md` already named it as a
+  *cause*: "Powell-damped BFGS forces a PSD model, so the IPM's inertia
+  check never sees the indefiniteness, never fires regularization, and
+  never escapes." Powell damping is a real feature of this codebase —
+  `hessian_approximation=damped-bfgs` on the active-set-SQP path, where
+  it is named, selected and documented — and that path is independent of
+  this one and unchanged.
+
+  Exact leg identical, 57/57. On the L-BFGS leg, two fixtures move
+  closer to the exact-Hessian answer rather than merely faster:
+  `hs13_bigstart` 0.9945139766 → 0.985014399 against the exact path's
+  0.9849287152, and `cresc4` 0.8718975397 → 0.8718975252 against
+  0.8718975273, in 106 iterations instead of 190. `pooling_rt2stp` drops
+  292→203 at the same objective. `issue_508_infeasible_gap_1em2`
+  recovers the infeasibility certificate noted as lost above, and now
+  renders it at `obj 25` — the same point the exact leg certifies —
+  rather than the blown-up iterate it used to use.
+
+  Against that: `eigenb2` downgrades from `Solve_Succeeded` in 44
+  iterations to `Solved_To_Acceptable_Level` in 61, and
+  `autocorr_bern55-06` takes 1753 iterations instead of 66 (to
+  −2272, nearer the exact −2304 than the −2256 it gave before).
+  `eigenb2`'s downgrade is the one line here that is a plain loss.
+
 - **A feasible model is no longer reported infeasible after restoration
   blows up** (#684).
 

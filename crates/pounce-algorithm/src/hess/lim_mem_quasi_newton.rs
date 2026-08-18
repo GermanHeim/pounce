@@ -26,7 +26,6 @@
 //!
 //! Update kernels:
 //!   - [`initial_hessian_scalar`] (sigma per `LIM_MEM_INIT`)
-//!   - [`powell_damping_theta`] (modified-y damping for BFGS)
 //!   - [`bfgs_curvature_pair_ok`] (skip-criterion for L-BFGS)
 //!   - [`sr1_denominator_ok`] (skip-criterion for SR1)
 
@@ -517,21 +516,44 @@ impl LimMemQuasiNewtonUpdater {
                     if s_bs <= 0.0 {
                         continue;
                     }
+                    // Textbook BFGS, which is what upstream forms:
+                    //
+                    //     v_new = y_new / sqrt(sᵀy)        (positive column)
+                    //     u_new = B₀·S·C                    (negative column)
+                    //
+                    // `y` is used as it stands. pounce used to blend it
+                    // toward `B s` by a Powell damping factor whenever
+                    // `sᵀy < 0.2·sᵀBs`, citing
+                    // `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping` —
+                    // a function that does not exist. Upstream's
+                    // `CheckSkippingBFGS` takes `const Vector&` for both
+                    // `s_new` and `y_new` and returns a bool, so it
+                    // cannot modify a pair, and nothing else in that file
+                    // does either: a pair is skipped or it is stored as
+                    // measured (#686).
+                    //
+                    // Damping was not a harmless extra safeguard. It
+                    // fired on every accepted pair with marginal
+                    // curvature and silently replaced the measured
+                    // curvature with a synthetic one, on a path where
+                    // upstream's answer to marginal curvature is to skip
+                    // the pair and — after `limited_memory_max_skipping`
+                    // of them — discard the history. That strategy is
+                    // complete on its own, and it is now implemented.
+                    //
+                    // `sᵀy > sqrt(eps)·‖s‖·‖y‖ > 0` holds for every pair
+                    // in `history` by the skip criterion, so the square
+                    // root below is of a positive number without needing
+                    // the damped `sr` guard that used to stand here.
                     let sy = pair.s_dot_y;
-                    let theta = powell_damping_theta(sy, s_bs);
-                    let sr = theta * sy + (1.0 - theta) * s_bs;
-                    if sr <= 0.0 {
+                    if sy <= 0.0 {
                         continue;
                     }
-                    let r_scale = 1.0 / sr.sqrt();
+                    let y_scale = 1.0 / sy.sqrt();
                     let bs_scale = 1.0 / s_bs.sqrt();
-                    // r rᵀ / sr  →  positive column r/√sr.
-                    v_cols.push(
-                        (0..n)
-                            .map(|i| (theta * y[i] + (1.0 - theta) * bs[i]) * r_scale)
-                            .collect(),
-                    );
-                    // −(Bs)(Bs)ᵀ / s_bs  →  negative column Bs/√s_bs.
+                    // y yᵀ / sᵀy  →  positive column y/√(sᵀy).
+                    v_cols.push(y.iter().map(|&yi| yi * y_scale).collect());
+                    // −(Bs)(Bs)ᵀ / sᵀBs  →  negative column Bs/√(sᵀBs).
                     u_cols.push(bs.iter().map(|&bi| bi * bs_scale).collect());
                 }
                 UpdateType::Sr1 => {
@@ -692,30 +714,6 @@ pub fn initial_hessian_scalar(
     raw.clamp(min_val, max_val)
 }
 
-/// Powell damping coefficient `theta` for the modified-y BFGS update.
-/// When the curvature pair `(s, y)` violates `s^T y >= 0.2 * s^T B s`,
-/// we replace `y` by `y_bar = theta * y + (1 - theta) * B s` so that
-/// the resulting update is positive-definite.
-///
-/// ```text
-///   if s^T y >= 0.2 * s^T B s:  theta = 1
-///   else:                        theta = (0.8 * s^T B s) / (s^T B s - s^T y)
-/// ```
-///
-/// Mirrors upstream's `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping`.
-pub fn powell_damping_theta(s_dot_y: Number, s_dot_b_s: Number) -> Number {
-    if s_dot_y >= 0.2 * s_dot_b_s {
-        1.0
-    } else {
-        let denom = s_dot_b_s - s_dot_y;
-        if denom > 0.0 {
-            0.8 * s_dot_b_s / denom
-        } else {
-            1.0
-        }
-    }
-}
-
 /// L-BFGS curvature-pair acceptance: include `(s, y)` in history iff
 /// `s^T y > eps * ||s|| ||y||`. Mirrors upstream's skip-criterion
 /// (`IpLimMemQuasiNewtonUpdater.cpp` ~line 750: `eps = 1e-8`).
@@ -826,19 +824,6 @@ mod tests {
     fn init_clamped_to_min() {
         let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e20, 1.0, 1.0, 1e-8, 1e8);
         assert_eq!(v, 1e-8);
-    }
-
-    #[test]
-    fn powell_no_damping_when_curvature_ok() {
-        // s^T y = 1, s^T B s = 1; 1 >= 0.2 * 1 → theta = 1.
-        assert_eq!(powell_damping_theta(1.0, 1.0), 1.0);
-    }
-
-    #[test]
-    fn powell_damps_when_curvature_violated() {
-        // s^T y = 0.1, s^T B s = 1; 0.1 < 0.2 → theta = 0.8/(1-0.1) = 8/9.
-        let theta = powell_damping_theta(0.1, 1.0);
-        assert!((theta - 8.0 / 9.0).abs() < 1e-15);
     }
 
     #[test]
