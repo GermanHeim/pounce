@@ -57,7 +57,6 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
         ),
         ("dependency_detector=mumps", "linear-dependency detection"),
         ("check_derivatives_for_naninf=yes", "NaN/Inf"),
-        ("recalc_y=yes", "multiplier recalculation"),
         ("magic_steps=yes", "magic steps"),
         ("suppress_all_output=yes", "output controls"),
         ("hsllib=libcoinhsl.so", "HSL loader"),
@@ -108,6 +107,11 @@ fn knobs_on_implemented_features_still_solve() {
         "accept_after_max_steps=3",
         "limited_memory_max_skipping=4",
         "corrector_type=affine",
+        // #677: `recalc_y` was refused as unimplemented until the
+        // least-square multiplier recalculation landed. It is a real
+        // feature now, so asking for it must solve rather than fail.
+        "recalc_y=yes",
+        "recalc_y_feas_tol=1e-4",
     ]
     .into_iter()
     .enumerate()
