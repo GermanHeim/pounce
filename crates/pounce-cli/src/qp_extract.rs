@@ -79,7 +79,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
 
     // --- objective Hessian P (lower triangle) + nonlinear-tree linear part
     //     + nonlinear-tree constant (degree-0 term, for reporting only) ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear)?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         // analyze_quadratic returns (i ≤ j) upper-ish keys; store as
@@ -121,7 +121,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         // silently solves the wrong constraint. The folded constant
         // shifts the bounds: `g_l ≤ row + k ≤ g_u  ⇔  g_l−k ≤ row ≤ g_u−k`.
         // This mirrors the SOCP extractor's linear-constraint handling.
-        let (nl_lin, const_shift) = analyze_quadratic_full(&prob.con_nonlinear[row], n)
+        let (nl_lin, const_shift) = analyze_quadratic_full(&prob.con_nonlinear[row])
             .map(|(_, l, k)| (l, k))
             .unwrap_or_default();
         let mut coef = vec![0.0; n];
@@ -383,7 +383,7 @@ pub fn extract_socp_with_map(
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
     // --- objective P (lower triangle) + folded linear / constant terms ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear)?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         let (row, col) = if i >= j { (*i, *j) } else { (*j, *i) };
@@ -411,7 +411,7 @@ pub fn extract_socp_with_map(
         let lo = prob.g_l[row];
         let hi = prob.g_u[row];
         let nl = &prob.con_nonlinear[row];
-        let quad = analyze_quadratic_full(nl, n);
+        let quad = analyze_quadratic_full(nl);
         let is_quadratic = matches!(&quad, Some((hmap, _, _)) if !hmap.is_empty());
 
         if is_quadratic {

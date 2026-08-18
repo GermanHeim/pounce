@@ -35,9 +35,8 @@
 //! (PSD) test uses a tolerance and routes "inconclusive within
 //! tolerance" to the safe side, never to the convex path.
 
-use crate::nl_reader::{BinOp, Expr, NlProblem, UnaryOp};
+use crate::nl_reader::NlProblem;
 use pounce_common::types::{lower_bound_present, upper_bound_present};
-use std::collections::BTreeMap;
 
 /// Tolerance for the smallest-eigenvalue sign test in the convexity
 /// check. A Hessian eigenvalue below `-PSD_TOL` is treated as a genuine
@@ -381,7 +380,7 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
     }
 
     // Objective curvature.
-    let obj_quad = match analyze_quadratic(&prob.obj_nonlinear, prob.n) {
+    let obj_quad = match analyze_quadratic(&prob.obj_nonlinear) {
         Some(q) => q,
         // Objective has a non-quadratic nonlinear term ⇒ NLP.
         None => return (ProblemClass::Nlp, ClassReason::ObjectiveNotQuadratic),
@@ -394,7 +393,7 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
         if is_trivially_zero(c) {
             continue;
         }
-        match analyze_quadratic(c, prob.n) {
+        match analyze_quadratic(c) {
             Some(q) if q.is_empty() => {} // purely linear after all
             Some(_) => any_quadratic_constraint = true,
             None => {
@@ -445,7 +444,7 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
             if is_trivially_zero(c) {
                 continue;
             }
-            match analyze_quadratic(c, prob.n) {
+            match analyze_quadratic(c) {
                 Some(q) if q.is_empty() => {} // purely linear after all
                 Some(q) => {
                     let lo = prob.g_l[row];
@@ -630,237 +629,15 @@ fn mismatch_msg(class: ProblemClass, forced: &str, expected: &str) -> String {
 // Quadratic-form analysis
 // ---------------------------------------------------------------------
 
-/// The symmetric Hessian of a quadratic form, stored as a sparse upper-
-/// triangular (i ≤ j) map of `(i, j) -> ∂²/∂xᵢ∂xⱼ`. Empty means the
-/// expression is (at most) linear.
-pub(crate) type QuadHessian = BTreeMap<(usize, usize), f64>;
-
-/// Full quadratic read-out: `(Hessian, [(var, linear coef), …], constant)`.
-/// The linear and constant parts are the pieces AMPL/Pyomo fold into the
-/// nonlinear objective tree (see [`analyze_quadratic_full`]).
-pub(crate) type QuadForm = (QuadHessian, Vec<(usize, f64)>, f64);
-
-/// Attempt to read an expression as a polynomial of total degree ≤ 2 and
-/// return its Hessian (constant, since the form is quadratic). Returns
-/// `None` if the expression contains any term the classifier cannot
-/// prove is degree-≤2 polynomial (transcendental ops, division by a
-/// non-constant, `Pow` with exponent ∉ {0,1,2}, products of degree > 2,
-/// external calls, …). `None` ⇒ treat as general nonlinear.
-pub(crate) fn analyze_quadratic(e: &Expr, n: usize) -> Option<QuadHessian> {
-    analyze_quadratic_full(e, n).map(|(h, _, _)| h)
-}
-
-/// Like [`analyze_quadratic`] but also returns the degree-1 (linear)
-/// coefficients *and* the degree-0 (constant) term of the form:
-/// `(Hessian, [(var, coef), …], constant)`.
-///
-/// AMPL folds the linear part of a nonlinear term into the objective's
-/// nonlinear expression tree (the `−6·x₀` of `(x₀−3)²`, say) rather than
-/// the linear section. Callers building the QP objective vector `c` must
-/// add these in, exactly as the NLP path's `eval_f` sums the linear
-/// section *and* the nonlinear tree — otherwise the linear shift is
-/// silently dropped and the convex solve minimizes the wrong objective.
-///
-/// The **constant** is returned for the same reason: AMPL/Pyomo also fold
-/// the objective's degree-0 term into the nonlinear tree (the `+9` of
-/// `(x₀−3)²`), where it does *not* land in `NlProblem::obj_constant`. It
-/// is irrelevant to the minimizer but is part of the *reported objective
-/// value*; dropping it makes the convex solve report an objective off by
-/// that constant versus the NLP path (see `qp_extract`).
-pub(crate) fn analyze_quadratic_full(e: &Expr, _n: usize) -> Option<QuadForm> {
-    let poly = to_poly(e)?;
-    if poly.max_degree() > 2 {
-        return None;
-    }
-    let mut h: QuadHessian = BTreeMap::new();
-    let mut lin: Vec<(usize, f64)> = Vec::new();
-    let mut constant = 0.0;
-    for (vars, coef) in &poly.terms {
-        match vars.as_slice() {
-            // Constant term: no gradient/Hessian contribution, but it is
-            // part of the objective *value* — accumulate, don't drop.
-            [] => constant += *coef,
-            // Linear term c·xᵢ.
-            [i] => lin.push((*i, *coef)),
-            // Quadratic term c·xᵢ·xⱼ.
-            [i, j] => {
-                let (i, j) = (*i.min(j), *i.max(j));
-                // ∂²(c·xᵢxⱼ)/∂xᵢ∂xⱼ = c for i≠j; ∂²(c·xᵢ²)/∂xᵢ² = 2c.
-                let contrib = if i == j { 2.0 * coef } else { *coef };
-                *h.entry((i, j)).or_insert(0.0) += contrib;
-            }
-            _ => return None,
-        }
-    }
-    // Drop explicit zeros so `is_empty()` means "linear".
-    h.retain(|_, v| v.abs() > 0.0);
-    Some((h, lin, constant))
-}
-
-/// A multivariate polynomial as a map from a sorted variable-index
-/// multiset (the monomial) to its coefficient. `[]` is the constant
-/// term, `[i]` is `xᵢ`, `[i, i]` is `xᵢ²`, `[i, j]` is `xᵢxⱼ`.
-#[derive(Debug, Clone, Default)]
-struct Poly {
-    terms: BTreeMap<Vec<usize>, f64>,
-}
-
-impl Poly {
-    fn constant(c: f64) -> Self {
-        let mut terms = BTreeMap::new();
-        if c != 0.0 {
-            terms.insert(Vec::new(), c);
-        }
-        Poly { terms }
-    }
-
-    fn var(i: usize) -> Self {
-        let mut terms = BTreeMap::new();
-        terms.insert(vec![i], 1.0);
-        Poly { terms }
-    }
-
-    fn max_degree(&self) -> usize {
-        self.terms.keys().map(|m| m.len()).max().unwrap_or(0)
-    }
-
-    fn as_constant(&self) -> Option<f64> {
-        match self.terms.len() {
-            0 => Some(0.0),
-            1 => self.terms.get(&Vec::new()).copied(),
-            _ => None,
-        }
-    }
-
-    fn add(mut self, other: &Poly) -> Poly {
-        for (m, c) in &other.terms {
-            *self.terms.entry(m.clone()).or_insert(0.0) += c;
-        }
-        self.prune();
-        self
-    }
-
-    fn neg(mut self) -> Poly {
-        for c in self.terms.values_mut() {
-            *c = -*c;
-        }
-        self
-    }
-
-    fn scale(mut self, s: f64) -> Poly {
-        if s == 0.0 {
-            return Poly::default();
-        }
-        for c in self.terms.values_mut() {
-            *c *= s;
-        }
-        self
-    }
-
-    /// Multiply two polynomials, bailing (`None`) if any product
-    /// monomial would exceed total degree 2 — past that the classifier
-    /// gives up and the caller routes to NLP.
-    fn mul(&self, other: &Poly) -> Option<Poly> {
-        let mut out = Poly::default();
-        for (ma, ca) in &self.terms {
-            for (mb, cb) in &other.terms {
-                if ma.len() + mb.len() > 2 {
-                    return None;
-                }
-                let mut m = ma.clone();
-                m.extend_from_slice(mb);
-                m.sort_unstable();
-                *out.terms.entry(m).or_insert(0.0) += ca * cb;
-            }
-        }
-        out.prune();
-        Some(out)
-    }
-
-    fn prune(&mut self) {
-        self.terms.retain(|_, c| c.abs() > 0.0);
-    }
-}
-
-/// Lower an `Expr` to a [`Poly`] of total degree ≤ 2, or `None` if it
-/// contains anything outside that class. `Cse` nodes are inlined (they
-/// are mathematically equivalent to their body).
-fn to_poly(e: &Expr) -> Option<Poly> {
-    match e {
-        Expr::Const(c) => Some(Poly::constant(*c)),
-        Expr::Var(i) => Some(Poly::var(*i)),
-        Expr::Cse(body) => to_poly(body),
-        Expr::Sum(items) => {
-            // Accumulate every monomial into one map, pruning ONCE at the
-            // end. The previous `acc = acc.add(&to_poly(it)?)` called the
-            // self-pruning `add` per item, and `prune` rescans the entire
-            // accumulated map, making an N-term sum O(N²). On QCQP forms
-            // (a quadratic over n vars expands to up to ~n² monomials) this
-            // hung the `solver_selection=auto` classifier for >300 s before
-            // the solver ever started. Merge-then-prune is O(N log N).
-            let mut acc = Poly::default();
-            for it in items {
-                let p = to_poly(it)?;
-                for (m, c) in &p.terms {
-                    *acc.terms.entry(m.clone()).or_insert(0.0) += c;
-                }
-            }
-            acc.prune();
-            Some(acc)
-        }
-        Expr::Unary(op, a) => match op {
-            UnaryOp::Neg => Some(to_poly(a)?.neg()),
-            // Everything else is transcendental / non-polynomial.
-            _ => None,
-        },
-        Expr::Binary(op, a, b) => {
-            let pa = to_poly(a)?;
-            let pb = to_poly(b)?;
-            match op {
-                BinOp::Add => Some(pa.add(&pb)),
-                BinOp::Sub => Some(pa.add(&pb.neg())),
-                BinOp::Mul => pa.mul(&pb),
-                BinOp::Div => {
-                    // Division is polynomial only by a nonzero constant.
-                    let d = pb.as_constant()?;
-                    if d == 0.0 {
-                        None
-                    } else {
-                        Some(pa.scale(1.0 / d))
-                    }
-                }
-                BinOp::Pow => {
-                    // Polynomial only for constant integer exponents in
-                    // {0, 1, 2}.
-                    let exp = pb.as_constant()?;
-                    if exp == 0.0 {
-                        Some(Poly::constant(1.0))
-                    } else if exp == 1.0 {
-                        Some(pa)
-                    } else if exp == 2.0 {
-                        pa.mul(&pa)
-                    } else {
-                        None
-                    }
-                }
-                // atan2 and any other binary opcodes are non-polynomial.
-                _ => None,
-            }
-        }
-        // External function calls are opaque ⇒ not provably polynomial.
-        Expr::Funcall { .. } => None,
-        // Comparisons, logicals, conditionals, and n-ary min/max (the
-        // smooth-/control-flow `.nl` opcodes) are non-polynomial ⇒ not a
-        // convex QP, so the classifier routes them to the NLP solver.
-        _ => None,
-    }
-}
-
-/// True if the expression is the literal constant zero the `.nl` reader
-/// uses for "no nonlinear part".
-fn is_trivially_zero(e: &Expr) -> bool {
-    matches!(e, Expr::Const(c) if *c == 0.0)
-}
+// The recognizer itself lives in `pounce-nl` (`nl_quadratic`), next to the
+// `Expr` DAG it walks, so that the consumers that are not this binary can
+// use it — see that module's docs. What stays here is the *routing*: which
+// `ProblemClass` a recognized form implies, and which guards a QCQP has to
+// clear to reach the conic path. These re-exports keep the call sites in
+// `qp_extract` and in the tests below spelled as they were.
+pub(crate) use pounce_nl::nl_quadratic::{
+    QuadHessian, analyze_quadratic, analyze_quadratic_full, is_trivially_zero,
+};
 
 // ---------------------------------------------------------------------
 // PSD test
@@ -996,7 +773,7 @@ fn coupled_hessian_is_psd(h: &QuadHessian) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nl_reader::parse_nl_text;
+    use crate::nl_reader::{BinOp, Expr, UnaryOp, parse_nl_text};
 
     // --- SolverSelection parsing ---
 
@@ -1130,7 +907,7 @@ mod tests {
             )),
             Box::new(Expr::Const(2.0)),
         );
-        let h = analyze_quadratic(&e, 1).expect("degree-2 polynomial");
+        let h = analyze_quadratic(&e).expect("degree-2 polynomial");
         // d²/dx0² (x0²) = 2
         assert_eq!(h.get(&(0, 0)), Some(&2.0));
     }
@@ -1139,7 +916,7 @@ mod tests {
     fn poly_rejects_transcendental() {
         // sin(x0) is not polynomial.
         let e = Expr::Unary(UnaryOp::Sin, Box::new(Expr::Var(0)));
-        assert!(analyze_quadratic(&e, 1).is_none());
+        assert!(analyze_quadratic(&e).is_none());
     }
 
     #[test]
@@ -1150,14 +927,14 @@ mod tests {
             Box::new(Expr::Var(0)),
             Box::new(Expr::Const(3.0)),
         );
-        assert!(analyze_quadratic(&e, 1).is_none());
+        assert!(analyze_quadratic(&e).is_none());
     }
 
     #[test]
     fn cross_term_hessian() {
         // x0 * x1  =>  H[0,1] = 1
         let e = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
-        let h = analyze_quadratic(&e, 2).expect("degree-2");
+        let h = analyze_quadratic(&e).expect("degree-2");
         assert_eq!(h.get(&(0, 1)), Some(&1.0));
     }
 
@@ -1166,20 +943,24 @@ mod tests {
         // Regression guard for the `solver_selection=auto` classifier hang
         // (mittelmann QCQP/bearing_400/qssp180 emitted zero iterations and
         // burned the full CPU budget). A quadratic expressed as a large
-        // `Sum` of monomials must lower to a `Poly` in O(N log N): the old
-        // `acc = acc.add(&to_poly(it)?)` ran the self-pruning `add` per
-        // item, and `prune` rescans the whole accumulated map, so an
-        // N-monomial sum was O(N²) and spun for >300 s before the solver
-        // started (Ipopt solved the same problems in seconds). Build a
-        // 5000-term sum of distinct squares and confirm the full diagonal
-        // Hessian is recovered — this path completes effectively instantly
-        // once the per-`add` prune is gone.
+        // `Sum` of monomials must lower in O(N log N): the recognizer used
+        // to re-scan the whole accumulated polynomial for zeros on every
+        // merged item, so an N-monomial sum was O(N²) and spun for >300 s
+        // before the solver started (Ipopt solved the same problems in
+        // seconds). Build a 5000-term sum of distinct squares and confirm
+        // the full diagonal Hessian is recovered.
+        //
+        // That fix covered the n-ary `Sum` node only. The same quadratic
+        // written as a chain of binary `Add`s — which is what a `.nl` writer
+        // emitting `o0` produces — kept the re-scan until Q3 moved the
+        // per-merge zero check onto the merged terms; see
+        // `wide_diagonal_convex_qcqp_keeps_conic` for that shape.
         const N: usize = 5000;
         let terms: Vec<Expr> = (0..N)
             .map(|i| Expr::Binary(BinOp::Mul, Box::new(Expr::Var(i)), Box::new(Expr::Var(i))))
             .collect();
         let e = Expr::Sum(terms);
-        let h = analyze_quadratic(&e, N).expect("degree-2 sum of squares is a QP");
+        let h = analyze_quadratic(&e).expect("degree-2 sum of squares is a QP");
         assert_eq!(h.len(), N, "every xᵢ² contributes one diagonal entry");
         assert_eq!(h.get(&(0, 0)), Some(&2.0));
         assert_eq!(h.get(&(N - 1, N - 1)), Some(&2.0));
@@ -1770,20 +1551,29 @@ mod tests {
     }
 
     /// A diagonal row is factored in `O(k)`, so width alone must not push a
-    /// separable QCQP off the conic path — 1000 uncoupled variables cost 1000
-    /// flops, where the same width densely coupled would cost 1e9.
+    /// separable QCQP off the conic path — 100 000 uncoupled variables cost
+    /// 100 000 flops, where the same width densely coupled would cost 1e15.
     ///
-    /// `k` is held at 1000 by an unrelated defect, not by the cost model: the
-    /// constraint is a left-deep `Add` tree, and `to_poly` walks it
-    /// recursively, so a sum of ~5000 squares overflows the stack during
-    /// classification. That is a real crash on a legitimate model and it is
-    /// Q3's to fix (make the recognizer iterative); the cost model itself is
-    /// indifferent to `k`.
+    /// `k` was held at 1 000 by an unrelated defect rather than by the cost
+    /// model: the constraint is a left-deep `Add` tree, the recognizer walked
+    /// it recursively, and a sum of a few thousand squares overflowed the
+    /// stack during classification (Q1 found this; a left-deep `o0` chain is
+    /// what a `.nl` writer emits for a long sum). Q3 made the recognizer
+    /// iterative, so the cost model can now be tested at a width that means
+    /// something. See `pounce_nl::nl_quadratic` for the depth tests
+    /// themselves.
+    ///
+    /// The problem is leaked rather than dropped: `Expr`'s derived `Drop` is
+    /// still recursive and would overflow tearing a tree this deep down. That
+    /// is a real remaining defect on the same shape — the Python bindings
+    /// work around it with a big-stack worker thread (pounce#472) — and it is
+    /// not this test's subject.
     #[test]
     fn wide_diagonal_convex_qcqp_keeps_conic() {
-        let k = 1_000;
+        let k = 100_000;
         let prob = separable_convex_qcqp_with_k_vars(k);
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
+        std::mem::forget(prob);
     }
 
     /// Classification mirror of the boundary guard: a QP whose only
