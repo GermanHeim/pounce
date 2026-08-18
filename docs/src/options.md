@@ -139,11 +139,28 @@ Two deliberate exceptions:
   `ipopt.opt` spells out defaults, and `dependency_detector=none` asks for
   nothing. Only a value that differs from the default is a request POUNCE
   cannot honour.
-* **Caching hints warn instead of failing.** `grad_f_constant`,
+* **Caching hints are checked, not trusted.** `grad_f_constant`,
   `hessian_constant`, `jac_c_constant` and `jac_d_constant` tell the
-  solver a quantity does not change between iterations. POUNCE
-  re-evaluates regardless, so ignoring them costs evaluations and never
-  correctness — failing the solve would be a worse trade.
+  solver a derivative does not change between iterations. Ipopt takes
+  such a hint on faith and silently returns a wrong answer if it is
+  false. POUNCE asks the model first, and there are three cases:
+
+  * **POUNCE proves the derivative constant** — from an `.nl` model's own
+    algebra — and reuses it across iterations *whether or not you set the
+    option*. Setting it is harmless and unnecessary.
+  * **POUNCE proves the derivative is not constant** and you set the
+    option anyway: the option is **ignored, with a warning**. A QCQP's
+    `∇²L = σQ₀ + Σᵢλᵢ Qᵢ` genuinely varies with the multipliers, so
+    `hessian_constant=yes` there is not a hint but a false statement, and
+    honouring it would trade a correct answer for a fast wrong one.
+  * **POUNCE cannot tell** — every callback front end (the C interface,
+    the Python `Problem` callbacks, both GAMS links) hands POUNCE numbers
+    rather than algebra — and your assertion is **honoured on trust**,
+    exactly as upstream. "Unproved" is not "disproved"; overriding you
+    here would be its own silent wrong answer.
+
+  `POUNCE_DBG_CONSTDERIV=1` prints which of the three fired for each of
+  the four options.
 
 Options whose *feature* runs and whose value simply is not read yet are
 **not** in this category; they still solve, with the default in effect.
@@ -1008,6 +1025,9 @@ of the stable interface, and may change between releases.
 | `POUNCE_DBG_RESTO_KAPPA` | `pounce::restoration` | Restoration `κ_resto` convergence-guard evaluation. |
 | `POUNCE_DBG_RESTO_LOCINF` | `pounce::restoration` | Restoration local-infeasibility verdict inputs. |
 | `POUNCE_DBG_TAPE_STATS` | — (stderr) | AD tape counts after parsing an `.nl` model. Printed straight to stderr; no `RUST_LOG` needed. |
+| `POUNCE_DBG_CLASSIFY` | — (stderr) | The detected problem class and the finding that produced it, next to the `.nl` header's own nonlinearity census. This is the line to read when a model routed to a solver you did not expect. No `RUST_LOG` needed. |
+| `POUNCE_DBG_CONSTDERIV` | — (stderr) | Which of the three [constant-derivative](#options-pounce-does-not-implement) cases fired for each of the four `*_constant` hints — the proof, whether you asserted it, and whether the derivative is reused. No `RUST_LOG` needed. |
+| `POUNCE_DBG_NO_QUAD` | — (no output) | **Changes what runs, rather than emitting.** Turns off parse-time quadratic recognition, so every `.nl` body keeps its expression tree and is evaluated through the AD tape instead of from constant matrices. This is the A/B switch the quadratic evaluator is measured with: if a model's numbers move when it is set, the evaluator is the difference. Slower by construction, and larger in memory. It is **not** a general "pre-quadratic" switch — in particular the constant-derivative proofs behind the four `*_constant` hints read the same recognizer through the tree, so they resolve identically either way and `POUNCE_DBG_CONSTDERIV=1` prints the same verdicts with it set. |
 | `POUNCE_SIMPLEX_DEBUG` | — (stderr) | Convex/LP-QP simplex pivoting trace. Printed straight to stderr; no `RUST_LOG` needed. |
 
 Two already-documented gates round out the set: `POUNCE_DBG_LLM` and

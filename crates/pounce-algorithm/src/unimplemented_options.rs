@@ -258,12 +258,41 @@ pub const UNIMPLEMENTED_VALUES: &[UnimplementedValue] = &[UnimplementedValue {
 /// unaffected — but whose performance hint pounce does not exploit.
 /// These warn rather than fail: refusing them would stop a solve that
 /// returns the right result today, only a little slower.
-pub const UNEXPLOITED_HINTS: &[&str] = &[
-    "grad_f_constant",
-    "hessian_constant",
-    "jac_c_constant",
-    "jac_d_constant",
-];
+///
+/// **Empty since gh #588 phase Q6.** The four constant-derivative hints
+/// (`grad_f_constant`, `hessian_constant`, `jac_c_constant`,
+/// `jac_d_constant`) lived here and are now exploited:
+/// [`pounce_nlp::constant_derivatives`] reconciles each one against what
+/// the model can prove about its own algebra, and
+/// `OrigIpoptNlp` reuses the derivative across iterates when the answer
+/// is yes. A hint the model *disproves* still produces a warning — but a
+/// louder one, from that module, saying the hint was refused rather than
+/// merely unused.
+///
+/// The table stays because the shape is right for the next hint that
+/// arrives registered-but-unexploited, and because
+/// [`hint_warnings`] and its two membership tests are the mechanism that
+/// keeps such an option from going silent again.
+pub const UNEXPLOITED_HINTS: &[&str] = &[];
+
+/// The same four hints again — on the **convex** route, where they are
+/// still unexploited.
+///
+/// [`UNEXPLOITED_HINTS`] is empty because the NLP path exploits them. The
+/// convex path does not: an LP/QP/SOCP routed to `pounce-convex` never
+/// builds an `OrigIpoptNlp` and so never reaches
+/// `IpoptApplication::install_constant_derivative_hints`, which is where
+/// the reuse is decided. Emptying the table above therefore silenced the
+/// warning on *both* routes when only one of them had earned it — a
+/// registered option going quiet without anyone deciding it should, which
+/// is the failure mode this module exists to remove (gh#483).
+///
+/// A warning and not a refusal, for the same reason as above and one
+/// more: on a convex engine these hints are not merely unexploited but
+/// structurally vacuous. The engine is handed constant `P`/`A` matrices
+/// to begin with, so there is no per-iterate derivative to cache and
+/// asserting that there is changes nothing about the answer.
+pub const CONVEX_UNEXPLOITED_HINTS: &[&str] = &pounce_nlp::constant_derivatives::HINT_OPTIONS;
 
 /// An option set to something the registry says is not its default.
 ///
@@ -369,6 +398,23 @@ pub fn hint_warnings(options: &OptionsList, reg: &RegisteredOptions) -> Vec<Stri
         .collect()
 }
 
+/// Warnings for the constant-derivative hints on the convex route, where
+/// — unlike the NLP route — nothing reads them. Never blocks a solve.
+/// Call this only when the convex dispatch is actually taken; on the NLP
+/// route the same options are honoured, and warning there would
+/// contradict the reuse the solver really does.
+pub fn convex_hint_warnings(options: &OptionsList, reg: &RegisteredOptions) -> Vec<String> {
+    CONVEX_UNEXPLOITED_HINTS
+        .iter()
+        .filter(|name| set_to_a_non_default(options, reg, name))
+        .map(|name| {
+            format!(
+                "pounce: warning: `{name}` asserts a derivative is constant                  across iterates, which the NLP path reconciles against the                  model and exploits — but this problem routed to                  pounce-convex, whose LP/QP/SOCP engines are handed constant                  matrices to begin with and do not read the option at all. Your                  answer is unaffected. Use `solver_selection=nlp` if you                  wanted the path that acts on it. (gh#483, gh#588)"
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,12 +447,55 @@ mod tests {
                 );
             }
         }
-        for name in UNEXPLOITED_HINTS {
+        for name in UNEXPLOITED_HINTS.iter().chain(CONVEX_UNEXPLOITED_HINTS) {
             assert!(
                 reg.get_option(name).is_some(),
-                "`{name}` is in the hint table but is not registered",
+                "`{name}` is in a hint table but is not registered",
             );
         }
+    }
+
+    /// A hint must never also be a refusal: refusing beats warning, so an
+    /// option in both tables would fail the solve *and* warn about it.
+    /// The two hint tables are allowed to differ from each other — they
+    /// describe two different routes — but neither may collide with the
+    /// features table.
+    #[test]
+    fn the_convex_hint_table_does_not_collide_with_a_refusal() {
+        let refused: BTreeSet<&str> = UNIMPLEMENTED_FEATURES
+            .iter()
+            .flat_map(|g| g.options.iter().copied())
+            .collect();
+        for name in CONVEX_UNEXPLOITED_HINTS {
+            assert!(
+                !refused.contains(name),
+                "`{name}` both warns on the convex route and is refused",
+            );
+        }
+    }
+
+    /// The convex route never reaches `install_constant_derivative_hints`,
+    /// so the hint that the NLP path acts on does nothing there. It has to
+    /// say so: gh #588 Q6 emptied [`UNEXPLOITED_HINTS`] for the NLP route
+    /// and took the convex route's warning down with it.
+    #[test]
+    fn the_convex_route_still_says_the_hints_do_nothing_there() {
+        let (mut opts, reg) = fixture();
+        assert!(
+            convex_hint_warnings(&opts, &reg).is_empty(),
+            "an unset hint must not warn"
+        );
+        opts.set_string_value("hessian_constant", "yes", true, false)
+            .unwrap();
+        let w = convex_hint_warnings(&opts, &reg);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("hessian_constant"), "{}", w[0]);
+        assert!(w[0].contains("pounce-convex"), "{}", w[0]);
+        assert_eq!(
+            refusal(&opts, &reg),
+            None,
+            "a hint must not block a convex solve either"
+        );
     }
 
     /// No option may appear twice — once in two feature groups, or in
@@ -467,18 +556,29 @@ mod tests {
         assert!(msg.contains("CG-penalty"), "{msg}");
     }
 
-    /// Hints warn instead of failing: the answer is the same either way,
-    /// so blocking the solve would cost the user more than the silence
-    /// did.
+    /// The four constant-derivative hints left this table in gh #588 Q6.
+    /// They must not block a solve — that was never in question — and
+    /// they must no longer produce the "pounce does not exploit this"
+    /// warning, because pounce now does. What they earn instead (a
+    /// proof-backed refusal, or silent reuse) is asserted where it is
+    /// decided: `pounce_nlp::constant_derivatives` and
+    /// `pounce-cli/tests/unimplemented_options.rs`.
     #[test]
-    fn caching_hints_warn_but_do_not_refuse() {
+    fn the_constant_derivative_hints_are_no_longer_unexploited() {
         let (mut opts, reg) = fixture();
         opts.set_string_value("hessian_constant", "yes", true, false)
             .unwrap();
         assert_eq!(refusal(&opts, &reg), None, "a hint must not block a solve");
-        let warnings = hint_warnings(&opts, &reg);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("hessian_constant"));
+        assert!(
+            hint_warnings(&opts, &reg).is_empty(),
+            "`hessian_constant` is exploited now; the unexploited-hint \
+             warning would contradict the reuse the solver actually does",
+        );
+        assert!(
+            UNEXPLOITED_HINTS.is_empty(),
+            "gh #588 Q6 emptied this table; an entry added back needs its \
+             own warning text and a test that the option is really unused",
+        );
     }
 
     /// `fast_step_computation` was in the refusal table for one commit,

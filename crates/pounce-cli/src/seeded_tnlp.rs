@@ -99,6 +99,16 @@ impl TNLP for SeededTnlp {
     fn get_number_of_nonlinear_variables(&mut self) -> Index {
         self.inner.borrow_mut().get_number_of_nonlinear_variables()
     }
+
+    /// Transparent decorator: forward the constant-derivative proofs, or
+    /// `OrigIpoptNlp` asks this wrapper — which knows no algebra — and
+    /// gets the declining default, so gh #588 Q6's reuse never engages on
+    /// any model the CLI solves. Neither wrapper changes a row, a
+    /// variable or a derivative's value, so both directions of the proof
+    /// carry through unchanged.
+    fn derivative_proofs(&mut self) -> pounce_nlp::constant_derivatives::DerivativeProofs {
+        self.inner.borrow_mut().derivative_proofs()
+    }
     fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
         self.inner.borrow_mut().get_list_of_nonlinear_variables(pos)
     }

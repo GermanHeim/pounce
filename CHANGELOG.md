@@ -9,6 +9,144 @@ changes.
 
 ## [Unreleased]
 
+- **Quadratic `.nl` rows are solved from their constant matrices instead
+  of being re-derived every iteration** (#588, phases Q0–Q6).
+
+  POUNCE already held an exact quadratic recognizer and an exact LDLᵀ
+  convexity certificate, ran both on the Mittelmann `qcqp*` family, and
+  then discarded the answer: `classify_problem` returned
+  `ProblemClass::Nlp` and the solver rebuilt the same constant Hessian
+  and Jacobian through a coloured AD tape on every iteration — 332 times
+  on `qcqp500-3c`. A degree-≤2 row is now recognized while the `.nl` is
+  parsed and evaluated from the matrices it already is.
+
+  On the real `qcqp1000-2c`: 131.4 s → 97.6–103.3 s wall (1.27–1.35×) at
+  **100 → 100 iterations** — the trajectory is unchanged and the whole
+  saving is evaluation, with the `eval_h` timer going 19.58 s → 0.20 s
+  (~95×). Peak RSS 577 → 445 MB and load time 0.98 → 0.71 s, because a
+  body recognized at parse time never builds its `Expr` DAG at all; on a
+  generated `qcqp500-3c` shape that is 1253 → 586 MB. The extractor that
+  fed the conic route was asking for `n·n` per quadratic row — 134 GB for
+  one 2-nonzero row of `nql180` — and now works on the row's compressed
+  support, 32 B. Classifying a long `o0` sum chain was `O(k²)`; at
+  k = 16 000 that is 0.77 s → 0.020 s.
+
+  The fast path is gated on *already-expanded*, *unshared* forms. It is
+  not gated for elegance: before the gate it cost `airport.nl` 16 → 300
+  iterations and took a shared-DAG model from 0.00 s to 172 s. Set
+  `POUNCE_DBG_NO_QUAD=1` to turn parse-time recognition off and A/B any
+  model against the tape; `quad_evaluator_differential.rs` declares in
+  advance which comparisons are bitwise (`eval_h`) and which are not
+  (`eval_g`, `eval_jac_g`, whose sums the matrix path reassociates). The
+  switch scopes to the evaluator and the load, and not to the phase
+  below: the constant-derivative proofs reach the recognizer through the
+  expression tree as well, so they resolve the same with it set.
+
+  Q7–Q9 (a native QCQP barrier driver and its presolve) are not in this
+  release and stay on #588. Q10 (dense-front factorization) was **cut**
+  by its own control experiment: feral beat MA57 on two of the three
+  instances that motivated it, and on `qcqp1500-1c` MA57 could not finish
+  in 1200 s a problem feral solves in 167 — the premise that POUNCE was
+  leaving a large factorization factor on the table is false on this
+  family. Full measurements, including the forecasts that turned out
+  wrong, are in `dev-notes/quadratic-structure-exploitation.md`.
+
+- **The four `*_constant` hints are checked against the model instead of
+  believed** (#588, phase Q6).
+
+  `grad_f_constant`, `hessian_constant`, `jac_c_constant` and
+  `jac_d_constant` are, in Ipopt, unchecked assertions: the derivative is
+  reused across iterates and a false assertion returns a wrong answer
+  with no indication. POUNCE now asks the model first, and the answer is
+  three-valued. Where the algebra **proves** the derivative constant it
+  is reused whether or not you set the option — the hint is redundant.
+  Where the algebra proves it **varies** and you set the option anyway,
+  the option is warned about and ignored rather than obeyed; that is the
+  deliberate divergence from upstream, and it is the only one. Where
+  nothing can be proved — every callback front end, both GAMS links — the
+  assertion is honoured on trust exactly as upstream does, because
+  "unproved" is not "disproved".
+
+  Across the 57-model fixture corpus this removes evaluations at
+  bit-identical trajectories: ∇f 1729 → 1161 and ∇g 2005 → 1573. ∇²L
+  barely moves (1880 → 1873) and neither does `qcqp1000-2c`, which was
+  the forecast. `POUNCE_DBG_CONSTDERIV=1` prints the resolved verdict for
+  all four.
+
+  Fixing a variable (`x_l == x_u`) can only remove variation from a
+  derivative, so a proof of variation does not survive it — but the
+  weakening is applied only to the forms a fixed variable structurally
+  reaches, read out of sparsity POUNCE already has. Weakening all four
+  proofs because a model fixed one unrelated variable would have handed
+  that model back its own false hints everywhere else.
+
+  On a problem that routes to the convex LP/QP/SOCP engines none of this
+  runs — those engines are handed constant matrices to begin with — so
+  setting one of the four hints there now warns that it is doing nothing,
+  which is what the NLP path's now-empty unexploited-hint table used to
+  say for both routes.
+
+- **A quadratic row whose coefficients cancel is no longer reported as
+  affine** (#683, found reviewing #588 before merge).
+
+  `provably_affine` is a proof of *degree*, and Q6 above uses it to set
+  `jac_c_constant` / `jac_d_constant` — a row it proves affine has its
+  Jacobian evaluated once and reused for the rest of the solve. It read
+  that proof off the recognizer's coefficient map, which stores only
+  nonzero coefficients, and those coefficients are floating-point
+  **sums**: `2⁵³·x² + x² − 2⁵³·x²` is `x²` but folds to exactly zero, and
+  `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)` underflows. Either left the map empty and the
+  row proved affine, on the default route, with no debug variable and no
+  option set — a silently wrong answer.
+
+  A dropped term is now recorded rather than believed: the coefficient
+  maps answer the *storage* question and a separate flag says whether
+  that answer is also a proof of degree. Where it is not, the degree
+  question comes back "not established" and the derivative is not frozen.
+
+- **…and it is no longer evaluated from those coefficients either**
+  (#685 part 1, same review).
+
+  The other consumer of the same cancelled map is Q4's
+  constant-structure evaluator, which uses it *in place of* the row's
+  tape. Its gate tested the shape the coefficients were derived from —
+  a flat sum of monomials — and a cancelling row is one, so the row was
+  evaluated as identically zero: `g = 0` and `∂g/∂x = [0, 0]` at
+  `x₀ = 3` where the tape gives `16` and `[8, 0]`. An inequality on such
+  a row stops constraining anything, and the reproduction walks its
+  objective variable to a `-10⁶` bound and reports `Optimal` where the
+  same bytes down the tape stop at `-0.281`. The form is now admitted
+  only when nothing was dropped deriving it; a row that lost a term goes
+  back to the tape, which is where it was before this phase.
+
+  The gate is on the dropped-term flag and not on the map being empty,
+  because partial cancellation is the same defect: in
+  `2⁵³·x² + x² − 2⁵³·x² + y²` the surviving `y²` keeps the map non-empty
+  and the *degree* answer correct while the read-out is still short an
+  entire `x²`.
+
+  Part 2 of #685 — a model of this shape being classified LP — predates
+  this work and is unchanged here.
+
+- **`least_square_init_primal=yes` costs one accepted downgrade on the
+  fixture corpus, not two** (#681, revising the gh#616 measurement).
+
+  gh#616 measured the option's cost as two models finishing at
+  `SolvedToAcceptableLevel` instead of `SolveSucceeded`. One of them,
+  `eigenb2`, no longer does: the reassociated sums on the quadratic fast
+  path above carry it across the accept band, to `SolveSucceeded` at
+  1.5999999999925176 in 54 iterations where the AD tape stalls at
+  1.5999999913471497 in 57. `csfi2` is unchanged to the bit — its
+  safeguard declines the step, so no evaluator change can reach it.
+
+  Nothing about the safeguard moved. `eigena2` and `eigenb2` still hand
+  it bit-identical numbers, with only two ulps of `violation_final`
+  separating the fast path from the tape, so `eigenb2`'s downgrade was
+  never a property of the accept test and retuning that test against it
+  would have been tuning against round-off. Both legs are pinned in
+  `issue_616_ls_init_downgrades.rs` — the fast path's verdict and the
+  tape's under `POUNCE_DBG_NO_QUAD=1` — so a future move is attributable
+  to one of them.
 - **`estimate()` decides a degenerate base point for the perturbation's
   own direction** (#672). A solve can converge with a bound weakly active, on
   the bound with a multiplier of the same order as the slack, and the

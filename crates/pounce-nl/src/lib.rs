@@ -12,6 +12,10 @@
 //!   `funcadd_ASL` ABI.
 //! - [`nl_fbbt_translate`] lowers an `Expr` to an `FbbtTape` for
 //!   feasibility-based bound tightening.
+//! - [`nl_quadratic`] recognizes a degree-≤2 polynomial in an `Expr` DAG and
+//!   reads off its Hessian, linear part, and constant — the algebra behind
+//!   the CLI's LP/QP/QCQP routing, kept here so the evaluator and the
+//!   extractors can share it.
 //! - [`sol_writer`] is the reader's inverse: it formats a solve's primals,
 //!   duals, and suffixes as an AMPL `.sol` file. It lives here (rather than
 //!   in the CLI, which owned it until the browser frontend needed it too) so
@@ -24,6 +28,7 @@
 
 pub mod nl_external;
 pub mod nl_fbbt_translate;
+pub mod nl_quadratic;
 pub mod nl_reader;
 pub mod nl_tape;
 pub mod sol_writer;

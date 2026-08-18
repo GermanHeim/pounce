@@ -946,6 +946,29 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     if (!data->have_hessian)
         AddIpoptStrOption(nlp, "hessian_approximation", "limited-memory");
 
+    /* Every constraint's Jacobian row is a constant vector when GMO flags
+     * no nonlinear nonzero anywhere in the matrix. That is not a new claim:
+     * gams_eval_jac_g already *relies* on it per row, copying
+     * jac_values_init for a row with row_has_nl == 0 instead of calling
+     * gmoEvalGrad. Asserting it to POUNCE lets the solver evaluate the
+     * Jacobian once for the whole solve rather than once per iteration
+     * (pounce #588, phase Q6). POUNCE cannot prove this itself through the
+     * callback interface -- it sees numbers, not algebra -- so the hint is
+     * honored on trust, which is exactly the state it is for.
+     *
+     * Both blocks are asserted together because the equality/inequality
+     * split happens inside POUNCE and this flag is about the whole matrix.
+     * Set before the option-file parse so a user pounce.opt can override. */
+    if (m > 0 && data->nnz_jac > 0) {
+        int any_nl_row = 0;
+        for (int i = 0; i < m; i++)
+            if (data->row_has_nl[i]) { any_nl_row = 1; break; }
+        if (!any_nl_row) {
+            AddIpoptStrOption(nlp, "jac_c_constant", "yes");
+            AddIpoptStrOption(nlp, "jac_d_constant", "yes");
+        }
+    }
+
     /* ---------------------------------------------------------------
      * Read option file (pounce.opt, pounce.op2, ...)
      * --------------------------------------------------------------- */

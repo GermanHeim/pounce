@@ -29,7 +29,6 @@
 //!   the *opposite* sentinel (an upper bound of `-5e20`) is an ordinary
 //!   bound and is kept.
 
-use crate::dispatch::analyze_quadratic_full;
 use crate::nl_reader::NlProblem;
 // Bound presence is read **directionally** — a lower bound is absent only at
 // or below `-1e19`, an upper bound only at or above `+1e19`. This file used a
@@ -79,7 +78,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
 
     // --- objective Hessian P (lower triangle) + nonlinear-tree linear part
     //     + nonlinear-tree constant (degree-0 term, for reporting only) ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = prob.obj_nonlinear.analyze_quadratic_full()?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         // analyze_quadratic returns (i ≤ j) upper-ish keys; store as
@@ -121,7 +120,8 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         // silently solves the wrong constraint. The folded constant
         // shifts the bounds: `g_l ≤ row + k ≤ g_u  ⇔  g_l−k ≤ row ≤ g_u−k`.
         // This mirrors the SOCP extractor's linear-constraint handling.
-        let (nl_lin, const_shift) = analyze_quadratic_full(&prob.con_nonlinear[row], n)
+        let (nl_lin, const_shift) = prob.con_nonlinear[row]
+            .analyze_quadratic_full()
             .map(|(_, l, k)| (l, k))
             .unwrap_or_default();
         let mut coef = vec![0.0; n];
@@ -326,17 +326,29 @@ pub enum ConSocpMap {
 /// A deferred second-order-cone block, built after the nonnegative `G` rows
 /// are known so the cones partition `G` in row order (nonneg block first,
 /// then the SOCs).
+/// Everything here is sized by the row's own **support** `k` — the variables
+/// that actually appear in it — never by the problem width `n`. A QCQP row
+/// typically touches a handful of variables out of `n` in the hundreds of
+/// thousands (`nql180`: `k = 2`, `n = 129 601`), so an `n`-sized structure per
+/// row is the difference between kilobytes and tens of gigabytes.
 struct SocBlock {
     /// Index in `con_map` of the originating constraint, to patch with the
     /// final cone-row indices once they are assigned.
     con_idx: usize,
-    /// Linear coefficient vector `a` of the constraint (length `n`).
-    a: Vec<f64>,
+    /// Linear coefficients of the constraint as `(variable, coefficient)`,
+    /// ascending by variable and with zeros dropped.
+    a: Vec<(usize, f64)>,
     /// `b_eff = (nonlinear constant) − g_u`, the constraint's degree-0 term
     /// after moving the upper bound to the right: `½xᵀQx + aᵀx + b_eff ≤ 0`.
     b_eff: f64,
-    /// Rows of the factor `F` (each length `n`) with `FᵀF = Q`; `‖Fx‖² = xᵀQx`.
-    f_rows: Vec<Vec<f64>>,
+    /// Rows of the factor `F` with `FᵀF = Q`, each a sparse
+    /// `(variable, coefficient)` list in the problem's own indexing.
+    ///
+    /// Sparse rather than length-`n` (or even length-`k`) dense: a diagonal
+    /// `Q` — the `qssp180`/`nql180` regime — has rank `k` and one nonzero per
+    /// factor row, so a dense factor would be `k²` to hold a `k`-nonzero
+    /// object.
+    f_rows: Vec<Vec<(usize, f64)>>,
 }
 
 /// Convert a classified **convex QCQP** `NlProblem` into the conic standard
@@ -371,7 +383,7 @@ pub fn extract_socp_with_map(
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
     // --- objective P (lower triangle) + folded linear / constant terms ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = prob.obj_nonlinear.analyze_quadratic_full()?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         let (row, col) = if i >= j { (*i, *j) } else { (*j, *i) };
@@ -399,7 +411,7 @@ pub fn extract_socp_with_map(
         let lo = prob.g_l[row];
         let hi = prob.g_u[row];
         let nl = &prob.con_nonlinear[row];
-        let quad = analyze_quadratic_full(nl, n);
+        let quad = nl.analyze_quadratic_full();
         let is_quadratic = matches!(&quad, Some((hmap, _, _)) if !hmap.is_empty());
 
         if is_quadratic {
@@ -407,17 +419,20 @@ pub fn extract_socp_with_map(
             // guarantees an upper-only bound with PSD Hessian). Build the
             // factor F (FᵀF = Q) and defer the SOC rows.
             let (hmap, nl_lin, nl_const) = quad.expect("checked above");
-            // Full linear coefficient vector a = linear-section + folded
-            // nonlinear-tree linear part.
-            let mut a_vec = vec![0.0; n];
+            // Linear coefficients a = linear-section + folded nonlinear-tree
+            // linear part, accumulated sparsely: a QCQP row's linear part is
+            // as narrow as its quadratic part, and `n` here can be six digits.
+            let mut a_map: std::collections::BTreeMap<usize, f64> =
+                std::collections::BTreeMap::new();
             for (var, coef) in lin {
-                a_vec[*var] += *coef;
+                *a_map.entry(*var).or_insert(0.0) += *coef;
             }
             for (var, coef) in &nl_lin {
-                a_vec[*var] += *coef;
+                *a_map.entry(*var).or_insert(0.0) += *coef;
             }
-            let dense = dense_symmetric(&hmap, n);
-            let f_rows = psd_outer_factor(dense, n);
+            let a_vec: Vec<(usize, f64)> = a_map.into_iter().filter(|&(_, c)| c != 0.0).collect();
+
+            let f_rows = socp_factor_rows(&hmap);
             let con_idx = con_map.len();
             con_map.push(ConSocpMap::Quad {
                 z_row0: 0,
@@ -496,28 +511,23 @@ pub fn extract_socp_with_map(
         let dim = r + 2;
         let row0 = next_row(&h);
         // s0 = (1 − b_eff) − aᵀx  →  G row = a, h = 1 − b_eff.
-        for (var, &coef) in blk.a.iter().enumerate() {
-            if coef != 0.0 {
-                g.push(Triplet::new(row0, var, coef));
-            }
+        for &(var, coef) in &blk.a {
+            g.push(Triplet::new(row0, var, coef));
         }
         h.push(1.0 - blk.b_eff);
         let row1 = next_row(&h);
         // s1 = −(1 + b_eff) − aᵀx  →  G row = a, h = −(1 + b_eff).
-        for (var, &coef) in blk.a.iter().enumerate() {
-            if coef != 0.0 {
-                g.push(Triplet::new(row1, var, coef));
-            }
+        for &(var, coef) in &blk.a {
+            g.push(Triplet::new(row1, var, coef));
         }
         h.push(-(1.0 + blk.b_eff));
-        // s_{2+k} = √2·(Fx)_k  →  G row = −√2·F_k, h = 0.
+        // s_{2+k} = √2·(Fx)_k  →  G row = −√2·F_k, h = 0. `f` is indexed by
+        // position within the row's support, so scatter back through it.
         let sqrt2 = std::f64::consts::SQRT_2;
         for f in &blk.f_rows {
             let gr = next_row(&h);
-            for (var, &fv) in f.iter().enumerate() {
-                if fv != 0.0 {
-                    g.push(Triplet::new(gr, var, -sqrt2 * fv));
-                }
+            for &(var, fv) in f {
+                g.push(Triplet::new(gr, var, -sqrt2 * fv));
             }
             h.push(0.0);
         }
@@ -578,14 +588,109 @@ pub fn recover_socp_duals(
         .collect()
 }
 
-/// Build a dense symmetric `n×n` matrix from a [`QuadHessian`]-style map of
-/// `(i ≤ j) → Hessian entry` (diagonal entries are the full `∂²/∂xᵢ²`, so
-/// `½xᵀHx` reproduces the quadratic form). Off-diagonals are mirrored.
-fn dense_symmetric(hmap: &std::collections::BTreeMap<(usize, usize), f64>, n: usize) -> Vec<f64> {
-    let mut dense = vec![0.0; n * n];
+/// Factor one quadratic row's Hessian `Q` into sparse rows `f_k` (in the
+/// problem's variable indexing) with `Σ_k f_k f_kᵀ = Q`.
+///
+/// Two paths, and the cheap one is the common one:
+///
+/// * **Diagonal `Q`** — `f` is one row per positive diagonal entry, each with a
+///   single nonzero `√d_i`. `O(k)` time and `O(k)` space in the row's support.
+///   This is the `qssp180`/`nql180` regime, where the general path's `O(k³)`
+///   factorization and `k²` factor would both be ruinous for no benefit.
+/// * **Otherwise** — pivoted Cholesky on a dense `k×k` over the row's support,
+///   then scatter the rows back to problem indices, dropping zeros. Sized by
+///   `k`, never by `n`.
+fn socp_factor_rows(
+    hmap: &std::collections::BTreeMap<(usize, usize), f64>,
+) -> Vec<Vec<(usize, f64)>> {
+    let support = quad_support(hmap);
+    let k = support.len();
+
+    if !hmap.keys().any(|&(i, j)| i != j) {
+        // Diagonal: one factor row per variable, holding that entry's square
+        // root. Nonpositive diagonal entries are the zero eigenvalues of a PSD
+        // diagonal matrix (convexity is already established before we get
+        // here), and contribute no row.
+        //
+        // Two details make this a *shortcut* rather than an approximation, so
+        // the fast path and the general path emit bit-identical factors and a
+        // problem's trajectory cannot depend on which one ran:
+        //
+        //  * the tolerance is the same expression `psd_outer_factor` uses, so
+        //    both drop exactly the same entries and agree on the cone's
+        //    dimension;
+        //  * the value is `d / √d`, not `√d`. They differ by an ulp — `√2` is
+        //    `0x1.6a09e667f3bcdp+0` and `2/√2` is `0x1.6a09e667f3bccp+0` — and
+        //    `d / √d` is what the general path's `a[i][p] / d_pivot` computes.
+        //    Reproducing it is free; not reproducing it moved `qcqp_ball` from
+        //    17 conic iterations to 12 on a 2-ulp perturbation of one `G`
+        //    entry, which is precisely the kind of invisible trajectory change
+        //    `scripts/sweep-fixtures.sh` exists to catch.
+        //  * the rows come out in **pivot order**, largest diagonal first. On a
+        //    diagonal matrix the rank-1 downdate only zeros the pivot, so the
+        //    general path's complete pivoting visits entries in descending
+        //    order with ties going to the lower index — which is what a
+        //    *stable* sort of the (ascending-by-index) map entries gives.
+        //    `‖Fx‖` does not care about row order, but `G` does: the rows land
+        //    in the KKT matrix and the ordering feeds the fill-reducing
+        //    permutation.
+        let max_diag = hmap.values().fold(0.0_f64, |m, &v| m.max(v));
+        let tol = 1e-12 * max_diag.max(1.0);
+        let mut diag: Vec<(usize, f64)> = hmap
+            .iter()
+            .filter(|&(_, &v)| v > tol)
+            .map(|(&(i, _), &v)| (i, v))
+            .collect();
+        diag.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("PSD diagonal is finite"));
+        return diag
+            .into_iter()
+            .map(|(i, v)| vec![(i, v / v.sqrt())])
+            .collect();
+    }
+
+    let dense = dense_symmetric_on_support(hmap, &support);
+    psd_outer_factor(dense, k)
+        .into_iter()
+        .map(|f| {
+            f.into_iter()
+                .enumerate()
+                .filter(|&(_, fv)| fv != 0.0)
+                .map(|(loc, fv)| (support[loc], fv))
+                .collect()
+        })
+        .collect()
+}
+
+/// The variables a quadratic row touches, ascending and deduplicated.
+///
+/// This is the row's *support*, and it is what every downstream structure is
+/// sized by. `hmap` stores only `i ≤ j`, so both coordinates must be collected.
+fn quad_support(hmap: &std::collections::BTreeMap<(usize, usize), f64>) -> Vec<usize> {
+    let mut s: Vec<usize> = hmap.keys().flat_map(|&(i, j)| [i, j]).collect();
+    s.sort_unstable();
+    s.dedup();
+    s
+}
+
+/// Build a dense symmetric `k×k` matrix over a row's `support` from a
+/// [`QuadHessian`]-style map of `(i ≤ j) → Hessian entry` (diagonal entries are
+/// the full `∂²/∂xᵢ²`, so `½xᵀHx` reproduces the quadratic form). Off-diagonals
+/// are mirrored.
+///
+/// Sized by `k`, never by `n`: the previous `n×n` version asked for 134 GB on a
+/// two-variable row of `nql180`.
+fn dense_symmetric_on_support(
+    hmap: &std::collections::BTreeMap<(usize, usize), f64>,
+    support: &[usize],
+) -> Vec<f64> {
+    let k = support.len();
+    // `support` is sorted, so a binary search is the local index.
+    let loc = |v: usize| support.binary_search(&v).expect("key came from support");
+    let mut dense = vec![0.0; k * k];
     for (&(i, j), &v) in hmap {
-        dense[i * n + j] = v;
-        dense[j * n + i] = v;
+        let (li, lj) = (loc(i), loc(j));
+        dense[li * k + lj] = v;
+        dense[lj * k + li] = v;
     }
     dense
 }
@@ -593,7 +698,13 @@ fn dense_symmetric(hmap: &std::collections::BTreeMap<(usize, usize), f64>, n: us
 /// Symmetric **pivoted (rank-revealing) Cholesky** of a PSD matrix `H`
 /// (row-major `n×n`, consumed as scratch), returning the factor rows `f_k`
 /// (each length `n`) such that `Σ_k f_k f_kᵀ = H` — equivalently `FᵀF = H`
-/// with `F` the matrix whose rows are the `f_k`. The number of rows is the
+/// with `F` the matrix whose rows are the `f_k`.
+///
+/// Callers pass a **row's support size** `k` here, not the problem width: this
+/// is `O(n³)` in whatever it is handed, so the distinction is what makes a wide
+/// QCQP extractable at all.
+///
+/// The number of rows is the
 /// numerical rank, so a rank-deficient `Q` (e.g. `Q = vvᵀ`) yields the
 /// minimal cone. Complete diagonal pivoting keeps the factorization stable
 /// on the indefinite-looking-but-PSD matrices finite precision can produce.
@@ -641,6 +752,7 @@ fn psd_outer_factor(mut a: Vec<f64>, n: usize) -> Vec<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nl_reader::NlBody;
     use crate::nl_reader::{BinOp, Expr};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_socp_ipm};
     use pounce_feral::FeralSolverInterface;
@@ -664,18 +776,20 @@ mod tests {
     #[test]
     fn extract_and_solve_socp_ball() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, -1.0), (1, -1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Binary(
+            con_nonlinear: vec![NlBody::Tree(Expr::Binary(
                 BinOp::Add,
                 Box::new(pow2(0)),
                 Box::new(pow2(1)),
-            )],
+            ))],
             con_linear: vec![vec![]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -686,6 +800,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -734,14 +849,16 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]],
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -752,6 +869,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -762,6 +880,204 @@ mod tests {
         let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         assert!((sol.x[0] - 2.0).abs() < 1e-5, "x0={}", sol.x[0]);
+    }
+
+    /// Build `min −x_i − x_j  s.t.  x_i² + x_j² ≤ 1` over `n` variables, where
+    /// `i` and `j` are neither low-numbered nor adjacent.
+    fn wide_ball(n: usize, i: usize, j: usize) -> NlProblem {
+        let sq = |v: usize| {
+            Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(v)),
+                Box::new(Expr::Const(2.0)),
+            )
+        };
+        NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
+            n,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
+            obj_linear: vec![(i, -1.0), (j, -1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![NlBody::Tree(Expr::Binary(
+                BinOp::Add,
+                Box::new(sq(i)),
+                Box::new(sq(j)),
+            ))],
+            con_linear: vec![vec![]],
+            x_l: vec![-10.0; n],
+            x_u: vec![10.0; n],
+            g_l: vec![-2e19],
+            g_u: vec![1.0],
+            x0: vec![0.0; n],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
+            nl_counts: None,
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    /// The cone factor is built on the row's **support**, so its columns are
+    /// support-local and must be scattered back through `support` on emission.
+    /// If that scatter is dropped, a row touching `x11`/`x37` silently
+    /// constrains `x0`/`x1` instead — a wrong answer, not a crash.
+    #[test]
+    fn socp_factor_columns_scatter_back_to_original_variables() {
+        let prob = wide_ball(40, 11, 37);
+        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        assert_eq!(cones, vec![ConeSpec::SecondOrder(4)]); // rank 2 + 2.
+
+        // Every G entry in the two factor rows must sit in column 11 or 37.
+        // Rows 0 and 1 are the `a`-rows (here empty: no linear part).
+        let factor_cols: std::collections::BTreeSet<usize> =
+            qp.g.iter().filter(|t| t.row >= 2).map(|t| t.col).collect();
+        assert_eq!(
+            factor_cols,
+            [11usize, 37].into_iter().collect(),
+            "factor rows must reference the row's own variables, got {factor_cols:?}"
+        );
+    }
+
+    /// The extractor must be sized by a row's support, not by the problem
+    /// width. A two-variable quadratic row in a 50 000-variable problem needs
+    /// kilobytes; sizing it `n×n` would ask for 20 GB and abort the process.
+    #[test]
+    fn socp_extraction_is_sized_by_support_not_problem_width() {
+        let n = 50_000;
+        let prob = wide_ball(n, 7, n - 3);
+        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        assert_eq!(cones, vec![ConeSpec::SecondOrder(4)]);
+        // The cone contributes exactly two nonzeros per factor row.
+        assert_eq!(qp.g.iter().filter(|t| t.row >= 2).count(), 2);
+    }
+
+    /// The same scatter, but through the **dense** path: a cross term makes `Q`
+    /// non-diagonal, so the row goes through the pivoted Cholesky and its
+    /// support-local columns must be mapped back. Rank 1, so one factor row.
+    #[test]
+    fn socp_dense_factor_columns_scatter_back_to_original_variables() {
+        // (x11 + x37)² ≤ 1 — off-diagonal Q, rank 1.
+        let con = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(11)),
+                Box::new(Expr::Var(37)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let mut prob = wide_ball(40, 11, 37);
+        prob.con_nonlinear = vec![NlBody::Tree(con)];
+
+        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        assert_eq!(cones, vec![ConeSpec::SecondOrder(3)], "rank 1 + 2");
+        let factor_cols: std::collections::BTreeSet<usize> =
+            qp.g.iter().filter(|t| t.row >= 2).map(|t| t.col).collect();
+        assert_eq!(factor_cols, [11usize, 37].into_iter().collect());
+    }
+
+    /// A diagonal `Q` must not be densified. `socp_factor_rows` returns one
+    /// single-nonzero row per positive diagonal entry, so the factor is `O(k)`
+    /// — this is what makes the very large diagonal QCQPs (`qssp180`,
+    /// `nql180`) representable at all.
+    #[test]
+    fn diagonal_hessian_factors_in_linear_space() {
+        let mut h = std::collections::BTreeMap::new();
+        for i in 0..1000usize {
+            h.insert((i, i), 4.0);
+        }
+        let rows = socp_factor_rows(&h);
+        assert_eq!(rows.len(), 1000);
+        assert!(
+            rows.iter().all(|r| r.len() == 1),
+            "a diagonal Q must give one nonzero per factor row"
+        );
+        for (k, r) in rows.iter().enumerate() {
+            assert_eq!(r[0].0, k);
+            assert!((r[0].1 - 2.0).abs() < 1e-12, "√4 = 2, got {}", r[0].1);
+        }
+    }
+
+    /// Both factor paths must satisfy the same contract, `Σ_k f_k f_kᵀ = Q`,
+    /// and must agree on the rank. There are now two of them — an `O(k)`
+    /// diagonal shortcut and the general pivoted Cholesky — so the contract is
+    /// asserted directly rather than inferred from the shortcut's derivation.
+    ///
+    /// The near-zero diagonal entry is the rank agreement: it sits below the
+    /// `1e-12 · max_diag` cut, and both paths must drop it, or the two would
+    /// build cones of different dimension for the same constraint.
+    #[test]
+    fn both_factor_paths_reconstruct_q_and_agree_on_rank() {
+        let recon = |rows: &[Vec<(usize, f64)>]| {
+            let mut q: std::collections::BTreeMap<(usize, usize), f64> = Default::default();
+            for r in rows {
+                for &(i, fi) in r {
+                    for &(j, fj) in r {
+                        *q.entry((i, j)).or_insert(0.0) += fi * fj;
+                    }
+                }
+            }
+            q.retain(|_, v| v.abs() > 1e-12);
+            q
+        };
+
+        // Diagonal path, with one entry far below the rank tolerance.
+        // Deliberately *not* descending by index: the largest entry sits on
+        // the highest variable, so a shortcut that emitted in index order
+        // would produce the right cone with the rows in the wrong order.
+        let diag: std::collections::BTreeMap<(usize, usize), f64> =
+            [((3, 3), 2.0), ((8, 8), 9.0), ((9, 9), 1e-20)]
+                .into_iter()
+                .collect();
+        let drows = socp_factor_rows(&diag);
+        assert_eq!(drows.len(), 2, "the 1e-20 pivot is a zero eigenvalue");
+
+        // The shortcut must be *bit*-identical to the general path, not merely
+        // close: a 2-ulp difference in one `G` entry visibly moved `qcqp_ball`'s
+        // conic trajectory (17 → 12 iterations). Run the same matrix through
+        // `psd_outer_factor` and compare the raw bits.
+        let support = quad_support(&diag);
+        let general = psd_outer_factor(dense_symmetric_on_support(&diag, &support), support.len());
+        let general_vals: Vec<f64> = general
+            .iter()
+            .map(|f| f.iter().copied().find(|v| *v != 0.0).expect("one nonzero"))
+            .collect();
+        let short_vals: Vec<f64> = drows.iter().map(|r| r[0].1).collect();
+        assert_eq!(
+            short_vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            general_vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "diagonal shortcut must reproduce psd_outer_factor bit for bit \
+             (got {short_vals:?} vs {general_vals:?})"
+        );
+        assert_eq!(drows[0][0].0, 8, "largest diagonal pivots first");
+        assert_eq!(drows[1][0].0, 3);
+        let dq = recon(&drows);
+        assert_eq!(dq.len(), 2);
+        assert!((dq[&(3, 3)] - 2.0).abs() < 1e-12);
+        assert!((dq[&(8, 8)] - 9.0).abs() < 1e-12);
+
+        // General path: same matrix plus a cross term, so the diagonal
+        // shortcut no longer applies. Q = [[2,1],[1,9]] on {3,8} is positive
+        // definite, so full rank 2.
+        let mut coupled = diag.clone();
+        coupled.insert((3, 8), 1.0);
+        let grows = socp_factor_rows(&coupled);
+        assert_eq!(grows.len(), 2);
+        let gq = recon(&grows);
+        assert!((gq[&(3, 3)] - 2.0).abs() < 1e-10);
+        assert!((gq[&(8, 8)] - 9.0).abs() < 1e-10);
+        assert!((gq[&(3, 8)] - 1.0).abs() < 1e-10);
+        assert!((gq[&(8, 3)] - 1.0).abs() < 1e-10);
+        assert!(
+            !gq.contains_key(&(9, 9)),
+            "zero eigenvalue must not reappear"
+        );
     }
 
     /// `psd_outer_factor` recovers a rank-1 `Q = vvᵀ` with a single factor row
@@ -790,14 +1106,20 @@ mod tests {
     #[test]
     fn extract_and_solve_equality_qp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Binary(BinOp::Add, Box::new(pow2(0)), Box::new(pow2(1))),
+            obj_nonlinear: NlBody::Tree(Expr::Binary(
+                BinOp::Add,
+                Box::new(pow2(0)),
+                Box::new(pow2(1)),
+            )),
             obj_linear: vec![],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -808,6 +1130,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -852,11 +1175,13 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: obj,
+            obj_nonlinear: NlBody::Tree(obj),
             obj_linear: vec![],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -870,6 +1195,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -900,14 +1226,16 @@ mod tests {
     #[test]
     fn inequality_dual_recovered() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: pow2(0),
+            obj_nonlinear: NlBody::Tree(pow2(0)),
             obj_linear: vec![],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0)]], // g(x) = x0
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -918,6 +1246,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -956,14 +1285,16 @@ mod tests {
             Box::new(Expr::Const(3.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]], // the `+x0` lives in the TREE
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -974,6 +1305,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1010,11 +1342,13 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: obj,
+            obj_nonlinear: NlBody::Tree(obj),
             obj_linear: vec![],
             obj_constant: 0.0, // the +9 is in the TREE, not here
             con_nonlinear: vec![],
@@ -1028,6 +1362,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1050,11 +1385,13 @@ mod tests {
     #[test]
     fn extract_and_solve_bounded_qp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: pow2(0),
+            obj_nonlinear: NlBody::Tree(pow2(0)),
             obj_linear: vec![(0, -6.0)],
             obj_constant: 9.0,
             con_nonlinear: vec![],
@@ -1068,6 +1405,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1084,11 +1422,13 @@ mod tests {
     #[test]
     fn extract_and_solve_lp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, -1.0), (1, -1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1102,6 +1442,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1121,11 +1462,13 @@ mod tests {
     #[test]
     fn extract_maximize_negates() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: false,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1139,6 +1482,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1160,11 +1504,13 @@ mod tests {
     #[test]
     fn variable_bound_past_the_opposite_sentinel_is_kept() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: false, // maximize x0, so the -5e20 upper bound binds
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1180,6 +1526,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1210,14 +1557,16 @@ mod tests {
     #[test]
     fn a_row_with_equal_bounds_past_the_sentinel_does_not_vanish() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -1228,6 +1577,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1258,11 +1608,13 @@ mod tests {
     #[test]
     fn the_box_is_built_with_the_directional_bound_test() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0), (1, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1278,6 +1630,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1298,11 +1651,13 @@ mod tests {
     #[test]
     fn bound_multipliers_come_back_per_variable() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0), (1, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1316,6 +1671,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
