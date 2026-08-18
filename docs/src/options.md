@@ -139,11 +139,28 @@ Two deliberate exceptions:
   `ipopt.opt` spells out defaults, and `dependency_detector=none` asks for
   nothing. Only a value that differs from the default is a request POUNCE
   cannot honour.
-* **Caching hints warn instead of failing.** `grad_f_constant`,
+* **Caching hints are checked, not trusted.** `grad_f_constant`,
   `hessian_constant`, `jac_c_constant` and `jac_d_constant` tell the
-  solver a quantity does not change between iterations. POUNCE
-  re-evaluates regardless, so ignoring them costs evaluations and never
-  correctness — failing the solve would be a worse trade.
+  solver a derivative does not change between iterations. Ipopt takes
+  such a hint on faith and silently returns a wrong answer if it is
+  false. POUNCE asks the model first, and there are three cases:
+
+  * **POUNCE proves the derivative constant** — from an `.nl` model's own
+    algebra — and reuses it across iterations *whether or not you set the
+    option*. Setting it is harmless and unnecessary.
+  * **POUNCE proves the derivative is not constant** and you set the
+    option anyway: the option is **ignored, with a warning**. A QCQP's
+    `∇²L = σQ₀ + Σᵢλᵢ Qᵢ` genuinely varies with the multipliers, so
+    `hessian_constant=yes` there is not a hint but a false statement, and
+    honouring it would trade a correct answer for a fast wrong one.
+  * **POUNCE cannot tell** — every callback front end (the C interface,
+    the Python `Problem` callbacks, both GAMS links) hands POUNCE numbers
+    rather than algebra — and your assertion is **honoured on trust**,
+    exactly as upstream. "Unproved" is not "disproved"; overriding you
+    here would be its own silent wrong answer.
+
+  `POUNCE_DBG_CONSTDERIV=1` prints which of the three fired for each of
+  the four options.
 
 Options whose *feature* runs and whose value simply is not read yet are
 **not** in this category; they still solve, with the default in effect.

@@ -287,6 +287,19 @@ def solve_view(
     prob.add_option("acceptable_iter", 0)
     if not gp.has_hessian:
         prob.add_option("hessian_approximation", "limited-memory")
+    # Every Jacobian row is a constant vector when GMO flags no nonlinear
+    # nonzero anywhere in the matrix. `_GmoView.eval_jac` already relies on
+    # exactly this per row -- it copies the cached coefficients for a row
+    # with no nonlinear entry instead of calling the evaluator -- so
+    # asserting it to POUNCE adds no new claim, it just lets the solver
+    # evaluate the Jacobian once for the whole solve instead of once per
+    # iteration (pounce#588, phase Q6). POUNCE cannot prove this through the
+    # callback interface; a hint it can neither confirm nor refute is
+    # honoured on trust, which is what this state is for. Mirrors the C
+    # link, and is set before the option file so a user pounce.opt wins.
+    if gp.jacobian_is_constant:
+        prob.add_option("jac_c_constant", "yes")
+        prob.add_option("jac_d_constant", "yes")
 
     for key, value in (options or {}).items():
         try:
@@ -567,6 +580,15 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
     # --- structure -------------------------------------------------------
     def jac_structure(self):
         return self._jac_rows, self._jac_cols
+
+    def constraints_are_linear(self) -> bool:
+        """True when no Jacobian nonzero is flagged nonlinear by GMO.
+
+        Same `nlflag` array :meth:`eval_jac` keys its copy-the-cached-
+        coefficients path on, so this asserts nothing the link does not
+        already depend on being true.
+        """
+        return self._m > 0 and not any(self._row_has_nl)
 
     def hess_structure(self):
         gmo = self._gmo

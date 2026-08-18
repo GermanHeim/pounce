@@ -237,12 +237,22 @@ pub const UNIMPLEMENTED_VALUES: &[UnimplementedValue] = &[UnimplementedValue {
 /// unaffected — but whose performance hint pounce does not exploit.
 /// These warn rather than fail: refusing them would stop a solve that
 /// returns the right result today, only a little slower.
-pub const UNEXPLOITED_HINTS: &[&str] = &[
-    "grad_f_constant",
-    "hessian_constant",
-    "jac_c_constant",
-    "jac_d_constant",
-];
+///
+/// **Empty since gh #588 phase Q6.** The four constant-derivative hints
+/// (`grad_f_constant`, `hessian_constant`, `jac_c_constant`,
+/// `jac_d_constant`) lived here and are now exploited:
+/// [`pounce_nlp::constant_derivatives`] reconciles each one against what
+/// the model can prove about its own algebra, and
+/// `OrigIpoptNlp` reuses the derivative across iterates when the answer
+/// is yes. A hint the model *disproves* still produces a warning — but a
+/// louder one, from that module, saying the hint was refused rather than
+/// merely unused.
+///
+/// The table stays because the shape is right for the next hint that
+/// arrives registered-but-unexploited, and because
+/// [`hint_warnings`] and its two membership tests are the mechanism that
+/// keeps such an option from going silent again.
+pub const UNEXPLOITED_HINTS: &[&str] = &[];
 
 /// An option set to something the registry says is not its default.
 ///
@@ -446,18 +456,29 @@ mod tests {
         assert!(msg.contains("CG-penalty"), "{msg}");
     }
 
-    /// Hints warn instead of failing: the answer is the same either way,
-    /// so blocking the solve would cost the user more than the silence
-    /// did.
+    /// The four constant-derivative hints left this table in gh #588 Q6.
+    /// They must not block a solve — that was never in question — and
+    /// they must no longer produce the "pounce does not exploit this"
+    /// warning, because pounce now does. What they earn instead (a
+    /// proof-backed refusal, or silent reuse) is asserted where it is
+    /// decided: `pounce_nlp::constant_derivatives` and
+    /// `pounce-cli/tests/unimplemented_options.rs`.
     #[test]
-    fn caching_hints_warn_but_do_not_refuse() {
+    fn the_constant_derivative_hints_are_no_longer_unexploited() {
         let (mut opts, reg) = fixture();
         opts.set_string_value("hessian_constant", "yes", true, false)
             .unwrap();
         assert_eq!(refusal(&opts, &reg), None, "a hint must not block a solve");
-        let warnings = hint_warnings(&opts, &reg);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("hessian_constant"));
+        assert!(
+            hint_warnings(&opts, &reg).is_empty(),
+            "`hessian_constant` is exploited now; the unexploited-hint \
+             warning would contradict the reuse the solver actually does",
+        );
+        assert!(
+            UNEXPLOITED_HINTS.is_empty(),
+            "gh #588 Q6 emptied this table; an entry added back needs its \
+             own warning text and a test that the option is really unused",
+        );
     }
 
     /// `fast_step_computation` was in the refusal table for one commit,

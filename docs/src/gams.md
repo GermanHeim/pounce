@@ -144,6 +144,19 @@ tol        1e-10
 max_iter   500
 ```
 
+Both links set a few defaults before reading the option file, so a
+`pounce.opt` entry always wins. One of them is worth knowing about: when
+GMO reports that **no** Jacobian nonzero is nonlinear — the whole
+constraint matrix is linear — the link asserts `jac_c_constant=yes` and
+`jac_d_constant=yes`, and POUNCE then evaluates the constraint Jacobian
+once for the entire solve instead of once per iteration. This is the same
+flag the links already use to copy cached coefficients for a linear row
+rather than calling the GMO evaluator, so it asserts nothing new. POUNCE
+cannot establish it on its own here — through a callback interface it
+sees numbers, not algebra — which is precisely why the link, which does
+see GMO's linearity census, is the layer that says it. Put
+`jac_c_constant no` in `pounce.opt` to turn it off.
+
 ### Machine-readable solve report
 
 Set `json_output` in `pounce.opt` to also emit a structured

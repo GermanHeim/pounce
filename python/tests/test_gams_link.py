@@ -698,3 +698,123 @@ def test_gams_pi_wyndor_shadow_prices_both_senses():
     lam = [0.0, 1.5, 1.0]  # POUNCE internal multipliers for the Wyndor optimum
     assert link.gams_pi(lam, obj_sign=-1.0) == pytest.approx([0.0, 1.5, 1.0])
     assert link.gams_pi(lam, obj_sign=1.0) == pytest.approx([0.0, -1.5, -1.0])
+
+
+# --- gh #588 Q6: the constant-Jacobian hint the link can prove and POUNCE
+#     cannot ------------------------------------------------------------------
+#
+# POUNCE's own auto-detection reads the algebra of an `.nl` body. Through a
+# callback front end there is no algebra to read, so every proof comes back
+# "unknown" and a hint the *caller* asserts is honoured on trust. GMO hands
+# the link a per-nonzero linearity flag, which the link already relies on
+# (`eval_jac` copies cached coefficients for a row with no nonlinear entry
+# rather than calling the evaluator), so the link is exactly the layer that
+# can assert it.
+
+
+class LinearRowsView(HS071View):
+    """HS071's shape with a linear constraint matrix and no Hessian.
+
+    Only the flag and the Jacobian matter here; nothing in these tests
+    solves this model.
+    """
+
+    def constraints_are_linear(self):
+        return True
+
+
+def test_a_view_that_declines_the_linearity_question_reports_not_constant():
+    """The protocol member is optional, so a view predating it must not
+    accidentally assert the hint. Absence is `False`, never `True`."""
+    gp = problem_from_gmo(HS071View())
+    assert not hasattr(HS071View, "constraints_are_linear")
+    assert gp.jacobian_is_constant is False
+
+
+def test_a_linear_constraint_matrix_is_carried_into_the_problem():
+    gp = problem_from_gmo(LinearRowsView())
+    assert gp.jacobian_is_constant is True
+
+
+def test_a_model_with_no_rows_never_claims_a_constant_jacobian():
+    """`m == 0` has no Jacobian to reuse; claiming the hint there would set
+    an option that describes nothing."""
+
+    class NoRows(LinearRowsView):
+        def num_cons(self):
+            return 0
+
+        def con_lower(self):
+            return []
+
+        def con_upper(self):
+            return []
+
+        def jac_structure(self):
+            return [], []
+
+    assert problem_from_gmo(NoRows()).jacobian_is_constant is False
+
+
+def test_solve_view_sets_the_jacobian_hints_only_when_the_rows_are_linear():
+    """The two options reach `pounce.Problem`, and only for a linear matrix.
+
+    Asserted on the options the link *sets*, not on an evaluation count: a
+    counter would also move if POUNCE changed how it caches, and the claim
+    here is about what this link asserts.
+    """
+    seen = []
+
+    class FakeProblem:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def add_option(self, key, value):
+            seen.append((key, value))
+
+        def solve(self, x0, report_path=None, report_detail=None):
+            return np.asarray(x0, dtype=float), {"status": "Solve_Succeeded"}
+
+    import pounce as pounce_mod
+
+    real = pounce_mod.Problem
+    try:
+        pounce_mod.Problem = FakeProblem
+        seen.clear()
+        link.solve_view(LinearRowsView())
+        assert ("jac_c_constant", "yes") in seen
+        assert ("jac_d_constant", "yes") in seen
+
+        seen.clear()
+        link.solve_view(HS071View())
+        assert not [k for k, _ in seen if k.startswith("jac_")]
+    finally:
+        pounce_mod.Problem = real
+
+
+def test_the_jacobian_hints_precede_the_user_option_file():
+    """A `pounce.opt` must be able to turn the hint back off, which requires
+    the link to set it *before* the user's options are applied."""
+    seen = []
+
+    class FakeProblem:
+        def __init__(self, **kwargs):
+            pass
+
+        def add_option(self, key, value):
+            seen.append((key, value))
+
+        def solve(self, x0, report_path=None, report_detail=None):
+            return np.asarray(x0, dtype=float), {"status": "Solve_Succeeded"}
+
+    import pounce as pounce_mod
+
+    real = pounce_mod.Problem
+    try:
+        pounce_mod.Problem = FakeProblem
+        link.solve_view(LinearRowsView(), options={"jac_c_constant": "no"})
+    finally:
+        pounce_mod.Problem = real
+    keys = [k for k, _ in seen]
+    assert keys.index("jac_c_constant") < len(keys) - 1
+    assert seen[-1] == ("jac_c_constant", "no")

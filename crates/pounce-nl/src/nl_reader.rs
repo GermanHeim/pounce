@@ -34,10 +34,11 @@
 
 use crate::nl_quadratic::{
     Quad2, QuadForm, QuadHessian, analyze_quadratic_full, is_expanded_quadratic, is_trivially_zero,
-    quad_form_readout,
+    quad_form_readout, recognize_expr,
 };
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
+use pounce_nlp::constant_derivatives::{DerivativeProof, DerivativeProofs};
 use pounce_nlp::quadratic::QuadraticStructure;
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo,
@@ -387,6 +388,41 @@ impl NlBody {
                 analyze_quadratic_full(e)
             }
             NlBody::Quad(q) => Some(quad_form_readout(&q.form)),
+        }
+    }
+
+    /// Whether this body is provably **affine** — degree ≤ 1 — as a
+    /// three-valued answer: `Some(true)` proved affine, `Some(false)`
+    /// proved to have a nonzero second derivative, `None` no proof
+    /// either way.
+    ///
+    /// This is the degree question *without* the exactness gate
+    /// [`Self::admitted_quad_form`] applies, and the difference is the
+    /// point (gh #588, Q6). That gate exists because reading a value out
+    /// of stored coefficients cancels for a factored form; nothing is
+    /// read out here. The answer is used to decide whether a derivative
+    /// may be **reused** across iterates — a question about the
+    /// *degree* of the body, which a factored `(x − a)²` answers just as
+    /// well as an expanded one.
+    ///
+    /// `None` is not evidence of nonlinearity: the recognizer refuses
+    /// `2·(x + 1)`, which is affine. Consumers must treat it as "not
+    /// established".
+    ///
+    /// Deliberately answers from the term maps rather than from
+    /// [`Self::analyze_quadratic_full`]'s triplets: on `qssp180` that is
+    /// 65 341 recognized rows, and materializing a `QuadHessian` per row
+    /// to ask whether it is empty is the allocation-per-object cost Q3
+    /// removed from the recognizer in the first place.
+    pub fn provably_affine(&self) -> Option<bool> {
+        match self {
+            NlBody::Tree(e) => {
+                if is_trivially_zero(e) {
+                    return Some(true);
+                }
+                recognize_expr(e).map(|q| q.quadratic().is_empty())
+            }
+            NlBody::Quad(q) => Some(q.form.quadratic().is_empty()),
         }
     }
 
@@ -5484,6 +5520,51 @@ impl TNLP for NlTnlp {
         }
         pos_nonlin_vars[..list.len()].copy_from_slice(&list);
         true
+    }
+
+    fn derivative_proofs(&mut self) -> DerivativeProofs {
+        // Degree is the whole argument (gh #588, Q6). A body proved
+        // degree ≤ 1 has a constant gradient and no second derivative; a
+        // body proved degree 2 has a nonzero second derivative, hence a
+        // gradient that moves. A body the recognizer refuses is
+        // `Unknown` — and `Unknown` must stay `Unknown`, because the
+        // refusal is structural, not a finding of nonlinearity.
+        fn proof(affine: Option<bool>) -> DerivativeProof {
+            match affine {
+                Some(true) => DerivativeProof::Constant,
+                Some(false) => DerivativeProof::Varying,
+                None => DerivativeProof::Unknown,
+            }
+        }
+        let obj_affine = self.prob.obj_nonlinear.provably_affine();
+        let jac: Vec<DerivativeProof> = self
+            .prob
+            .con_nonlinear
+            .iter()
+            .map(|b| proof(b.provably_affine()))
+            .collect();
+
+        // `∇²L = σ·∇²f + Σᵢ λᵢ·∇²gᵢ`. One row proved genuinely quadratic
+        // makes `∇²L` a non-constant function of `λ` — this is the QCQP
+        // case, and it is exactly the assertion Ipopt would honour and
+        // get wrong (§4 Lever 2). Otherwise every row must be *proved*
+        // affine and the objective *proved* degree ≤ 2, at which point
+        // `∇²L = σ·∇²f`, constant for a given `σ`; the caller keys its
+        // reuse on `σ` because the restoration phase passes a different
+        // one.
+        let hessian = if jac.iter().any(|&p| p == DerivativeProof::Varying) {
+            DerivativeProof::Varying
+        } else if obj_affine.is_some() && jac.iter().all(|&p| p == DerivativeProof::Constant) {
+            DerivativeProof::Constant
+        } else {
+            DerivativeProof::Unknown
+        };
+
+        DerivativeProofs {
+            grad_f: proof(obj_affine),
+            hessian,
+            jac,
+        }
     }
 }
 

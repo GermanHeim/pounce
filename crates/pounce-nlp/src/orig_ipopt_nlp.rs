@@ -57,6 +57,9 @@
 //!   `fixed_variable_treatment` knob lands when the option machinery
 //!   does.
 
+use crate::constant_derivatives::{
+    ConstantDerivatives, DerivativeProof, DerivativeProofs, subsystem_proof,
+};
 use crate::ipopt_nlp::{IpoptNlp, Nlp, SplitNames};
 use crate::tnlp::{IDX_NAMES, MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
@@ -279,6 +282,19 @@ pub struct OrigIpoptNlp {
     /// [`Self::set_timing_stats`]; when `None`, all `eval_*` entry
     /// points skip the timing overhead.
     timing: RefCell<Option<Rc<TimingStatistics>>>,
+
+    /// Which derivatives this solve reuses across iterates — the four
+    /// upstream `*_constant` hints, resolved against what the model
+    /// could prove (gh #588, Q6). Default: reuse nothing, which is the
+    /// behaviour every path had before this field existed.
+    ///
+    /// A reused derivative is stored in its ordinary cache with an
+    /// **empty** dependency list instead of the iterate's tag, so the
+    /// lookup that already runs on every call finds it at every point.
+    /// That is upstream's own mechanism (`IpOrigIpoptNLP.cpp` nulls the
+    /// dependency); what pounce does differently is decide *when* it is
+    /// allowed to (see [`crate::constant_derivatives`]).
+    const_deriv: ConstantDerivatives,
 }
 
 #[derive(Clone)]
@@ -620,6 +636,7 @@ impl OrigIpoptNlp {
             h_evals: RefCell::new(0),
             info,
             timing: RefCell::new(None),
+            const_deriv: ConstantDerivatives::default(),
         })
     }
 
@@ -656,6 +673,68 @@ impl OrigIpoptNlp {
                 f()
             }
         }
+    }
+
+    // ---- constant-derivative hints (gh #588, Q6) ----
+
+    /// Ask the model what it can prove about its own derivatives, and
+    /// fold the per-row answers into the four hints the algorithm's
+    /// evaluation sites are actually about.
+    ///
+    /// Returned in [`crate::constant_derivatives::HINT_OPTIONS`] order:
+    /// `grad_f`, `hessian`, `jac_c`, `jac_d`. Two translations happen
+    /// here and nowhere else, because this is the only layer that knows
+    /// both the model's row order and the algorithm's:
+    ///
+    /// 1. **The c/d split.** The model proves things about *its* rows;
+    ///    the algorithm evaluates an equality block and an inequality
+    ///    block. `c_map` / `d_map` are the authoritative split — deriving
+    ///    it a second time from `g_l == g_u` inside the model would be a
+    ///    second rule that could disagree with this one.
+    /// 2. **Fixed variables.** Under `fixed_variable_treatment =
+    ///    make_parameter` a variable with `x_l == x_u` leaves the space
+    ///    the algorithm differentiates in, so a row like `x·y` with `y`
+    ///    fixed has a *constant* gradient here while the model correctly
+    ///    proved it varies. A proof of variation therefore does not
+    ///    survive fixing and is weakened to `Unknown`; a proof of
+    ///    constancy does survive, since dropping variables cannot
+    ///    introduce dependence. Getting this backwards would make pounce
+    ///    refuse a hint that is true — the same kind of silent wrong
+    ///    answer the phase exists to prevent, pointed the other way.
+    pub fn derivative_proofs(&self) -> [DerivativeProof; 4] {
+        let proofs: DerivativeProofs = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.derivative_proofs()
+        };
+        let cls = self.adapter.borrow().classification().clone();
+        let out = [
+            proofs.grad_f,
+            proofs.hessian,
+            subsystem_proof(&proofs, &cls.c_map),
+            subsystem_proof(&proofs, &cls.d_map),
+        ];
+        if cls.n_x_fixed == 0 {
+            return out;
+        }
+        out.map(DerivativeProof::forget_variation)
+    }
+
+    /// Install the resolved hints. Called once, before the first
+    /// evaluation; calling it later would leave point-keyed entries in
+    /// the caches, which is harmless (they simply never match again) but
+    /// means the first reused value is whichever iterate got there
+    /// first.
+    pub fn set_constant_derivatives(&mut self, cd: ConstantDerivatives) {
+        self.const_deriv = cd;
+        // Anything cached against a point was computed before the
+        // decision and must not be mistaken for the constant answer.
+        self.invalidate_eval_caches();
+    }
+
+    /// The hints in force for this solve.
+    pub fn constant_derivatives(&self) -> ConstantDerivatives {
+        self.const_deriv
     }
 
     // ---- accessors used by the algorithm wiring layer ----
@@ -1584,6 +1663,13 @@ impl OrigIpoptNlp {
     }
 
     fn eval_grad_f_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
+        // A reused derivative lives in the same cache under an empty
+        // dependency list, so it matches at every point (gh #588, Q6).
+        if self.const_deriv.grad_f
+            && let Some(v) = self.grad_f_cache.borrow().get(&[], &[])
+        {
+            return v;
+        }
         if let Some(v) = self.grad_f_cache.borrow().get_1dep(x.as_tagged()) {
             return v;
         }
@@ -1610,10 +1696,21 @@ impl OrigIpoptNlp {
                 gv[var_idx] = full_g[full_idx as usize] * obj_scal;
             }
         }
+        // A failed evaluation NaN-fills; storing that as *the* constant
+        // answer would poison every remaining iteration instead of
+        // letting the line search back away from a bad point, so the
+        // point-keyed entry is used and the next call tries again.
+        let reuse = self.const_deriv.grad_f && all_finite(g_compressed.values());
         let result: Rc<dyn Vector> = Rc::new(g_compressed);
-        self.grad_f_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.grad_f_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.grad_f_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
@@ -1763,6 +1860,11 @@ impl OrigIpoptNlp {
     }
 
     fn eval_jac_c_internal(&self, x: &dyn Vector) -> Rc<dyn Matrix> {
+        if self.const_deriv.jac_c
+            && let Some(m) = self.jac_c_cache.borrow().get(&[], &[])
+        {
+            return m;
+        }
         if let Some(m) = self.jac_c_cache.borrow().get_1dep(x.as_tagged()) {
             return m;
         }
@@ -1785,14 +1887,26 @@ impl OrigIpoptNlp {
                 };
             }
         }
+        let reuse = self.const_deriv.jac_c && all_finite(jac_c.values());
         let result: Rc<dyn Matrix> = Rc::new(jac_c);
-        self.jac_c_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.jac_c_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.jac_c_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
     fn eval_jac_d_internal(&self, x: &dyn Vector) -> Rc<dyn Matrix> {
+        if self.const_deriv.jac_d
+            && let Some(m) = self.jac_d_cache.borrow().get(&[], &[])
+        {
+            return m;
+        }
         if let Some(m) = self.jac_d_cache.borrow().get_1dep(x.as_tagged()) {
             return m;
         }
@@ -1813,10 +1927,17 @@ impl OrigIpoptNlp {
                 };
             }
         }
+        let reuse = self.const_deriv.jac_d && all_finite(jac_d.values());
         let result: Rc<dyn Matrix> = Rc::new(jac_d);
-        self.jac_d_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.jac_d_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.jac_d_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
@@ -1829,6 +1950,20 @@ impl OrigIpoptNlp {
     ) -> Rc<dyn SymMatrix> {
         // h_cache key: (x, y_c, y_d) tags + obj_factor scalar dep, as
         // upstream `IpOrigIpoptNLP.cpp:786`.
+        //
+        // A reused `∇²L` drops the three tags and keeps `obj_factor`:
+        // the hint's premise is that every row is linear, so `λ` weights
+        // nothing and `∇²L = σ·∇²f` — a function of `σ` alone. Upstream
+        // drops `σ` too, which is safe only because the main algorithm
+        // always passes 1.0; the restoration phase passes 0.0
+        // (`resto_nlp.rs`), and keeping the scalar dependency costs one
+        // float compare and makes that case right by construction rather
+        // than by coincidence.
+        if self.const_deriv.hessian
+            && let Some(m) = self.h_cache.borrow().get(&[], &[obj_factor])
+        {
+            return m;
+        }
         if let Some(m) = self.h_cache.borrow().get(
             &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
             &[obj_factor],
@@ -1885,17 +2020,32 @@ impl OrigIpoptNlp {
         for (k, &src) in self.h_entry_in_full.iter().enumerate() {
             h_vals[k] = full_vals[src as usize];
         }
+        let reuse = self.const_deriv.hessian && all_finite(h.values());
         let result: Rc<dyn SymMatrix> = Rc::new(h);
-        self.h_cache.borrow_mut().add(
-            Rc::clone(&result),
-            &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
-            &[obj_factor],
-        );
+        if reuse {
+            self.h_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[obj_factor]);
+        } else {
+            self.h_cache.borrow_mut().add(
+                Rc::clone(&result),
+                &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
+                &[obj_factor],
+            );
+        }
         result
     }
 }
 
 // ---- helpers ----
+
+/// Whether every value is finite. Guards the constant-derivative store:
+/// a failed user evaluation NaN-fills its buffer, and a NaN written into
+/// a cache entry that never expires would fail the rest of the solve
+/// rather than the one trial point that caused it.
+fn all_finite(v: &[Number]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}
 
 fn make_dense_from(
     space: &Rc<DenseVectorSpace>,

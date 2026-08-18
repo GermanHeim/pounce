@@ -254,6 +254,35 @@ pub trait TNLP {
         false
     }
 
+    /// What this model can *prove* about the constancy of its own
+    /// derivatives (gh #588, phase Q6).
+    ///
+    /// This is the auto-detection behind the four upstream hints
+    /// `grad_f_constant` / `hessian_constant` / `jac_c_constant` /
+    /// `jac_d_constant`. Where a model knows its own algebra — an `.nl`
+    /// body the degree-≤2 recognizer reads exactly — it can establish
+    /// the hint without being told, *and* it can establish that the hint
+    /// is false, which is the case upstream honours anyway and pounce
+    /// refuses.
+    ///
+    /// The default declines: everything
+    /// [`DerivativeProof::Unknown`](crate::constant_derivatives::DerivativeProof::Unknown),
+    /// no rows. That is the truthful answer for a TNLP that offers
+    /// callbacks and no algebra — the C interface, the Python bridge,
+    /// both GAMS links — and it is what makes a user's hint on such a
+    /// model still count: `Unknown` means "not established", never
+    /// "varies", and an asserted hint over `Unknown` is honoured on
+    /// trust. See [`crate::constant_derivatives`] for the full table.
+    ///
+    /// A transparent decorator should forward the inner answer only if
+    /// its transformation preserves both directions. Diagonal variable
+    /// scaling does ([`crate::scaling_tnlp::ScalingTnlp`] forwards);
+    /// presolve does not — it changes what the rows *are* — so a
+    /// presolve wrapper must keep the declining default.
+    fn derivative_proofs(&mut self) -> crate::constant_derivatives::DerivativeProofs {
+        crate::constant_derivatives::DerivativeProofs::default()
+    }
+
     /// Per-iteration intermediate callback. Returning false requests
     /// early termination with `User_Requested_Stop`.
     fn intermediate_callback(
