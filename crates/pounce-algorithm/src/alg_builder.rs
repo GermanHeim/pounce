@@ -627,6 +627,11 @@ impl Default for MuOptions {
 /// mirror `IpBacktrackingLineSearch.cpp:RegisterOptions`.
 #[derive(Debug, Clone)]
 pub struct LineSearchOptions {
+    /// `alpha_red_factor` — fractional reduction applied to the trial
+    /// step size at every backtracking step
+    /// (`alpha *= alpha_red_factor`). Mirrors upstream's
+    /// `IpBacktrackingLineSearch::alpha_red_factor_`.
+    pub alpha_red_factor: Number,
     pub watchdog_shortened_iter_trigger: Index,
     pub watchdog_trial_iter_max: Index,
     /// `soft_resto_pderror_reduction_factor` — required relative
@@ -720,6 +725,7 @@ pub struct LineSearchOptions {
 impl Default for LineSearchOptions {
     fn default() -> Self {
         Self {
+            alpha_red_factor: 0.5,
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
             soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
@@ -1178,6 +1184,7 @@ impl AlgorithmBuilder {
             LineSearchChoice::CgPenalty => Box::new(PenaltyLsAcceptor::default()),
         };
         let mut line_search = BacktrackingLineSearch::new(acceptor);
+        line_search.alpha_red_factor = self.line_search.alpha_red_factor;
         line_search.watchdog_shortened_iter_trigger =
             self.line_search.watchdog_shortened_iter_trigger;
         line_search.watchdog_trial_iter_max = self.line_search.watchdog_trial_iter_max;

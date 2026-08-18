@@ -37,7 +37,23 @@ const A1: Number = 1.10;
 const B0: Number = -0.29;
 const B1: Number = 0.11;
 
-struct ParamQp;
+struct ParamQp {
+    /// Constant part of `b(p)`. The standard fixture uses [`B0`];
+    /// the degenerate one uses `G * A0`, which puts the
+    /// unconstrained minimizer of `x2` exactly on its lower bound
+    /// at `p = 0`, so the bound is weakly active: on the bound
+    /// with a vanishing multiplier, the solution map's kink.
+    b0: Number,
+}
+
+impl ParamQp {
+    fn standard() -> Self {
+        Self { b0: B0 }
+    }
+    fn degenerate() -> Self {
+        Self { b0: G * A0 }
+    }
+}
 
 impl TNLP for ParamQp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
@@ -72,14 +88,14 @@ impl TNLP for ParamQp {
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
         let (x1, x2, p) = (x[0], x[1], x[2]);
         let a = A0 + A1 * p;
-        let b = B0 + B1 * p;
+        let b = self.b0 + B1 * p;
         Some(0.5 * x1 * x1 + 0.5 * x2 * x2 + G * x1 * x2 - a * x1 - b * x2)
     }
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         let (x1, x2, p) = (x[0], x[1], x[2]);
         g[0] = x1 + G * x2 - (A0 + A1 * p);
-        g[1] = x2 + G * x1 - (B0 + B1 * p);
+        g[1] = x2 + G * x1 - (self.b0 + B1 * p);
         g[2] = -A1 * x1 - B1 * x2;
         true
     }
@@ -150,7 +166,7 @@ fn converged_backsolver() -> PdSensBacksolver {
             PdSensBacksolver::new(data, cq, nlp, pd).expect("backsolver from converged state"),
         );
     }));
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp::standard()));
     let status = app.optimize_tnlp(Rc::clone(&tnlp));
     assert!(
         matches!(
@@ -267,7 +283,7 @@ fn the_path_releases_and_reaches_the_target_on_this_qp() {
         .set_numeric_value("tol", 1e-10, true, false)
         .unwrap();
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp::standard()));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
     assert!(
@@ -286,4 +302,134 @@ fn the_path_releases_and_reaches_the_target_on_this_qp() {
         endpoint[0],
         endpoint[1],
     );
+}
+
+/// Solve the degenerate fixture through `Solver` and return it.
+fn degenerate_solver() -> Solver {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-10, true, false)
+        .unwrap();
+    // The classifier reads slacks against the model's own bounds, so
+    // the solve must not relax them; the pyomo route sets the same.
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp::degenerate()));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "base solve failed: {status:?}",
+    );
+    solver
+}
+
+#[test]
+fn the_degenerate_fixture_is_detected() {
+    // x2 sits exactly on its lower bound with a vanishing multiplier,
+    // so the classifier cannot call the bound active or inactive and
+    // the weakly active set holds exactly that one bound.
+    let solver = degenerate_solver();
+    let x = solver.converged().expect("converged").x.clone();
+    // the kink converges less tightly than an interior point, so the
+    // position asserts are loose; the directions below are the test
+    assert!(
+        (x[0] - A0).abs() < 1e-3,
+        "x1 should sit at {A0}, got {}",
+        x[0]
+    );
+    assert!(
+        x[1].abs() < 1e-3,
+        "x2 should sit on its bound, got {}",
+        x[1]
+    );
+    let weak = solver.weakly_active_bounds().expect("classification");
+    assert_eq!(weak.len(), 1, "one weakly active bound, got {weak:?}");
+    assert_eq!(weak[0].var_row, 1);
+    assert!(weak[0].lower);
+}
+
+#[test]
+fn the_directional_step_matches_hand_algebra_on_both_sides() {
+    // The kink's two one-sided derivatives, each computable by hand.
+    // Toward positive p the bound releases: the free system gives
+    // dx = [(A1 - G*B1)/det, (B1 - G*A1)/det]. Toward negative p the
+    // bound holds: dx = [-A1, 0]. A single linear step cannot give
+    // both, which is what the search corrects.
+    let solver = degenerate_solver();
+    let det = 1.0 - G * G;
+
+    let (d, pinned, trials) = solver
+        .parametric_step_directional(&[0], &[1.0], 16)
+        .expect("release side");
+    let want = [(A1 - G * B1) / det, (B1 - G * A1) / det];
+    assert!(
+        (d[0] - want[0]).abs() < 1e-6 && (d[1] - want[1]).abs() < 1e-6,
+        "release side [{}, {}] should be [{}, {}]",
+        d[0],
+        d[1],
+        want[0],
+        want[1],
+    );
+    assert!(pinned.is_empty(), "nothing pinned on the release side");
+    assert!(trials <= 2, "one trial expected, spent {trials}");
+
+    let (d, pinned, trials) = solver
+        .parametric_step_directional(&[0], &[-1.0], 16)
+        .expect("hold side");
+    assert!(
+        (d[0] + A1).abs() < 1e-6 && d[1].abs() < 1e-6,
+        "hold side [{}, {}] should be [{}, 0]",
+        d[0],
+        d[1],
+        -A1,
+    );
+    assert_eq!(pinned, vec![1], "x2 pinned on the hold side");
+    assert!(trials <= 4, "three trials expected, spent {trials}");
+}
+
+#[test]
+fn a_clean_base_point_takes_the_plain_step() {
+    // The standard fixture's bound is strongly active, the weakly
+    // active set is empty, and the directional step is the plain
+    // parametric step with zero trials spent.
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-10, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp::standard()));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+
+    let weak = solver.weakly_active_bounds().expect("classification");
+    assert!(
+        weak.is_empty(),
+        "strongly active is not weakly active: {weak:?}"
+    );
+    let (d, pinned, trials) = solver
+        .parametric_step_directional(&[0], &[1.0], 16)
+        .expect("plain step");
+    let plain = solver.parametric_step(&[0], &[1.0]).expect("reference");
+    assert!((d[0] - plain[0]).abs() < 1e-12 && (d[1] - plain[1]).abs() < 1e-12);
+    assert!(pinned.is_empty());
+    assert_eq!(trials, 0);
 }

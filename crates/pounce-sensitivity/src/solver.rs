@@ -729,9 +729,235 @@ impl Solver {
             &ctx.hi,
             &ctx.mults,
             max_iter,
+            &[],
+            &[],
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((dx[..ctx.n_x].to_vec(), segments))
+    }
+
+    /// [`Self::parametric_step_path`] with the directional-derivative
+    /// decision applied first at a degenerate base point.
+    ///
+    /// The weakly active bounds are decided by the eq. 14 QP for this
+    /// perturbation's own direction, the path starts with every weakly
+    /// active row released and the accepted working set held, and the
+    /// rows the working set leaves are forced into the walk's
+    /// base-activity table, so the record carries each departure at
+    /// the fraction where its multiplier reaches zero, essentially
+    /// zero at an exact kink. With no weakly active bounds this is
+    /// exactly [`Self::parametric_step_path`]. Returns the step, the
+    /// record, and the trials the decision spent.
+    pub fn parametric_step_path_directional(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>, usize), SolverError> {
+        let weak = self.weakly_active_bounds()?;
+        if weak.is_empty() {
+            let (dx, segments) =
+                self.parametric_step_path(pin_constraint_indices, deltas, max_iter)?;
+            return Ok((dx, segments, 0));
+        }
+        let mut rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        // The barrier correction on a bound row assumes the bound is
+        // enforced by its sigma. A weak row's sigma is order one, so
+        // the correction folds into the variable's equation at order
+        // sqrt(mu), a constant offset the perturbation does not scale,
+        // which dominated steps of 1e-10. Released rows get their rhs
+        // zeroed inside solve_released; this does the same for the
+        // weak rows the walk carries in its table instead.
+        for w in &weak {
+            rhs_plain[w.row] = 0.0;
+        }
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let (_, pinned, trials) =
+            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
+                .map_err(SolverError::SensComputationFailed)?;
+        // Rows the direction holds are pinned from fraction zero. Rows
+        // it leaves are forced into the walk's base-activity table, so
+        // the release scan frees each at the fraction where its
+        // multiplier reaches zero: essentially zero at an exact kink,
+        // and partway along the step when the held solve sits inside
+        // the ambiguous band, where the bound is genuinely active for
+        // the first stretch of the perturbation.
+        let holds: Vec<(usize, bool)> = weak
+            .iter()
+            .filter(|w| pinned.contains(&w.var_row))
+            .map(|w| (w.var_row, w.lower))
+            .collect();
+        let forced_active: Vec<usize> = weak
+            .iter()
+            .filter(|w| !pinned.contains(&w.var_row))
+            .map(|w| w.row)
+            .collect();
+        let (dx, segments) = crate::boundcheck::step_along_path(
+            &state.backsolver,
+            &rhs_plain,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            max_iter,
+            &forced_active,
+            &holds,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((dx[..ctx.n_x].to_vec(), segments, trials))
+    }
+
+    /// [`Self::parametric_step_bounded`] with the directional
+    /// derivative as its predictor at a degenerate base point.
+    ///
+    /// The refinement's own crossing and release decisions then run
+    /// unchanged on everything beyond the weakly active set. A weak
+    /// bound the working set held sits exactly on its bound in the
+    /// predictor and is not a crossing, and one it left moves into the
+    /// interior. With no weakly active bounds this is exactly
+    /// [`Self::parametric_step_bounded`]. Returns the step, the pinned
+    /// rows, and the trials the decision spent.
+    pub fn parametric_step_bounded_directional(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<Index>, usize), SolverError> {
+        let weak = self.weakly_active_bounds()?;
+        if weak.is_empty() {
+            let (dx, pinned) =
+                self.parametric_step_bounded(pin_constraint_indices, deltas, max_iter)?;
+            return Ok((dx, pinned, 0));
+        }
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let (d, _, trials) =
+            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
+                .map_err(SolverError::SensComputationFailed)?;
+        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+            &state.backsolver,
+            &d,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            &rhs_plain,
+            ctx.eps,
+            max_iter,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((
+            dx[..ctx.n_x].to_vec(),
+            pinned.into_iter().map(|p| p as Index).collect(),
+            trials,
+        ))
+    }
+
+    /// The bounds the activity classifier could not call at the base
+    /// point: on the bound with a multiplier of the same order as the
+    /// slack. Each entry is a bound row present in the held
+    /// factorization, with the side taken from the smaller slack,
+    /// which is the only side an ambiguous label can come from.
+    ///
+    /// The classifier reports per user variable, in full-x, while the
+    /// bound context and the factor's rows are var-x, and the two
+    /// index spaces diverge from the first fixed variable on. Each
+    /// var-x row's status is read through the same map the classifier
+    /// scattered through, so a fixed variable shifts nothing. Using
+    /// the full-x index as a factor row instead returns a NEIGHBORING
+    /// variable's answer, plausible and wrong, which is the gh#450
+    /// hazard the `primal_row` discipline exists to prevent.
+    pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
+        use crate::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
+
+        // A relaxed solve shifts the slacks the classifier reads, so
+        // degeneracy is undetectable there: the callers take the plain
+        // step, the same choice `estimate_report` makes when it fills
+        // `bounds_relaxed` instead of raising.
+        let report = match self.classify_activity() {
+            Ok(r) => r,
+            Err(SolverError::BadOptions(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let Some(rows) = state.backsolver.bound_rows() else {
+            return Ok(Vec::new());
+        };
+        let full_of: Vec<usize> = {
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            (0..ctx.n_x)
+                .map(|r| nl.var_x_to_full_x(r as Index) as usize)
+                .collect()
+        };
+        let mut out = Vec::new();
+        for var_row in 0..ctx.n_x {
+            let Some(&st) = report.var_status.get(full_of[var_row]) else {
+                continue;
+            };
+            if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
+                continue;
+            }
+            let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];
+            let s_hi = ctx.hi[var_row] - ctx.x_curr[var_row];
+            let lower = s_lo <= s_hi;
+            if let Some(br) = rows
+                .iter()
+                .find(|b| b.var_row == var_row && b.lower == lower)
+            {
+                out.push(crate::boundcheck::WeakBound {
+                    row: br.row,
+                    var_row,
+                    lower,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The parametric step with the directional-derivative correction
+    /// at a degenerate base point (the 2012 paper's eq. 14 QP).
+    ///
+    /// With no weakly active bounds this is exactly
+    /// [`Self::parametric_step`]. Otherwise the weakly active rows are
+    /// released and an active-set search over them decides which
+    /// variables the direction holds on their bounds, so the returned
+    /// step is the one-sided derivative for the side the perturbation
+    /// asks about. Returns the primal step, the var-x rows the
+    /// accepted working set pinned, and the trials the search spent
+    /// against `max_iter`.
+    ///
+    /// Errors from the search (budget exhausted, no sign-consistent
+    /// working set) surface as [`SolverError::SensComputationFailed`];
+    /// the caller owns the fallback to the plain step and its warning.
+    pub fn parametric_step_directional(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<usize>, usize), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let weak = self.weakly_active_bounds()?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        if weak.is_empty() {
+            let mut d = vec![0.0; state.backsolver.dim()];
+            if !state.backsolver.solve(&rhs_plain, &mut d) {
+                return Err(SolverError::BacksolveFailed);
+            }
+            return Ok((d[..ctx.n_x].to_vec(), Vec::new(), 0));
+        }
+        let (d, pinned, trials) =
+            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
+                .map_err(SolverError::SensComputationFailed)?;
+        Ok((d[..ctx.n_x].to_vec(), pinned, trials))
     }
 
     /// The bound geometry both bound-aware steps read: the primal

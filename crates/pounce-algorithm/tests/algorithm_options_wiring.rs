@@ -358,3 +358,46 @@ fn dual_inf_scale_kappa_override_flows_through() {
         assert_eq!(b.conv_check.dual_inf_scale_kappa, value);
     }
 }
+
+/// gh#678 — `alpha_red_factor` was registered, range-checked and
+/// accepted, but never copied out of the `OptionsList`, so the line
+/// search always backtracked by the hard-coded 0.5. It was the last
+/// unwired field of the ten on `BacktrackingLineSearch`; the other nine
+/// (including the `max_soc` block right beside it) were already
+/// covered. Note that a name grep does *not* find this class of bug:
+/// `alpha_red_factor` has eleven hits in `backtracking.rs` and a real
+/// read site, so the option looks consumed. Only the assignment path
+/// tells you, which is what these two tests walk.
+#[test]
+fn alpha_red_factor_default_matches_registered() {
+    // Untouched option ⇒ builder carries the registered default 0.5,
+    // which is also `BacktrackingLineSearch::new`'s hard-coded default.
+    // That equality is the whole reason wiring this moves no default
+    // trajectory, so it is asserted rather than assumed.
+    let b = builder_from(|_| {}).line_search;
+    assert_eq!(b.alpha_red_factor, 0.5);
+}
+
+#[test]
+fn alpha_red_factor_override_flows_through() {
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_numeric_value("alpha_red_factor", 0.2, true, false)
+            .unwrap();
+    })
+    .line_search;
+    assert_eq!(b.alpha_red_factor, 0.2);
+}
+
+/// The option must survive `build()` onto the concrete
+/// `BacktrackingLineSearch` in the assembled bundle. This is the step
+/// that was actually missing in gh#678 — `application.rs` had no read
+/// *and* `alg_builder.rs` had no assignment, so covering only the
+/// option → builder hop above would leave half the gap untested.
+#[test]
+fn alpha_red_factor_reaches_assembled_line_search() {
+    let mut builder = AlgorithmBuilder::new();
+    builder.line_search.alpha_red_factor = 0.2;
+    let bundle = builder.build();
+    assert_eq!(bundle.line_search.alpha_red_factor, 0.2);
+}
