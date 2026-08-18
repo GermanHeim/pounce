@@ -3296,8 +3296,18 @@ impl IpoptApplication {
         {
             if found {
                 use crate::hess::lim_mem_quasi_newton::InitialApprox;
+                // Every registered value is named explicitly. #551 §3
+                // held this option back precisely because wiring only
+                // the values that mapped would leave the rest falling
+                // back silently — a new no-op created by the fix — so a
+                // catch-all standing in for a real value is the one
+                // shape to avoid here. `OptionsList` rejects any
+                // unregistered value before this runs (`options_list.rs`
+                // `OPTION_INVALID`), so the final arm is unreachable
+                // rather than a fallback.
                 builder.limited_memory_initialization = match v.as_str() {
                     "scalar1" => InitialApprox::Scalar1,
+                    "scalar2" => InitialApprox::Scalar2,
                     "scalar3" => InitialApprox::Scalar3,
                     "scalar4" => InitialApprox::Scalar4,
                     "constant" => InitialApprox::Constant,
