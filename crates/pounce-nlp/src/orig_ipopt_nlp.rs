@@ -1519,10 +1519,31 @@ impl OrigIpoptNlp {
 
     fn fetch_warm_start_snapshot(&self) -> Option<StartingPointSnapshot> {
         let cls = self.adapter.borrow().classification().clone();
+        // The bound-multiplier slots start *unseeded*, not at zero
+        // (gh#622). `TNLP::get_starting_point` is asked for `init_z`
+        // and is free to leave the blocks untouched — a caller warm
+        // starting from a point alone does exactly that — and this
+        // snapshot is what `get_starting_z` then hands the algorithm.
+        // Zero is a legal multiplier value, so it sails past the "was
+        // this seeded?" resolution in the warm-start initializer and
+        // is merely floored at `warm_start_mult_bound_push`: 1e-3 by
+        // default, 1e-9 under the tightened pushes `pounce.WarmStart`
+        // ships. A start of z = 1e-9 declares every bound inactive and
+        // breaks complementarity against mu before the first
+        // iteration. NaN is the marker that initializer already
+        // documents for "you decide", and resolves to
+        // `bound_mult_init_val`.
+        //
+        // `lambda` deliberately keeps its zero fill. The equality
+        // multipliers' unseeded resolution is *also* zero, so the
+        // marker would buy nothing, and `any_dual_seeded` reads an
+        // all-zero `y` as unseeded — which is what keeps gh#606's
+        // reconstruction off a primal-only seed (measured there:
+        // 1102 -> 1211 iterations across 27 parametric paths).
         let mut snapshot = StartingPointSnapshot {
             x: vec![0.0; cls.n_full_x as usize],
-            z_l: vec![0.0; cls.n_full_x as usize],
-            z_u: vec![0.0; cls.n_full_x as usize],
+            z_l: vec![Number::NAN; cls.n_full_x as usize],
+            z_u: vec![Number::NAN; cls.n_full_x as usize],
             lambda: vec![0.0; cls.n_full_g as usize],
         };
         let ok = {
@@ -1568,8 +1589,12 @@ impl OrigIpoptNlp {
         let n_x_u = self.x_u.dim() as usize;
 
         let mut full_x = vec![0.0; n_full_x];
-        let mut full_z_l = vec![0.0; n_full_x];
-        let mut full_z_u = vec![0.0; n_full_x];
+        // Unseeded, not zero, for the reason spelled out in
+        // `fetch_warm_start_snapshot` (gh#622): a block the TNLP
+        // declines to write must not read as a supplied multiplier of
+        // zero. `full_lambda` keeps its zero fill, also per that note.
+        let mut full_z_l = vec![Number::NAN; n_full_x];
+        let mut full_z_u = vec![Number::NAN; n_full_x];
         let mut full_lambda = vec![0.0; n_full_g];
 
         let ok = {
@@ -2151,6 +2176,16 @@ impl IpoptNlp for OrigIpoptNlp {
             }
         }
         Some((dl, du))
+    }
+
+    fn declared_x_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        // No scaling to reapply, unlike `declared_d_bounds`: pounce models
+        // objective and constraint scaling only, so nothing has touched the
+        // variable box between the snapshot and now except the relaxation
+        // this accessor exists to undo.
+        let xl = self.declared_x_l.borrow().clone()?;
+        let xu = self.declared_x_u.borrow().clone()?;
+        Some((xl, xu))
     }
 
     fn declared_c_rhs(&self) -> Option<Vec<Number>> {
@@ -3944,6 +3979,29 @@ mod tests {
         let (dl, du) = nlp.declared_d_bounds().expect("snapshotted at relax");
         assert_eq!(dl, vec![25.0], "declared bound is the pre-relax value");
         assert!(du.is_empty() || du[0] >= 25.0); // HS071: no finite d upper
+    }
+
+    /// gh#612: the variable box the user declared survives the relaxation.
+    ///
+    /// Crossover pivots against these, not the live vector. HS071's box is
+    /// `1 <= x_i <= 5`; a solution that sits exactly on `x = 1` is a full
+    /// `delta` *inside* the relaxed `1 - delta`, so an activity test against
+    /// the live bound reports the binding bound inactive — the one answer
+    /// crossover exists to get right.
+    #[test]
+    fn declared_x_bounds_are_the_pre_relax_box() {
+        let (_adapter, mut nlp) = build_orig_nlp();
+        assert_eq!(nlp.declared_x_bounds(), None, "no snapshot before relax");
+        let x_l_before = nlp.x_l.values().to_vec();
+        let x_u_before = nlp.x_u.values().to_vec();
+        nlp.relax_bounds(1e-2, 1.0);
+        let (xl, xu) = nlp.declared_x_bounds().expect("snapshotted at relax");
+        assert_eq!(xl, x_l_before, "declared lower box is the pre-relax value");
+        assert_eq!(xu, x_u_before, "declared upper box is the pre-relax value");
+        // And the live vectors did move, so the two are genuinely distinct
+        // rather than the accessor happening to alias an unrelaxed bound.
+        assert!(nlp.x_l.values()[0] < xl[0]);
+        assert!(nlp.x_u.values()[0] > xu[0]);
     }
 
     /// gh#390: the equality RHS folded into `c(x) = 0` is plumbed back out, so

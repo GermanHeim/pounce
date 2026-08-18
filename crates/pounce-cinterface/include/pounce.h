@@ -215,7 +215,24 @@ bool SetIpoptProblemScaling(
 
 /** Install (or remove, with cb == NULL) a per-iteration callback.
  *  Returning false from the callback signals
- *  ApplicationReturnStatus::User_Requested_Stop. */
+ *  ApplicationReturnStatus::User_Requested_Stop.
+ *
+ *  Fires from the outer loop with `alg_mod = 0` (RegularMode) and from
+ *  the feasibility-restoration inner solver with `alg_mod = 1`
+ *  (RestorationPhaseMode). Two things about the restoration fires:
+ *
+ *   - The scalars beside `alg_mod` (`obj_value`, `inf_pr`, `inf_du`,
+ *     `mu`, `d_norm`, `regularization_size`, `alpha_*`, `ls_trials`)
+ *     describe the min-||c||_1 feasibility subproblem, not your NLP.
+ *     `alg_mod` is what tells them apart; do not plot them on one axis
+ *     without checking it.
+ *   - The GetIpoptCurrent* inspectors report no data for the duration.
+ *     The restoration iterate is not a point of your problem, and does
+ *     not even have its dimensions.
+ *
+ *  Returning false from a restoration fire ends the solve at the last
+ *  iterate accepted for your NLP, not at the subproblem's iterate — so
+ *  a caller aborting on a deadline gets back a point it can use. */
 bool SetIntermediateCallback(
     IpoptProblem    ipopt_problem,
     Intermediate_CB intermediate_cb);
@@ -248,10 +265,13 @@ enum ApplicationReturnStatus IpoptSolve(
  * Inspection (valid only during the intermediate callback)
  *
  * These mirror Ipopt 3.14's GetIpoptCurrent* functions. Pass NULL for
- * any output buffer to skip retrieving it. They return false until
- * pounce's algorithm core invokes the intermediate callback per
- * iteration (currently a follow-up — the signature is here so callers
- * can link against it today).
+ * any output buffer to skip retrieving it.
+ *
+ * Both are live: pounce's algorithm core installs the context these
+ * read from around every intermediate-callback invocation. Outside
+ * one — before the first iteration, after IpoptSolve returns, or from
+ * another thread — they return false and write nothing, which is the
+ * upstream contract.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -308,6 +328,112 @@ ipnumber GetIpoptDualInf(IpoptProblem ipopt_problem);
 
 /** Final complementarity error from the most recent solve. */
 ipnumber GetIpoptComplInf(IpoptProblem ipopt_problem);
+
+/**
+ * Restoration-phase activity in the most recent solve. Any pointer may
+ * be NULL to skip that component.
+ *
+ * `calls` is how many times restoration was entered, `inner_iters` the
+ * total iterations its inner solver ran, `outer_iters` the outer
+ * iterations driving a restoration trial step, and `wall_secs` the
+ * cumulative seconds spent there — enough to answer "did this solve
+ * struggle, and how much of it was restoration?".
+ *
+ * This is solve-level. Individual iterations can be labelled too — the
+ * intermediate callback fires from the restoration inner solver with
+ * `alg_mod = 1` (`RestorationPhaseMode`); see `SetIntermediateCallback`
+ * for what those fires do and do not carry. These counters remain the
+ * only source for the inner iteration count and the wall time, and the
+ * only way to ask the question without installing a callback.
+ */
+void GetPounceRestorationStats(
+    IpoptProblem ipopt_problem,
+    ipindex*     calls,
+    ipindex*     inner_iters,
+    ipindex*     outer_iters,
+    ipnumber*    wall_secs);
+
+/* -----------------------------------------------------------------
+ * Pounce extensions — linear-solver post-mortem
+ *
+ * What the KKT linear solver did during the most recent solve. The
+ * `linear_solver` option selects the backend (`feral`, pounce's own
+ * sparse LDL^T, is the default); `solver_name` reports the one that
+ * actually ran, which is the reliable way to confirm it.
+ *
+ * The struct is versioned with the library, not independently: a
+ * caller must compile against the pounce.h that ships with the
+ * libpounce_cinterface it loads. Fields pounce collects unconditionally
+ * are always set; the optional ones carry the sentinels named below
+ * when the backend did not report them.
+ * ----------------------------------------------------------------- */
+
+typedef struct {
+    /** Backend that ran, e.g. "feral". NUL-terminated, truncated to
+     *  fit; empty when no backend reported a summary. */
+    char     solver_name[32];
+    /** factor() calls completed over the solve. */
+    ipindex  n_factors;
+    /** Of `n_factors`, how many reused the previous symbolic
+     *  factorization (sparsity pattern unchanged). */
+    ipindex  n_pattern_reuse;
+    /** Of `n_factors`, how many needed a fresh symbolic factorization. */
+    ipindex  n_pattern_changes;
+    /** Maximum nnz(L)/nnz(A) over the solve; NaN when unreported. */
+    ipnumber max_fill_ratio;
+    /** Smallest |pivot| seen over the solve; NaN when unreported. */
+    ipnumber min_abs_pivot;
+    /** Largest |pivot| seen over the solve; NaN when unreported. */
+    ipnumber max_abs_pivot;
+    /** Inertia of the final factorization; each -1 when unreported. */
+    ipindex  last_inertia_positive;
+    ipindex  last_inertia_negative;
+    ipindex  last_inertia_zero;
+    /** nnz of the final factorization's matrix / factor; -1 when
+     *  unreported. */
+    ipindex  last_nnz_a;
+    ipindex  last_nnz_l;
+} PounceLinearSolverStats;
+
+/**
+ * Fill `stats` with the linear-solver post-mortem of the most recent
+ * solve. Returns false — leaving `stats` untouched — when the problem
+ * has not been solved yet or the backend reported no summary.
+ *
+ * Timings (symbolic analysis, numeric factorization, back-solve) are
+ * deliberately absent: pounce does not instrument them today, and this
+ * struct reports only what it already collects.
+ */
+Bool GetPounceLinearSolverStats(
+    IpoptProblem             ipopt_problem,
+    PounceLinearSolverStats* stats);
+
+/* -----------------------------------------------------------------
+ * Pounce extensions — option introspection
+ * ----------------------------------------------------------------- */
+
+/** Value type of a registered option, as reported by
+ *  GetPounceOptionType. */
+enum PounceOptionType {
+    POUNCE_OPTION_UNKNOWN = 0, /**< not a registered option */
+    POUNCE_OPTION_NUMBER  = 1, /**< AddIpoptNumOption */
+    POUNCE_OPTION_INTEGER = 2, /**< AddIpoptIntOption */
+    POUNCE_OPTION_STRING  = 3  /**< AddIpoptStrOption */
+};
+
+/**
+ * Which AddIpopt*Option a keyword expects, so a caller forwarding
+ * options from a differently-typed source (a scripting language's
+ * dictionary, say) can pick the right setter instead of guessing from
+ * the value it happens to hold. Returns POUNCE_OPTION_UNKNOWN for a
+ * keyword this build does not register — which also answers "is this
+ * option available here?".
+ *
+ * `ipopt_problem` may be NULL: an option's type is a property of the
+ * build, not of a problem, and a caller deciding how to forward options
+ * need not have created one yet.
+ */
+int GetPounceOptionType(IpoptProblem ipopt_problem, const char* keyword);
 
 /* -----------------------------------------------------------------
  * Pounce extensions — active-set SQP working-set warm start
@@ -394,6 +520,43 @@ Bool IpoptSetWarmStartWorkingSet(
 
 /** Drop any pending warm-start working set without solving. */
 Bool IpoptClearWarmStartWorkingSet(IpoptProblem ipopt_problem);
+
+/**
+ * Declare which variables enter the problem NONLINEARLY.
+ *
+ * The C-API face of Ipopt's TNLP::get_number_of_nonlinear_variables /
+ * get_list_of_nonlinear_variables pair (which upstream exposes only to
+ * C++ callers), for frontends that already know their model's
+ * structure — CasADi's `pass_nonlinear_variables`, an algebraic
+ * modeling language, a hand-written driver.
+ *
+ * The effect is confined to the LIMITED-MEMORY Hessian
+ * (`hessian_approximation=limited-memory`): curvature is approximated
+ * over the declared subset only, and the Hessian is exactly zero for
+ * every other variable — the win on a model whose variables mostly
+ * enter linearly. Exact-Hessian solves ignore the declaration, and so
+ * does any solve that never calls this: the default is "all variables
+ * are nonlinear", identical to previous behavior. The subset takes
+ * precedence over the `num_linear_variables` option, matching Ipopt.
+ *
+ * `pos_nonlin_vars` holds `num_nonlin_vars` variable indices in the
+ * problem's own index style (the `index_style` given to
+ * CreateIpoptProblem). The subset may be arbitrary and noncontiguous;
+ * order does not matter. Declaring all `n` variables is the same as
+ * not calling this at all.
+ *
+ * Returns 1 on success, 0 — leaving any previous declaration in place
+ * — on a NULL handle, a negative or oversized count, a NULL array with
+ * a positive count, or an out-of-range index.
+ */
+Bool IpoptSetNonlinearVariables(
+    IpoptProblem   ipopt_problem,
+    ipindex        num_nonlin_vars,
+    const ipindex *pos_nonlin_vars
+);
+
+/** Drop a declared nonlinear-variable subset (back to "all nonlinear"). */
+Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
 
 /**
  * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,

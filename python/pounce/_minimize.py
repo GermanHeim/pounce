@@ -1259,6 +1259,68 @@ def minimize(
         _warn_convex_dropped_opts("convex SOCP")
         return _solve_via_socp(socp, options)
 
+    problem, _problem_obj, eval_counters = _prepare_nlp(
+        fun=fun,
+        n=n,
+        m=m,
+        args=args,
+        jac=jac,
+        hess=hess,
+        constraints=constraints,
+        g_combined=g_combined,
+        jac_combined=jac_combined,
+        jac_rows=jac_rows,
+        jac_cols=jac_cols,
+        lb=lb,
+        ub=ub,
+        cl=cl,
+        cu=cu,
+        callback=callback,
+        options=options,
+    )
+
+    # Pass warm_start only when set: test doubles (and any cyipopt-style
+    # stand-in) may not accept the keyword.
+    if warm_start is not None:
+        x, info = problem.solve(x0=x0, warm_start=warm_start)
+    else:
+        x, info = problem.solve(x0=x0)
+    return _result_from_info(x, info, eval_counters, options)
+
+
+def _prepare_nlp(
+    *,
+    fun,
+    n,
+    m,
+    args,
+    jac,
+    hess,
+    constraints,
+    g_combined,
+    jac_combined,
+    jac_rows,
+    jac_cols,
+    lb,
+    ub,
+    cl,
+    cu,
+    callback,
+    options,
+    facade="pounce.minimize",
+):
+    """Build the ``Problem`` the NLP path solves, and its eval counters.
+
+    Extracted from :func:`minimize` so a caller that drives the solver
+    itself — :func:`pounce.race_starts`, which holds one
+    :class:`pounce.Solver` session per candidate across racing rounds —
+    constructs *exactly* the same problem, warnings and option
+    translation included, instead of a lookalike that drifts.
+
+    Returns ``(problem, problem_obj, eval_counters)``. `options` must
+    already be drained of the routing keys (``solver_selection``,
+    ``route_tol``, ``disp``); everything left is translated and applied.
+    """
     eval_counters: dict[str, int] = {"nfev": 0, "njev": 0, "nhev": 0}
 
     # A user-supplied ``hess`` equals the Lagrangian Hessian (so the IPM can use
@@ -1281,12 +1343,12 @@ def minimize(
         fd_targets.append("constraint Jacobian(s) (pass 'jac' in each constraint dict)")
     if fd_targets:
         warnings.warn(
-            "pounce.minimize is approximating "
+            f"{facade} is approximating "
             + " and ".join(fd_targets)
             + " by finite differences. This is slower and less accurate than "
             "analytic derivatives. For a faster, more robust solve supply them "
             "directly, or use the autodiff frontends pounce.jax / pounce.torch.",
-            stacklevel=2,
+            stacklevel=3,
         )
 
     # (L48) The NLP wrapper can only supply the *objective* Hessian; for
@@ -1297,12 +1359,12 @@ def minimize(
     # no warning. Warn only for the genuinely-nonlinear case.
     if hess is not None and m > 0 and not constraints_all_linear:
         warnings.warn(
-            "pounce.minimize ignores the supplied 'hess' when nonlinear "
+            f"{facade} ignores the supplied 'hess' when nonlinear "
             "constraints are present: the wrapper cannot form the "
             "constraint-curvature term of the Lagrangian Hessian, so the solver "
             "uses an L-BFGS approximation. The objective Hessian is used for "
             "unconstrained problems and problems with only linear constraints.",
-            stacklevel=2,
+            stacklevel=3,
         )
 
     problem_obj = _build_problem_obj(
@@ -1354,18 +1416,20 @@ def minimize(
     # (``gtol`` / ``ftol`` / ``xtol`` → ``tol``, ``maxiter`` → ``max_iter``).
     from .qp import _validate_solver_opts
 
-    _validate_solver_opts(
-        translated.get("tol"), translated.get("max_iter"), "pounce.minimize"
-    )
+    _validate_solver_opts(translated.get("tol"), translated.get("max_iter"), facade)
     for ipopt_k, ipopt_v in translated.items():
         problem.add_option(ipopt_k, ipopt_v)
+    return problem, problem_obj, eval_counters
 
-    # Pass warm_start only when set: test doubles (and any cyipopt-style
-    # stand-in) may not accept the keyword.
-    if warm_start is not None:
-        x, info = problem.solve(x0=x0, warm_start=warm_start)
-    else:
-        x, info = problem.solve(x0=x0)
+
+def _result_from_info(x, info, eval_counters, options) -> OptimizeResult:
+    """Assemble the :class:`OptimizeResult` for one NLP solve.
+
+    Shared with :func:`pounce.race_starts`, whose candidates must be
+    indistinguishable from a :func:`minimize` result — including the
+    ``success`` upgrade below, which is the whole reason this is one
+    function and not two.
+    """
     # (E, gh #119 / #123) Judge success on the final KKT error, not the exit
     # status enum alone. Ipopt-family solvers report a non-success status (e.g.
     # ``Search_Direction_Becomes_Too_Small``, code 3) when progress stalls — but

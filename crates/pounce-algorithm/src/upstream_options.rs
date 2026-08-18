@@ -620,6 +620,71 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    // ----- Crossover (`crossover*`) -----
+    //
+    // Post-convergence purification of the interior-point iterate onto an
+    // exact active set (KNITRO 2006 §7; gh#612). Implemented in
+    // `crate::crossover`; runs on the `algorithm = interior-point` path
+    // AFTER convergence, so it moves no interior trajectory. Distinct from
+    // the convex-only `qp_crossover` above, which purifies an LP iterate to
+    // a vertex — different engine, different problem class, hence the
+    // different name.
+    r.add_string_option(
+        "crossover",
+        "Purify the converged interior-point iterate onto an exact active set.",
+        "no",
+        &[
+            (
+                "yes",
+                "After the NLP interior-point solve converges, pivot to the active-set path to identify an exact active set.",
+            ),
+            ("no", "Return the interior-point iterate directly (default)."),
+        ],
+        "NLP interior-point path only. An interior method never places an \
+         iterate ON a constraint, so at termination \"which constraints are \
+         active\" is a tolerance inference, not an established fact; where \
+         strict complementarity fails that inference cannot be made at all. \
+         Crossover takes the converged iterate to the active-set path and \
+         returns a point at which a linearly independent set of constraints \
+         is satisfied to equality with multipliers certifying stationarity \
+         against that set. Never-regress: the crossed-over point replaces the \
+         interior one only when it is at least as good a KKT point, so this \
+         cannot turn a converged solve into a failed one. Costs about one \
+         extra iteration on a nondegenerate problem. Off by default.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "crossover_max_iter",
+        "Outer-iteration budget for the crossover fallback phase.",
+        0,
+        30,
+        "When the single EQP-equivalent step of KNITRO §7 step 3 does not \
+         reach the stopping tolerances, crossover falls back to a full \
+         active-set SQP run from the interior iterate (§7 step 4); this caps \
+         that run. 0 disables the fallback, leaving crossover as the \
+         one-step refinement. Only consulted when \"crossover\" is \"yes\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "crossover_mult_tol",
+        "Multiplier magnitude above which a row is taken active by crossover.",
+        0.0,
+        true,
+        1e-8,
+        "The dual half of the KNITRO §7 step-2 active-set tolerance test. \
+         Raising it makes the initial estimate more conservative (fewer rows \
+         guessed active), which the active-set phase can still correct by \
+         pivoting. Only consulted when \"crossover\" is \"yes\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "crossover_primal_tol",
+        "Primal distance below which a row is taken binding by crossover.",
+        0.0,
+        true,
+        1e-6,
+        "The primal half of the KNITRO §7 step-2 active-set tolerance test. \
+         Should exceed the barrier parameter at termination, since the \
+         fraction-to-boundary rule leaves an active constraint slack by \
+         O(mu). Only consulted when \"crossover\" is \"yes\".",
+    )?;
     // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
     //
     // Consulted only on `solver_selection=qp-active-set` (the active-set SQP
@@ -1256,6 +1321,22 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "",
     )?;
     r.add_number_option("warm_start_target_mu", "", 0.0, "Experimental!")?;
+    r.add_string_option(
+        "warm_start_recentering",
+        "How the warm-start initializer adapts to the quality of the supplied iterate.",
+        "residual",
+        &[
+            (
+                "residual",
+                "measure the supplied point and derive mu, the bound-multiplier fills, and the equality-multiplier reconstruction from it",
+            ),
+            (
+                "none",
+                "pre-pounce#606 behaviour: universal constants, zero-filled unseeded multipliers, mu untouched",
+            ),
+        ],
+        "DELIBERATE DEVIATION FROM UPSTREAM IPOPT (pounce#606). Ipopt's warm-start initializer applies fixed pushes and floors regardless of what the caller handed it, and fills a missing multiplier block with a constant. That makes the warm start's behaviour a function of the options rather than of the iterate: an at-the-optimum restart and a stale point from a different parameter both start on the same barrier, and a caller who supplies only a primal point gets bound multipliers of warm_start_mult_bound_push -- a number chosen with no reference to the slacks it is paired against. Under `residual` the initializer instead measures the supplied point's primal residual, complementarity and stationarity residual; fills unseeded bound multipliers from mu/slack; re-derives an identically-zero equality-multiplier block from the same regularized stationarity least-squares solve the cold path uses; and raises mu to the measured average complementarity (clamped to [1e-11, 0.1]) when the supplied point cannot support the barrier mu_init asked for. Only complementarity moves mu: a warm point at a moved parameter carries primal and dual residuals of order delta-theta by construction, and raising mu to meet those discards the warm start to pay for a Newton step that was about to happen anyway -- measured at 715 -> 1129 iterations over the 27 parametric paths in benchmarks/warmstart before that term was dropped. `warm_start_target_mu` still overrides mu outright. Set to `none` to restore bit-for-bit pre-pounce#606 warm-start behaviour.",
+    )?;
 
     // ===== CGSearchDirCalculator::RegisterOptions (contrib/CGPenalty/IpCGSearchDirCalc.cpp) =====
     r.set_registering_category("CG Penalty");

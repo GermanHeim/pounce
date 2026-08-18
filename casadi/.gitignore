@@ -1,0 +1,5 @@
+# Build artifacts and the fetched CasADi source tree (`make fetch-src`).
+casadi-src
+*.so
+*.dylib
+test_output_interleaving

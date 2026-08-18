@@ -109,8 +109,56 @@ pub struct Solution {
     pub stats: SolveStatistics,
 }
 
+/// Why a solve could not be started.
+///
+/// Returned by [`Nlp::try_solve`]; [`Nlp::solve`] panics on the same
+/// conditions. Every variant here is a configuration error detected
+/// *before* the solver runs — a solve that runs and fails to converge is
+/// not an error, it comes back as a [`Solution`] with `success == false`
+/// and the reason in `status`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum NlpError {
+    /// Neither [`var_bounds`](Nlp::var_bounds) nor [`x0`](Nlp::x0) was
+    /// called, so the number of variables is unknown.
+    UnknownVariableCount,
+    /// An option passed to [`option_num`](Nlp::option_num) /
+    /// [`option_int`](Nlp::option_int) / [`option_str`](Nlp::option_str)
+    /// was rejected by the options registry: unknown name, wrong value
+    /// type for that name, or a value outside the registered range or
+    /// set of choices.
+    InvalidOption {
+        /// The option name as passed by the caller.
+        tag: String,
+        /// The rejected value, rendered as a string.
+        value: String,
+        /// The registry's explanation.
+        reason: String,
+    },
+    /// `IpoptApplication::initialize` failed.
+    Initialize(String),
+}
+
+impl std::fmt::Display for NlpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownVariableCount => write!(
+                f,
+                "number of variables unknown — call .var_bounds(..) or .x0(..) \
+                 to set it",
+            ),
+            Self::InvalidOption { tag, value, reason } => {
+                write!(f, "option {tag}={value} rejected: {reason}")
+            }
+            Self::Initialize(msg) => write!(f, "IpoptApplication::initialize failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for NlpError {}
+
 /// Builder: `Nlp::new(problem)` then `.var_bounds(..)` / `.x0(..)` (which fix
-/// the number of variables) and `.solve()`.
+/// the number of variables) and `.solve()` / `.try_solve()`.
 pub struct Nlp<P: Problem> {
     problem: P,
     n: Option<usize>, // inferred from var_bounds / x0 (must agree)
@@ -219,12 +267,47 @@ impl<P: Problem + 'static> Nlp<P> {
     /// Build the `TNLP` adapter and run the interior-point solver.
     ///
     /// # Panics
-    /// If the number of variables was never fixed (no `var_bounds` or `x0`).
+    /// If the solve could not be started: the number of variables was never
+    /// fixed (no `var_bounds` or `x0`), or an option was rejected by the
+    /// options registry. Use [`try_solve`](Self::try_solve) to handle those
+    /// as a [`Result`] instead.
     pub fn solve(self) -> Solution {
-        let n = self.n.expect(
-            "pounce_rs::Nlp: number of variables unknown — call .var_bounds(..) \
-             or .x0(..) to set it",
-        );
+        match self.try_solve() {
+            Ok(sol) => sol,
+            Err(e) => panic!("pounce_rs::Nlp: {e}"),
+        }
+    }
+
+    /// Build the `TNLP` adapter and run the interior-point solver, reporting
+    /// setup failures as an [`NlpError`] instead of panicking.
+    ///
+    /// Unlike [`solve`](Self::solve) this surfaces a rejected option — a
+    /// misspelled name, a value out of the registered range, or a value
+    /// that is not one of the registered choices — rather than letting it
+    /// pass silently and solving with the default still in effect.
+    ///
+    /// A solve that *runs* and does not converge is not an error here: it
+    /// returns `Ok` with `success == false` and the reason in `status`.
+    ///
+    /// ```
+    /// use pounce_rs::builder::{Nlp, NlpError, Problem};
+    ///
+    /// struct P;
+    /// impl Problem for P {
+    ///     fn objective(&self, x: &[f64]) -> f64 { (x[0] - 1.0).powi(2) }
+    /// }
+    ///
+    /// // "mu_stratgey" is a typo for "mu_strategy".
+    /// let err = Nlp::new(P).x0(&[0.0]).option_str("mu_stratgey", "adaptive").try_solve();
+    /// assert!(matches!(err, Err(NlpError::InvalidOption { .. })));
+    /// ```
+    ///
+    /// # Errors
+    /// [`NlpError::UnknownVariableCount`] if neither `var_bounds` nor `x0`
+    /// was called, [`NlpError::InvalidOption`] if an option was rejected, and
+    /// [`NlpError::Initialize`] if the application failed to initialize.
+    pub fn try_solve(self) -> Result<Solution, NlpError> {
+        let n = self.n.ok_or(NlpError::UnknownVariableCount)?;
         let m = self.problem.n_constraints();
         let adapter = Rc::new(RefCell::new(Adapter {
             problem: self.problem,
@@ -244,7 +327,8 @@ impl<P: Problem + 'static> Nlp<P> {
         }));
 
         let mut app = IpoptApplication::new();
-        app.initialize().expect("IpoptApplication::initialize");
+        app.initialize()
+            .map_err(|e| NlpError::Initialize(e.message))?;
         // No analytic Hessian is required from `Problem`, so default to L-BFGS.
         let _ = app.options_mut().set_string_value(
             "hessian_approximation",
@@ -260,14 +344,38 @@ impl<P: Problem + 'static> Nlp<P> {
         let _ = app
             .options_mut()
             .set_string_value("sqp_hessian", "lbfgs", true, true);
+        // User options, in contrast to the two defaults above, are reported
+        // rather than dropped: an unknown name or an out-of-range value that
+        // is silently discarded leaves the default in effect and the solve
+        // looks like it honoured the request (gh#649). `Ok(false)` is not a
+        // failure — it means an earlier no-clobber setting won — so only the
+        // `Err` arm is escalated.
         for (k, v) in &self.string {
-            let _ = app.options_mut().set_string_value(k, v, true, true);
+            app.options_mut()
+                .set_string_value(k, v, true, true)
+                .map_err(|e| NlpError::InvalidOption {
+                    tag: k.clone(),
+                    value: v.clone(),
+                    reason: e.message,
+                })?;
         }
         for (k, v) in &self.num {
-            let _ = app.options_mut().set_numeric_value(k, *v, true, true);
+            app.options_mut()
+                .set_numeric_value(k, *v, true, true)
+                .map_err(|e| NlpError::InvalidOption {
+                    tag: k.clone(),
+                    value: v.to_string(),
+                    reason: e.message,
+                })?;
         }
         for (k, v) in &self.int {
-            let _ = app.options_mut().set_integer_value(k, *v, true, true);
+            app.options_mut()
+                .set_integer_value(k, *v, true, true)
+                .map_err(|e| NlpError::InvalidOption {
+                    tag: k.clone(),
+                    value: v.to_string(),
+                    reason: e.message,
+                })?;
         }
 
         let scope = self.capture_iterations.then(|| {
@@ -279,7 +387,7 @@ impl<P: Problem + 'static> Nlp<P> {
         drop(scope);
         let stats = app.statistics();
         let a = adapter.borrow();
-        Solution {
+        Ok(Solution {
             status,
             success: matches!(
                 status,
@@ -293,7 +401,7 @@ impl<P: Problem + 'static> Nlp<P> {
             z_l: a.sol_z_l.clone(),
             z_u: a.sol_z_u.clone(),
             stats,
-        }
+        })
     }
 }
 

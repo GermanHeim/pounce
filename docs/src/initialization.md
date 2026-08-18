@@ -138,6 +138,130 @@ if let Some(r) = app.least_square_init_report() {
 }
 ```
 
+From the CLI, where that accessor is not reachable, the same fields go
+out once per solve at `debug` level:
+
+```sh
+RUST_LOG=pounce::algorithm=debug pounce model.nl model.sol \
+    least_square_init_primal=yes
+# DEBUG pounce::algorithm: pounce: least_square_init_primal safeguard
+#   decision violation_initial=1.0 violation_final=0.25 alpha=0.5
+#   step_norm=3.2596 rejected_trials=1 termination="accepted"
+```
+
+### What the safeguard costs, and why it is not tuned away
+
+The guarantee above is about **the starting point's violation** — the
+only quantity the test measures. It says nothing about the trajectory
+that follows. A different, more feasible starting point on a nonconvex
+model is entitled to reach a different local minimum and to converge
+into a different tolerance band, and on this corpus two models do.
+
+Sweeping the 57 CLI fixtures with `least_square_init_primal=yes`, with
+the safeguard against without it (gh#616, measured on `a44f4e8b`):
+
+| fixture | unsafeguarded | safeguarded | what changed |
+|---|---|---|---|
+| `csfi2` | `SolveSucceeded`, 53 it | `SolvedToAcceptableLevel`, 35 it | objective bit-identical at 55.0176045 |
+| `eigenb2` | `SolveSucceeded`, 55 it | `SolvedToAcceptableLevel`, 57 it | 1.6 → 1.599999991 |
+| `pooling_rt2stp` | −4391.826, 134 it | −3273.955, 81 it | different local optimum |
+| `deb7` | 249.746, 479 it | 97.560, 202 it | different local optimum, much better |
+| `eigena2` | `SolveSucceeded`, 78 it | `SolveSucceeded`, 65 it | |
+| `unbounded_cubic` | `DivergingIterates`, 91 it | `DivergingIterates`, 290 it | unbounded either way |
+
+Fourteen fixtures move in total; `SolveSucceeded` goes 46 → 44 and the
+solved-or-acceptable set is unchanged at 46. Under **default options**
+the two routes are bit-identical, because `least_square_init_primal`
+defaults to `no`. Under `mehrotra_algorithm=yes` — which turns the
+option on as part of its cascade — the same 27 fixtures solve to the
+same objectives on both sides, at 2475 against 2463 total iterations.
+Twelve fixtures move there. Ten of them fail on both sides
+(restoration failure, detected infeasibility, a step-computation
+error), so only the failure label and the meaningless objective it
+carries change; the other two are `eigena2` and `eigenb2`, which solve
+to the same objectives either way and differ by a single iteration.
+
+Across the 57 fixtures the safeguard engages on 29: 16 accept, 8
+decline every trial, and 5 start feasible and short-circuit. It is
+inert on the other 28 — 26 are LP or convex-QP models the CLI
+dispatches to `pounce-convex`, which does not run this initializer at
+all, and 2 have no constraints for the step to act on.
+
+The two downgrades are deliberate, and they are **not** a defect in the
+accept test. Attributing every moving fixture through the report above
+puts them in three different arms of the safeguard, which do not share
+a mechanism:
+
+* **`theta_0 = 0`, short-circuit.** `unbounded_cubic`, `unbounded_exp`,
+  `boxed_qp_fixed_var` start feasible, so no direction is computed at
+  all. `unbounded_cubic`'s 91 → 290 is the unsafeguarded path having
+  taken a step from an already-feasible point; both routes return
+  `DivergingIterates` on a model that is genuinely unbounded.
+* **Declined.** `csfi2`, `deb7`, `pooling_rt2stp`,
+  `linear_eq_aggregation`, `linear_eq_aggregation_row_constant`,
+  `issue_372_infeasible_bounds`: every trial is worse than `theta_0`,
+  so the user's point is kept.
+* **Backtracked accept.** `eigena2`, `eigenb2`, `hs71_obj1e8`,
+  `user_scaling_suffix`, `user_scaling_var_suffix` accept at
+  `alpha < 1`.
+
+`csfi2` is in the declined group. Its old `SolveSucceeded` came from
+taking a step that raises the true violation above `theta_0 = 1508.55`
+— exactly the step the safeguard exists to refuse. A *tighter* accept
+test still declines it, so no tuning reaches it; only removing the
+safeguard does. With the step declined, `csfi2` under
+`least_square_init_primal=yes` now matches `=no` to the bit, which is
+the least surprising thing an off-by-default option can do.
+
+`eigenb2` is in the accepted group, and it is paired with `eigena2`:
+the safeguard sees **bit-identical numbers** on both — `theta_0 = 1.0`,
+accepted `theta = 0.2500000062500001`, `alpha = 0.5`, one rejected
+trial, step norm `3.2596` — and `eigena2` improves while `eigenb2`
+drops a tolerance band. Any criterion computed from the safeguard's own
+inputs necessarily treats the two the same, so none can keep one and
+drop the other. Two specific proposals were measured and rejected:
+
+* **Retuning `least_square_init_accept_ratio`.** Acceptance is
+  `theta_0 − theta >= eta·alpha·theta_0`, so `eigenb2`'s trial survives
+  every `eta <= 1.5`, and `eta > 1` is meaningless (it would demand a
+  negative violation at `alpha = 1`). No reachable setting rejects it.
+* **A band that prefers the untouched point when the improvement is
+  marginal.** `eigenb2`'s step is not marginal: it cuts the violation
+  4×, the median of the sixteen accepted steps in the corpus and the
+  same ratio as `airport`, `cresc4` and both
+  `issue_508_infeasible_gap_*` fixtures, all of which are wins.
+* **Requiring the accepted point not to degrade the dual residual.**
+  Measured: iteration-0 `inf_du` *improves* on both, 100 → 13.9 on
+  `eigena2` and 100 → 47.7 on `eigenb2`. The gate accepts the step.
+
+So the downgrades are accepted as the cost of a route that is off by
+default, and the corpus measurement is pinned by
+`crates/pounce-cli/tests/issue_616_ls_init_downgrades.rs` rather than
+left in a PR body.
+
+### A declined step is not the same as never asking
+
+Worth knowing before you read `least_square_init_primal=yes` results:
+declining restores your `x` exactly, but it does not restore the
+solver's state. Computing the direction has by then driven the first
+factorization through the augmented-system solver, on the `W = 0`
+least-square matrix rather than on the first real KKT matrix.
+
+gh#616 isolated this by forcing a decline on either side of that call.
+Declining *before* the augmented-system solve is bit-identical to
+`least_square_init_primal=no` on every fixture; declining *after* it is
+bit-identical to the real safeguard. So the carrier is that one solve,
+not the staging or the trial evaluations — those are free.
+
+It shows on two of the eight declining fixtures: `pooling_rt2stp` takes
+298 iterations with the option off and 81 with it on and declined
+(same objective, same status), and `deb7` takes 154 against 202.
+Everywhere else declining and `=no` agree exactly. Making the decline a
+true no-op would need a separate augmented-system solver for the
+initializer; it was not done, because it is a trajectory change that
+costs `pooling_rt2stp` 81 → 298 iterations to buy a tidier contract on
+an off-by-default option.
+
 ## Warm-starting the interior-point path
 
 From Python, the packaged form is one object:
@@ -172,7 +296,9 @@ any one of them silently degrades to (roughly) a cold solve:
 2. **Lower `mu_init`.** The default `0.1` makes the solver walk the
    barrier schedule down from scratch even when started at the
    optimum. Seed it near the converged complementarity (e.g. `1e-7`
-   after a `tol=1e-8` solve).
+   after a `tol=1e-8` solve). Since #606 this is a *floor*: the solver
+   measures the point you supplied and raises `mu` above it if the
+   point cannot support that barrier (see below).
 3. **Tighten the warm-start pushes.** The warm initializer applies
    its own interior clamp with `warm_start_bound_push` / `_frac`
    (default `1e-3`), which shoves an at-the-bound solution back off
@@ -210,6 +336,126 @@ the `.nl` file's dual segment when present.
 | `warm_start_slack_bound_push` / `warm_start_slack_bound_frac` | `1e-3` | Same, for slacks. |
 | `warm_start_mult_bound_push` | `1e-3` | Floor on seeded bound multipliers (a carried-in `z = 0` must not start on the barrier's boundary). |
 | `warm_start_mult_init_max` | `1e6` | Cap on seeded equality multipliers. |
+| `warm_start_recentering` | `residual` | Reconstruct the multiplier blocks the caller did not supply, and raise `mu` when the supplied point cannot support it. `none` restores the pre-#606 constants. |
+
+### What the solver does with a partial warm start
+
+Two things about the list above are worth knowing before you tune it.
+
+**You cannot seed every multiplier block.** `TNLP::get_starting_point`
+— which is what `lagrange` / `zl` / `zu` reach — carries the equality
+multipliers and the *variable*-bound multipliers. The interior-point
+method also needs a multiplier for each inequality row's slack
+(`v_L` / `v_U` internally), and there is no field for those on any
+frontend. On every warm start ever run they arrived as zero and were
+floored at `warm_start_mult_bound_push`.
+
+**A constant is the wrong fill.** `warm_start_mult_bound_push` is a
+number chosen with no reference to the slacks it is paired against, so
+the "warm" point it produces is not a stationary point of anything.
+
+Under `warm_start_recentering=residual` (the default since #606) the
+initializer instead rebuilds what it was not given:
+
+- a bound-multiplier entry that arrives as exactly `0` (or `NaN`) is
+  not a legal barrier multiplier, so it was never a seed; it is
+  re-derived from the stationarity identity
+  `P_L z_L − P_U z_U = ∇f + J_c^T y_c + J_d^T y_d` (and its slack-block
+  twin `P_L v_L − P_U v_U = −y_d`), floored at `μ / slack` so an
+  inactive bound still gets the value complementarity implies and
+  capped at ten times that floor, so a stationarity *miss* cannot be
+  laundered into a multiplier (#617);
+- an equality-multiplier block that is identically zero goes through
+  the same regularized least-squares augmented solve the cold path
+  uses, now with real bound multipliers in its right-hand side;
+- `mu` is raised to the point's measured average complementarity when
+  that exceeds `mu_init` **by more than a factor of ten**, so a stale
+  seed gets a looser barrier instead of being trusted while a merely
+  imperfect one keeps the barrier it asked for. Moving `mu` reroutes
+  the whole trajectory, so a near miss is not worth what the reroute
+  costs. The measurement is clamped to `[1e-11, 0.1]`; `mu_init`
+  itself is not, so an explicit setting outside that band is a floor
+  and is never capped. The primal and dual residuals deliberately do
+  **not** move `mu`: a warm point at a moved parameter carries both by
+  construction, and reacting to them discards the warm start to pay for
+  a Newton step that was about to happen anyway.
+
+`warm_start_target_mu`, when set, still pins `mu` outright.
+
+### A seed the solver will not believe
+
+Everything above derives the blocks you did not supply *from* the ones
+you did, so a supplied block that does not describe your point gets
+propagated rather than caught. Two guards bound that (#617, #618). Both
+are as conservative as the `mu` rule above, and for the same reason —
+refusing a seed reroutes the trajectory exactly as much as trusting a
+bad one does.
+
+**A dual block that cannot belong to this primal point is refused.**
+Each seeded bound-multiplier block is measured on the quantity the
+barrier *is*: `|z_i| · s_i`, averaged over the entries you actually
+seeded. A point on any central path — converged, mid-solve, or stale —
+carries that at the order of its own barrier, and a point that misses
+feasibility by `inf_pr` may carry it at that order too. A block reading
+ten times above **both** cannot have come from a solve of this problem,
+so it takes the pre-#606 constant fill and stops being an input to
+anything. The equality block gets the matching test — a `y` whose
+stationarity residual dwarfs `∇f` and the multipliers *you* supplied is
+not this point's `y` — and while the block itself is left where you put
+it (there is no constant to fall back to), the split no longer runs off
+it.
+
+**A slack the point's own infeasibility swamps is not a measurement.**
+Both halves of the bound reconstruction read a small slack as "this
+bound is active". On a point that misses feasibility by more than the
+slack itself, that reading is not available, so those entries keep the
+pre-#606 constant instead. It is a per-entry test, so a partly-stale
+seed keeps the reconstruction exactly where its slacks still outrun the
+residual. The comparison is made against `inf_pr` only once `inf_pr`
+clears the barrier by a factor of ten — a converged solve leaves
+`inf_pr` at its own tolerance, routinely above the pushed slacks, and
+comparing the two unguarded would throw away the reconstruction on the
+exact restarts it exists for.
+
+Neither guard fires on a good seed: an exact same-model restart is
+bit-identical to what #606 shipped.
+
+What happened is reported back. From Python it is `info["warm_start"]`:
+
+```python
+x2, info2 = warm.solve(x0=x, zl=..., zu=...)
+info2["warm_start"]
+# {'primal_residual': 1.6e-09, 'dual_residual': 3.5e-10,
+#  'complementarity': 4.2e-09, 'mu_in': 2.5e-09, 'mu_out': 4.2e-09,
+#  'bound_duals': 'reconstructed', 'eq_duals': 'accepted',
+#  'bound_duals_reconstructed': 1, 'bound_duals_rejected': 0,
+#  'eq_duals_rejected': False, 'stationarity_split': True,
+#  'recentering_disabled': False}
+```
+
+`bound_duals` reads `rejected` when a seeded block was refused, and
+`bound_duals_rejected` counts the entries; the verdicts are per block,
+so a model can refuse the blocks you seeded and still reconstruct the
+slack-bound blocks nobody can seed, and the two counters keep that
+legible.
+
+From Rust it is `IpoptApplication::warm_start_diagnostics()`. At
+`print_level=5` the iteration line carries `wz` (bound multipliers
+rebuilt), `wz!` (a seeded bound block was refused), `wy` (equality
+multipliers rebuilt), `wy0` (a reconstruction was discarded), `wy!`
+(the seeded `y` was refused as an input) and `wmu` (the barrier was
+loosened).
+
+### Two options that are refused
+
+`warm_start_same_structure` and `warm_start_entire_iterate` are
+registered — an `ipopt.opt` written for Ipopt parses unchanged — but
+both name Ipopt's `TNLP::GetWarmStartIterate` surface, which pounce
+does not expose. Setting either to `yes` used to parse, set a field
+nothing read, and change nothing at all. Since #606 it fails with a
+message instead. `warm_start_init_point=yes` is the supported route
+and carries the primal point and every multiplier block the TNLP
+surface has.
 
 ### Which model does this warm start belong to?
 
@@ -222,8 +468,9 @@ answer, or the right answer down a much longer trajectory.
 
 Pass `problem=` when you capture, and the object records a
 **signature** of the model as well: dimensions, the bound signature, the
-declared sparsity, the scaling convention, the algorithm/backend, and
-the model-defining options.
+declared sparsity, the scaling convention, the algorithm/backend, the
+model-defining options, and an order-sensitive probe of the model
+itself.
 
 ```python
 ws = pounce.WarmStart.from_info(x, info, problem=prob)
@@ -256,15 +503,87 @@ per call: `prob.solve(warm_start=ws, compat="warn")`.
 `ws.describe_compatibility(prob)` returns the report as a string without
 raising, which is the dry run for a replay you are unsure of.
 
-One structural change a fingerprint cannot see is a **reordering**:
-permuting a model with a uniform box and a dense jacobian leaves every
-digest bit-identical. Ordering is knowledge only you have, so name it:
+#### Reordered variables
+
+Every facet listed above is a digest of what the model *declares*, and
+none of them can see a **reordering**: permuting a model with a uniform
+box and a dense jacobian leaves the bound digest and the sparsity digest
+bit-identical. Replaying through one produced objective 16.0909 against
+a true 17.0140 on permuted HS071, with nothing raised (#621).
+
+So the signature also records a **probe**: the model evaluated once at a
+fixed point inside the bounds, summarized order-sensitively. A
+permutation moves those numbers, so it is refused with no help from you:
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob)
+reordered_prob.solve(warm_start=ws)        # refused — no var_ids needed
+```
+
+```text
+warm start is not compatible with this problem (1 mismatch,
+exact-structure replay, schema v2):
+  - probe: this problem's model does not evaluate to the same numbers as
+    the one the warm start was captured against (a reordering of the
+    variables looks exactly like this; so does a different model of the
+    same shape)
+```
+
+The probe costs one model evaluation at capture, and one at replay only
+when the artifact carries a probe to compare against — 0.15 ms on a
+4-variable model and 1.7 ms at 10 000 variables, or 1.2% and 0.002% of a
+cold solve of the same model. It is a fixed 20 floats in the artifact
+whatever the problem size. Decline it with `probe=False` for a model
+whose evaluation is expensive or has side effects:
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob, probe=False)
+```
+
+The comparison is to a **relative tolerance** (`PROBE_RTOL`, 1e-9), not a
+hash equality: a model does not have to be bitwise reproducible to
+replay. Re-associating a model's internal sums — what a different BLAS
+or thread count does — moves the probe by 5e-18 relative and is
+accepted.
+
+**Stable IDs remain the rigorous answer**, for two reasons. The probe
+infers ordering from arithmetic, so a model that is genuinely symmetric
+under the permutation looks unchanged to it; and the probe can only
+*refuse* a reordering, where IDs let `reindex` repair it:
 
 ```python
 ws = pounce.WarmStart.from_info(x, info, problem=prob,
                                 var_ids=names, con_ids=con_names)
 ...
-prob2.solve(warm_start=ws, var_ids=names_in_prob2_order)   # refused
+prob2.solve(warm_start=ws, var_ids=names_in_prob2_order)   # refused, by name
+ws.reindex(prob2, var_ids=names_in_prob2_order)            # ...or repaired
+```
+
+The probe is best-effort, and unavailable in three cases: an artifact
+captured with `probe=False`, an artifact written before #621, and a
+model that will not evaluate at an arbitrary interior point or answers
+with a NaN. Each leaves the facet unrecorded, which reads as
+*unverifiable* rather than incompatible — the replay still proceeds. When
+neither the probe nor IDs were available on both sides, the report says
+so rather than claiming a clean bill of health:
+
+```text
+warm start is compatible with this problem
+  (note: neither a model probe nor stable IDs were available on both
+  sides, so a pure reordering of the variables would not have been
+  caught here (pounce#621). ...)
+```
+
+`describe_compatibility()` is the dry run, though, and you have to know
+to call it. The enforcing path — `check_compatible()`, which
+`solve(warm_start=...)` takes for you — says the same thing as a
+`WarmStartOrderingUnverifiedWarning` (#660), so a replay that could not
+have ruled a reordering out is never silent. Nothing disagreed, so it is
+a warning and not a refusal; if you would rather refuse, promote it:
+
+```python
+import warnings
+warnings.simplefilter("error", pounce.WarmStartOrderingUnverifiedWarning)
 ```
 
 ### Transferring a warm start: horizon shifts and reindexing
@@ -283,8 +602,8 @@ moved = ws.transfer(next_prob, shift, var_ids=next_ids, con_ids=next_con_ids)
 
 With stable IDs on both sides, `reindex` writes that mapper for you —
 entries the target shares with the source move to their new positions,
-entries only the target has are left *unseeded* (`NaN`, which the warm
-initializer reads as "you decide") rather than fabricated:
+and entries only the target has are the freshly-entered stage of a
+receding horizon:
 
 ```python
 moved = ws.reindex(next_prob, var_ids=next_ids, con_ids=next_con_ids)
@@ -292,13 +611,138 @@ x, info = next_prob.solve(warm_start=moved)
 ```
 
 That covers both cases: a reordering, where the ID sets are equal, and a
-receding horizon, where they overlap. Note what it does *not* buy you —
-a transferred interior-point start is about validity, not speed. On a
-slew-limited tracking model the mapped point costs 12 iterations against
-7 for a cold solve; on a longer sinusoidal track the gap widens with the
-horizon (12 vs 9 at horizon 5, 30 vs 10 at horizon 40). That is the same
-barrier/active-set limit described just below, and the reason the SQP
-path exists.
+receding horizon, where they overlap.
+
+#### What goes in the new stage
+
+The two blocks of a prolongated stage are answered differently, and both
+answers were measured (pounce#622).
+
+Its **multipliers** are left *unseeded* — `NaN`, which the warm
+initializer reads as "you decide" — rather than fabricated. Since
+pounce#606 the solver reconstructs each unseeded *bound* multiplier
+from `μ̂ / slack`, the complementarity relation it is about to enforce,
+which is a better number than anything this side can invent. That
+reconstruction needs no dual to work from, only the slacks the point
+already determines, so it runs however much or little you seeded
+(pounce#622).
+
+The *equality* multipliers are the asymmetric half. Completing those
+takes a least-squares solve that a partial seed can support and a bare
+point cannot, so a state carrying no duals at all gets them reported
+`unseeded` and left at the constant fill — deliberately, with its own
+measurement behind it (deriving them from a primal-only seed cost
+1102 → 1211 iterations across the 27 parametric paths in
+`benchmarks/warmstart`). `info["warm_start"]` reports the split
+directly: `eq_duals: accepted` for a mapped replay against `unseeded`
+for a values-only one.
+
+So what the carried multipliers buy is that equality block, not the
+bound blocks. Dropping them is close to a wash on iteration count here
+— 44/55/55/47 against 45/50/54/46 over the eight-step loop tabulated
+below — and the reason to carry them is that they are the only thing
+that *can* carry `y` across the shift.
+
+Its **primal values** are the `fill_x` argument, and they matter more
+than they look:
+
+| `fill_x` | what lands in the new stage |
+|---|---|
+| `"prolong"` (default) | Repeat the last stage. When the identifier map is a pure shift — every matched entry the same distance from its counterpart, which is what a receding horizon *is* — that distance is the layout's own period, and each new entry takes the value one period behind it, clipped into its box. One variable per stage or `(p, v, u)` interleaved, the value lands in the same *kind* of slot; a tail longer than one stage repeats the terminal stage. Not a shift (a reordering, an interpolation) means no stage to repeat, and this degrades to `"zero"`. |
+| `"zero"` | Zero clipped into the variable's box: independent of the point, and of the model. The pre-#622 default. |
+| an array or scalar | Your values, used as-is — nothing is prolongated on top of an explicit answer. |
+
+The default is worth what it costs to state. On a chain with a slew
+limit, `"zero"` enters the new stage 2.25 away from feasible — the new
+variable starts at `0` next to a neighbour at `2.75` under a limit of
+`0.5` — and the filter's first iterations go on walking that back: 11
+iterations against 7 for a cold solve. `"prolong"` enters it *feasible*
+(primal residual 1.7e-10) and costs 8, and over the closed loop 21
+against cold's 22.
+
+Where the transfer pays properly is over a sequence, at a horizon long
+enough to have something to carry. Eight steps of a receding horizon on
+the sinusoidal tracking family, total iterations, transferred against
+cold:
+
+| horizon | transferred | cold |
+|---|---|---|
+| 5 | 45 | 67 |
+| 10 | 50 | 75 |
+| 20 | 54 | 77 |
+| 40 | 46 | 76 |
+
+`"zero"` runs the same loop in 42 / 47 / 55 / 53 — ahead at the two
+short horizons, behind at the two long ones, and 27 against 21 on the
+slew fixture. The default is not the one that wins every row; it is the
+one that never hands the solver a point the model itself rejects. When
+your own prolongation is better than repeating a stage — a simulation
+step, a tangent predictor — `transfer()` with an explicit mapper is
+where it goes.
+
+Those numbers are `66cc1d4` + pounce#622, and they are the *reverse* of
+what this page said before pounce#620: a transferred start used to lose
+to a cold solve by more the longer the horizon got. Residual-adaptive
+recentering (pounce#606/#620) is what turned that around; the fill
+policy above is what fixed the case it did not reach.
+
+#### Could a better transfer do better? (pounce#622)
+
+Yes, by about 2x — and not by any of the obvious routes, so the
+measurements are recorded here rather than left for the next person to
+re-run. Bound the question with oracles no transfer can beat: seed each
+window with the *next* window's converged answer. Eight-step receding
+horizon, total iterations:
+
+| horizon | cold | shipped | perfect primal | perfect primal+dual |
+|---|---|---|---|---|
+| 5 | 67 | 45 | 21 | 9 |
+| 10 | 75 | 50 | 24 | 12 |
+| 20 | 77 | 54 | 26 | 18 |
+| 40 | 76 | 46 | 23 | 18 |
+
+So the barrier's own floor is about one iteration per warm step, and
+roughly half of what the shipped transfer spends is the zero-order
+prediction rather than the interior-point method. Two ways of
+collecting it were measured and neither works:
+
+**A finite-difference (secant) predictor** — each variable stepped by
+its own drift across the last two solves, which stable identifiers make
+directly observable — is *worse than zero-order everywhere*: 59/75/66/60
+against 45/50/54/46, and at horizon 10 no better than a cold solve. The
+prolongated point is feasible to 1e-10; extrapolating pushes it off the
+constraint manifold and breaks the pairing between the carried
+multipliers and the new slacks. This is the same failure
+`docs/src/continuation.md` records for the predictor at horizon 80.
+
+**The KKT tangent** (`pounce.Solver.parametric_step`, the machinery
+behind the `pred-ipm` arm) cannot be pointed at a horizon shift at all,
+for a reason worth stating plainly: **a receding horizon is not a
+parametric perturbation.** On the stages two consecutive windows share,
+theta does not move — the same physical targets are in force. What
+changes is *which stages exist*: one leaves, one enters. Fed a shift,
+`parametric_step` is handed a delta vector of exact zeros and correctly
+returns a zero step, so the "predictor" is bit-identical to the
+zero-order transfer. Give the same family a parameter that genuinely
+moves — an MPC initial-condition pin — and the tangent becomes
+non-trivial and then degrades with horizon: 52/87/95/137 against the
+zero-order 54/78/81/93 at horizons 5/10/20/40, ahead only at the
+shortest, and worst where there are the most active-set events per step.
+
+What is left, then, is the part no first-order step can supply: the
+freshly-entered stage has no history to extrapolate *from*. Closing the
+gap means predicting it from the model — a dynamics rollout, which
+`transfer()`'s mapper already lets you supply and which only you can
+write — or changing method, which is what the active-set SQP path is
+for.
+
+Two things it still does not buy you. A single hand-off across a *large*
+parameter step on a *small* model is not where warm starting wins —
+on the five-variable slew fixture, whose targets move by 2.0 per stage,
+the transferred point costs 8 iterations against a cold solve's 7 to 9
+(the cold arm's own spread over where you put the guess). And the
+underlying barrier/active-set limit described just below has not gone
+anywhere; it is still the reason the SQP path exists.
 
 ### Artifacts written before pounce#607
 
@@ -442,6 +886,161 @@ best = pounce.race_starts(fun, starts, bounds=bounds, iters=10)[0]
 res = pounce.minimize(fun, best.x,
                       warm_start=pounce.WarmStart.from_info(best.x, best.info))
 ```
+
+### Racing starts: the successive-halving ladder
+
+The default policy, `policy="fixed"`, spends the same budget on every
+candidate from a cold start and ranks the field once at the end. That
+keeps most of multistart's cost — the candidate that was hopeless after
+two iterations is still charged for ten — and throws away the solver
+state between rounds. pounce#610 adds an opt-in alternative,
+`policy="halving"`, an adaptive **successive-halving ladder**:
+
+1. every candidate runs for a small budget;
+2. the field is ranked on five signals (below);
+3. the weakest fraction is eliminated;
+4. the survivors are **resumed from their held solver state** with a
+   budget `eta` times larger, and the ladder repeats.
+
+The winner ends up with about the effort `iters` would have given it
+under the fixed policy; what changes is what the losers cost.
+
+**It is opt-in, and the reason is measured — read this before using
+it.** The ladder's early rungs rank the field on a handful of
+iterations. On a strongly multimodal model that ranking carries almost
+no information about which basin ends lowest, so rung 0 discards the
+eventual winner. On 2-D Ackley from 27 Sobol starts with `iters=40` —
+so rung 0 is four iterations and cuts 27 candidates to 9 — the start
+that reaches the global minimum at full effort is cut at rung 0 in
+every seed tried, ranked 19th, 13th and 24th of 27. The fixed policy
+returns 4e-16 on all three seeds; the ladder returns 3.57, 5.38 and
+3.57. Across an independent five-model set the ladder was 30% cheaper
+overall and returned a worse answer in 13 of 45 configurations, and the
+gap *widened* with more starts, because a larger field is culled harder
+on the same weak signal.
+
+Nor is that a tuning accident. `explore` does not help — it retains the
+candidate *farthest* from those kept, which is not the winner — and the
+only setting that recovered the answer, `min_rung_iters=20` (half the
+total budget, i.e. a single cut), cost slightly more than the fixed
+policy on both models. On a genuinely multimodal problem the ladder's
+saving *is* the quality loss.
+
+Reach for `policy="halving"` when a solver iteration is expensive and
+the basins are few or well separated, and check the answer against the
+default before relying on it. `python/tests/test_starts_racing.py::`
+`test_the_ladder_can_cut_the_winner_at_rung_zero` pins the failure
+mode, so if the rung-0 ranking ever becomes informative on that model
+the test fails and the default is worth revisiting.
+
+```python
+best, race = pounce.race_starts(fun, starts, jac=jac, bounds=bounds,
+                                constraints=cons, iters=20,
+                                policy="halving", return_report=True)
+print(race.report())
+# race: policy=halving eta=3 candidates=16 rungs=2
+#   rung 0: budget=37 evals entrants=16 -> survivors=7 spent=530 evals / 112 iters (0 resumed, 16 started)
+#       - #10: duplicate of candidate 6 (scaled distance 0.000606 <= 0.001)
+#       - #14: below halving cut (rank 7 of 15, keep 6)
+#       - #5: below halving cut (rank 8 of 15, keep 6)
+#       ... seven more
+#   rung 1: budget=111 evals entrants=7 -> survivors=7 spent=272 evals / 61 iters (7 resumed, 0 started)
+#   total 834 evals / 173 iters, 7 resumes
+```
+
+(HS71, 16 Sobol starts, `iters=20` — the `hs71` row of the benchmark
+table below. The fixed policy spends 259 iterations on the same field.)
+
+`RaceReport` carries the per-rung resource spend and a reason for every
+candidate's exit; `RaceCandidate` carries each one's evaluations,
+iterations, resumes, restoration calls and final residuals.
+
+**What "resumed" means, precisely.** POUNCE has no API for suspending an
+IPM mid-iteration and re-entering the same algorithm object — every
+`Solver.solve` builds its application afresh. What a pause carries is the
+whole interior-point *iterate*: the primal point, the constraint
+multipliers, both bound-multiplier blocks, and the barrier parameter μ,
+replayed through the warm-start machinery above so that pounce#606's
+recentering measures the point it is actually handed. That is materially
+not a cold restart. Measured on the `rastrigin_eq` fixture in
+`python/tests/test_starts_racing.py`:
+
+| paused at | resumed (state + point) | restarted (point only) |
+|---|---|---|
+| 3 iterations | **32 iters** / 330 evals | 43 iters / 368 evals |
+| 5 iterations | **17 iters** / 250 evals | 43 iters / 376 evals |
+| 8 iterations | **0 iters** / 80 evals | 43 iters / 372 evals |
+
+Both arms start from the identical iterate and reach the identical
+objective, start for start. The last row is the clearest: by 8
+iterations every candidate has converged, the resumed solve recognises
+it immediately because the carried duals and μ satisfy the convergence
+check on entry, and the restarted solve — handed the same point and
+nothing else — needs 5 to 8 iterations each to re-derive the same
+certificate.
+
+The size of that gap is model-dependent. On HS71 the same comparison is
+a wash (98/92/77 iterations resumed against 102/87/79 restarted), which
+is the regime pounce#608 warns about: a warm-started IPM often converges
+in one iteration per step, and where it does a resume has nothing left
+to remove. What a pause does *not* carry is the filter history and the
+line-search state; that would need a `Solver.resolve()`, which does not
+exist yet.
+
+**Ranking.** Eliminations are decided on a weighted sum of five
+rank-normalized signals — rank-normalized so that a violation in mol/s
+and a dimensionless KKT residual can be combined without an invented
+scale factor:
+
+| signal | what it reads | default weight |
+|---|---|---|
+| `violation` | how infeasible the iterate is now | 3.0 |
+| `feasibility_progress` | how much of its *initial* violation it has removed | 1.0 |
+| `kkt` | the scaled first-order residual, in log units | 1.5 |
+| `objective_progress` | objective removed per evaluation spent, damped while infeasible | 1.0 |
+| `health` | restoration share, non-finite objective, failed exit | 1.0 |
+
+Feasibility carries the most weight because an infeasible candidate's
+objective is not a number about the problem being solved. Pass
+`weights=` to re-balance. Diversity is protected two ways: survivors
+within `cluster_tol` of each other in scaled units are collapsed to the
+best of the group, and `explore` candidates from *outside* the cut are
+retained anyway, chosen farthest-first from those already kept.
+
+**Evaluations, not iterations, are the resource.** Rung 0 has no
+evaluation budget — it *is* the calibration — and every later rung's
+budget is a multiple of what rung 0 actually cost. Each candidate then
+converts its remaining budget into an iteration cap through *its own*
+measured evaluations-per-iteration, so a candidate whose iterations are
+expensive (a dozen line-search trials, a restoration excursion) is
+granted fewer of them for the same resource. A cumulative iteration
+ceiling rising to `iters` bounds the other side.
+
+**When not to use it.** A rung boundary costs a fresh solver application
+and a re-evaluation at the seed. On a model where that fixed cost is a
+large fraction of the whole solve — one variable, no constraints, a
+handful of evaluations per iteration — the ladder cuts iterations but
+comes out level or slightly up on evaluations. Measured over
+`benchmarks/scripts/race_starts_bench.py` (six multi-basin models × three
+field sizes): **17.9% fewer** user-callable evaluations overall with no
+quality regression *on that set*, ranging from **43.8% fewer** on HS71
+with 27 starts to **5.5% more** on the two-variable `himmelblau_disc`
+with 16. Iterations fall in every one of the eighteen configurations.
+That set is not a promise about your model — see the quality caveat
+above. Where the ladder does not pay, the default `policy="fixed"` is
+the pre-#610 policy, kept verbatim and reproducing its old answers
+exactly:
+
+```python
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10)  # fixed
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10,
+                          policy="halving")                      # the ladder
+```
+
+`policy="halving"` runs on the NLP path only — it holds a
+`pounce.Solver` session per candidate, which is what a pause suspends —
+and refuses a non-`"nlp"` `solver_selection` rather than silently losing
+the session it needs.
 
 When the model has many local minima and you want *all* of them (or a
 managed search rather than a tournament), the

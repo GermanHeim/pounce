@@ -54,10 +54,13 @@ Requires ``pyomo.contrib.incidence_analysis`` (needs ``networkx`` and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, List, Optional
 
 from pyomo.core.expr.numeric_expr import DivisionExpression, NegationExpression
 from pyomo.environ import value
+
+from pyomo_pounce.init_options import InitOptions
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pyomo.core.base.constraint import ConstraintData
@@ -70,11 +73,55 @@ __all__ = [
     "structural_incidence",
     "BlockAnalysisReport",
     "BlockInitReport",
+    "BlockOutcome",
     "BlockRepairPlan",
 ]
 
 #: Termination conditions under which a solve's values may be kept.
 OK_TERMINATIONS = ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
+
+
+#: Per-block statuses reported by :attr:`BlockInitReport.blocks`.
+BLOCK_STATUSES = ("initialized", "fallback", "failed", "skipped")
+
+
+@dataclass
+class BlockOutcome:
+    """What happened to one block of the calculation order (gh #609).
+
+    Before gh #609 a run reported a count of initialized variables and a
+    free-text failure string, so "which blocks actually got values" was
+    not answerable -- and once a failure stopped the traversal, the
+    difference between *skipped because it depended on the failure* and
+    *skipped because the loop gave up* was not recorded at all. It is
+    now, per block.
+    """
+
+    #: Position in the block-triangular calculation order.
+    index: int
+    #: Number of variables (== number of constraints) in the block.
+    size: int
+    #: Name of the block's leading constraint -- how the block is named
+    #: in ``failures`` and in the report text.
+    constraint: str
+    #: One of :data:`BLOCK_STATUSES`.
+    status: str
+    #: Why, in the user's terms. Empty for a plain success.
+    detail: str = ""
+    #: Reciprocal condition number of the block's scaled Jacobian,
+    #: or None when the check did not run (``conditioning="off"``, or a
+    #: Jacobian that could not be built).
+    rcond: Optional[float] = None
+    #: Indices of the blocks this one consumes values from.
+    depends_on: List[int] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        rc = "" if self.rcond is None else f", rcond={self.rcond:.2e}"
+        detail = f" -- {self.detail}" if self.detail else ""
+        return (
+            f"[{self.index}] {self.size}x{self.size} at {self.constraint!r}: "
+            f"{self.status}{rc}{detail}"
+        )
 
 
 @dataclass
@@ -106,10 +153,53 @@ class BlockInitReport:
     #: actually needed repair (something pruned or pinned); None when
     #: the given decisions were used as-is.
     repair: Optional["BlockRepairPlan"] = None
+    #: One :class:`BlockOutcome` per block of the calculation order, in
+    #: that order (gh #609). The structured half of this report:
+    #: ``failures`` stays the free-text half it always was.
+    blocks: List[BlockOutcome] = field(default_factory=list)
+    #: Numerical-conditioning notes: which blocks were found weak, what
+    #: their rcond was, and what they were routed to (gh #609).
+    diagnostics: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.failures
+
+    def _by_status(self, status: str) -> List[BlockOutcome]:
+        return [b for b in self.blocks if b.status == status]
+
+    @property
+    def initialized_blocks(self) -> List[BlockOutcome]:
+        """Blocks solved as square systems and kept."""
+        return self._by_status("initialized")
+
+    @property
+    def fallback_blocks(self) -> List[BlockOutcome]:
+        """Weak blocks routed to a regularized or coupled fallback."""
+        return self._by_status("fallback")
+
+    @property
+    def failed_blocks(self) -> List[BlockOutcome]:
+        """Blocks whose solve failed; their seed values were restored."""
+        return self._by_status("failed")
+
+    @property
+    def skipped_blocks(self) -> List[BlockOutcome]:
+        """Blocks not attempted -- descendants of a failure, or, under
+        ``on_block_failure="stop"``, everything after one."""
+        return self._by_status("skipped")
+
+    @property
+    def n_fallback(self) -> int:
+        return len(self.fallback_blocks)
+
+    @property
+    def n_failed(self) -> int:
+        return len(self.failed_blocks)
+
+    @property
+    def n_skipped(self) -> int:
+        return len(self.skipped_blocks)
 
     def __str__(self) -> str:
         lines = [
@@ -150,6 +240,17 @@ class BlockInitReport:
                 "  overconstrained cons (redundant/conflicting specs): "
                 + ", ".join(self.overconstrained_constraints)
             )
+        if self.n_fallback or self.n_skipped or self.n_failed:
+            lines.append(
+                f"  block outcomes    : {len(self.initialized_blocks)} initialized, "
+                f"{self.n_fallback} fallback, {self.n_failed} failed, "
+                f"{self.n_skipped} skipped"
+            )
+        for d in self.diagnostics:
+            lines.append(f"  diagnostic: {d}")
+        for b in self.blocks:
+            if b.status != "initialized":
+                lines.append(f"  {b}")
         for f in self.failures:
             lines.append(f"  FAILED: {f}")
         return "\n".join(lines)
@@ -195,6 +296,14 @@ class BlockAnalysisReport:
     square_constraints: List[ConstraintData] = field(default_factory=list)
     variable_blocks: List[List[VarData]] = field(default_factory=list)
     constraint_blocks: List[List[ConstraintData]] = field(default_factory=list)
+    #: The block DAG (gh #609): ``block_dependencies[k]`` lists the
+    #: indices of the blocks whose variables appear in block ``k``'s
+    #: constraints, i.e. the blocks ``k`` consumes values from. Block
+    #: triangularity means every entry is ``< k``, so a block with an
+    #: empty list is the head of an independent branch. This is what
+    #: lets :func:`block_initialize` skip only a failure's *descendants*
+    #: instead of abandoning the rest of the traversal.
+    block_dependencies: List[List[int]] = field(default_factory=list)
 
     @property
     def n_extra_degrees_of_freedom(self) -> int:
@@ -769,6 +878,9 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
             )
             report.variable_blocks = [list(blk) for blk in var_blocks]
             report.constraint_blocks = [list(blk) for blk in con_blocks]
+            report.block_dependencies = _block_dependencies(
+                igraph, report.variable_blocks, report.constraint_blocks
+            )
     finally:
         for vd in fixed_by_us:
             vd.unfix()
@@ -782,8 +894,9 @@ def block_initialize(
     solver=None,
     *,
     repair: str = "auto",
-    max_list: int = 10,
+    max_list: Optional[int] = None,
     tee: bool = False,
+    options=None,
     igraph=None,
 ) -> BlockInitReport:
     """Fill ``Var.value`` by solving equality blocks in calculation order.
@@ -806,8 +919,17 @@ def block_initialize(
             decisions exactly as given — nothing pruned, nothing
             pinned, every decision needs a value, and a non-square
             system is reported (``report.square``) instead of repaired.
-        max_list: Cap on the reported name lists.
-        tee: Echo block-solver output.
+        max_list: Cap on the reported name lists. Defaults to
+            ``options.max_list``.
+        tee: Echo block-solver output. Ignored when `options` is an
+            :class:`~pyomo_pounce.InitOptions`, which carries its own.
+        options: Solver options dict handed to **every** block solve, or
+            an :class:`~pyomo_pounce.InitOptions` that also chooses the
+            conditioning, fallback, and failure-recovery policy (gh
+            #609). A bare dict is always solver options. Before gh #609
+            there was no such argument here at all, so options given to
+            :func:`~pyomo_pounce.initialize` reached the projection and
+            were dropped by every block solve.
 
     With ``repair="auto"`` the specification is checked before anything
     is held. When holding the given decisions would leave the equality
@@ -826,9 +948,41 @@ def block_initialize(
     the offending variable/constraint **names** are reported, and the
     square part is still solved best-effort. ``report.failures`` is
     non-empty when a block solve failed: the failed block's variables
-    are restored to their seed values, the loop stops there, and the
-    downstream blocks keep their seeds — a failed solve never writes
-    its values into the model.
+    are restored to their seed values — a failed solve never writes its
+    values into the model.
+
+    A failure no longer abandons the traversal (gh #609). The block DAG
+    (:attr:`BlockAnalysisReport.block_dependencies`) says which later
+    blocks consume the failed block's values; those are marked
+    ``"skipped"`` and every branch independent of the failure is still
+    initialized. ``report.blocks`` is the per-block record —
+    initialized, fallback, failed, skipped — and
+    ``options.on_block_failure="stop"`` restores the pre-gh#609
+    behaviour of stopping at the first failure.
+
+    A 1x1 block solves by Pyomo's ``calculate_variable_from_constraint``.
+    When the model's export-enabled ``scaling_factor`` Suffix tags the
+    block's constraint, the convergence test is measured on the row's
+    stated scale (``eps = 1e-8 / factor``), the same view
+    ``user-scaling`` gives a full-model solve. An untagged constraint
+    keeps the absolute default, and a model without the Suffix behaves
+    exactly as before.
+
+    The test moves in both directions, and both matter. A factor below
+    1 (a row in large units) *loosens* it, which is what lets a row
+    whose evaluation floor sits above 1e-8 converge at all. A factor
+    above 1 (a row in small units) *tightens* it, which is what stops a
+    row whose residual starts below 1e-8 from being declared solved at
+    its seed. ``options=InitOptions(scaling="none")`` opts out of both.
+
+    Structurally square is not numerically solvable, so each block is
+    also rank-checked before it is solved (gh #609). A block whose
+    scaled Jacobian has a reciprocal condition number below
+    ``options.cond_tol`` is routed to a regularized least-squares
+    fallback (or, with ``options.fallback="coupled"``, solved together
+    with the blocks that depend on it) and recorded in
+    ``report.diagnostics``, rather than being handed to a Newton step
+    that will land on an arbitrary point of the near-null direction.
 
     ``igraph``, when given, is the structural incidence graph from
     :func:`structural_incidence`, built over THIS model with fixed
@@ -864,10 +1018,18 @@ def block_initialize(
     from pyomo.util.calc_var_value import calculate_variable_from_constraint
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
 
+    from pyomo_pounce.scaling import read_scaling
+
     if repair not in ("auto", "off"):
         raise ValueError(
             f"block_initialize: repair must be 'auto' or 'off', got {repair!r}"
         )
+
+    opts = InitOptions.coerce(options)
+    if not isinstance(options, InitOptions) and tee:
+        opts = dc_replace(opts, tee=True)
+    if max_list is None:
+        max_list = opts.max_list
 
     report = BlockInitReport()
 
@@ -944,46 +1106,175 @@ def block_initialize(
         if n_large > 0 and solver is None:
             solver = pyo.SolverFactory("pounce")
 
+        deps = analysis.block_dependencies or [[] for _ in analysis.variable_blocks]
+
+        # Row factors from the model's `scaling_factor` Suffix, read
+        # through the same machinery the full-model solves use (gh
+        # #483), so the 1x1 convergence test below and a `user-scaling`
+        # solve of the same model see the same rows. An untagged
+        # constraint, and a model with no export-enabled Suffix, keep
+        # Pyomo's absolute default. `scaling="none"` means no row
+        # scaling anywhere, this test included -- it is the way back to
+        # the pre-#632 behaviour for a model whose factors make the
+        # test stricter than its rows can meet.
+        scaled = None if opts.scaling == "none" else read_scaling(model)
+        row_factor = {} if scaled is None else scaled[1]
+
         # The block loop is ours so every solve's verdict is checked
         # before its values are kept: a failed block restores its seed
-        # values instead of poisoning the model, then the loop stops.
-        # (Later blocks typically feed on the failed one; some may be
-        # independent of it — stopping is the conservative choice.) 1x1
-        # blocks solve by Pyomo's single-constraint Newton, larger ones
-        # by `solver`; variables outside the block are held at their
-        # current values while it solves.
+        # values instead of poisoning the model. Since gh #609 a failure
+        # no longer stops the traversal: the block DAG says exactly which
+        # later blocks consumed the failed block's values, those are
+        # marked skipped, and every branch independent of the failure is
+        # still initialized. (`on_block_failure="stop"` restores the old
+        # conservative behaviour.) 1x1 blocks solve by Pyomo's
+        # single-constraint Newton, larger ones by `solver`; variables
+        # outside the block are held at their current values while it
+        # solves.
+        #
+        # Before the square solve, each block gets a numerical rank check
+        # (gh #609): structural matching proves a block is *solvable in
+        # principle*, not that its Jacobian has usable rank here. A block
+        # that is square but near-singular is routed to a regularized
+        # (or coupled) least squares, which returns a defined
+        # minimum-norm point instead of whichever end of the near-null
+        # direction the Newton step happened to fall off.
         n_done = 0
         n_sub = 0
+        skip = {}
         outer = create_subsystem_block(square_cons, square_vars)
         with TemporarySubsystemManager(to_fix=list(outer.input_vars.values())):
-            for vblk, cblk in zip(
-                analysis.variable_blocks, analysis.constraint_blocks
+            for bi, (vblk, cblk) in enumerate(
+                zip(analysis.variable_blocks, analysis.constraint_blocks)
             ):
-                snapshot = [(vd, vd.value) for vd in vblk]
+                outcome = BlockOutcome(
+                    index=bi,
+                    size=len(vblk),
+                    constraint=cblk[0].name,
+                    status="skipped",
+                    depends_on=list(deps[bi]) if bi < len(deps) else [],
+                )
+                report.blocks.append(outcome)
+                if bi in skip:
+                    outcome.detail = skip[bi]
+                    continue
+
+                rcond = None
+                if opts.conditioning == "auto":
+                    rcond = _block_rcond(cblk, vblk)
+                    outcome.rcond = rcond
+                weak = rcond is not None and rcond < opts.cond_tol
+                merged = []
+                if weak:
+                    note = (
+                        f"{len(vblk)}x{len(vblk)} block at {cblk[0].name!r} is "
+                        f"structurally square but numerically near-singular "
+                        f"(rcond {rcond:.2e} < {opts.cond_tol:.2e})"
+                    )
+                    if opts.fallback == "off":
+                        report.diagnostics.append(
+                            note + "; solved squarely anyway "
+                            "(fallback='off') -- its values may be unstable"
+                        )
+                        weak = False
+                    else:
+                        if opts.fallback == "coupled":
+                            merged = [
+                                k
+                                for k, parents in enumerate(deps)
+                                if bi in parents and k not in skip
+                            ]
+                        report.diagnostics.append(
+                            note
+                            + "; routed to the "
+                            + (
+                                f"coupled fallback with {len(merged)} "
+                                "dependent block(s)"
+                                if merged
+                                else "regularized least-squares fallback"
+                            )
+                        )
+
+                group_v = list(vblk)
+                group_c = list(cblk)
+                for k in merged:
+                    group_v += list(analysis.variable_blocks[k])
+                    group_c += list(analysis.constraint_blocks[k])
+                snapshot = [(vd, vd.value) for vd in group_v]
                 try:
-                    if len(vblk) == 1:
-                        calculate_variable_from_constraint(vblk[0], cblk[0])
+                    if weak:
+                        if solver is None:
+                            solver = pyo.SolverFactory("pounce")
+                        _regularized_solve(
+                            group_c, group_v, solver, opts, ridge_vars=vblk
+                        )
+                        n_sub += 1
+                    elif len(vblk) == 1:
+                        # The default eps=1e-8 is absolute, measured in
+                        # the row's raw units. An equation whose terms
+                        # sit near 3e7 has a double-precision evaluation
+                        # floor above that, so the linesearch can never
+                        # pass. eps = 1e-8 / f is the identical test
+                        # measured on the scaled row f*g(x), which is
+                        # the row the Suffix says this equation is.
+                        f_c = abs(row_factor.get(cblk[0], 0.0))
+                        if f_c > 0.0:
+                            calculate_variable_from_constraint(
+                                vblk[0], cblk[0], eps=1e-8 / f_c
+                            )
+                        else:
+                            calculate_variable_from_constraint(vblk[0], cblk[0])
                     else:
                         sub = create_subsystem_block(cblk, vblk)
                         with TemporarySubsystemManager(
                             to_fix=list(sub.input_vars.values())
                         ):
-                            results = solver.solve(sub, tee=tee)
+                            results = solver.solve(sub, **opts.solver_kwargs())
                         cond = str(results.solver.termination_condition)
                         if cond not in OK_TERMINATIONS:
                             raise RuntimeError(f"termination condition {cond}")
                         n_sub += 1
-                    n_done += len(vblk)
+                    n_done += len(group_v)
+                    outcome.status = "fallback" if weak else "initialized"
+                    for k in merged:
+                        skip[k] = ""  # solved as part of this group
                 except Exception as e:  # noqa: BLE001 - report, don't raise
                     for vd, val in snapshot:
                         vd.set_value(val, skip_validation=True)
+                    outcome.status = "failed"
+                    outcome.detail = str(e)
+                    if opts.on_block_failure == "stop":
+                        doomed = set(range(bi + 1, len(analysis.variable_blocks)))
+                        reason = (
+                            f"traversal stopped at block {bi} "
+                            f"({cblk[0].name!r}); on_block_failure='stop'"
+                        )
+                    else:
+                        doomed = _descendants(deps, bi)
+                        for k in merged:
+                            doomed |= _descendants(deps, k)
+                            doomed.add(k)
+                        doomed -= {bi}
+                        reason = (
+                            f"depends on failed block {bi} ({cblk[0].name!r})"
+                        )
+                    n_lost = 0
+                    for k in sorted(doomed):
+                        if k > bi and k not in skip:
+                            skip[k] = reason
+                            n_lost += len(analysis.variable_blocks[k])
                     report.failures.append(
                         f"{len(vblk)}x{len(vblk)} block at {cblk[0].name!r} "
                         f"failed ({e}); its seed values are restored and "
-                        f"the {len(square_vars) - n_done - len(vblk)} "
-                        f"downstream variables keep their seeds"
+                        f"the {n_lost} downstream variables keep their seeds"
                     )
-                    break
+
+        # Blocks consumed by a coupled fallback are recorded as such
+        # rather than left reading "skipped" -- they did get values.
+        for k, why in skip.items():
+            if why == "" and k < len(report.blocks):
+                report.blocks[k].status = "fallback"
+                report.blocks[k].detail = "solved as part of a coupled fallback"
         report.n_subsystem_solves = n_sub
         report.n_vars_initialized = n_done
     finally:
@@ -991,6 +1282,208 @@ def block_initialize(
             vd.unfix()
 
     return report
+
+
+def _block_dependencies(igraph, variable_blocks, constraint_blocks):
+    """The block DAG: parent block indices for each block (gh #609).
+
+    Read straight off the incidence graph already in hand -- block ``k``
+    depends on block ``j`` when a variable owned by ``j`` is incident to
+    one of ``k``'s constraints. No new graph is constructed, so the
+    single-walk guarantee of gh #444 is untouched; this is a lookup over
+    edges that were built once.
+
+    Block triangularity guarantees ``j < k`` for every edge, so the
+    result is acyclic by construction and a plain reverse-reachability
+    walk is enough to find a failure's descendants.
+    """
+    owner = {}
+    for bi, blk in enumerate(variable_blocks):
+        for v in blk:
+            owner[id(v)] = bi
+    deps = []
+    for bi, cblk in enumerate(constraint_blocks):
+        parents = set()
+        for con in cblk:
+            for v in igraph.get_adjacent_to(con):
+                j = owner.get(id(v))
+                if j is not None and j != bi:
+                    parents.add(j)
+        deps.append(sorted(parents))
+    return deps
+
+
+def _descendants(deps, root):
+    """Every block that (transitively) consumes `root`'s values."""
+    children = [[] for _ in deps]
+    for k, parents in enumerate(deps):
+        for j in parents:
+            children[j].append(k)
+    out = set()
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        for k in children[cur]:
+            if k not in out:
+                out.add(k)
+                stack.append(k)
+    return out
+
+
+def _block_jacobian(cblk, vblk):
+    """Dense Jacobian ``d(cblk)/d(vblk)`` at the current point, or None.
+
+    Symbolic differentiation where Pyomo manages it; None when it does
+    not, which the caller reads as "no conditioning verdict available"
+    rather than as a well-conditioned block.
+    """
+    from pyomo.core.expr.calculus.derivatives import differentiate
+
+    rows = []
+    for con in cblk:
+        try:
+            grads = differentiate(con.body, wrt_list=list(vblk))
+        except Exception:  # noqa: BLE001 - no verdict beats a wrong one
+            return None
+        row = []
+        for g in grads:
+            try:
+                gv = float(value(g, exception=False) or 0.0)
+            except Exception:  # noqa: BLE001
+                return None
+            if gv != gv or gv in (float("inf"), float("-inf")):
+                return None
+            row.append(gv)
+        rows.append(row)
+    return rows
+
+
+def _block_rcond(cblk, vblk):
+    """Reciprocal condition number of the block's *scaled* Jacobian.
+
+    Returns None when no verdict is available -- which the caller reads
+    as "no verdict", never as "well conditioned".
+
+    The scaling is the whole point. Structural matching proves a block is
+    solvable in principle; whether its Jacobian has usable rank *here* is
+    a numerical question, and asking it of the raw Jacobian answers a
+    units question instead. So each row is divided by its own gradient
+    infinity norm (over every variable the row mentions, fixed inputs
+    included -- they set the row's magnitude just as much) and each
+    column is multiplied by its variable's magnitude. The entries are
+    then dimensionless: relative change in a row per relative change in a
+    variable, which is the quantity a condition number is meaningful for.
+
+    Column scaling by the variable's own magnitude, rather than by the
+    column norm, is deliberate: normalising columns would drive every
+    1x1 block to exactly 1.0 and silently retire the check on the blocks
+    that make up most of a calculation order.
+    """
+    from pyomo_pounce.init_scaling import SCALE_FLOOR, GRAD_FLOOR, row_scales
+
+    jac = _block_jacobian(cblk, vblk)
+    if jac is None:
+        return None
+    scales = row_scales(cblk)
+    cols = []
+    for v in vblk:
+        a = abs(float(v.value)) if v.value is not None else 0.0
+        cols.append(a if (a == a and a >= SCALE_FLOOR) else 1.0)
+    scaled = []
+    for i, con in enumerate(cblk):
+        s = scales.get(con)
+        if s is None or s <= GRAD_FLOOR:
+            # A row with no usable gradient is rank-deficient in the
+            # strongest sense available here.
+            return 0.0
+        scaled.append([jac[i][j] * cols[j] / s for j in range(len(vblk))])
+    try:
+        import numpy
+
+        sv = numpy.linalg.svd(numpy.asarray(scaled, dtype=float), compute_uv=False)
+    except Exception:  # noqa: BLE001 - numpy absent or a degenerate matrix
+        return None
+    if sv.size == 0 or not numpy.isfinite(sv).all() or sv[0] <= 0.0:
+        return 0.0 if sv.size and sv[0] <= 0.0 else None
+    return float(sv[-1] / sv[0])
+
+
+def _residual(con):
+    """``body - rhs`` for an equality row, as a Pyomo expression.
+
+    ``c.body`` alone is not the residual: Pyomo keeps ``a + b == 3`` as a
+    body of ``a + b`` with the 3 on ``c.upper``, so squaring the body
+    would minimise the wrong thing entirely.
+    """
+    rhs = con.upper if con.upper is not None else con.lower
+    return con.body if rhs is None else con.body - rhs
+
+
+def _regularized_solve(cblk, vblk, solver, opts, ridge_vars=None):
+    """Least-squares-with-a-ridge fallback for a numerically weak block.
+
+    Minimises ``sum((c_i/s_i)**2) + lambda * sum(((v - v0)/t_j)**2)`` over
+    the block's variables, with the block's rows *deactivated* -- so a
+    rank-deficient block that has no unique square solution still gets a
+    defined, stable one instead of an arbitrary point along its near-null
+    direction. The ridge is anchored at the seed, so on a consistent but
+    deficient block it picks the minimum-norm solution.
+
+    Both terms are scaled (rows by their gradient norm, variables by
+    their own magnitude), so ``lambda`` is dimensionless and a row in
+    units of 1e6 does not swamp one in units of 1e-6 -- the same
+    reasoning as the projection merit's scaling.
+
+    `ridge_vars` narrows the ridge to a subset of `vblk`, which is what
+    the coupled fallback needs: the extra rows it merges in are there to
+    *add information* about the weak block, and ridging their variables
+    too would let their pull toward the seed decide the weak block's
+    answer. Measured on the module's near-singular fixture, ridging the
+    union picked u = 2, v = 0 (the arbitrary end of the near-null
+    direction the whole fallback exists to avoid); ridging only the weak
+    block's own variables picks u = v = 1.
+
+    Raises on a failed solve, like the square path, so the caller's
+    seed-restore and DAG bookkeeping are identical either way.
+    """
+    import pyomo.environ as pyo
+
+    from pyomo.util.subsystems import (
+        TemporarySubsystemManager,
+        create_subsystem_block,
+    )
+
+    from pyomo_pounce.init_scaling import row_factors, variable_weights
+
+    if solver is None:
+        solver = pyo.SolverFactory("pounce")
+    rf = row_factors(cblk, list(vblk))
+    ridge_on = list(vblk if ridge_vars is None else ridge_vars)
+    anchors = [(v, float(v.value)) for v in ridge_on if v.value is not None]
+    vw = variable_weights(anchors)
+
+    sub = create_subsystem_block(cblk, vblk)
+    deactivated = []
+    for c in sub.component_data_objects(pyo.Constraint, active=True):
+        c.deactivate()
+        deactivated.append(c)
+    resid = sum(rf.get(c, 1.0) ** 2 * _residual(c) ** 2 for c in cblk)
+    ridge = sum(
+        vw.get(id(v), 1.0) ** 2 * (v - v0) ** 2 for v, v0 in anchors
+    )
+    sub._pounce_regularized_objective = pyo.Objective(
+        expr=resid + opts.regularization * ridge
+    )
+    try:
+        with TemporarySubsystemManager(to_fix=list(sub.input_vars.values())):
+            results = solver.solve(sub, **opts.solver_kwargs())
+        cond = str(results.solver.termination_condition)
+        if cond not in OK_TERMINATIONS:
+            raise RuntimeError(f"regularized fallback terminated {cond}")
+    finally:
+        sub.del_component(sub._pounce_regularized_objective)
+        for c in deactivated:
+            c.activate()
 
 
 def _seed_var(v) -> None:

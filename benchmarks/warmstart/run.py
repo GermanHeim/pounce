@@ -19,7 +19,7 @@ import sys
 import time
 from typing import List
 
-from .adapters import ARMS, get_adapter
+from .adapters import ARMS, REFERENCE_ARM, get_adapter
 from .families import REGISTRY
 from .report import render
 from .runner import run_family_scale
@@ -47,6 +47,20 @@ def _solver_version(name: str) -> str:
             import pounce
 
             return getattr(pounce, "__version__", "unknown")
+        except Exception:
+            return "unknown"
+    if name == "ipopt":
+        # Two versions matter and they are different things: the Python
+        # binding and the Ipopt it was linked against. A wall-time number
+        # from this arm is only interpretable with the second one, and
+        # with the linear solver, so both go in the metadata.
+        try:
+            import cyipopt
+
+            return (
+                f"cyipopt {cyipopt.__version__} / Ipopt "
+                f"{getattr(cyipopt, 'IPOPT_VERSION', 'unknown')}"
+            )
         except Exception:
             return "unknown"
     return "unknown"
@@ -96,6 +110,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("--max-iter", type=int, default=500)
     p.add_argument(
+        "--recentering",
+        default="residual",
+        choices=("residual", "none"),
+        help="warm_start_recentering (pounce#606). The warm-start "
+        "baseline moves with this, and so does any margin measured "
+        "against it, so a predictor claim has to name which setting it "
+        "was taken at",
+    )
+    p.add_argument(
         "--tier",
         default="default",
         choices=("default", "large", "all"),
@@ -120,7 +143,24 @@ def main(argv=None) -> int:
         families = [f for f in families if f in _QUICK_FAMILIES]
         scales = ["small"]
 
-    adapter = get_adapter(args.solver, max_iter=args.max_iter)
+    if REFERENCE_ARM not in arms:
+        # Correctness is scored *against the reference arm*; without it
+        # in the run, `correct` stays None for every step and every
+        # summary that reads it silently reports each step as incorrect.
+        # That is a display artifact rather than a result, and it is
+        # exactly the shape of thing that gets quoted -- so say so
+        # loudly rather than let a narrowed `--arms` produce a table of
+        # 20/20 failures that means nothing.
+        print(
+            f"warning: {REFERENCE_ARM!r} is not in --arms, so no step can "
+            "be scored for correctness.\n"
+            "         The `incorrect` / `bad` columns below are "
+            "meaningless in this run; speed columns are still valid.",
+            file=sys.stderr,
+        )
+
+    adapter = get_adapter(args.solver, max_iter=args.max_iter,
+                          recentering=args.recentering)
 
     meta = {
         "solver": args.solver,
@@ -134,6 +174,7 @@ def main(argv=None) -> int:
         "kkt_gate": args.kkt_gate,
         "viol_gate": args.viol_gate,
         "max_iter": args.max_iter,
+        "recentering": args.recentering,
         "arms": arms,
     }
 

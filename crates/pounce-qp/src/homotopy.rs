@@ -93,6 +93,40 @@ const RELAX_MARGIN: Number = 1.0;
 /// How close to `1` counts as having reached the end of the path.
 const T_EPS: Number = 1e-12;
 
+/// Bound *re*-prunes a path may spend before it is declared to be cycling and
+/// abandoned (gh #615).
+///
+/// A *re*-prune is a rank repair dropping a bound this path already dropped
+/// once — see `pruned_once` in [`ParametricActiveSetSolver::trace_path`]. One or
+/// two are ordinary: the path left a bound, came back to it, and the geometry at
+/// the second visit was genuinely different. Hundreds are the prune -> re-add
+/// cycle, and that cycle does not *fail*, which is what makes it expensive: it
+/// finishes, and hands the corrector a working set that costs more than starting
+/// from nothing.
+///
+/// The number is calibrated, not chosen. Tracing all 138 Maros-Meszaros
+/// instances through the cold arm, 127 of which start a path:
+///
+/// | re-prunes | paths | who |
+/// |-----------|-------|-----|
+/// | 0         | 72    | `AUG*`, `BOYD2`, `CONT-050`, ... |
+/// | 1..=63    | 41    | `GOULDQP2` (29), `QISRAEL` (52), `QFFFFF80` (51) |
+/// | 64..=383  | 8     | `QGROW7`, `CONT-101` (74), `QSCTAP3` (146), `QSEBA` (383) |
+/// | >= 512    | 6     | `CVXQP{1,2,3}_{M,L}` — and nothing else |
+///
+/// So the cut lands in an empty band: no path observed to complete usefully gets
+/// past 383, and the cycling family starts at 635. Be aware the band is only
+/// 1.7x wide — a path landing between 383 and 635 would be a coin flip, and this
+/// constant would need re-deriving against whatever instance produced it rather
+/// than nudged to make one problem pass.
+///
+/// Abandoning is cheap by construction: the bail returns `Ok(None)`, which is the
+/// same "the path could not be completed, run the conventional solve" exit the
+/// unbounded-relaxation and stalled cases already take. A false positive costs
+/// the path steps already spent and nothing else — no answer changes, because
+/// nothing is reported optimal on the homotopy's own authority.
+const REPRUNE_BUDGET: u32 = 512;
+
 /// Two ratio-test events are **coincident** — the same degenerate vertex, hit at
 /// the same parameter value — when their crossing points differ by no more than
 /// this. `t` lives in `[0, 1]`, so this is a rounding-scale window (~50 ulp),
@@ -369,8 +403,9 @@ fn worst_path_violation(
 /// both arms — is a benchmark sweep that has to read it back out. `exit` is one
 /// of `complete` (the path reached `t = 1`), `budget` (the step budget ran out
 /// short of it), `stalled` (the loop ended without either), `kkt` (an
-/// unrecoverable factorization failure), or `rank` (a rank repair that had
-/// nothing left to prune).
+/// unrecoverable factorization failure), `rank` (a rank repair that had nothing
+/// left to prune), or `cycle` (the bound prune -> re-add cycle of gh #615 ran
+/// past [`REPRUNE_BUDGET`]).
 fn trace_summary(
     exit: &str,
     steps: u32,
@@ -630,6 +665,23 @@ impl ParametricActiveSetSolver {
         // pruned could never come back, so the prune -> re-add cycle `tabu_cons`
         // exists to break had no bound analogue. It does now.
         let mut tabu_bounds = vec![false; n];
+        // Bounds a rank repair has already pruned once on this path (gh #615).
+        //
+        // Pruning a bound that is *already* flagged is a re-prune: the repair
+        // dropped it as dependent, the path advanced, walked straight back into
+        // the same bound, the primal ratio test re-added it, and the next
+        // factorization was deficient in the same place. That is the prune ->
+        // re-add cycle `tabu_bounds` exists to break, and `tabu_bounds` cannot
+        // break it — the tabu is scoped to the parameter value it was raised at,
+        // and this cycle advances `t` by a hair on every turn, which releases it.
+        //
+        // Breaking the cycle properly needs the exchange pivot described at the
+        // repair site: re-add the bound and drop a *different* dependent member,
+        // so the working set stops oscillating between the same two subsets.
+        // Until that exists, count the re-prunes and abandon the path when they
+        // run away; see `REPRUNE_BUDGET` for why abandoning is cheap.
+        let mut pruned_once = vec![false; n];
+        let mut repruned_total: u32 = 0;
         // Iterations actually executed. Distinct from `n_changes`: a rank repair
         // and a degenerate zero-length advance both consume a step (and a
         // factorization) without necessarily moving the working set or `t`.
@@ -646,6 +698,12 @@ impl ParametricActiveSetSolver {
         // stopped ones (gh #434).
         let mut stalled: u32 = 0;
         let mut longest_stall: u32 = 0;
+
+        if trace {
+            let ab = working.bounds.iter().filter(|b| b.is_active()).count();
+            let ac = working.constraints.iter().filter(|c| c.is_active()).count();
+            eprintln!("[hom] start: n={n} m={m} active_bounds={ab} active_cons={ac}");
+        }
 
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
@@ -763,22 +821,44 @@ impl ParametricActiveSetSolver {
                             n_changes += 1;
                         }
                     }
+                    let mut repruned_here: u32 = 0;
                     for &j in &active_bounds {
                         if !keep_b[j] {
                             working.bounds[j] = BoundStatus::Inactive;
                             lambda_x[j] = 0.0;
                             tabu_bounds[j] = true;
+                            if pruned_once[j] {
+                                repruned_here += 1;
+                                repruned_total += 1;
+                            }
+                            pruned_once[j] = true;
                             n_changes += 1;
                         }
                     }
                     if trace {
                         eprintln!(
-                            "[hom] rank repair at t={t:.6e}: {} -> {} cons, {} -> {} bounds",
+                            "[hom] rank repair at t={t:.6e}: {} -> {} cons, {} -> {} bounds, repruned={repruned_here} cum={repruned_total}",
                             active_cons.len(),
                             kc.len(),
                             active_bounds.len(),
                             kb.len()
                         );
+                    }
+                    if repruned_total > REPRUNE_BUDGET {
+                        // The path is cycling. It will not fail — it will
+                        // *finish*, and hand the corrector a working set that
+                        // costs more than starting from nothing. Give up here
+                        // instead; `Ok(None)` is the established "run the
+                        // conventional solve" exit, so a false positive costs
+                        // the path steps already spent and nothing else.
+                        if trace {
+                            eprintln!(
+                                "[hom] abandoning path at t={t:.6e}: {repruned_total} bound \
+                                 re-prunes exceeds budget {REPRUNE_BUDGET}"
+                            );
+                            trace_summary("cycle", steps, t, n_changes, n_refactor, longest_stall);
+                        }
+                        return Ok(None);
                     }
                     continue;
                 }

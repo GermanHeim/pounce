@@ -135,18 +135,8 @@ impl PySolver {
             py,
             &bridge.borrow(),
             status,
-            stats.iteration_count,
-            stats.final_mu,
-            stats.final_kkt_error,
-            stats.final_dual_inf,
-            stats.final_constr_viol,
-            stats.final_compl,
-            stats.final_unscaled_kkt_error,
-            stats.final_unscaled_dual_inf,
-            stats.final_unscaled_constr_viol,
-            stats.final_unscaled_compl,
-            stats.sqp_qp_solves,
-            stats.sqp_qp_working_set_changes,
+            &stats,
+            inner.app().warm_start_diagnostics(),
         )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone
@@ -290,7 +280,7 @@ impl PySolver {
     /// already respects every bound, and the step is then the plain
     /// one.
     ///
-    /// `max_passes` is a budget rather than a safeguard: the
+    /// `max_iter` is a budget rather than a safeguard: the
     /// refinement is only worth running while it stays cheaper than a
     /// re-solve. The factorization is never rebuilt, but the Schur
     /// complement is rebuilt each pass, so pass `k` costs one dense
@@ -298,17 +288,17 @@ impl PySolver {
     /// quadratically. The default of 16 is 136 back-solves. What counts
     /// as outside a bound comes from the solve's own
     /// `bound_relax_factor` rather than from an argument. Passes stop
-    /// when nothing is outside by that much, at `max_passes`, or when
+    /// when nothing is outside by that much, at `max_iter`, or when
     /// the conditions exhaust the problem's degrees of freedom, which
     /// makes the augmented system singular. None is an error, and
     /// `pinned` says how far the refinement got.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_passes=16))]
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_bounded<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
-        max_passes: usize,
+        max_iter: usize,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -325,11 +315,68 @@ impl PySolver {
         }
         let (dx, pinned) = s
             .inner
-            .parametric_step_bounded(&pins, &deltas, max_passes)
+            .parametric_step_bounded(&pins, &deltas, max_iter)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
             pinned.into_iter().map(|p| p as i64).collect(),
+        ))
+    }
+
+    /// Parametric step applied a little at a time, stopping wherever
+    /// the active set changes, as `(dx, segments)`.
+    ///
+    /// `parametric_step_bounded` decides every condition at the base
+    /// point. This advances to the fraction of the perturbation that
+    /// reaches the first change, applies it, and continues from there
+    /// under the new set, so the result is piecewise linear in the
+    /// parameter.
+    ///
+    /// `segments` is one tuple per breakpoint crossed, in the order
+    /// crossed, as `(fraction, var_row, lower, pinned)`. `fraction` is
+    /// how far along the perturbation the change happened, `var_row`
+    /// is the variable's row in the factor's x block for every kind of
+    /// change, `lower` is `True` when the bound involved is the lower
+    /// one, and `pinned` is `True` for a variable reaching a bound and
+    /// `False` for a variable leaving one.
+    ///
+    /// `max_iter` caps the breakpoints crossed, and is in practice a
+    /// budget on factorizations, since a pin is a back-solve against
+    /// the held factor while a release re-factors. Reaching the cap is
+    /// not an error: the rest of the perturbation is taken in one step
+    /// under the active set reached, and a returned `segments` of
+    /// length `max_iter` is what says so.
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
+    fn parametric_step_path<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<(Number, i64, bool, bool)>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_path: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (dx, segments) = s
+            .inner
+            .parametric_step_path(&pins, &deltas, max_iter)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            segments
+                .into_iter()
+                .map(|g| (g.at, g.var_row as i64, g.lower, g.pinned))
+                .collect(),
         ))
     }
 

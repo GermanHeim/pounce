@@ -21,6 +21,7 @@ before the schema existed.
 
 import dataclasses
 import os
+import warnings
 
 os.environ.setdefault("RUST_LOG", "off")
 
@@ -28,6 +29,7 @@ import numpy as np
 import pytest
 
 import pounce
+from pounce._warm_start_schema import ORDERING_UNVERIFIED_NOTE
 from pounce import (
     WarmStart,
     WarmStartCompatibilityError,
@@ -250,16 +252,25 @@ def test_dimension_mismatch_is_refused_before_the_solver():
 
 def test_reordered_variables_are_refused_when_ids_are_supplied():
     """A permutation of a model with a uniform box and a dense jacobian
-    leaves every structural digest bit-identical — ordering is knowledge
-    only the caller has. Replaying through it produced objective
-    16.3801 against a true 17.0140 before pounce#607."""
+    leaves every structural *digest* bit-identical. Replaying through it
+    produced objective 16.3801 against a true 17.0140 before pounce#607.
+
+    A caller who names the ordering gets a refusal that says so. (Since
+    pounce#621 a caller who names nothing also gets one, from the model
+    probe — that is `test_reordered_variables_are_refused_without_any_
+    var_ids` below; this test pins the named-ordering diagnosis, which
+    is the more useful of the two because it is the one `reindex` can
+    act on.)
+    """
     perm = [2, 0, 3, 1]
     ws = signed(var_ids=VAR_IDS, con_ids=CON_IDS)
     target = make(obj=HS071(perm=perm))
 
-    # Without the ordering, nothing can see the permutation...
-    assert ws.check_compatible(target) == []
-    # ...but the caller who knows it gets a refusal.
+    # The digests alone still cannot see it — that has not changed, and
+    # is why the probe had to be added rather than a digest widened.
+    assert (pounce.ProblemSignature.from_problem(make(), probe=False)
+            == pounce.ProblemSignature.from_problem(target, probe=False))
+
     with pytest.raises(WarmStartCompatibilityError) as e:
         target.solve(warm_start=ws,
                      var_ids=[VAR_IDS[i] for i in perm], con_ids=CON_IDS)
@@ -490,8 +501,12 @@ def test_horizon_shift_transfers_and_replays():
     moved = ws.reindex(p1, var_ids=v1, con_ids=c1)
     assert moved.replay == "mapped"
     assert moved.source_signature == ws.signature
-    # x1..x4 carried across; the freshly-entered stage is unseeded.
+    # x1..x4 carried across; the freshly-entered stage repeats the one
+    # before it (the default "prolong" fill, gh#622). Its *multipliers*
+    # stay unseeded — a value the solver reconstructs is better than one
+    # this side fabricates.
     np.testing.assert_allclose(moved.x[:HORIZON - 1], x0[1:])
+    assert moved.x[-1] == x0[-1]
     assert np.isnan(moved.zl[-1]) and np.isnan(moved.zu[-1])
     assert np.isnan(moved.lagrange[-1])
 
@@ -499,19 +514,14 @@ def test_horizon_shift_transfers_and_replays():
     cold_x, cold_info = window(1)[0].solve(x0=np.full(HORIZON, 3.0))
     assert warm_info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(warm_x, cold_x, atol=1e-6)
-    # Deliberately no assertion that the mapped replay is *cheaper*. On
-    # this family it is not: the shifted point costs 12 iterations here
-    # against 7 for a cold solve, and on a longer sinusoidal track the
-    # gap widens with the horizon -- 12 vs 9 at HORIZON=5, 15 vs 11 at
-    # 10, 22 vs 9 at 20, 30 vs 10 at 40. Neither dropping the carried mu
-    # nor loosening it nor loosening bound_push moves it (11-13 across
-    # six variants).
-    # That is the structural limit docs/src/initialization.md already
-    # states — the barrier pushes iterates off their bounds, so a
-    # converged interior point's active-set information does not survive
-    # the transfer — and it is what pounce#606 attacks on the Rust side.
-    # The transfer hook's job here is that the replay is *valid* and
-    # *labelled*, not that it is fast.
+    # No iteration assertion *on this window*: the targets move by 2.0
+    # per stage here, which is a large parameter step for a 5-variable
+    # model, and the transferred point costs 8 iterations against a cold
+    # solve that costs 7 to 9 depending on where the cold guess is put
+    # (7 at x0=1/3/5/8, 9 at 0, 8 at 10). Where the win is real and
+    # measurable is over the sequence, and over a horizon long enough to
+    # have something to carry — which is what the two tests below
+    # assert. Numbers on 66cc1d4 + gh#622.
 
 
 def test_mapped_artifact_is_still_refused_on_a_third_problem():
@@ -568,10 +578,197 @@ def test_explicit_mapper_gets_the_context_and_is_length_checked():
         ws.transfer(p1, wrong_key, var_ids=v1, con_ids=c1)
 
 
+def test_a_mapper_that_moves_the_point_must_say_what_happens_to_the_duals():
+    """The carried-block trap (gh#622).
+
+    `transfer` carries over whatever the mapper does not return. On a
+    horizon shift that silently replays the previous window's
+    multipliers against the new window's variables — same length, so
+    the length check passes, and the result is a plausible answer down
+    a longer trajectory. It is refused instead.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    p1, v1, c1 = window(1)
+
+    with pytest.raises(WarmStartCompatibilityError, match="wrong variables"):
+        ws.transfer(p1, lambda ctx: {"x": np.roll(ctx.source.x, -1)},
+                    var_ids=v1, con_ids=c1)
+
+    # Saying what should happen to them is all it asks for: rearranged,
+    # or None for "unseeded".
+    moved = ws.transfer(
+        p1,
+        lambda ctx: {"x": np.roll(ctx.source.x, -1), "zl": None, "zu": None,
+                     "lagrange": None},
+        var_ids=v1, con_ids=c1,
+    )
+    assert moved.replay == "mapped"
+    p1.solve(warm_start=moved)
+
+
+def test_a_mapper_may_still_carry_the_duals_when_nothing_moved():
+    """The check is per axis and only fires on a map that moved: a
+    mapper nudging a point whose indexing is unchanged still carries
+    the multipliers, which is the case the carry-over default is for."""
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+
+    same, v_same, c_same = window(0)
+    nudged = ws.transfer(same, lambda ctx: {"x": ctx.source.x * 1.001},
+                         var_ids=v_same, con_ids=c_same)
+    np.testing.assert_array_equal(nudged.zl, ws.zl)
+    np.testing.assert_array_equal(nudged.lagrange, ws.lagrange)
+    same.solve(warm_start=nudged)
+
+
 def test_transfer_without_ids_or_mapper_explains_itself():
     ws = signed()
     with pytest.raises(WarmStartCompatibilityError, match="stable variable IDs"):
         ws.transfer(make())
+
+
+# ---------------------------------------------------------------------------
+# 6b. what goes in the prolongated stage (gh#622)
+# ---------------------------------------------------------------------------
+def test_prolong_repeats_the_stage_a_stride_back():
+    """The default fill reads the *stride* off the identifier map, so it
+    lands in the right kind of slot on an interleaved layout too.
+
+    Two stages of `(p, v, u)` mapped one stage forward: the map is a
+    pure shift by 3, so the new stage takes `p <- p`, `v <- v`,
+    `u <- u`, not "whatever the previous entry held".
+    """
+    n = 6
+    p = pounce.Problem(
+        n=n, m=0, problem_obj=Chain(np.zeros(n)),
+        lb=[-10.0] * n, ub=[10.0] * n, cl=[], cu=[],
+    )
+    ids0 = ["p0", "v0", "u0", "p1", "v1", "u1"]
+    ids1 = ["p1", "v1", "u1", "p2", "v2", "u2"]
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    ws = WarmStart(x=x, signature=pounce.ProblemSignature.from_problem(p, ids0))
+
+    moved = ws.reindex(p, var_ids=ids1)
+    np.testing.assert_allclose(moved.x, [4.0, 5.0, 6.0, 4.0, 5.0, 6.0])
+
+    # A tail longer than one stage repeats the terminal stage again,
+    # rather than reading a hole it has not filled yet.
+    ids2 = ["p1", "v1", "u1", "p3", "v3", "u3"]
+    far = ws.reindex(p, var_ids=ids2)
+    np.testing.assert_allclose(far.x[:3], [4.0, 5.0, 6.0])
+    assert np.isfinite(far.x).all()
+
+
+def test_prolong_stays_in_the_box_and_yields_to_an_explicit_fill():
+    n = 4
+    lb = [0.0, 0.0, 0.0, 0.0]
+    ub = [10.0, 10.0, 10.0, 1.5]          # the new stage is capped low
+    p = pounce.Problem(n=n, m=0, problem_obj=Chain(np.zeros(n)),
+                       lb=lb, ub=ub, cl=[], cu=[])
+    ids0 = ["a0", "a1", "a2", "a3"]
+    ids1 = ["a1", "a2", "a3", "a4"]
+    ws = WarmStart(x=np.array([1.0, 2.0, 3.0, 9.0]),
+                   signature=pounce.ProblemSignature.from_problem(p, ids0))
+
+    assert ws.reindex(p, var_ids=ids1).x[-1] == 1.5     # clipped, not 9.0
+    assert ws.reindex(p, var_ids=ids1, fill_x="zero").x[-1] == 0.0
+    assert ws.reindex(p, var_ids=ids1, fill_x=7.0).x[-1] == 7.0
+    with pytest.raises(ValueError, match="not a fill policy"):
+        ws.reindex(p, var_ids=ids1, fill_x="hold")
+
+
+def test_prolong_falls_back_when_the_map_is_not_a_shift():
+    """No constant stride means no stage to repeat: a reordering that
+    also introduces a variable gets the box-clipped zero, unchanged."""
+    n = 3
+    p = pounce.Problem(n=n, m=0, problem_obj=Chain(np.zeros(n)),
+                       lb=[-1.0, -1.0, 2.0], ub=[10.0] * n, cl=[], cu=[])
+    ws = WarmStart(
+        x=np.array([1.0, 2.0, 3.0]),
+        signature=pounce.ProblemSignature.from_problem(p, ["a", "b", "c"]),
+    )
+    moved = ws.reindex(p, var_ids=["c", "a", "d"])
+    np.testing.assert_allclose(moved.x, [3.0, 1.0, 2.0])   # 0 clipped into [2, 10]
+
+
+def test_a_mapped_replay_carries_the_equality_multipliers_a_bare_point_cannot():
+    """What the carried multipliers are actually worth (gh#622).
+
+    The *bound* blocks are reconstructible from the slacks the point
+    already determines (`z = mu / slack`), so the solver fills them
+    whichever way the state arrives — dropping them costs nothing it
+    cannot rebuild. The *equality* multipliers are the ones that need a
+    dual to complete: from a point alone the solver reports them
+    unseeded and leaves them at the constant fill, deliberately. That
+    is the asymmetry `reindex` is built around, and the reason it
+    carries what it matched instead of handing over a bare point.
+    """
+    p0, v0, c0 = window(0)
+    x0, info0 = p0.solve(x0=np.full(HORIZON, 3.0))
+    ws = WarmStart.from_info(x0, info0, problem=p0, var_ids=v0, con_ids=c0)
+    moved = ws.reindex(window(1)[0], var_ids=window(1)[1], con_ids=window(1)[2])
+
+    _, info = window(1)[0].solve(warm_start=moved)
+    assert info["warm_start"]["bound_duals"] == "reconstructed"
+    assert info["warm_start"]["eq_duals"] == "accepted"
+
+    bare = dataclasses.replace(moved, lagrange=None, zl=None, zu=None)
+    _, bare_info = window(1)[0].solve(warm_start=bare)
+    assert bare_info["warm_start"]["bound_duals"] == "reconstructed"
+    assert bare_info["warm_start"]["eq_duals"] == "unseeded"
+
+
+# The sinusoidal track of the gh#622 table: a receding horizon with
+# enough history to be worth carrying.
+SINE = 5.0 + 4.0 * np.sin(np.arange(64) * 0.35)
+
+
+def sine_window(start, H):
+    t = SINE[start:start + H]
+    p = pounce.Problem(
+        n=H, m=H - 1, problem_obj=Chain(t),
+        lb=[0.0] * H, ub=[10.0] * H,
+        cl=[-0.5] * (H - 1), cu=[0.5] * (H - 1),
+    )
+    p.add_option("tol", 1e-8)
+    p.add_option("print_level", 0)
+    return p, [f"x{start + i}" for i in range(H)], \
+        [f"c{start + i}" for i in range(H - 1)]
+
+
+def _receding_loop(H, steps, warm):
+    """Total iterations over `steps` of a receding horizon."""
+    total, ws = 0, None
+    for s in range(steps):
+        p, v, c = sine_window(s, H)
+        if warm and ws is not None:
+            x, info = p.solve(warm_start=ws.reindex(p, var_ids=v, con_ids=c))
+        else:
+            x, info = p.solve(x0=np.full(H, 3.0))
+        assert info["status_msg"] == "Solve_Succeeded"
+        total += info["iter_count"]
+        ws = WarmStart.from_info(x, info, problem=p, var_ids=v, con_ids=c)
+    return total
+
+
+@pytest.mark.parametrize("H", [5, 10, 20, 40])
+def test_a_transferred_start_beats_a_cold_solve_over_the_horizon(H):
+    """gh#622's acceptance criterion, at every horizon of its table.
+
+    On 66cc1d4 + gh#622, over eight steps: 45 against 67 at H=5, 50/75
+    at 10, 54/77 at 20, 46/76 at 40 — and 21 against 22 on the
+    slew-limited fixture above. The margin is asserted loosely (the
+    point is the sign, not the digit) but the *direction* is the
+    contract now: gh#620's recentering plus a prolongated tail turned
+    the table in the issue upside down, and this is what keeps it that
+    way.
+    """
+    warm = _receding_loop(H, 8, warm=True)
+    cold = _receding_loop(H, 8, warm=False)
+    assert warm < cold, f"H={H}: transferred {warm} vs cold {cold}"
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +779,8 @@ def test_signature_records_the_named_facets():
     sig = pounce.ProblemSignature.from_problem(p, VAR_IDS, CON_IDS)
     assert (sig.n, sig.m) == (4, 2)
     assert sig.var_ids == tuple(VAR_IDS) and sig.con_ids == tuple(CON_IDS)
-    for facet in ("bounds", "sparsity", "scaling", "algorithm", "model"):
+    for facet in ("bounds", "sparsity", "probe", "scaling", "algorithm",
+                  "model"):
         assert getattr(sig, facet) is not None
     assert pounce.ProblemSignature.from_json(sig.to_json()) == sig
 
@@ -609,3 +807,458 @@ def test_non_model_options_do_not_change_the_signature():
     assert pounce.ProblemSignature.from_problem(make(print_level=5)) == base
     assert pounce.ProblemSignature.from_problem(
         make(bound_relax_factor=0.0)) != base
+
+
+# ---------------------------------------------------------------------------
+# 8. pounce#621 — a reordering is refused without the caller naming it
+#
+# #607 left this open: every digest above is taken of what the model
+# *declares*, and a permutation changes none of them. The signature now
+# also carries a `probe` — the model evaluated once at a fixed interior
+# point, summarized order-sensitively — which does move under a
+# permutation. On the parent commit the reordered replay below returned
+# objective 16.0909032757 against a true 17.0140171452, status
+# Error_In_Step_Computation, in 44 iterations, with nothing raised.
+# ---------------------------------------------------------------------------
+PERM = [2, 0, 3, 1]
+
+
+def test_reordered_variables_are_refused_without_any_var_ids():
+    """The issue's headline case, and the positive control for the rest
+    of this section: no IDs on either side, and the replay is refused."""
+    ws = signed()
+    target = make(obj=HS071(perm=PERM))
+
+    assert ws.signature.probe is not None
+    with pytest.raises(WarmStartCompatibilityError) as e:
+        target.solve(warm_start=ws)
+    report = str(e.value)
+    assert "  - probe:" in report
+    assert "reordering of the variables" in report
+    # ...and the digests it did *not* catch it on are still identical,
+    # which is the whole point of the facet.
+    a = pounce.ProblemSignature.from_problem(make(), probe=False)
+    b = pounce.ProblemSignature.from_problem(target, probe=False)
+    assert a == b
+
+
+def test_the_probe_does_not_refuse_the_model_it_came_from():
+    """The false-positive side. A probe that refused everything would
+    'close' the issue and break every legitimate replay."""
+    ws = signed()
+    assert ws.check_compatible(make()) == []
+    assert "compatible" in ws.describe_compatibility(make())
+
+
+def test_probe_survives_a_save_load_round_trip(tmp_path):
+    p, x, info = cold()
+    ws = WarmStart.from_info(x, info, problem=p)
+    path = tmp_path / "probed.npz"
+    ws.save(path)
+    back = WarmStart.load(path)
+    # Floats through JSON must land bit-for-bit, or the tolerance gets
+    # spent on the serializer instead of on the model.
+    assert back.signature.probe == ws.signature.probe
+    assert back.check_compatible(make()) == []
+    with pytest.raises(WarmStartCompatibilityError, match="probe"):
+        make(obj=HS071(perm=PERM)).solve(warm_start=back)
+
+
+def test_probe_can_be_declined_at_capture_and_then_costs_nothing():
+    """`probe=False` is the opt-out for an expensive or side-effecting
+    model. It must also make the *replay* free: an artifact with no
+    probe must not cause the target to be probed."""
+    p, x, info = cold()
+    ws = WarmStart.from_info(x, info, problem=p, probe=False)
+    assert ws.signature.probe is None
+
+    seen = []
+
+    class Counting(HS071):
+        def gradient(self, x):
+            seen.append(1)
+            return super().gradient(x)
+
+    target = make(obj=Counting())
+    ws.check_compatible(target)
+    assert seen == []          # the target was never evaluated
+    # ...and with no probe on either side, the reordering is invisible
+    # again — which is the documented cost of declining it.
+    assert ws.check_compatible(make(obj=HS071(perm=PERM))) == []
+
+
+def test_an_unprobeable_model_degrades_to_unverifiable_not_refused():
+    """A model that will not evaluate at an arbitrary interior point is
+    one this cannot fingerprint. That is not evidence the warm start is
+    invalid, so the facet is dropped rather than failed."""
+
+    class Hostile(HS071):
+        def gradient(self, x):
+            raise RuntimeError("I only evaluate where I feel like it")
+
+    sig = pounce.ProblemSignature.from_problem(make(obj=Hostile()))
+    assert sig.probe is None
+    # A probed artifact meeting an unprobeable problem: skipped, not refused.
+    ws = signed()
+    assert ws.check_compatible(make(obj=Hostile())) == []
+
+
+def test_a_nonfinite_probe_is_dropped():
+    class Nan(HS071):
+        def objective(self, x):
+            return float("nan")
+
+    assert pounce.ProblemSignature.from_problem(make(obj=Nan())).probe is None
+
+
+def test_probe_absorbs_evaluation_noise_but_not_a_reordering():
+    """The tolerance question the issue asks about. A model that
+    reproduces itself to 1e-12 relative is the same model; one whose
+    variables moved is not, and the gap between those two is what
+    PROBE_RTOL has to sit in."""
+    from pounce._warm_start_schema import _probe_agrees
+
+    class Jittery(HS071):
+        def __init__(self, rel, **kw):
+            super().__init__(**kw)
+            self.rel = rel
+
+        def gradient(self, x):
+            g = super().gradient(x)
+            return g * (1.0 + self.rel * np.random.default_rng().standard_normal(g.shape))
+
+    base = pounce.ProblemSignature.from_problem(make()).probe
+    for rel in (1e-14, 1e-12, 1e-11):
+        noisy = pounce.ProblemSignature.from_problem(make(obj=Jittery(rel))).probe
+        assert _probe_agrees(base, noisy), f"refused a same-model at rel={rel}"
+    permuted = pounce.ProblemSignature.from_problem(
+        make(obj=HS071(perm=PERM))).probe
+    assert not _probe_agrees(base, permuted)
+
+
+def test_probe_point_is_deterministic_and_inside_the_bounds():
+    from pounce._warm_start_schema import _probe_point
+
+    lb = np.array([1.0, -1e20, 0.0, -3.0])
+    ub = np.array([5.0, 2.0, 1e20, -3.0])   # free-below, free-above, fixed
+    a = _probe_point(lb, ub)
+    assert np.array_equal(a, _probe_point(lb, ub))       # no RNG anywhere
+    assert np.all(np.isfinite(a))
+    assert a[0] > lb[0] and a[0] < ub[0]
+    assert a[1] < ub[1] and a[2] > lb[2]
+    assert a[3] == -3.0                                   # a fixed variable
+    assert len(set(a.tolist())) == 4                      # varies with index
+
+    # A wide box must not put the probe somewhere a model overflows.
+    wide = _probe_point(np.full(4, -1e18), np.full(4, 1e18))
+    assert np.all(np.abs(wide) < 1.0)
+
+
+# --- the #607 non-regression this fix must not break -----------------------
+def test_signing_with_ids_is_never_worse_than_signing_without():
+    """#607 rejected any design in which signing an artifact *with*
+    stable IDs makes it strictly harder to replay than signing it
+    without — that is what would make people stop supplying them.
+
+    The probe must not reintroduce that asymmetry. For every target, an
+    ID-signed artifact replayed against a plain `Problem` (no IDs on the
+    target, which is the normal case) must be refused *only* where the
+    unsigned-ID artifact is also refused.
+    """
+    targets = {
+        "same model": make,
+        "reordered": lambda: make(obj=HS071(perm=PERM)),
+        "moved bounds": lambda: make(ub=4.0),
+        "extra nonzero": lambda: make(obj=HS071ExtraNonzero()),
+        "changed scaling": lambda: make(nlp_scaling_method="none"),
+    }
+    with_ids = signed(var_ids=VAR_IDS, con_ids=CON_IDS)
+    without = signed()
+    for name, factory in targets.items():
+        a = [m.facet for m in with_ids.check_compatible(factory(), "warn")]
+        b = [m.facet for m in without.check_compatible(factory(), "warn")]
+        assert set(a) == set(b), (
+            f"{name}: IDs changed the verdict against a plain Problem "
+            f"({a} vs {b}) — signing with IDs must not cost anything"
+        )
+    # The specific thing that must stay true: on a matching problem, an
+    # ID-signed artifact replays clean without the caller passing IDs.
+    assert with_ids.check_compatible(make()) == []
+    make().solve(warm_start=with_ids)
+
+
+def test_ids_still_beat_the_probe_where_the_probe_is_blind():
+    """The probe infers ordering from arithmetic, so a model that is
+    genuinely symmetric under the permutation looks unchanged to it.
+    Stable IDs *say* which variable is which, and still catch it —
+    which is why they remain the rigorous answer, not a legacy path."""
+
+    class Symmetric:
+        """min sum x^2 s.t. sum x >= 4, sum x^2 == 40: every function is
+        symmetric, so permuting it is undetectable by evaluation."""
+
+        def objective(self, x):
+            return float(np.sum(np.asarray(x) ** 2))
+
+        def gradient(self, x):
+            return 2.0 * np.asarray(x)
+
+        def constraints(self, x):
+            x = np.asarray(x)
+            return np.array([float(np.sum(x)), float(np.dot(x, x))])
+
+        def jacobianstructure(self):
+            return (np.repeat([0, 1], 4), np.tile([0, 1, 2, 3], 2))
+
+        def jacobian(self, x):
+            return np.concatenate([np.ones(4), 2 * np.asarray(x)])
+
+    p = make(obj=Symmetric())
+    x, info = p.solve(x0=X0)
+    ws = WarmStart.from_info(x, info, problem=p, var_ids=VAR_IDS,
+                             con_ids=CON_IDS)
+    target = make(obj=Symmetric())
+    # The probe cannot see it — the model really does evaluate the same.
+    assert ws.check_compatible(target) == []
+    # The IDs can.
+    with pytest.raises(WarmStartCompatibilityError, match="var_ids"):
+        target.solve(warm_start=ws,
+                     var_ids=[VAR_IDS[i] for i in PERM], con_ids=CON_IDS)
+
+
+# --- the limitation is louder when it still applies ------------------------
+def test_a_clean_verdict_says_when_ordering_was_not_checked():
+    """Option 3 from the issue, kept alongside the fix: when neither a
+    probe nor IDs were available on both sides, 'compatible' overstates
+    what was verified, so it says so."""
+    p, x, info = cold()
+    ws = WarmStart.from_info(x, info, problem=p, probe=False)
+    report = ws.describe_compatibility(make())
+    assert "compatible" in report
+    assert "pure reordering" in report and "#621" in report
+
+    # ...and it stays quiet when the ordering really was checked.
+    assert "pure reordering" not in signed().describe_compatibility(make())
+
+
+def test_the_multistart_ladder_does_not_pay_for_the_probe():
+    """`_starts.py` re-checks its warm start once per rung, against the
+    same `Problem` it captured from. Probing there would spend four of
+    the *caller's* evaluations per resume on a facet that cannot fire —
+    it took the racing suite from 2592 to 2920 evaluations before this
+    was pinned. The capture declines the probe, which by construction
+    also makes the per-rung check free.
+    """
+    from pounce._warm_start_schema import _probe_point
+
+    lb, ub = -3.0, 3.0
+    bounds = [(lb, ub)] * 3
+    probe_pt = _probe_point(np.full(3, lb), np.full(3, ub))
+    seen = []
+
+    def f(x):
+        seen.append(np.array(x, dtype=float))
+        return float(np.sum((np.asarray(x) - 1.5) ** 2))
+
+    def g(x):
+        return 2.0 * (np.asarray(x) - 1.5)
+
+    starts = pounce.generate_starts(6, bounds=bounds, seed=0)
+    pounce.race_starts(f, starts, jac=g, bounds=bounds, policy="halving")
+
+    assert seen, "the race evaluated nothing; the test is not measuring"
+    # The probe evaluates at one specific point that no solver iterate
+    # lands on. If the ladder ever starts probing, that point shows up.
+    hits = sum(bool(np.array_equal(p, probe_pt)) for p in seen)
+    assert hits == 0, (
+        f"the racing ladder evaluated the model at the pounce#621 probe "
+        f"point {hits} times; the per-rung check must not probe"
+    )
+
+
+def test_transfer_does_not_pay_for_a_probe_the_caller_declined():
+    """`transfer` re-signs the *target*, and it is the per-step call in
+    a receding-horizon loop (pounce#622) — so signing it unconditionally
+    charges four of the caller's evaluations every step to a caller who
+    passed ``probe=False``. It is the same trap
+    `test_the_multistart_ladder_does_not_pay_for_the_probe` covers on
+    the check path, one call site over: `_target_signature` gates on
+    whether the source carries a probe, and `transfer` has to gate the
+    same way.
+    """
+    calls = []
+
+    class Counted(HS071):
+        def objective(self, x):
+            calls.append("objective")
+            return super().objective(x)
+
+        def gradient(self, x):
+            calls.append("gradient")
+            return super().gradient(x)
+
+        def constraints(self, x):
+            calls.append("constraints")
+            return super().constraints(x)
+
+        def jacobian(self, x):
+            calls.append("jacobian")
+            return super().jacobian(x)
+
+    p = make(obj=Counted())
+    x, info = p.solve(x0=X0)
+
+    # Declined at capture: the mapped result carries no probe either,
+    # and the target is never evaluated.
+    ws = WarmStart.from_info(x, info, problem=p, var_ids=VAR_IDS,
+                             con_ids=CON_IDS, probe=False)
+    calls.clear()
+    out = ws.transfer(make(obj=Counted()), var_ids=VAR_IDS, con_ids=CON_IDS)
+    assert calls == [], (
+        f"transfer evaluated the model {len(calls)} times for a probe the "
+        f"caller declined: {calls}"
+    )
+    assert out.signature.probe is None
+
+    # Bought into at capture: the mapped result is protected, so a
+    # replay of it on a third problem is still refused on the probe.
+    ws_probed = WarmStart.from_info(x, info, problem=p, var_ids=VAR_IDS,
+                                    con_ids=CON_IDS, probe=True)
+    calls.clear()
+    out = ws_probed.transfer(make(obj=Counted()), var_ids=VAR_IDS,
+                             con_ids=CON_IDS)
+    assert calls, "a probed transfer must actually probe the target"
+    assert out.signature.probe is not None
+
+
+def test_the_note_also_rides_on_a_mismatch_report():
+    p, x, info = cold()
+    ws = WarmStart.from_info(x, info, problem=p, probe=False)
+    report = ws.describe_compatibility(make(ub=4.0))
+    assert "bounds:" in report and "pure reordering" in report
+
+
+# --- gh#660: a clean verdict that could not have seen a reordering ---------
+def test_a_clean_but_unverifiable_check_warns_that_it_was_unverifiable():
+    """gh#660. `check_compatible` computed `unordered` on every path but
+    rendered it only inside `if mismatches:`, so the one case the note
+    exists for — nothing disagreed, *and* nothing could have seen a
+    reordering — was the one case that stayed silent. Only
+    `describe_compatibility`, which the caller has to know to call, ever
+    said it."""
+    ws = signed(probe=False)                      # signed, but no probe facet
+    with pytest.warns(pounce.WarmStartOrderingUnverifiedWarning,
+                      match="pounce#621"):
+        assert ws.check_compatible(make(obj=HS071(perm=PERM))) == []
+
+
+def test_a_verifiable_clean_check_stays_quiet():
+    """The note is about a *blind* comparison. When the probe ran on both
+    sides the check really did rule a reordering out, and saying
+    otherwise would train the reader to ignore it."""
+    ws = signed()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make()) == []
+
+
+def test_stable_ids_on_both_sides_also_silence_the_note():
+    ws = signed(var_ids=VAR_IDS, con_ids=CON_IDS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make(), var_ids=VAR_IDS,
+                                   con_ids=CON_IDS) == []
+
+
+def test_the_note_can_be_raised_to_a_refusal():
+    """A warning category rather than a print is what lets a caller who
+    would rather refuse than replay unverified say so."""
+    ws = signed(probe=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "error", pounce.WarmStartOrderingUnverifiedWarning)
+        with pytest.raises(pounce.WarmStartOrderingUnverifiedWarning):
+            make(obj=HS071(perm=PERM)).solve(warm_start=ws)
+
+
+def test_a_mismatched_check_still_carries_the_note_inline(recwarn):
+    """The pre-existing rendering — inside the report — must not have
+    turned into a second, separate warning."""
+    ws = signed(probe=False)
+    with pytest.warns(WarmStartCompatibilityWarning) as rec:
+        ws.check_compatible(make(n=5), compat="warn")
+    assert len(rec) == 1
+    assert ORDERING_UNVERIFIED_NOTE in str(rec[0].message)
+
+
+def test_a_legacy_artifact_does_not_get_told_twice(tmp_path):
+    """An unsigned artifact read from a file already gets
+    WarmStartLegacyWarning, which says the same thing in more detail.
+    Emitting both would be noise, so the new note is scoped to *signed*
+    states — which is every case gh#660 names."""
+    p, cold_x, cold_info = cold()
+    path = tmp_path / "legacy.npz"
+    _write_v1(path, WarmStart.from_info(cold_x, cold_info))
+    with pytest.warns(WarmStartLegacyWarning) as rec:
+        WarmStart.load(path).check_compatible(make())
+    assert len(rec) == 1
+    assert not any(
+        isinstance(w.message, pounce.WarmStartOrderingUnverifiedWarning)
+        for w in rec
+    )
+
+
+# --- gh#659: the per-block scale must actually be per-block ----------------
+class HS071Offset(HS071):
+    """HS071 plus an additive constant on the objective.
+
+    The constant changes no derivative, no constraint and no solution —
+    it is inert to the optimization. It exists only to make the
+    objective block's L1 scale large.
+    """
+
+    def __init__(self, offset, **kw):
+        super().__init__(**kw)
+        self.offset = offset
+
+    def objective(self, x):
+        return super().objective(x) + self.offset
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e3, 1e6, 1e9, 1e12])
+def test_an_inert_objective_offset_does_not_blind_the_probe(offset):
+    """gh#659. `floor = max(scales)` made every block's tolerance the
+    *largest* block's, so inflating the objective raised the gradient,
+    constraint and jacobian tolerances too. Past ~1e9 that was enough to
+    swallow a variable transposition — on `check_compatible`, the gate
+    that is supposed to refuse it, not just on the dry run."""
+    base = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset))).probe
+    permuted = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset, perm=PERM))).probe
+    from pounce._warm_start_schema import _probe_agrees
+
+    assert not _probe_agrees(base, permuted), (
+        f"a reordering went undetected at objective offset {offset:g}"
+    )
+
+
+def test_the_probe_floor_still_rescues_a_near_zero_block():
+    """The floor is not merely deleted: a block that computes to ~0 out
+    of cancellation of large terms must still not be held to bit
+    equality, which is what it was there for."""
+    from pounce._warm_start_schema import _PROBE_PROJECTIONS, _probe_agrees
+
+    stride = _PROBE_PROJECTIONS + 1
+    # block 0 is large; block 1 computes to zero with absolute noise
+    # commensurate with block 0's magnitude.
+    a = [1e8] * _PROBE_PROJECTIONS + [4e8] + [0.0] * _PROBE_PROJECTIONS + [0.0]
+    b = list(a)
+    for k in range(stride, stride + _PROBE_PROJECTIONS):
+        b[k] = 1e-8                      # ~1e-16 relative to block 0
+    assert _probe_agrees(a, b)
+
+    # but a difference the size of block 0 itself is still a difference
+    c = list(a)
+    c[stride] = 1e6
+    assert not _probe_agrees(a, c)

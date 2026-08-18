@@ -14,6 +14,9 @@ interface as well, carrying all of the extras below (see pyomo_pounce.v2):
 Initialization helpers (see the POUNCE docs' initialization chapter):
     report = pyomo_pounce.preflight(model)         # starting-point check
     pyomo_pounce.initialize(model, decisions=[...])  # fill -> repair -> block-solve
+    #     options=InitOptions(...) tunes every stage at once: the
+    #     projection's scaling, the block conditioning threshold and its
+    #     fallback, and what a failed block does to the traversal
     # ... or the individual stages:
     pyomo_pounce.initialize_missing_values(model)  # fill unset Var values
     pyomo_pounce.project_to_feasible(model)        # min-norm repair onto constraints
@@ -23,6 +26,10 @@ Initialization helpers (see the POUNCE docs' initialization chapter):
     pyomo_pounce.block_repair_plan(model, decision_candidates=[...])
     #     plan a valid specification: which candidates to hold as the
     #     decisions, which to prune, and what gets pinned automatically
+
+Predictor--corrector continuation over a parameter path (pounce#608):
+    trace = pyomo_pounce.continuation(m, [m.p], path)   # repeated NLPs
+    pyomo_pounce.shift_map(m, [m.x])                    # horizon-shift transfer
 
 Parametric sensitivity (see pyomo_pounce.sens):
     declare_sens_param(m.p)      # flag parameters when building the model
@@ -34,17 +41,22 @@ Parametric sensitivity (see pyomo_pounce.sens):
 from pyomo_pounce.block_init import (
     BlockAnalysisReport,
     BlockInitReport,
+    BlockOutcome,
     BlockRepairPlan,
     block_analyze,
     block_initialize,
     block_repair_plan,
     structural_incidence,
 )
+from pyomo_pounce.continuation import continuation, shift_map
+from pyomo_pounce.init_options import InitOptions
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
+    ActiveSetChange,
     Covariance,
     EstimateReport,
     Gradient,
+    active_set_changes,
     covariance,
     declare_fitted,
     declare_residual,
@@ -108,7 +120,11 @@ __all__ = [
     "gradient",
     "estimate",
     "estimate_report",
+    "continuation",
+    "shift_map",
     "EstimateReport",
+    "active_set_changes",
+    "ActiveSetChange",
     "Gradient",
     "preflight",
     "PyomoPreflightReport",
@@ -122,6 +138,8 @@ __all__ = [
     "BlockAnalysisReport",
     "block_repair_plan",
     "BlockRepairPlan",
+    "BlockOutcome",
+    "InitOptions",
     "information",
     "Information",
     "structural_incidence",

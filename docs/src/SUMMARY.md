@@ -22,6 +22,7 @@
 - [Verifying Solutions](verify.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
+- [Continuation over a Parametric NLP Sequence](continuation.md)
 - [Differentiable Solves & the DiffHandoff Contract](differentiable-solves.md)
 - [Interactive Debugger](debugger.md)
 
@@ -29,6 +30,7 @@
 
 - [Pyomo](pyomo.md)
 - [GAMS](gams.md)
+- [CasADi](casadi.md)
 - [Python API](python.md)
 - [Rust API](rust.md)
   - [Path Following & Inverse Mapping](path-following.md)
@@ -51,6 +53,7 @@
 - [Initialization and Warm Starts](initialization.md)
 - [Active-Set SQP & Warm Starts](active-set-sqp.md)
   - [Design Note](active-set-sqp-warm-start.md)
+- [Crossover](crossover.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)

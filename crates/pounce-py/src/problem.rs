@@ -9,9 +9,11 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::init::warm_start::{BlockVerdict, WarmStartDiagnostics};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
@@ -370,18 +372,8 @@ impl PyProblem {
             py,
             &bridge.borrow(),
             status,
-            stats.iteration_count,
-            stats.final_mu,
-            stats.final_kkt_error,
-            stats.final_dual_inf,
-            stats.final_constr_viol,
-            stats.final_compl,
-            stats.final_unscaled_kkt_error,
-            stats.final_unscaled_dual_inf,
-            stats.final_unscaled_constr_viol,
-            stats.final_unscaled_compl,
-            stats.sqp_qp_solves,
-            stats.sqp_qp_working_set_changes,
+            &stats,
+            app.warm_start_diagnostics(),
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -814,18 +806,8 @@ impl PyProblem {
             py,
             &bridge.borrow(),
             result.status,
-            stats.iteration_count,
-            stats.final_mu,
-            stats.final_kkt_error,
-            stats.final_dual_inf,
-            stats.final_constr_viol,
-            stats.final_compl,
-            stats.final_unscaled_kkt_error,
-            stats.final_unscaled_dual_inf,
-            stats.final_unscaled_constr_viol,
-            stats.final_unscaled_compl,
-            stats.sqp_qp_solves,
-            stats.sqp_qp_working_set_changes,
+            &stats,
+            app.warm_start_diagnostics(),
         )?;
         info.set_item("dx", opt_vec_to_py(py, result.dx))?;
         info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
@@ -1180,25 +1162,46 @@ fn write_solve_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Stable string name for a warm-start block verdict, so
+/// `info["warm_start"]` reads the same from Python as the Rust enum.
+fn verdict_name(v: BlockVerdict) -> &'static str {
+    match v {
+        BlockVerdict::Absent => "absent",
+        BlockVerdict::Accepted => "accepted",
+        BlockVerdict::Reconstructed => "reconstructed",
+        BlockVerdict::Discarded => "discarded",
+        BlockVerdict::Unseeded => "unseeded",
+        BlockVerdict::Rejected => "rejected",
+    }
+}
+
 pub(crate) fn build_info_dict<'py>(
     py: Python<'py>,
     bridge: &PyTnlp,
     status: ApplicationReturnStatus,
-    iter_count: i32,
-    final_mu: Number,
-    final_kkt_error: Number,
-    final_dual_inf: Number,
-    final_constr_viol: Number,
-    final_compl: Number,
-    final_unscaled_kkt_error: Number,
-    final_unscaled_dual_inf: Number,
-    final_unscaled_constr_viol: Number,
-    final_unscaled_compl: Number,
-    sqp_qp_solves: i32,
-    sqp_qp_working_set_changes: i32,
+    stats: &SolveStatistics,
+    warm_start: Option<WarmStartDiagnostics>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
+    // gh#606: what the warm-start initializer made of the seeds this
+    // call supplied. Absent on a cold solve, so a caller can tell
+    // "warm start did nothing" from "warm start was not requested".
+    if let Some(w) = warm_start {
+        let d = PyDict::new_bound(py);
+        d.set_item("primal_residual", w.primal_residual)?;
+        d.set_item("dual_residual", w.dual_residual)?;
+        d.set_item("complementarity", w.complementarity)?;
+        d.set_item("mu_in", w.mu_in)?;
+        d.set_item("mu_out", w.mu_out)?;
+        d.set_item("bound_duals", verdict_name(w.bound_duals))?;
+        d.set_item("eq_duals", verdict_name(w.eq_duals))?;
+        d.set_item("bound_duals_reconstructed", w.bound_duals_reconstructed)?;
+        d.set_item("bound_duals_rejected", w.bound_duals_rejected)?;
+        d.set_item("eq_duals_rejected", w.eq_duals_rejected)?;
+        d.set_item("stationarity_split", w.stationarity_split)?;
+        d.set_item("recentering_disabled", w.recentering_disabled)?;
+        info.set_item("warm_start", d)?;
+    }
     info.set_item("status", status as i32)?;
     info.set_item("status_msg", status_message(status))?;
     info.set_item("obj_val", bridge.state.final_obj)?;
@@ -1215,19 +1218,42 @@ pub(crate) fn build_info_dict<'py>(
         "mult_x_U",
         bridge.state.final_z_u.clone().into_pyarray_bound(py),
     )?;
-    info.set_item("iter_count", iter_count)?;
+    info.set_item("iter_count", stats.iteration_count)?;
     // Active-set SQP subproblem work. `iter_count` on that path is the
     // *outer* iteration count, which says nothing about how much
     // active-set searching the QPs underneath did — and that is exactly
     // what a working-set warm start changes. Both are 0 on the IPM path,
     // which solves no QP subproblems.
-    info.set_item("n_qp_solves", sqp_qp_solves)?;
-    info.set_item("n_qp_ws_changes", sqp_qp_working_set_changes)?;
+    info.set_item("n_qp_solves", stats.sqp_qp_solves)?;
+    info.set_item("n_qp_ws_changes", stats.sqp_qp_working_set_changes)?;
+
+    // The solver's own callback tallies. Python-side wrappers can only
+    // count what they themselves route, so a frontend that hands the
+    // solver derivative callbacks it did not build (pounce.jax, the
+    // NlProblem path) had no eval count at all; and *iterations* are the
+    // wrong resource to compare truncated solves on, because one
+    // iteration can cost anything from one evaluation to a dozen when
+    // the line search backtracks. pounce#610's racer budgets in these.
+    info.set_item("n_obj_evals", stats.num_obj_evals)?;
+    info.set_item("n_grad_evals", stats.num_obj_grad_evals)?;
+    info.set_item("n_constr_evals", stats.num_constr_evals)?;
+    info.set_item("n_jac_evals", stats.num_constr_jac_evals)?;
+    info.set_item("n_hess_evals", stats.num_hess_evals)?;
+
+    // Restoration-phase audit counters (pounce#12), previously reachable
+    // only through a written solve report. They are the numerical-health
+    // signal pounce#610 ranks racing candidates on: a candidate that
+    // spent its budget in restoration made no progress on the problem it
+    // was given, whatever its objective says.
+    info.set_item("restoration_calls", stats.restoration_calls)?;
+    info.set_item("restoration_outer_iters", stats.restoration_outer_iters)?;
+    info.set_item("restoration_inner_iters", stats.restoration_inner_iters)?;
+
     // Converged barrier parameter μ. Thread this into the next
     // warm-started solve's `mu_init` / `warm_start_target_mu` to seed
     // the corrector in predictor–corrector path following (pounce#86).
     // `0.0` on the barrier-free SQP path.
-    info.set_item("mu", final_mu)?;
+    info.set_item("mu", stats.final_mu)?;
 
     // Final convergence metrics (the values the IPM/SQP convergence check
     // saw at the last iterate). `final_kkt_error` is the overall NLP error
@@ -1236,20 +1262,23 @@ pub(crate) fn build_info_dict<'py>(
     // optimality residual rather than solely on the exit-status enum, so a
     // verified optimum reached via a tiny-step exit (gh #119/#123) is still
     // reported as a success. NaN on a path that never computed them.
-    info.set_item("final_kkt_error", final_kkt_error)?;
-    info.set_item("final_dual_inf", final_dual_inf)?;
-    info.set_item("final_constr_viol", final_constr_viol)?;
-    info.set_item("final_compl", final_compl)?;
+    info.set_item("final_kkt_error", stats.final_kkt_error)?;
+    info.set_item("final_dual_inf", stats.final_dual_inf)?;
+    info.set_item("final_constr_viol", stats.final_constr_viol)?;
+    info.set_item("final_compl", stats.final_compl)?;
     // Unscaled (user-original-space) counterparts of the four residuals
     // above — the nlp_scaling divided back out so a consumer can verify a
     // returned KKT certificate in its own units, independent of any
     // internal objective/constraint scaling (pounce#173). Equal to the
     // scaled values when no scaling is active. `final_unscaled_kkt_error`
     // is the plain max-norm of the three (no s_d/s_c optimality scaling).
-    info.set_item("final_unscaled_kkt_error", final_unscaled_kkt_error)?;
-    info.set_item("final_unscaled_dual_inf", final_unscaled_dual_inf)?;
-    info.set_item("final_unscaled_constr_viol", final_unscaled_constr_viol)?;
-    info.set_item("final_unscaled_compl", final_unscaled_compl)?;
+    info.set_item("final_unscaled_kkt_error", stats.final_unscaled_kkt_error)?;
+    info.set_item("final_unscaled_dual_inf", stats.final_unscaled_dual_inf)?;
+    info.set_item(
+        "final_unscaled_constr_viol",
+        stats.final_unscaled_constr_viol,
+    )?;
+    info.set_item("final_unscaled_compl", stats.final_unscaled_compl)?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /

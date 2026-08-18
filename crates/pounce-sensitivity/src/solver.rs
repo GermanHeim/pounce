@@ -66,6 +66,24 @@ use crate::vec_util::dense_to_vec;
 /// against sIPOPT rather than derived.
 pub const BARRIER_SIGN: Number = -1.0;
 
+/// The bound geometry the bound-aware parametric steps share. See
+/// [`Solver::bound_context`].
+struct BoundContext {
+    /// Length of the primal block.
+    n_x: usize,
+    /// Lower bounds over the primal block, in the model's own units.
+    lo: Vec<Number>,
+    /// Upper bounds, likewise.
+    hi: Vec<Number>,
+    /// The converged primal point, truncated to the primal block.
+    x_curr: Vec<Number>,
+    /// How far outside a bound still counts as on it.
+    eps: Number,
+    /// Bound multipliers at the base point, in the solve's own
+    /// coordinates, with the compound row each occupies.
+    mults: Vec<crate::boundcheck::BoundMultiplier>,
+}
+
 /// Errors returned by post-convergence operations on [`Solver`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -635,7 +653,7 @@ impl Solver {
     /// is never rebuilt, but the Schur complement is rebuilt each pass,
     /// so pass `k` costs one dense `k × k` solve and `k + 1`
     /// back-solves and the total grows quadratically in the number of
-    /// pins. The default `max_passes` of 16 is 136 back-solves.
+    /// pins. The default `max_iter` of 16 is 136 back-solves.
     ///
     /// What counts as outside a bound is taken from the solve rather
     /// than from the caller: it was willing to leave a converged point
@@ -643,27 +661,96 @@ impl Solver {
     /// is on the bound. An unrelaxed solve gets a roundoff floor.
     ///
     /// Passes stop when nothing is outside its bound by that much, at
-    /// `max_passes`, or when a pin cannot be achieved because the pins
+    /// `max_iter`, or when a pin cannot be achieved because the pins
     /// have exhausted the problem's degrees of freedom. None of those
     /// is an error: the step returned is the last one computed, and the
-    /// returned pin list says how far the refinement got. `max_passes`
+    /// returned pin list says how far the refinement got. `max_iter`
     /// is a budget, since each pass costs a dense `k × k` solve and the
     /// point of the refinement is to stay cheaper than a re-solve.
     pub fn parametric_step_bounded(
         &self,
         pin_constraint_indices: &[Index],
         deltas: &[Number],
-        max_passes: usize,
+        max_iter: usize,
     ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
         let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+            &state.backsolver,
+            &dx_full,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            &rhs_plain,
+            ctx.eps,
+            max_iter,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((
+            dx[..ctx.n_x].to_vec(),
+            pinned.into_iter().map(|p| p as Index).collect(),
+        ))
+    }
+
+    /// Parametric step applied a little at a time instead of taken
+    /// whole, stopping wherever the active set changes and continuing
+    /// from there under the new one. Returns the primal step and the
+    /// breakpoints crossed.
+    ///
+    /// [`Self::parametric_step_bounded`] decides every condition at the
+    /// base point, which is upstream's fix-relax. This is past it: the
+    /// result is piecewise linear in the parameter, exact for a QP
+    /// because a QP's solution is piecewise affine in the parameter,
+    /// and still a predictor for an NLP because nothing is
+    /// re-linearized between breakpoints.
+    ///
+    /// `max_iter` caps the breakpoints crossed. It is in practice a
+    /// budget on factorizations, since a pin is a back-solve against
+    /// the held factor while a release re-factors.
+    pub fn parametric_step_path(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let (dx, segments) = crate::boundcheck::step_along_path(
+            &state.backsolver,
+            &rhs_plain,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            max_iter,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((dx[..ctx.n_x].to_vec(), segments))
+    }
+
+    /// The bound geometry both bound-aware steps read: the primal
+    /// block's size and base point, its bounds in the model's own
+    /// units, the tolerance that decides what counts as on a bound, and
+    /// the bound multipliers at the base point.
+    ///
+    /// Shared rather than assembled twice. The two callers have to
+    /// agree on all of it, and the unit and index-space conversions
+    /// below are exactly what went wrong when a second caller wrote its
+    /// own.
+    fn bound_context(&self) -> Result<BoundContext, SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let n_x = state.backsolver.block_dims()[0];
 
         // Expanded once, before any re-solve: reading the compressed
-        // form means borrowing the NLP, and `run_sens_step` below
-        // re-borrows it.
+        // form means borrowing the NLP, and the solves below re-borrow
+        // it.
         let (mut lo, mut hi) = {
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
@@ -688,7 +775,6 @@ impl Solver {
                 hi[i] = a.max(b);
             }
         }
-        let x_curr = &state.x[..n_x];
 
         // What counts as outside a bound is the solve's own answer: it
         // was willing to leave a converged point `bound_relax_factor`
@@ -697,8 +783,8 @@ impl Solver {
         // roundoff.
         let eps = state.bound_relax_factor.abs().max(1e-9);
         // The bound multipliers at the base point, with the compound
-        // row each one occupies, so the refinement can tell when the
-        // step drives one negative and release that bound.
+        // row each one occupies, so a step that drives one negative can
+        // release that bound.
         let mults = {
             let dims = state.backsolver.block_dims();
             let (z_l_off, z_u_off) = (
@@ -716,22 +802,14 @@ impl Solver {
             }
             out
         };
-        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
-            &state.backsolver,
-            &dx_full,
-            x_curr,
-            &lo,
-            &hi,
-            &mults,
-            &rhs_plain,
+        Ok(BoundContext {
+            n_x,
+            lo,
+            hi,
+            x_curr: state.x[..n_x].to_vec(),
             eps,
-            max_passes,
-        )
-        .map_err(SolverError::SensComputationFailed)?;
-        Ok((
-            dx[..n_x].to_vec(),
-            pinned.into_iter().map(|p| p as Index).collect(),
-        ))
+            mults,
+        })
     }
 
     /// Full KKT-space parametric step for a set of pinned equality

@@ -21,7 +21,11 @@ use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
 /// - `lambda_x`: packed signed bound multipliers (`z_l − z_u`) of
 ///   length `n`. Positive ⇒ lower bound active; negative ⇒ upper.
 /// - `lambda_g`: stacked constraint multipliers `[y_c ; y_d]` of
-///   length `m = m_eq + m_ineq`. Same sign convention.
+///   length `m = m_eq + m_ineq`. The **opposite** sign convention to
+///   `lambda_x`: negative ⇒ lower bound active, positive ⇒ upper. Both
+///   follow from the one stationarity form `∇f + Jᵀλ_g − λ_x = 0` that
+///   pounce-qp, the SQP driver's `check_kkt`, and IPOPT's `(y, z_l, z_u)`
+///   all share; the bound block enters it negated, so its signs flip.
 /// - `m_eq`: number of equality rows at the start of `lambda_g`.
 ///   Used to flag rows as [`ConsStatus::Equality`] without
 ///   consulting `g_l`/`g_u`.
@@ -110,16 +114,32 @@ pub fn classify_working_set(
             constraints.push(ConsStatus::Equality);
             continue;
         }
+        // Constraint-row multipliers carry the OPPOSITE sign to bound
+        // multipliers, because they enter stationarity with the opposite
+        // sign: `Hx + g + Aᵀλ_g − λ_x = 0`. So `λ_g ≤ 0` at an active lower
+        // bound and `λ_g ≥ 0` at an active upper bound — the reverse of the
+        // bound rules above, and pinned by
+        // `classify_matches_pounce_qp_row_sign_convention` below.
+        //
+        // This block read the bound signs until gh#612. That is lossy rather
+        // than wrong — a row the estimate calls `Inactive` is simply one the
+        // QP has to re-add on its first pivot, and the returned solution is
+        // unaffected — which is why nothing caught it: no test asserts a
+        // working-set *estimate*, only the solutions it warm-starts. It
+        // matters here because crossover's whole purpose is to hand the
+        // active-set path an estimate that is already right (KNITRO §7 step
+        // 2), and the old rules classified every active inequality row as
+        // inactive.
         let mu = lambda_g[i];
         let at_lo = lo_fin && (g[i] - g_l[i]).abs() < primal_tol;
         let at_up = up_fin && (g_u[i] - g[i]).abs() < primal_tol;
-        let status = if mu > mult_tol && at_lo {
+        let status = if mu < -mult_tol && at_lo {
             ConsStatus::AtLower
-        } else if mu < -mult_tol && at_up {
+        } else if mu > mult_tol && at_up {
             ConsStatus::AtUpper
-        } else if at_lo && mu >= 0.0 {
+        } else if at_lo && mu <= 0.0 {
             ConsStatus::AtLower
-        } else if at_up && mu <= 0.0 {
+        } else if at_up && mu >= 0.0 {
             ConsStatus::AtUpper
         } else {
             ConsStatus::Inactive
@@ -255,9 +275,12 @@ mod tests {
 
     #[test]
     fn classify_inequality_at_lower_bound() {
+        // λ_g ≤ 0 at an active lower bound — the row convention, opposite to
+        // the bound convention two tests up. See
+        // `classify_matches_pounce_qp_row_sign_convention`.
         let ws = classify_working_set(
             &[],
-            &[3.0],
+            &[-3.0],
             0,
             &[],
             &[],
@@ -275,7 +298,7 @@ mod tests {
     fn classify_inequality_at_upper_bound() {
         let ws = classify_working_set(
             &[],
-            &[-3.0],
+            &[3.0],
             0,
             &[],
             &[],
@@ -287,6 +310,78 @@ mod tests {
             1e-8,
         );
         assert_eq!(ws.constraints[0], ConsStatus::AtUpper);
+    }
+
+    /// Anchor the classifier's row-sign convention to the engine that
+    /// consumes its output, rather than to a hand-written expectation.
+    ///
+    /// The classifier exists to hand `pounce-qp` a working set built from
+    /// someone else's multipliers, so "which sign means AtLower" is not ours
+    /// to choose — it is whatever `pounce-qp` returns. Asserting a literal
+    /// (`-3.0 ⇒ AtLower`) restates a belief; solving the QP and feeding its
+    /// own multipliers back through the classifier tests the agreement, and
+    /// fails if either side's convention moves. gh#612: the two had silently
+    /// disagreed on rows since the classifier was written.
+    #[test]
+    fn classify_matches_pounce_qp_row_sign_convention() {
+        use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+        use pounce_qp::{HessianInertia, QpOptions, QpProblem, QpSolver};
+
+        // min ½‖x‖²  s.t.  x₀ + x₁ ≥ 2.  Solution x = (1,1) with the row
+        // active at its lower bound.
+        let n = 2usize;
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]));
+        h.set_values(&[1.0, 1.0]);
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]));
+        a.set_values(&[1.0, 1.0]);
+        let g = [0.0, 0.0];
+        let bl = [2.0];
+        let bu = [NLP_UPPER_BOUND_INF];
+        let xl = [NLP_LOWER_BOUND_INF; 2];
+        let xu = [NLP_UPPER_BOUND_INF; 2];
+        let qp = QpProblem {
+            n,
+            m: 1,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = pounce_qp::ParametricActiveSetSolver::new(Box::new(
+            pounce_feral::FeralSolverInterface::new(),
+        ));
+        let sol = solver
+            .solve(&qp, None, &QpOptions::default())
+            .expect("QP solve");
+        assert_eq!(sol.working.constraints[0], ConsStatus::AtLower);
+
+        // Now the actual claim: re-deriving the working set from the
+        // solution the engine returned reproduces the engine's own labels.
+        let g_vals = [sol.x[0] + sol.x[1]];
+        let ws = classify_working_set(
+            &sol.lambda_x,
+            &sol.lambda_g,
+            0,
+            &sol.x,
+            &xl,
+            &xu,
+            &g_vals,
+            &bl,
+            &bu,
+            1e-8,
+            1e-6,
+        );
+        assert_eq!(
+            ws.constraints, sol.working.constraints,
+            "classifier disagrees with pounce-qp on row activity \
+             (λ_g = {:?})",
+            sol.lambda_g
+        );
+        assert_eq!(ws.bounds, sol.working.bounds);
     }
 
     #[test]

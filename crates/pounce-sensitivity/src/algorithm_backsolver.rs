@@ -46,7 +46,7 @@ use std::rc::Rc;
 use pounce_algorithm::ipopt_cq::IpoptCqHandle;
 use pounce_algorithm::ipopt_data::IpoptDataHandle;
 use pounce_algorithm::iterates_vector::{IteratesVector, IteratesVectorMut};
-use pounce_algorithm::kkt::pd_full_space_solver::PdFullSpaceSolver;
+use pounce_algorithm::kkt::pd_full_space_solver::{PdFullSpaceSolver, SigmaOverride};
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_nlp::ipopt_nlp::IpoptNlp;
@@ -145,6 +145,57 @@ pub struct PdSensBacksolver {
     /// expansions. `None` when either expansion is not an
     /// `ExpansionMatrix` and the map cannot be recovered.
     bound_vars: Option<Rc<Vec<crate::backsolver::BoundRow>>>,
+    /// The barrier geometry re-measured against the bounds the model
+    /// declares, for a held iterate that came from crossover. `None` —
+    /// meaning "read the calculated quantities as they stand" — on
+    /// every solve that ended on an interior point. See
+    /// [`DeclaredFrameBarrier`].
+    declared: Option<Rc<DeclaredFrameBarrier>>,
+}
+
+/// `Σ` and the active-bound slacks of a **crossed-over** iterate,
+/// measured against the bounds the user declared rather than the ones
+/// the barrier ran against (gh#654).
+///
+/// `bound_relax_factor` (default `1e-8`) widens every bound by `δ`
+/// before the solve, and crossover (gh#612) then parks the iterate
+/// exactly on the *declared* bound — a full `δ` inside the live relaxed
+/// one. So the calculated quantities report a slack of exactly `δ` at
+/// every active bound, where an interior iterate would have carried
+/// `μ/z`, and the barrier diagonal `Σ = z/s` comes out as `z/δ` instead
+/// of `z²/μ`. Since `δ` is capped at `constr_viol_tol` and `μ` ends near
+/// `tol/(barrier_tol_factor+1)`, that is *looser* whenever `z·δ/μ > 1`,
+/// which is the ordinary case.
+///
+/// `Σ` is the stiffness with which the barrier holds a bounded variable,
+/// and a reduced Hessian read off the held factor carries a residual
+/// error of exactly `O(1/Σ)` — the leftover of that pin being finite. So
+/// the looser reading is a measurably less accurate covariance: on the
+/// gh#654 fixture, `18x` at a bound multiplier of `4.5` and `396x` at
+/// `994.5`, tracking `z·δ/μ` exactly.
+///
+/// The correction is the same one gh#646 applied to the reported
+/// residuals: measure the crossed-over point in the frame it was solved
+/// in. Nothing on the live iterate is touched — the relaxed bounds are
+/// still what the algorithm ran against, and un-relaxing them after the
+/// fact would mean replacing the NLP's bound `Rc`s and invalidating
+/// every tag-keyed cache built on them. This is the consumer boundary
+/// instead, where the question "how stiffly is this point held" is
+/// actually being asked.
+struct DeclaredFrameBarrier {
+    /// Variable-bound contribution to the `x` diagonal.
+    sigma_x: Rc<dyn pounce_linalg::Vector>,
+    /// Inequality-row-bound contribution to the `s` diagonal. Relaxation
+    /// widens `d_L` / `d_U` too, and crossover puts `s = d(x)` on the
+    /// declared row bounds, so the row half of the defect is identical
+    /// to the variable half.
+    sigma_s: Rc<dyn pounce_linalg::Vector>,
+    /// The declared-frame `x` slacks behind `sigma_x`, compressed in the
+    /// `px_l` / `px_u` spaces. Kept because a *released* solve rebuilds
+    /// one variable's `Σ` entry from the sides that stay active and has
+    /// to rebuild it in the same frame.
+    slack_x_l: Vec<Number>,
+    slack_x_u: Vec<Number>,
 }
 
 /// Left/right diagonal pair for the natural-units back-solve; see the
@@ -195,6 +246,7 @@ impl PdSensBacksolver {
         let (d_var, d_full) = Self::variable_factors(nlp, &dims)?;
         let conj = Self::natural_units_conj(nlp, &dims, d_var.as_ref().map(|v| v.as_slice()))?;
         let bound_vars = Self::bound_variable_rows(nlp, &dims);
+        let declared = Self::declared_frame_barrier(data, nlp, &dims);
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -206,7 +258,103 @@ impl PdSensBacksolver {
             d_var,
             d_full,
             bound_vars,
+            declared,
         })
+    }
+
+    /// Re-measure `Σ` against the declared bounds when the held iterate
+    /// came from crossover; `None` otherwise, and `None` whenever the
+    /// NLP does not report its declared box (the fallback is then the
+    /// calculated quantities, i.e. the pre-gh#654 behaviour).
+    ///
+    /// Deliberately gated on crossover rather than applied everywhere:
+    /// an *interior* iterate is not near the declared bounds in any
+    /// useful sense — it can sit up to `δ` **outside** one — and its
+    /// `μ/z` standoff is the barrier's own geometry, which is the right
+    /// thing to read. Only a purified point has the declared frame as
+    /// its own.
+    fn declared_frame_barrier(
+        data: &IpoptDataHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        dims: &[usize; 8],
+    ) -> Option<Rc<DeclaredFrameBarrier>> {
+        let (curr, from_crossover) = {
+            let d = data.borrow();
+            (d.curr.clone()?, d.curr_from_crossover)
+        };
+        if !from_crossover {
+            return None;
+        }
+        let nlp_ref = nlp.borrow();
+        let (x_l, x_u) = nlp_ref.declared_x_bounds()?;
+        let (d_l, d_u) = nlp_ref.declared_d_bounds()?;
+        if x_l.len() != dims[4]
+            || x_u.len() != dims[5]
+            || d_l.len() != dims[6]
+            || d_u.len() != dims[7]
+        {
+            return None;
+        }
+        let (sigma_x, slack_x_l, slack_x_u) = declared_frame_sigma(
+            &*nlp_ref.px_l(),
+            &*nlp_ref.px_u(),
+            &*curr.x,
+            &x_l,
+            &x_u,
+            &*curr.z_l,
+            &*curr.z_u,
+            dims[0],
+        );
+        let (sigma_s, _, _) = declared_frame_sigma(
+            &*nlp_ref.pd_l(),
+            &*nlp_ref.pd_u(),
+            &*curr.s,
+            &d_l,
+            &d_u,
+            &*curr.v_l,
+            &*curr.v_u,
+            dims[1],
+        );
+        Some(Rc::new(DeclaredFrameBarrier {
+            sigma_x,
+            sigma_s,
+            slack_x_l,
+            slack_x_u,
+        }))
+    }
+
+    /// The barrier diagonals to factor with: the declared-frame pair
+    /// when the held iterate came from crossover, otherwise the
+    /// calculated quantities (which is what [`SigmaOverride::default`]
+    /// selects).
+    fn sigma_override(&self) -> SigmaOverride {
+        match self.declared.as_ref() {
+            None => SigmaOverride::default(),
+            Some(d) => SigmaOverride {
+                x: Some(Rc::clone(&d.sigma_x)),
+                s: Some(Rc::clone(&d.sigma_s)),
+            },
+        }
+    }
+
+    /// The `x`-block barrier diagonal in the frame the held iterate
+    /// belongs to. Crate-internal because [`crate::activity`] reads `Σ`
+    /// straight off the iterate rather than through the factor, and the
+    /// two must not disagree about which bounds the point is measured
+    /// against.
+    pub(crate) fn barrier_sigma_x(&self) -> Rc<dyn pounce_linalg::Vector> {
+        match self.declared.as_ref() {
+            Some(d) => Rc::clone(&d.sigma_x),
+            None => self.cq.borrow().curr_sigma_x(),
+        }
+    }
+
+    /// [`Self::barrier_sigma_x`] for the `s` block.
+    pub(crate) fn barrier_sigma_s(&self) -> Rc<dyn pounce_linalg::Vector> {
+        match self.declared.as_ref() {
+            Some(d) => Rc::clone(&d.sigma_s),
+            None => self.cq.borrow().curr_sigma_s(),
+        }
     }
 
     /// Shared body of the two released solves. `shift` moves the
@@ -235,6 +383,21 @@ impl PdSensBacksolver {
             Some(c) => rhs.iter().zip(c.e.iter()).map(|(&r, &e)| r * e).collect(),
             None => rhs.to_vec(),
         };
+        // A released bound's multiplier is fixed at zero, so its row
+        // has no equation and the right-hand side there is meaningless.
+        // It is also dangerous: the elimination folds a multiplier
+        // row's entry in as r_z / s, and at a tightly active bound the
+        // barrier-correction term every parametric right-hand side
+        // carries, -mu on each bound row, folds to -mu / s = -z by
+        // complementarity, an order-one injection into the released
+        // variable's equation. Measured on a two-variable QP that bent
+        // the released direction from the analytic [1.227, 0.454] to
+        // [1.154, 0.194].
+        for &r in released {
+            if r < scaled.len() {
+                scaled[r] = 0.0;
+            }
+        }
         if shift && !self.shift_released_rhs(released, &mut scaled) {
             return false;
         }
@@ -249,41 +412,67 @@ impl PdSensBacksolver {
         true
     }
 
-    /// `curr_sigma_x` with each released bound's own `z / s` taken off
-    /// the variable it constrains -- subtracted rather than zeroed,
-    /// since a variable bounded on both sides contributes twice and
-    /// only one side is being released.
+    /// The barrier's `x` diagonal with each released bound's own `z / s`
+    /// taken off the variable it constrains -- subtracted rather than
+    /// zeroed, since a variable bounded on both sides contributes twice
+    /// and only one side is being released.
+    ///
+    /// Both the starting diagonal and the slacks the surviving sides are
+    /// rebuilt from come from the frame the held iterate belongs to
+    /// (gh#654): mixing a declared-frame `Σ` with relaxed-frame slacks
+    /// would leave the released variable pinned in one frame and its
+    /// neighbours in the other.
     fn released_sigma_x(&self, released: &[usize]) -> Option<Rc<dyn pounce_linalg::Vector>> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let rows = self.bound_vars.as_deref()?;
         let base_row = rows.first()?.row;
-        let cq_ref = self.cq.borrow();
         let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
             v.as_any()
                 .downcast_ref::<DenseVector>()
                 .map(|d| d.expanded_values())
         };
-        let mut sigma = dense(cq_ref.curr_sigma_x())?;
-        let slack_l = dense(cq_ref.curr_slack_x_l())?;
-        let slack_u = dense(cq_ref.curr_slack_x_u())?;
-        drop(cq_ref);
+        let mut sigma = dense(self.barrier_sigma_x())?;
+        let (slack_l, slack_u) = match self.declared.as_ref() {
+            Some(d) => (d.slack_x_l.clone(), d.slack_x_u.clone()),
+            None => {
+                let cq_ref = self.cq.borrow();
+                let l = dense(cq_ref.curr_slack_x_l())?;
+                let u = dense(cq_ref.curr_slack_x_u())?;
+                (l, u)
+            }
+        };
         let (z_l, z_u) = {
             let d = self.data.borrow();
             let curr = d.curr.as_ref()?;
             (dense(Rc::clone(&curr.z_l))?, dense(Rc::clone(&curr.z_u))?)
         };
+        // Rebuild each released variable's entry from its bounds that
+        // stay active, rather than subtracting the released bound's
+        // `z / s` from the cached total. The subtraction differences
+        // two numbers of order `z / s`, 1e7 and up at a tightly
+        // active bound, and its correctness rests on the cache having
+        // built its total from bitwise-identical products. Rebuilding
+        // makes the released side an exact zero by construction and
+        // depends on nothing about the cache.
         for &r in released {
             let br = rows.iter().find(|b| b.row == r)?;
-            let k = r - base_row - if br.lower { 0 } else { self.dims[4] };
-            let (z, s) = if br.lower {
-                (*z_l.get(k)?, *slack_l.get(k)?)
-            } else {
-                (*z_u.get(k)?, *slack_u.get(k)?)
-            };
-            if s == 0.0 || !s.is_finite() {
-                return None;
+            let mut fresh = 0.0;
+            for other in rows.iter().filter(|b| b.var_row == br.var_row) {
+                if released.contains(&other.row) {
+                    continue;
+                }
+                let k = other.row - base_row - if other.lower { 0 } else { self.dims[4] };
+                let (z, s) = if other.lower {
+                    (*z_l.get(k)?, *slack_l.get(k)?)
+                } else {
+                    (*z_u.get(k)?, *slack_u.get(k)?)
+                };
+                if s == 0.0 || !s.is_finite() {
+                    return None;
+                }
+                fresh += z / s;
             }
-            *sigma.get_mut(br.var_row)? -= z / s;
+            *sigma.get_mut(br.var_row)? = fresh;
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);
@@ -361,7 +550,7 @@ impl PdSensBacksolver {
         {
             return false;
         }
-        if !self.pd.borrow_mut().solve_with_sigma_x(
+        if !self.pd.borrow_mut().solve_with_sigma(
             &self.data,
             &self.cq,
             &self.nlp,
@@ -371,7 +560,12 @@ impl PdSensBacksolver {
             &mut res_iv,
             /* allow_inexact = */ true,
             /* improve_solution = */ false,
-            Some(sigma),
+            SigmaOverride {
+                x: Some(sigma),
+                // The release is an x-block operation; the row block
+                // keeps whichever frame the held iterate belongs to.
+                s: self.sigma_override().s,
+            },
         ) {
             return false;
         }
@@ -911,6 +1105,21 @@ impl PdSensBacksolver {
         }
         let off = self.offsets();
 
+        // Both cached tiers below assemble their elimination from the
+        // *calculated* `Σ` and slacks, and fire against whatever factor
+        // the last solve left behind. Neither is the right system when
+        // the held iterate came from crossover and the declared-frame
+        // diagonal is in force (gh#654), and the tag check cannot be
+        // relied on to decline: on the first call after convergence the
+        // cached tags are the algorithm's own final solve, which used
+        // exactly the diagonal being corrected. So skip them outright
+        // and take the per-RHS path, which carries the override. That
+        // costs the batched path its inlining on a crossed-over solve —
+        // one factorization, then a back-substitution per RHS, against
+        // the tag cache that the shared override vector keeps warm.
+        let sigma = self.sigma_override();
+        let corrected = self.declared.is_some();
+
         // Tier 1: fully-inline flat-slice path. `PdFullSpaceSolver::
         // solve_many_cached_flat` downcasts the slack / z / v vectors to
         // `DenseVector` and the bound-expansion matrices to
@@ -919,7 +1128,7 @@ impl PdSensBacksolver {
         // dispatch in the per-RHS inner loops. Returns `None` if a
         // downcast fails (homogeneous-on-non-empty block, unusual matrix
         // type) — we fall to Tier 2.
-        {
+        if !corrected {
             let mut pd_ref = self.pd.borrow_mut();
             let fast_flat = pd_ref.solve_many_cached_flat(
                 &self.data, &self.cq, &self.nlp, n_rhs, rhs_flat, lhs_flat, self.dims,
@@ -937,7 +1146,7 @@ impl PdSensBacksolver {
         // `IteratesVectorMut`. Slower than Tier 1 but correct for
         // homogeneous DenseVectors and non-`ExpansionMatrix` bound
         // expansions.
-        {
+        if !corrected {
             let mut pd_ref = self.pd.borrow_mut();
             let fast = pd_ref.solve_many_cached(
                 &self.data,
@@ -997,7 +1206,7 @@ impl PdSensBacksolver {
                 return false;
             }
 
-            let ok = pd_ref.solve(
+            let ok = pd_ref.solve_with_sigma(
                 &self.data,
                 &self.cq,
                 &self.nlp,
@@ -1007,6 +1216,7 @@ impl PdSensBacksolver {
                 &mut res_iv,
                 /* allow_inexact = */ true,
                 /* improve_solution = */ false,
+                sigma.clone(),
             );
             if !ok {
                 return false;
@@ -1026,6 +1236,112 @@ impl PdSensBacksolver {
         }
         true
     }
+}
+
+/// Headroom on the representability half of [`declared_slack_floor`],
+/// matching `ipopt_cq`'s `SIGMA_OVERFLOW_HEADROOM` (gh#655) because it
+/// bounds the same quantity for the same reason: `Σ_x` sums a lower and
+/// an upper ratio into one diagonal entry, so bounding each by `MAX/4`
+/// bounds the sum by `MAX/2` with room for the rounding in the divide.
+const SIGMA_OVERFLOW_HEADROOM: Number = 4.0;
+
+/// The smallest offset from a bound that the declared-frame slack is
+/// allowed to be: the larger of what double precision tells apart from
+/// the bound itself, and what keeps `Σ = z/s` inside the double range.
+///
+/// A crossed-over point is *on* its active bounds, so its declared-frame
+/// slack is the residual of the QP step and the line search — measured
+/// around `1.8e-12` (gh#653), comfortably above both, so this does
+/// nothing on the ordinary path. Each half covers a different corner:
+///
+/// * **`eps·max(1,|bound|)`** — a pivot landing on the bound exactly.
+///   `Σ = z/0` is not a stiffer pin, it is a `NaN` in the KKT matrix.
+///   Flooring says the honest thing instead: below this distance the
+///   point *is* the bound, and the slack carries no further information
+///   about how far inside it sits.
+/// * **`z_max/(f64::MAX/4)`** — a multiplier large enough that `z/s`
+///   leaves the double range even at a slack this frame considers
+///   resolvable. This is gh#655's floor, which the live path gained in
+///   `CalculateSafeSlack`; the declared frame does not go through that
+///   function, so without carrying the bound here explicitly the
+///   guarantee would stop at the frame boundary. It takes `max_i z_i`
+///   over the block rather than each bound's own `z`, matching gh#655
+///   and conservative in the harmless direction — raising a slack only
+///   lowers `Σ`. A non-finite `z` leaves the floor alone; the iterate
+///   finiteness checks own that case.
+///
+/// What is deliberately *not* borrowed is the rest of
+/// `CalculateSafeSlack`: it raises a below-floor slack to
+/// `max(μ/z, s_min)`, i.e. straight back to the `μ/z` standoff crossover
+/// exists to remove (the same reason gh#646 declined it for the residual
+/// report). Only the representability bound crosses over, because that
+/// one is about what a double can hold, not about where the barrier
+/// would have put the point.
+fn declared_slack_floor(bound: Number, z_max: Number) -> Number {
+    let resolvable = Number::EPSILON * bound.abs().max(1.0);
+    if z_max.is_finite() && z_max > 0.0 {
+        // Divide before multiplying so a `z_max` near `f64::MAX` cannot
+        // overflow the floor itself.
+        resolvable.max(z_max / (Number::MAX / SIGMA_OVERFLOW_HEADROOM))
+    } else {
+        resolvable
+    }
+}
+
+/// `Σ = Σ_l z_l/s_l + Σ_u z_u/s_u` for one primal block, with the slacks
+/// taken against `b_l` / `b_u` instead of the NLP's live (relaxed)
+/// bounds. Returns the diagonal plus the two slack vectors it was built
+/// from, compressed in the `p_l` / `p_u` spaces.
+///
+/// Mirrors `IpoptCalculatedQuantities`' own `curr_sigma_x` /
+/// `curr_sigma_s` — the same `Pᵀx − b` slack and the same
+/// `add_m_sinv_z` accumulation — so the only difference between this and
+/// the cached value is which bounds it measured against, and the floor
+/// above in place of the safe-slack correction.
+#[allow(clippy::too_many_arguments)]
+fn declared_frame_sigma(
+    p_l: &dyn pounce_linalg::Matrix,
+    p_u: &dyn pounce_linalg::Matrix,
+    primal: &dyn pounce_linalg::Vector,
+    b_l: &[Number],
+    b_u: &[Number],
+    z_l: &dyn pounce_linalg::Vector,
+    z_u: &dyn pounce_linalg::Vector,
+    n: usize,
+) -> (Rc<dyn pounce_linalg::Vector>, Vec<Number>, Vec<Number>) {
+    use pounce_linalg::Vector;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    // One scalar over both sides of the block, as gh#655 does: the two
+    // ratios land in the same `Σ` entry, so the bound that keeps their
+    // sum representable has to be taken over both.
+    let z_max = z_l.amax().max(z_u.amax());
+
+    // `lower`: s = Pᵀx − b_l. Otherwise: s = b_u − Pᵀx.
+    let slack = |p: &dyn pounce_linalg::Matrix, b: &[Number], lower: bool| -> DenseVector {
+        let mut v = DenseVector::new(DenseVectorSpace::new(b.len() as Index));
+        if !b.is_empty() {
+            v.values_mut().copy_from_slice(b);
+        }
+        let (alpha, beta) = if lower { (1.0, -1.0) } else { (-1.0, 1.0) };
+        p.trans_mult_vector(alpha, primal, beta, &mut v);
+        for (s, &bi) in v.values_mut().iter_mut().zip(b.iter()) {
+            *s = s.max(declared_slack_floor(bi, z_max));
+        }
+        v
+    };
+    let s_l = slack(p_l, b_l, true);
+    let s_u = slack(p_u, b_u, false);
+
+    let mut sigma = DenseVector::new(DenseVectorSpace::new(n as Index));
+    sigma.set(0.0);
+    p_l.add_m_sinv_z(1.0, &s_l, z_l, &mut sigma);
+    p_u.add_m_sinv_z(1.0, &s_u, z_u, &mut sigma);
+    (
+        Rc::new(sigma) as Rc<dyn pounce_linalg::Vector>,
+        s_l.expanded_values(),
+        s_u.expanded_values(),
+    )
 }
 
 /// Write `slice` into the `DenseVector` behind `b` in place. Used by
@@ -1118,7 +1434,7 @@ impl PdSensBacksolver {
         // time at moderate `n+m` (pounce#77 follow-up).
         let ok = {
             let mut pd_ref = self.pd.borrow_mut();
-            pd_ref.solve(
+            pd_ref.solve_with_sigma(
                 &self.data,
                 &self.cq,
                 &self.nlp,
@@ -1128,6 +1444,10 @@ impl PdSensBacksolver {
                 &mut res_iv,
                 /* allow_inexact = */ true,
                 /* improve_solution = */ false,
+                // Identity on every ordinary solve; the declared-frame
+                // diagonal when the held iterate came from crossover
+                // (gh#654).
+                self.sigma_override(),
             )
         };
         if !ok {

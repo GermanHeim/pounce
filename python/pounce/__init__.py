@@ -27,6 +27,14 @@ from ._warm_start import (
     WarmStartCompatibilityError,
     WarmStartCompatibilityWarning,
     WarmStartLegacyWarning,
+    WarmStartOrderingUnverifiedWarning,
+)
+from ._continuation import (
+    Continuation,
+    ContinuationStep,
+    ContinuationTrace,
+    StepController,
+    kkt_residual_monitor,
 )
 from ._minimize import minimize, OptimizeResult
 from ._nlp_batch import solve_nlp_batch
@@ -41,6 +49,9 @@ from .trf import trf_minimize, TRFResult, TRFConfig
 from ._preflight import preflight, PreflightReport
 from ._starts import (
     ProjectionReport,
+    RaceCandidate,
+    RaceReport,
+    RaceRound,
     generate_starts,
     project_to_feasible,
     race_starts,
@@ -105,10 +116,22 @@ __all__ = [
     "WarmStartCompatibilityError",
     "WarmStartCompatibilityWarning",
     "WarmStartLegacyWarning",
+    "WarmStartOrderingUnverifiedWarning",
+    # Predictor--corrector continuation over a repeated-NLP sequence
+    # (see docs: continuation.md)
+    "Continuation",
+    "ContinuationStep",
+    "ContinuationTrace",
+    "StepController",
+    "kkt_residual_monitor",
     "generate_starts",
     "project_to_feasible",
     "ProjectionReport",
+    # Adaptive successive-halving racing (see docs: initialization.md)
     "race_starts",
+    "RaceReport",
+    "RaceRound",
+    "RaceCandidate",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "ActiveSet",
     "QpResult",

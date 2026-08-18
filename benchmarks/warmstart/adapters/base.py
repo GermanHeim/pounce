@@ -37,6 +37,34 @@ defines:
     the suite exercises working-set hot starts but never the parametric
     path. Paired against ``cold-sqp`` / ``warm-sqp``, which differ in
     that one option and nothing else.
+``values-ipm``
+    Interior point seeded with the previous step's **primal point and
+    nothing else** — no multipliers, no barrier parameter — through
+    ``warm_start_init_point``. This is what a caller who kept only `x`
+    gets, and what every frontend that carries variable levels but no
+    duals produces (GAMS `x.L`, a Pyomo model whose `dual` Suffix was
+    never loaded, a `.nl` written without dual guesses). Paired against
+    ``cold-ipm``, and against ``warm-ipm`` to price the multipliers.
+
+    It exists because its absence hid a defect. gh#622's bound-multiplier
+    blocks arrived as literal zeros on this path and were floored at
+    `warm_start_mult_bound_push`, so a values-only start declared every
+    bound inactive and got *worse* the tighter the pushes were set —
+    and every arm above seeds duals, so the corpus was bit-identical
+    across the fix. An arm nobody runs is a regime nobody measures.
+
+``pred-ipm`` / ``predcorr-ipm``
+    Interior point seeded with a **tangent predictor** rather than with
+    the previous solution alone: the first-order parametric step
+    ``Δx ≈ ∂x*/∂θ · Δθ`` read off the previous solve's held KKT factor
+    (``pounce.Solver.parametric_step``). ``predcorr-ipm`` additionally
+    steps the multipliers (``parametric_step_full``) and re-anchors on
+    an active-set event. These are the third and fourth arms pounce#608
+    asks for; paired against ``warm-ipm``, which differs only in the
+    seed. Defined only for families that route θ through pin-equality
+    rows (:attr:`ParametricFamily.pin_rows`), because that is what the
+    sensitivity step's ``deltas`` argument means -- on any other family
+    they are skipped with a reason rather than silently omitted.
 ``cold-qp-ipm`` / ``warm-qp-ipm``
     The dedicated convex QP interior-point solver, handed the problem
     in matrix form rather than through callbacks, cold and seeded with
@@ -65,12 +93,52 @@ ARMS: List[str] = [
     "cold-ipm",
     "cold-sqp",
     "warm-ipm",
+    "values-ipm",
     "warm-sqp",
     "cold-sqp-hom",
     "warm-sqp-hom",
+    "pred-ipm",
+    "predcorr-ipm",
     "cold-qp-ipm",
     "warm-qp-ipm",
+    # pounce#611 additions, completing the issue's initialization list.
+    "warm-ipm-norecenter",
+    "cold-ipm-lsq",
+    "race-fixed",
+    "race-halving",
 ]
+
+#: Arms seeded with the previous **primal point only** — no
+#: multipliers, no barrier parameter. The issue lists this separately
+#: from the complete primal-dual-barrier warm start because it is what
+#: a caller gets for free from any solver (and all an external solver
+#: without a dual warm-start API can accept), and the gap between it
+#: and ``warm-ipm`` is the value of carrying the dual state at all.
+#: It is also the only arm that reaches the warm-start initializer's
+#: unseeded-dual path (gh#622), which is why gh#622's absence of it hid
+#: a defect.
+PRIMAL_ONLY_ARMS = ("values-ipm",)
+
+#: Arms that pin ``warm_start_recentering=none`` regardless of the
+#: run's ``--recentering`` setting. This is the pre-#606 attribution
+#: control: paired against ``warm-ipm``, the difference is exactly what
+#: residual-adaptive recentering bought (or cost).
+NO_RECENTER_ARMS = ("warm-ipm-norecenter",)
+
+#: Arms using the safeguarded least-squares normal step for the primal
+#: initialization (``least_square_init_primal=yes``, off by default).
+#: A *cold* arm: the option chooses where a cold solve starts, so it is
+#: paired against ``cold-ipm`` and means nothing next to a warm seed,
+#: which supplies the primal point directly.
+LSQ_INIT_ARMS = ("cold-ipm-lsq",)
+
+#: Start-racing arms: generate a field of candidate starts, spend a
+#: bounded budget ranking them, then solve to convergence from the
+#: winner. ``race-fixed`` gives every candidate the same budget;
+#: ``race-halving`` runs the pounce#610 successive-halving ladder.
+#: Both are *cold* in the sense that they carry nothing from the
+#: previous step — the racing replaces the start, it does not reuse one.
+RACE_ARMS = ("race-fixed", "race-halving")
 
 #: Arms that run the active-set SQP driver (either inner-QP variant).
 SQP_ARMS = ("cold-sqp", "warm-sqp", "cold-sqp-hom", "warm-sqp-hom")
@@ -83,6 +151,17 @@ HOMOTOPY_ARMS = ("cold-sqp-hom", "warm-sqp-hom")
 #: Arms that need the family's instances to be QPs.
 QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
 
+#: The arm that seeds the primal point alone — no multipliers, no mu.
+#: Warm in the sense that it carries state forward. The sole member of
+#: `PRIMAL_ONLY_ARMS`; named separately because several call sites want
+#: the arm rather than the group.
+VALUES_ARM = PRIMAL_ONLY_ARMS[0]
+
+#: Arms whose primal seed is a held-factor tangent predictor rather than
+#: the previous solution (pounce#608). They need the family to declare
+#: which constraint rows carry θ.
+PREDICTOR_ARMS = ("pred-ipm", "predcorr-ipm")
+
 #: The arm whose per-step solutions every other arm is checked
 #: against, and which generates the parameter path for adaptive
 #: families.
@@ -90,7 +169,54 @@ REFERENCE_ARM = "cold-ipm"
 
 
 def is_warm(arm: str) -> bool:
-    return arm.startswith("warm")
+    """Whether the arm carries state forward from the previous step.
+
+    The predictor arms do: they seed from the previous solve and then
+    step that seed along the sensitivity, so they are warm arms with a
+    better seed, not a separate category. `values-ipm` does too, with a
+    *worse* seed — the point without its duals.
+
+    The race arms do **not**, even though they are elaborate
+    initializations: they build their start from a fresh sample of the
+    box every step. That is the point of having them here — they are
+    the "spend effort choosing a cold start" alternative to "reuse the
+    previous answer", and the comparison is only meaningful if the
+    runner does not hand them the previous answer as well.
+    """
+    return arm.startswith("warm") or arm in PREDICTOR_ARMS or arm == VALUES_ARM
+
+
+def is_primal_only(arm: str) -> bool:
+    return arm in PRIMAL_ONLY_ARMS
+
+
+def recentering_override(arm: str) -> Optional[str]:
+    """``"none"`` for the attribution-control arm, else ``None``.
+
+    ``None`` means "use whatever the run was configured with", so the
+    ``--recentering`` sweep still moves every other warm arm.
+    """
+    return "none" if arm in NO_RECENTER_ARMS else None
+
+
+def uses_lsq_init(arm: str) -> bool:
+    return arm in LSQ_INIT_ARMS
+
+
+def is_race(arm: str) -> bool:
+    return arm in RACE_ARMS
+
+
+def race_policy(arm: str) -> str:
+    return "halving" if arm == "race-halving" else "fixed"
+
+
+def uses_predictor(arm: str) -> bool:
+    return arm in PREDICTOR_ARMS
+
+
+def predicts_duals(arm: str) -> bool:
+    return arm == "predcorr-ipm"
 
 
 def is_sqp(arm: str) -> bool:
@@ -113,6 +239,11 @@ def arm_applies(arm: str, family: ParametricFamily) -> Optional[str]:
     """
     if arm in QP_ARMS and not family.quadratic:
         return "family is not a QP (nonlinear objective or constraints)"
+    if arm in PREDICTOR_ARMS and not family.pin_rows:
+        return (
+            "family does not route theta through pin-equality rows, so a "
+            "sensitivity step has no deltas to take"
+        )
     return None
 
 

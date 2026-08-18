@@ -38,6 +38,7 @@ use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
+use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
@@ -57,11 +58,43 @@ use std::rc::Rc;
 pub type Number = f64;
 /// Mirrors C `Index`.
 pub type Index = c_int;
-/// Mirrors C `Bool`.
-pub type Bool = c_int;
+/// Mirrors C `Bool`, which `pounce.h` — like Ipopt 3.14's
+/// `IpStdCInterface.h` — declares as the C99 `bool`. That is **one byte**,
+/// so this is `u8` and not `c_int`.
+///
+/// It was `c_int` until gh#624, i.e. four bytes on the Rust side against
+/// one on every C caller's, in both directions:
+///
+/// * a callback returning `false` sets only `AL`, and the x86-64 psABI
+///   leaves the rest of `EAX` unspecified — read as an `i32`, a failed
+///   evaluation could come back nonzero, which reads as *success*. The
+///   solver would then accept a point it was told it could not evaluate
+///   instead of cutting the step. gcc and clang emit `movzbl`, which is
+///   why this stayed latent rather than exploding;
+/// * an *array* of them would have been a hard stride bug, 1-byte
+///   elements read at 4-byte spacing. That is why
+///   [`IpoptSetNonlinearVariables`] takes a count plus an index list
+///   rather than the `Bool` mask gh#624 originally proposed.
+///
+/// `u8` rather than Rust's `bool` on purpose: the two have identical
+/// layout, but `bool` carries a validity invariant (it *must* hold 0 or
+/// 1), and a C caller reaching this boundary with anything else — an
+/// older header where `Bool` was `int`, a hand-rolled binding, a value
+/// that came through a `memcpy` — would be instant undefined behaviour.
+/// `u8` accepts whatever arrives and tests it the way C does, which is
+/// the same reason the entry points validate rather than trust.
+pub type Bool = u8;
 
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
+
+// The whole point of the alias. `pounce.h` says `typedef bool Bool`, so a
+// build where this stops being one byte is one where every C caller
+// disagrees with the implementation about every boolean.
+const _: () = assert!(
+    core::mem::size_of::<Bool>() == 1,
+    "Bool must be one byte to match `typedef bool Bool` in pounce.h"
+);
 
 /// Run an FFI entry-point body, converting any Rust panic into `fallback`
 /// rather than letting it unwind across the `extern "C"` boundary — which is
@@ -136,6 +169,15 @@ pub struct IpoptProblemInfo {
     /// iterate instead of querying the NLP for a starting point. The
     /// merge therefore has to happen inside `IpoptSolve` (gh#484).
     pub(crate) pending_working_set: Option<pounce_qp::WorkingSet>,
+    /// Nonlinear-variable subset staged by
+    /// [`IpoptSetNonlinearVariables`] (gh#624). Stored in the problem's
+    /// own index style, exactly as the caller passed it; the bridge
+    /// TNLP serves it back through
+    /// `get_number_of_nonlinear_variables` /
+    /// `get_list_of_nonlinear_variables`, which is where the algorithm
+    /// reads it. `None` — the default — means "every variable is
+    /// nonlinear".
+    pub(crate) nonlinear_vars: Option<Vec<Index>>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -338,6 +380,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             eval_h,
             intermediate_cb: None,
             user_scaling: None,
+            nonlinear_vars: None,
             last_solve: None,
             pending_working_set: None,
         });
@@ -672,6 +715,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 user_data,
                 intermediate_cb: info.intermediate_cb,
                 user_scaling: info.user_scaling.clone(),
+                nonlinear_vars: info.nonlinear_vars.clone(),
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],
@@ -800,44 +844,62 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
             return FALSE;
         }
         let result = ip_intermediate::with_current(|ctx| {
-            let data = ctx.data.borrow();
-            let Some(curr) = data.curr.as_ref() else {
-                return false;
+            // Snapshot the iterate handles and release the `data` borrow
+            // before touching `cq`: several `IpoptCq` accessors
+            // (`curr_c`, `curr_d`, …) evaluate through the NLP and take
+            // `nlp.borrow_mut()` internally, so no `nlp`/`data` borrow may
+            // be alive across them. Holding one here panicked
+            // ("RefCell already borrowed") on every `g != NULL` call, and
+            // a panic across this `extern "C"` boundary aborts the
+            // process rather than returning `FALSE`.
+            let curr = {
+                let data = ctx.data.borrow();
+                match data.curr.as_ref() {
+                    Some(curr) => curr.clone(),
+                    None => return false,
+                }
             };
-            let nlp = ctx.nlp.borrow();
             let n_us = n as usize;
             let m_us = m as usize;
             if !x.is_null() && n_us > 0 {
-                let full_x = nlp.lift_x_to_full(&*curr.x);
+                let full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
                 if full_x.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
             }
             if !z_l.is_null() && n_us > 0 {
-                let full = nlp.pack_z_l_for_user(&*curr.z_l);
+                let full = ctx.nlp.borrow().pack_z_l_for_user(&*curr.z_l);
                 if full.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
             }
             if !z_u.is_null() && n_us > 0 {
-                let full = nlp.pack_z_u_for_user(&*curr.z_u);
+                let full = ctx.nlp.borrow().pack_z_u_for_user(&*curr.z_u);
                 if full.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
             }
             if !g.is_null() && m_us > 0 {
-                let cq = ctx.cq.borrow();
-                let full = nlp.pack_g_for_user(&*cq.curr_c(), &*cq.curr_d());
+                // `curr_c` / `curr_d` re-enter the NLP mutably: evaluate
+                // them first, *then* borrow `nlp` to pack the result.
+                let (c, d) = {
+                    let cq = ctx.cq.borrow();
+                    (cq.curr_c(), cq.curr_d())
+                };
+                let full = ctx.nlp.borrow().pack_g_for_user(&*c, &*d);
                 if full.len() != m_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), g, m_us);
             }
             if !lambda.is_null() && m_us > 0 {
-                let full = nlp.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                let full = ctx
+                    .nlp
+                    .borrow()
+                    .pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
                 if full.len() != m_us {
                     return false;
                 }
@@ -892,10 +954,14 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 return false;
             };
             drop(data);
-            let nlp = ctx.nlp.borrow();
             let cq = ctx.cq.borrow();
             let n_us = n as usize;
             let m_us = m as usize;
+            // No `nlp` borrow may be held across a `cq` accessor that
+            // evaluates through the NLP (`curr_grad_lag_x` reaches
+            // `curr_grad_f`, which takes `nlp.borrow_mut()`); each branch
+            // below therefore borrows `nlp` only to pack a value that has
+            // already been computed. See `GetIpoptCurrentIterate`.
             // x_L / x_U violations: scatter the compressed slack-shortfalls
             // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
             // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
@@ -903,7 +969,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
             // sign and clamp.
             if !x_l_violation.is_null() && n_us > 0 {
                 let slack = cq.curr_slack_x_l();
-                let z_l_full = nlp.pack_z_l_for_user(&*slack);
+                let z_l_full = ctx.nlp.borrow().pack_z_l_for_user(&*slack);
                 // Guard the scatter length exactly like the sibling branches
                 // below: an unexpected packed length would otherwise index
                 // `v[i]` out of bounds and panic across this `extern "C"`
@@ -923,7 +989,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
             }
             if !x_u_violation.is_null() && n_us > 0 {
                 let slack = cq.curr_slack_x_u();
-                let s_full = nlp.pack_z_u_for_user(&*slack);
+                let s_full = ctx.nlp.borrow().pack_z_u_for_user(&*slack);
                 if s_full.len() != n_us {
                     return false;
                 }
@@ -934,14 +1000,16 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
             }
             if !compl_x_l.is_null() && n_us > 0 {
-                let v = nlp.pack_z_l_for_user(&*cq.curr_compl_x_l());
+                let compl = cq.curr_compl_x_l();
+                let v = ctx.nlp.borrow().pack_z_l_for_user(&*compl);
                 if v.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
             }
             if !compl_x_u.is_null() && n_us > 0 {
-                let v = nlp.pack_z_u_for_user(&*cq.curr_compl_x_u());
+                let compl = cq.curr_compl_x_u();
+                let v = ctx.nlp.borrow().pack_z_u_for_user(&*compl);
                 if v.len() != n_us {
                     return false;
                 }
@@ -952,7 +1020,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 // Scatter compressed x-var → full-x via lift_x_to_full
                 // (treats `glx` as if it were an x-vector). Fixed-variable
                 // slots remain zero.
-                let full = nlp.lift_x_to_full(&*glx);
+                let full = ctx.nlp.borrow().lift_x_to_full(&*glx);
                 if full.len() != n_us {
                     return false;
                 }
@@ -1092,6 +1160,194 @@ where
             return None;
         }
         (*ipopt_problem).last_solve.as_ref().map(|ls| f(&ls.stats))
+    }
+}
+
+/// Restoration-phase activity in the most recent solve. Each output
+/// may be NULL to skip it; all yield zero before the first solve.
+///
+/// Solve-level, and still worth having now that the intermediate
+/// callback also fires from restoration with `alg_mod = 1` (gh#645):
+/// these counters answer "how much restoration did this solve do?"
+/// without the caller having to install a callback and tally fires,
+/// and they are the only source for the inner iteration count and
+/// wall time.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. Each
+/// non-NULL output pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceRestorationStats(
+    ipopt_problem: IpoptProblem,
+    calls: *mut Index,
+    inner_iters: *mut Index,
+    outer_iters: *mut Index,
+    wall_secs: *mut Number,
+) {
+    unsafe {
+        let stats = last_stat(ipopt_problem, |s| {
+            (
+                s.restoration_calls,
+                s.restoration_inner_iters,
+                s.restoration_outer_iters,
+                s.restoration_wall_secs,
+            )
+        });
+        let (c, i, o, w) = stats.unwrap_or((0, 0, 0, 0.0));
+        if !calls.is_null() {
+            *calls = c;
+        }
+        if !inner_iters.is_null() {
+            *inner_iters = i;
+        }
+        if !outer_iters.is_null() {
+            *outer_iters = o;
+        }
+        if !wall_secs.is_null() {
+            *wall_secs = w;
+        }
+    }
+}
+
+/// C mirror of [`pounce_linsol::summary::LinearSolverSummary`], laid
+/// out for `pounce.h`'s `PounceLinearSolverStats`. Optional fields
+/// carry sentinels rather than a discriminant, because a plain struct
+/// of scalars is what a C or C++ caller can consume without an
+/// accessor per field: `NaN` for absent reals, `-1` for absent counts.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceLinearSolverStats {
+    pub solver_name: [c_char; 32],
+    pub n_factors: Index,
+    pub n_pattern_reuse: Index,
+    pub n_pattern_changes: Index,
+    pub max_fill_ratio: Number,
+    pub min_abs_pivot: Number,
+    pub max_abs_pivot: Number,
+    pub last_inertia_positive: Index,
+    pub last_inertia_negative: Index,
+    pub last_inertia_zero: Index,
+    pub last_nnz_a: Index,
+    pub last_nnz_l: Index,
+}
+
+/// Post-mortem of the KKT linear solver for the most recent solve.
+///
+/// Reports what pounce already collects — factorization counts,
+/// pattern reuse, fill, pivot range, final inertia. Timings are not
+/// among them: pounce does not instrument the analyse / factor /
+/// solve phases separately, so there is nothing honest to report and
+/// the struct omits them rather than inventing zeros.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `stats`,
+/// when non-NULL, must point at a writable `PounceLinearSolverStats`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceLinearSolverStats(
+    ipopt_problem: IpoptProblem,
+    stats: *mut PounceLinearSolverStats,
+) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() || stats.is_null() {
+            return FALSE;
+        }
+        let Some(summary) = (*ipopt_problem)
+            .last_solve
+            .as_ref()
+            .and_then(|ls| ls.linear_solver.as_ref())
+        else {
+            return FALSE;
+        };
+        // Saturate rather than wrap: these are diagnostics, and a
+        // count that does not fit an `Index` is better reported as the
+        // largest representable one than as a negative.
+        let count = |v: u64| Index::try_from(v).unwrap_or(Index::MAX);
+        let size = |x: usize| Index::try_from(x).unwrap_or(Index::MAX);
+        let opt_size = |v: Option<usize>| v.map_or(-1, size);
+        let inertia = summary.last_inertia;
+        let mut out = PounceLinearSolverStats {
+            solver_name: [0; 32],
+            n_factors: count(summary.n_factors),
+            n_pattern_reuse: count(summary.n_pattern_reuse),
+            n_pattern_changes: count(summary.n_pattern_changes),
+            max_fill_ratio: summary.max_fill_ratio.unwrap_or(Number::NAN),
+            min_abs_pivot: summary.min_abs_pivot.unwrap_or(Number::NAN),
+            max_abs_pivot: summary.max_abs_pivot.unwrap_or(Number::NAN),
+            last_inertia_positive: inertia.map_or(-1, |(p, _, _)| size(p)),
+            last_inertia_negative: inertia.map_or(-1, |(_, n, _)| size(n)),
+            last_inertia_zero: inertia.map_or(-1, |(_, _, z)| size(z)),
+            last_nnz_a: opt_size(summary.last_nnz_a),
+            last_nnz_l: opt_size(summary.last_nnz_l),
+        };
+        // Truncate on a byte boundary and always leave room for the
+        // NUL; backend names are ASCII identifiers well under 31 bytes,
+        // so this is a guard rather than an expected path.
+        let name = summary.solver_name.as_bytes();
+        let keep = name.len().min(out.solver_name.len() - 1);
+        for (slot, b) in out.solver_name.iter_mut().zip(&name[..keep]) {
+            *slot = *b as c_char;
+        }
+        *stats = out;
+        TRUE
+    }
+}
+
+thread_local! {
+    /// Option registry for handle-free [`GetPounceOptionType`] queries.
+    ///
+    /// Built from a throwaway application rather than by re-running the
+    /// registration functions here, so it cannot drift from the set a
+    /// real problem carries: it *is* that set, by construction.
+    static DEFAULT_REGISTRY: Rc<pounce_common::reg_options::RegisteredOptions> =
+        Rc::clone(IpoptApplication::new().registered_options());
+}
+
+/// Which `AddIpopt*Option` setter a keyword expects.
+///
+/// Returns a `PounceOptionType` discriminant: 0 when the keyword is not
+/// registered in this build, 1 number, 2 integer, 3 string. Lets a
+/// caller forwarding options from an untyped source pick the setter
+/// from pounce's registry instead of from the value's own type — the
+/// difference between `tol: 1` reaching the solver as `1.0` and being
+/// refused as an integer.
+///
+/// `ipopt_problem` may be NULL: option types are a property of the
+/// build, not of a problem, and a caller deciding how to forward
+/// options may not have created one yet (code generators, in
+/// particular, have no handle at all).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `keyword`,
+/// when non-NULL, must be a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceOptionType(
+    ipopt_problem: IpoptProblem,
+    keyword: *const c_char,
+) -> c_int {
+    unsafe {
+        if keyword.is_null() {
+            return 0;
+        }
+        let Ok(name) = CStr::from_ptr(keyword).to_str() else {
+            return 0;
+        };
+        let registered = if ipopt_problem.is_null() {
+            DEFAULT_REGISTRY.with(|r| r.get_option(name))
+        } else {
+            (*ipopt_problem).app.registered_options().get_option(name)
+        };
+        let Some(opt) = registered else {
+            return 0;
+        };
+        match opt.option_type {
+            OptionType::OT_Number => 1,
+            OptionType::OT_Integer => 2,
+            OptionType::OT_String => 3,
+            OptionType::OT_Unknown => 0,
+        }
     }
 }
 
@@ -1367,6 +1623,98 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
     }
 }
 
+/// Declare which variables enter the problem **nonlinearly** (gh#624).
+///
+/// This is the C-API face of Ipopt's `TNLP::get_number_of_nonlinear_variables`
+/// / `get_list_of_nonlinear_variables` pair, which upstream exposes only
+/// to C++ callers. It exists so a frontend that already knows the
+/// structure of its model — CasADi's `pass_nonlinear_variables`, an
+/// algebraic modeling language, a hand-written driver — can hand that
+/// knowledge to pounce.
+///
+/// Effect is confined to the **limited-memory** Hessian: curvature is
+/// approximated over the declared subset only, and the Hessian is
+/// exactly zero for every other variable. Exact-Hessian solves ignore
+/// the declaration entirely, and so does any solve that never calls
+/// this function — the default remains "all variables are nonlinear".
+/// The subset takes precedence over the `num_linear_variables` option,
+/// matching Ipopt's own ordering.
+///
+/// `pos_nonlin_vars` holds `num_nonlin_vars` variable indices **in the
+/// problem's index style** (the `index_style` passed to
+/// [`CreateIpoptProblem`]). The subset may be arbitrary and
+/// noncontiguous; order does not matter. Passing `num_nonlin_vars == n`
+/// is equivalent to not calling this at all.
+///
+/// Returns `FALSE` (leaving any previous declaration untouched) on a
+/// NULL problem, a negative or oversized count, a NULL array with a
+/// positive count, or an index outside the problem's variable range.
+///
+/// Note the deliberate signature choice: the issue that requested this
+/// suggested a `const Bool*` mask, but `Bool` in the Ipopt C API is a
+/// C99 `bool`, and a *array* of those would be a per-element
+/// data-layout contract that is easy to get wrong from a caller with a
+/// different boolean width. The count-plus-index-list shape is the one
+/// the TNLP callbacks already use.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+/// `pos_nonlin_vars`, when non-NULL, must point at `num_nonlin_vars`
+/// readable `ipindex` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn IpoptSetNonlinearVariables(
+    ipopt_problem: IpoptProblem,
+    num_nonlin_vars: Index,
+    pos_nonlin_vars: *const Index,
+) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        if num_nonlin_vars < 0 || num_nonlin_vars > info.n {
+            return FALSE;
+        }
+        if num_nonlin_vars > 0 && pos_nonlin_vars.is_null() {
+            return FALSE;
+        }
+        let offset = if info.index_style == 1 { 1 } else { 0 };
+        let raw = if num_nonlin_vars == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(pos_nonlin_vars, num_nonlin_vars as usize)
+        };
+        // Validate before storing: a half-applied declaration would be
+        // worse than a refused one.
+        for &p in raw {
+            let zero_based = p - offset;
+            if zero_based < 0 || zero_based >= info.n {
+                return FALSE;
+            }
+        }
+        info.nonlinear_vars = Some(raw.to_vec());
+        TRUE
+    }
+}
+
+/// Drop a subset declared by [`IpoptSetNonlinearVariables`], restoring
+/// the default (every variable treated as nonlinear).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProblem) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        (*ipopt_problem).nonlinear_vars = None;
+        TRUE
+    }
+}
+
 /// Drop any pending warm-start working set without solving. The
 /// next [`IpoptSolve`] will cold-start.
 ///
@@ -1477,6 +1825,9 @@ pub(crate) struct CCallbackTnlp {
     pub(crate) intermediate_cb: Option<Intermediate_CB>,
     /// Snapshot of user-provided scaling captured at solve time.
     pub(crate) user_scaling: Option<UserScaling>,
+    /// Snapshot of the nonlinear-variable subset (gh#624), in the
+    /// problem's index style.
+    pub(crate) nonlinear_vars: Option<Vec<Index>>,
     pub(crate) final_status: Option<pounce_nlp::alg_types::SolverReturn>,
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_z_l: Vec<Number>,
@@ -1499,6 +1850,30 @@ impl TNLP for CCallbackTnlp {
                 IndexStyle::C
             },
         })
+    }
+
+    /// gh#624 — serve the subset staged by
+    /// [`IpoptSetNonlinearVariables`]. `-1` (no subset) keeps the
+    /// upstream default of "all variables are nonlinear".
+    fn get_number_of_nonlinear_variables(&mut self) -> pounce_common::types::Index {
+        match &self.nonlinear_vars {
+            Some(v) => v.len() as pounce_common::types::Index,
+            None => -1,
+        }
+    }
+
+    fn get_list_of_nonlinear_variables(
+        &mut self,
+        pos_nonlin_vars: &mut [pounce_common::types::Index],
+    ) -> bool {
+        let Some(v) = self.nonlinear_vars.as_ref() else {
+            return false;
+        };
+        if v.len() != pos_nonlin_vars.len() {
+            return false;
+        }
+        pos_nonlin_vars.copy_from_slice(v);
+        true
     }
 
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
@@ -2490,6 +2865,123 @@ mod tests {
             assert!(GetIpoptComplInf(p).is_finite());
             FreeIpoptProblem(p);
         }
+    }
+
+    /// The linear-solver post-mortem is reported for a real solve, and
+    /// reports the backend that actually ran rather than the one the
+    /// option asked for — which is the question a caller pinning
+    /// `linear_solver` is really asking.
+    #[test]
+    fn linear_solver_stats_populated_after_solve() {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+        let mut stats = unsafe { std::mem::zeroed::<PounceLinearSolverStats>() };
+        // Nothing to report before the first solve.
+        assert_eq!(unsafe { GetPounceLinearSolverStats(p, &mut stats) }, FALSE);
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert_eq!(unsafe { GetPounceLinearSolverStats(p, &mut stats) }, TRUE);
+
+        let name = unsafe { CStr::from_ptr(stats.solver_name.as_ptr()) }
+            .to_str()
+            .expect("solver name is ASCII");
+        assert_eq!(name, "feral", "default backend should report itself");
+        assert!(stats.n_factors > 0, "n_factors = {}", stats.n_factors);
+        assert_eq!(
+            stats.n_pattern_reuse + stats.n_pattern_changes,
+            stats.n_factors,
+            "every factor is either a pattern reuse or a pattern change"
+        );
+        // Optional fields are either a real value or the documented
+        // sentinel — never a silent zero.
+        assert!(stats.max_fill_ratio.is_nan() || stats.max_fill_ratio > 0.0);
+        assert!(stats.last_nnz_l == -1 || stats.last_nnz_l > 0);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn option_type_reports_the_setter_a_keyword_expects() {
+        let p = create_unconstrained();
+        let ty = |s: &str| {
+            let c = std::ffi::CString::new(s).unwrap();
+            unsafe { GetPounceOptionType(p, c.as_ptr()) }
+        };
+        assert_eq!(ty("tol"), 1, "tol is a number");
+        assert_eq!(ty("max_iter"), 2, "max_iter is an integer");
+        assert_eq!(ty("linear_solver"), 3, "linear_solver is a string");
+        // `hessian_approximation` is the option the CasADi plugin has to
+        // set as a string while the user may well type it as one too.
+        assert_eq!(ty("hessian_approximation"), 3);
+        // Unregistered, and NULL keyword, both answer "unknown" rather
+        // than guessing a type.
+        assert_eq!(ty("no_such_option_at_all"), 0);
+        assert_eq!(unsafe { GetPounceOptionType(p, std::ptr::null()) }, 0);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    /// A NULL problem handle answers from the same registry — the case a
+    /// code generator is in, having no problem to ask.
+    #[test]
+    fn option_type_answers_without_a_problem_handle() {
+        let ty = |s: &str| {
+            let c = std::ffi::CString::new(s).unwrap();
+            unsafe { GetPounceOptionType(std::ptr::null_mut(), c.as_ptr()) }
+        };
+        assert_eq!(ty("tol"), 1);
+        assert_eq!(ty("max_iter"), 2);
+        assert_eq!(ty("linear_solver"), 3);
+        assert_eq!(ty("no_such_option_at_all"), 0);
+
+        // …and the same answers a live problem gives, which is the
+        // property that keeps the two paths from drifting apart.
+        let p = create_unconstrained();
+        for name in [
+            "tol",
+            "max_iter",
+            "linear_solver",
+            "mu_strategy",
+            "print_level",
+        ] {
+            let c = std::ffi::CString::new(name).unwrap();
+            assert_eq!(
+                unsafe { GetPounceOptionType(std::ptr::null_mut(), c.as_ptr()) },
+                unsafe { GetPounceOptionType(p, c.as_ptr()) },
+                "handle-free and problem-bound disagree on {name}"
+            );
+        }
+        unsafe { FreeIpoptProblem(p) };
     }
 
     #[test]

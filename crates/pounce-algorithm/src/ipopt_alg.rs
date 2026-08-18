@@ -94,6 +94,26 @@ pub struct IpoptAlgorithm {
     /// view (fixed-variable elimination, c/d split) while the callback
     /// payload needs to expose the original-coordinate iterate.
     pub tnlp: Option<Rc<RefCell<dyn TNLP>>>,
+    /// Set on the *restoration* inner IPM so its callback fires report
+    /// `AlgorithmMode::RestorationPhaseMode` (gh#645). Two things hang
+    /// off it, both in [`Self::fire_intermediate`]:
+    ///
+    /// 1. the mode field of the [`IterStats`] payload, which is what
+    ///    tells a caller the numbers beside it (`obj`, `inf_pr`,
+    ///    `inf_du`, `alpha_*`) describe the min-C1-norm feasibility
+    ///    subproblem rather than the user's NLP;
+    /// 2. whether the live-inspector `IntermediateContext` is installed
+    ///    — and for a restoration fire it deliberately is **not**. The
+    ///    inner iterate is a `CompoundVector` over `(x_orig, n, p)`, so
+    ///    it does not even have the user's `n`, and the C API's
+    ///    `GetIpoptCurrent*` family checks the caller's `n`/`m` against
+    ///    the *problem's* registered dimensions rather than the
+    ///    context's. Installing this context would sail past that check
+    ///    and read a differently-shaped `cq`. The live accessors
+    ///    therefore report "no data" during restoration, which is the
+    ///    truth: there is no current iterate of the user's problem
+    ///    while the subproblem is being solved.
+    pub fires_as_restoration: bool,
     /// Search-direction calculator (`PdSearchDirCalc`). Lands once a
     /// concrete `SymLinearSolver` backend (MUMPS / FERAL) is wired
     /// through `AlgBuilder` in Phase 7's tail.
@@ -396,6 +416,7 @@ impl IpoptAlgorithm {
             bundle,
             nlp: None,
             tnlp: None,
+            fires_as_restoration: false,
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
@@ -1624,9 +1645,16 @@ impl IpoptAlgorithm {
             None => 0.0,
         };
         IterStats {
-            // alg_mod tracking (regular vs restoration) is a follow-up;
-            // every callback fire from the outer loop reports RegularMode.
-            mode: AlgorithmMode::RegularMode,
+            // Regular from the outer loop; restoration from the inner
+            // sub-IPM, which the outer driver flags at construction
+            // (gh#645). The outer loop never sets the flag, so every
+            // fire from here is still `RegularMode` — what changed is
+            // that restoration now fires at all.
+            mode: if self.fires_as_restoration {
+                AlgorithmMode::RestorationPhaseMode
+            } else {
+                AlgorithmMode::RegularMode
+            },
             iter: d.iter_count,
             obj_value: c.curr_f(),
             inf_pr: c.curr_primal_infeasibility_max(),
@@ -1653,10 +1681,17 @@ impl IpoptAlgorithm {
             return true;
         };
         let stats = self.build_iter_stats();
-        let _guard = CtxGuard::install(IntermediateContext {
-            data: Rc::clone(&self.data),
-            cq: Rc::clone(&self.cq),
-            nlp: Rc::clone(nlp),
+        // The live-inspector context is for iterates of the *user's*
+        // problem only. During restoration the iterate belongs to the
+        // feasibility subproblem and is not even the same length, so no
+        // context is installed and `GetIpoptCurrent*` reports no data
+        // for the duration. See `fires_as_restoration`.
+        let _guard = (!self.fires_as_restoration).then(|| {
+            CtxGuard::install(IntermediateContext {
+                data: Rc::clone(&self.data),
+                cq: Rc::clone(&self.cq),
+                nlp: Rc::clone(nlp),
+            })
         });
         tnlp.borrow_mut().intermediate_callback(
             stats,
@@ -3149,6 +3184,10 @@ impl IpoptAlgorithm {
         resto.set_orig_progress_check(orig_progress_cb);
         // Forward the shared debugger so it can step the inner solve.
         resto.set_debug_hook(self.debug.as_ref().map(Rc::clone));
+        // Forward the user's TNLP so the callback fires from the inner
+        // solve too (gh#645). `None` when the caller installed no
+        // callback, which keeps the whole path inert for them.
+        resto.set_intermediate_tnlp(self.tnlp.as_ref().map(Rc::clone));
         let mut pd_guard = sd.pd_solver_mut();
         let aug = pd_guard.aug_solver_mut();
         // Audit counters (pounce#12). Increment call count + outer-iter
@@ -3269,6 +3308,18 @@ impl IpoptAlgorithm {
                         IterateOutcome::Terminate(SolverReturn::RestorationFailure)
                     }
                 }
+            }
+            RestorationOutcome::UserRequestedStop => {
+                // gh#645. Same discipline as the pounce#244 deadline
+                // exit a few lines up, and for the same reason: the
+                // recovered point is staged on `data.trial` and we
+                // return without promoting it, so `data.curr` is still
+                // the last iterate accepted for the *original* NLP.
+                // That matters more than the status code to the caller
+                // this exists for — a controller that aborts on a
+                // deadline still has to apply something, and the
+                // subproblem's iterate is not a point it should apply.
+                IterateOutcome::Terminate(SolverReturn::UserRequestedStop)
             }
             RestorationOutcome::LocallyInfeasible => {
                 // Mirrors upstream's catch of `LOCALLY_INFEASIBLE` thrown
@@ -3570,6 +3621,18 @@ impl IpoptAlgorithm {
                     // returns either `Converged`/`ConvergedToAcceptable` or
                     // `MaxIterExceeded`, never `Continue` (L1).
                     self.data.borrow_mut().iter_count = iter_count;
+                    // Floor evidence for restoration's gh#661 divergence
+                    // guard: how long this solve has sat at a violation
+                    // it could not get below. Sampled here, once per
+                    // accepted iterate, from the same quantity the
+                    // `inf_pr` column reports — so it is free, and it
+                    // sees the whole outer trajectory rather than the
+                    // handful of iterations a restoration sub-solve runs.
+                    // The nested restoration IPM reaches this line too,
+                    // but writes its own `IpoptData`, so the two
+                    // trajectories never mix.
+                    let inf_pr_now = self.cq.borrow().curr_primal_infeasibility_max();
+                    self.data.borrow_mut().inf_pr_floor.observe(inf_pr_now);
                     // Keep the diagnostics counter in lock-step with
                     // `data.iter_count` so KKT-dump gating reflects the
                     // about-to-execute iteration.

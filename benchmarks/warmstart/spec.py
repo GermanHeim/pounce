@@ -108,6 +108,16 @@ class StepResult:
     # only measurement that responds to a warm start at all.
     n_qp_solves: Optional[int] = None
     n_qp_ws_changes: Optional[int] = None
+    #: Initialization overhead: wall time spent *building the seed*,
+    #: outside the solve itself (pounce#611 asks for it as a metric).
+    #: The tangent back-solve for a predictor arm, the whole tournament
+    #: for a racing arm, the transfer mapper for a prolongation arm.
+    #: Zero for arms whose seed is the previous solution verbatim, which
+    #: costs nothing to form. ``solve_time`` never includes this, so
+    #: total cost is the sum and the two are separable in the report --
+    #: an arm that wins on ``solve_time`` and loses on the sum is a
+    #: result worth seeing rather than one worth hiding.
+    init_time: float = 0.0
     # Active-set descriptors, present only when the solver returned a
     # working set (i.e. the active-set path).
     n_active: Optional[int] = None
@@ -167,6 +177,16 @@ class ParametricFamily(ABC):
     #: single active-set solve on them can take seconds.
     tier: str = "default"
 
+    #: Constraint rows through which θ enters as a pin equality
+    #: ``g_i(x) = θ_i`` (``cl[i] == cu[i]``), in θ's own component order.
+    #: Empty (the default) means θ does not enter that way, which is what
+    #: a held-factor sensitivity step needs: `deltas` is a perturbation of
+    #: exactly these rows' right-hand sides. Declaring it enables the
+    #: predictor arms (pounce#608); the suite's self-test checks the claim
+    #: by comparing the tangent step against a finite difference of two
+    #: solves.
+    pin_rows: tuple = ()
+
     #: True when the next parameter depends on the previous solution
     #: (closed-loop MPC / moving horizon). The runner then records the
     #: path produced by the reference arm and *replays* it for the
@@ -205,6 +225,17 @@ class ParametricFamily(ABC):
 
         ``scale`` multiplies the family's natural per-step increment.
         """
+
+    def current_theta(self) -> Optional[np.ndarray]:
+        """The parameter currently installed, or ``None`` if unknown.
+
+        Families that keep it in ``self._theta`` (all of them today) get
+        this for free. Needed by the predictor arms, which form Δθ from
+        the previous step's value rather than from the runner's path --
+        an adapter never sees the path.
+        """
+        theta = getattr(self, "_theta", None)
+        return None if theta is None else np.asarray(theta, float).ravel().copy()
 
     def initial_theta(self, scale: float) -> np.ndarray:
         """First parameter of an adaptive path (adaptive families only)."""

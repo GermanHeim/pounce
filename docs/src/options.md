@@ -281,6 +281,16 @@ constraint-violation and complementarity figures in the end-of-run
 summary are for the **non-projected** point; only the reported `x` (and
 the objective and constraint values evaluated at it) move.
 
+Note what `honor_original_bounds` does *not* do: it moves the reported
+point, not the solve. The iterate still stopped where the relaxed bounds
+put it, and any question of the form "is this constraint active" is still
+being asked about a point `~1e-8` shy of the bound. Projection cannot
+recover that, because the projection has no way to tell "pinned to the
+bound" from "genuinely `1e-8` inside it". [Crossover](crossover.md)
+answers that question instead: it re-solves against the bounds you
+declared, so the returned point sits *on* them and the active set is
+established rather than inferred.
+
 ## Large constraint values and `primal_noise_floor_kappa`
 
 On a model whose constraint values run to `~1e7` and beyond, a converged
