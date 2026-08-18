@@ -24,6 +24,7 @@
 #include "pounce_runtime.hpp"
 #include <cmath>
 #include <cstring>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -168,6 +169,57 @@ namespace casadi {
 
     static const std::string meta_doc;
 
+    /// Drain CasADi's output streams before handing control back to POUNCE
+    /// (gh#667).
+    ///
+    /// Two writers share file descriptor 1 and neither knows about the
+    /// other. POUNCE journals from Rust, where `io::stdout()` is a
+    /// `LineWriter` that goes out on every newline — unconditionally, not
+    /// only on a tty. CasADi writes through `uout()`, whose streambuf holds
+    /// nothing and passes each chunk straight to `Logger::writeFun`, leaving
+    /// the buffering to whatever sits behind it. Behind a pipe that buffer is
+    /// a *fully* buffered one, so an embedder printing a line long enough to
+    /// straddle it leaves the tail sitting there — and a POUNCE iteration row
+    /// written in the meantime lands in the middle of the embedder's line.
+    /// CasADi's own ipopt plugin has no equivalent problem: Ipopt is C++ and
+    /// its journal shares the stream it is competing with.
+    ///
+    /// The only instant at which the plugin *knows* POUNCE is not writing is
+    /// while POUNCE is blocked inside one of these callbacks, so the last
+    /// thing to do before returning is empty the buffer. Doing it in
+    /// `cb_iter` alone is not enough: model code logging from inside the
+    /// oracle callbacks tears just as readily, and `guarded` is the one choke
+    /// point all seven call sites pass through.
+    ///
+    /// `uerr()` as well as `uout()` because `casadi_warning` below writes
+    /// there, and `OpenIpoptOutputFile(prob, "stderr", ...)` is a supported
+    /// way to put POUNCE's journal on that same descriptor.
+    ///
+    /// Caveats worth knowing before trusting this too far:
+    ///   * It assumes a single-threaded host. Two `nlpsol` instances solving
+    ///     on two threads can still interleave, because solver A is free to
+    ///     write while solver B sits in a callback. Ipopt is no better off.
+    ///   * It does nothing for a *Python* embedder. CasADi's Python binding
+    ///     points `Logger::writeFun` at `PySys_WriteStdout` but leaves
+    ///     `Logger::flush` at `flushDefault`, so the bytes go into Python's
+    ///     `sys.stdout` and the flush drains `std::cout` instead. There is no
+    ///     portable way to reach Python's buffer from here; the fix for that
+    ///     case is to route POUNCE's journal through `uout()` rather than to
+    ///     flush harder. See `docs/src/casadi.md` for the interim workaround.
+    ///
+    /// Nothing in here may throw. A destructor is implicitly `noexcept`, and
+    /// `Logger::flush` is a host-supplied callback, so a throwing sink would
+    /// `std::terminate` inside the very function whose job is to keep
+    /// exceptions away from Rust frames.
+    struct FlushCasadiOutputOnExit {
+      ~FlushCasadiOutputOnExit() {
+        try {
+          uout() << std::flush;
+          uerr() << std::flush;
+        } catch (...) {}                        // see above: never throw
+      }
+    };
+
     /// Run an oracle evaluation, converting *any* escaping exception into the
     /// C API's "this point could not be evaluated" answer.
     ///
@@ -185,8 +237,15 @@ namespace casadi {
     /// A KeyboardInterrupt is remembered rather than swallowed: the iteration
     /// callback then stops the solve and `solve()` re-throws it, so Ctrl-C is
     /// responsive without ever crossing the language boundary.
+    ///
+    /// It is also where CasADi's output buffer gets drained; see
+    /// `FlushCasadiOutputOnExit` below for why here and nowhere else.
     template <typename F>
     static bool guarded(PounceMemory* m, const char* what, F&& body) {
+      // Function scope, above the `try`: the destructor then runs on the
+      // ordinary return path *after* the handlers below have caught, never
+      // while an exception is still unwinding.
+      FlushCasadiOutputOnExit flush_on_exit;
       if (m->interrupted) return false;         // fail fast once stopping
       try {
         return body();
@@ -821,6 +880,12 @@ namespace casadi {
     }
 
     SetIntermediateCallback(prob, &PounceInterface::cb_iter);
+
+    // The one window `guarded` cannot close (gh#667): whatever the host and
+    // CasADi buffered before this call is still pending when POUNCE prints
+    // its banner, and no callback has fired yet to drain it. Once per solve.
+    uout() << std::flush;
+    uerr() << std::flush;
 
     enum ApplicationReturnStatus st = IpoptSolve(
       prob, m->xk.data(), ng ? m->gk.data() : nullptr, &m->obj,
