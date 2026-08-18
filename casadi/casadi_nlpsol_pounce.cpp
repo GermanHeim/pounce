@@ -20,6 +20,7 @@
 
 #include "casadi/core/nlpsol_impl.hpp"
 #include "casadi/core/convexify.hpp"
+#include "convexify_compat.hpp"
 #include "pounce_runtime.hpp"
 #include <cmath>
 #include <cstring>
@@ -620,8 +621,11 @@ namespace casadi {
       // which is the pattern the solver was given, so `values` is big enough.
       return guarded(m, "Hessian convexification", [&] {
         ScopedTiming tic(m->fstats.at("convexify"));
-        return convexify_eval(&self->convexify_data_.config, values, values,
-                              m->iw, m->w) == 0;
+        // `convexify_eval_compat`, not `convexify_eval`: CasADi renamed the
+        // helper after 3.7.2 and the shim picks whichever name is declared
+        // (gh#668, convexify_compat.hpp).
+        return convexify_eval_compat(0, &self->convexify_data_.config, values,
+                                     values, m->iw, m->w) == 0;
       });
     }
     // upper-triangular CCS == lower-triangular triplet (row/col swap)
