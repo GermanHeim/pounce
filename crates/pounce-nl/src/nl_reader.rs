@@ -32,8 +32,10 @@
 //! * `ref/Ipopt/test/mytoy.nl` — annotated example used for the unit
 //!   tests in this module.
 
+use crate::nl_quadratic::{analyze_quadratic_full, is_expanded_quadratic, is_trivially_zero};
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
+use pounce_nlp::quadratic::QuadraticStructure;
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -2174,6 +2176,23 @@ pub struct NlTnlp {
     /// `eval_g` when the model benefits (see [`ConHybrid`]). `None` keeps
     /// `eval_g` on the per-summand `con_tapes` above.
     con_hybrid: Option<ConHybrid>,
+    /// The degree-≤2 objective and rows, evaluated from their constant
+    /// matrices instead of from a tape (gh #588, Q4). A row with a form here
+    /// has an **empty** `con_tapes` entry, so every loop over the tapes
+    /// naturally contributes nothing for it and only the sites that consult
+    /// `quad` add it back: `eval_f`, `eval_grad_f`, `eval_g`, `eval_jac_g`,
+    /// `eval_h`, and `hessian_vector_products` — the last of which the design
+    /// note's list of five omitted, and which is the one where an omission
+    /// would be silent. Empty for a model with nothing recognized, in which
+    /// case everything below behaves bit for bit as it did before this
+    /// existed.
+    quad: QuadraticStructure,
+    /// Which entries of `h_irow`/`h_jcol` some *tape* can contribute to.
+    /// Empty when `quad` is — the pattern is then all tape. The coloring is
+    /// built over this subset alone, which is what stops one dense quadratic
+    /// block from forcing the color count to `n` for the benefit of tapes
+    /// that no longer exist.
+    h_tape_mask: Vec<bool>,
     /// Lower-triangle Hessian sparsity (row >= col), one entry per
     /// structurally nonzero second derivative in the Lagrangian.
     h_irow: Vec<i32>,
@@ -2977,6 +2996,7 @@ fn build_color_tables(
     n: usize,
     m: usize,
     lower_pairs: &[(usize, usize)],
+    tape_mask: &[bool],
     peel_veto: &[bool],
     obj_tapes: &[Tape],
     con_tapes: &[Vec<Tape>],
@@ -2986,7 +3006,27 @@ fn build_color_tables(
     // column-intersection graph bounds how many directional
     // Hessian-vector products we need per `eval_h` call —
     // typically O(stencil) for PDE-mesh problems.
-    let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, lower_pairs, peel_veto);
+    //
+    // Only the entries a *tape* can write take part. `tape_mask` is empty
+    // when every entry is a tape entry (no quadratic structure), which is
+    // the pre-#588 behaviour bit for bit; otherwise the quadratic forms'
+    // entries are excluded, since they are scattered from their stored
+    // values and never read out of a directional product. A variable that
+    // appears only in quadratic rows then has no color at all
+    // (`u32::MAX`) — `greedy_hessian_coloring` already declines to color a
+    // column with no surviving entries.
+    let colored_pairs: Vec<(usize, usize)>;
+    let color_input: &[(usize, usize)] = if tape_mask.is_empty() {
+        lower_pairs
+    } else {
+        colored_pairs = lower_pairs
+            .iter()
+            .zip(tape_mask)
+            .filter_map(|(p, &t)| t.then_some(*p))
+            .collect();
+        &colored_pairs
+    };
+    let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, color_input, peel_veto);
 
     // Per-color seed vectors (dense for O(1) Var lookup in
     // `Tape::hessian_directional`).
@@ -3008,6 +3048,11 @@ fn build_color_tables(
     // build drained a `HashMap`, whose iteration order is arbitrary).
     let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
     for (idx, &(i, j)) in lower_pairs.iter().enumerate() {
+        // An entry no tape writes has no pass to be decoded out of; the
+        // quadratic scatter already put its value there.
+        if !tape_mask.is_empty() && !tape_mask[idx] {
+            continue;
+        }
         // Which directional product recovers H[i, j]? Column `j`'s,
         // read at row `i` — except when `i` is a peeled column and
         // `j` is not: then `j` may have no color of its own, and the
@@ -3178,6 +3223,23 @@ impl NlTnlp {
     /// `$AMPLFUNC` is unset, a named library is missing/unloadable, or a
     /// referenced function id isn't registered by any loaded library.
     pub fn try_new(prob: NlProblem) -> Result<Self, String> {
+        // `POUNCE_DBG_NO_QUAD=1` forces the AD tape for every row and the
+        // objective — the A/B reference for the constant-structure path,
+        // mirroring `POUNCE_DBG_NO_HYBRID`. Diagnostic only: it is how the
+        // fast path's derivatives are checked against the ones they replace
+        // on a real model, and how a suspected fast-path bug is bisected
+        // against a reference that computes the same numbers a different way.
+        Self::try_new_with_quadratic(prob, std::env::var("POUNCE_DBG_NO_QUAD").is_err())
+    }
+
+    /// [`Self::try_new`] with the constant-structure fast path (gh #588, Q4)
+    /// explicitly on or off.
+    ///
+    /// The env var `try_new` reads is process-global, which is exactly wrong
+    /// for the differential test that has to build the *same* model both ways
+    /// and compare the derivatives — so the knob is a parameter here and the
+    /// env var only chooses its default.
+    pub fn try_new_with_quadratic(prob: NlProblem, use_quadratic: bool) -> Result<Self, String> {
         // Resolve any AMPL imported (external) functions. Walk every
         // nonlinear expression to collect the funcall ids actually
         // referenced; load the libraries named in $AMPLFUNC and bind
@@ -3197,23 +3259,70 @@ impl NlTnlp {
             )?
         };
 
+        // Recognize the degree-≤2 objective and rows *before* anything is
+        // taped, because the win is not in evaluating the tape faster — it
+        // is in never building it. On `qcqp500-3c` the ten quadratic rows
+        // are 2.32 M monomials, one `Tape` each; recognizing them first
+        // means those 2.32 M tapes, their color lists and their per-tape
+        // sparsity sets are never allocated.
+        //
+        // A row that is trivially zero is left alone: it has no nonlinear
+        // part to replace, and routing it through a (necessarily empty)
+        // quadratic form would touch every model in the corpus to save
+        // nothing.
+        let mut quad = QuadraticStructure::new(prob.m);
+        if use_quadratic {
+            // `is_expanded_quadratic` is the accuracy gate, not an
+            // optimization: it admits only forms whose read-out repeats the
+            // additions the `.nl` writer already wrote. See its docs — and
+            // note it is checked *before* recognition, so a factored form
+            // costs one cheap structural walk rather than a full expansion.
+            if !is_trivially_zero(&prob.obj_nonlinear) && is_expanded_quadratic(&prob.obj_nonlinear)
+            {
+                if let Some((h, lin, c)) = analyze_quadratic_full(&prob.obj_nonlinear) {
+                    let f = quad.push_form(&h, &lin, c);
+                    quad.assign_objective(f);
+                }
+            }
+            for k in 0..prob.m {
+                let row = &prob.con_nonlinear[k];
+                if is_trivially_zero(row) || !is_expanded_quadratic(row) {
+                    continue;
+                }
+                if let Some((h, lin, c)) = analyze_quadratic_full(row) {
+                    let f = quad.push_form(&h, &lin, c);
+                    quad.assign_row(k, f);
+                }
+            }
+        }
+
         // Flatten objective and each constraint into independent
         // summands. Each summand becomes its own `Tape` (CSE bodies
         // are deduplicated within a tape via Rc identity in
         // `Tape::build`; bodies shared across summands are
         // duplicated, which we accept as a simplicity tradeoff).
-        let obj_summands = split_top_sums(&prob.obj_nonlinear);
-        let obj_tapes: Vec<Tape> = obj_summands
-            .iter()
-            .map(|e| Tape::build_with_externals(e, &resolver))
-            .collect();
+        let obj_tapes: Vec<Tape> = if quad.objective_form().is_some() {
+            Vec::new()
+        } else {
+            split_top_sums(&prob.obj_nonlinear)
+                .iter()
+                .map(|e| Tape::build_with_externals(e, &resolver))
+                .collect()
+        };
 
         let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
         let mut con_roots: Vec<Expr> = Vec::new();
         let mut row_start: Vec<usize> = Vec::with_capacity(prob.m + 1);
         for k in 0..prob.m {
-            let summands = split_top_sums(&prob.con_nonlinear[k]);
             row_start.push(con_roots.len());
+            // A row with a quadratic form contributes no tape and no
+            // hybrid-tape root, so `con_tapes[k]` is empty and its
+            // `row_start` range is empty too.
+            if quad.row_form(k).is_some() {
+                con_tapes.push(Vec::new());
+                continue;
+            }
+            let summands = split_top_sums(&prob.con_nonlinear[k]);
             con_tapes.push(
                 summands
                     .iter()
@@ -3289,23 +3398,78 @@ impl NlTnlp {
         // chased a pointer and allocated a node per entry. The result is
         // exactly the ascending order the rest of this function wants, so
         // it doubles as `lower_pairs` instead of being copied into it.
-        let mut lower_pairs: Vec<(usize, usize)> = Vec::new();
+        let mut tape_pairs: Vec<(usize, usize)> = Vec::new();
         for t in &obj_tapes {
-            lower_pairs.extend(t.hessian_sparsity());
+            tape_pairs.extend(t.hessian_sparsity());
         }
         for row in &con_tapes {
             for t in row {
-                lower_pairs.extend(t.hessian_sparsity());
+                tape_pairs.extend(t.hessian_sparsity());
             }
         }
-        lower_pairs.sort_unstable();
-        lower_pairs.dedup();
+        tape_pairs.sort_unstable();
+        tape_pairs.dedup();
+
+        // The assembled pattern is the tapes' union *plus* the quadratic
+        // forms'. They are kept apart because the coloring only ever needs
+        // the tape half — a quadratic block's entries are scattered
+        // directly, not recovered from a directional product — and coloring
+        // a dense quadratic block would put the color count back at `n` to
+        // pay for products nobody runs (`qcqp500-3c`: 500 colors → 0).
+        let mut lower_pairs = tape_pairs.clone();
+        if !quad.is_empty() {
+            for f in quad
+                .objective_form()
+                .into_iter()
+                .chain((0..prob.m).filter_map(|i| quad.row_form(i)))
+            {
+                lower_pairs.extend(
+                    quad.lower_triangle(f)
+                        .map(|(r, c, _)| (r as usize, c as usize)),
+                );
+            }
+            lower_pairs.sort_unstable();
+            lower_pairs.dedup();
+        }
+
+        // Which assembled entries a tape can write. Both sides are sorted
+        // and `tape_pairs ⊆ lower_pairs`, so this is a merge walk, and the
+        // mask is left empty (meaning "all of them") when nothing was
+        // recognized.
+        let h_tape_mask: Vec<bool> = if quad.is_empty() {
+            Vec::new()
+        } else {
+            let mut mask = vec![false; lower_pairs.len()];
+            let mut t = 0usize;
+            for (idx, pair) in lower_pairs.iter().enumerate() {
+                if t < tape_pairs.len() && tape_pairs[t] == *pair {
+                    mask[idx] = true;
+                    t += 1;
+                }
+            }
+            debug_assert_eq!(t, tape_pairs.len(), "every tape pair is in the union");
+            mask
+        };
+        drop(tape_pairs);
 
         let mut h_irow = Vec::with_capacity(lower_pairs.len());
         let mut h_jcol = Vec::with_capacity(lower_pairs.len());
         for &(hi, lo) in &lower_pairs {
             h_irow.push(hi as i32);
             h_jcol.push(lo as i32);
+        }
+
+        // Bind each form's lower-triangle entries to their index in the
+        // assembled pattern. `lower_pairs` is sorted, so the lookup is a
+        // binary search — done once here, never again on the hot path.
+        if !quad.is_empty() {
+            quad.bind_slots(|r, c| {
+                lower_pairs
+                    .binary_search(&(r as usize, c as usize))
+                    .unwrap_or_else(|_| {
+                        unreachable!("quadratic entry ({r}, {c}) missing from the union pattern")
+                    })
+            });
         }
 
         // Hessian column coloring and everything keyed off it. The
@@ -3324,6 +3488,7 @@ impl NlTnlp {
             prob.n,
             prob.m,
             &lower_pairs,
+            &h_tape_mask,
             &vec![false; prob.n],
             &obj_tapes,
             &con_tapes,
@@ -3338,6 +3503,12 @@ impl NlTnlp {
             let mut cols: Vec<usize> = Vec::with_capacity(prob.con_linear[i].len());
             for t in row_tapes {
                 cols.extend(t.variables());
+            }
+            // A quadratic row has no tape, so its Jacobian support comes
+            // from the form: `Hx + a` is nonzero exactly on the union of the
+            // Hessian's rows and the folded linear part.
+            if let Some(f) = quad.row_form(i) {
+                cols.extend(quad.gradient_support(f).iter().map(|&v| v as usize));
             }
             cols.extend(prob.con_linear[i].iter().map(|(v, _)| *v));
             cols.sort_unstable();
@@ -3401,6 +3572,28 @@ impl NlTnlp {
                 }
                 None => eprintln!("[hybrid stats] con hybrid not built (no shared CSE bodies)"),
             }
+            // What the constant-structure path took off the tape builder.
+            // `forms` counts the objective too, which is why it can exceed
+            // the row count by one.
+            let quad_rows = (0..prob.m).filter(|&i| quad.row_form(i).is_some()).count();
+            eprintln!(
+                "[quad stats] forms={} rows={quad_rows}/{} obj={} \
+                 stored_h_entries={} colored_pairs={}/{}",
+                quad.len(),
+                prob.m,
+                if quad.objective_form().is_some() {
+                    "quadratic"
+                } else {
+                    "taped"
+                },
+                quad.stored_entries(),
+                if h_tape_mask.is_empty() {
+                    lower_pairs.len()
+                } else {
+                    h_tape_mask.iter().filter(|&&t| t).count()
+                },
+                lower_pairs.len(),
+            );
         }
 
         let compressed: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
@@ -3410,6 +3603,8 @@ impl NlTnlp {
             obj_tapes,
             con_tapes,
             con_hybrid,
+            quad,
+            h_tape_mask,
             h_irow,
             h_jcol,
             jac_cols,
@@ -3576,6 +3771,7 @@ impl NlTnlp {
             self.prob.n,
             self.prob.m,
             &lower_pairs,
+            &self.h_tape_mask,
             peel_veto,
             &self.obj_tapes,
             &self.con_tapes,
@@ -3617,6 +3813,21 @@ impl NlTnlp {
     /// [`Self::variant`].
     pub fn problem(&self) -> &NlProblem {
         &self.prob
+    }
+
+    /// Is constraint row `i` evaluated from a constant quadratic form
+    /// rather than from an AD tape (gh #588, Q4)?
+    ///
+    /// Structural, so it answers before any evaluation. Exposed for the
+    /// differential test, which has to know which models exercise the fast
+    /// path at all, and for `POUNCE_DBG_TAPE_STATS`.
+    pub fn quadratic_row(&self, i: usize) -> bool {
+        self.quad.row_form(i).is_some()
+    }
+
+    /// As [`Self::quadratic_row`], for the objective.
+    pub fn quadratic_objective(&self) -> bool {
+        self.quad.objective_form().is_some()
     }
 
     /// Structural set of variables that appear in *some* nonlinear part —
@@ -3781,6 +3992,45 @@ impl NlTnlp {
         } else {
             -obj_factor
         };
+        // The constant blocks. `H · v` for a quadratic form is a matvec
+        // against stored values, so unlike a tape it needs no forward sweep
+        // and no `x` at all. Easy to forget — a matrix-free solve that
+        // silently dropped the quadratic part of `∇²L` would still converge,
+        // just to a different point by a different route, which is the
+        // failure mode this series is most exposed to.
+        if !self.quad.is_empty() {
+            if obj_seed != 0.0 {
+                if let Some(f) = self.quad.objective_form() {
+                    for (c, out_col) in out.chunks_mut(n).enumerate() {
+                        if self.hvp_live[c] {
+                            self.quad.add_hessian_vector(
+                                f,
+                                &v[c * n..(c + 1) * n],
+                                obj_seed,
+                                out_col,
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(lam) = lambda {
+                for (i, &w) in lam.iter().enumerate() {
+                    if w == 0.0 {
+                        continue;
+                    }
+                    let Some(f) = self.quad.row_form(i) else {
+                        continue;
+                    };
+                    for (c, out_col) in out.chunks_mut(n).enumerate() {
+                        if self.hvp_live[c] {
+                            self.quad
+                                .add_hessian_vector(f, &v[c * n..(c + 1) * n], w, out_col);
+                        }
+                    }
+                }
+            }
+        }
+
         if obj_seed != 0.0 {
             for t in &self.obj_tapes {
                 if t.ops.is_empty() {
@@ -4040,6 +4290,13 @@ impl TNLP for NlTnlp {
         for t in obj_tapes {
             nl += t.eval_into(x, vals);
         }
+        // A recognized objective has no tapes, so the loop above added
+        // nothing and the form supplies the whole nonlinear part — including
+        // the linear and constant terms AMPL folded into that tree, which is
+        // why they are *not* also in `obj_linear` / `obj_constant`.
+        if let Some(f) = self.quad.objective_form() {
+            nl += self.quad.value(f, x);
+        }
         let lin: Number = self.prob.obj_linear.iter().map(|(i, c)| c * x[*i]).sum();
         let v = self.prob.obj_constant + nl + lin;
         let signed = if self.prob.minimize { v } else { -v };
@@ -4053,6 +4310,9 @@ impl TNLP for NlTnlp {
         // nothing — see `Tape::gradient_seed_into` (M18).
         for t in &self.obj_tapes {
             t.gradient_seed_into(x, 1.0, grad, &mut self.vals_scratch, &mut self.adj_scratch);
+        }
+        if let Some(f) = self.quad.objective_form() {
+            self.quad.add_gradient(f, x, 1.0, grad);
         }
         for (i, c) in &self.prob.obj_linear {
             grad[*i] += c;
@@ -4075,6 +4335,7 @@ impl TNLP for NlTnlp {
         // `Tape::eval_into`.
         let m = self.prob.m;
         let con_linear = &self.prob.con_linear;
+        let quad = &self.quad;
         if let Some(h) = &mut self.con_hybrid {
             // Shared CSE bodies once for the whole constraint block, then one
             // local sweep per summand (pounce#476).
@@ -4092,6 +4353,9 @@ impl TNLP for NlTnlp {
                     tape.forward_summand(s, x, prelude_vals, local_vals);
                     nl += tape.root_value(s, local_vals);
                 }
+                if let Some(f) = quad.row_form(i) {
+                    nl += quad.value(f, x);
+                }
                 let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
                 g[i] = nl + lin;
             }
@@ -4102,6 +4366,12 @@ impl TNLP for NlTnlp {
             let mut nl: Number = 0.0;
             for t in &con_tapes[i] {
                 nl += t.eval_into(x, vals);
+            }
+            // A quadratic row's summand range is empty above, so this is its
+            // whole nonlinear part: one matvec against a constant matrix in
+            // place of a walk over every monomial's tape.
+            if let Some(f) = quad.row_form(i) {
+                nl += quad.value(f, x);
             }
             let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
             g[i] = nl + lin;
@@ -4136,6 +4406,7 @@ impl TNLP for NlTnlp {
                     prob,
                     con_tapes,
                     con_hybrid,
+                    quad,
                     jac_cols,
                     scratch_row_grad,
                     vals_scratch,
@@ -4176,6 +4447,9 @@ impl TNLP for NlTnlp {
                                 prelude_adj,
                             );
                         }
+                        if let Some(f) = quad.row_form(i) {
+                            quad.add_gradient(f, xs, 1.0, scratch_row_grad);
+                        }
                         for &(v, c) in &prob.con_linear[i] {
                             scratch_row_grad[v] += c;
                         }
@@ -4194,6 +4468,14 @@ impl TNLP for NlTnlp {
                         // Allocation-free reverse-AD per summand tape (M18):
                         // reuse the shared forward/adjoint scratch arenas.
                         t.gradient_seed_into(xs, 1.0, scratch_row_grad, vals_scratch, adj_scratch);
+                    }
+                    // `Hx + a` for a quadratic row: one matvec over the
+                    // row's support, in place of a reverse sweep per
+                    // monomial. `jac_cols[i]` already covers the form's
+                    // gradient support, so the scatter lands inside the
+                    // window zeroed above.
+                    if let Some(f) = quad.row_form(i) {
+                        quad.add_gradient(f, xs, 1.0, scratch_row_grad);
                     }
                     for &(v, c) in &prob.con_linear[i] {
                         scratch_row_grad[v] += c;
@@ -4242,6 +4524,32 @@ impl TNLP for NlTnlp {
                 // sparse `values` array.
                 for buf in &mut self.compressed {
                     buf.fill(0.0);
+                }
+
+                // The constant blocks first: no forward sweep, no
+                // directional product, no decode — the multipliers are the
+                // only thing that changed since the model was read, so this
+                // is one `values[slot] += w · h` pass per live form. Skipped
+                // wholesale on a model with nothing recognized, so such a
+                // model does not pay an `O(m)` scan for a structure that is
+                // empty.
+                if !self.quad.is_empty() {
+                    if obj_seed != 0.0 {
+                        if let Some(f) = self.quad.objective_form() {
+                            self.quad.accumulate_hessian(f, obj_seed, values);
+                        }
+                    }
+                    if let Some(lam) = lambda {
+                        for i in 0..self.prob.m {
+                            let w = lam[i];
+                            if w == 0.0 {
+                                continue;
+                            }
+                            if let Some(f) = self.quad.row_form(i) {
+                                self.quad.accumulate_hessian(f, w, values);
+                            }
+                        }
+                    }
                 }
 
                 if obj_seed != 0.0 {

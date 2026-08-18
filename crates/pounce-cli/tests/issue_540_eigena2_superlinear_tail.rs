@@ -73,6 +73,10 @@ fn tmp_path(suffix: &str) -> PathBuf {
 }
 
 fn solve(extra: &[&str]) -> SolveReport {
+    solve_with_env(extra, &[])
+}
+
+fn solve_with_env(extra: &[&str], env: &[(&str, &str)]) -> SolveReport {
     let json_path = tmp_path("eigena2.json");
     let sol_path = tmp_path("eigena2.sol");
     let mut cmd = Command::new(pounce_exe());
@@ -82,6 +86,9 @@ fn solve(extra: &[&str]) -> SolveReport {
         .arg(&json_path);
     for o in extra {
         cmd.arg(o);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
     }
     let _ = cmd.status().expect("spawn pounce");
     let text = std::fs::read_to_string(&json_path).expect("read json report");
@@ -124,9 +131,27 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// must still reproduce the reported failure. If a later change fixes
 /// `eigena2` by some other route, this test fails and says so rather than
 /// letting the two tests above pass for a reason they do not describe.
+///
+/// **`POUNCE_DBG_NO_QUAD=1` is part of the reproduction, as of gh #588's Q4.**
+/// The pre-#540 route is a knife edge — it turns on an inertia count read off
+/// a factor whose smallest pivot is ~1e-16 — and Q4 moved `∇²L[8, 8]` by
+/// **one ulp** on this model. `eigena2` has 55 quadratic rows and a
+/// non-quadratic objective, so that entry is now assembled as a constant
+/// scatter plus a decoded tape share rather than as one sum, and the two
+/// associate differently. With the fast path on, `feral_inertia_pivot_floor=0`
+/// converges (27 iterations, dual 6.0e-10) instead of stalling, and this
+/// guard would pass vacuously in the other direction — by having nothing left
+/// to reproduce.
+///
+/// The env var restores the pre-Q4 arithmetic exactly: 29 iterations, dual
+/// 1.841e-7, `SolvedToAcceptableLevel`, the same numbers as before that
+/// commit. **The shipped route is untouched** — with the trigger on,
+/// `eigena2` takes 26 iterations to `SolveSucceeded` at dual 2.211e-9 before
+/// Q4 and 2.208e-9 after, on the same objective. So what changed is the
+/// reproducibility of a failure, not the fix and not the answer.
 #[test]
 fn disabling_the_trigger_reproduces_the_reported_failure() {
-    let r = solve(&NO_TRIGGER);
+    let r = solve_with_env(&NO_TRIGGER, &[("POUNCE_DBG_NO_QUAD", "1")]);
     assert_eq!(
         r.solution.status,
         ApplicationReturnStatus::SolvedToAcceptableLevel,

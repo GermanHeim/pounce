@@ -26,6 +26,7 @@ pub mod derivative_test;
 pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod orig_ipopt_nlp;
+pub mod quadratic;
 pub mod return_codes;
 pub mod scaling_tnlp;
 pub mod solve_statistics;
@@ -36,6 +37,7 @@ pub use alg_types::SolverReturn;
 pub use expression_provider::{ExpressionProvider, FbbtOp, FbbtTape};
 pub use ipopt_nlp::{IpoptNlp, Nlp};
 pub use orig_ipopt_nlp::{ConstObjScaling, NlpScaling, NoScaling, OrigIpoptNlp};
+pub use quadratic::QuadraticStructure;
 pub use return_codes::{AlgorithmMode, ApplicationReturnStatus};
 pub use solve_statistics::SolveStatistics;
 pub use tnlp::{

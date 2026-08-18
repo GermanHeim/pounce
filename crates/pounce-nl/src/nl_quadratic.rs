@@ -41,7 +41,7 @@
 //! all this one looks at.
 
 use crate::nl_reader::{BinOp, Expr, UnaryOp};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The symmetric Hessian of a quadratic form, stored as a sparse upper-
 /// triangular (i ≤ j) map of `(i, j) -> ∂²/∂xᵢ∂xⱼ`. Empty means the
@@ -440,6 +440,125 @@ pub fn analyze_quadratic_full(e: &Expr) -> Option<QuadForm> {
     Some((h, lin, 0.0 + q.constant))
 }
 
+/// Is this expression **already** a flat sum of monomials — that is, would
+/// reading it as `½xᵀHx + aᵀx + c` reproduce the same additions the writer
+/// wrote, rather than algebraically expanding something it did not?
+///
+/// This is the gate on the constant-structure evaluator (gh #588, Q4), and
+/// it exists because expanding a quadratic is not an accuracy-neutral
+/// rewrite. `(xᵢ − xⱼ)²` evaluated as written squares a small residual;
+/// evaluated as `xᵢ² − 2xᵢxⱼ + xⱼ²` it cancels two large numbers, and on
+/// `airport.nl` — 84 coordinates around 10³, every row a squared distance —
+/// that difference is enough to take an adaptive-μ solve from stopping at a
+/// tiny step in 16 iterations to grinding out the 300-iteration cap at the
+/// same objective. Which is precisely the gh #544 failure mode: the right
+/// answer, slowly.
+///
+/// So the rule is *exactness*, not magnitude: a form is admitted only when
+/// the recognizer's read-out does no algebra the tape would not have done.
+/// A sum of monomials qualifies — which is exactly how AMPL emits the
+/// `qcqp*` family (`o54` over `o2 n0.5 o2 o2 n<c> v<i> v<j>`), so the target
+/// of the phase is unaffected — and a `Pow` or a `Mul` over a non-atomic
+/// operand does not.
+///
+/// The consequence is worth stating plainly rather than discovering later:
+/// a model written in factored form keeps its tape and gains nothing from
+/// Q4. Evaluating such a form stably from its stored coefficients means
+/// carrying a shift (a vertex, or the writer's own grouping), which is a
+/// larger change than this phase.
+///
+/// ## A re-referenced `Cse` body is refused, and that is about cost
+///
+/// This walk and [`recognize_expr`] behind it both inline a `Cse` body at
+/// **every** reference, so a DAG whose bodies are shared costs `Θ(2^depth)`
+/// rather than `Θ(nodes)`. `nl_reader`'s
+/// `shared_dag_walks_are_memoized_not_exponential` builds exactly that shape
+/// — 30 levels, each a `Cse` referenced twice — and taking it through this
+/// gate ungated measured **0.00 s → 172 s** on a model the tape path loads
+/// instantly. At depth 40 it would not return at all.
+///
+/// So a body reached a second time ends the walk with `false`: the model
+/// keeps its tape, which handles sharing properly (that is what `ConHybrid`
+/// is for), and nothing hangs. Memoizing instead — on `Arc` identity, which
+/// is a pure and bitwise-neutral win — would fix this walk and leave
+/// `recognize_expr` exponential behind it, so it belongs with that change in
+/// Q5 rather than half-done here. The target family is unaffected: the
+/// `qcqp*` files declare no common expressions at all.
+///
+/// Iterative for the same reason [`recognize_expr`] is.
+pub fn is_expanded_quadratic(e: &Expr) -> bool {
+    // The sum spine: `Add`/`Sub`/`Neg`/`Sum` may nest freely, and every
+    // leaf of that spine must be a monomial.
+    let mut seen: BTreeSet<*const Expr> = BTreeSet::new();
+    let mut spine: Vec<&Expr> = vec![e];
+    while let Some(e) = spine.pop() {
+        match e {
+            Expr::Sum(items) => spine.extend(items.iter()),
+            Expr::Binary(BinOp::Add | BinOp::Sub, a, b) => {
+                spine.push(a);
+                spine.push(b);
+            }
+            Expr::Unary(UnaryOp::Neg, a) => spine.push(a),
+            Expr::Cse(body) => {
+                if !seen.insert(std::sync::Arc::as_ptr(body)) {
+                    return false;
+                }
+                spine.push(body);
+            }
+            other => {
+                if !is_monomial(other, &mut seen) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// A single product term: constants and variables multiplied together, with
+/// no addition anywhere inside it. `xᵢxⱼ`, `0.5·c·xᵢ·xⱼ`, `xᵢ²` and `xᵢ/3`
+/// all qualify; `(xᵢ − xⱼ)²` and `(xᵢ + 1)·xⱼ` do not.
+///
+/// Degree is not checked here — [`recognize_expr`] already refused anything
+/// past 2 by the time this runs, and duplicating the rule would only give
+/// the two a way to disagree.
+fn is_monomial(e: &Expr, seen: &mut BTreeSet<*const Expr>) -> bool {
+    let mut work: Vec<&Expr> = vec![e];
+    while let Some(e) = work.pop() {
+        match e {
+            Expr::Const(_) | Expr::Var(_) => {}
+            // Shared with the spine walk, and refused for the same reason —
+            // see [`is_expanded_quadratic`].
+            Expr::Cse(body) => {
+                if !seen.insert(std::sync::Arc::as_ptr(body)) {
+                    return false;
+                }
+                work.push(body);
+            }
+            Expr::Unary(UnaryOp::Neg, a) => work.push(a),
+            Expr::Binary(BinOp::Mul | BinOp::Div, a, b) => {
+                work.push(a);
+                work.push(b);
+            }
+            // `x^2` is one monomial; `(x - y)^2` is an expansion. The
+            // exponent itself may be any constant expression — the
+            // recognizer has already restricted it to {0, 1, 2}.
+            Expr::Binary(BinOp::Pow, a, b) => {
+                if !matches!(
+                    a.as_ref(),
+                    Expr::Const(_) | Expr::Var(_) | Expr::Unary(UnaryOp::Neg, _)
+                ) {
+                    return false;
+                }
+                work.push(a);
+                work.push(b);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// True if the expression is the literal constant zero the `.nl` reader
 /// uses for "no nonlinear part".
 pub fn is_trivially_zero(e: &Expr) -> bool {
@@ -544,6 +663,117 @@ mod tests {
         let h = analyze_quadratic(&e).expect("sum of squares is a QP");
         assert_eq!(h.len(), N);
         assert_eq!(h.get(&(N - 1, N - 1)), Some(&2.0));
+    }
+
+    /// The gate that decides whether a form may be evaluated from its
+    /// coefficients. The two directions cost different things, so both are
+    /// pinned: admitting a factored form loses digits (and, on
+    /// `airport.nl`, 284 iterations), refusing an expanded one loses the
+    /// phase's whole point on the family it was built for.
+    #[test]
+    fn only_already_expanded_forms_are_admitted() {
+        // AMPL's `qcqp*` emission: `o54` over `0.5·((c·xᵢ)·xⱼ)`.
+        let monomial = |c: f64, i: usize, j: usize| {
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(0.5)),
+                Box::new(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Binary(
+                        BinOp::Mul,
+                        Box::new(Expr::Const(c)),
+                        Box::new(Expr::Var(i)),
+                    )),
+                    Box::new(Expr::Var(j)),
+                )),
+            )
+        };
+        let row = Expr::Sum(vec![monomial(2.0, 0, 0), monomial(3.0, 0, 1)]);
+        assert!(is_expanded_quadratic(&row));
+        // `xᵢ²` is a single monomial, not an expansion.
+        assert!(is_expanded_quadratic(&Expr::Sum(vec![sq(0), sq(1)])));
+        // A left-deep `Add` chain is still a sum.
+        let chain = Expr::Binary(BinOp::Add, Box::new(sq(0)), Box::new(sq(1)));
+        assert!(is_expanded_quadratic(&chain));
+        // Division by a constant, and a negated term.
+        assert!(is_expanded_quadratic(&Expr::Binary(
+            BinOp::Div,
+            Box::new(sq(0)),
+            Box::new(Expr::Const(3.0)),
+        )));
+        assert!(is_expanded_quadratic(&Expr::Unary(
+            UnaryOp::Neg,
+            Box::new(monomial(1.0, 0, 1))
+        )));
+
+        // `(x₀ − x₁)²` — the `airport.nl` shape. Reading it as
+        // `x₀² − 2x₀x₁ + x₁²` cancels, so it stays on the tape.
+        let diff = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        let factored = Expr::Binary(BinOp::Pow, Box::new(diff), Box::new(Expr::Const(2.0)));
+        assert!(analyze_quadratic(&factored).is_some(), "it is quadratic");
+        assert!(
+            !is_expanded_quadratic(&factored),
+            "but not already expanded"
+        );
+
+        // `(x₀ + 1)·x₁` — expansion by multiplication rather than by power.
+        let product = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(1.0)),
+            )),
+            Box::new(Expr::Var(1)),
+        );
+        assert!(!is_expanded_quadratic(&product));
+
+        // One factored term anywhere in a long expanded sum disqualifies
+        // the whole row — the cancellation is in that term, not in the sum.
+        let mixed = Expr::Sum(vec![monomial(1.0, 0, 0), factored]);
+        assert!(!is_expanded_quadratic(&mixed));
+
+        // A `Cse` referenced once is inlined and judged on its body.
+        let once = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Cse(std::sync::Arc::new(Expr::Var(0)))),
+            Box::new(Expr::Var(1)),
+        );
+        assert!(is_expanded_quadratic(&once));
+    }
+
+    /// A `Cse` body reached twice is refused, and the reason is cost rather
+    /// than algebra: this walk and `recognize_expr` behind it both inline a
+    /// body per reference, so a shared DAG is `Θ(2^depth)`. The shape below
+    /// is `nl_reader`'s `shared_dag_walks_are_memoized_not_exponential`
+    /// scaled up — at depth 60 an exponential walk does not return in the
+    /// lifetime of the test run, so this passing at all is the assertion.
+    #[test]
+    fn a_shared_cse_body_is_refused_rather_than_walked_exponentially() {
+        let mut e = Expr::Var(0);
+        for _ in 0..60 {
+            let shared = std::sync::Arc::new(e);
+            e = Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Cse(std::sync::Arc::clone(&shared))),
+                Box::new(Expr::Cse(shared)),
+            );
+        }
+        assert!(!is_expanded_quadratic(&e));
+    }
+
+    /// Deep, and on a default-sized test thread, for the same reason
+    /// [`recognize_expr`] is iterative: the gate runs on every row of every
+    /// model, including the ones that overflow a recursive walk.
+    #[test]
+    fn the_expansion_gate_does_not_overflow_the_stack() {
+        const K: usize = 250_000;
+        let mut e = sq(0);
+        for i in 1..K {
+            e = Expr::Binary(BinOp::Add, Box::new(e), Box::new(sq(i)));
+        }
+        assert!(is_expanded_quadratic(&e));
+        std::mem::forget(e);
     }
 
     /// The reason this module is iterative.
