@@ -134,7 +134,10 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
 
     let factory: RestorationFactory = Box::new(move || {
         let count = Rc::clone(&count_for_factory);
-        let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _, _| {
+        // Trailing arg is the user TNLP the outer driver forwards for
+        // the gh#645 restoration-phase callback fires; this fake inner
+        // solver never runs an IPM, so it has nothing to fire.
+        let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _, _, _| {
             *count.borrow_mut() += 1;
             // Returning `None` makes `MinC1NormRestoration` surface
             // `RestorationOutcome::Failed`, so the outer algorithm

@@ -10,6 +10,7 @@
 //! search, mu update, etc.) read/write fields here as their inputs
 //! and outputs.
 
+use crate::inf_pr_floor::InfPrFloor;
 use crate::init::warm_start::WarmStartDiagnostics;
 use crate::iterates_vector::IteratesVector;
 use pounce_common::timing::{Deadline, TimingStatistics};
@@ -119,12 +120,41 @@ pub struct IpoptData {
     /// counterpart. See pounce#58.
     pub request_resto: bool,
 
+    /// How long this solve has sat at a constraint violation it could
+    /// not get below (gh#661, gh#664). Fed once per outer iteration from
+    /// the `inf_pr` the iteration output already computes.
+    ///
+    /// Read by restoration's divergence guard, which needs to know
+    /// whether the solve had *demonstrated* a floor before its
+    /// restoration sub-solve blew up — the premise the reconstructed
+    /// locally-infeasible gates assert and never tested. The evidence
+    /// lives here rather than in restoration because the trajectory that
+    /// carries it is the outer one: the sub-solves themselves run a
+    /// handful of iterations. Pounce-specific; no upstream counterpart.
+    pub inf_pr_floor: InfPrFloor,
+
     /// What the warm-start initializer accepted, reconstructed, or
     /// discarded from the supplied iterate, and the residuals it based
     /// those calls on (gh#606). `None` on the cold path, which has no
     /// supplied iterate to report on. Read back after a solve through
     /// [`crate::application::IpoptApplication::warm_start_diagnostics`].
     pub warm_start_diagnostics: Option<WarmStartDiagnostics>,
+
+    /// `curr` was installed by the post-convergence crossover phase
+    /// (gh#612) rather than produced by the interior iteration.
+    ///
+    /// The distinction is not bookkeeping: a crossed-over point sits
+    /// *on* the bounds the user declared, which is `bound_relax_factor`
+    /// **inside** the widened box the barrier quantities are measured
+    /// against, so every slack at an active bound reads exactly `δ`
+    /// where an interior iterate would have carried `μ/z` (gh#646,
+    /// gh#654). Anything that reads `curr` through the barrier — the
+    /// residual report, the sensitivity path's `Σ = z/s` — has to know
+    /// which of the two frames the iterate belongs to before it can
+    /// pick the bounds to measure against. Nothing inside the
+    /// algorithm reads this: the flag is set after `optimize()` has
+    /// returned and no further step is taken.
+    pub curr_from_crossover: bool,
 
     /// Line-search reset request from the μ-update layer (pounce#510).
     /// Upstream's μ updates hold a `linesearch_` handle and call
@@ -226,7 +256,9 @@ impl IpoptData {
             info_string: String::new(),
             tiny_step_flag: false,
             request_resto: false,
+            inf_pr_floor: InfPrFloor::default(),
             warm_start_diagnostics: None,
+            curr_from_crossover: false,
             request_ls_reset: false,
             request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',

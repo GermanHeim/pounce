@@ -517,6 +517,33 @@ relaxation, pass `bound_relax_factor` explicitly in `options=`: your
 value wins, and `covariance()` then refuses with a clear error rather
 than classifying against shifted slacks.
 
+The AMBIGUOUS class is the one this machinery cannot argue away: the
+interior iterate simply does not carry enough information to decide
+whether the constraint binds. [Crossover](crossover.md) (`crossover=yes`)
+attacks that directly — it pivots to the active-set path after
+convergence and returns a point at which a linearly independent set of
+constraints holds with *equality*, collapsing the ambiguity into a
+STRONGLY or WEAKLY ACTIVE verdict. It is a different remedy to the same
+problem the `bound_relax_factor = 0` rule above addresses, and the two
+compose — genuinely independently, since
+[#654](https://github.com/jkitchin/pounce/issues/654); see [Crossover and
+the barrier
+diagonal](crossover.md#what-it-does-to-a-downstream-sensitivity-result)
+for the measurement. A crossed-over point sits *on* the declared bounds,
+i.e. `bound_relax_factor` inside the box the barrier measured against, so
+its `Σ = z/s` used to read `z/δ` and hold the bound more loosely than an
+interior iterate would have — degrading, rather than improving, every
+quantity read off the held factor unless the relaxation was also switched
+off. `Σ` is now re-measured against the declared bounds whenever
+crossover is accepted, so the two options no longer have to be set
+together.
+
+`classify_activity()` still requires `bound_relax_factor = 0`, for the
+separate reason above: the central-path checks it makes read the
+barrier's own slacks, which the relaxation shifts. A solve routed through
+the declaration-triggered path already sets it; a `Solver` or `SensSolve`
+session you configure yourself does not, unless you ask.
+
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as
 [`pounce.curve_fit`](curve-fitting.md) — both read a reduced-Hessian

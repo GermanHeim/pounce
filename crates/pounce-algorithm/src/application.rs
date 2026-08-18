@@ -230,6 +230,16 @@ pub struct IpoptApplication {
     /// Stays valid until the next solve (which overwrites it).
     /// Accessed via [`Self::last_sqp_working_set`].
     sqp_last_working_set: Option<pounce_qp::WorkingSet>,
+    /// What the post-convergence crossover phase did on the most recent
+    /// IPM solve (gh#612). `None` when `crossover=no` (the default) or
+    /// when the solve did not converge — crossover only runs on a
+    /// converged interior iterate. Read via [`Self::crossover_report`].
+    ///
+    /// Kept separate from `sqp_last_working_set`, which crossover *also*
+    /// populates on success: that field answers "what can the next solve
+    /// warm-start from", this one answers "was the active set I am about
+    /// to trust actually identified, or merely inferred".
+    crossover_report: Option<crate::crossover::CrossoverReport>,
     /// Full primal-dual warm-start iterate for the IPM path, captured by
     /// the interactive debugger's `resolve` command. When `Some`, the
     /// next `optimize_tnlp` installs this 8-vector (algorithm space)
@@ -322,6 +332,7 @@ impl IpoptApplication {
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
+            crossover_report: None,
             warm_start_iterate: None,
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
@@ -1055,6 +1066,20 @@ impl IpoptApplication {
         self.sqp_warm_start = None;
     }
 
+    /// What the crossover phase did on the most recent solve (gh#612).
+    ///
+    /// `None` means crossover never ran — either `crossover=no` (the
+    /// default) or the solve did not converge. A `Some` whose
+    /// [`CrossoverReport::accepted`] is false means it ran and *declined*;
+    /// the two are different facts about a solve and consumers that reason
+    /// about active-set certainty (sensitivity's AMBIGUOUS class, a
+    /// downstream `var_status`) need to tell them apart.
+    ///
+    /// [`CrossoverReport::accepted`]: crate::crossover::CrossoverReport::accepted
+    pub fn crossover_report(&self) -> Option<&crate::crossover::CrossoverReport> {
+        self.crossover_report.as_ref()
+    }
+
     /// Install a full primal-dual warm-start iterate for the next IPM
     /// `optimize_tnlp`. Captured by the debugger's `resolve` so the
     /// re-solve continues from the paused interior point. The caller is
@@ -1777,6 +1802,188 @@ impl IpoptApplication {
     /// Build a *copy* of the algorithm builder configured per the
     /// current options. The SQP path uses this so it gets a
     /// fresh builder without mutating the application's state.
+    /// Read the `crossover*` option family into a [`CrossoverOptions`].
+    fn crossover_options(&self) -> crate::crossover::CrossoverOptions {
+        let mut o = crate::crossover::CrossoverOptions::default();
+        if let Ok((v, true)) = self.options.get_bool_value("crossover", "") {
+            o.enabled = v;
+        }
+        if let Ok((v, true)) = self.options.get_integer_value("crossover_max_iter", "") {
+            o.max_iter = v.max(0) as u32;
+        }
+        if let Ok((v, true)) = self.options.get_numeric_value("crossover_mult_tol", "") {
+            o.mult_tol = v;
+        }
+        if let Ok((v, true)) = self.options.get_numeric_value("crossover_primal_tol", "") {
+            o.primal_tol = v;
+        }
+        o
+    }
+
+    /// Post-convergence crossover (gh#612): hand the converged interior
+    /// iterate to the active-set path so the solve ends on an exact active
+    /// set. See [`crate::crossover`] for the algorithm.
+    ///
+    /// On acceptance this **replaces `data.curr`** rather than reporting
+    /// alongside it. Everything downstream — the residual drain, the KKT
+    /// fidelity gate, `on_converged`, `finalize_via_orig_nlp`, the end
+    /// summary — already reads that one iterate, so replacing it is what
+    /// makes the crossed-over point the solution instead of an annotation on
+    /// it, and it does so without a second copy of the unscaling path.
+    ///
+    /// A no-op unless `crossover=yes` and the solve converged: an
+    /// unconverged interior point is not a KKT point, so there is no active
+    /// set at it worth identifying.
+    fn maybe_crossover(
+        &mut self,
+        alg: &mut IpoptAlgorithm,
+        nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+        solver_status: SolverReturn,
+    ) {
+        self.crossover_report = None;
+        // Cleared on every entry, alongside the report, so the flag
+        // describes this solve and not a previous one — the same reason
+        // `crossover_report` is reset here rather than only written on
+        // the accept path.
+        alg.data.borrow_mut().curr_from_crossover = false;
+        let xopts = self.crossover_options();
+        if !xopts.enabled {
+            return;
+        }
+        if !matches!(
+            solver_status,
+            SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
+        ) {
+            return;
+        }
+        let Some(curr) = alg.data.borrow().curr.clone() else {
+            return;
+        };
+
+        // Seed, in the algorithm's compressed / scaled space. The SQP
+        // adapter presents that same space, so nothing is translated here
+        // beyond repacking the bound duals: `λ_x = z_l − z_u`.
+        let seed = crate::crossover::CrossoverSeed {
+            x: dense_values(&*curr.x),
+            lambda_g: {
+                let mut v = dense_values(&*curr.y_c);
+                v.extend(dense_values(&*curr.y_d));
+                v
+            },
+            lambda_x: crate::sqp::ipopt_adapter::pack_bound_multipliers(
+                nlp_handle,
+                &dense_values(&*curr.z_l),
+                &dense_values(&*curr.z_u),
+            ),
+        };
+
+        let snapshot = self.algorithm_builder_snapshot();
+        let sqp_opts = snapshot.sqp.clone();
+        let qp_opts = snapshot.sqp_qp.clone();
+        // Declared bounds, not the live relaxed ones: crossover's whole claim
+        // is that the returned point sits *on* the constraints the user
+        // wrote. Against the `bound_relax_factor`-widened box it would pivot
+        // to a point `1e-8` shy of every one of them and then correctly
+        // report an empty active set.
+        let mut adapter =
+            crate::sqp::IpoptNlpAdapter::new_with_declared_bounds(Rc::clone(nlp_handle));
+        let (report, accepted) = crate::crossover::run(
+            &mut adapter,
+            &seed,
+            &xopts,
+            &sqp_opts,
+            &qp_opts,
+            || {
+                let mut f = self.make_backend_factory();
+                // `make_backend_factory` ships the workspace-default
+                // backend regardless of the choice passed, exactly as the
+                // SQP path's `build_sqp_with_backend` call does; naming
+                // `Feral` here keeps that visible rather than implicit.
+                f(crate::alg_builder::LinearSolverChoice::Feral)
+            },
+            |step4_opts| {
+                let mut b = self.algorithm_builder_snapshot();
+                b.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+                b.sqp = step4_opts;
+                b.build_sqp_with_backend(self.make_backend_factory())
+            },
+        );
+
+        if let Some(res) = accepted {
+            self.install_crossover_iterate(alg, nlp_handle, &curr, &res);
+            // Publish the identified set as the SQP warm-start output. This
+            // is the IPM → SQP handoff the active-set path never had: a
+            // sequence whose first solve wants the interior method can now
+            // feed the next `algorithm=active-set-sqp` solve a working set.
+            self.sqp_last_working_set = res.working_set.clone();
+        }
+        tracing::debug!(target: "pounce::crossover", "crossover: {report:?}");
+        self.crossover_report = Some(report);
+    }
+
+    /// Write an accepted crossover result back onto the IPM iterate.
+    ///
+    /// All eight components have to move together: leaving `s`, `v_l` or
+    /// `v_u` describing the interior point while `x` and the duals describe
+    /// the crossed-over one would make the calculated quantities read off an
+    /// iterate that never existed, and the residuals reported to the user
+    /// would be neither point's. The slack relations are the barrier
+    /// problem's own — `s = d(x)` and `v_l − v_u = −y_d`.
+    fn install_crossover_iterate(
+        &self,
+        alg: &mut IpoptAlgorithm,
+        nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+        curr: &crate::iterates_vector::IteratesVector,
+        res: &crate::sqp::SqpResult,
+    ) {
+        let (m_c, m_d) = {
+            let b = nlp_handle.borrow();
+            (b.m_eq() as usize, b.m_ineq() as usize)
+        };
+        let y_c = &res.lambda_g[..m_c];
+        let y_d = &res.lambda_g[m_c..];
+        // `s = d(x)`: the adapter's combined constraint vector is `[c ; d]`,
+        // so the inequality block is its tail.
+        let mut adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(nlp_handle));
+        let c_all = crate::sqp::SqpProblemSpec::eval_c(&mut adapter, &res.x);
+        let s_new = &c_all[m_c..];
+        debug_assert_eq!(s_new.len(), m_d);
+        let (z_l, z_u) =
+            crate::sqp::ipopt_adapter::split_bound_multipliers(nlp_handle, &res.lambda_x);
+        let (v_l, v_u) = crate::sqp::ipopt_adapter::split_slack_multipliers(nlp_handle, y_d);
+
+        let mut out = curr.deep_copy();
+        let ok = set_dense(&mut *out.x, &res.x)
+            && set_dense(&mut *out.s, s_new)
+            && set_dense(&mut *out.y_c, y_c)
+            && set_dense(&mut *out.y_d, y_d)
+            && set_dense(&mut *out.z_l, &z_l)
+            && set_dense(&mut *out.z_u, &z_u)
+            && set_dense(&mut *out.v_l, &v_l)
+            && set_dense(&mut *out.v_u, &v_u);
+        if !ok {
+            // A non-dense backing or a length mismatch. POUNCE is dense-only,
+            // so this is defensive — but a partially-written iterate is worse
+            // than no crossover at all, so bail without touching `curr`.
+            tracing::warn!(
+                target: "pounce::crossover",
+                "crossover result did not fit the iterate; keeping the interior point"
+            );
+            return;
+        }
+        let mut d = alg.data.borrow_mut();
+        d.set_curr(out.freeze());
+        // Mark which frame the installed iterate belongs to. It sits on the
+        // *declared* bounds, and every barrier quantity built off `curr` —
+        // slacks, and through them `Σ = z/s` — is measured against the
+        // `bound_relax_factor`-widened ones, so a consumer that wants the
+        // point's own geometry rather than the barrier's has to know this
+        // happened (gh#654). Set only on the path that actually replaced
+        // `curr`: a declined or abandoned crossover leaves the interior
+        // iterate, which is an interior-frame point.
+        d.curr_from_crossover = true;
+    }
+
     fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
         let mut builder = AlgorithmBuilder::default();
         apply_sqp_options(&self.options, &mut builder.sqp);
@@ -2682,6 +2889,16 @@ impl IpoptApplication {
         // `Optimize` returns, regardless of solver_status).
         timing.overall_alg.end();
 
+        // gh#612: opt-in crossover. Runs here — after the algorithm is done
+        // but BEFORE the statistics drain, the status gates, the
+        // `on_converged` hook and `finalize_via_orig_nlp` — so that when it
+        // accepts, every one of those describes the point actually returned.
+        // Placing it later would mean reporting residuals for an iterate the
+        // user is not given, and would hide the exact active set from the
+        // post-optimal sensitivity hook, which is the first of the three
+        // consumers this exists for.
+        self.maybe_crossover(&mut alg, &nlp_handle, solver_status);
+
         // Drain counters / iter count off the algorithm.
         {
             let mut stats = self.statistics.borrow_mut();
@@ -2782,6 +2999,57 @@ impl IpoptApplication {
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
                 stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
                 stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
+
+                // Report an accepted crossover in the frame it solved in
+                // (#646). Everything above measures against the bounds the
+                // interior iteration ran against, which `bound_relax_factor`
+                // widened by `δ` before the solve. That is the right frame
+                // for an interior iterate — it never touches a bound — but a
+                // crossed-over point sits *exactly* on the constraints of the
+                // problem as declared, i.e. `δ` inside the relaxed ones, so
+                // the four `s·z` blocks above read `|multiplier| · δ`. For a
+                // unit multiplier and the default `δ = 1e-8` that is `1e-8`,
+                // which is `tol`: a strictly better point printed an `Overall
+                // NLP error` above tolerance, and the opt-in
+                // `kkt_fidelity_tol` gate below downgraded it.
+                //
+                // Only complementarity moves. Stationarity involves no
+                // bounds, and the crossed-over point is *interior* to the
+                // relaxed box, so its violation is zero under either reading.
+                //
+                // The substitution is confined to reporting. Crossover runs
+                // after the status is decided, and it only ever installs a
+                // point the never-regress gate accepted on the declared-bound
+                // residuals, so this cannot dress up a worse iterate — the
+                // measurement it replaces is the artifact.
+                if let Some(report) = self.crossover_report.as_ref()
+                    && report.accepted()
+                    && report.compl_after.is_finite()
+                {
+                    let compl_declared = report.compl_after;
+                    stats.final_compl = compl_declared;
+                    stats.final_kkt_error =
+                        cq.curr_nlp_error_with_complementarity(compl_declared, 0.0);
+                    stats.final_kkt_error_above_noise = cq.curr_nlp_error_with_complementarity(
+                        compl_declared,
+                        builder.conv_check.primal_noise_floor_kappa,
+                    );
+                    // Same unscaling as `curr_unscaled_complementarity_max`:
+                    // the slack's row factor and the multiplier's cancel in
+                    // the product, leaving the objective factor. Magnitude —
+                    // `obj_scaling_factor` is signed, `-1` being the
+                    // documented way to pose a maximization.
+                    let df = cq.obj_scaling_factor().abs();
+                    stats.final_unscaled_compl = if df == 0.0 || df == 1.0 {
+                        compl_declared
+                    } else {
+                        compl_declared / df
+                    };
+                    stats.final_unscaled_kkt_error = stats
+                        .final_unscaled_dual_inf
+                        .max(stats.final_unscaled_constr_viol)
+                        .max(stats.final_unscaled_compl);
+                }
             }
         }
 
@@ -3948,6 +4216,32 @@ fn is_l1_fallback_trigger(status: ApplicationReturnStatus) -> bool {
 /// fleshed out). On success returns the unscaled objective evaluated
 /// on the user TNLP at the final iterate; returns `Err` if the final
 /// iterate is missing.
+/// Read a `dyn Vector`'s entries. Empty for a non-dense backing; POUNCE is
+/// dense-only, so that is defensive rather than a supported case.
+fn dense_values(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
+    v.as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+        .map(|d| d.expanded_values())
+        .unwrap_or_default()
+}
+
+/// Overwrite a `dyn Vector`'s entries. Returns false — writing nothing —
+/// when the backing is not dense or the lengths disagree, so a caller
+/// updating several components together can abandon the whole update rather
+/// than leave a half-written iterate.
+fn set_dense(v: &mut dyn pounce_linalg::Vector, vals: &[Number]) -> bool {
+    match v
+        .as_any_mut()
+        .downcast_mut::<pounce_linalg::dense_vector::DenseVector>()
+    {
+        Some(d) if pounce_linalg::Vector::dim(d) as usize == vals.len() => {
+            d.set_values(vals);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn finalize_via_orig_nlp(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     alg: &IpoptAlgorithm,

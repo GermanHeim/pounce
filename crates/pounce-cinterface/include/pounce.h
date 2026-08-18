@@ -215,7 +215,24 @@ bool SetIpoptProblemScaling(
 
 /** Install (or remove, with cb == NULL) a per-iteration callback.
  *  Returning false from the callback signals
- *  ApplicationReturnStatus::User_Requested_Stop. */
+ *  ApplicationReturnStatus::User_Requested_Stop.
+ *
+ *  Fires from the outer loop with `alg_mod = 0` (RegularMode) and from
+ *  the feasibility-restoration inner solver with `alg_mod = 1`
+ *  (RestorationPhaseMode). Two things about the restoration fires:
+ *
+ *   - The scalars beside `alg_mod` (`obj_value`, `inf_pr`, `inf_du`,
+ *     `mu`, `d_norm`, `regularization_size`, `alpha_*`, `ls_trials`)
+ *     describe the min-||c||_1 feasibility subproblem, not your NLP.
+ *     `alg_mod` is what tells them apart; do not plot them on one axis
+ *     without checking it.
+ *   - The GetIpoptCurrent* inspectors report no data for the duration.
+ *     The restoration iterate is not a point of your problem, and does
+ *     not even have its dimensions.
+ *
+ *  Returning false from a restoration fire ends the solve at the last
+ *  iterate accepted for your NLP, not at the subproblem's iterate — so
+ *  a caller aborting on a deadline gets back a point it can use. */
 bool SetIntermediateCallback(
     IpoptProblem    ipopt_problem,
     Intermediate_CB intermediate_cb);
@@ -322,10 +339,12 @@ ipnumber GetIpoptComplInf(IpoptProblem ipopt_problem);
  * cumulative seconds spent there — enough to answer "did this solve
  * struggle, and how much of it was restoration?".
  *
- * This is solve-level, not per-iteration: pounce fires the intermediate
- * callback only from its outer loop and always reports
- * `RegularMode` in `alg_mod`, so a caller cannot yet label an
- * individual iteration as a restoration one.
+ * This is solve-level. Individual iterations can be labelled too — the
+ * intermediate callback fires from the restoration inner solver with
+ * `alg_mod = 1` (`RestorationPhaseMode`); see `SetIntermediateCallback`
+ * for what those fires do and do not carry. These counters remain the
+ * only source for the inner iteration count and the wall time, and the
+ * only way to ask the question without installing a callback.
  */
 void GetPounceRestorationStats(
     IpoptProblem ipopt_problem,

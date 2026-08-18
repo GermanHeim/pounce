@@ -64,6 +64,12 @@ endif
 
 PLUGIN := libcasadi_nlpsol_pounce.$(SO_EXT)
 
+# gh#667 regression driver. A C++ host, not a Python one: the Python
+# bindings leave `Logger::flush` at its default, so the same check driven
+# from test_parity.py would measure CasADi's buffering rather than the
+# plugin's flushing. See the comment at the top of the source.
+TEARTEST := test_output_interleaving
+
 # Version macros CasADi's headers expect, derived from the installed
 # CasADi rather than hard-coded.
 VER_MAJOR := $(word 1,$(subst ., ,$(CASADI_VER)))
@@ -149,7 +155,11 @@ install: all
 uninstall:
 	rm -f $(CASADI_LIB)/$(PLUGIN)
 
-test: all
+$(TEARTEST): $(TEARTEST).cpp $(PLUGIN)
+	$(CXX) $(CXXFLAGS) $(DEFS) $(INCLUDES) -o $@ $< \
+	  -L$(CASADI_LIB) -lcasadi $(RPATH)
+
+test: all $(TEARTEST)
 	CASADIPATH=$(CURDIR) $(PYTHON) test_parity.py
 
 examples: all
@@ -159,4 +169,4 @@ examples: all
 	done
 
 clean:
-	rm -f $(PLUGIN)
+	rm -f $(PLUGIN) $(TEARTEST)

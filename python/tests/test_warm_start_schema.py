@@ -21,6 +21,7 @@ before the schema existed.
 
 import dataclasses
 import os
+import warnings
 
 os.environ.setdefault("RUST_LOG", "off")
 
@@ -28,6 +29,7 @@ import numpy as np
 import pytest
 
 import pounce
+from pounce._warm_start_schema import ORDERING_UNVERIFIED_NOTE
 from pounce import (
     WarmStart,
     WarmStartCompatibilityError,
@@ -1134,3 +1136,129 @@ def test_the_note_also_rides_on_a_mismatch_report():
     ws = WarmStart.from_info(x, info, problem=p, probe=False)
     report = ws.describe_compatibility(make(ub=4.0))
     assert "bounds:" in report and "pure reordering" in report
+
+
+# --- gh#660: a clean verdict that could not have seen a reordering ---------
+def test_a_clean_but_unverifiable_check_warns_that_it_was_unverifiable():
+    """gh#660. `check_compatible` computed `unordered` on every path but
+    rendered it only inside `if mismatches:`, so the one case the note
+    exists for — nothing disagreed, *and* nothing could have seen a
+    reordering — was the one case that stayed silent. Only
+    `describe_compatibility`, which the caller has to know to call, ever
+    said it."""
+    ws = signed(probe=False)                      # signed, but no probe facet
+    with pytest.warns(pounce.WarmStartOrderingUnverifiedWarning,
+                      match="pounce#621"):
+        assert ws.check_compatible(make(obj=HS071(perm=PERM))) == []
+
+
+def test_a_verifiable_clean_check_stays_quiet():
+    """The note is about a *blind* comparison. When the probe ran on both
+    sides the check really did rule a reordering out, and saying
+    otherwise would train the reader to ignore it."""
+    ws = signed()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make()) == []
+
+
+def test_stable_ids_on_both_sides_also_silence_the_note():
+    ws = signed(var_ids=VAR_IDS, con_ids=CON_IDS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ws.check_compatible(make(), var_ids=VAR_IDS,
+                                   con_ids=CON_IDS) == []
+
+
+def test_the_note_can_be_raised_to_a_refusal():
+    """A warning category rather than a print is what lets a caller who
+    would rather refuse than replay unverified say so."""
+    ws = signed(probe=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "error", pounce.WarmStartOrderingUnverifiedWarning)
+        with pytest.raises(pounce.WarmStartOrderingUnverifiedWarning):
+            make(obj=HS071(perm=PERM)).solve(warm_start=ws)
+
+
+def test_a_mismatched_check_still_carries_the_note_inline(recwarn):
+    """The pre-existing rendering — inside the report — must not have
+    turned into a second, separate warning."""
+    ws = signed(probe=False)
+    with pytest.warns(WarmStartCompatibilityWarning) as rec:
+        ws.check_compatible(make(n=5), compat="warn")
+    assert len(rec) == 1
+    assert ORDERING_UNVERIFIED_NOTE in str(rec[0].message)
+
+
+def test_a_legacy_artifact_does_not_get_told_twice(tmp_path):
+    """An unsigned artifact read from a file already gets
+    WarmStartLegacyWarning, which says the same thing in more detail.
+    Emitting both would be noise, so the new note is scoped to *signed*
+    states — which is every case gh#660 names."""
+    p, cold_x, cold_info = cold()
+    path = tmp_path / "legacy.npz"
+    _write_v1(path, WarmStart.from_info(cold_x, cold_info))
+    with pytest.warns(WarmStartLegacyWarning) as rec:
+        WarmStart.load(path).check_compatible(make())
+    assert len(rec) == 1
+    assert not any(
+        isinstance(w.message, pounce.WarmStartOrderingUnverifiedWarning)
+        for w in rec
+    )
+
+
+# --- gh#659: the per-block scale must actually be per-block ----------------
+class HS071Offset(HS071):
+    """HS071 plus an additive constant on the objective.
+
+    The constant changes no derivative, no constraint and no solution —
+    it is inert to the optimization. It exists only to make the
+    objective block's L1 scale large.
+    """
+
+    def __init__(self, offset, **kw):
+        super().__init__(**kw)
+        self.offset = offset
+
+    def objective(self, x):
+        return super().objective(x) + self.offset
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e3, 1e6, 1e9, 1e12])
+def test_an_inert_objective_offset_does_not_blind_the_probe(offset):
+    """gh#659. `floor = max(scales)` made every block's tolerance the
+    *largest* block's, so inflating the objective raised the gradient,
+    constraint and jacobian tolerances too. Past ~1e9 that was enough to
+    swallow a variable transposition — on `check_compatible`, the gate
+    that is supposed to refuse it, not just on the dry run."""
+    base = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset))).probe
+    permuted = pounce.ProblemSignature.from_problem(
+        make(obj=HS071Offset(offset, perm=PERM))).probe
+    from pounce._warm_start_schema import _probe_agrees
+
+    assert not _probe_agrees(base, permuted), (
+        f"a reordering went undetected at objective offset {offset:g}"
+    )
+
+
+def test_the_probe_floor_still_rescues_a_near_zero_block():
+    """The floor is not merely deleted: a block that computes to ~0 out
+    of cancellation of large terms must still not be held to bit
+    equality, which is what it was there for."""
+    from pounce._warm_start_schema import _PROBE_PROJECTIONS, _probe_agrees
+
+    stride = _PROBE_PROJECTIONS + 1
+    # block 0 is large; block 1 computes to zero with absolute noise
+    # commensurate with block 0's magnitude.
+    a = [1e8] * _PROBE_PROJECTIONS + [4e8] + [0.0] * _PROBE_PROJECTIONS + [0.0]
+    b = list(a)
+    for k in range(stride, stride + _PROBE_PROJECTIONS):
+        b[k] = 1e-8                      # ~1e-16 relative to block 0
+    assert _probe_agrees(a, b)
+
+    # but a difference the size of block 0 itself is still a difference
+    c = list(a)
+    c[stride] = 1e6
+    assert not _probe_agrees(a, c)

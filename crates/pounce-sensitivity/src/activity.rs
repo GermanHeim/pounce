@@ -39,9 +39,12 @@
 //!
 //! Everything read here is retained by the converged state the
 //! backsolver already holds: the bound multipliers on the iterate, the
-//! solver's own slacks, `Σ` as `curr_sigma_x` / `curr_sigma_s`, the
-//! barrier parameter, and the exact Lagrangian Hessian, so `H` is
-//! never recovered from the barrier-augmented factor.
+//! solver's own slacks, `Σ` through the backsolver's
+//! `barrier_sigma_x` / `barrier_sigma_s` — `curr_sigma_x` /
+//! `curr_sigma_s` unless the held iterate came from crossover, in which
+//! case the declared-frame diagonal the factor is also built with
+//! (gh#654) — the barrier parameter, and the exact Lagrangian Hessian,
+//! so `H` is never recovered from the barrier-augmented factor.
 //!
 //! The report is indexed in **user space**: `var_*` arrays have the
 //! user TNLP's full variable count and `row_*` arrays its full
@@ -370,12 +373,18 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let has_u = present(&px_u, n);
     let z_l = expand(&dense_to_vec(mult_z_l.as_ref()), &px_l, n);
     let z_u = expand(&dense_to_vec(mult_z_u.as_ref()), &px_u, n);
+    // The solver's own slacks, deliberately, even when `Σ` below comes
+    // from the declared frame (gh#654): these feed `off_path` only, and
+    // "is `s·z` near `μ`" is a question about the central path, which is
+    // the barrier's geometry and therefore the barrier's slacks. A
+    // crossed-over point is off that path by construction and reads so
+    // under either frame.
     let s_l = expand(&dense_to_vec(cq.curr_slack_x_l().as_ref()), &px_l, n);
     let s_u = expand(&dense_to_vec(cq.curr_slack_x_u().as_ref()), &px_u, n);
     // `Σ̃_i = df·Σ_i/d_i²`: the `d_i²` comes out here, the `df` on
     // export below (it cancels in every ratio, so classification never
     // sees it).
-    let sigma_x: Vec<Number> = dense_to_vec(cq.curr_sigma_x().as_ref())
+    let sigma_x: Vec<Number> = dense_to_vec(bs.barrier_sigma_x().as_ref())
         .iter()
         .enumerate()
         .map(|(i, &s)| s * dv(i) * dv(i))
@@ -417,7 +426,7 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let v_u = expand(&dense_to_vec(mult_v_u.as_ref()), &pd_u, m_d);
     let rs_l = expand(&dense_to_vec(cq.curr_slack_s_l().as_ref()), &pd_l, m_d);
     let rs_u = expand(&dense_to_vec(cq.curr_slack_s_u().as_ref()), &pd_u, m_d);
-    let sigma_s = dense_to_vec(cq.curr_sigma_s().as_ref());
+    let sigma_s = dense_to_vec(bs.barrier_sigma_s().as_ref());
 
     let jac_d = cq.curr_jac_d();
     // One pass over the Jacobian triplets gathers every row's support

@@ -10,6 +10,8 @@ same model, so a failure says "the two solvers disagree", not "the
 number moved".
 """
 
+import itertools
+import json
 import os
 import shutil
 import subprocess
@@ -663,6 +665,76 @@ def test_repeated_solves_do_not_concatenate_the_trace():
           f"pounce={lengths} ipopt={ip}")
 
 
+def test_restoration_iterations_are_labelled():
+    """`iterations['alg_mod']` separates outer rows from restoration ones.
+
+    POUNCE used to fire the intermediate callback only from its outer
+    loop, so this column would have been constant zero and #637 declined
+    to publish it. gh#645 made the restoration inner solver fire too,
+    which is what gives the column something to say — and what makes it
+    load-bearing: on a restoration row the other vectors describe the
+    min-||c||_1 feasibility subproblem, not this NLP.
+    """
+    clean = rosenbrock_nlp()
+    S = ca.nlpsol("S", "pounce", clean, QUIET_POUNCE)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    it = S.stats()["iterations"]
+    check("stats: iterations carries alg_mod", "alg_mod" in it,
+          f"keys = {sorted(it)}")
+    if "alg_mod" not in it:
+        return
+    check("stats: alg_mod is as long as the other traces",
+          len(it["alg_mod"]) == len(it["inf_pr"]),
+          f"{len(it['alg_mod'])} vs {len(it['inf_pr'])}")
+    check("stats: a clean solve is all regular iterations",
+          set(it["alg_mod"]) <= {0}, f"{sorted(set(it['alg_mod']))}")
+
+    # The infeasible equality from `test_restoration_stats`: this one
+    # actually restores.
+    x = ca.MX.sym("x")
+    hard = {"x": x, "f": x**2, "g": x**2 + 1}
+    R = ca.nlpsol("R", "pounce", hard, dict(QUIET_POUNCE))
+    try:
+        R(x0=0.5, lbg=0, ubg=0)
+    except RuntimeError:
+        pass
+    st = R.stats()
+    modes = st["iterations"]["alg_mod"]
+    check("stats: restoration iterations are labelled 1",
+          any(m == 1 for m in modes),
+          f"{st['return_status']}, alg_mod = {modes}")
+
+    # The column has to stay usable as an index into the others.
+    check("stats: alg_mod still aligns with the traces under restoration",
+          len(modes) == len(st["iterations"]["inf_pr"]),
+          f"{len(modes)} vs {len(st['iterations']['inf_pr'])}")
+
+    # `iter_count` must keep describing the outer solve. The inner
+    # solver restarts its own counter from zero on every restoration
+    # entry, so recording those would leave `iter_count` reporting
+    # whatever the last episode happened to reach — the same class of
+    # disagreement #637 fixed for the accumulating trace, one level down.
+    #
+    # Necessary rather than sufficient, but it is the part an outside
+    # caller can see: a clobbered `iter_count` could not exceed the
+    # longest run of restoration rows, because that run is what would
+    # have written it.
+    longest_resto_run = max((len(list(g)) for m, g in
+                             itertools.groupby(modes) if m == 1), default=0)
+    check("stats: iter_count is the outer count, not the inner one",
+          st["iter_count"] > longest_resto_run,
+          f"iter_count {st['iter_count']} vs longest restoration run "
+          f"{longest_resto_run}")
+
+    # Note for anyone reading the two side by side: `iter_count` counts
+    # more than the regular rows here (the outer counter advances across
+    # a restoration episode, as upstream's does — its `r`-suffixed rows
+    # share the same counter). That predates gh#645 and is unchanged by
+    # it; `test_repeated_solves_do_not_concatenate_the_trace` is where
+    # the exact trace/`iter_count` agreement is pinned, on solves that
+    # never restore.
+
+
 def test_final_kkt_errors_in_stats():
     """The final infeasibilities POUNCE already computes, in `stats()`."""
     nlp = rosenbrock_nlp()
@@ -887,6 +959,130 @@ def _compile_generated(solver, workdir, stem):
     return ca.external(solver.name(), so)
 
 
+def test_output_does_not_tear_embedder_lines():
+    """gh#667: POUNCE's log must not split a line the embedder is printing
+    from inside a callback.
+
+    Driven by a C++ host (`test_output_interleaving.cpp`), not from here.
+    CasADi's Python bindings point `Logger::writeFun` at `PySys_WriteStdout`
+    but leave `Logger::flush` at `flushDefault`, so the plugin's flush drains
+    `std::cout` while the bytes are sitting in Python's `sys.stdout`. Run
+    from Python this would report on CasADi's buffering, not on the plugin's
+    flushing, and would keep passing however broken the plugin got.
+
+    The driver prints a long line in chunks from `iteration_callback` while
+    POUNCE writes its iteration rows to the same descriptor. Pre-fix every
+    such line arrives without its terminator.
+    """
+    exe = os.path.join(HERE, "test_output_interleaving")
+    if not os.path.exists(exe):
+        print("SKIP  output interleaving (driver not built; run `make`)")
+        return
+    env = dict(os.environ, CASADIPATH=HERE)
+    # stdout must be a pipe: on a tty the competing buffer is line-buffered
+    # and the tear cannot happen in the first place.
+    out = subprocess.run([exe], env=env, capture_output=True, text=True,
+                         timeout=300).stdout
+    host = [ln for ln in out.splitlines() if ln.startswith("HOST ")]
+    torn = [ln for ln in host if not ln.endswith(" END")]
+    check("output: the embedder actually printed", len(host) > 1,
+          f"{len(host)} lines from the callback")
+    check("output: POUNCE does not tear embedder lines (gh#667)",
+          not torn, f"{len(torn)}/{len(host)} lines torn")
+
+
+def test_solve_report_option():
+    """`solve_report` writes POUNCE's structured report (gh#644).
+
+    Both entry points (`IpoptEnableIterHistory`, `IpoptWriteSolveReport`)
+    already existed in the C interface; what was missing was any way for
+    a CasADi caller to reach them, so the report was available to a
+    `pounce` CLI user and not to this one.
+    """
+    nlp = rosenbrock_nlp()
+
+    # Off by default: no keys claiming a report, and nothing written.
+    S = ca.nlpsol("S", "pounce", nlp, QUIET_POUNCE)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    st = S.stats()
+    check("solve_report: absent from stats when not requested",
+          "solve_report" not in st and "solve_report_written" not in st,
+          f"keys = {sorted(k for k in st if 'report' in k)}")
+
+    with tempfile.TemporaryDirectory() as d:
+        full = os.path.join(d, "full.json")
+        F = ca.nlpsol("F", "pounce", nlp,
+                      dict(QUIET_POUNCE, solve_report=full,
+                           solve_report_detail="full"))
+        F(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+        st = F.stats()
+        check("solve_report: stats reports the write", 
+              st.get("solve_report_written") is True and st.get("solve_report") == full,
+              f"{st.get('solve_report_written')}, {st.get('solve_report')}")
+        check("solve_report: file exists", os.path.exists(full))
+        if not os.path.exists(full):
+            return
+        with open(full) as fh:
+            report = json.load(fh)
+        check("solve_report: schema is pounce.solve-report/v1",
+              report.get("schema") == "pounce.solve-report/v1",
+              str(report.get("schema")))
+
+        # `detail=full` is the whole reason `IpoptEnableIterHistory` has
+        # to be called before the solve; if that ordering were wrong the
+        # report would arrive with no trajectory and nothing saying why.
+        traj = report.get("iterations")
+        check("solve_report: full embeds the trajectory",
+              isinstance(traj, list) and len(traj) > 0,
+              f"{type(traj).__name__}, {len(traj) if isinstance(traj, list) else 0} entries")
+        # Same convention as `stats()['iterations']`: the initial point
+        # is recorded too, so the trajectory is one longer than the
+        # iteration count. A disagreement here means the two views of one
+        # solve are describing different things — the defect class #637
+        # fixed for the trace.
+        if isinstance(traj, list):
+            check("solve_report: trajectory agrees with iter_count",
+                  len(traj) == st["iter_count"] + 1,
+                  f"{len(traj)} entries vs iter_count {st['iter_count']}")
+
+        # Default detail is a summary: same report, no trajectory. Worth
+        # pinning because the cost of `full` is a retained iterate per
+        # iteration, and a default that quietly paid it would be a
+        # surprise on a long solve.
+        summary = os.path.join(d, "summary.json")
+        M = ca.nlpsol("M", "pounce", nlp, dict(QUIET_POUNCE, solve_report=summary))
+        M(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+        with open(summary) as fh:
+            sm = json.load(fh)
+        check("solve_report: summary is the default and omits the trajectory",
+              sm.get("schema") == "pounce.solve-report/v1" and not sm.get("iterations"),
+              f"iterations = {sm.get('iterations')}")
+
+        # A typo costs the construction, not a solve.
+        try:
+            ca.nlpsol("B", "pounce", nlp,
+                      dict(QUIET_POUNCE, solve_report=os.path.join(d, "b.json"),
+                           solve_report_detail="verbose"))
+            refused, detail = False, "accepted"
+        except RuntimeError as exc:
+            refused = "solve_report_detail" in str(exc)
+            detail = str(exc).strip().splitlines()[-1][:70]
+        check("solve_report: an invalid detail is refused at construction",
+              refused, detail)
+
+        # An unwritable path must not cost the answer. The solve
+        # succeeded; a diagnostic file that could not be written is a
+        # warning and a False in stats, not a failed solve.
+        bad = os.path.join(d, "no-such-dir", "r.json")
+        B = ca.nlpsol("B2", "pounce", nlp, dict(QUIET_POUNCE, solve_report=bad))
+        r = B(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+        st = B.stats()
+        check("solve_report: an unwritable path does not fail the solve",
+              st["success"] and st.get("solve_report_written") is False,
+              f"success={st['success']}, written={st.get('solve_report_written')}, "
+              f"x={r['x']}")
+
+
 def test_codegen_matches_the_interpreted_solve():
     """`solver.generate()` — the model *and* the solve, as compiled C.
 
@@ -986,6 +1182,7 @@ def test_codegen_refuses_what_it_cannot_reproduce():
         ("iteration_callback", {"iteration_callback": Noop()}),
         ("warm_start_from_previous", {"warm_start_from_previous": True}),
         ("convexify_strategy", {"convexify_strategy": "eigen-clip"}),
+        ("solve_report", {"solve_report": "report.json"}),
     ]
     with tempfile.TemporaryDirectory() as d:
         for label, opts in cases:
@@ -1038,10 +1235,13 @@ def main():
         test_final_kkt_errors_in_stats,
         test_linear_solver_stats,
         test_restoration_stats,
+        test_restoration_iterations_are_labelled,
         test_live_diagnostics_during_the_callback,
         test_option_types_come_from_pounce_not_the_literal,
+        test_solve_report_option,
         test_codegen_matches_the_interpreted_solve,
         test_codegen_refuses_what_it_cannot_reproduce,
+        test_output_does_not_tear_embedder_lines,
     ):
         t()
     print()

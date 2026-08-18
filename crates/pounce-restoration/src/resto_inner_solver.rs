@@ -73,6 +73,98 @@ const RESTO_INNER_MAX_ITERS: i32 = 3000;
 /// (`IpRestoConvCheck.cpp:144` `maximum_resto_iters`).
 const RESTO_MAX_SUCCESSIVE_ITERS: i32 = 3000;
 
+/// How much worse than the violation restoration was *entered* at a
+/// recovered point may be and still support a locally-infeasible verdict
+/// from one of the reconstructed gates in [`run_inner_resto`] (gh#661).
+///
+/// Those gates infer "the sub-solve stalled" from a terminal status and
+/// then test only that the violation is large. A diverging restoration
+/// passes that size test ever more strongly the further it blows up, which
+/// is how a model that solves at default options got reported infeasible at
+/// a point 105,700x worse than restoration's own starting violation. One
+/// order of magnitude lets a plateau wander — the signature these gates
+/// describe sits at ~1x entry — without admitting a blow-up.
+const RESTO_DIVERGENCE_HEADROOM: f64 = 10.0;
+
+/// Outer iterations spent at an unimprovable constraint violation after
+/// which a solve is taken to have demonstrated a floor, independent of
+/// how its restoration sub-solve finally exited.
+///
+/// Measured by [`pounce_algorithm::inf_pr_floor::InfPrFloor`], not by a raw iteration count. The
+/// distinction is the whole of gh#664's residual defect: a count says the
+/// solve *ran* a long time, which is not the claim the reconstructed
+/// gates make. The claim is that it ran out of room, and a solve can
+/// burn any number of iterations while still descending.
+///
+/// The threshold sits in a wide measured gap. Over the fixture sweep the
+/// two trajectories that earn the exemption accumulate 943 and 890
+/// iterations at their floor. Across all 57 fixtures on three option
+/// arms, every row where the guard engages sits at 31 or below —
+/// `pooling_rt2stp` at 7, `hs71_obj1e8` at 1, bounded above by their own
+/// outer solve lengths. 200 is 6x clear of the largest non-floor case and
+/// 4x under the smallest genuine one, so neither side is decided by where
+/// exactly the line falls inside that band.
+const RESTO_STALL_EVIDENCE_ITERS: Index = 200;
+
+/// Whether a restoration sub-solve ended somewhere enough *worse* than it
+/// began that the five reconstructed gates in [`run_inner_resto`] have no
+/// basis for a locally-infeasible verdict (gh#661).
+///
+/// `orig_curr_inf_pr` is the original-NLP violation the outer handed to this
+/// restoration call; `orig_inf_pr_scaled` is where the sub-solve left it.
+/// Both are in the scaled space (`orig_curr_inf_pr` is the same reference the
+/// kappa-reduction guard measures progress against). Restoration exists to
+/// *reduce* that number, so a point an order of magnitude worse than entry is
+/// not a point restoration converged to.
+///
+/// Three ways this returns `false`, each deliberate:
+///
+/// - **No usable reference.** A non-finite or non-positive entry violation
+///   gives nothing to measure divergence against, so the gates are left as
+///   they were rather than suppressed on a ratio against zero.
+/// - **The floor is already evidenced.** `outer_iters_at_floor` is
+///   [`pounce_algorithm::inf_pr_floor::InfPrFloor::iters_at_floor`]
+///   off the *outer* `IpoptData`: how many outer iterates sat within an
+///   order of magnitude of the floor that count is measured against — a
+///   reference pinned where the count started, so a solve still working
+///   its way down clears it and restarts rather than accumulating.
+///   Past [`RESTO_STALL_EVIDENCE_ITERS`] of those
+///   the solve has shown it cannot get below that violation, and a
+///   restoration blow-up at the end is the tail of that trajectory rather
+///   than a description of it. `issue_508_infeasible_gap_1em2` spends 943
+///   of its 1016 outer iterations pinned at the `1.0e-2` gap the fixture is
+///   built around before its four-iteration sub-solve jumps to `3.19e9`;
+///   the final `1e11x` ratio is an artifact of those four iterations.
+/// - **Within headroom.** A plateau, which is the signature these gates
+///   actually describe, lands at ~1x entry.
+///
+/// The evidence is read at outer scope on purpose. gh#664 read the *inner*
+/// IPM's `iter_count`, which its comments described as the sub-solve's own
+/// length; it is not. That counter is seeded from the outer's to mirror
+/// upstream `IpRestoMinC_1Nrm.cpp:181`, so the `1019` those comments cited
+/// is 1015 outer iterations plus a four-iteration sub-solve. Restoration
+/// sub-solves are short — 4 to 12 iterations across every fixture measured
+/// — so there was never a thousand-iteration sub-solve to observe, and any
+/// per-sub-solve measure of a long stall is measuring a window too small to
+/// hold one. The long trajectory lives in the outer loop.
+///
+/// Never applied to the layer-2 verdict (gh#438): that one is not
+/// reconstructed — the sub-solve's own convergence check issued it at a point
+/// it certified — so it already carries the stall evidence the other five
+/// infer.
+fn diverged_from_restoration_entry(
+    orig_curr_inf_pr: f64,
+    orig_inf_pr_scaled: f64,
+    outer_iters_at_floor: Index,
+) -> bool {
+    let entry_reference_usable = orig_curr_inf_pr.is_finite() && orig_curr_inf_pr > 0.0;
+    let floor_already_evidenced = outer_iters_at_floor >= RESTO_STALL_EVIDENCE_ITERS;
+
+    entry_reference_usable
+        && !floor_already_evidenced
+        && orig_inf_pr_scaled > RESTO_DIVERGENCE_HEADROOM * orig_curr_inf_pr
+}
+
 /// Build the restoration convergence-check adapter, threading the inner
 /// IPM's *user-derived* stationarity tolerances (`tol`,
 /// `acceptable_tol`, `acceptable_iter`) through to the sub-solve.
@@ -115,7 +207,13 @@ pub fn make_resto_inner_solver(
     mut backend_factory_factory: InnerBackendFactoryFactory,
 ) -> crate::min_c_1nrm::RestoInnerSolver {
     Box::new(
-        move |outer_data, outer_cq, outer_nlp, orig_progress_cb, print_iter_output, debug_hook| {
+        move |outer_data,
+              outer_cq,
+              outer_nlp,
+              orig_progress_cb,
+              print_iter_output,
+              debug_hook,
+              intermediate_tnlp| {
             run_inner_resto(
                 outer_data,
                 outer_cq,
@@ -126,6 +224,7 @@ pub fn make_resto_inner_solver(
                 orig_progress_cb,
                 print_iter_output,
                 debug_hook,
+                intermediate_tnlp,
             )
         },
     )
@@ -245,6 +344,7 @@ pub fn run_inner_resto(
     orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
     print_iter_output: bool,
     debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -568,6 +668,17 @@ pub fn run_inner_resto(
     if let Some(h) = debug_hook {
         alg = alg.with_debug_hook(h);
     }
+    // Forward the user's TNLP so `intermediate_callback` fires per inner
+    // iteration (gh#645), flagged so those fires carry
+    // `AlgorithmMode::RestorationPhaseMode` and skip the live-inspector
+    // context — the inner iterate is a compound `(x_orig, n, p)` vector,
+    // not a point of the user's NLP. Left unset when the caller
+    // installed no callback, so nothing about this path is reachable for
+    // them.
+    if let Some(t) = intermediate_tnlp {
+        alg = alg.with_tnlp(t);
+        alg.fires_as_restoration = true;
+    }
     // Forward the outer `print_level == 0` gate. Suppresses the
     // restoration `r`-suffixed iter table; the resto-of-resto level
     // also inherits the same flag (its `RestorationPhase` impl is the
@@ -598,6 +709,26 @@ pub fn run_inner_resto(
         let d = alg.data.borrow();
         (d.iter_count, d.info_iters_since_header, d.info_last_output)
     };
+
+    // gh#645: the user's callback returned `false` from a restoration
+    // fire. Return before the locally-infeasible adjudication below
+    // rather than after it: that verdict is a claim about the original
+    // NLP's feasibility, and a sub-solve the user interrupted has not
+    // finished earning it. The caller maps this to
+    // `RestorationOutcome::UserRequestedStop` and drops `trial_x` /
+    // `trial_s` on the floor — they are carried here only because the
+    // struct is shared with the success path.
+    if matches!(status, SolverReturn::UserRequestedStop) {
+        return Some(RestoSolveResult {
+            trial_x,
+            trial_s,
+            iter_count: inner_iter_count,
+            iters_since_header,
+            last_output,
+            locally_infeasible: false,
+            user_requested_stop: true,
+        });
+    }
 
     // Locally-infeasible detection. Mirrors upstream
     // `IpRestoConvCheck.cpp:208-241`: fires when the inner sub-IPM
@@ -709,7 +840,7 @@ pub fn run_inner_resto(
     // burned with no exit. Conservative threshold to avoid
     // misclassifying genuinely under-resourced solves.
     let cycle_locally_infeasible = matches!(status, SolverReturn::MaxiterExceeded)
-        && inner_iter_count >= 1000
+        && inner_iter_count >= RESTO_STALL_EVIDENCE_ITERS
         && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
 
@@ -821,22 +952,74 @@ pub fn run_inner_resto(
     // preceding safeguards in this area were each added to one path and not its
     // twin, and a hole survived both times.
     let solver_would_call_it_feasible = orig_inf_pr_scaled <= outer_tol;
-    let locally_infeasible = !solver_would_call_it_feasible
-        && (verdict_locally_infeasible
-            || strict_locally_infeasible
+
+    // Divergence guard over the five *reconstructed* gates (gh#661).
+    //
+    // Each of those gates reconstructs "the sub-solve stalled at a point it
+    // could not improve on" after the fact, from a terminal status plus a
+    // KKT residual — and every one of them then tests only that the residual
+    // violation is *large* (`is_significant`). Large is not the same claim as
+    // stalled. A restoration that is actively *diverging* satisfies the size
+    // test more emphatically the worse it gets, so the size test alone reads
+    // a blow-up as strong evidence for the verdict it most contradicts.
+    //
+    // `orig_curr_inf_pr` is the original-NLP violation the outer handed to
+    // this restoration call, in the same scaled space as `orig_inf_pr_scaled`
+    // (it is the reference the kappa-reduction guard measures progress
+    // against). Restoration exists to *reduce* that number; the kappa guard
+    // will not even call the sub-solve converged until it reaches
+    // `kappa_resto` (0.9) of it. A point an order of magnitude *worse* than
+    // where restoration started is not a point restoration converged to, and
+    // "converged to a point of local infeasibility" — an affirmative claim
+    // about the user's model — has no basis there. `Restoration_Failed`, the
+    // solver admitting it failed, is the honest answer.
+    //
+    // Measured on `pooling_rt2stp.nl` under `mehrotra_algorithm=yes`: the
+    // `step_failure` gate fired at `entry_inf_pr = 6.957e0`,
+    // `orig_inf_pr = 7.355e5` — restoration made feasibility 105,700x worse,
+    // with the inner's `inf_pr` climbing monotonically (2.61e2, 5.67e3,
+    // 6.24e4, 7.35e5) and `||d||` reaching 1.64e9, and the model was reported
+    // infeasible. It is not; at default options the same model solves. The
+    // same run on #619's parent commit differed only in that its inner
+    // exploded at iteration 19 rather than 32, missing the gate's `iter >= 30`
+    // floor — identical divergence, opposite verdict, decided by an iteration
+    // count. #619 did not introduce the defect, only a starting point that
+    // reaches it.
+    //
+    // The waiver, the headroom's looseness, and why the layer-2 verdict is
+    // exempt are all documented on `diverged_from_restoration_entry`. The
+    // short of it: `hs71_obj1e8` and `pooling_rt2stp` are feasible models
+    // whose outer solves ran 25 and 20 iterations and never demonstrated a
+    // floor at all (1 and 7 iterations at one), while
+    // `issue_508_infeasible_gap_1em2` — which reaches a *correct* verdict —
+    // spent 943 outer iterations unable to get below the `1.0e-2` gap it is
+    // built around.
+    //
+    // Read off the *outer* `IpoptData`, which is where that trajectory
+    // lives: this sub-solve ran four iterations.
+    let outer_iters_at_floor = outer_data.borrow().inf_pr_floor.iters_at_floor();
+    let diverged_from_entry =
+        diverged_from_restoration_entry(orig_curr_inf_pr, orig_inf_pr_scaled, outer_iters_at_floor);
+
+    let reconstructed_locally_infeasible = !diverged_from_entry
+        && (strict_locally_infeasible
             || alt_locally_infeasible
             || cycle_locally_infeasible
             || step_failure_locally_infeasible
             || tiny_step_locally_infeasible);
 
+    let locally_infeasible = !solver_would_call_it_feasible
+        && (verdict_locally_infeasible || reconstructed_locally_infeasible);
+
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} at_floor={} floor={:.6e} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
             orig_inf_pr_at_final,
             orig_inf_pr_scaled,
+            orig_curr_inf_pr,
             outer_tol,
             verdict_locally_infeasible,
             strict_locally_infeasible,
@@ -844,6 +1027,9 @@ pub fn run_inner_resto(
             cycle_locally_infeasible,
             step_failure_locally_infeasible,
             tiny_step_locally_infeasible,
+            diverged_from_entry,
+            outer_iters_at_floor,
+            outer_data.borrow().inf_pr_floor.floor(),
             locally_infeasible
         );
     }
@@ -866,6 +1052,7 @@ pub fn run_inner_resto(
         iters_since_header,
         last_output,
         locally_infeasible,
+        user_requested_stop: false,
     })
 }
 
@@ -1227,5 +1414,110 @@ mod tests {
         assert!(!is_resto_success(SolverReturn::RestorationFailure));
         assert!(!is_resto_success(SolverReturn::InternalError));
         assert!(!is_resto_success(SolverReturn::LocalInfeasibility));
+    }
+}
+
+#[cfg(test)]
+mod issue_661_divergence_guard {
+    use super::*;
+
+    /// gh#661, the case the guard exists for. `pooling_rt2stp.nl` under
+    /// `mehrotra_algorithm=yes`: restoration entered at a violation of
+    /// 6.957e0 and left at 7.355e5 — 105,700x worse — and a reconstructed
+    /// gate read that as "converged to a point of local infeasibility".
+    /// The model solves at default options, and its outer trajectory
+    /// spent 7 iterations at a floor: no evidence of being out of room.
+    #[test]
+    fn a_blow_up_without_floor_evidence_is_divergence() {
+        assert!(diverged_from_restoration_entry(6.957_464e0, 7.354_646e5, 7));
+    }
+
+    /// A plateau — the signature the reconstructed gates actually describe —
+    /// keeps its verdict. `qcqp750-2nc`, the fixture the `step_failure` gate
+    /// is named for, sat pinned at `inf_pr = 1.05e6` for 25+ iterations,
+    /// i.e. ~1x entry. The guard never engages, whatever the floor evidence.
+    #[test]
+    fn a_plateau_is_not_divergence() {
+        assert!(!diverged_from_restoration_entry(1.05e6, 1.05e6, 27));
+        // and wandering within the headroom is still a plateau
+        assert!(!diverged_from_restoration_entry(1.05e6, 9.9e6, 27));
+    }
+
+    /// The headroom is a strict `>`, so exactly 10x entry is not yet
+    /// divergence.
+    #[test]
+    fn the_headroom_boundary_is_exclusive() {
+        assert!(!diverged_from_restoration_entry(
+            1.0,
+            RESTO_DIVERGENCE_HEADROOM,
+            5
+        ));
+        assert!(diverged_from_restoration_entry(
+            1.0,
+            RESTO_DIVERGENCE_HEADROOM * 1.000_001,
+            5
+        ));
+    }
+
+    /// Restoration that *improved* on entry is the ordinary case and must
+    /// never be read as divergence.
+    #[test]
+    fn progress_is_not_divergence() {
+        assert!(!diverged_from_restoration_entry(1.0e3, 1.0e-4, 40));
+    }
+
+    /// `issue_508_infeasible_gap_1em2`, which reaches a *correct*
+    /// infeasibility verdict: 943 of its 1016 outer iterations sat at the
+    /// `1.0e-2` gap the fixture is built around, and only then did a
+    /// four-iteration restoration sub-solve jump from `1.04e-2` to
+    /// `3.19e9`. The final ratio is ~1e11 — far past the headroom — but
+    /// the floor was already demonstrated, so the verdict stands.
+    #[test]
+    fn a_demonstrated_floor_keeps_its_verdict_despite_a_terminal_blow_up() {
+        assert!(!diverged_from_restoration_entry(1.04e-2, 3.19e9, 943));
+    }
+
+    /// The point of measuring a floor rather than counting iterations,
+    /// and the gh#664 residual this replaces. A solve may run for any
+    /// number of iterations while still descending — it has not run out
+    /// of room, and the reconstructed gates' premise does not hold for it.
+    /// Under the old proxy an elapsed-iteration count alone bought the
+    /// exemption; here the count that matters is time *at a floor*, which
+    /// such a solve never accumulates.
+    #[test]
+    fn a_long_run_without_a_floor_is_still_divergence() {
+        assert!(diverged_from_restoration_entry(1.04e-2, 3.19e9, 0));
+        assert!(diverged_from_restoration_entry(
+            1.04e-2,
+            3.19e9,
+            RESTO_STALL_EVIDENCE_ITERS - 1
+        ));
+    }
+
+    /// The waiver boundary is inclusive, on `>=`.
+    #[test]
+    fn the_floor_waiver_boundary_is_inclusive() {
+        let (entry, final_) = (1.0, 1.0e9);
+        assert!(diverged_from_restoration_entry(
+            entry,
+            final_,
+            RESTO_STALL_EVIDENCE_ITERS - 1
+        ));
+        assert!(!diverged_from_restoration_entry(
+            entry,
+            final_,
+            RESTO_STALL_EVIDENCE_ITERS
+        ));
+    }
+
+    /// Without a usable entry reference there is nothing to measure
+    /// divergence against, so the gates are left exactly as they were
+    /// rather than suppressed on a ratio against zero or a NaN.
+    #[test]
+    fn an_unusable_entry_reference_suppresses_nothing() {
+        assert!(!diverged_from_restoration_entry(0.0, 1.0e9, 5));
+        assert!(!diverged_from_restoration_entry(f64::NAN, 1.0e9, 5));
+        assert!(!diverged_from_restoration_entry(f64::INFINITY, 1.0e9, 5));
+        assert!(!diverged_from_restoration_entry(-1.0, 1.0e9, 5));
     }
 }
