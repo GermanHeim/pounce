@@ -9,6 +9,55 @@ changes.
 
 ## [Unreleased]
 
+- **The restoration divergence guard's waiver now measures a floor
+  instead of counting iterations** (#661, #664).
+
+  #664 let the #661 guard stand down once `inner_iter_count >= 1000`,
+  reading that as "the sub-solve ran out of room". Two things were wrong
+  with it, and both are the kind of substitution #661 itself was about.
+
+  A count is not a stall test. #661 fixed five gates that let a *size*
+  stand in for "the sub-solve stalled at a point it could not improve
+  on"; the waiver then let a *duration* stand in for the same claim. A
+  solve can burn any number of iterations while still descending, and
+  such a solve has not run out of room.
+
+  And the counter was not what the comments said it was. The inner IPM's
+  `iter_count` is seeded from the outer's, mirroring upstream
+  `IpRestoMinC_1Nrm.cpp:181`, so `issue_508_infeasible_gap_1em2`'s
+  `iter=1019` is 1015 outer iterations plus a **four**-iteration
+  sub-solve — not, as #664's comments and changelog entry stated, a
+  sub-solve that sat at its entry violation for 1016 iterations.
+  Restoration sub-solves run 4 to 12 iterations across every fixture
+  measured, so a per-sub-solve measure of a long stall is looking at a
+  window too small to contain one. The long trajectory lives in the
+  outer loop, and the evidence is now read there.
+
+  `InfPrFloor` (`pounce-algorithm`) counts how many outer iterates sat
+  within an order of magnitude of the violation the count is being
+  measured against, sampled once per iteration from the value the
+  `inf_pr` column already computes — no extra function evaluations. It is deliberately
+  cumulative rather than a longest-consecutive run: a trajectory pinned
+  at a floor does not sit there quietly, and over the real traces
+  longest-consecutive gives 39 for `issue_508_infeasible_gap_1em2`
+  against 19 for the *feasible* `pooling_rt2stp`, which does not separate
+  them at all. Time at the floor gives 943 against 7. The band is pinned
+  to where the count started rather than chasing the running minimum, so
+  a solve creeping downward by 0.9x per iteration — which reduces the
+  violation by 88 orders of magnitude over 2000 iterations, i.e. is
+  working — accumulates 20 rather than 2000.
+
+  Corpus behaviour is unchanged: the fixture sweep is byte-identical to
+  the previous implementation across all 57 fixtures on all three arms
+  (default, `mehrotra_algorithm=yes`, `least_square_init_primal=yes`).
+  The waiver is load-bearing on the same two rows as before, now at 943
+  and 890 iterates-at-floor, while every row where the guard engages sits
+  at 31 or below — a 30x empty band around the threshold, against a
+  corpus in which nothing exercises the hole this closes. That is the
+  honest summary: the change is a correction of what the waiver measures,
+  evidenced by unit tests over the trajectory shapes, not by a fixture
+  that regressed.
+
 - **A diverging restoration is no longer reported as an infeasible
   model** (#661).
 
@@ -43,21 +92,19 @@ changes.
   the gate carries an `iter >= 30` floor — identical divergence on either
   side of #619, opposite verdict, decided by an iteration count.
 
-  The guard stands down once the sub-solve has burned
-  `RESTO_STALL_EVIDENCE_ITERS` — the 1000-iteration budget the `cycle`
-  gate above already required before reading a stall as local
-  infeasibility. `issue_508_infeasible_gap_1em2` is why: it is infeasible
-  by a constructed `1e-2` gap, and its restoration sits at `1.04e-2` —
-  the violation it entered at, to the digit — for 1016 inner iterations
-  before jumping to `3.19e9` over its last three. The large final ratio
-  describes those three iterations, not the run. `pooling_rt2stp` and
-  `hs71_obj1e8` have no such plateau: both exit after ~30 inner
-  iterations, and `hs71_obj1e8` was still *reducing* the original
-  violation (`4.48e1` to `2.25e1`) shortly before diverging. Deferring to
-  that budget also removes an inconsistency predating this guard — a
-  sub-solve stalling 1000+ iterations and exiting by iteration cap
-  rendered the verdict, while the identical stall exiting by step failure
-  did not.
+  The guard stands down once the solve has *demonstrated* a floor on the
+  constraint violation — measured by a new `InfPrFloor` on `IpoptData`,
+  fed once per outer iteration from the `inf_pr` the iteration output
+  already computes, and read at `RESTO_STALL_EVIDENCE_ITERS` (200)
+  iterates spent within an order of magnitude of a reference floor pinned
+  where the count started. `issue_508_infeasible_gap_1em2` is why the waiver
+  exists: it is infeasible by a constructed `1e-2` gap, and 943 of its
+  1016 outer iterations sit pinned at that gap before a restoration
+  sub-solve jumps to `3.19e9`. The large final ratio describes the
+  sub-solve, not the run that led to it. `pooling_rt2stp` and
+  `hs71_obj1e8` are feasible models whose outer solves never demonstrated
+  a floor at all — 7 and 1 iterates at one — so the guard applies to them
+  unweakened.
 
   Trajectory sweep: the fixture corpus is byte-identical at default
   options and under `least_square_init_primal=yes`. Under

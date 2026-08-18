@@ -86,17 +86,25 @@ const RESTO_MAX_SUCCESSIVE_ITERS: i32 = 3000;
 /// describe sits at ~1x entry — without admitting a blow-up.
 const RESTO_DIVERGENCE_HEADROOM: f64 = 10.0;
 
-/// Inner iterations after which a restoration sub-solve is taken to have
-/// demonstrated a stall on its own, independent of how it finally exited.
+/// Outer iterations spent at an unimprovable constraint violation after
+/// which a solve is taken to have demonstrated a floor, independent of
+/// how its restoration sub-solve finally exited.
 ///
-/// This is the budget the `cycle` gate in [`run_inner_resto`] has always
-/// required before reading an iteration-cap exit as evidence of local
-/// infeasibility ("a generous iteration budget has been burned with no
-/// exit"). [`RESTO_DIVERGENCE_HEADROOM`] defers to it: a sub-solve that
-/// spent a thousand-plus iterations unable to improve, and *then* blew up
-/// over its last handful, has shown the floor the gates are looking for —
-/// the blow-up is the tail of the trajectory, not the trajectory.
-const RESTO_STALL_EVIDENCE_ITERS: i32 = 1000;
+/// Measured by [`pounce_algorithm::inf_pr_floor::InfPrFloor`], not by a raw iteration count. The
+/// distinction is the whole of gh#664's residual defect: a count says the
+/// solve *ran* a long time, which is not the claim the reconstructed
+/// gates make. The claim is that it ran out of room, and a solve can
+/// burn any number of iterations while still descending.
+///
+/// The threshold sits in a wide measured gap. Over the fixture sweep the
+/// two trajectories that earn the exemption accumulate 943 and 890
+/// iterations at their floor. Across all 57 fixtures on three option
+/// arms, every row where the guard engages sits at 31 or below —
+/// `pooling_rt2stp` at 7, `hs71_obj1e8` at 1, bounded above by their own
+/// outer solve lengths. 200 is 6x clear of the largest non-floor case and
+/// 4x under the smallest genuine one, so neither side is decided by where
+/// exactly the line falls inside that band.
+const RESTO_STALL_EVIDENCE_ITERS: Index = 200;
 
 /// Whether a restoration sub-solve ended somewhere enough *worse* than it
 /// began that the five reconstructed gates in [`run_inner_resto`] have no
@@ -114,15 +122,31 @@ const RESTO_STALL_EVIDENCE_ITERS: i32 = 1000;
 /// - **No usable reference.** A non-finite or non-positive entry violation
 ///   gives nothing to measure divergence against, so the gates are left as
 ///   they were rather than suppressed on a ratio against zero.
-/// - **The stall is already evidenced.** Past [`RESTO_STALL_EVIDENCE_ITERS`]
-///   the sub-solve has demonstrated a floor on its own; a blow-up over its
-///   last handful of iterations is the tail of that trajectory, not a
-///   description of it. `issue_508_infeasible_gap_1em2` sits at `1.04e-2` —
-///   to the digit, the violation it entered at — for 1016 inner iterations
-///   and only then jumps to `3.19e9`. Its final `1e11x` ratio is an artifact
-///   of three iterations.
+/// - **The floor is already evidenced.** `outer_iters_at_floor` is
+///   [`pounce_algorithm::inf_pr_floor::InfPrFloor::iters_at_floor`]
+///   off the *outer* `IpoptData`: how many outer iterates sat within an
+///   order of magnitude of the floor that count is measured against — a
+///   reference pinned where the count started, so a solve still working
+///   its way down clears it and restarts rather than accumulating.
+///   Past [`RESTO_STALL_EVIDENCE_ITERS`] of those
+///   the solve has shown it cannot get below that violation, and a
+///   restoration blow-up at the end is the tail of that trajectory rather
+///   than a description of it. `issue_508_infeasible_gap_1em2` spends 943
+///   of its 1016 outer iterations pinned at the `1.0e-2` gap the fixture is
+///   built around before its four-iteration sub-solve jumps to `3.19e9`;
+///   the final `1e11x` ratio is an artifact of those four iterations.
 /// - **Within headroom.** A plateau, which is the signature these gates
 ///   actually describe, lands at ~1x entry.
+///
+/// The evidence is read at outer scope on purpose. gh#664 read the *inner*
+/// IPM's `iter_count`, which its comments described as the sub-solve's own
+/// length; it is not. That counter is seeded from the outer's to mirror
+/// upstream `IpRestoMinC_1Nrm.cpp:181`, so the `1019` those comments cited
+/// is 1015 outer iterations plus a four-iteration sub-solve. Restoration
+/// sub-solves are short — 4 to 12 iterations across every fixture measured
+/// — so there was never a thousand-iteration sub-solve to observe, and any
+/// per-sub-solve measure of a long stall is measuring a window too small to
+/// hold one. The long trajectory lives in the outer loop.
 ///
 /// Never applied to the layer-2 verdict (gh#438): that one is not
 /// reconstructed — the sub-solve's own convergence check issued it at a point
@@ -131,13 +155,13 @@ const RESTO_STALL_EVIDENCE_ITERS: i32 = 1000;
 fn diverged_from_restoration_entry(
     orig_curr_inf_pr: f64,
     orig_inf_pr_scaled: f64,
-    inner_iter_count: i32,
+    outer_iters_at_floor: Index,
 ) -> bool {
     let entry_reference_usable = orig_curr_inf_pr.is_finite() && orig_curr_inf_pr > 0.0;
-    let stall_already_evidenced = inner_iter_count >= RESTO_STALL_EVIDENCE_ITERS;
+    let floor_already_evidenced = outer_iters_at_floor >= RESTO_STALL_EVIDENCE_ITERS;
 
     entry_reference_usable
-        && !stall_already_evidenced
+        && !floor_already_evidenced
         && orig_inf_pr_scaled > RESTO_DIVERGENCE_HEADROOM * orig_curr_inf_pr
 }
 
@@ -964,13 +988,18 @@ pub fn run_inner_resto(
     //
     // The waiver, the headroom's looseness, and why the layer-2 verdict is
     // exempt are all documented on `diverged_from_restoration_entry`. The
-    // short of it: `hs71_obj1e8` and `pooling_rt2stp` both exit after ~30
-    // inner iterations with no plateau at all — `hs71_obj1e8` was still
-    // *reducing* the original violation (4.48e1 -> 2.25e1) shortly before it
-    // diverged — while `issue_508_infeasible_gap_1em2`, which reaches a
-    // *correct* verdict, is pinned at its entry violation for 1016.
+    // short of it: `hs71_obj1e8` and `pooling_rt2stp` are feasible models
+    // whose outer solves ran 25 and 20 iterations and never demonstrated a
+    // floor at all (1 and 7 iterations at one), while
+    // `issue_508_infeasible_gap_1em2` — which reaches a *correct* verdict —
+    // spent 943 outer iterations unable to get below the `1.0e-2` gap it is
+    // built around.
+    //
+    // Read off the *outer* `IpoptData`, which is where that trajectory
+    // lives: this sub-solve ran four iterations.
+    let outer_iters_at_floor = outer_data.borrow().inf_pr_floor.iters_at_floor();
     let diverged_from_entry =
-        diverged_from_restoration_entry(orig_curr_inf_pr, orig_inf_pr_scaled, inner_iter_count);
+        diverged_from_restoration_entry(orig_curr_inf_pr, orig_inf_pr_scaled, outer_iters_at_floor);
 
     let reconstructed_locally_infeasible = !diverged_from_entry
         && (strict_locally_infeasible
@@ -984,7 +1013,7 @@ pub fn run_inner_resto(
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} at_floor={} floor={:.6e} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
@@ -999,6 +1028,8 @@ pub fn run_inner_resto(
             step_failure_locally_infeasible,
             tiny_step_locally_infeasible,
             diverged_from_entry,
+            outer_iters_at_floor,
+            outer_data.borrow().inf_pr_floor.floor(),
             locally_infeasible
         );
     }
@@ -1392,22 +1423,19 @@ mod issue_661_divergence_guard {
 
     /// gh#661, the case the guard exists for. `pooling_rt2stp.nl` under
     /// `mehrotra_algorithm=yes`: restoration entered at a violation of
-    /// 6.957e0 and left at 7.355e5 — 105,700x worse — after 32 inner
-    /// iterations, and a reconstructed gate read that as "converged to a
-    /// point of local infeasibility". The model solves at default options.
+    /// 6.957e0 and left at 7.355e5 — 105,700x worse — and a reconstructed
+    /// gate read that as "converged to a point of local infeasibility".
+    /// The model solves at default options, and its outer trajectory
+    /// spent 7 iterations at a floor: no evidence of being out of room.
     #[test]
-    fn a_short_blow_up_is_divergence() {
-        assert!(diverged_from_restoration_entry(
-            6.957_464e0,
-            7.354_646e5,
-            32
-        ));
+    fn a_blow_up_without_floor_evidence_is_divergence() {
+        assert!(diverged_from_restoration_entry(6.957_464e0, 7.354_646e5, 7));
     }
 
     /// A plateau — the signature the reconstructed gates actually describe —
     /// keeps its verdict. `qcqp750-2nc`, the fixture the `step_failure` gate
-    /// is named for, sat pinned at `inf_pr = 1.05e6` for 25+ inner
-    /// iterations, i.e. ~1x entry.
+    /// is named for, sat pinned at `inf_pr = 1.05e6` for 25+ iterations,
+    /// i.e. ~1x entry. The guard never engages, whatever the floor evidence.
     #[test]
     fn a_plateau_is_not_divergence() {
         assert!(!diverged_from_restoration_entry(1.05e6, 1.05e6, 27));
@@ -1439,22 +1467,36 @@ mod issue_661_divergence_guard {
     }
 
     /// `issue_508_infeasible_gap_1em2`, which reaches a *correct*
-    /// infeasibility verdict: pinned at its 1.04e-2 entry violation for 1016
-    /// inner iterations, then a jump to 3.19e9 over the last three. The final
-    /// ratio is ~1e11 — far past the headroom — but the stall was already
-    /// demonstrated, so the verdict stands.
+    /// infeasibility verdict: 943 of its 1016 outer iterations sat at the
+    /// `1.0e-2` gap the fixture is built around, and only then did a
+    /// four-iteration restoration sub-solve jump from `1.04e-2` to
+    /// `3.19e9`. The final ratio is ~1e11 — far past the headroom — but
+    /// the floor was already demonstrated, so the verdict stands.
     #[test]
-    fn a_long_stall_keeps_its_verdict_despite_a_terminal_blow_up() {
-        assert!(!diverged_from_restoration_entry(1.04e-2, 3.19e9, 1019));
-        // the same trajectory truncated before the evidence threshold would
-        // have been suppressed — the iteration count is what separates them
-        assert!(diverged_from_restoration_entry(1.04e-2, 3.19e9, 999));
+    fn a_demonstrated_floor_keeps_its_verdict_despite_a_terminal_blow_up() {
+        assert!(!diverged_from_restoration_entry(1.04e-2, 3.19e9, 943));
     }
 
-    /// The waiver is the `cycle` gate's own budget, not a threshold invented
-    /// for this guard, and the boundary is inclusive on the same `>=`.
+    /// The point of measuring a floor rather than counting iterations,
+    /// and the gh#664 residual this replaces. A solve may run for any
+    /// number of iterations while still descending — it has not run out
+    /// of room, and the reconstructed gates' premise does not hold for it.
+    /// Under the old proxy an elapsed-iteration count alone bought the
+    /// exemption; here the count that matters is time *at a floor*, which
+    /// such a solve never accumulates.
     #[test]
-    fn the_stall_waiver_starts_at_the_cycle_gates_budget() {
+    fn a_long_run_without_a_floor_is_still_divergence() {
+        assert!(diverged_from_restoration_entry(1.04e-2, 3.19e9, 0));
+        assert!(diverged_from_restoration_entry(
+            1.04e-2,
+            3.19e9,
+            RESTO_STALL_EVIDENCE_ITERS - 1
+        ));
+    }
+
+    /// The waiver boundary is inclusive, on `>=`.
+    #[test]
+    fn the_floor_waiver_boundary_is_inclusive() {
         let (entry, final_) = (1.0, 1.0e9);
         assert!(diverged_from_restoration_entry(
             entry,
@@ -1468,11 +1510,9 @@ mod issue_661_divergence_guard {
         ));
     }
 
-    /// With no usable entry reference there is nothing to measure divergence
-    /// against, and the gates are left exactly as they were rather than
-    /// suppressed on a ratio against zero (or against NaN, where every
-    /// comparison is false anyway and the `> 0.0` test is what actually
-    /// carries it).
+    /// Without a usable entry reference there is nothing to measure
+    /// divergence against, so the gates are left exactly as they were
+    /// rather than suppressed on a ratio against zero or a NaN.
     #[test]
     fn an_unusable_entry_reference_suppresses_nothing() {
         assert!(!diverged_from_restoration_entry(0.0, 1.0e9, 5));
