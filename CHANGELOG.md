@@ -10,7 +10,7 @@ changes.
 ## [Unreleased]
 
 - **`estimate()` decides a degenerate base point for the perturbation's
-  own direction.** A solve can converge with a bound weakly active, on
+  own direction** (#672). A solve can converge with a bound weakly active, on
   the bound with a multiplier of the same order as the slack, and the
   solution has a kink there with a different one-sided derivative on
   each side. The activity thresholds have no answer at a kink, and the
