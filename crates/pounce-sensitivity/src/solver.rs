@@ -742,8 +742,10 @@ impl Solver {
     /// The weakly active bounds are decided by the eq. 14 QP for this
     /// perturbation's own direction, the path starts with every weakly
     /// active row released and the accepted working set held, and the
-    /// out rows are recorded as departures at fraction zero, which is
-    /// where the kink resolves. With no weakly active bounds this is
+    /// rows the working set leaves are forced into the walk's
+    /// base-activity table, so the record carries each departure at
+    /// the fraction where its multiplier reaches zero, essentially
+    /// zero at an exact kink. With no weakly active bounds this is
     /// exactly [`Self::parametric_step_path`]. Returns the step, the
     /// record, and the trials the decision spent.
     pub fn parametric_step_path_directional(
@@ -851,12 +853,14 @@ impl Solver {
     /// factorization, with the side taken from the smaller slack,
     /// which is the only side an ambiguous label can come from.
     ///
-    /// The classifier reports per user variable while the bound
-    /// context is in the factor's var-x block. The two index spaces
-    /// agree up to the first fixed variable; a fixed variable is a
-    /// constant with no bound row in the factor, so a status past one
-    /// cannot produce an entry here, only miss one, and the callers
-    /// treat an empty result as "no degeneracy" in either case.
+    /// The classifier reports per user variable, in full-x, while the
+    /// bound context and the factor's rows are var-x, and the two
+    /// index spaces diverge from the first fixed variable on. Each
+    /// var-x row's status is read through the same map the classifier
+    /// scattered through, so a fixed variable shifts nothing. Using
+    /// the full-x index as a factor row instead returns a NEIGHBORING
+    /// variable's answer, plausible and wrong, which is the gh#450
+    /// hazard the `primal_row` discipline exists to prevent.
     pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
         use crate::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
 
@@ -875,21 +879,31 @@ impl Solver {
         let Some(rows) = state.backsolver.bound_rows() else {
             return Ok(Vec::new());
         };
+        let full_of: Vec<usize> = {
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            (0..ctx.n_x)
+                .map(|r| nl.var_x_to_full_x(r as Index) as usize)
+                .collect()
+        };
         let mut out = Vec::new();
-        for (i, &st) in report.var_status.iter().enumerate() {
+        for var_row in 0..ctx.n_x {
+            let Some(&st) = report.var_status.get(full_of[var_row]) else {
+                continue;
+            };
             if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
                 continue;
             }
-            if i >= ctx.n_x {
-                continue;
-            }
-            let s_lo = ctx.x_curr[i] - ctx.lo[i];
-            let s_hi = ctx.hi[i] - ctx.x_curr[i];
+            let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];
+            let s_hi = ctx.hi[var_row] - ctx.x_curr[var_row];
             let lower = s_lo <= s_hi;
-            if let Some(br) = rows.iter().find(|b| b.var_row == i && b.lower == lower) {
+            if let Some(br) = rows
+                .iter()
+                .find(|b| b.var_row == var_row && b.lower == lower)
+            {
                 out.push(crate::boundcheck::WeakBound {
                     row: br.row,
-                    var_row: i,
+                    var_row,
                     lower,
                 });
             }

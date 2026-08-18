@@ -468,9 +468,10 @@ impl PySolver {
 
     /// `parametric_step_path` with the directional-derivative decision
     /// applied first at a degenerate base point, as
-    /// `(dx, segments, trials)`. Out rows of the accepted working set
-    /// appear in the record as departures at fraction zero, where the
-    /// kink resolves.
+    /// `(dx, segments, trials)`. Rows the accepted working set leaves
+    /// are forced into the walk's base-activity table, so the record
+    /// carries each departure at the fraction where its multiplier
+    /// reaches zero, essentially zero at an exact kink.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_path_directional<'py>(
         &self,

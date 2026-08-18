@@ -108,6 +108,65 @@ def test_a_bound_inside_the_band_releases_where_its_multiplier_ends():
     assert est[m.x] == pytest.approx(1.0, abs=1e-4)
 
 
+def test_a_fixed_variable_does_not_shift_the_detection():
+    """The classifier reports per user variable while the factor's
+    rows skip fixed variables, and the two index spaces diverge from
+    the first fixed variable on. With a variable fixed by equal bounds
+    sitting ahead of the kink, an unmapped index pins or releases the
+    kink variable's NEIGHBOR, a plausible wrong answer, which is the
+    gh#450 hazard. This model has one fixed column, one kink variable,
+    and one spectator behind it."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.0, mutable=True)
+    m.f = pyo.Var(bounds=(2.0, 2.0), initialize=2.0)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    m.y = pyo.Var(bounds=(-50.0, 50.0), initialize=1.0)
+    # the fixed term comes first in the expression so the NL writer
+    # orders the fixed column ahead of the kink variable, which is the
+    # arrangement that makes the two index spaces diverge in front of x
+    m.obj = pyo.Objective(
+        expr=0.1 * (m.f - 1.0) ** 3 + (m.x - m.p) ** 2
+        + 0.1 * (m.y - 1.0) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-4), "on the bound"
+
+    # the fixture only guards the hazard if the two spaces diverge
+    from pyomo_pounce.sens import _REG
+    sess = m.__dict__[_REG].session
+    assert sess.solver.block_dims[0] < len(sess.var_names), (
+        "the fixed column must be out of the factor")
+
+    with pytest.warns(UserWarning, match=r"x \(lower\)"):
+        gradient(m.x, wrt=m.p)
+
+    for mode in MODES:
+        up = estimate(m, [(m.p, 1.0)], mode=mode)
+        down = estimate(m, [(m.p, -1.0)], mode=mode, clamp=False)
+        assert up[m.x] == pytest.approx(1.0, abs=1e-4), f"mode={mode}"
+        assert down[m.x] == pytest.approx(0.0, abs=1e-4), f"mode={mode}"
+        assert up[m.y] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the spectator must not be touched")
+        assert down[m.y] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the spectator must not be touched")
+
+
+def test_the_decision_is_invariant_to_the_perturbation_scale():
+    """The acceptance test is relative to the direction's own norm, so
+    the working set decided at a perturbation of 1e-10 is the same one
+    decided at 1. An absolute tolerance accepted the all-released set
+    on the holding side at tiny perturbations, reading the derivative
+    as -1 instead of 0."""
+    m = kink()
+    base_val = pyo.value(m.x)
+    tiny_down = estimate(m, [(m.p, -1e-10)], clamp=False)
+    assert tiny_down[m.x] - base_val == pytest.approx(0.0, abs=1e-12), (
+        "the holding side holds at any scale")
+    tiny_up = estimate(m, [(m.p, 1e-10)], clamp=False)
+    assert tiny_up[m.x] - base_val == pytest.approx(1e-10, rel=1e-3), (
+        "the releasing side releases at any scale")
+
+
 def test_gradient_warns_at_a_kink_and_not_at_a_clean_point():
     m = kink()
     with pytest.warns(UserWarning, match="one-sided"):

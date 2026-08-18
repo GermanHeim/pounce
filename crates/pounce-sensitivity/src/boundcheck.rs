@@ -942,76 +942,99 @@ where
 {
     let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
     let mut trials = 0usize;
-    // dx tolerance: zero movement of a pinned variable is exact up to
-    // the augmented solve's roundoff, so the feasibility comparisons
-    // only need to clear that.
-    const EPS: Number = 1e-9;
-    let feasible =
-        |w: &WeakBound, di: Number| -> bool { if w.lower { di >= -EPS } else { di <= EPS } };
-    let violates =
-        |w: &WeakBound, di: Number| -> bool { if w.lower { di < -EPS } else { di > EPS } };
+    // dx tolerance, relative to the direction's own magnitude so the
+    // decision is invariant to the perturbation's scale: an absolute
+    // tolerance accepted the all-released set at a perturbation of
+    // 1e-10, reading the holding side's derivative as -1 instead of 0.
+    // Zero movement of a pinned variable is roundoff relative to the
+    // direction's norm, so pinned rows still clear it.
+    const EPS_REL: Number = 1e-9;
+    let scale_of =
+        |d: &[Number]| -> Number { d.iter().fold(0.0_f64, |a, &b| a.max(b.abs())).max(1e-300) };
+    let feasible = |w: &WeakBound, di: Number, tol: Number| -> bool {
+        if w.lower { di >= -tol } else { di <= tol }
+    };
+    let violates = |w: &WeakBound, di: Number, tol: Number| -> bool {
+        if w.lower { di < -tol } else { di > tol }
+    };
 
     let n = weak.len();
-    // Subsets ordered by size then least index: subset bits over the
-    // weak list, sizes 0..=n.
-    let mut candidates: Vec<u32> = (0u32..(1 << n)).collect();
-    candidates.sort_by_key(|s| (s.count_ones(), *s));
-    for s in candidates {
-        if trials >= max_iter {
-            return Err(format!(
-                "directional derivative: the budget of {max_iter} trials \
-                 ran out over {n} weakly active bound(s)"
-            ));
-        }
-        let pinned: Vec<usize> = weak
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| s >> k & 1 == 1)
-            .map(|(_, w)| w.var_row)
-            .collect();
-        let (d, _) = path_direction(backsolver, rhs_plain, &released, &pinned)?;
-        trials += 1;
-        let out_ok = weak
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| s >> k & 1 == 0)
-            .all(|(_, w)| feasible(w, d[w.var_row]));
-        if !out_ok {
-            continue;
-        }
-        // Necessity of each pin, one removal probe per member.
-        let mut all_needed = true;
-        for k in 0..n {
-            if s >> k & 1 == 0 {
-                continue;
-            }
+    let budget_err = || {
+        format!(
+            "directional derivative: the budget of {max_iter} trials \
+             ran out over {n} weakly active bound(s)"
+        )
+    };
+    // Working sets are generated lazily in size-then-least-index
+    // order: the first accepted candidate is deterministic, the budget
+    // bounds the work, and nothing is materialized. Building all 2^n
+    // masks up front allocated gigabytes near n = 30 to try at most
+    // max_iter of them, and overflowed the shift at n = 32.
+    for size in 0..=n {
+        let mut combo: Vec<usize> = (0..size).collect();
+        loop {
             if trials >= max_iter {
-                return Err(format!(
-                    "directional derivative: the budget of {max_iter} trials \
-                     ran out over {n} weakly active bound(s)"
-                ));
+                return Err(budget_err());
             }
-            let probe: Vec<usize> = weak
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != k && s >> j & 1 == 1)
-                .map(|(_, w)| w.var_row)
-                .collect();
-            let (dp, _) = path_direction(backsolver, rhs_plain, &released, &probe)?;
+            let pinned: Vec<usize> = combo.iter().map(|&k| weak[k].var_row).collect();
+            let (d, _) = path_direction(backsolver, rhs_plain, &released, &pinned)?;
             trials += 1;
-            if !violates(&weak[k], dp[weak[k].var_row]) {
-                all_needed = false;
+            let tol = EPS_REL * scale_of(&d);
+            let out_ok = (0..n)
+                .filter(|k| !combo.contains(k))
+                .all(|k| feasible(&weak[k], d[weak[k].var_row], tol));
+            if out_ok {
+                // Necessity of each pin, one removal probe per member.
+                let mut all_needed = true;
+                for &k in &combo {
+                    if trials >= max_iter {
+                        return Err(budget_err());
+                    }
+                    let probe: Vec<usize> = combo
+                        .iter()
+                        .filter(|&&j| j != k)
+                        .map(|&j| weak[j].var_row)
+                        .collect();
+                    let (dp, _) = path_direction(backsolver, rhs_plain, &released, &probe)?;
+                    trials += 1;
+                    let ptol = EPS_REL * scale_of(&dp);
+                    if !violates(&weak[k], dp[weak[k].var_row], ptol) {
+                        all_needed = false;
+                        break;
+                    }
+                }
+                if all_needed {
+                    return Ok((d, pinned, trials));
+                }
+            }
+            if !next_combination(&mut combo, n) {
                 break;
             }
-        }
-        if all_needed {
-            return Ok((d, pinned, trials));
         }
     }
     Err(format!(
         "directional derivative: no sign-consistent working set over \
          {n} weakly active bound(s)"
     ))
+}
+
+/// Advance `combo` to the next lexicographic combination of its size
+/// over `0..n`, returning `false` when it was the last one. The empty
+/// combination has no successor.
+fn next_combination(combo: &mut [usize], n: usize) -> bool {
+    let k = combo.len();
+    let mut i = k;
+    while i > 0 {
+        i -= 1;
+        if combo[i] != i + n - k {
+            combo[i] += 1;
+            for j in i + 1..k {
+                combo[j] = combo[j - 1] + 1;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn path_direction<B>(
