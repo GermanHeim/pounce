@@ -623,6 +623,16 @@ impl TNLP for ScalingTnlp {
             .get_objective_variables_linearity(types)
     }
 
+    fn derivative_proofs(&mut self) -> crate::constant_derivatives::DerivativeProofs {
+        // Every transform this wrapper applies is a multiply by a
+        // constant factor (`∇f ÷ d`, `J[i,j] ÷ d[j]`, `H[i,j] ÷
+        // d[i]·d[j]`), and the row order is untouched — so a derivative
+        // that was constant below stays constant above, and one that
+        // was proved to vary still varies. Forwarding is sound in both
+        // directions, which is the condition the trait states.
+        self.inner.borrow_mut().derivative_proofs()
+    }
+
     fn scaling_factors(&self) -> Option<Vec<Number>> {
         Some(self.d.clone())
     }

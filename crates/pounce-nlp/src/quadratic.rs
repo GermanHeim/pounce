@@ -1,0 +1,501 @@
+//! Constant-structure evaluation for degree-≤2 objectives and rows.
+//!
+//! A quadratic row's value, gradient and Hessian are all determined by one
+//! constant matrix. POUNCE nevertheless re-derives them on every call from a
+//! reverse-mode AD tape: on Mittelmann's `qcqp500-3c` that is 2.32 M tapes
+//! walked twice per `eval_h`, 332 times, to recover ten matrices that never
+//! change. [`QuadraticStructure`] is where the recognizer's answer is kept
+//! instead of thrown away — see
+//! `dev-notes/quadratic-structure-exploitation.md` (gh #588), phase Q4.
+//!
+//! ## What lives here, and what does not
+//!
+//! This module is **pure sparse linear algebra**. It never sees an `Expr`, a
+//! tape or a `feral` factorization: recognition is
+//! `pounce_nl::nl_quadratic`'s job and it hands the result over as plain
+//! `(i, j, ∂²/∂xᵢ∂xⱼ)` triplets. That split is what lets the type live in
+//! `pounce-nlp`, which every other crate already depends on, so `pounce-py`,
+//! `pounce-wasm` and `pounce-rs` inherit it with no manifest change — and it
+//! is why the structure stops at the TNLP values array and knows nothing
+//! about the KKT system those values end up in.
+//!
+//! ## Storage
+//!
+//! Every array is **flat and shared across forms**, indexed by per-form
+//! offsets. A `Vec` per form would reintroduce, one level up, exactly the
+//! allocation-per-object cost Q3 removed from the recognizer: `qssp180` has
+//! 65 341 quadratic rows of three nonzeros each, and a struct-per-row layout
+//! would spend ten allocations on each of them to describe 24 bytes of
+//! matrix.
+//!
+//! Each form is stored as
+//!
+//! * the **full symmetric** `H` in CSR over the form's support — both
+//!   triangles, because the value and the gradient are matvecs and a matvec
+//!   against half a symmetric matrix costs a scatter it does not need;
+//! * the linear coefficients `a` folded into the nonlinear tree by the `.nl`
+//!   writer (the `−6x₀` of `(x₀−3)²`), which are *not* the row's `.nl` linear
+//!   section — the caller still adds that;
+//! * the constant `c` (the `+9`), for the same reason
+//!   [`analyze_quadratic_full`](https://docs.rs/pounce-nl) returns it: it does
+//!   not move the minimizer but it is part of the reported value;
+//! * one scatter slot per lower-triangle entry, so accumulating `∇²L` is a
+//!   `values[slot] += w · h` loop with no hashing and no search.
+//!
+//! The convention on `H` is the Hessian's, `∂²/∂xᵢ∂xⱼ` — so a `c·xᵢ²` term
+//! arrives as `2c` on the diagonal, and the form evaluates as
+//! `½xᵀHx + aᵀx + c`. Handing it *polynomial* coefficients instead is a
+//! silent factor of two on the diagonal, which is why
+//! [`QuadraticStructure::push_form`] takes the Hessian triplets that
+//! `analyze_quadratic_full` already applies that factor in, rather than a
+//! `Quad2`.
+
+use std::collections::BTreeMap;
+
+/// Index into [`QuadraticStructure`]'s form arrays. `u32` because the count
+/// is bounded by `m + 1` and the row map is one of these per constraint.
+type FormId = u32;
+
+/// No form: the value in [`QuadraticStructure::form_of_row`] for a row that
+/// is not (recognized as) quadratic and keeps its tape.
+const NO_FORM: FormId = u32::MAX;
+
+/// The recognized degree-≤2 parts of one model: at most one per constraint
+/// row, plus at most one for the objective.
+///
+/// Built once in `NlTnlp::try_new` and then read-only. Cloning it is what
+/// `NlTnlp::variant` does — a variation changes bounds and starting points,
+/// never structure — so the layout is deliberately a handful of flat `Vec`s
+/// rather than a graph.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuadraticStructure {
+    // ---- per form ----
+    /// `sup[form_sup[f] .. form_sup[f + 1]]` — the variables with a Hessian
+    /// row in form `f`, ascending.
+    form_sup: Vec<u32>,
+    /// `lin[form_lin[f] .. form_lin[f + 1]]` — indices into `lin_idx`/`lin_val`.
+    form_lin: Vec<u32>,
+    /// `grad[form_grad[f] .. form_grad[f + 1]]` — the form's gradient
+    /// support (Hessian support ∪ linear support), ascending. Precomputed
+    /// because `eval_jac_g` needs it once per call per row and it is the
+    /// same set every time.
+    form_grad: Vec<u32>,
+    /// `h_slot[form_h[f] .. form_h[f + 1]]` — one scatter target per
+    /// lower-triangle entry of form `f`, in the order
+    /// [`Self::lower_triangle`] walks them.
+    form_h: Vec<u32>,
+    /// The degree-0 term of each form.
+    constant: Vec<f64>,
+
+    // ---- concatenated payloads ----
+    /// Concatenated Hessian supports.
+    sup: Vec<u32>,
+    /// CSR row pointers, one per entry of `sup` plus a global terminator:
+    /// support entry `k` owns `col[sup_ptr[k] .. sup_ptr[k + 1]]`.
+    sup_ptr: Vec<u32>,
+    /// Column indices of the **full symmetric** `H`, ascending within a row.
+    col: Vec<u32>,
+    /// Values of the full symmetric `H`, parallel to `col`.
+    val: Vec<f64>,
+    /// Concatenated linear supports and coefficients.
+    lin_idx: Vec<u32>,
+    lin_val: Vec<f64>,
+    /// Concatenated gradient supports.
+    grad: Vec<u32>,
+    /// Concatenated scatter targets; `u32::MAX` until [`Self::bind_slots`].
+    h_slot: Vec<u32>,
+
+    // ---- the map back to the model ----
+    /// `form_of_row[i]` is the form evaluating row `i`, or [`NO_FORM`] when
+    /// row `i` keeps its tape.
+    form_of_row: Vec<FormId>,
+    /// The objective's form, or [`NO_FORM`].
+    obj_form: FormId,
+}
+
+impl QuadraticStructure {
+    /// An empty structure over `m` constraint rows: nothing recognized, so
+    /// every caller behaves exactly as it did before this module existed.
+    pub fn new(m: usize) -> Self {
+        QuadraticStructure {
+            form_sup: vec![0],
+            form_lin: vec![0],
+            form_grad: vec![0],
+            form_h: vec![0],
+            sup_ptr: vec![0],
+            form_of_row: vec![NO_FORM; m],
+            obj_form: NO_FORM,
+            ..Self::default()
+        }
+    }
+
+    /// Add a form and return its id.
+    ///
+    /// `hess` is the **upper-triangular (i ≤ j) Hessian** of the form —
+    /// `∂²/∂xᵢ∂xⱼ`, so the factor of two on the diagonal is already applied
+    /// — which is exactly `analyze_quadratic_full`'s first return value.
+    /// `lin` is its degree-1 part and `constant` its degree-0 part.
+    ///
+    /// Entries that are exactly zero are dropped: they cost a scatter slot
+    /// and a multiply-add to contribute nothing, and keeping them would make
+    /// the Hessian pattern depend on how a coefficient happened to cancel.
+    pub fn push_form(
+        &mut self,
+        hess: &BTreeMap<(usize, usize), f64>,
+        lin: &[(usize, f64)],
+        constant: f64,
+    ) -> FormId {
+        // Scatter the upper triangle into full symmetric rows. A `BTreeMap`
+        // keyed by row keeps the support ascending without a sort, and the
+        // inner `BTreeMap` keeps each row's columns ascending — which is
+        // what makes `lower_triangle` come out in the (row, col) order the
+        // TNLP's `lower_pairs` is sorted in.
+        let mut rows: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
+        for (&(i, j), &v) in hess {
+            debug_assert!(i <= j, "push_form takes the upper triangle, got ({i}, {j})");
+            if v == 0.0 {
+                continue;
+            }
+            rows.entry(i as u32).or_default().insert(j as u32, v);
+            if i != j {
+                rows.entry(j as u32).or_default().insert(i as u32, v);
+            }
+        }
+
+        for (&r, cols) in &rows {
+            self.sup.push(r);
+            for (&c, &v) in cols {
+                self.col.push(c);
+                self.val.push(v);
+            }
+            self.sup_ptr.push(self.col.len() as u32);
+        }
+        self.form_sup.push(self.sup.len() as u32);
+
+        for &(i, c) in lin {
+            if c == 0.0 {
+                continue;
+            }
+            self.lin_idx.push(i as u32);
+            self.lin_val.push(c);
+        }
+        self.form_lin.push(self.lin_idx.len() as u32);
+
+        // Gradient support = Hessian support ∪ linear support, ascending.
+        // Both sides are already ascending, so this is a merge.
+        let f = self.constant.len();
+        let hs = &self.sup[self.form_sup[f] as usize..];
+        let ls = &self.lin_idx[self.form_lin[f] as usize..];
+        let (mut a, mut b) = (0usize, 0usize);
+        while a < hs.len() || b < ls.len() {
+            let take = match (hs.get(a), ls.get(b)) {
+                (Some(&x), Some(&y)) => {
+                    if x < y {
+                        a += 1;
+                        x
+                    } else if y < x {
+                        b += 1;
+                        y
+                    } else {
+                        a += 1;
+                        b += 1;
+                        x
+                    }
+                }
+                (Some(&x), None) => {
+                    a += 1;
+                    x
+                }
+                (None, Some(&y)) => {
+                    b += 1;
+                    y
+                }
+                (None, None) => unreachable!("loop guard"),
+            };
+            self.grad.push(take);
+        }
+        self.form_grad.push(self.grad.len() as u32);
+
+        // One unbound scatter slot per lower-triangle entry.
+        let n_lower = self.lower_triangle(f as FormId).count();
+        self.h_slot.resize(self.h_slot.len() + n_lower, NO_FORM);
+        self.form_h.push(self.h_slot.len() as u32);
+
+        self.constant.push(constant);
+        f as FormId
+    }
+
+    /// Attach form `f` to constraint row `i`.
+    pub fn assign_row(&mut self, i: usize, f: FormId) {
+        self.form_of_row[i] = f;
+    }
+
+    /// Attach form `f` to the objective.
+    pub fn assign_objective(&mut self, f: FormId) {
+        self.obj_form = f;
+    }
+
+    /// Is there anything here at all? A model with no recognized part gets
+    /// the tape path unchanged, down to the coloring.
+    pub fn is_empty(&self) -> bool {
+        self.constant.is_empty()
+    }
+
+    /// How many forms are stored (objective included).
+    pub fn len(&self) -> usize {
+        self.constant.len()
+    }
+
+    /// The form evaluating constraint row `i`, if it has one.
+    pub fn row_form(&self, i: usize) -> Option<FormId> {
+        match self.form_of_row.get(i).copied() {
+            Some(f) if f != NO_FORM => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The objective's form, if it has one.
+    pub fn objective_form(&self) -> Option<FormId> {
+        (self.obj_form != NO_FORM).then_some(self.obj_form)
+    }
+
+    /// The form's gradient support (Hessian support ∪ linear support),
+    /// ascending. This is what a Jacobian row's column list must include.
+    pub fn gradient_support(&self, f: FormId) -> &[u32] {
+        let f = f as usize;
+        &self.grad[self.form_grad[f] as usize..self.form_grad[f + 1] as usize]
+    }
+
+    /// The form's lower-triangle Hessian entries as `(row, col, value)` with
+    /// `row >= col`, ascending by `(row, col)`.
+    ///
+    /// The order is load-bearing twice over: it is the order
+    /// [`Self::bind_slots`] consumes scatter targets in, and it is the order
+    /// [`Self::accumulate_hessian`] replays them in.
+    pub fn lower_triangle(&self, f: FormId) -> impl Iterator<Item = (u32, u32, f64)> + '_ {
+        let f = f as usize;
+        let (lo, hi) = (self.form_sup[f] as usize, self.form_sup[f + 1] as usize);
+        (lo..hi).flat_map(move |k| {
+            let r = self.sup[k];
+            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+            (a..b).filter_map(move |e| {
+                let c = self.col[e];
+                (c <= r).then(|| (r, c, self.val[e]))
+            })
+        })
+    }
+
+    /// Point each lower-triangle entry at its index in the TNLP's Hessian
+    /// `values` array.
+    ///
+    /// `lookup` is called once per entry, in [`Self::lower_triangle`] order,
+    /// and must return the index of `(row, col)` in the model's assembled
+    /// lower-triangle pattern.
+    pub fn bind_slots(&mut self, mut lookup: impl FnMut(u32, u32) -> usize) {
+        let mut k = 0usize;
+        for f in 0..self.constant.len() as FormId {
+            let entries: Vec<(u32, u32)> = self.lower_triangle(f).map(|(r, c, _)| (r, c)).collect();
+            for (r, c) in entries {
+                self.h_slot[k] = lookup(r, c) as u32;
+                k += 1;
+            }
+        }
+        debug_assert_eq!(k, self.h_slot.len(), "every entry gets a slot");
+    }
+
+    /// `½xᵀHx + aᵀx + c`.
+    ///
+    /// The `½` is applied once at the end rather than per row, which is both
+    /// cheaper and closer to what the tape did (it never scaled a partial
+    /// sum).
+    pub fn value(&self, f: FormId, x: &[f64]) -> f64 {
+        let fi = f as usize;
+        let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
+        let mut quad = 0.0;
+        for k in lo..hi {
+            let r = self.sup[k] as usize;
+            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+            let mut t = 0.0;
+            for e in a..b {
+                t += self.val[e] * x[self.col[e] as usize];
+            }
+            quad += x[r] * t;
+        }
+        let mut lin = 0.0;
+        for e in self.form_lin[fi] as usize..self.form_lin[fi + 1] as usize {
+            lin += self.lin_val[e] * x[self.lin_idx[e] as usize];
+        }
+        0.5 * quad + lin + self.constant[fi]
+    }
+
+    /// `out += w · (Hx + a)`, touching only the form's gradient support.
+    pub fn add_gradient(&self, f: FormId, x: &[f64], w: f64, out: &mut [f64]) {
+        let fi = f as usize;
+        let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
+        for k in lo..hi {
+            let r = self.sup[k] as usize;
+            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+            let mut t = 0.0;
+            for e in a..b {
+                t += self.val[e] * x[self.col[e] as usize];
+            }
+            out[r] += w * t;
+        }
+        for e in self.form_lin[fi] as usize..self.form_lin[fi + 1] as usize {
+            out[self.lin_idx[e] as usize] += w * self.lin_val[e];
+        }
+    }
+
+    /// `values[slot] += w · H[row, col]` over the form's lower triangle.
+    ///
+    /// This is the whole Hessian contribution of a quadratic row: no forward
+    /// sweep, no directional product, no decode — the multipliers are the
+    /// only thing that changed since the model was read.
+    pub fn accumulate_hessian(&self, f: FormId, w: f64, values: &mut [f64]) {
+        let fi = f as usize;
+        let base = self.form_h[fi] as usize;
+        for (k, (_, _, v)) in self.lower_triangle(f).enumerate() {
+            let slot = self.h_slot[base + k] as usize;
+            values[slot] += w * v;
+        }
+    }
+
+    /// `out += w · (H · v)` — the Hessian-vector product form, for the
+    /// matrix-free (Newton-Krylov) path.
+    pub fn add_hessian_vector(&self, f: FormId, v: &[f64], w: f64, out: &mut [f64]) {
+        let fi = f as usize;
+        let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
+        for k in lo..hi {
+            let r = self.sup[k] as usize;
+            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+            let mut t = 0.0;
+            for e in a..b {
+                t += self.val[e] * v[self.col[e] as usize];
+            }
+            out[r] += w * t;
+        }
+    }
+
+    /// Total stored Hessian entries over all forms, both triangles. Reported
+    /// by `POUNCE_DBG_TAPE_STATS`; also the thing the memory claim in the
+    /// design note is about.
+    pub fn stored_entries(&self) -> usize {
+        self.val.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `q(x) = 3x₀² + 5x₀x₁ − 2x₀ + 7`, whose Hessian is
+    /// `[[6, 5], [5, 0]]`.
+    fn sample() -> (QuadraticStructure, FormId) {
+        let mut h = BTreeMap::new();
+        h.insert((0, 0), 6.0);
+        h.insert((0, 1), 5.0);
+        let mut qs = QuadraticStructure::new(1);
+        let f = qs.push_form(&h, &[(0, -2.0)], 7.0);
+        (qs, f)
+    }
+
+    #[test]
+    fn value_matches_the_polynomial() {
+        let (qs, f) = sample();
+        let x = [2.0, -3.0];
+        // 3·4 + 5·2·(−3) − 2·2 + 7 = 12 − 30 − 4 + 7
+        assert_eq!(qs.value(f, &x), -15.0);
+    }
+
+    #[test]
+    fn gradient_is_hx_plus_a() {
+        let (qs, f) = sample();
+        let x = [2.0, -3.0];
+        let mut g = [0.0; 2];
+        qs.add_gradient(f, &x, 1.0, &mut g);
+        // ∂/∂x₀ = 6·2 + 5·(−3) − 2 = −5 ; ∂/∂x₁ = 5·2 = 10
+        assert_eq!(g, [-5.0, 10.0]);
+        // Weighted, and accumulating rather than overwriting.
+        qs.add_gradient(f, &x, 2.0, &mut g);
+        assert_eq!(g, [-15.0, 30.0]);
+    }
+
+    /// The factor-of-two trap: `push_form` takes *Hessian* entries, so a
+    /// `3x₀²` term must arrive as `6`, and the value must come back as `3x₀²`
+    /// rather than `6x₀²`.
+    #[test]
+    fn the_diagonal_is_a_hessian_entry_not_a_polynomial_coefficient() {
+        let mut h = BTreeMap::new();
+        h.insert((0, 0), 6.0);
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs.push_form(&h, &[], 0.0);
+        assert_eq!(qs.value(f, &[1.0]), 3.0);
+        let mut g = [0.0];
+        qs.add_gradient(f, &[1.0], 1.0, &mut g);
+        assert_eq!(g, [6.0]);
+    }
+
+    #[test]
+    fn lower_triangle_is_ascending_and_omits_the_upper_half() {
+        let (qs, f) = sample();
+        let got: Vec<(u32, u32, f64)> = qs.lower_triangle(f).collect();
+        assert_eq!(got, vec![(0, 0, 6.0), (1, 0, 5.0)]);
+    }
+
+    #[test]
+    fn hessian_scatters_through_the_bound_slots() {
+        let (mut qs, f) = sample();
+        // Pretend the model's assembled pattern is [(1,0), (0,0)] — a
+        // deliberately un-sorted order, so a bug that assumed identity
+        // mapping shows up.
+        let pattern = [(1u32, 0u32), (0, 0)];
+        qs.bind_slots(|r, c| {
+            pattern
+                .iter()
+                .position(|&p| p == (r, c))
+                .expect("entry in pattern")
+        });
+        let mut values = [0.0; 2];
+        qs.accumulate_hessian(f, 2.0, &mut values);
+        assert_eq!(values, [10.0, 12.0]);
+    }
+
+    #[test]
+    fn hessian_vector_product_agrees_with_the_dense_matrix() {
+        let (qs, f) = sample();
+        let v = [1.0, 2.0];
+        let mut out = [0.0; 2];
+        qs.add_hessian_vector(f, &v, 1.0, &mut out);
+        // [[6,5],[5,0]] · [1,2] = [16, 5]
+        assert_eq!(out, [16.0, 5.0]);
+    }
+
+    #[test]
+    fn gradient_support_merges_the_two_sides() {
+        let mut h = BTreeMap::new();
+        h.insert((1, 3), 1.0);
+        let mut qs = QuadraticStructure::new(0);
+        // Linear part touches 0 and 3; the Hessian touches 1 and 3.
+        let f = qs.push_form(&h, &[(0, 1.0), (3, 1.0)], 0.0);
+        assert_eq!(qs.gradient_support(f), &[0, 1, 3]);
+    }
+
+    #[test]
+    fn zero_coefficients_are_not_stored() {
+        let mut h = BTreeMap::new();
+        h.insert((0, 0), 0.0);
+        h.insert((0, 1), 4.0);
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs.push_form(&h, &[(2, 0.0)], 0.0);
+        assert_eq!(qs.lower_triangle(f).count(), 1);
+        assert_eq!(qs.gradient_support(f), &[0, 1]);
+    }
+
+    #[test]
+    fn an_empty_structure_reports_itself_as_one() {
+        let qs = QuadraticStructure::new(4);
+        assert!(qs.is_empty());
+        assert_eq!(qs.row_form(2), None);
+        assert_eq!(qs.objective_form(), None);
+    }
+}

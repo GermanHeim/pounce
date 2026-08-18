@@ -72,6 +72,14 @@ class GmoView(Protocol):
     # Lower-triangle Hessian-of-Lagrangian nonzeros (only when has_hessian()).
     def hess_structure(self) -> tuple[Sequence[int], Sequence[int]]: ...
 
+    # True when no Jacobian nonzero is flagged nonlinear, i.e. every
+    # constraint gradient is a constant vector. Optional: a view that does
+    # not define it is read as "not established", which is what
+    # `problem_from_gmo` records. The adapter over the real GMO answers it
+    # from the same `nlflag` array `eval_jac` already keys its
+    # copy-the-cached-coefficients fast path on.
+    def constraints_are_linear(self) -> bool: ...
+
     # --- numerical evaluators (native sense) -----------------------------
     def eval_obj(self, x: np.ndarray) -> float: ...
     def eval_grad_obj(self, x: np.ndarray) -> Sequence[float]: ...
@@ -105,6 +113,12 @@ class GmoProblem:
     x0: np.ndarray
     has_hessian: bool
     obj_sign: float  # +1 minimize, -1 maximize
+    #: Every constraint gradient is a constant vector (GMO flags no
+    #: nonlinear Jacobian nonzero). Drives the `jac_c_constant` /
+    #: `jac_d_constant` hints, which let POUNCE evaluate the Jacobian once
+    #: for the whole solve (pounce#588 Q6). False when the view does not
+    #: report it: an unanswered question is not a "yes".
+    jacobian_is_constant: bool = False
 
 
 class _GmoProblemObj:
@@ -191,6 +205,10 @@ def problem_from_gmo(view: GmoView) -> GmoProblem:
     x0 = np.asarray(view.var_init(), dtype=float)
 
     has_hess = bool(view.has_hessian())
+    # Optional on the protocol, so a view written before this existed (or a
+    # test fake) simply declines rather than failing.
+    linear_rows = getattr(view, "constraints_are_linear", None)
+    jac_const = bool(m) and bool(linear_rows() if callable(linear_rows) else False)
     obj = (
         _GmoProblemObjHess(view, obj_sign)
         if has_hess
@@ -208,4 +226,5 @@ def problem_from_gmo(view: GmoView) -> GmoProblem:
         x0=x0,
         has_hessian=has_hess,
         obj_sign=obj_sign,
+        jacobian_is_constant=jac_const,
     )

@@ -1340,6 +1340,62 @@ impl IpoptApplication {
         crate::unimplemented_options::hint_warnings(&self.options, &self.reg_options)
     }
 
+    /// Warnings for the constant-derivative hints when the solve routes to
+    /// `pounce-convex` instead of here. Call site is the convex dispatch
+    /// in the CLI, next to the other guards that live there for the same
+    /// reason: that dispatch never reaches [`Self::optimize_tnlp`], so
+    /// `install_constant_derivative_hints` never runs and the hints are
+    /// unread. On the NLP route they are honoured, so this must not be
+    /// called there.
+    pub fn convex_unexploited_hint_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::convex_hint_warnings(&self.options, &self.reg_options)
+    }
+
+    /// Resolve the four constant-derivative hints for this solve and
+    /// install the result on the NLP (gh #588, phase Q6).
+    ///
+    /// `grad_f_constant` / `hessian_constant` / `jac_c_constant` /
+    /// `jac_d_constant` are, upstream, unchecked user assertions: Ipopt
+    /// reuses the derivative and returns a wrong answer if the assertion
+    /// was false. pounce asks the model first. Where the model *proves*
+    /// the derivative constant, the reuse happens whether or not the
+    /// option was set — the hint is redundant. Where the model proves it
+    /// **varies** and the option was set anyway, the option is refused
+    /// with a warning, which is the deliberate divergence. Where the
+    /// model can prove nothing — every callback front end, both GAMS
+    /// links — the user's assertion is honoured on trust, exactly as
+    /// upstream, because "unproved" is not "disproved" and silently
+    /// overriding the caller there would be its own wrong answer.
+    fn install_constant_derivative_hints(&self, orig_nlp: &mut OrigIpoptNlp) {
+        use pounce_common::journalist::JournalCategory;
+        use pounce_nlp::constant_derivatives::{HINT_OPTIONS, reconcile};
+
+        let asserted = HINT_OPTIONS
+            .map(|name| matches!(self.options.get_bool_value(name, ""), Ok((true, true))));
+        let proofs = orig_nlp.derivative_proofs();
+        let (outcomes, enabled) = reconcile(proofs, asserted);
+
+        for outcome in &outcomes {
+            if let Some(warning) = outcome.warning() {
+                eprintln!("{warning}");
+                self.journalist.print(
+                    JournalLevel::J_STRONGWARNING,
+                    JournalCategory::J_MAIN,
+                    &format!("{warning}\n"),
+                );
+            }
+        }
+        if std::env::var("POUNCE_DBG_CONSTDERIV").is_ok() {
+            for outcome in &outcomes {
+                eprintln!(
+                    "[const deriv] {:<15} proof={:?} asserted={} reused={}",
+                    outcome.name, outcome.proof, outcome.asserted, outcome.honoured,
+                );
+            }
+        }
+        orig_nlp.set_constant_derivatives(enabled);
+    }
+
     /// Resolve the five registered `derivative_test*` knobs. Every one
     /// of them was registered and never read, so `derivative_test=
     /// first-order` ran no test and printed nothing — a checker that
@@ -1476,13 +1532,16 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(1.0);
-        let orig_nlp = match OrigIpoptNlp::new(
+        let mut orig_nlp = match OrigIpoptNlp::new(
             Rc::clone(&adapter),
             Rc::new(ConstObjScaling(obj_scaling_factor)),
         ) {
             Ok(n) => n,
             Err(_) => return ApplicationReturnStatus::InternalError,
         };
+        // Same Q6 reconciliation as the IPM route: the SQP driver
+        // evaluates the same derivatives through the same NLP object.
+        self.install_constant_derivative_hints(&mut orig_nlp);
         let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
         let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
@@ -2492,6 +2551,9 @@ impl IpoptApplication {
             }
         };
         orig_nlp.set_timing_stats(Rc::clone(&timing));
+        // Q6: decide which derivatives may be reused across iterates,
+        // before anything is evaluated (gh #588).
+        self.install_constant_derivative_hints(&mut orig_nlp);
 
         // Mirror upstream `OrigIpoptNLP::InitializeStructures` (IpOrigIpoptNLP.cpp:299):
         // bail out with NotEnoughDegreesOfFreedom when there are fewer free

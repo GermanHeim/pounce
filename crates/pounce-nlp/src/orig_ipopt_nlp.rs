@@ -57,6 +57,9 @@
 //!   `fixed_variable_treatment` knob lands when the option machinery
 //!   does.
 
+use crate::constant_derivatives::{
+    ConstantDerivatives, DerivativeProof, DerivativeProofs, subsystem_proof,
+};
 use crate::ipopt_nlp::{IpoptNlp, Nlp, SplitNames};
 use crate::tnlp::{IDX_NAMES, MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
@@ -279,6 +282,61 @@ pub struct OrigIpoptNlp {
     /// [`Self::set_timing_stats`]; when `None`, all `eval_*` entry
     /// points skip the timing overhead.
     timing: RefCell<Option<Rc<TimingStatistics>>>,
+
+    /// Which derivatives this solve reuses across iterates — the four
+    /// upstream `*_constant` hints, resolved against what the model
+    /// could prove (gh #588, Q6). Default: reuse nothing, which is the
+    /// behaviour every path had before this field existed.
+    ///
+    /// A reused derivative is stored in its ordinary cache with an
+    /// **empty** dependency list instead of the iterate's tag, so the
+    /// lookup that already runs on every call finds it at every point.
+    /// That is upstream's own mechanism (`IpOrigIpoptNLP.cpp` nulls the
+    /// dependency); what pounce does differently is decide *when* it is
+    /// allowed to (see [`crate::constant_derivatives`]).
+    const_deriv: ConstantDerivatives,
+
+    /// Which forms a *fixed* variable can actually reach — the guard on
+    /// the `forget_variation` weakening in [`Self::derivative_proofs`].
+    /// All-clear (and unread) when the model fixes nothing.
+    fixed_reach: FixedVarReach,
+}
+
+/// Where `make_parameter`'s fixed variables are structurally reachable.
+///
+/// Fixing a variable can only *remove* variation from a derivative, so a
+/// `Varying` proof does not survive it — that is why
+/// [`DerivativeProof::forget_variation`] exists. But the weakening is
+/// not free: `Varying` refuses a false user hint, and `Unknown` honours
+/// it on trust (see the table in [`crate::constant_derivatives`]). Applied
+/// to a form no fixed variable can reach, it would trade a refusal pounce
+/// had earned for trust it has no basis for — on a model whose only sin
+/// was fixing one unrelated variable. So it is applied per form, and this
+/// records which forms qualify.
+///
+/// Both tests are read straight out of the sparsity the constructor
+/// already queries for the `make_parameter` remap, so neither costs an
+/// extra call into the user's TNLP.
+#[derive(Clone, Debug, Default)]
+struct FixedVarReach {
+    /// `g_row_touches_fixed[i]` — row `i` of the full TNLP Jacobian has a
+    /// declared nonzero in a fixed column. If `∂gᵢ/∂x_j` depends on a
+    /// fixed `x_p` then `gᵢ` depends on `x_p`, so `∂gᵢ/∂x_p ≢ 0` and the
+    /// entry is there: a row without one cannot change character.
+    /// Indexed by the model's own row order, like `DerivativeProofs::jac`.
+    g_row_touches_fixed: Vec<bool>,
+    /// Whether a fixed variable is reachable in *second* order — set when
+    /// the declared Hessian has an entry whose row or column is fixed, and
+    /// (conservatively) whenever the TNLP declines to declare a Hessian at
+    /// all, which leaves the question unanswerable.
+    ///
+    /// This is the test for both `∇f` and `∇²L`, because both are second
+    /// order in the fixed variable: if `∂f/∂x_j` depends on a fixed `x_p`
+    /// then `∂²f/∂x_j∂x_p ≢ 0`, and if `∂²L/∂x_j∂x_k` does then
+    /// `∂²L/∂x_j∂x_p ≢ 0` — either way a Hessian entry in a fixed
+    /// row/column is declared. A first-order-only appearance (`f` linear
+    /// in `x_p`) changes no derivative w.r.t. the remaining variables.
+    second_order_touches_fixed: bool,
 }
 
 #[derive(Clone)]
@@ -462,11 +520,16 @@ impl OrigIpoptNlp {
         // columns. Their contribution to f and g is constant under the
         // active-x search so they don't appear in the KKT.
         let full_to_var = &classification.full_to_var;
+        // Dropping an entry here *is* the observation "this row touches a
+        // fixed variable" — see `FixedVarReach`. Recording it costs one
+        // byte per row and no extra query.
+        let mut g_row_touches_fixed = vec![false; info.m as usize];
         for k in 0..info.nnz_jac_g as usize {
             let g_row_0 = (full_irow[k] - style_offset) as usize;
             let x_col_0 = (full_jcol[k] - style_offset) as usize;
             let var_col = full_to_var[x_col_0];
             if var_col < 0 {
+                g_row_touches_fixed[g_row_0] = true;
                 continue;
             }
             // Triplet output is 1-based (matches `GenTMatrix` convention).
@@ -504,6 +567,11 @@ impl OrigIpoptNlp {
         // `LowRankUpdateSymMatrixSpace` instead. -----
         let nnz_h_lag_full = info.nnz_h_lag;
         let mut h_entry_in_full: Vec<Index> = Vec::new();
+        // A TNLP with no `eval_h` leaves second-order reach unanswerable,
+        // so it starts out assumed. A structurally zero Hessian answers it:
+        // no second derivatives at all means no derivative w.r.t. the
+        // remaining variables can depend on a fixed one.
+        let mut second_order_touches_fixed = info.nnz_h_lag > 0;
         let h_space = if info.nnz_h_lag > 0 {
             let mut h_irow = vec![0 as Index; info.nnz_h_lag as usize];
             let mut h_jcol = vec![0 as Index; info.nnz_h_lag as usize];
@@ -523,6 +591,7 @@ impl OrigIpoptNlp {
                 )
             };
             if supports_h {
+                second_order_touches_fixed = false;
                 // `make_parameter`: drop Hessian entries where row OR
                 // column is fixed (the second derivatives w.r.t. a
                 // parameter are not needed in the active-x KKT). The
@@ -536,6 +605,7 @@ impl OrigIpoptNlp {
                     let i_var = full_to_var[i_full];
                     let j_var = full_to_var[j_full];
                     if i_var < 0 || j_var < 0 {
+                        second_order_touches_fixed = true;
                         continue;
                     }
                     h_irow_1.push(i_var + 1);
@@ -620,6 +690,11 @@ impl OrigIpoptNlp {
             h_evals: RefCell::new(0),
             info,
             timing: RefCell::new(None),
+            const_deriv: ConstantDerivatives::default(),
+            fixed_reach: FixedVarReach {
+                g_row_touches_fixed,
+                second_order_touches_fixed,
+            },
         })
     }
 
@@ -656,6 +731,89 @@ impl OrigIpoptNlp {
                 f()
             }
         }
+    }
+
+    // ---- constant-derivative hints (gh #588, Q6) ----
+
+    /// Ask the model what it can prove about its own derivatives, and
+    /// fold the per-row answers into the four hints the algorithm's
+    /// evaluation sites are actually about.
+    ///
+    /// Returned in [`crate::constant_derivatives::HINT_OPTIONS`] order:
+    /// `grad_f`, `hessian`, `jac_c`, `jac_d`. Two translations happen
+    /// here and nowhere else, because this is the only layer that knows
+    /// both the model's row order and the algorithm's:
+    ///
+    /// 1. **The c/d split.** The model proves things about *its* rows;
+    ///    the algorithm evaluates an equality block and an inequality
+    ///    block. `c_map` / `d_map` are the authoritative split — deriving
+    ///    it a second time from `g_l == g_u` inside the model would be a
+    ///    second rule that could disagree with this one.
+    /// 2. **Fixed variables.** Under `fixed_variable_treatment =
+    ///    make_parameter` a variable with `x_l == x_u` leaves the space
+    ///    the algorithm differentiates in, so a row like `x·y` with `y`
+    ///    fixed has a *constant* gradient here while the model correctly
+    ///    proved it varies. A proof of variation therefore does not
+    ///    survive fixing and is weakened to `Unknown`; a proof of
+    ///    constancy does survive, since dropping variables cannot
+    ///    introduce dependence. Getting this backwards would make pounce
+    ///    refuse a hint that is true — the same kind of silent wrong
+    ///    answer the phase exists to prevent, pointed the other way.
+    pub fn derivative_proofs(&self) -> [DerivativeProof; 4] {
+        let mut proofs: DerivativeProofs = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.derivative_proofs()
+        };
+        let cls = self.adapter.borrow().classification().clone();
+        if cls.n_x_fixed > 0 {
+            // A proof is stated about the model the *user* wrote; pounce
+            // then solves a smaller one, with the fixed variables folded
+            // into the forms as constants. That can only remove variation,
+            // so `Varying` no longer holds — but only where a fixed
+            // variable is reachable. Weakening a form it cannot reach
+            // would convert a refusal into `Unknown`, which the hint layer
+            // honours **on trust**, and a model that fixes one unrelated
+            // variable would quietly lose the ability to refuse a false
+            // `hessian_constant=yes` on the rest of itself. See
+            // [`FixedVarReach`] for why each test is exactly right.
+            //
+            // Weakening happens per row, *before* the fold below, so a
+            // subsystem is only weakened by the rows that earned it.
+            let reach = &self.fixed_reach;
+            for (row, proof) in proofs.jac.iter_mut().enumerate() {
+                if reach.g_row_touches_fixed.get(row).copied().unwrap_or(true) {
+                    *proof = proof.forget_variation();
+                }
+            }
+            if reach.second_order_touches_fixed {
+                proofs.grad_f = proofs.grad_f.forget_variation();
+                proofs.hessian = proofs.hessian.forget_variation();
+            }
+        }
+        [
+            proofs.grad_f,
+            proofs.hessian,
+            subsystem_proof(&proofs, &cls.c_map),
+            subsystem_proof(&proofs, &cls.d_map),
+        ]
+    }
+
+    /// Install the resolved hints. Called once, before the first
+    /// evaluation; calling it later would leave point-keyed entries in
+    /// the caches, which is harmless (they simply never match again) but
+    /// means the first reused value is whichever iterate got there
+    /// first.
+    pub fn set_constant_derivatives(&mut self, cd: ConstantDerivatives) {
+        self.const_deriv = cd;
+        // Anything cached against a point was computed before the
+        // decision and must not be mistaken for the constant answer.
+        self.invalidate_eval_caches();
+    }
+
+    /// The hints in force for this solve.
+    pub fn constant_derivatives(&self) -> ConstantDerivatives {
+        self.const_deriv
     }
 
     // ---- accessors used by the algorithm wiring layer ----
@@ -1609,6 +1767,13 @@ impl OrigIpoptNlp {
     }
 
     fn eval_grad_f_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
+        // A reused derivative lives in the same cache under an empty
+        // dependency list, so it matches at every point (gh #588, Q6).
+        if self.const_deriv.grad_f
+            && let Some(v) = self.grad_f_cache.borrow().get(&[], &[])
+        {
+            return v;
+        }
         if let Some(v) = self.grad_f_cache.borrow().get_1dep(x.as_tagged()) {
             return v;
         }
@@ -1635,10 +1800,21 @@ impl OrigIpoptNlp {
                 gv[var_idx] = full_g[full_idx as usize] * obj_scal;
             }
         }
+        // A failed evaluation NaN-fills; storing that as *the* constant
+        // answer would poison every remaining iteration instead of
+        // letting the line search back away from a bad point, so the
+        // point-keyed entry is used and the next call tries again.
+        let reuse = self.const_deriv.grad_f && all_finite(g_compressed.values());
         let result: Rc<dyn Vector> = Rc::new(g_compressed);
-        self.grad_f_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.grad_f_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.grad_f_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
@@ -1788,6 +1964,11 @@ impl OrigIpoptNlp {
     }
 
     fn eval_jac_c_internal(&self, x: &dyn Vector) -> Rc<dyn Matrix> {
+        if self.const_deriv.jac_c
+            && let Some(m) = self.jac_c_cache.borrow().get(&[], &[])
+        {
+            return m;
+        }
         if let Some(m) = self.jac_c_cache.borrow().get_1dep(x.as_tagged()) {
             return m;
         }
@@ -1810,14 +1991,26 @@ impl OrigIpoptNlp {
                 };
             }
         }
+        let reuse = self.const_deriv.jac_c && all_finite(jac_c.values());
         let result: Rc<dyn Matrix> = Rc::new(jac_c);
-        self.jac_c_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.jac_c_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.jac_c_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
     fn eval_jac_d_internal(&self, x: &dyn Vector) -> Rc<dyn Matrix> {
+        if self.const_deriv.jac_d
+            && let Some(m) = self.jac_d_cache.borrow().get(&[], &[])
+        {
+            return m;
+        }
         if let Some(m) = self.jac_d_cache.borrow().get_1dep(x.as_tagged()) {
             return m;
         }
@@ -1838,10 +2031,17 @@ impl OrigIpoptNlp {
                 };
             }
         }
+        let reuse = self.const_deriv.jac_d && all_finite(jac_d.values());
         let result: Rc<dyn Matrix> = Rc::new(jac_d);
-        self.jac_d_cache
-            .borrow_mut()
-            .add_1dep(Rc::clone(&result), x.as_tagged());
+        if reuse {
+            self.jac_d_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[]);
+        } else {
+            self.jac_d_cache
+                .borrow_mut()
+                .add_1dep(Rc::clone(&result), x.as_tagged());
+        }
         result
     }
 
@@ -1854,6 +2054,20 @@ impl OrigIpoptNlp {
     ) -> Rc<dyn SymMatrix> {
         // h_cache key: (x, y_c, y_d) tags + obj_factor scalar dep, as
         // upstream `IpOrigIpoptNLP.cpp:786`.
+        //
+        // A reused `∇²L` drops the three tags and keeps `obj_factor`:
+        // the hint's premise is that every row is linear, so `λ` weights
+        // nothing and `∇²L = σ·∇²f` — a function of `σ` alone. Upstream
+        // drops `σ` too, which is safe only because the main algorithm
+        // always passes 1.0; the restoration phase passes 0.0
+        // (`resto_nlp.rs`), and keeping the scalar dependency costs one
+        // float compare and makes that case right by construction rather
+        // than by coincidence.
+        if self.const_deriv.hessian
+            && let Some(m) = self.h_cache.borrow().get(&[], &[obj_factor])
+        {
+            return m;
+        }
         if let Some(m) = self.h_cache.borrow().get(
             &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
             &[obj_factor],
@@ -1910,17 +2124,32 @@ impl OrigIpoptNlp {
         for (k, &src) in self.h_entry_in_full.iter().enumerate() {
             h_vals[k] = full_vals[src as usize];
         }
+        let reuse = self.const_deriv.hessian && all_finite(h.values());
         let result: Rc<dyn SymMatrix> = Rc::new(h);
-        self.h_cache.borrow_mut().add(
-            Rc::clone(&result),
-            &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
-            &[obj_factor],
-        );
+        if reuse {
+            self.h_cache
+                .borrow_mut()
+                .add(Rc::clone(&result), &[], &[obj_factor]);
+        } else {
+            self.h_cache.borrow_mut().add(
+                Rc::clone(&result),
+                &[x.as_tagged(), y_c.as_tagged(), y_d.as_tagged()],
+                &[obj_factor],
+            );
+        }
         result
     }
 }
 
 // ---- helpers ----
+
+/// Whether every value is finite. Guards the constant-derivative store:
+/// a failed user evaluation NaN-fills its buffer, and a NaN written into
+/// a cache entry that never expires would fail the rest of the solve
+/// rather than the one trial point that caused it.
+fn all_finite(v: &[Number]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}
 
 fn make_dense_from(
     space: &Rc<DenseVectorSpace>,
@@ -2945,6 +3174,159 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    /// Three-variable TNLP with `x[2]` fixed at 2.0, built so the fixed
+    /// variable's reach is *different* for every form:
+    ///
+    /// ```text
+    /// min  x0³                    ∇f, ∇²L vary; neither touches x2
+    /// s.t. x0·x1 - 1 == 0         (equality)  ∇g0 varies, no x2
+    ///      <row 1>       >= 0     (inequality) ∇g1 varies, touches x2
+    /// ```
+    ///
+    /// Row 1 is the knob: `second_order = false` makes it `x1² + x2`, where
+    /// x2 appears linearly and so reaches nothing but that row's Jacobian;
+    /// `true` makes it `x1·x2`, where x2 is coupled to a free variable and
+    /// so reaches ∇²L — and through it ∇f's and ∇g's character generally.
+    /// Every declared proof is honest: all four forms really do vary.
+    struct FixedVarReachModel {
+        second_order: bool,
+    }
+    impl TNLP for FixedVarReachModel {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 3,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-1.0e19, -1.0e19, 2.0]);
+            b.x_u.copy_from_slice(&[1.0e19, 1.0e19, 2.0]); // x[2] fixed
+            b.g_l.copy_from_slice(&[0.0, 0.0]);
+            b.g_u.copy_from_slice(&[0.0, 1.0e19]); // g0 equality, g1 inequality
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.0, 1.0, 2.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(x[0] * x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g.copy_from_slice(&[3.0 * x[0] * x[0], 0.0, 0.0]);
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[1] - 1.0;
+            g[1] = if self.second_order {
+                x[1] * x[2]
+            } else {
+                x[1] * x[1] + x[2]
+            };
+            true
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    // (0,0) (0,1) — row 0 is free-only; (1,1) (1,2) — row 1
+                    // has a nonzero in the fixed column.
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 1, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    let x = x.expect("values need x");
+                    values[0] = x[1];
+                    values[1] = x[0];
+                    let (d1, d2) = if self.second_order {
+                        (x[2], x[1])
+                    } else {
+                        (2.0 * x[1], 1.0)
+                    };
+                    values[2] = d1;
+                    values[3] = d2;
+                }
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            _: bool,
+            sigma: Number,
+            lambda: Option<&[Number]>,
+            _: bool,
+            m: SparsityRequest<'_>,
+        ) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    // ∂²f/∂x0², ∂²g0/∂x1∂x0, and row 1's own second
+                    // derivative — (1,1) when it is x1², (2,1) when it is
+                    // x1·x2, which is the only entry in a fixed index.
+                    irow.copy_from_slice(&[0, 1, if self.second_order { 2 } else { 1 }]);
+                    jcol.copy_from_slice(&[0, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    let (x, l) = (x.expect("values need x"), lambda.expect("values need λ"));
+                    values[0] = sigma * 6.0 * x[0];
+                    values[1] = l[0];
+                    values[2] = if self.second_order { l[1] } else { 2.0 * l[1] };
+                }
+            }
+            true
+        }
+        fn derivative_proofs(&mut self) -> DerivativeProofs {
+            DerivativeProofs {
+                grad_f: DerivativeProof::Varying,
+                hessian: DerivativeProof::Varying,
+                jac: vec![DerivativeProof::Varying; 2],
+            }
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    fn reach_proofs(second_order: bool) -> [DerivativeProof; 4] {
+        let tnlp: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(FixedVarReachModel { second_order }));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).unwrap();
+        nlp.derivative_proofs()
+    }
+
+    /// Fixing a variable weakens the forms it reaches — and only those.
+    ///
+    /// `Varying` is what lets pounce *refuse* a false `*_constant=yes`;
+    /// `Unknown` is honoured on trust. Weakening all four proofs because
+    /// the model happened to fix one variable would hand a model back its
+    /// own false hints on every form, which is the whole safety payload of
+    /// gh#588 Q6. Row 1 is the only form the fixed x[2] reaches here, so
+    /// it is the only one that may lose its refusal.
+    #[test]
+    fn only_the_forms_a_fixed_variable_reaches_lose_their_refusal() {
+        use DerivativeProof::*;
+        let [grad_f, hessian, jac_c, jac_d] = reach_proofs(false);
+        assert_eq!(grad_f, Varying, "x[2] is nowhere in ∇f");
+        assert_eq!(hessian, Varying, "x[2] appears linearly; ∇²L cannot see it");
+        assert_eq!(jac_c, Varying, "row 0 has no nonzero in the fixed column");
+        assert_eq!(jac_d, Unknown, "row 1 does, so fixing x[2] may flatten it");
+    }
+
+    /// The other direction: the weakening is not merely never applied.
+    /// Couple the fixed variable to a free one and ∇²L — and with it ∇f,
+    /// which is second-order in exactly the same sense — must give up its
+    /// refusal too.
+    #[test]
+    fn a_second_order_coupling_to_a_fixed_variable_weakens_the_hessian() {
+        use DerivativeProof::*;
+        let [grad_f, hessian, jac_c, jac_d] = reach_proofs(true);
+        assert_eq!(hessian, Unknown, "x1·x2 puts a fixed index in ∇²L");
+        assert_eq!(grad_f, Unknown, "same test, and ∇f is reached the same way");
+        assert_eq!(jac_c, Varying, "row 0 is still untouched by x[2]");
+        assert_eq!(jac_d, Unknown);
     }
 
     #[test]
