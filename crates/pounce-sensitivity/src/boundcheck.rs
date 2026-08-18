@@ -169,6 +169,37 @@ mod tests {
     }
 
     #[test]
+    fn combinations_advance_in_lexicographic_order_and_terminate() {
+        // The enumeration order is the determinism promise of the
+        // directional search: size first, least index within a size.
+        let n = 4;
+        let mut seen: Vec<Vec<usize>> = Vec::new();
+        for size in 0..=n {
+            let mut combo: Vec<usize> = (0..size).collect();
+            loop {
+                seen.push(combo.clone());
+                if !next_combination(&mut combo, n) {
+                    break;
+                }
+            }
+        }
+        assert_eq!(seen.len(), 16, "2^4 subsets in total");
+        let expected_size_2: Vec<Vec<usize>> = vec![
+            vec![0, 1],
+            vec![0, 2],
+            vec![0, 3],
+            vec![1, 2],
+            vec![1, 3],
+            vec![2, 3],
+        ];
+        let got_size_2: Vec<Vec<usize>> = seen.iter().filter(|c| c.len() == 2).cloned().collect();
+        assert_eq!(got_size_2, expected_size_2);
+        for w in seen.windows(2) {
+            assert!(w[0].len() <= w[1].len(), "sizes never decrease");
+        }
+    }
+
+    #[test]
     fn expand_bounds_puts_infinity_where_a_bound_is_absent() {
         // only x1 has a lower bound, only x2 an upper one
         let (lo, hi) = expand_bounds(
@@ -575,6 +606,8 @@ pub fn step_along_path<B>(
     hi: &[Number],
     multipliers: &[BoundMultiplier],
     max_iter: usize,
+    forced_active: &[usize],
+    initial_holds: &[(usize, bool)],
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
@@ -645,9 +678,10 @@ where
             if !slack_base.is_finite() {
                 continue;
             }
-            if mult_nat
-                .iter()
-                .any(|m| m.row == br.row && m.base > slack_base)
+            if forced_active.contains(&br.row)
+                || mult_nat
+                    .iter()
+                    .any(|m| m.row == br.row && m.base > slack_base)
             {
                 let side = if br.lower { 0 } else { 1 };
                 base_active_row[br.var_row][side] = Some(br.row);
@@ -662,8 +696,39 @@ where
 
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
-    let mut holds: Vec<PathHold> = Vec::new();
-    let mut released: Vec<usize> = Vec::new();
+    // Seeded state from the directional-derivative decision at a
+    // degenerate base point. A weakly active row the direction holds
+    // arrives released, since its order-one sigma is wrong once the
+    // direction later changes, and pinned through a Schur hold with
+    // zero accumulated multiplier, exactly as a hold added at fraction
+    // zero would, so the drop test can end it later like any other. A
+    // weakly active row the direction leaves goes into the
+    // base-activity table below instead, so the release scan frees it
+    // at the fraction where its multiplier actually reaches zero:
+    // essentially zero at an exact kink, and partway along the step
+    // when the held solve sits inside the ambiguous band, where the
+    // bound is genuinely active for the first stretch. Deciding those
+    // rows at fraction zero released them a sixth of a step early on
+    // the CSTR held at 75% of the breakpoint fraction, and overshot
+    // tenfold against the walk's own release.
+    let mut holds: Vec<PathHold> = initial_holds
+        .iter()
+        .map(|&(row, lower)| PathHold {
+            row,
+            lower,
+            mult: 0.0,
+        })
+        .collect();
+    let mut released: Vec<usize> = initial_holds
+        .iter()
+        .filter_map(|&(var_row, lower)| {
+            bound_rows.as_ref().and_then(|rows| {
+                rows.iter()
+                    .find(|b| b.var_row == var_row && b.lower == lower)
+                    .map(|b| b.row)
+            })
+        })
+        .collect();
     let mut segments: Vec<PathSegment> = Vec::new();
     // Rows already changed at the fraction the path currently ends at.
     // A zero-length segment is where cycling comes from, so a row that
@@ -854,6 +919,155 @@ where
 /// without the constraint the released direction is measurably wrong:
 /// on a two-variable QP the free direction after a release came back
 /// [1.154, 0.194] against the analytic [1.227, 0.454].
+/// A bound the classifier could not call active or inactive at the
+/// base point: variable on the bound with a multiplier of the same
+/// order as the slack, both order sqrt(mu). The solution map has a
+/// kink there, and no single linear step is right for both sides.
+#[derive(Clone, Copy, Debug)]
+pub struct WeakBound {
+    /// Bound-multiplier row in the compound KKT vector.
+    pub row: usize,
+    /// Var-x row of the variable the bound covers.
+    pub var_row: usize,
+    /// `true` when the bound is the variable's lower bound.
+    pub lower: bool,
+}
+
+/// The directional derivative at a degenerate base point: the QP of
+/// Pirnay, Lopez-Negrete and Biegler 2012, eq. 14, solved as an
+/// active-set search over the weakly active rows on the held
+/// factorization.
+///
+/// Every weakly active row is released in every trial, because its
+/// sigma is `z / s` with both of order sqrt(mu), an order-one term
+/// that half-enforces a bound the direction may need to leave, and it
+/// is wrong for both sides of the kink. A candidate working set then
+/// pins its variable rows to zero movement through Schur rows. The
+/// candidate is accepted when
+///
+/// 1. every out variable moves into its feasible side, and
+/// 2. every pin is necessary: removing it alone makes its variable
+///    move into violation.
+///
+/// The necessity probe stands in for the dual-feasibility sign test
+/// on the pin's Schur multiplier, whose sign convention the rest of
+/// this file deliberately never names. The two tests agree wherever
+/// the returned direction differs: a pin whose multiplier is exactly
+/// zero at a doubly degenerate QP can be in or out, and both answers
+/// give the same direction.
+///
+/// Candidates are enumerated by size and then by least index, so the
+/// result is deterministic, and every trial counts against
+/// `max_iter`, the shared budget. Returns the direction, the var rows
+/// pinned in the accepted set, and the trials spent. `Err` when no
+/// candidate fits the budget or none is sign-consistent, and the
+/// caller falls back to the plain direction and says so.
+pub fn directional_step<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    weak: &[WeakBound],
+    max_iter: usize,
+) -> Result<(Vec<Number>, Vec<usize>, usize), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+    let mut trials = 0usize;
+    // dx tolerance, relative to the direction's own magnitude so the
+    // decision is invariant to the perturbation's scale: an absolute
+    // tolerance accepted the all-released set at a perturbation of
+    // 1e-10, reading the holding side's derivative as -1 instead of 0.
+    // Zero movement of a pinned variable is roundoff relative to the
+    // direction's norm, so pinned rows still clear it.
+    const EPS_REL: Number = 1e-9;
+    let scale_of =
+        |d: &[Number]| -> Number { d.iter().fold(0.0_f64, |a, &b| a.max(b.abs())).max(1e-300) };
+    let feasible = |w: &WeakBound, di: Number, tol: Number| -> bool {
+        if w.lower { di >= -tol } else { di <= tol }
+    };
+    let violates = |w: &WeakBound, di: Number, tol: Number| -> bool {
+        if w.lower { di < -tol } else { di > tol }
+    };
+
+    let n = weak.len();
+    let budget_err = || {
+        format!(
+            "directional derivative: the budget of {max_iter} trials \
+             ran out over {n} weakly active bound(s)"
+        )
+    };
+    // Working sets are generated lazily in size-then-least-index
+    // order: the first accepted candidate is deterministic, the budget
+    // bounds the work, and nothing is materialized. Building all 2^n
+    // masks up front allocated gigabytes near n = 30 to try at most
+    // max_iter of them, and overflowed the shift at n = 32.
+    for size in 0..=n {
+        let mut combo: Vec<usize> = (0..size).collect();
+        loop {
+            if trials >= max_iter {
+                return Err(budget_err());
+            }
+            let pinned: Vec<usize> = combo.iter().map(|&k| weak[k].var_row).collect();
+            let (d, _) = path_direction(backsolver, rhs_plain, &released, &pinned)?;
+            trials += 1;
+            let tol = EPS_REL * scale_of(&d);
+            let out_ok = (0..n)
+                .filter(|k| !combo.contains(k))
+                .all(|k| feasible(&weak[k], d[weak[k].var_row], tol));
+            if out_ok {
+                // Necessity of each pin, one removal probe per member.
+                let mut all_needed = true;
+                for &k in &combo {
+                    if trials >= max_iter {
+                        return Err(budget_err());
+                    }
+                    let probe: Vec<usize> = combo
+                        .iter()
+                        .filter(|&&j| j != k)
+                        .map(|&j| weak[j].var_row)
+                        .collect();
+                    let (dp, _) = path_direction(backsolver, rhs_plain, &released, &probe)?;
+                    trials += 1;
+                    let ptol = EPS_REL * scale_of(&dp);
+                    if !violates(&weak[k], dp[weak[k].var_row], ptol) {
+                        all_needed = false;
+                        break;
+                    }
+                }
+                if all_needed {
+                    return Ok((d, pinned, trials));
+                }
+            }
+            if !next_combination(&mut combo, n) {
+                break;
+            }
+        }
+    }
+    Err(format!(
+        "directional derivative: no sign-consistent working set over \
+         {n} weakly active bound(s)"
+    ))
+}
+
+/// Advance `combo` to the next lexicographic combination of its size
+/// over `0..n`, returning `false` when it was the last one. The empty
+/// combination has no successor.
+fn next_combination(combo: &mut [usize], n: usize) -> bool {
+    let k = combo.len();
+    let mut i = k;
+    while i > 0 {
+        i -= 1;
+        if combo[i] != i + n - k {
+            combo[i] += 1;
+            for j in i + 1..k {
+                combo[j] = combo[j - 1] + 1;
+            }
+            return true;
+        }
+    }
+    false
+}
+
 fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],

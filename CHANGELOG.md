@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+- **`estimate()` decides a degenerate base point for the perturbation's
+  own direction** (#672). A solve can converge with a bound weakly active, on
+  the bound with a multiplier of the same order as the slack, and the
+  solution has a kink there with a different one-sided derivative on
+  each side. The activity thresholds have no answer at a kink, and the
+  factorization carries the bound as an order-one diagonal term that is
+  wrong for both sides. Measured on the CSTR held at its record's first
+  breakpoint, the thresholds land on the wrong side of a 2% step toward
+  the steady state. `linear` and `path` miss by 0.0077 with an empty
+  record, four times `fix_relax`'s 0.0018, which its own sign-based
+  release test reaches by a favorable read rather than by construction.
+
+  `estimate()`, `estimate_report()`, and `active_set_changes()` gain
+  `degeneracy="directional"` (the default). The weakly active bounds
+  are decided by the directional-derivative QP (the sIPOPT paper's
+  eq. 14), an active-set search on the held factorization whose
+  candidate is accepted when every variable left out moves into its
+  feasible side and every pin is necessary. All three modes consume
+  the decision, and all three land at 0.0018 on the case above. The
+  path starts the rows the QP leaves in its base-activity table, so a
+  bound genuinely active for the first stretch, the held solve inside
+  the ambiguous band rather than at the kink, releases at the fraction
+  where its multiplier reaches zero. Deciding those at fraction zero
+  overshot tenfold at 75% of the breakpoint fraction, and the record
+  carries the measured fraction. `degeneracy="one_sided"` is
+  bit-identical to the previous behavior. Detection is a scan, the QP
+  runs only at a degenerate base point under the shared `max_iter`
+  budget, and past it the call falls back to the one-sided step with a
+  warning. `gradient()` has no direction to decide with, so it warns
+  at a degenerate base point and names the variables and bounds.
+  Roadmap item 3.
 - **`alpha_red_factor` reaches the line search** (#678).
 
   The option was registered, range-checked against its bounds `(0,1)`,

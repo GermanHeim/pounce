@@ -511,9 +511,9 @@ def test_a_coordinate_on_one_bound_can_still_cross_the_other():
 
     # drive x down, away from the bound it is held at and toward the
     # other one. x must be scored: the exclusion covers its upper side
-    # only. (Its step is the two-sided derivative at a degenerate base
-    # point, half the interior value, so the crossing lands where the
-    # scan says rather than where dx/dp = 1 would put it.)
+    # only. (The base point is degenerate, so the step is the
+    # directional derivative for this direction, the interior value,
+    # and the report and the brute force agree because both take it.)
     r = estimate_report(m, [(m.p, -2.0)])
     assert r.first == "x"
     alpha, who = brute_force_multi(m, [(m.p, -2.0)])
@@ -523,22 +523,29 @@ def test_a_coordinate_on_one_bound_can_still_cross_the_other():
 
 def test_a_coordinate_pushed_further_past_the_bound_it_is_held_at():
     """The exclusion covers the side x is held on, which is also the
-    side the step pushes it past. Excluding it there reported that 998
-    times the perturbation fits while naming x as leaving its bound by
-    0.25 in the same object."""
+    side the one-sided step pushes it past. Excluding it there reported
+    that 998 times the perturbation fits while naming x as leaving its
+    bound by 0.25 in the same object. That bookkeeping lives on the
+    one-sided step, so this pins it there; under the directional
+    default the weak bound is decided for this direction, which holds
+    x, and nothing crosses at all."""
     m = held_at_a_bound()
-    r = estimate_report(m, [(m.p, 1.5)])
+    r = estimate_report(m, [(m.p, 1.5)], degeneracy="one_sided")
     assert r.activity["x"] == "weakly_active"
     assert len(r.crossed) == 1 and m.x in r.crossed
 
-    # x is on its bound and the step drives it outward, so no part of
-    # the perturbation fits before the bound is reached
+    # x is on its bound and the one-sided step drives it outward, so no
+    # part of the perturbation fits before the bound is reached
     assert r.first == "x"
     assert r.alpha < 1e-3
 
+    # under the directional default the decided step holds x on its
+    # bound, which is the correct one-sided derivative for this side
+    assert len(estimate_report(m, [(m.p, 1.5)]).crossed) == 0
+
     # the classification still keeps it out when nothing crosses, which
     # is what the exclusion is for
-    r2 = estimate_report(m, [(m.p, 1.0 + 1e-9)])
+    r2 = estimate_report(m, [(m.p, 1.0 + 1e-9)], degeneracy="one_sided")
     assert len(r2.crossed) == 0
     assert r2.first != "x"
 
