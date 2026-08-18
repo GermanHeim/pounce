@@ -198,6 +198,69 @@ pub enum UnaryOp {
     XLogX,
 }
 
+/// The `.nl` header's nonlinearity census — lines 3 and 5 of Gay's header
+/// table (*Hooking Your Solver to AMPL*, §D and Table 1).
+///
+/// AMPL has already done this analysis when it writes the file, so these are
+/// facts about the model that cost nothing to keep and would otherwise have
+/// to be recovered by walking every expression tree in it.
+///
+/// ```text
+///  55 1        # nonlinear constraints, objectives          -> nl_cons, nl_objs
+///  100 110 100 # nonlinear vars in constraints, objectives, both
+/// ```
+///
+/// Two properties of the format make these usable rather than merely
+/// informative, and both are asserted against the fixture corpus in
+/// `crates/pounce-cli/tests/nl_header_counts.rs`:
+///
+/// 1. **Nonlinear rows come first.** Constraints `0..nl_cons` are the ones
+///    with a nonlinear body; objectives `0..nl_objs` likewise.
+/// 2. **Nonlinear variables come first.** The `.nl` variable order is
+///    "nonlinear in both, then constraints-only, then objectives-only, then
+///    everything linear", so the variables that appear nonlinearly occupy a
+///    prefix of length [`NlCounts::nonlinear_vars`].
+///
+/// The counts are what the *writer* asserted, which is not always what the
+/// parsed trees say: `parse_nl_text` folds a variable-free `C` body into the
+/// row bounds (`gh #492`), so a row counted in `nl_cons` can arrive here with
+/// a nonlinear part of `Const(0.0)`. The discrepancy is one-directional —
+/// the header only ever over-states nonlinearity relative to the trees — and
+/// every consumer below is written to be sound under exactly that direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NlCounts {
+    /// `nlc`: constraints with a nonlinear body.
+    pub nl_cons: usize,
+    /// `nlo`: objectives with a nonlinear body.
+    pub nl_objs: usize,
+    /// `nlvc`: variables appearing nonlinearly in constraints. **Includes**
+    /// the [`Self::nl_vars_both`] variables that are also nonlinear in an
+    /// objective.
+    pub nl_vars_cons: usize,
+    /// `nlvo`: variables appearing nonlinearly in objectives. Also includes
+    /// [`Self::nl_vars_both`].
+    pub nl_vars_objs: usize,
+    /// `nlvb`: variables appearing nonlinearly in *both* a constraint and an
+    /// objective. Counted a second and third time in the two fields above,
+    /// which is why the total is an inclusion–exclusion and not a sum.
+    pub nl_vars_both: usize,
+}
+
+impl NlCounts {
+    /// Number of distinct variables that appear nonlinearly anywhere:
+    /// `nlvc + nlvo − nlvb`, because `nlvb` is double-counted by the other
+    /// two. Saturating, so a malformed header cannot underflow.
+    ///
+    /// This is *not* `max(nlvc, nlvo)`: for `min x₀² s.t. x₁² ≤ 1` the counts
+    /// are `nlvc = nlvo = 1`, `nlvb = 0` and there are two nonlinear
+    /// variables, not one.
+    pub fn nonlinear_vars(&self) -> usize {
+        self.nl_vars_cons
+            .saturating_add(self.nl_vars_objs)
+            .saturating_sub(self.nl_vars_both)
+    }
+}
+
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
 #[derive(Debug, Clone)]
 pub struct NlProblem {
@@ -232,6 +295,11 @@ pub struct NlProblem {
     /// them — see [`crate::sol_writer::format_sol_with_options`]. Empty
     /// for problems not built from a `.nl` file.
     pub ampl_options: Vec<i64>,
+    /// The header's nonlinearity census, when the problem came from a `.nl`
+    /// file whose header parsed cleanly. `None` for a model built in memory
+    /// ([`NlProblem::from_expressions`]) — there is no header to read, and
+    /// inventing one would let a consumer trust a count nobody computed.
+    pub nl_counts: Option<NlCounts>,
     /// AMPL imported (external) functions declared via top-level `F` segments.
     /// Empty unless the `.nl` file calls compiled-C user functions (typically
     /// emitted by IDAES property packages — see issue #49).
@@ -382,6 +450,10 @@ impl NlProblem {
             suffixes: NlSuffixes::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            // No header was read, so there is no census to report. Consumers
+            // fall back to walking the trees, which is what they would have
+            // to do here anyway.
+            nl_counts: None,
             var_names,
             con_names,
         })
@@ -860,6 +932,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         lambda0,
         suffixes,
         ampl_options: p.ampl_options.clone(),
+        nl_counts: p.nl_counts,
         imported_funcs,
         // `.nl` text carries no names; `read_nl_file` fills these from the
         // sibling `.col`/`.row` files when present.
@@ -1076,6 +1149,34 @@ fn parse_var_coef(line: &str) -> Result<(usize, Number), String> {
     Ok((v, c))
 }
 
+/// Build an [`NlCounts`] from `.nl` header lines 3 (`nlc nlo`) and 5
+/// (`nlvc nlvo nlvb`).
+///
+/// Returns `None` unless both lines carry the full complement of
+/// non-negative integers, so a truncated or non-conforming header reads as
+/// "unknown" rather than as zeros — "no nonlinear variables" is a claim, and
+/// a header that failed to parse has not made it.
+fn parse_nl_counts(line3: &str, line5: &str) -> Option<NlCounts> {
+    let nums = |line: &str, want: usize| -> Option<Vec<usize>> {
+        let v: Vec<usize> = line
+            .split_whitespace()
+            .take(want)
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        (v.len() == want).then_some(v)
+    };
+    let cons_objs = nums(line3, 2)?;
+    let vars = nums(line5, 3)?;
+    Some(NlCounts {
+        nl_cons: cons_objs[0],
+        nl_objs: cons_objs[1],
+        nl_vars_cons: vars[0],
+        nl_vars_objs: vars[1],
+        nl_vars_both: vars[2],
+    })
+}
+
 struct Parser<'a> {
     lines: Vec<&'a str>,
     pos: usize,
@@ -1084,6 +1185,8 @@ struct Parser<'a> {
     num_obj: usize,
     /// Number of AMPL imported (external) functions declared in the header.
     n_funcs: usize,
+    /// Header lines 3 and 5, when both parsed. See [`NlCounts`].
+    nl_counts: Option<NlCounts>,
     ampl_options: Vec<i64>,
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
@@ -1100,6 +1203,7 @@ impl<'a> Parser<'a> {
             m: 0,
             num_obj: 0,
             n_funcs: 0,
+            nl_counts: None,
             ampl_options: Vec::new(),
             cses: Vec::new(),
         }
@@ -1170,13 +1274,22 @@ impl<'a> Parser<'a> {
         self.m = nums[1].parse().map_err(|e| format!("m: {e}"))?;
         self.num_obj = nums[2].parse().map_err(|e| format!("num_obj: {e}"))?;
 
-        // Lines 3..5 are metadata we skip.
-        for _ in 0..3 {
-            self.next_data_line()?;
-        }
-        // Line 5 (0-indexed from `g`-header): `nwv nfunc arith flags`
+        // Header line 3: `nlc nlo`. Line 4: the network-constraint census,
+        // which pounce has no use for. Line 5: `nlvc nlvo nlvb`. Together
+        // these are the model's nonlinearity census — see [`NlCounts`].
+        //
+        // A header that does not carry them in the documented shape leaves
+        // `nl_counts` at `None` rather than at a guess: every consumer has a
+        // walk-the-trees fallback, and a fabricated count is worse than an
+        // absent one. The rest of the header stays tolerant in the same way
+        // the `nfunc` read below is.
+        let l3 = self.next_data_line()?;
+        let _l4_network = self.next_data_line()?;
         let l5 = self.next_data_line()?;
-        let nums5: Vec<&str> = l5.split_whitespace().collect();
+        self.nl_counts = parse_nl_counts(l3, l5);
+        // Line 5 (0-indexed from `g`-header): `nwv nfunc arith flags`
+        let l6 = self.next_data_line()?;
+        let nums5: Vec<&str> = l6.split_whitespace().collect();
         self.n_funcs = nums5.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         // Lines 6..10 are metadata we don't need — skip 4 more lines.
         for _ in 0..4 {
@@ -3506,6 +3619,58 @@ impl NlTnlp {
         &self.prob
     }
 
+    /// Structural set of variables that appear in *some* nonlinear part —
+    /// the union of `collect_vars` over the objective and every constraint
+    /// row. Shared by `get_variables_linearity` and the nonlinear-variable
+    /// list below so the two can never disagree.
+    fn nonlinear_var_set(&self) -> BTreeSet<usize> {
+        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
+        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        for row in &self.prob.con_nonlinear {
+            collect_vars(row, &mut nonlinear);
+        }
+        nonlinear
+    }
+
+    /// The nonlinear-variable list published through the TNLP contract
+    /// (`get_number_of_nonlinear_variables` / `get_list_of_nonlinear_variables`),
+    /// ascending, in the C index style [`NlTnlp`] reports.
+    ///
+    /// The contract's asymmetry decides how this is computed. A consumer
+    /// treats every variable *absent* from the list as linear — Ipopt's
+    /// limited-memory Hessian skips the quasi-Newton update in that
+    /// subspace — so naming too few variables is a wrong answer, while
+    /// naming too many merely costs work. Hence:
+    ///
+    /// * When the `.nl` header says **every** variable is nonlinear, publish
+    ///   that and skip the walk. This is the maximally conservative answer,
+    ///   so it is sound whatever the header's provenance, and it is the
+    ///   common case for the models this matters on (`eigena2`: 110 of 110).
+    /// * Otherwise walk the trees. The header's prefix
+    ///   (`nlvc + nlvo − nlvb` — see [`NlCounts`]) would also be an O(1)
+    ///   answer, but it would be one that *trusts* the writer to have
+    ///   ordered the variables as the format requires, and the walk is
+    ///   already paid once per solve by `get_variables_linearity`. The
+    ///   walk is also the only option for a model built through
+    ///   [`NlProblem::from_expressions`], which has no header at all.
+    ///
+    /// The two disagree only in the safe direction, which
+    /// `crates/pounce-cli/tests/nl_header_counts.rs` asserts over the
+    /// fixture corpus: the walked set always sits inside the header's
+    /// prefix, because `parse_nl_text` folds constant `C` bodies away
+    /// (`gh #492`) and AMPL's own census predates that fold.
+    fn nonlinear_variables(&self) -> Vec<Index> {
+        if let Some(c) = self.prob.nl_counts
+            && c.nonlinear_vars() >= self.prob.n
+        {
+            return (0..self.prob.n as Index).collect();
+        }
+        self.nonlinear_var_set()
+            .into_iter()
+            .map(|i| i as Index)
+            .collect()
+    }
+
     /// Mutable access to that same problem, for a caller that owns this
     /// TNLP outright.
     ///
@@ -4283,11 +4448,7 @@ impl TNLP for NlTnlp {
         // `obj_nonlinear` and every `con_nonlinear` row. A variable touched
         // only by a linear part — or not referenced at all — is Linear.
         //
-        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
-        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
-        for row in &self.prob.con_nonlinear {
-            collect_vars(row, &mut nonlinear);
-        }
+        let nonlinear = self.nonlinear_var_set();
         for (i, t) in types.iter_mut().enumerate() {
             *t = if nonlinear.contains(&i) {
                 Linearity::NonLinear
@@ -4318,6 +4479,19 @@ impl TNLP for NlTnlp {
                 Linearity::Linear
             };
         }
+        true
+    }
+
+    fn get_number_of_nonlinear_variables(&mut self) -> Index {
+        self.nonlinear_variables().len() as Index
+    }
+
+    fn get_list_of_nonlinear_variables(&mut self, pos_nonlin_vars: &mut [Index]) -> bool {
+        let list = self.nonlinear_variables();
+        if pos_nonlin_vars.len() < list.len() {
+            return false;
+        }
+        pos_nonlin_vars[..list.len()].copy_from_slice(&list);
         true
     }
 }
@@ -4504,6 +4678,7 @@ b
             suffixes: NlSuffixes::default(),
             imported_funcs: vec![],
             ampl_options: vec![],
+            nl_counts: None,
             var_names: vec![],
             con_names: vec![],
         };
@@ -4559,6 +4734,7 @@ b
             suffixes: NlSuffixes::default(),
             imported_funcs: vec![],
             ampl_options: vec![],
+            nl_counts: None,
             var_names: vec![],
             con_names: vec![],
         };
@@ -4581,6 +4757,122 @@ b
             matches!(obj[1], Linearity::Linear),
             "x1 is linear everywhere"
         );
+    }
+
+    /// Header lines 3 and 5 land in [`NlCounts`], with the field order the
+    /// format documents: `nlc nlo` then `nlvc nlvo nlvb`. `SIMPLE` is
+    /// `min (x0-1)^2 + (x1-2)^2`, so one nonlinear objective, no nonlinear
+    /// constraints, and both variables nonlinear in the objective only.
+    #[test]
+    fn header_census_is_parsed() {
+        let p = parse_nl_text(SIMPLE).expect("parse");
+        let c = p.nl_counts.expect("SIMPLE has a well-formed header");
+        assert_eq!(c.nl_cons, 0);
+        assert_eq!(c.nl_objs, 1);
+        assert_eq!((c.nl_vars_cons, c.nl_vars_objs, c.nl_vars_both), (0, 2, 0));
+        assert_eq!(c.nonlinear_vars(), 2);
+    }
+
+    /// `nlvb` is inside both `nlvc` and `nlvo`, so the total is
+    /// `nlvc + nlvo − nlvb`. The two degenerate directions matter as much
+    /// as the overlapping one: disjoint sets add, and `max` would be wrong
+    /// for them.
+    #[test]
+    fn nonlinear_var_total_uses_inclusion_exclusion() {
+        let c = |vc, vo, vb| NlCounts {
+            nl_cons: 0,
+            nl_objs: 0,
+            nl_vars_cons: vc,
+            nl_vars_objs: vo,
+            nl_vars_both: vb,
+        };
+        // Fully shared: the same 5 variables in both.
+        assert_eq!(c(5, 5, 5).nonlinear_vars(), 5);
+        // Disjoint: `min x0^2 s.t. x1^2 <= 1` is two nonlinear variables,
+        // not the `max(nlvc, nlvo) = 1` a naive reading gives.
+        assert_eq!(c(1, 1, 0).nonlinear_vars(), 2);
+        // Partial overlap: 4 + 3 - 2.
+        assert_eq!(c(4, 3, 2).nonlinear_vars(), 5);
+        // Nonsense header: saturates instead of underflowing.
+        assert_eq!(c(1, 1, 9).nonlinear_vars(), 0);
+    }
+
+    /// A header that does not carry the documented fields records no
+    /// census at all rather than a guess of zero — "no nonlinear
+    /// variables" is a claim, and a truncated header has not made it.
+    #[test]
+    fn short_header_line_records_no_census() {
+        // Line 5 with two fields instead of `nlvc nlvo nlvb`.
+        let txt = SIMPLE.replacen("0 2 0\n", "0 2\n", 1);
+        assert_ne!(txt, SIMPLE, "the substitution must have applied");
+        let p = parse_nl_text(&txt).expect("parse");
+        assert!(p.nl_counts.is_none());
+    }
+
+    /// `get_number_of_nonlinear_variables` used to be the trait default,
+    /// `-1` ("assume everything is nonlinear"). It now answers from the
+    /// trees, and `get_list_of_nonlinear_variables` agrees with it.
+    ///
+    /// `min (x0 - 1)^2 + 3*x1`: x0 is nonlinear, x1 is not.
+    #[test]
+    fn nonlinear_variable_list_excludes_linear_columns() {
+        let obj_nl = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Sub,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(1.0)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let parts = NlProblemParts {
+            minimize: true,
+            objective: obj_nl,
+            obj_constant: 0.0,
+            constraints: vec![],
+            x_l: vec![-1e19; 2],
+            x_u: vec![1e19; 2],
+            x0: vec![0.0; 2],
+            g_l: vec![],
+            g_u: vec![],
+            var_names: vec![],
+            con_names: vec![],
+        };
+        let prob = NlProblem::from_expressions(parts).expect("build");
+        assert!(
+            prob.nl_counts.is_none(),
+            "a model built in memory has no header to read"
+        );
+        let mut tnlp = NlTnlp::new(prob);
+        assert_eq!(tnlp.get_number_of_nonlinear_variables(), 1);
+        let mut list = [-1 as Index; 2];
+        assert!(tnlp.get_list_of_nonlinear_variables(&mut list));
+        assert_eq!(list[0], 0);
+    }
+
+    /// When the header says every variable is nonlinear the walk is
+    /// skipped, and the answer is the same one the walk would give for
+    /// `SIMPLE` (both variables appear in the objective's nonlinear part).
+    #[test]
+    fn all_nonlinear_header_short_circuits_to_n() {
+        let p = parse_nl_text(SIMPLE).expect("parse");
+        assert_eq!(p.nl_counts.expect("census").nonlinear_vars(), p.n);
+        let mut tnlp = NlTnlp::new(p);
+        assert_eq!(tnlp.get_number_of_nonlinear_variables(), 2);
+        let mut list = [-1 as Index; 2];
+        assert!(tnlp.get_list_of_nonlinear_variables(&mut list));
+        assert_eq!(list, [0, 1]);
+    }
+
+    /// The list must not be written when the caller's slice is too small —
+    /// the contract's `false` return, not a panic.
+    #[test]
+    fn nonlinear_variable_list_declines_a_short_slice() {
+        let p = parse_nl_text(SIMPLE).expect("parse");
+        let mut tnlp = NlTnlp::new(p);
+        let mut list = [-1 as Index; 1];
+        assert!(!tnlp.get_list_of_nonlinear_variables(&mut list));
+        assert_eq!(list, [-1]);
     }
 
     /// `min x0^2 + x1^2  s.t.  x0 + x1 = 1`.

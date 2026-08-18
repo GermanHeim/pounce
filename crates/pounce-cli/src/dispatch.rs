@@ -137,6 +137,91 @@ impl ProblemClass {
     }
 }
 
+/// Why [`classify_problem`] reached the class it did.
+///
+/// Every arm is a place the classifier *stops* — either because it proved a
+/// class or because it could not, and fell back to the more general one. The
+/// distinction matters most for a convex QCQP: four different findings
+/// (a nonconvex row, a nonconvex *sense*, an unaffordable reformulation, an
+/// oversized conic solve) all route to `Nlp`, and a user staring at
+/// `Problem class: NLP` on a model they know is a QCQP has so far had no way
+/// to tell which. `POUNCE_DBG_CLASSIFY=1` prints it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassReason {
+    /// Neither the objective nor any row carries a nonlinear part.
+    NoNonlinearParts,
+    /// Nonlinear parts exist but all of them expanded to nothing of
+    /// degree 2 or higher — the model is linear after expansion.
+    NonlinearPartsCancelled,
+    /// The objective's nonlinear part is not a degree-2 polynomial.
+    ObjectiveNotQuadratic,
+    /// Row `row`'s nonlinear part is not a degree-2 polynomial.
+    ConstraintNotQuadratic { row: usize },
+    /// The sense-adjusted objective Hessian has a negative eigenvalue.
+    ObjectiveHessianIndefinite,
+    /// Row `row` is quadratic with a PSD Hessian, but its bound sense
+    /// (`>=`, `=`, or two-sided) carves a nonconvex feasible set.
+    ConstraintSenseNonconvex { row: usize },
+    /// Row `row`'s quadratic Hessian is not PSD.
+    ConstraintHessianIndefinite { row: usize },
+    /// Convex QCQP, but the cone reformulation exceeds
+    /// [`SOCP_REFORM_FLOP_BUDGET`].
+    QcqpReformTooCostly { flops: u128 },
+    /// Convex QCQP whose reformulation is affordable, but whose conic
+    /// solve exceeds [`SOCP_SOLVE_SIZE_CAP`].
+    QcqpTooLargeToSolve { size: u64 },
+    /// Convex quadratic objective, linear constraints.
+    ConvexQuadraticObjective,
+    /// Convex QCQP inside both guards — the conic path is taken.
+    ConvexQcqpWithinBudgets { flops: u128, size: u64 },
+}
+
+impl ClassReason {
+    /// One-line explanation, for the `POUNCE_DBG_CLASSIFY` log.
+    pub fn explain(self) -> String {
+        match self {
+            ClassReason::NoNonlinearParts => {
+                "no nonlinear part in the objective or any row".to_string()
+            }
+            ClassReason::NonlinearPartsCancelled => {
+                "every nonlinear part expanded to a linear (or constant) polynomial".to_string()
+            }
+            ClassReason::ObjectiveNotQuadratic => {
+                "the objective's nonlinear part is not a degree-2 polynomial".to_string()
+            }
+            ClassReason::ConstraintNotQuadratic { row } => {
+                format!("row {row}'s nonlinear part is not a degree-2 polynomial")
+            }
+            ClassReason::ObjectiveHessianIndefinite => {
+                "the objective Hessian (sense-adjusted for minimization) is not PSD".to_string()
+            }
+            ClassReason::ConstraintSenseNonconvex { row } => format!(
+                "row {row} is a convex quadratic but its bound sense (>=, =, or \
+                 two-sided) makes the feasible set nonconvex"
+            ),
+            ClassReason::ConstraintHessianIndefinite { row } => {
+                format!("row {row}'s quadratic Hessian is not PSD")
+            }
+            ClassReason::QcqpReformTooCostly { flops } => format!(
+                "convex QCQP downgraded: cone reformulation costs {flops} flops \
+                 (budget {SOCP_REFORM_FLOP_BUDGET})"
+            ),
+            ClassReason::QcqpTooLargeToSolve { size } => format!(
+                "convex QCQP downgraded: conic solve size n·m = {size} \
+                 (cap {SOCP_SOLVE_SIZE_CAP})"
+            ),
+            ClassReason::ConvexQuadraticObjective => {
+                "convex quadratic objective, linear rows".to_string()
+            }
+            ClassReason::ConvexQcqpWithinBudgets { flops, size } => format!(
+                "convex QCQP inside both guards: reformulation {flops} flops \
+                 (budget {SOCP_REFORM_FLOP_BUDGET}), conic solve size n·m = {size} \
+                 (cap {SOCP_SOLVE_SIZE_CAP})"
+            ),
+        }
+    }
+}
+
 /// The resolved solver to dispatch to, after combining a
 /// [`ProblemClass`] with the `solver_selection` option.
 ///
@@ -219,32 +304,105 @@ impl SolverSelection {
 /// nonlinear `Expr` (the linear part is, by construction, linear). The
 /// classifier is deliberately conservative — see the module docs.
 pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
-    // Fast path: no nonlinear parts anywhere ⇒ LP. (Header-equivalent:
-    // n_nl_objs == 0 && n_nl_cons == 0.)
+    classify_problem_explained(prob).0
+}
+
+/// [`classify_problem`], plus the finding that produced the class.
+///
+/// Also the single place the `POUNCE_DBG_CLASSIFY=1` routing log is
+/// emitted, so every caller — including the tests — sees the same line.
+pub fn classify_problem_explained(prob: &NlProblem) -> (ProblemClass, ClassReason) {
+    let verdict = classify_inner(prob);
+    if std::env::var_os("POUNCE_DBG_CLASSIFY").is_some() {
+        eprintln!(
+            "pounce: problem class {} — {} [{}]",
+            verdict.0.name(),
+            verdict.1.explain(),
+            header_census(prob)
+        );
+    }
+    verdict
+}
+
+/// The `.nl` header's nonlinearity census next to what the parsed trees
+/// actually say, for the `POUNCE_DBG_CLASSIFY` line.
+///
+/// The two are allowed to differ in exactly one direction — the header can
+/// over-state, because `parse_nl_text` folds a constant `C` body into the
+/// row bounds after AMPL took its census (`gh #492`). A header that
+/// *under*-states is a non-conforming writer, and the note says so rather
+/// than letting the discrepancy pass silently; nothing in the classifier
+/// trusts the header, so it is a diagnostic, not a guard.
+fn header_census(prob: &NlProblem) -> String {
+    let tree_rows = prob
+        .con_nonlinear
+        .iter()
+        .filter(|e| !is_trivially_zero(e))
+        .count();
+    let tree_obj = usize::from(!is_trivially_zero(&prob.obj_nonlinear));
+    let Some(c) = prob.nl_counts else {
+        return format!("no .nl header census; trees: nl_rows={tree_rows} nl_obj={tree_obj}");
+    };
+    let flag = if c.nl_cons < tree_rows || c.nl_objs < tree_obj {
+        " — HEADER UNDER-STATES the trees; writer is non-conforming"
+    } else {
+        ""
+    };
+    format!(
+        "header nlc={} nlo={} nlvc={} nlvo={} nlvb={} ({} of {} vars nonlinear); \
+         trees: nl_rows={tree_rows} nl_obj={tree_obj}{flag}",
+        c.nl_cons,
+        c.nl_objs,
+        c.nl_vars_cons,
+        c.nl_vars_objs,
+        c.nl_vars_both,
+        c.nonlinear_vars(),
+        prob.n,
+    )
+}
+
+fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
+    // Fast path: no nonlinear parts anywhere ⇒ LP.
+    //
+    // This deliberately stays a walk over the parsed rows rather than the
+    // O(1) header read (`nlc == 0 && nlo == 0`) the design note proposed.
+    // Two reasons, both found by writing it out: the test is already O(1)
+    // *per row* — `is_trivially_zero` matches the root node, it does not
+    // walk an `Expr` — so the header saves a pointer compare per row and
+    // nothing else; and the header answer is the writer's claim, while this
+    // one is a fact about the trees pounce will evaluate. Trusting the
+    // claim would route a model to the LP solver on the strength of a
+    // header field, which is not a trade this classifier makes anywhere
+    // else. The header is logged beside the verdict instead.
     let obj_nl = !is_trivially_zero(&prob.obj_nonlinear);
     let cons_nl = prob.con_nonlinear.iter().any(|e| !is_trivially_zero(e));
     if !obj_nl && !cons_nl {
-        return ProblemClass::Lp;
+        return (ProblemClass::Lp, ClassReason::NoNonlinearParts);
     }
 
     // Objective curvature.
     let obj_quad = match analyze_quadratic(&prob.obj_nonlinear, prob.n) {
         Some(q) => q,
         // Objective has a non-quadratic nonlinear term ⇒ NLP.
-        None => return ProblemClass::Nlp,
+        None => return (ProblemClass::Nlp, ClassReason::ObjectiveNotQuadratic),
     };
 
     // Constraint curvature. A quadratic constraint makes this a QCQP;
     // any non-quadratic constraint term makes the whole problem NLP.
     let mut any_quadratic_constraint = false;
-    for c in &prob.con_nonlinear {
+    for (row, c) in prob.con_nonlinear.iter().enumerate() {
         if is_trivially_zero(c) {
             continue;
         }
         match analyze_quadratic(c, prob.n) {
             Some(q) if q.is_empty() => {} // purely linear after all
             Some(_) => any_quadratic_constraint = true,
-            None => return ProblemClass::Nlp,
+            None => {
+                return (
+                    ProblemClass::Nlp,
+                    ClassReason::ConstraintNotQuadratic { row },
+                );
+            }
         }
     }
 
@@ -260,7 +418,10 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
             obj_quad.iter().map(|(k, v)| (*k, -v)).collect()
         };
         if !hessian_is_psd(&effective, prob.n) {
-            return ProblemClass::NonconvexQp;
+            return (
+                ProblemClass::NonconvexQp,
+                ClassReason::ObjectiveHessianIndefinite,
+            );
         }
     }
 
@@ -310,12 +471,26 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
                     // ruinous to put in SOC form, so route the whole QCQP to
                     // NLP (which solves it soundly) rather than burn the budget
                     // in the reformulation — the mittelmann `qcqp1000-*` rows.
-                    if !upper_only || !hessian_is_psd(&q, prob.n) {
-                        return ProblemClass::Nlp;
+                    if !upper_only {
+                        return (
+                            ProblemClass::Nlp,
+                            ClassReason::ConstraintSenseNonconvex { row },
+                        );
+                    }
+                    if !hessian_is_psd(&q, prob.n) {
+                        return (
+                            ProblemClass::Nlp,
+                            ClassReason::ConstraintHessianIndefinite { row },
+                        );
                     }
                     reform_flops = reform_flops.saturating_add(socp_reform_flops(&q));
                 }
-                None => return ProblemClass::Nlp,
+                None => {
+                    return (
+                        ProblemClass::Nlp,
+                        ClassReason::ConstraintNotQuadratic { row },
+                    );
+                }
             }
         }
         // Two independent guards, for two different costs. A convex QCQP whose
@@ -340,19 +515,39 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
                 }
             );
         }
-        if too_costly_to_reform || too_large_to_solve {
-            return ProblemClass::Nlp;
+        if too_costly_to_reform {
+            return (
+                ProblemClass::Nlp,
+                ClassReason::QcqpReformTooCostly {
+                    flops: reform_flops,
+                },
+            );
         }
-        return ProblemClass::ConvexQcqp;
+        if too_large_to_solve {
+            return (
+                ProblemClass::Nlp,
+                ClassReason::QcqpTooLargeToSolve { size: solve_size },
+            );
+        }
+        return (
+            ProblemClass::ConvexQcqp,
+            ClassReason::ConvexQcqpWithinBudgets {
+                flops: reform_flops,
+                size: solve_size,
+            },
+        );
     }
 
     // Quadratic (or linear) convex objective with linear constraints.
     if obj_quad.is_empty() {
         // Objective nonlinear part collapsed to nothing quadratic and no
         // constraints are quadratic — it was effectively linear.
-        ProblemClass::Lp
+        (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
     } else {
-        ProblemClass::ConvexQp
+        (
+            ProblemClass::ConvexQp,
+            ClassReason::ConvexQuadraticObjective,
+        )
     }
 }
 
@@ -1166,6 +1361,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1349,6 +1545,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1388,6 +1585,87 @@ mod tests {
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
     }
 
+    /// Four different findings route a QCQP to `Nlp`, and until now the log
+    /// said only "NLP" for all of them. Each guard must name itself.
+    #[test]
+    fn qcqp_downgrades_say_which_guard_fired() {
+        // Solve-size cap: one diagonal row, trivial to reform.
+        let (class, reason) = classify_problem_explained(&convex_qcqp_at_size(10_001, 10_001));
+        assert_eq!(class, ProblemClass::Nlp);
+        assert!(
+            matches!(reason, ClassReason::QcqpTooLargeToSolve { size } if size == 10_001 * 10_001),
+            "expected the solve-size cap, got {reason:?}"
+        );
+
+        // Reformulation budget: one dense row coupling 400 variables, k³ ≫ 2e7.
+        let (class, reason) = classify_problem_explained(&coupled_convex_qcqp_with_k_vars(400));
+        assert_eq!(class, ProblemClass::Nlp);
+        assert!(
+            matches!(reason, ClassReason::QcqpReformTooCostly { .. }),
+            "expected the reformulation budget, got {reason:?}"
+        );
+
+        // Inside both guards: the reason carries the numbers that decided it.
+        let (class, reason) = classify_problem_explained(&convex_qcqp_at_size(100, 100));
+        assert_eq!(class, ProblemClass::ConvexQcqp);
+        assert!(
+            matches!(
+                reason,
+                ClassReason::ConvexQcqpWithinBudgets { size, .. } if size == 10_000
+            ),
+            "expected a within-budget QCQP, got {reason:?}"
+        );
+    }
+
+    /// A quadratic row that is convex as a *function* but bounded from
+    /// below carves a nonconvex set. That is a different finding from a row
+    /// whose Hessian is indefinite, and the two used to be one `return`.
+    #[test]
+    fn nonconvex_sense_and_indefinite_hessian_are_distinct_reasons() {
+        // x0² ≥ 1 — PSD Hessian, nonconvex feasible set.
+        let mut prob = convex_qcqp_at_size(10, 10);
+        prob.g_l[0] = 1.0;
+        prob.g_u[0] = f64::INFINITY;
+        let (class, reason) = classify_problem_explained(&prob);
+        assert_eq!(class, ProblemClass::Nlp);
+        assert_eq!(reason, ClassReason::ConstraintSenseNonconvex { row: 0 });
+
+        // −x0² ≤ 1 — upper-bounded, but the Hessian is negative definite.
+        let mut prob = convex_qcqp_at_size(10, 10);
+        prob.con_nonlinear[0] = Expr::Unary(
+            UnaryOp::Neg,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let (class, reason) = classify_problem_explained(&prob);
+        assert_eq!(class, ProblemClass::Nlp);
+        assert_eq!(reason, ClassReason::ConstraintHessianIndefinite { row: 0 });
+    }
+
+    /// The LP fast path reports *why* it is an LP, and the two ways of
+    /// getting there are told apart: nothing nonlinear at all, versus
+    /// nonlinear parts that expanded to nothing quadratic.
+    #[test]
+    fn lp_reasons_distinguish_absent_from_cancelled() {
+        let prob = qp_stub(Expr::Const(0.0), vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NoNonlinearParts)
+        );
+
+        // x0 − x0 in the objective's nonlinear part: present, but degree 0
+        // once expanded.
+        let cancels = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(Expr::Var(0)));
+        let prob = qp_stub(cancels, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+    }
+
     /// Build a convex QCQP whose single quadratic constraint `(Σ xᵢ)² ≤ 1`
     /// couples all `k` variables (a dense rank-1 PSD Hessian over `k` vars),
     /// with `n = k`, `m = 1`. Exercises the per-row conic-reformulation guard
@@ -1420,6 +1698,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1459,6 +1738,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1643,6 +1923,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }

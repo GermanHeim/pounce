@@ -797,6 +797,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -863,6 +864,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -904,6 +906,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1110,6 +1113,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1172,6 +1176,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1220,6 +1225,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1276,6 +1282,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1330,6 +1337,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1370,6 +1378,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1404,6 +1413,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1441,6 +1451,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1482,6 +1493,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1530,6 +1542,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1580,6 +1593,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1618,6 +1632,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
+            nl_counts: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
