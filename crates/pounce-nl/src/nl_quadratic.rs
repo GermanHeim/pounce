@@ -225,6 +225,20 @@ impl Quad2 {
         self
     }
 
+    /// `self · s`, for a scalar `s`.
+    ///
+    /// The `prune` is not decoration, and neither is the flag it sets. A
+    /// nonzero coefficient times a nonzero `s` can still land on zero by
+    /// underflow — `1e-300 x0²` divided by `1e300` is reachable from a real
+    /// `.nl` body, through [`Op::Div`]'s `scale(1.0 / d)` — so this is the
+    /// gh #683 shape again, arrived at by scaling rather than by summing.
+    /// Leaving the flushed entry stored would make an arithmetically
+    /// constant form report degree 2 to [`Quad2::degree`] and be refused as
+    /// degree 3 the moment anything multiplied it; dropping it without
+    /// recording the drop would make a genuinely degree-2 body look affine
+    /// to [`Quad2::dropped_terms`]'s consumers. `prune` does both.
+    /// (`neg` needs neither: negation cannot reach zero from a coefficient
+    /// that was not already there.)
     pub(crate) fn scale(mut self, s: f64) -> Quad2 {
         if s == 0.0 {
             // An exact zero annihilates every term, so this is a proof of
@@ -785,6 +799,38 @@ mod tests {
         // Division by a variable is not polynomial.
         let e = Expr::Binary(BinOp::Div, Box::new(sq(0)), Box::new(Expr::Var(1)));
         assert!(analyze_quadratic(&e).is_none());
+    }
+
+    #[test]
+    fn scaling_a_coefficient_to_zero_drops_it_like_cancellation_does() {
+        // 1e-300·x0² divided by 1e300. Neither the coefficient nor the
+        // divisor is zero, so the whole-form `s == 0.0` shortcut does not
+        // fire — the product underflows instead, and the entry has to go
+        // the same way a cancelled one does.
+        let tiny = Expr::Binary(BinOp::Mul, Box::new(Expr::Const(1e-300)), Box::new(sq(0)));
+        let flushed = Expr::Binary(BinOp::Div, Box::new(tiny), Box::new(Expr::Const(1e300)));
+        let h = analyze_quadratic(&flushed).expect("degree-2 at worst");
+        assert!(
+            h.is_empty(),
+            "underflowed coefficient was kept as a structural nonzero: {h:?}"
+        );
+        // Storage and degree are the two halves of gh #683 and this route
+        // reaches both: the entry is gone from the map, *and* the form
+        // says so, so a consumer asking whether the body is affine gets
+        // "not established" rather than "yes".
+        let q = recognize_expr(&flushed).expect("degree-2 at worst");
+        assert!(
+            q.dropped_terms(),
+            "a coefficient that underflowed in `scale` was dropped silently"
+        );
+        // And the degree has to go with it for the *storage* question:
+        // multiplying by another variable must still be recognized rather
+        // than refused as degree 3.
+        let times_x1 = Expr::Binary(BinOp::Mul, Box::new(flushed), Box::new(Expr::Var(1)));
+        assert!(
+            analyze_quadratic(&times_x1).is_some(),
+            "a form scaled to nothing was refused as degree 3"
+        );
     }
 
     #[test]
