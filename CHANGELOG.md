@@ -100,11 +100,26 @@ changes.
   **`cresc4` under L-BFGS goes from `Restoration_Failed` at 976
   iterations to solved at 190**, objective `0.8718975397` against the
   exact-Hessian path's `0.8718975273`. `pooling_rt2stp` drops 413→292
-  iterations at the same objective and `eigenb2` 56→44. Two move the
-  other way and are not yet explained: `autocorr_bern55-06` converges in
-  66 iterations instead of 106 but to a worse local minimum
-  (−2256.0 against −2368.0), and `deb7` goes from a restoration failure
-  near the right objective to the iteration cap at `119.59`.
+  iterations at the same objective and `eigenb2` 56→44.
+
+  Two fixtures move the other way, and both were run down rather than
+  accepted as a cost — neither is a loss of a correct result.
+
+  `autocorr_bern55-06` is nonconvex and its L-BFGS answer is unstable
+  under any perturbation. Sweeping `limited_memory_max_skipping` 1→50
+  gives −2336, −2256, −2252, −2368, −2368 — non-monotone, and *none* is
+  the exact-Hessian reference of −2304. Each is a certified KKT point of
+  a problem that has many; the −2368 this moved away from was not the
+  right answer either, just one draw.
+
+  `deb7` does not solve under L-BFGS at any setting — every value from 1
+  to 50 returns `Maximum_Iterations_Exceeded`,
+  `Error_In_Step_Computation` or `Restoration_Failed`, and only the
+  exact-Hessian path solves it (154 iterations, 97.5599345). The
+  objective it stops at does degrade with more resetting (119.59 at the
+  default against 97.56 with resetting off), but that is the objective
+  of a failed solve, not a result. Recorded as evidence that upstream's
+  default of 2 is aggressive on this model.
 
   This does **not** fix the reporter's dual stall — they measured
   `inf_du` plateauing at the same `0.155` with and without the change.
