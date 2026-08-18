@@ -73,17 +73,27 @@ changes.
   their own when no exact Hessian is available, so that leg is what an
   embedder gets by default.
 
-- **`linear_system_scaling=slack-based` now says it is doing nothing**
-  (#677).
+- **`linear_system_scaling=slack-based` is implemented** (#677).
 
-  The value is registered, so it was accepted, but it reached the
+  The value was registered, so it was accepted, but it reached the
   no-scaling fallback through a catch-all arm and emitted no notice —
   `mc19` warned, `slack-based` did not, though a code comment claimed
-  both did. It is not an obscure setting: it is what Ipopt's recommended
-  configuration for large collocation NLPs uses, so the users most likely
-  to set it were the least likely to learn it was inert. It still falls
-  back to no scaling; it now warns when it does. (`ruiz` is implemented
-  and unaffected.)
+  both did. Setting it was indistinguishable from not setting it. It is
+  not an obscure setting: it is what Ipopt's recommended configuration
+  for large collocation NLPs uses, so the users most likely to set it
+  were the least likely to learn it was inert.
+
+  It now does what Ipopt's `IpSlackBasedTSymScalingMethod` does — scale
+  the augmented system's `s` block by
+  `min(Pd_L·slack_s_L + Pd_U·slack_s_U, 1)` and leave the `x`, `y_c` and
+  `y_d` blocks at 1. On `cresc4` with `linear_scaling_on_demand=no` it
+  takes 74 iterations against 81 for `none` and 61 for `ruiz` — its own
+  method, not an alias for either.
+
+  Default runs are untouched: the default is still `none`, and the
+  fixture corpus is identical on both legs. `mc19` remains unimplemented
+  and still falls back, now with a test pinning that so the fallback
+  stays deliberate.
 
 - **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
 

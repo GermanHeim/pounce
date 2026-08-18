@@ -127,6 +127,15 @@ impl TSymLinearSolver {
     /// Pin the triplet sparsity pattern. Must be called once before
     /// the first [`Self::multi_solve`]. `airn` / `ajcn` are 1-based.
     /// Mirrors the bulk of `TSymLinearSolver::InitializeStructure`.
+    /// Forward per-iterate data to the scaling method, if it wants any.
+    /// No-op for matrix-only methods. See
+    /// [`crate::TSymScalingMethod::set_slack_scaling`].
+    pub fn set_slack_scaling(&mut self, nx: Index, s_scale: &[Number]) {
+        if let Some(m) = self.scaling_method.as_mut() {
+            m.set_slack_scaling(nx, s_scale);
+        }
+    }
+
     pub fn initialize_structure(
         &mut self,
         dim: Index,

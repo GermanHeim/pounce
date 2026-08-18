@@ -144,6 +144,10 @@ pub struct IpoptAlgorithm {
     /// a feasible primal and still fail to drive `inf_du` down, because
     /// the dual step is computed from an approximate `W`. Re-estimating
     /// `y` by least squares side-steps the approximation entirely.
+    /// `linear_system_scaling=slack-based` is active, so the
+    /// iterate-dependent `s`-block scaling must be refreshed each
+    /// iteration. See [`Self::push_slack_scaling`].
+    pub slack_based_scaling: bool,
     pub recalc_y: bool,
     /// `recalc_y_feas_tol` — the constraint-violation threshold below
     /// which [`Self::recalc_y`] fires. Upstream default `1e-6`.
@@ -438,6 +442,7 @@ impl IpoptAlgorithm {
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
+            slack_based_scaling: false,
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             max_iter: 3000,
@@ -2322,6 +2327,19 @@ impl IpoptAlgorithm {
             return o;
         }
 
+        // 4b. `linear_system_scaling=slack-based` — refresh the
+        //     iterate-dependent part of the augmented-system scaling
+        //     before anything factorizes it.
+        //
+        //     The other scaling methods (Ruiz, MC19) derive their
+        //     factors from the matrix they are handed and need nothing
+        //     from here. Slack-based is a function of the iterate, and
+        //     upstream's method reads `IpCq()` directly; pounce's
+        //     scaling methods live in `pounce-linsol`, below the
+        //     algorithm, so the value is computed here and pushed down.
+        //     Inert unless the option selected it.
+        self.push_slack_scaling();
+
         // 5. Search direction. Skipped without an NLP + search_dir.
         // (Hessian was updated in step 3 above before the barrier-μ
         // oracle so that adaptive-μ uses W(curr_N), not stale W.)
@@ -3417,6 +3435,42 @@ impl IpoptAlgorithm {
             &*bounds.d_l,
             &*bounds.d_u,
         );
+    }
+
+    /// Refresh the `s`-block factors for
+    /// `linear_system_scaling=slack-based`.
+    ///
+    /// A no-op for every other scaling choice: the flag is set only when
+    /// the builder installed a `SlackBasedTSymScalingMethod`, and the
+    /// method itself ignores the push if it never receives one.
+    ///
+    /// Silently skips when the quantity cannot be formed — no NLP, no
+    /// current iterate, no inequality rows, or a primal vector shape the
+    /// CQ does not recognise. The scaling method then keeps behaving as
+    /// identity, which is what `linear_system_scaling=none` would have
+    /// done, so a missing push costs conditioning and never correctness.
+    fn push_slack_scaling(&mut self) {
+        if !self.slack_based_scaling {
+            return;
+        }
+        if self.nlp.is_none() {
+            return;
+        }
+        let nx = match self.data.borrow().curr.as_ref() {
+            Some(c) => c.x.dim(),
+            None => return,
+        };
+        let Some(s_scale) = self.cq.borrow().curr_slack_based_s_scaling() else {
+            return;
+        };
+        if s_scale.is_empty() {
+            return;
+        }
+        if let Some(sd) = self.search_dir.as_mut() {
+            sd.pd_solver_mut()
+                .aug_solver_mut()
+                .set_slack_scaling(nx, &s_scale);
+        }
     }
 
     /// `recalc_y` — replace `y_c`/`y_d` with least-square estimates once

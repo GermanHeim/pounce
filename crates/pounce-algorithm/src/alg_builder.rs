@@ -87,6 +87,11 @@ pub enum LinearSystemScalingChoice {
     None,
     Ruiz,
     Mc19,
+    /// `slack-based` — `IpSlackBasedTSymScalingMethod`. Unlike the
+    /// others this one is a function of the iterate, not of the matrix,
+    /// so the algorithm pushes the `s`-block factors down each
+    /// iteration (see `IpoptAlgorithm::push_slack_scaling`).
+    SlackBased,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -996,6 +1001,9 @@ impl AlgorithmBuilder {
                         "pounce: linear_system_scaling=mc19 not yet implemented; using no scaling"
                     );
                     None
+                }
+                LinearSystemScalingChoice::SlackBased => {
+                    Some(Box::new(pounce_linsol::SlackBasedTSymScalingMethod::new()))
                 }
             };
         let linsol = TSymLinearSolver::new(backend, scaling, self.linear_scaling_on_demand);
