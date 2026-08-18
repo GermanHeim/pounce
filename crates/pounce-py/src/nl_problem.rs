@@ -35,7 +35,7 @@ use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
 use pounce_nl::nl_reader::{
-    Expr, NlProblem, NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file,
+    Expr, NlBody, NlProblem, NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file,
 };
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
@@ -652,9 +652,12 @@ impl Drop for PyNlProblem {
         }
         let prob = self.tnlp.get_mut().problem_mut();
         let mut doomed = Vec::with_capacity(prob.con_nonlinear.len() + 1);
-        doomed.push(std::mem::replace(&mut prob.obj_nonlinear, Expr::Const(0.0)));
+        doomed.push(std::mem::replace(
+            &mut prob.obj_nonlinear,
+            NlBody::Tree(Expr::Const(0.0)),
+        ));
         for c in &mut prob.con_nonlinear {
-            doomed.push(std::mem::replace(c, Expr::Const(0.0)));
+            doomed.push(std::mem::replace(c, NlBody::Tree(Expr::Const(0.0))));
         }
         on_deep_stack(self.expr_depth, move || drop(doomed));
     }
@@ -669,11 +672,19 @@ impl Drop for PyNlProblem {
 /// anything else walks the result (pounce#472).
 fn checked_depth(prob: &NlProblem) -> Result<u32, String> {
     let mut memo = std::collections::HashMap::new();
+    // A body the `.nl` parser recognized as a quadratic has no tree to
+    // walk — it carries the depth the tree *would* have had instead, which
+    // is what this guard is about (gh #588, Q5). Skipping it would report a
+    // shallow model for one whose bodies are anything but.
+    let body_depth = |b: &NlBody, memo: &mut std::collections::HashMap<_, _>| match b {
+        NlBody::Tree(e) => expr_depth(e, memo),
+        NlBody::Quad(q) => q.depth,
+    };
     let depth = prob
         .con_nonlinear
         .iter()
-        .fold(expr_depth(&prob.obj_nonlinear, &mut memo), |acc, c| {
-            acc.max(expr_depth(c, &mut memo))
+        .fold(body_depth(&prob.obj_nonlinear, &mut memo), |acc, c| {
+            acc.max(body_depth(c, &mut memo))
         });
     if depth > MAX_DEPTH {
         return Err(format!(

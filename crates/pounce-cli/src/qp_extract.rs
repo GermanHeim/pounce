@@ -29,7 +29,6 @@
 //!   the *opposite* sentinel (an upper bound of `-5e20`) is an ordinary
 //!   bound and is kept.
 
-use crate::dispatch::analyze_quadratic_full;
 use crate::nl_reader::NlProblem;
 // Bound presence is read **directionally** — a lower bound is absent only at
 // or below `-1e19`, an upper bound only at or above `+1e19`. This file used a
@@ -79,7 +78,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
 
     // --- objective Hessian P (lower triangle) + nonlinear-tree linear part
     //     + nonlinear-tree constant (degree-0 term, for reporting only) ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = prob.obj_nonlinear.analyze_quadratic_full()?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         // analyze_quadratic returns (i ≤ j) upper-ish keys; store as
@@ -121,7 +120,8 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         // silently solves the wrong constraint. The folded constant
         // shifts the bounds: `g_l ≤ row + k ≤ g_u  ⇔  g_l−k ≤ row ≤ g_u−k`.
         // This mirrors the SOCP extractor's linear-constraint handling.
-        let (nl_lin, const_shift) = analyze_quadratic_full(&prob.con_nonlinear[row])
+        let (nl_lin, const_shift) = prob.con_nonlinear[row]
+            .analyze_quadratic_full()
             .map(|(_, l, k)| (l, k))
             .unwrap_or_default();
         let mut coef = vec![0.0; n];
@@ -383,7 +383,7 @@ pub fn extract_socp_with_map(
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
     // --- objective P (lower triangle) + folded linear / constant terms ---
-    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear)?;
+    let (hess, obj_nl_linear, obj_nl_constant) = prob.obj_nonlinear.analyze_quadratic_full()?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         let (row, col) = if i >= j { (*i, *j) } else { (*j, *i) };
@@ -411,7 +411,7 @@ pub fn extract_socp_with_map(
         let lo = prob.g_l[row];
         let hi = prob.g_u[row];
         let nl = &prob.con_nonlinear[row];
-        let quad = analyze_quadratic_full(nl);
+        let quad = nl.analyze_quadratic_full();
         let is_quadratic = matches!(&quad, Some((hmap, _, _)) if !hmap.is_empty());
 
         if is_quadratic {
@@ -752,6 +752,7 @@ fn psd_outer_factor(mut a: Vec<f64>, n: usize) -> Vec<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nl_reader::NlBody;
     use crate::nl_reader::{BinOp, Expr};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_socp_ipm};
     use pounce_feral::FeralSolverInterface;
@@ -775,18 +776,20 @@ mod tests {
     #[test]
     fn extract_and_solve_socp_ball() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, -1.0), (1, -1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Binary(
+            con_nonlinear: vec![NlBody::Tree(Expr::Binary(
                 BinOp::Add,
                 Box::new(pow2(0)),
                 Box::new(pow2(1)),
-            )],
+            ))],
             con_linear: vec![vec![]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -846,14 +849,16 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]],
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -888,14 +893,20 @@ mod tests {
             )
         };
         NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(i, -1.0), (j, -1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Binary(BinOp::Add, Box::new(sq(i)), Box::new(sq(j)))],
+            con_nonlinear: vec![NlBody::Tree(Expr::Binary(
+                BinOp::Add,
+                Box::new(sq(i)),
+                Box::new(sq(j)),
+            ))],
             con_linear: vec![vec![]],
             x_l: vec![-10.0; n],
             x_u: vec![10.0; n],
@@ -962,7 +973,7 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let mut prob = wide_ball(40, 11, 37);
-        prob.con_nonlinear = vec![con];
+        prob.con_nonlinear = vec![NlBody::Tree(con)];
 
         let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
         assert_eq!(cones, vec![ConeSpec::SecondOrder(3)], "rank 1 + 2");
@@ -1095,14 +1106,20 @@ mod tests {
     #[test]
     fn extract_and_solve_equality_qp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Binary(BinOp::Add, Box::new(pow2(0)), Box::new(pow2(1))),
+            obj_nonlinear: NlBody::Tree(Expr::Binary(
+                BinOp::Add,
+                Box::new(pow2(0)),
+                Box::new(pow2(1)),
+            )),
             obj_linear: vec![],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -1158,11 +1175,13 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: obj,
+            obj_nonlinear: NlBody::Tree(obj),
             obj_linear: vec![],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1207,14 +1226,16 @@ mod tests {
     #[test]
     fn inequality_dual_recovered() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: pow2(0),
+            obj_nonlinear: NlBody::Tree(pow2(0)),
             obj_linear: vec![],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0)]], // g(x) = x0
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -1264,14 +1285,16 @@ mod tests {
             Box::new(Expr::Const(3.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]], // the `+x0` lives in the TREE
             x_l: vec![-2e19],
             x_u: vec![2e19],
@@ -1319,11 +1342,13 @@ mod tests {
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: obj,
+            obj_nonlinear: NlBody::Tree(obj),
             obj_linear: vec![],
             obj_constant: 0.0, // the +9 is in the TREE, not here
             con_nonlinear: vec![],
@@ -1360,11 +1385,13 @@ mod tests {
     #[test]
     fn extract_and_solve_bounded_qp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: pow2(0),
+            obj_nonlinear: NlBody::Tree(pow2(0)),
             obj_linear: vec![(0, -6.0)],
             obj_constant: 9.0,
             con_nonlinear: vec![],
@@ -1395,11 +1422,13 @@ mod tests {
     #[test]
     fn extract_and_solve_lp() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, -1.0), (1, -1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1433,11 +1462,13 @@ mod tests {
     #[test]
     fn extract_maximize_negates() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: false,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1473,11 +1504,13 @@ mod tests {
     #[test]
     fn variable_bound_past_the_opposite_sentinel_is_kept() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 1,
             m: 0,
             num_obj: 1,
             minimize: false, // maximize x0, so the -5e20 upper bound binds
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1524,14 +1557,16 @@ mod tests {
     #[test]
     fn a_row_with_equal_bounds_past_the_sentinel_does_not_vanish() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
             x_l: vec![-2e19, -2e19],
             x_u: vec![2e19, 2e19],
@@ -1573,11 +1608,13 @@ mod tests {
     #[test]
     fn the_box_is_built_with_the_directional_bound_test() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0), (1, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -1614,11 +1651,13 @@ mod tests {
     #[test]
     fn bound_multipliers_come_back_per_variable() {
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0), (1, 1.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],

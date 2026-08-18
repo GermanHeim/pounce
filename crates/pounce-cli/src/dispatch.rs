@@ -336,9 +336,9 @@ fn header_census(prob: &NlProblem) -> String {
     let tree_rows = prob
         .con_nonlinear
         .iter()
-        .filter(|e| !is_trivially_zero(e))
+        .filter(|b| !b.is_trivially_zero())
         .count();
-    let tree_obj = usize::from(!is_trivially_zero(&prob.obj_nonlinear));
+    let tree_obj = usize::from(!prob.obj_nonlinear.is_trivially_zero());
     let Some(c) = prob.nl_counts else {
         return format!("no .nl header census; trees: nl_rows={tree_rows} nl_obj={tree_obj}");
     };
@@ -373,14 +373,14 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
     // claim would route a model to the LP solver on the strength of a
     // header field, which is not a trade this classifier makes anywhere
     // else. The header is logged beside the verdict instead.
-    let obj_nl = !is_trivially_zero(&prob.obj_nonlinear);
-    let cons_nl = prob.con_nonlinear.iter().any(|e| !is_trivially_zero(e));
+    let obj_nl = !prob.obj_nonlinear.is_trivially_zero();
+    let cons_nl = prob.con_nonlinear.iter().any(|b| !b.is_trivially_zero());
     if !obj_nl && !cons_nl {
         return (ProblemClass::Lp, ClassReason::NoNonlinearParts);
     }
 
     // Objective curvature.
-    let obj_quad = match analyze_quadratic(&prob.obj_nonlinear) {
+    let obj_quad = match prob.obj_nonlinear.analyze_quadratic() {
         Some(q) => q,
         // Objective has a non-quadratic nonlinear term ⇒ NLP.
         None => return (ProblemClass::Nlp, ClassReason::ObjectiveNotQuadratic),
@@ -390,10 +390,10 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
     // any non-quadratic constraint term makes the whole problem NLP.
     let mut any_quadratic_constraint = false;
     for (row, c) in prob.con_nonlinear.iter().enumerate() {
-        if is_trivially_zero(c) {
+        if c.is_trivially_zero() {
             continue;
         }
-        match analyze_quadratic(c) {
+        match c.analyze_quadratic() {
             Some(q) if q.is_empty() => {} // purely linear after all
             Some(_) => any_quadratic_constraint = true,
             None => {
@@ -441,10 +441,10 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
         // filter-IPM finds a local minimum either way).
         let mut reform_flops: u128 = 0;
         for (row, c) in prob.con_nonlinear.iter().enumerate() {
-            if is_trivially_zero(c) {
+            if c.is_trivially_zero() {
                 continue;
             }
-            match analyze_quadratic(c) {
+            match c.analyze_quadratic() {
                 Some(q) if q.is_empty() => {} // purely linear after all
                 Some(q) => {
                     let lo = prob.g_l[row];
@@ -635,9 +635,9 @@ fn mismatch_msg(class: ProblemClass, forced: &str, expected: &str) -> String {
 // `ProblemClass` a recognized form implies, and which guards a QCQP has to
 // clear to reach the conic path. These re-exports keep the call sites in
 // `qp_extract` and in the tests below spelled as they were.
-pub(crate) use pounce_nl::nl_quadratic::{
-    QuadHessian, analyze_quadratic, analyze_quadratic_full, is_trivially_zero,
-};
+pub(crate) use pounce_nl::nl_quadratic::QuadHessian;
+#[cfg(test)]
+use pounce_nl::nl_quadratic::analyze_quadratic;
 
 // ---------------------------------------------------------------------
 // PSD test
@@ -773,6 +773,7 @@ fn coupled_hessian_is_psd(h: &QuadHessian) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nl_reader::NlBody;
     use crate::nl_reader::{BinOp, Expr, UnaryOp, parse_nl_text};
 
     // --- SolverSelection parsing ---
@@ -1124,14 +1125,16 @@ mod tests {
         // minimize x0 + x1 s.t. x0 + x1 <= 1, no nonlinear parts.
         // Build an NlProblem directly for a hermetic test.
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0), (1, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![Expr::Const(0.0)],
+            con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0))],
             con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
             x_l: vec![0.0, 0.0],
             x_u: vec![f64::INFINITY, f64::INFINITY],
@@ -1298,21 +1301,23 @@ mod tests {
     /// two routing caps (`SOCP_REFORM_FLOP_BUDGET`, `SOCP_SOLVE_SIZE_CAP`)
     /// without allocating `n×n` data.
     fn convex_qcqp_at_size(n: usize, m: usize) -> NlProblem {
-        let mut con_nonlinear = vec![Expr::Const(0.0); m];
-        con_nonlinear[0] = Expr::Binary(
+        let mut con_nonlinear = vec![NlBody::Tree(Expr::Const(0.0)); m];
+        con_nonlinear[0] = NlBody::Tree(Expr::Binary(
             BinOp::Pow,
             Box::new(Expr::Var(0)),
             Box::new(Expr::Const(2.0)),
-        );
+        ));
         let g_l = vec![f64::NEG_INFINITY; m];
         let mut g_u = vec![f64::INFINITY; m];
         g_u[0] = 1.0; // upper-only bound ⇒ convex feasible set
         NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n,
             m,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
             con_nonlinear,
@@ -1413,14 +1418,14 @@ mod tests {
 
         // −x0² ≤ 1 — upper-bounded, but the Hessian is negative definite.
         let mut prob = convex_qcqp_at_size(10, 10);
-        prob.con_nonlinear[0] = Expr::Unary(
+        prob.con_nonlinear[0] = NlBody::Tree(Expr::Unary(
             UnaryOp::Neg,
             Box::new(Expr::Binary(
                 BinOp::Pow,
                 Box::new(Expr::Var(0)),
                 Box::new(Expr::Const(2.0)),
             )),
-        );
+        ));
         let (class, reason) = classify_problem_explained(&prob);
         assert_eq!(class, ProblemClass::Nlp);
         assert_eq!(reason, ClassReason::ConstraintHessianIndefinite { row: 0 });
@@ -1461,14 +1466,16 @@ mod tests {
         // PSD (rank 1) and fully coupled across all k variables.
         let con = Expr::Binary(BinOp::Pow, Box::new(sum), Box::new(Expr::Const(2.0)));
         NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: k,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]],
             x_l: vec![f64::NEG_INFINITY; k],
             x_u: vec![f64::INFINITY; k],
@@ -1501,14 +1508,16 @@ mod tests {
             con = Expr::Binary(BinOp::Add, Box::new(con), Box::new(sq(i)));
         }
         NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: k,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(0, 1.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con],
+            con_nonlinear: vec![NlBody::Tree(con)],
             con_linear: vec![vec![]],
             x_l: vec![f64::NEG_INFINITY; k],
             x_u: vec![f64::INFINITY; k],
@@ -1693,8 +1702,12 @@ mod tests {
     /// objective and per-constraint nonlinear parts. Linear parts and
     /// bounds are filled with benign defaults.
     fn qp_stub(obj_nonlinear: Expr, con_nonlinear: Vec<Expr>) -> NlProblem {
+        let obj_nonlinear = NlBody::Tree(obj_nonlinear);
+        let con_nonlinear: Vec<NlBody> = con_nonlinear.into_iter().map(NlBody::Tree).collect();
         let m = con_nonlinear.len();
         NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m,
             num_obj: 1,
@@ -1778,7 +1791,7 @@ G0 2
         // `x0 + x1 + 3 <= 6` is `x0 + x1 <= 3`.
         assert!((prob.g_u[0] - 3.0).abs() < 1e-12, "g_u = {}", prob.g_u[0]);
         assert!(
-            matches!(prob.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            prob.con_nonlinear[0].is_trivially_zero(),
             "the row body should be the identity zero: {:?}",
             prob.con_nonlinear[0]
         );

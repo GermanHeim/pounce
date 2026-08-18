@@ -303,15 +303,22 @@ fn every_fixture_row_reads_identically_under_both_recognizers() {
     for f in &fixtures {
         let Ok(prob) = read_nl_file(f) else { continue };
         let name = f.display();
-        check(&prob.obj_nonlinear, &format!("{name}: objective"));
+        // `obj_expr`/`con_expr` rather than the stored bodies: since
+        // gh #588 Q5 the parser recognizes a degree-2 body from the token
+        // stream and keeps no tree for it, and this test is about trees.
+        // The rebuilt tree is the one the parser would have built — which
+        // this test then also happens to exercise, on every corpus row.
+        let obj = prob.obj_expr();
+        check(&obj, &format!("{name}: objective"));
         rows += 1;
-        if analyze_quadratic_full(&prob.obj_nonlinear).is_some() {
+        if analyze_quadratic_full(&obj).is_some() {
             quadratic += 1;
         }
-        for (i, c) in prob.con_nonlinear.iter().enumerate() {
-            check(c, &format!("{name}: row {i}"));
+        for i in 0..prob.m {
+            let c = prob.con_expr(i);
+            check(&c, &format!("{name}: row {i}"));
             rows += 1;
-            if analyze_quadratic_full(c).is_some() {
+            if analyze_quadratic_full(&c).is_some() {
                 quadratic += 1;
             }
         }

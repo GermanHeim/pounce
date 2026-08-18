@@ -96,7 +96,7 @@ impl Quad2 {
         &self.quadratic
     }
 
-    fn of_constant(c: f64) -> Self {
+    pub(crate) fn of_constant(c: f64) -> Self {
         Quad2 {
             // `-0.0` and `0.0` alike mean "no constant term"; normalizing
             // here keeps `Neg(Const(0.0))` from reporting `-0.0`.
@@ -105,14 +105,14 @@ impl Quad2 {
         }
     }
 
-    fn of_var(i: usize) -> Self {
+    pub(crate) fn of_var(i: usize) -> Self {
         let mut q = Quad2::default();
         q.linear.insert(i, 1.0);
         q
     }
 
     /// Total degree: 0, 1, or 2.
-    fn degree(&self) -> usize {
+    pub(crate) fn degree(&self) -> usize {
         if !self.quadratic.is_empty() {
             2
         } else if !self.linear.is_empty() {
@@ -123,7 +123,7 @@ impl Quad2 {
     }
 
     /// The value, when this form has no variables in it.
-    fn as_constant(&self) -> Option<f64> {
+    pub(crate) fn as_constant(&self) -> Option<f64> {
         (self.degree() == 0).then_some(self.constant)
     }
 
@@ -143,7 +143,7 @@ impl Quad2 {
     /// either way rather than only when it leans left. Choosing the direction
     /// is free of arithmetic consequence: IEEE addition is commutative bit
     /// for bit, `-0.0` included.
-    fn add(a: Quad2, b: Quad2) -> Quad2 {
+    pub(crate) fn add(a: Quad2, b: Quad2) -> Quad2 {
         let (mut acc, small) = if a.width() >= b.width() {
             (a, b)
         } else {
@@ -161,7 +161,7 @@ impl Quad2 {
         acc
     }
 
-    fn neg(mut self) -> Quad2 {
+    pub(crate) fn neg(mut self) -> Quad2 {
         self.constant = -self.constant;
         for c in self.linear.values_mut() {
             *c = -*c;
@@ -172,7 +172,7 @@ impl Quad2 {
         self
     }
 
-    fn scale(mut self, s: f64) -> Quad2 {
+    pub(crate) fn scale(mut self, s: f64) -> Quad2 {
         if s == 0.0 {
             return Quad2::default();
         }
@@ -189,7 +189,7 @@ impl Quad2 {
     /// `self · other`, or `None` when the product would exceed total
     /// degree 2 — past that the recognizer gives up and the caller routes
     /// to the general NLP path.
-    fn mul(&self, other: &Quad2) -> Option<Quad2> {
+    pub(crate) fn mul(&self, other: &Quad2) -> Option<Quad2> {
         if self.degree() + other.degree() > 2 {
             return None;
         }
@@ -272,6 +272,9 @@ enum Op {
     Pow,
     /// n-ary sum over the top `n` values.
     Sum(usize),
+    /// Not an operation: the value now on top of the stack is the lowering
+    /// of the `Cse` body with this address, so record it before moving on.
+    CacheCse(*const Expr),
 }
 
 /// Lower an [`Expr`] to a [`Quad2`], or `None` if it contains anything the
@@ -281,23 +284,40 @@ enum Op {
 /// …). `None` ⇒ treat as general nonlinear.
 ///
 /// `Cse` nodes are inlined: a reference is mathematically its body, and
-/// every reference is an independent occurrence. A body reached `r` times
-/// is therefore lowered `r` times, exactly as the recursive predecessor did
-/// — memoizing on the `Arc` identity is a pure win still on the table for
-/// Q5, not a behaviour change made here.
+/// every reference is an independent occurrence. A body is nevertheless
+/// lowered **once**, and its [`Quad2`] reused at every later reference
+/// (keyed on `Arc` identity). That is what makes the walk `Θ(nodes)` on a
+/// shared DAG instead of `Θ(2^depth)`; Q4 had to refuse a re-referenced
+/// body outright to bound the cost, and this is the memoization that
+/// refusal was waiting for (gh #588, Q5). It is bitwise neutral — the
+/// lowering of a body is a function of the body, so the reused value is
+/// the one a second lowering would have produced, bit for bit.
 ///
 /// The walk is iterative. See the module docs for why that is a
 /// correctness property and not a style choice.
 pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
     let mut work: Vec<Step<'_>> = vec![Step::Visit(e)];
     let mut vals: Vec<Quad2> = Vec::new();
+    // Lowered `Cse` bodies, by address. Only successes land here: a body
+    // that fails aborts the whole walk, so there is no negative result to
+    // remember.
+    let mut cse: std::collections::HashMap<*const Expr, Quad2> = std::collections::HashMap::new();
 
     while let Some(step) = work.pop() {
         match step {
             Step::Visit(e) => match e {
                 Expr::Const(c) => vals.push(Quad2::of_constant(*c)),
                 Expr::Var(i) => vals.push(Quad2::of_var(*i)),
-                Expr::Cse(body) => work.push(Step::Visit(body)),
+                Expr::Cse(body) => {
+                    let key = std::sync::Arc::as_ptr(body);
+                    match cse.get(&key) {
+                        Some(q) => vals.push(q.clone()),
+                        None => {
+                            work.push(Step::Apply(Op::CacheCse(key)));
+                            work.push(Step::Visit(body));
+                        }
+                    }
+                }
                 Expr::Sum(items) => {
                     work.push(Step::Apply(Op::Sum(items.len())));
                     // Pushed forward, so they pop back to front and land on
@@ -334,8 +354,14 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                 // opcodes. None is provably polynomial ⇒ route to NLP.
                 _ => return None,
             },
+            Step::Apply(Op::CacheCse(key)) => {
+                // The body's value is already on the stack and stays there;
+                // this only records it for the next reference.
+                cse.insert(key, vals.last()?.clone());
+            }
             Step::Apply(op) => {
                 let combined = match op {
+                    Op::CacheCse(_) => unreachable!("handled above"),
                     Op::Sum(n) => {
                         // The items are the top `n` values, item 0 on top.
                         let at = vals.len().checked_sub(n)?;
@@ -426,7 +452,15 @@ pub fn analyze_quadratic(e: &Expr) -> Option<QuadHessian> {
 /// value*; dropping it makes the convex solve report an objective off by
 /// that constant versus the NLP path.
 pub fn analyze_quadratic_full(e: &Expr) -> Option<QuadForm> {
-    let q = recognize_expr(e)?;
+    Some(quad_form_readout(&recognize_expr(e)?))
+}
+
+/// The `(Hessian, linear, constant)` read-out of an already-recognized
+/// form — the second half of [`analyze_quadratic_full`], split out so a
+/// caller holding a [`Quad2`] the *parser* produced (gh #588, Q5) reaches
+/// the identical numbers by the identical route. There is exactly one
+/// conversion in the crate; a second one is a second thing to keep in step.
+pub fn quad_form_readout(q: &Quad2) -> QuadForm {
     // ∂²(c·xᵢxⱼ)/∂xᵢ∂xⱼ = c for i≠j; ∂²(c·xᵢ²)/∂xᵢ² = 2c.
     let mut h: QuadHessian = q
         .quadratic
@@ -437,7 +471,7 @@ pub fn analyze_quadratic_full(e: &Expr) -> Option<QuadForm> {
     h.retain(|_, v| v.abs() > 0.0);
     let lin: Vec<(usize, f64)> = q.linear.iter().map(|(i, c)| (*i, *c)).collect();
     // `0.0 +` normalizes `-0.0`, which is how this form spells "absent".
-    Some((h, lin, 0.0 + q.constant))
+    (h, lin, 0.0 + q.constant)
 }
 
 /// Is this expression **already** a flat sum of monomials — that is, would
@@ -467,29 +501,34 @@ pub fn analyze_quadratic_full(e: &Expr) -> Option<QuadForm> {
 /// carrying a shift (a vertex, or the writer's own grouping), which is a
 /// larger change than this phase.
 ///
-/// ## A re-referenced `Cse` body is refused, and that is about cost
+/// ## A re-referenced `Cse` body is *skipped*, not refused
 ///
 /// This walk and [`recognize_expr`] behind it both inline a `Cse` body at
-/// **every** reference, so a DAG whose bodies are shared costs `Θ(2^depth)`
-/// rather than `Θ(nodes)`. `nl_reader`'s
+/// **every** reference, so a DAG whose bodies are shared cost `Θ(2^depth)`
+/// rather than `Θ(nodes)` before either was memoized. `nl_reader`'s
 /// `shared_dag_walks_are_memoized_not_exponential` builds exactly that shape
 /// — 30 levels, each a `Cse` referenced twice — and taking it through this
-/// gate ungated measured **0.00 s → 172 s** on a model the tape path loads
-/// instantly. At depth 40 it would not return at all.
+/// gate in Q4 measured **0.00 s → 172 s** on a model the tape path loads
+/// instantly. At depth 40 it would not have returned at all.
 ///
-/// So a body reached a second time ends the walk with `false`: the model
-/// keeps its tape, which handles sharing properly (that is what `ConHybrid`
-/// is for), and nothing hangs. Memoizing instead — on `Arc` identity, which
-/// is a pure and bitwise-neutral win — would fix this walk and leave
-/// `recognize_expr` exponential behind it, so it belongs with that change in
-/// Q5 rather than half-done here. The target family is unaffected: the
-/// `qcqp*` files declare no common expressions at all.
+/// Q4 bounded that by ending the walk in `false` at the second reference,
+/// which cost reach to buy termination and was explicitly left for Q5 to
+/// replace. It is replaced here: a body reached a second time in the same
+/// mode is **skipped**, which is sound for exactly the reason
+/// `nl_reader::validate_expr` documents for the same trick — this walk
+/// aborts on the first violation, so reaching a body a second time proves
+/// the first visit found none. The verdict is unchanged for every DAG that
+/// is a tree, and a shared DAG that *is* an expanded quadratic is now
+/// admitted instead of refused. The mode is part of the key: a body is
+/// legal on the sum spine if it is a sum of monomials, and legal inside a
+/// monomial only if it is itself a monomial, so the two answers are cached
+/// apart.
 ///
 /// Iterative for the same reason [`recognize_expr`] is.
 pub fn is_expanded_quadratic(e: &Expr) -> bool {
     // The sum spine: `Add`/`Sub`/`Neg`/`Sum` may nest freely, and every
     // leaf of that spine must be a monomial.
-    let mut seen: BTreeSet<*const Expr> = BTreeSet::new();
+    let mut seen: BTreeSet<(*const Expr, bool)> = BTreeSet::new();
     let mut spine: Vec<&Expr> = vec![e];
     while let Some(e) = spine.pop() {
         match e {
@@ -500,10 +539,9 @@ pub fn is_expanded_quadratic(e: &Expr) -> bool {
             }
             Expr::Unary(UnaryOp::Neg, a) => spine.push(a),
             Expr::Cse(body) => {
-                if !seen.insert(std::sync::Arc::as_ptr(body)) {
-                    return false;
+                if seen.insert((std::sync::Arc::as_ptr(body), false)) {
+                    spine.push(body);
                 }
-                spine.push(body);
             }
             other => {
                 if !is_monomial(other, &mut seen) {
@@ -515,6 +553,17 @@ pub fn is_expanded_quadratic(e: &Expr) -> bool {
     true
 }
 
+/// Is this expression a single monomial — the leaf shape
+/// [`is_expanded_quadratic`] admits on its sum spine?
+///
+/// Public because the parse-time recognizer has to answer the same
+/// question about a `V`-segment body it has already parsed, and must
+/// answer it with *this* code rather than a second copy of the rule.
+pub fn is_monomial_expr(e: &Expr) -> bool {
+    let mut seen: BTreeSet<(*const Expr, bool)> = BTreeSet::new();
+    is_monomial(e, &mut seen)
+}
+
 /// A single product term: constants and variables multiplied together, with
 /// no addition anywhere inside it. `xᵢxⱼ`, `0.5·c·xᵢ·xⱼ`, `xᵢ²` and `xᵢ/3`
 /// all qualify; `(xᵢ − xⱼ)²` and `(xᵢ + 1)·xⱼ` do not.
@@ -522,18 +571,19 @@ pub fn is_expanded_quadratic(e: &Expr) -> bool {
 /// Degree is not checked here — [`recognize_expr`] already refused anything
 /// past 2 by the time this runs, and duplicating the rule would only give
 /// the two a way to disagree.
-fn is_monomial(e: &Expr, seen: &mut BTreeSet<*const Expr>) -> bool {
+fn is_monomial(e: &Expr, seen: &mut BTreeSet<(*const Expr, bool)>) -> bool {
     let mut work: Vec<&Expr> = vec![e];
     while let Some(e) = work.pop() {
         match e {
             Expr::Const(_) | Expr::Var(_) => {}
-            // Shared with the spine walk, and refused for the same reason —
-            // see [`is_expanded_quadratic`].
+            // Shared with the spine walk, and skipped on revisit for the
+            // same reason — see [`is_expanded_quadratic`]. The `true` in the
+            // key is "seen in monomial mode": a body cleared on the spine
+            // has not been cleared here.
             Expr::Cse(body) => {
-                if !seen.insert(std::sync::Arc::as_ptr(body)) {
-                    return false;
+                if seen.insert((std::sync::Arc::as_ptr(body), true)) {
+                    work.push(body);
                 }
-                work.push(body);
             }
             Expr::Unary(UnaryOp::Neg, a) => work.push(a),
             Expr::Binary(BinOp::Mul | BinOp::Div, a, b) => {
@@ -742,14 +792,20 @@ mod tests {
         assert!(is_expanded_quadratic(&once));
     }
 
-    /// A `Cse` body reached twice is refused, and the reason is cost rather
-    /// than algebra: this walk and `recognize_expr` behind it both inline a
-    /// body per reference, so a shared DAG is `Θ(2^depth)`. The shape below
-    /// is `nl_reader`'s `shared_dag_walks_are_memoized_not_exponential`
-    /// scaled up — at depth 60 an exponential walk does not return in the
-    /// lifetime of the test run, so this passing at all is the assertion.
+    /// A `Cse` body reached twice is walked once, not `2^depth` times, and
+    /// is **admitted** rather than refused.
+    ///
+    /// Q4 refused it, and refused it for cost rather than algebra — this
+    /// walk and `recognize_expr` behind it both inline a body per
+    /// reference, so a shared DAG was `Θ(2^depth)`. Q5's memoization is
+    /// what makes admitting it affordable, so both halves are asserted
+    /// here: the verdict, and the fact that the test returns at all. The
+    /// shape is `nl_reader`'s `shared_dag_walks_are_memoized_not_exponential`
+    /// scaled up; at depth 60 an exponential walk does not finish inside
+    /// the lifetime of this test run, and `2^60` sums do not fit in an
+    /// `f64` count either.
     #[test]
-    fn a_shared_cse_body_is_refused_rather_than_walked_exponentially() {
+    fn a_shared_cse_body_is_walked_once_and_admitted() {
         let mut e = Expr::Var(0);
         for _ in 0..60 {
             let shared = std::sync::Arc::new(e);
@@ -759,7 +815,44 @@ mod tests {
                 Box::new(Expr::Cse(shared)),
             );
         }
-        assert!(!is_expanded_quadratic(&e));
+        assert!(is_expanded_quadratic(&e));
+        // And the algebra agrees: `x + x` sixty times over is `2^60 · x`.
+        let q = recognize_expr(&e).expect("a sum of one monomial is degree 1");
+        assert_eq!(q.linear().get(&0).copied(), Some(2.0_f64.powi(60)));
+        std::mem::forget(e);
+    }
+
+    /// The same shape inside a *monomial*, which is a different question
+    /// with a different answer and therefore a separately keyed memo: a
+    /// body that is a sum of monomials is legal on the spine and illegal
+    /// under a `*`.
+    #[test]
+    fn a_shared_body_is_judged_per_context_not_once_and_for_all() {
+        let sum = std::sync::Arc::new(Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Var(1)),
+        ));
+        // On the spine, twice: fine.
+        let spine = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Cse(std::sync::Arc::clone(&sum))),
+            Box::new(Expr::Cse(std::sync::Arc::clone(&sum))),
+        );
+        assert!(is_expanded_quadratic(&spine));
+        // The same body on the spine and then under a product: the product
+        // is `(x0 + x1) · x1`, a factored form, and the earlier clean visit
+        // on the spine must not clear it.
+        let mixed = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Cse(std::sync::Arc::clone(&sum))),
+            Box::new(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Cse(sum)),
+                Box::new(Expr::Var(1)),
+            )),
+        );
+        assert!(!is_expanded_quadratic(&mixed));
     }
 
     /// Deep, and on a default-sized test thread, for the same reason

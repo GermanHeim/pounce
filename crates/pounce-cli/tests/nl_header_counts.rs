@@ -34,7 +34,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use pounce_cli::nl_reader::{Expr, NlProblem, collect_vars, read_nl_file};
+use pounce_cli::nl_reader::{NlProblem, read_nl_file};
 
 /// Fixtures whose header line 5 (`nlvc nlvo nlvb`) carries fewer than the
 /// three documented fields, so no census is recorded. All three are
@@ -90,16 +90,12 @@ fn base_name(p: &Path) -> String {
     p.file_name().unwrap_or_default().to_string_lossy().into()
 }
 
-fn is_trivially_zero(e: &Expr) -> bool {
-    matches!(e, Expr::Const(c) if *c == 0.0)
-}
-
 /// Rows whose nonlinear part survived parsing.
 fn nonlinear_rows(prob: &NlProblem) -> Vec<usize> {
     prob.con_nonlinear
         .iter()
         .enumerate()
-        .filter(|(_, e)| !is_trivially_zero(e))
+        .filter(|(_, b)| !b.is_trivially_zero())
         .map(|(i, _)| i)
         .collect()
 }
@@ -108,9 +104,9 @@ fn nonlinear_rows(prob: &NlProblem) -> Vec<usize> {
 /// `NlTnlp::get_variables_linearity` publishes.
 fn walked_nonlinear_vars(prob: &NlProblem) -> BTreeSet<usize> {
     let mut s = BTreeSet::new();
-    collect_vars(&prob.obj_nonlinear, &mut s);
+    prob.obj_nonlinear.collect_vars(&mut s);
     for row in &prob.con_nonlinear {
-        collect_vars(row, &mut s);
+        row.collect_vars(&mut s);
     }
     s
 }

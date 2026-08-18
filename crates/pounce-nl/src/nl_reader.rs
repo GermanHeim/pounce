@@ -32,7 +32,10 @@
 //! * `ref/Ipopt/test/mytoy.nl` — annotated example used for the unit
 //!   tests in this module.
 
-use crate::nl_quadratic::{analyze_quadratic_full, is_expanded_quadratic, is_trivially_zero};
+use crate::nl_quadratic::{
+    Quad2, QuadForm, QuadHessian, analyze_quadratic_full, is_expanded_quadratic, is_trivially_zero,
+    quad_form_readout,
+};
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::quadratic::QuadraticStructure;
@@ -263,6 +266,145 @@ impl NlCounts {
     }
 }
 
+/// The nonlinear body of the objective, or of one constraint row, as the
+/// parser left it.
+///
+/// Before gh #588 Q5 this was always an [`Expr`], and for most bodies it
+/// still is. The second variant exists because the `Expr` DAG is what sets
+/// peak RSS on a quadratic model — 2.32 M nodes for a ten-row
+/// `qcqp500-3c` — and every consumer of a *recognized* body wants the
+/// degree-≤2 coefficients rather than the tree they would have to walk to
+/// recover them. So the parser recognizes those bodies from the token
+/// stream and never builds the tree at all.
+///
+/// The distinction is deliberately impossible to ignore. Nine consumers
+/// read these bodies (§5.3 of `dev-notes/quadratic-structure-exploitation.md`
+/// enumerates them) and several would read a *missing* tree as "this row is
+/// linear" — a silent wrong answer. An enum makes every one of them a
+/// compile error until it says which reading it wants.
+#[derive(Debug, Clone)]
+pub enum NlBody {
+    /// The expression tree.
+    Tree(Expr),
+    /// A degree-2 form recognized while the token stream was consumed. The
+    /// tree was never built; [`NlProblem::con_expr`] rebuilds it on demand,
+    /// byte for byte, by re-parsing the same bytes with the same parser.
+    Quad(Box<QuadBody>),
+}
+
+/// A body the parser recognized as an already-expanded quadratic.
+#[derive(Debug, Clone)]
+pub struct QuadBody {
+    /// The recognized form. Bit-for-bit what
+    /// [`crate::nl_quadratic::recognize_expr`] returns for the tree these
+    /// same bytes parse to — asserted directly, over the whole corpus, by
+    /// `pounce-cli/tests/quad_parse_differential.rs`.
+    pub form: Quad2,
+    /// Every variable the body's token stream mentions, ascending and
+    /// deduplicated — exactly the set [`collect_vars`] reports for the tree,
+    /// **including** variables whose coefficient cancelled to zero (which
+    /// `form` necessarily drops). Structural consumers want this one; the
+    /// linearity contract is over-stating-is-safe, and a support taken from
+    /// `form` would under-state.
+    pub vars: Vec<u32>,
+    /// Byte range of this body's token stream inside [`NlProblem::src`].
+    pub src: std::ops::Range<usize>,
+    /// Nesting depth of the tree these tokens would have built, on the same
+    /// convention as a leaf counting 1.
+    ///
+    /// Recorded because the streaming recognizer is iterative and the tree
+    /// parser is not: a body deep enough to overflow the parser's stack now
+    /// *loads*, and the depth guard that used to be enforced implicitly by
+    /// the parse failing has to be enforced by something. `pounce-py`'s
+    /// `checked_depth` reads it (pounce #472). Rebuilding such a body with
+    /// [`NlProblem::con_expr`] would still recurse, which is the same
+    /// ceiling Q3 recorded and Q5 does not lift.
+    pub depth: u32,
+}
+
+impl NlBody {
+    /// The identity zero — "this row has no nonlinear part". A recognized
+    /// body is degree 2 by construction, so it is never trivially zero;
+    /// the question still has to be asked through here rather than by
+    /// matching on a tree that may not exist.
+    pub fn is_trivially_zero(&self) -> bool {
+        match self {
+            NlBody::Tree(e) => matches!(e, Expr::Const(c) if *c == 0.0),
+            NlBody::Quad(_) => false,
+        }
+    }
+
+    /// The recognized degree-2 form, when the parser produced one.
+    pub fn quad(&self) -> Option<&Quad2> {
+        match self {
+            NlBody::Tree(_) => None,
+            NlBody::Quad(q) => Some(&q.form),
+        }
+    }
+
+    /// The tree, when there is one resident. `None` for a recognized body —
+    /// use [`NlProblem::con_expr`] / [`NlProblem::obj_expr`] to rebuild it.
+    pub fn tree(&self) -> Option<&Expr> {
+        match self {
+            NlBody::Tree(e) => Some(e),
+            NlBody::Quad(_) => None,
+        }
+    }
+
+    /// This body as a degree-≤2 Hessian, or `None` if it is not provably
+    /// quadratic — [`crate::nl_quadratic::analyze_quadratic`] for a tree,
+    /// and the form the parser already proved for a recognized body. The
+    /// two answers are the same by construction and asserted to be so bit
+    /// for bit; this is the accessor that keeps the corpus from being
+    /// re-recognized once per consumer.
+    pub fn analyze_quadratic(&self) -> Option<QuadHessian> {
+        self.analyze_quadratic_full().map(|(h, _, _)| h)
+    }
+
+    /// [`Self::analyze_quadratic`] with the linear and constant parts.
+    pub fn analyze_quadratic_full(&self) -> Option<QuadForm> {
+        match self {
+            NlBody::Tree(e) => analyze_quadratic_full(e),
+            NlBody::Quad(q) => Some(quad_form_readout(&q.form)),
+        }
+    }
+
+    /// The form the constant-structure evaluator is allowed to use — i.e.
+    /// [`Self::analyze_quadratic_full`] behind the *exactness* gate.
+    ///
+    /// A recognized body has already passed that gate: the parser admits
+    /// only a flat sum of monomials, which is the same rule
+    /// [`crate::nl_quadratic::is_expanded_quadratic`] applies to a tree.
+    /// Reading a factored form out of stored coefficients cancels — five
+    /// digits on `(x − 500000)²` — so the gate is on both arms or on
+    /// neither (gh #588, Q4; gh #673).
+    pub fn admitted_quad_form(&self) -> Option<QuadForm> {
+        match self {
+            NlBody::Tree(e) => {
+                if is_trivially_zero(e) || !is_expanded_quadratic(e) {
+                    return None;
+                }
+                analyze_quadratic_full(e)
+            }
+            NlBody::Quad(q) => Some(quad_form_readout(&q.form)),
+        }
+    }
+
+    /// Add this body's structural variable support to `out`.
+    pub fn collect_vars(&self, out: &mut BTreeSet<usize>) {
+        match self {
+            NlBody::Tree(e) => collect_vars(e, out),
+            NlBody::Quad(q) => out.extend(q.vars.iter().map(|&v| v as usize)),
+        }
+    }
+}
+
+impl From<Expr> for NlBody {
+    fn from(e: Expr) -> Self {
+        NlBody::Tree(e)
+    }
+}
+
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
 #[derive(Debug, Clone)]
 pub struct NlProblem {
@@ -270,11 +412,11 @@ pub struct NlProblem {
     pub m: usize,
     pub num_obj: usize,
     pub minimize: bool,
-    pub obj_nonlinear: Expr,
+    pub obj_nonlinear: NlBody,
     pub obj_linear: Vec<(usize, Number)>,
     pub obj_constant: Number,
     /// Per-constraint nonlinear part (length m).
-    pub con_nonlinear: Vec<Expr>,
+    pub con_nonlinear: Vec<NlBody>,
     /// Per-constraint linear part (length m), each a list of (var, coef).
     pub con_linear: Vec<Vec<(usize, Number)>>,
     pub x_l: Vec<Number>,
@@ -321,6 +463,23 @@ pub struct NlProblem {
     /// (one name per line, row order). Empty when no `.row` file was found.
     /// See [`NlProblem::var_names`] for why names are captured.
     pub con_names: Vec<String>,
+    /// The `.nl` text this problem was parsed from, kept only when some
+    /// body was recognized as a quadratic and therefore has no tree of its
+    /// own. It is what makes [`NlProblem::con_expr`] able to hand back the
+    /// *exact* tree rather than a re-derived one: same bytes, same parser,
+    /// same `Expr`. `None` for [`NlProblem::from_expressions`] models and
+    /// for a parse that recognized nothing.
+    ///
+    /// The text is resident during parsing either way, so keeping it costs
+    /// nothing at the peak this is all in aid of — see
+    /// `dev-notes/quadratic-structure-exploitation.md` §0f.
+    pub src: Option<Arc<String>>,
+    /// The `V`-segment common subexpressions, by CSE-local index. Held so a
+    /// re-parse resolves `v<i>` (`i >= n`) to the *same* `Arc` the original
+    /// parse did — `HybridTape::build_multi` keys sharing on pointer
+    /// identity, so a rebuilt body that allocated fresh bodies would look
+    /// unshared.
+    pub cse_bodies: Vec<Arc<Expr>>,
 }
 
 /// The pieces of a model built in memory, as handed to
@@ -438,10 +597,10 @@ impl NlProblem {
             m,
             num_obj: 1,
             minimize,
-            obj_nonlinear: objective,
+            obj_nonlinear: NlBody::Tree(objective),
             obj_linear: Vec::new(),
             obj_constant,
-            con_nonlinear: constraints,
+            con_nonlinear: constraints.into_iter().map(NlBody::Tree).collect(),
             con_linear: vec![Vec::new(); m],
             x_l,
             x_u,
@@ -458,7 +617,54 @@ impl NlProblem {
             nl_counts: None,
             var_names,
             con_names,
+            // Built from trees, so every body has one and there is nothing
+            // to rebuild from.
+            src: None,
+            cse_bodies: Vec::new(),
         })
+    }
+
+    /// The objective's nonlinear body as an [`Expr`].
+    ///
+    /// Borrowed when the tree is resident, rebuilt when the parser
+    /// recognized the body and skipped building it. The rebuild re-parses
+    /// the body's own bytes with the same parser that produced the rest of
+    /// the model, so the result is the tree a non-recognizing parse would
+    /// have produced — structurally identical, coefficient bit patterns
+    /// included, and sharing the same `Cse` allocations.
+    ///
+    /// It is not free: it allocates the nodes the recognizer avoided. Reach
+    /// for [`NlBody::quad`] first if the coefficients are what you want.
+    pub fn obj_expr(&self) -> std::borrow::Cow<'_, Expr> {
+        self.body_expr(&self.obj_nonlinear, "objective")
+    }
+
+    /// Row `k`'s nonlinear body as an [`Expr`]. See [`Self::obj_expr`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `k >= m`, or if re-parsing a recognized body fails — the
+    /// latter cannot happen for a problem this crate produced (the bytes
+    /// parsed once already, by this code) and means the `NlProblem` was
+    /// assembled by hand with a `src` that does not match its bodies.
+    pub fn con_expr(&self, k: usize) -> std::borrow::Cow<'_, Expr> {
+        self.body_expr(&self.con_nonlinear[k], "constraint")
+    }
+
+    fn body_expr<'a>(&'a self, body: &'a NlBody, what: &str) -> std::borrow::Cow<'a, Expr> {
+        match body {
+            NlBody::Tree(e) => std::borrow::Cow::Borrowed(e),
+            NlBody::Quad(q) => {
+                let src = self
+                    .src
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{what} body was recognized but no source is kept"));
+                std::borrow::Cow::Owned(
+                    parse_body_fragment(&src[q.src.clone()], self.n, &self.cse_bodies)
+                        .unwrap_or_else(|e| panic!("re-parsing a recognized {what} body: {e}")),
+                )
+            }
+        }
     }
 }
 
@@ -583,7 +789,9 @@ pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
     };
     let txt = std::fs::read_to_string(&resolved)
         .map_err(|e| format!("could not read {}: {}", resolved.display(), e))?;
-    let mut prob = parse_nl_text(&txt)?;
+    // By value: a recognized body keeps a byte range into this text rather
+    // than a tree, so it is moved into the problem instead of copied.
+    let mut prob = parse_nl_string(txt, std::env::var("POUNCE_DBG_NO_QUAD").is_err())?;
     prob.var_names = read_name_file(&resolved.with_extension("col"), prob.n);
     prob.con_names = read_name_file(&resolved.with_extension("row"), prob.m);
     Ok(prob)
@@ -661,15 +869,44 @@ fn row_constant_value(e: &Expr) -> Option<Number> {
 }
 
 /// Parse `.nl` text content. Public so tests can use string literals.
+///
+/// Degree-2 bodies are recognized as the token stream is read, so their
+/// `Expr` trees are never built (gh #588, Q5); `POUNCE_DBG_NO_QUAD=1`
+/// turns that off and restores the pre-Q5 parse exactly, which is what the
+/// A/B reference and gh #540's guard test need. See
+/// [`parse_nl_text_with_quadratic`] for the same switch as a parameter.
 pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
-    let mut p = Parser::new(txt);
+    parse_nl_text_with_quadratic(txt, std::env::var("POUNCE_DBG_NO_QUAD").is_err())
+}
+
+/// [`parse_nl_text`] with parse-time quadratic recognition explicitly on
+/// or off.
+///
+/// The env var the plain entry point reads is process-global, which is
+/// exactly wrong for a differential test that has to parse the *same* text
+/// both ways in one process and compare the results — so the knob is a
+/// parameter here, mirroring [`NlTnlp::try_new_with_quadratic`].
+pub fn parse_nl_text_with_quadratic(txt: &str, use_quadratic: bool) -> Result<NlProblem, String> {
+    parse_nl_string(txt.to_string(), use_quadratic)
+}
+
+/// [`parse_nl_text_with_quadratic`], taking the text by value.
+///
+/// A recognized body keeps a byte range into the source rather than a tree,
+/// so the source outlives the parse. Taking ownership means the file
+/// [`read_nl_file`] already read is *moved* into the problem instead of
+/// copied: the text is resident during parsing either way, so this costs
+/// nothing at the peak the phase is about.
+pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, String> {
+    let src = Arc::new(txt);
+    let mut p = Parser::new(&src, use_quadratic);
     p.parse_header()?;
     let n = p.n;
     let m = p.m;
     let num_obj = p.num_obj;
 
-    let mut con_nonlinear: Vec<Expr> = (0..m).map(|_| Expr::Const(0.0)).collect();
-    let mut obj_nonlinear = Expr::Const(0.0);
+    let mut con_nonlinear: Vec<NlBody> = (0..m).map(|_| NlBody::Tree(Expr::Const(0.0))).collect();
+    let mut obj_nonlinear = NlBody::Tree(Expr::Const(0.0));
     let mut minimize = true;
     let mut obj_linear: Vec<(usize, Number)> = Vec::new();
     let mut con_linear: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
@@ -696,7 +933,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 if idx >= m {
                     return Err(format!("C{idx} out of range; m={m}"));
                 }
-                con_nonlinear[idx] = p.parse_expr()?;
+                con_nonlinear[idx] = p.parse_body()?;
             }
             'O' => {
                 let (hdr, _rest) = p.eat_segment_header()?;
@@ -708,7 +945,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 let kind: i32 = parts[1].parse().map_err(|e| format!("O kind: {e}"))?;
                 if idx == 0 {
                     minimize = kind == 0;
-                    obj_nonlinear = p.parse_expr()?;
+                    obj_nonlinear = p.parse_body()?;
                 } else {
                     // Extra objectives are read but ignored.
                     let _ = p.parse_expr()?;
@@ -900,7 +1137,12 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
     // normalization `qp_extract::analyze_quadratic_full` already performs
     // ad hoc via `const_shift`, promoted to the parse boundary.
     for i in 0..m {
-        let Some(c) = row_constant_value(&con_nonlinear[i]) else {
+        // A recognized body is degree 2, so it is not a constant row and
+        // this fold has nothing to do with it.
+        let Some(tree) = con_nonlinear[i].tree() else {
+            continue;
+        };
+        let Some(c) = row_constant_value(tree) else {
             continue;
         };
         // Presence is directional (gh #401): shifting an *absent* bound
@@ -913,8 +1155,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         if upper_bound_present(g_u[i]) {
             g_u[i] -= c;
         }
-        con_nonlinear[i] = Expr::Const(0.0);
+        con_nonlinear[i] = NlBody::Tree(Expr::Const(0.0));
     }
+
+    // The source is kept only when something in it has no tree of its own.
+    // A model with nothing recognized is byte-for-byte the pre-Q5 problem,
+    // extra field included.
+    let any_recognized =
+        obj_nonlinear.quad().is_some() || con_nonlinear.iter().any(|b| b.quad().is_some());
+    let kept_src = any_recognized.then(|| Arc::clone(&src));
 
     Ok(NlProblem {
         n,
@@ -940,6 +1189,8 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         // sibling `.col`/`.row` files when present.
         var_names: Vec::new(),
         con_names: Vec::new(),
+        src: kept_src,
+        cse_bodies: p.cses.clone(),
     })
 }
 
@@ -1181,6 +1432,17 @@ fn parse_nl_counts(line3: &str, line5: &str) -> Option<NlCounts> {
 
 struct Parser<'a> {
     lines: Vec<&'a str>,
+    /// Start address and length of the source text. A recognized body
+    /// records the byte *range* it consumed so it can be re-parsed later
+    /// (see [`QuadBody::src`]), and every line borrows from this buffer, so
+    /// one subtraction per line recovers its offset.
+    ///
+    /// Deliberately not a per-line offset table: on a 119 MB generated
+    /// `qcqp500-3c` the file is ~17 M lines, and a `Vec<usize>` beside the
+    /// existing `Vec<&str>` would add 136 MB to the peak this phase exists
+    /// to reduce.
+    txt_base: usize,
+    txt_len: usize,
     pos: usize,
     n: usize,
     m: usize,
@@ -1193,13 +1455,60 @@ struct Parser<'a> {
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
     cses: Vec<Arc<Expr>>,
+    /// Recognize degree-2 bodies from the token stream instead of building
+    /// their trees (gh #588, Q5). Off restores the pre-Q5 parse exactly.
+    quad_enabled: bool,
+    /// Per-CSE answers the streaming recognizer needs about a `V` body it
+    /// may be handed a reference to, all keyed by CSE-local index: the
+    /// body's own degree-≤2 form, whether it is legal on a sum spine,
+    /// whether it is legal *inside* a monomial, and its variable support.
+    ///
+    /// These are computed from the built `V` body with the same functions
+    /// `NlTnlp` would apply to a whole row, so a reference costs a lookup
+    /// and cannot drift from what the tree walk would have said. `V` bodies
+    /// keep their trees regardless — they are shared, so the memory is
+    /// amortized over every reference, and dropping them would mean
+    /// rebuilding them for the rows that are *not* recognized.
+    cse_quad: Vec<Option<Quad2>>,
+    cse_sum_ok: Vec<bool>,
+    cse_mono_ok: Vec<bool>,
+    cse_vars: Vec<Vec<u32>>,
+    cse_depth: Vec<u32>,
+}
+
+/// One pending operator on the streaming recognizer's stack.
+struct QFrame {
+    op: QOp,
+    /// Operands still to be read.
+    remaining: usize,
+    /// Read this frame's operands in monomial mode — no `+`/`-` may appear
+    /// below it. See [`crate::nl_quadratic::is_expanded_quadratic`].
+    mono: bool,
+}
+
+/// The operators the streaming recognizer accepts. One variant per shape
+/// that [`crate::nl_quadratic::recognize_expr`] handles; everything else
+/// makes it bail.
+enum QOp {
+    Neg,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    /// `o5`/`o81`/`o83`: base and exponent both read.
+    Pow,
+    /// `o82`: square, exponent implicit.
+    Square,
+    Sum(usize),
 }
 
 impl<'a> Parser<'a> {
-    fn new(txt: &'a str) -> Self {
+    fn new(txt: &'a str, quad_enabled: bool) -> Self {
         let lines: Vec<&str> = txt.lines().collect();
         Self {
             lines,
+            txt_base: txt.as_ptr() as usize,
+            txt_len: txt.len(),
             pos: 0,
             n: 0,
             m: 0,
@@ -1208,6 +1517,25 @@ impl<'a> Parser<'a> {
             nl_counts: None,
             ampl_options: Vec::new(),
             cses: Vec::new(),
+            quad_enabled,
+            cse_quad: Vec::new(),
+            cse_sum_ok: Vec::new(),
+            cse_mono_ok: Vec::new(),
+            cse_vars: Vec::new(),
+            cse_depth: Vec::new(),
+        }
+    }
+
+    /// Byte offset in the source text of the start of line `line`, or the
+    /// end of the text when the cursor has run off it.
+    ///
+    /// Pointer arithmetic against the same allocation, never a deref: every
+    /// line in `lines` borrows from the source buffer, so the difference is
+    /// its offset.
+    fn byte_at(&self, line: usize) -> usize {
+        match self.lines.get(line) {
+            Some(l) => l.as_ptr() as usize - self.txt_base,
+            None => self.txt_len,
         }
     }
 
@@ -1315,6 +1643,207 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| "expected segment header".to_string())?;
         let (hdr, comment) = split_comment(raw);
         Ok((hdr.trim(), comment.trim()))
+    }
+
+    /// Parse one `C`/`O` body, recognizing it from the token stream when
+    /// that is possible instead of building its tree (gh #588, Q5).
+    ///
+    /// The cursor is the whole mechanism. `Parser` is line-based, so a
+    /// failed recognition costs one assignment to rewind — the same trick
+    /// `parse_funcall_arg` already uses to route a Hollerith literal — and
+    /// the fallback then produces exactly the tree this file has always
+    /// produced. Nothing downstream can tell which arm ran except by
+    /// measuring memory.
+    ///
+    /// Only **degree-2** forms are kept. A body that recognizes as constant
+    /// or linear is re-parsed as a tree and stored as one: the constant-row
+    /// fold (gh #492), the linearity contract and the classifier's LP fast
+    /// path all key on the identity zero and on trees, they are cheap
+    /// already, and the memory that motivates this phase is entirely in
+    /// degree-2 rows. Refusing to touch them keeps the change confined to
+    /// the rows it is for.
+    fn parse_body(&mut self) -> Result<NlBody, String> {
+        if !self.quad_enabled {
+            return Ok(NlBody::Tree(self.parse_expr()?));
+        }
+        let saved = self.pos;
+        if let Some((form, vars, depth)) = self.parse_expr_quadratic() {
+            if !form.quadratic().is_empty() {
+                let src = self.byte_at(saved)..self.byte_at(self.pos);
+                return Ok(NlBody::Quad(Box::new(QuadBody {
+                    form,
+                    vars,
+                    src,
+                    depth,
+                })));
+            }
+        }
+        self.pos = saved;
+        Ok(NlBody::Tree(self.parse_expr()?))
+    }
+
+    /// Read one expression off the token stream as a degree-≤2 form,
+    /// **without building it**, or give up.
+    ///
+    /// This is the same computation as
+    /// `is_expanded_quadratic(e) && recognize_expr(e)` run on the tree these
+    /// tokens parse to — the accuracy gate and the algebra, interleaved so
+    /// neither needs the tree. That equivalence is the phase's correctness
+    /// claim and is asserted directly, bit for bit, over every body of every
+    /// `.nl` file in the repository by
+    /// `pounce-cli/tests/quad_parse_differential.rs`.
+    ///
+    /// Two things it must reproduce and not merely approximate:
+    ///
+    /// * **The exactness rule.** `is_expanded_quadratic` admits a body only
+    ///   when reading it as `½xᵀHx + aᵀx + c` repeats the additions the
+    ///   writer already wrote — expanding a *factored* form cancels, which
+    ///   is what took `airport.nl` from 16 to 300 iterations in Q4. Here
+    ///   that rule is structural rather than a separate pass: `+`/`-` are
+    ///   the spine, everything under a `*`, `/` or `^` is read in monomial
+    ///   mode, and a `+` seen in monomial mode gives up.
+    /// * **The association.** `recognize_expr` folds an `o54` sumlist from
+    ///   the *last* operand to the first (its work stack lowers them in
+    ///   reverse, and `drain` then hands them back in that order), so this
+    ///   folds the same way. Summation order is not observable on distinct
+    ///   monomials and is exactly observable on repeated ones.
+    ///
+    /// On `None` the cursor is left wherever it stopped; the caller rewinds.
+    fn parse_expr_quadratic(&mut self) -> Option<(Quad2, Vec<u32>, u32)> {
+        let mut frames: Vec<QFrame> = Vec::new();
+        let mut vals: Vec<Quad2> = Vec::new();
+        let mut vars: Vec<u32> = Vec::new();
+        // Deepest node of the tree these tokens describe. A leaf sits under
+        // `frames.len()` operators, and a CSE reference carries its body's
+        // depth under it — the same convention `pounce-py`'s `expr_depth`
+        // uses, because that is who reads the answer.
+        let mut depth: u32 = 0;
+        let note_leaf = |frames: &[QFrame], depth: &mut u32, below: u32| {
+            let d = u32::try_from(frames.len()).unwrap_or(u32::MAX);
+            *depth = (*depth).max(d.saturating_add(1).saturating_add(below));
+        };
+
+        loop {
+            let mono = frames.last().is_some_and(|f| f.mono);
+            // A `^` base must be atomic — `Const`, `Var` or a `Neg` — or the
+            // body is a factored form dressed as a monomial. `is_monomial`
+            // applies the same test to `Pow`'s left operand.
+            let pow_base = matches!(
+                frames.last(),
+                Some(QFrame {
+                    op: QOp::Pow,
+                    remaining: 2,
+                    ..
+                }) | Some(QFrame {
+                    op: QOp::Square,
+                    remaining: 1,
+                    ..
+                })
+            );
+
+            let raw = self.next_line()?;
+            let tok = strip_comment(raw).trim();
+            let first = tok.chars().next()?;
+            match first {
+                'n' => {
+                    // A constant base is atomic; `is_monomial` accepts it.
+                    let v: Number = tok[1..].trim().parse().ok()?;
+                    note_leaf(&frames, &mut depth, 0);
+                    vals.push(Quad2::of_constant(v));
+                }
+                'v' => {
+                    let i: usize = tok[1..].trim().parse().ok()?;
+                    if i < self.n {
+                        note_leaf(&frames, &mut depth, 0);
+                        vars.push(u32::try_from(i).ok()?);
+                        vals.push(Quad2::of_var(i));
+                    } else {
+                        // A CSE reference lowers to `Expr::Cse`, which is
+                        // *not* one of the shapes `is_monomial` accepts as a
+                        // power's base.
+                        if pow_base {
+                            return None;
+                        }
+                        let local = i.checked_sub(self.n)?;
+                        let ok = if mono {
+                            *self.cse_mono_ok.get(local)?
+                        } else {
+                            *self.cse_sum_ok.get(local)?
+                        };
+                        if !ok {
+                            return None;
+                        }
+                        let form = self.cse_quad.get(local)?.clone()?;
+                        note_leaf(&frames, &mut depth, *self.cse_depth.get(local)?);
+                        vars.extend_from_slice(self.cse_vars.get(local)?);
+                        vals.push(form);
+                    }
+                }
+                'o' => {
+                    let code: i32 = tok[1..].trim().parse().ok()?;
+                    if pow_base && code != 16 {
+                        return None;
+                    }
+                    let (op, arity, child_mono) = match code {
+                        // The sum spine. Inside a monomial there is no such
+                        // thing, and the body is a factored form.
+                        0 if !mono => (QOp::Add, 2, false),
+                        1 if !mono => (QOp::Sub, 2, false),
+                        16 => (QOp::Neg, 1, mono),
+                        54 if !mono => {
+                            let count_line = self.next_data_line().ok()?;
+                            let count: usize =
+                                count_line.split_whitespace().next()?.parse().ok()?;
+                            (QOp::Sum(count), count, false)
+                        }
+                        // Monomial operators: everything below them is read
+                        // in monomial mode.
+                        2 => (QOp::Mul, 2, true),
+                        3 => (QOp::Div, 2, true),
+                        5 | 81 | 83 => (QOp::Pow, 2, true),
+                        82 => (QOp::Square, 1, true),
+                        // Transcendentals, comparisons, conditionals,
+                        // min/max lists, and `+`/`-` under a monomial.
+                        _ => return None,
+                    };
+                    if arity == 0 {
+                        // An empty `o54` is the empty sum: zero.
+                        note_leaf(&frames, &mut depth, 0);
+                        vals.push(Quad2::default());
+                    } else {
+                        frames.push(QFrame {
+                            op,
+                            remaining: arity,
+                            mono: child_mono,
+                        });
+                        continue;
+                    }
+                }
+                // `f` (imported function call), `h`, and anything else.
+                _ => return None,
+            }
+
+            // A value has just been produced. Close every frame it completes.
+            while let Some(f) = frames.last_mut() {
+                f.remaining -= 1;
+                if f.remaining > 0 {
+                    break;
+                }
+                let f = frames.pop()?;
+                let combined = apply_quad_op(f.op, &mut vals)?;
+                vals.push(combined);
+            }
+            if frames.is_empty() {
+                break;
+            }
+        }
+
+        if vals.len() != 1 {
+            return None;
+        }
+        vars.sort_unstable();
+        vars.dedup();
+        Some((vals.pop()?, vars, depth))
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
@@ -1654,9 +2183,142 @@ impl<'a> Parser<'a> {
                 self.n + self.cses.len()
             ));
         }
+        // What a reference to this body would mean to the streaming
+        // recognizer, answered once here rather than per reference. The
+        // `V` tree exists at this point, so these are the *same* functions
+        // `NlTnlp` applies to a whole row — the parse-time recognizer never
+        // gets a second opinion about a CSE.
+        if self.quad_enabled {
+            self.cse_quad
+                .push(crate::nl_quadratic::recognize_expr(&combined));
+            self.cse_sum_ok
+                .push(crate::nl_quadratic::is_expanded_quadratic(&combined));
+            self.cse_mono_ok
+                .push(crate::nl_quadratic::is_monomial_expr(&combined));
+            let mut vars: BTreeSet<usize> = BTreeSet::new();
+            collect_vars(&combined, &mut vars);
+            self.cse_vars
+                .push(vars.into_iter().map(|v| v as u32).collect());
+            self.cse_depth.push(expr_tree_depth(&combined));
+        }
         self.cses.push(Arc::new(combined));
         Ok(())
     }
+}
+
+/// Combine the operands of one recognized operator, mirroring
+/// [`crate::nl_quadratic::recognize_expr`]'s `Apply` arm term for term.
+///
+/// Every difference from that function is a difference in the coefficients
+/// this parser stores, so there is nothing here that is "equivalent but
+/// tidier": the division scales by the reciprocal because that is what the
+/// tree walk does, and the sumlist folds back to front for the same reason.
+/// Nesting depth of a `V`-segment body, leaf = 1, a `Cse` reference
+/// counting one level above its body — the convention `pounce-py`'s
+/// `expr_depth` uses, since that is the guard the answer feeds.
+///
+/// Recursive, and safe to be: this only ever runs on a tree
+/// [`Parser::parse_expr`] has just built *recursively* on this same stack,
+/// so a frame that fits the parser fits this.
+fn expr_tree_depth(e: &Expr) -> u32 {
+    let deepest = |kids: &mut dyn Iterator<Item = &Expr>| {
+        kids.fold(0u32, |acc, k| acc.max(expr_tree_depth(k)))
+    };
+    1 + match e {
+        Expr::Const(_) | Expr::Var(_) => 0,
+        Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            deepest(&mut [&**a, &**b].into_iter())
+        }
+        Expr::Unary(_, a) | Expr::Not(a) => expr_tree_depth(a),
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => deepest(&mut args.iter()),
+        Expr::Cond { cond, then_, else_ } => {
+            deepest(&mut [&**cond, &**then_, &**else_].into_iter())
+        }
+        Expr::Funcall { args, .. } => deepest(&mut args.iter().filter_map(|a| match a {
+            FuncallArg::Real(inner) => Some(inner),
+            FuncallArg::Str(_) => None,
+        })),
+        Expr::Cse(body) => expr_tree_depth(body),
+    }
+}
+
+fn apply_quad_op(op: QOp, vals: &mut Vec<Quad2>) -> Option<Quad2> {
+    let pop2 = |vals: &mut Vec<Quad2>| -> Option<(Quad2, Quad2)> {
+        let b = vals.pop()?;
+        let a = vals.pop()?;
+        Some((a, b))
+    };
+    Some(match op {
+        QOp::Sum(n) => {
+            let at = vals.len().checked_sub(n)?;
+            let mut acc = Quad2::default();
+            // `recognize_expr` lowers a sumlist's operands in reverse and
+            // then folds them in the order `drain` yields, which is last
+            // operand first. Here they arrive in file order, so the fold is
+            // reversed to match. On repeated monomials the two orders do not
+            // agree bit for bit.
+            for p in vals.drain(at..).rev() {
+                acc = Quad2::add(acc, p);
+            }
+            acc
+        }
+        QOp::Neg => vals.pop()?.neg(),
+        QOp::Add => {
+            let (a, b) = pop2(vals)?;
+            Quad2::add(a, b)
+        }
+        QOp::Sub => {
+            let (a, b) = pop2(vals)?;
+            Quad2::add(a, b.neg())
+        }
+        QOp::Mul => {
+            let (a, b) = pop2(vals)?;
+            a.mul(&b)?
+        }
+        QOp::Div => {
+            let (a, b) = pop2(vals)?;
+            let d = b.as_constant()?;
+            if d == 0.0 {
+                return None;
+            }
+            a.scale(1.0 / d)
+        }
+        QOp::Pow => {
+            let (a, b) = pop2(vals)?;
+            let exp = b.as_constant()?;
+            if exp == 0.0 {
+                Quad2::of_constant(1.0)
+            } else if exp == 1.0 {
+                a
+            } else if exp == 2.0 {
+                a.mul(&a)?
+            } else {
+                return None;
+            }
+        }
+        // `o82` is `Pow(base, Const(2.0))` with the exponent left implicit,
+        // so it takes the `exp == 2.0` branch above.
+        QOp::Square => {
+            let a = vals.pop()?;
+            a.mul(&a)?
+        }
+    })
+}
+
+/// Re-parse one recognized body from the bytes it was recognized from.
+///
+/// The point is that this is the *same* function the original parse ran, on
+/// the *same* bytes, with the same `n` and the same `V`-segment bodies — so
+/// the tree it returns is the tree that parse would have built, down to the
+/// `Arc` identities that `HybridTape::build_multi` keys CSE sharing on.
+/// Deriving an equivalent tree from the stored coefficients instead would
+/// be a different tree, evaluated by a different tape, and this phase would
+/// stop being invisible from outside.
+fn parse_body_fragment(txt: &str, n: usize, cses: &[Arc<Expr>]) -> Result<Expr, String> {
+    let mut p = Parser::new(txt, false);
+    p.n = n;
+    p.cses = cses.to_vec();
+    p.parse_expr()
 }
 
 fn strip_comment(s: &str) -> &str {
@@ -2564,7 +3226,9 @@ fn render_body(linear: &[(usize, Number)], nonlinear: &Expr, prob: &NlProblem) -
 /// or `0 <= T_reactor <= 500`. Bounds outside ±1e19 are treated as
 /// infinite (AMPL's convention), matching [`TNLPAdapter`]'s classifier.
 pub fn render_constraint_equation(prob: &NlProblem, k: usize) -> String {
-    let body = render_body(&prob.con_linear[k], &prob.con_nonlinear[k], prob);
+    // Diagnostic path: a recognized body has no tree, so this is one of
+    // the places that pays to rebuild one. It runs once per rendered row.
+    let body = render_body(&prob.con_linear[k], &prob.con_expr(k), prob);
     let lo = prob.g_l[k];
     let hi = prob.g_u[k];
     const INF: Number = 1.0e19;
@@ -2609,7 +3273,7 @@ pub fn constraint_jacobian_sparsity(prob: &NlProblem) -> (Vec<Index>, Vec<Index>
         for &(j, _coef) in &prob.con_linear[k] {
             support.insert(j);
         }
-        collect_vars(&prob.con_nonlinear[k], &mut support);
+        prob.con_nonlinear[k].collect_vars(&mut support);
         for &j in &support {
             irow.push(k as Index);
             jcol.push(j as Index);
@@ -3246,9 +3910,12 @@ impl NlTnlp {
         // each id to its (library, registered-name) pair so the tape
         // builder can emit live `TapeOp::Funcall` ops.
         let mut referenced: BTreeSet<usize> = BTreeSet::new();
-        super::nl_external::collect_funcall_ids(&prob.obj_nonlinear, &mut referenced);
-        for c in &prob.con_nonlinear {
-            super::nl_external::collect_funcall_ids(c, &mut referenced);
+        // Only trees can carry a `Funcall`: the recognizer refuses one, so
+        // a recognized body provably contains none.
+        for body in std::iter::once(&prob.obj_nonlinear).chain(prob.con_nonlinear.iter()) {
+            if let Some(e) = body.tree() {
+                super::nl_external::collect_funcall_ids(e, &mut referenced);
+            }
         }
         let resolver = if referenced.is_empty() {
             super::nl_external::ExternalResolver::default()
@@ -3277,19 +3944,17 @@ impl NlTnlp {
             // additions the `.nl` writer already wrote. See its docs — and
             // note it is checked *before* recognition, so a factored form
             // costs one cheap structural walk rather than a full expansion.
-            if !is_trivially_zero(&prob.obj_nonlinear) && is_expanded_quadratic(&prob.obj_nonlinear)
-            {
-                if let Some((h, lin, c)) = analyze_quadratic_full(&prob.obj_nonlinear) {
-                    let f = quad.push_form(&h, &lin, c);
-                    quad.assign_objective(f);
-                }
+            // Recognition is the parser's job now (gh #588, Q5) for the
+            // bodies it could reach; `admitted_quad_form` reads its answer
+            // back, and still walks a tree for the bodies that kept one —
+            // a `from_expressions` model, a factored row rewound by the
+            // parser, or any body at all under `POUNCE_DBG_NO_QUAD`.
+            if let Some((h, lin, c)) = prob.obj_nonlinear.admitted_quad_form() {
+                let f = quad.push_form(&h, &lin, c);
+                quad.assign_objective(f);
             }
             for k in 0..prob.m {
-                let row = &prob.con_nonlinear[k];
-                if is_trivially_zero(row) || !is_expanded_quadratic(row) {
-                    continue;
-                }
-                if let Some((h, lin, c)) = analyze_quadratic_full(row) {
+                if let Some((h, lin, c)) = prob.con_nonlinear[k].admitted_quad_form() {
                     let f = quad.push_form(&h, &lin, c);
                     quad.assign_row(k, f);
                 }
@@ -3304,7 +3969,7 @@ impl NlTnlp {
         let obj_tapes: Vec<Tape> = if quad.objective_form().is_some() {
             Vec::new()
         } else {
-            split_top_sums(&prob.obj_nonlinear)
+            split_top_sums(&prob.obj_expr())
                 .iter()
                 .map(|e| Tape::build_with_externals(e, &resolver))
                 .collect()
@@ -3322,7 +3987,7 @@ impl NlTnlp {
                 con_tapes.push(Vec::new());
                 continue;
             }
-            let summands = split_top_sums(&prob.con_nonlinear[k]);
+            let summands = split_top_sums(&prob.con_expr(k));
             con_tapes.push(
                 summands
                     .iter()
@@ -3576,8 +4241,16 @@ impl NlTnlp {
             // `forms` counts the objective too, which is why it can exceed
             // the row count by one.
             let quad_rows = (0..prob.m).filter(|&i| quad.row_form(i).is_some()).count();
+            // How many of those forms the *parser* produced, i.e. how many
+            // never cost an `Expr` (gh #588, Q5). The rest were recognized
+            // from a tree that was built: a `from_expressions` model, or a
+            // body the parser rewound because it was not degree 2.
+            let parsed = std::iter::once(&prob.obj_nonlinear)
+                .chain(prob.con_nonlinear.iter())
+                .filter(|b| b.quad().is_some())
+                .count();
             eprintln!(
-                "[quad stats] forms={} rows={quad_rows}/{} obj={} \
+                "[quad stats] forms={} (parse-time {parsed}) rows={quad_rows}/{} obj={} \
                  stored_h_entries={} colored_pairs={}/{}",
                 quad.len(),
                 prob.m,
@@ -3836,9 +4509,9 @@ impl NlTnlp {
     /// list below so the two can never disagree.
     fn nonlinear_var_set(&self) -> BTreeSet<usize> {
         let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
-        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        self.prob.obj_nonlinear.collect_vars(&mut nonlinear);
         for row in &self.prob.con_nonlinear {
-            collect_vars(row, &mut nonlinear);
+            row.collect_vars(&mut nonlinear);
         }
         nonlinear
     }
@@ -4168,14 +4841,23 @@ impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
     /// neither a nonlinear expression nor any linear coefficients
     /// (so FBBT skips them — there's nothing to tighten).
     fn constraint_expression(&self, i: usize) -> Option<pounce_nlp::FbbtTape> {
-        let nonlinear = self.prob.con_nonlinear.get(i)?;
+        if i >= self.prob.con_nonlinear.len() {
+            return None;
+        }
+        let nonlinear = self.prob.con_expr(i);
         let linear = self
             .prob
             .con_linear
             .get(i)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        crate::nl_fbbt_translate::translate_constraint(nonlinear, linear)
+        // FBBT needs the tree, so a recognized body is rebuilt here. It is
+        // rebuilt once per row per presolve pass and dropped again, so the
+        // DAG never all exists at once — which is the property the phase is
+        // actually about. Translating the stored coefficients instead would
+        // propagate bounds through a different association and change the
+        // tightening; that is not a trade this phase makes.
+        crate::nl_fbbt_translate::translate_constraint(&nonlinear, linear)
     }
 
     /// Variable name from the sibling `.col` file, if one was loaded.
@@ -4738,9 +5420,10 @@ impl TNLP for NlTnlp {
         // that this test is a genuine linearity test and not just an
         // identity check (`gh #492`).
         for (i, t) in types.iter_mut().enumerate() {
-            *t = match &self.prob.con_nonlinear[i] {
-                Expr::Const(c) if *c == 0.0 => Linearity::Linear,
-                _ => Linearity::NonLinear,
+            *t = if self.prob.con_nonlinear[i].is_trivially_zero() {
+                Linearity::Linear
+            } else {
+                Linearity::NonLinear
             };
         }
         true
@@ -4779,7 +5462,7 @@ impl TNLP for NlTnlp {
         // the guard does not block legitimate eliminations of
         // objective-free equality blocks (the gas-network case).
         let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
-        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        self.prob.obj_nonlinear.collect_vars(&mut nonlinear);
         for (i, t) in types.iter_mut().enumerate() {
             *t = if nonlinear.contains(&i) {
                 Linearity::NonLinear
@@ -4926,10 +5609,10 @@ b
         assert_eq!(p.m, 0);
         assert_eq!(p.num_obj, 1);
         // f(0,0) = 1 + 4 = 5
-        let f = eval_expr(&p.obj_nonlinear, &[0.0, 0.0]);
+        let f = eval_expr(&p.obj_expr(), &[0.0, 0.0]);
         assert!((f - 5.0).abs() < 1e-12);
         // f(1,2) = 0
-        let f = eval_expr(&p.obj_nonlinear, &[1.0, 2.0]);
+        let f = eval_expr(&p.obj_expr(), &[1.0, 2.0]);
         assert!(f.abs() < 1e-12);
     }
 
@@ -4938,7 +5621,7 @@ b
         let p = parse_nl_text(SIMPLE).expect("parse");
         let x = [0.5, 1.0];
         let mut g = [0.0_f64; 2];
-        grad_expr(&p.obj_nonlinear, &x, 1.0, &mut g);
+        grad_expr(&p.obj_expr(), &x, 1.0, &mut g);
         // d/dx0 = 2*(x0-1) = -1.0
         // d/dx1 = 2*(x1-2) = -2.0
         assert!((g[0] - (-1.0)).abs() < 1e-12);
@@ -4968,11 +5651,13 @@ b
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: obj_nl,
+            obj_nonlinear: NlBody::Tree(obj_nl),
             obj_linear: vec![(1, 3.0)],
             obj_constant: 0.0,
             con_nonlinear: vec![],
@@ -5024,14 +5709,16 @@ b
             Box::new(Expr::Const(2.0)),
         );
         let prob = NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
             minimize: true,
-            obj_nonlinear: Expr::Const(0.0),
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
             obj_linear: vec![(1, 3.0)],
             obj_constant: 0.0,
-            con_nonlinear: vec![con_nl],
+            con_nonlinear: vec![NlBody::Tree(con_nl)],
             con_linear: vec![vec![]],
             x_l: vec![f64::NEG_INFINITY; 2],
             x_u: vec![f64::INFINITY; 2],
@@ -5286,7 +5973,7 @@ J0 2
         let p = parse_nl_text(&nl).expect("parse");
 
         assert!(
-            matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            p.con_nonlinear[0].is_trivially_zero(),
             "the constant body must be replaced by the identity zero, got {:?}",
             p.con_nonlinear[0]
         );
@@ -5336,7 +6023,7 @@ J0 2
         let nl = EQ_LIN.replace("C0\nn0\n", "C0\no0\nn1\nn2\n");
         assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
         let p = parse_nl_text(&nl).expect("parse");
-        assert!(matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0));
+        assert!(p.con_nonlinear[0].is_trivially_zero());
         assert!((p.g_l[0] - (-2.0)).abs() < 1e-12, "g_l = {}", p.g_l[0]);
         assert!((p.g_u[0] - (-2.0)).abs() < 1e-12, "g_u = {}", p.g_u[0]);
     }
@@ -5388,7 +6075,7 @@ J0 2
         assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
         let p = parse_nl_text(&nl).expect("parse");
         assert!(
-            !matches!(p.con_nonlinear[0], Expr::Const(_)),
+            !matches!(p.con_nonlinear[0].tree(), Some(Expr::Const(_))),
             "a row in x0 was folded away: {:?}",
             p.con_nonlinear[0]
         );
@@ -5408,7 +6095,7 @@ J0 2
         assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
         let p = parse_nl_text(&nl).expect("parse");
         assert!(
-            !matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            !p.con_nonlinear[0].is_trivially_zero(),
             "a NaN body was folded into the bounds"
         );
         assert!(p.g_l[0].is_finite() && p.g_u[0].is_finite());
@@ -5426,7 +6113,7 @@ J0 2
         assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
         let p = parse_nl_text(&nl).expect("parse");
         assert!(
-            matches!(p.con_nonlinear[0], Expr::Funcall { .. }),
+            matches!(p.con_nonlinear[0].tree(), Some(Expr::Funcall { .. })),
             "expected the funcall to survive the fold, got {:?}",
             p.con_nonlinear[0]
         );
@@ -6377,16 +7064,16 @@ b
         let p = parse_nl_text(CSE_OBJ).expect("parse");
         assert_eq!(p.n, 2);
         // f(1,2) = 9 + 3 = 12
-        let f = eval_expr(&p.obj_nonlinear, &[1.0, 2.0]);
+        let f = eval_expr(&p.obj_expr(), &[1.0, 2.0]);
         assert!((f - 12.0).abs() < 1e-12, "got {f}");
         // d/dx0 = 2*(x0+x1) + 1 = 7 at (1,2). Same for x1.
         let mut g = [0.0_f64; 2];
-        grad_expr(&p.obj_nonlinear, &[1.0, 2.0], 1.0, &mut g);
+        grad_expr(&p.obj_expr(), &[1.0, 2.0], 1.0, &mut g);
         assert!((g[0] - 7.0).abs() < 1e-12, "g[0]={}", g[0]);
         assert!((g[1] - 7.0).abs() < 1e-12, "g[1]={}", g[1]);
         // collect_vars reaches into the CSE body and finds {0, 1}.
         let mut vs = BTreeSet::new();
-        collect_vars(&p.obj_nonlinear, &mut vs);
+        p.obj_nonlinear.collect_vars(&mut vs);
         assert_eq!(vs.into_iter().collect::<Vec<_>>(), vec![0, 1]);
     }
 
@@ -6811,7 +7498,10 @@ S1 2 sens_init_constr
             vec![(0, 1.0), (1, -1.0)], // mass_in - mass_out
             vec![(0, 1.0)],            // mass_in
         ];
-        prob.con_nonlinear = vec![Expr::Const(0.0), Expr::Const(0.0)];
+        prob.con_nonlinear = vec![
+            NlBody::Tree(Expr::Const(0.0)),
+            NlBody::Tree(Expr::Const(0.0)),
+        ];
         prob.g_l = vec![0.0, 0.0];
         prob.g_u = vec![0.0, 500.0];
 
@@ -6835,8 +7525,12 @@ S1 2 sens_init_constr
         // Row 1: linear in x2 only → support {2}.
         prob.con_linear = vec![vec![(1, 4.0)], vec![(2, 1.0)]];
         prob.con_nonlinear = vec![
-            Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(2))),
-            Expr::Const(0.0),
+            NlBody::Tree(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Var(2)),
+            )),
+            NlBody::Tree(Expr::Const(0.0)),
         ];
         prob.g_l = vec![0.0, 0.0];
         prob.g_u = vec![0.0, 0.0];
@@ -6854,7 +7548,7 @@ S1 2 sens_init_constr
         // legitimately contain '#' (e.g. a parameters-directory path). The
         // old parser ran strip_comment() over the line first, truncating
         // the content at the '#'. Here `h3:a#b` must round-trip to "a#b".
-        let mut p = Parser::new("h3:a#b\n");
+        let mut p = Parser::new("h3:a#b\n", false);
         match p.parse_funcall_arg().expect("parse hollerith arg") {
             FuncallArg::Str(s) => assert_eq!(s, "a#b"),
             other => panic!("expected Str, got {other:?}"),
@@ -6866,7 +7560,7 @@ S1 2 sens_init_constr
         // The declared `<len>` is authoritative: exactly that many bytes
         // after the ':' form the string; trailing content (here a real
         // ` # comment`) is not part of it.
-        let mut p = Parser::new("h3:abc # trailing comment\n");
+        let mut p = Parser::new("h3:abc # trailing comment\n", false);
         match p.parse_funcall_arg().expect("parse hollerith arg") {
             FuncallArg::Str(s) => assert_eq!(s, "abc"),
             other => panic!("expected Str, got {other:?}"),
@@ -6885,7 +7579,7 @@ S1 2 sens_init_constr
     /// Parse a single expression `expr_src` with `n` variables in scope,
     /// driving the real `parse_opcode` path through `parse_expr`.
     fn parse_one_expr(n: usize, expr_src: &str) -> Expr {
-        let mut p = Parser::new(expr_src);
+        let mut p = Parser::new(expr_src, false);
         p.n = n;
         p.parse_expr().expect("parse expression")
     }
@@ -7004,8 +7698,8 @@ S1 2 sens_init_constr
         assert_ne!(nl, SIMPLE, "fixture substitution must apply");
         let p = parse_nl_text(&nl).expect("parse o82 objective");
         // f(3,4) = 9 + 16 = 25; both bases negative still real: f(-3,-4)=25.
-        assert!((eval_expr(&p.obj_nonlinear, &[3.0, 4.0]) - 25.0).abs() < 1e-12);
-        assert!((eval_expr(&p.obj_nonlinear, &[-3.0, -4.0]) - 25.0).abs() < 1e-12);
+        assert!((eval_expr(&p.obj_expr(), &[3.0, 4.0]) - 25.0).abs() < 1e-12);
+        assert!((eval_expr(&p.obj_expr(), &[-3.0, -4.0]) - 25.0).abs() < 1e-12);
     }
 
     #[test]
