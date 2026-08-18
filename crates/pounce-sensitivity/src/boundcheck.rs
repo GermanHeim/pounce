@@ -575,7 +575,7 @@ pub fn step_along_path<B>(
     hi: &[Number],
     multipliers: &[BoundMultiplier],
     max_iter: usize,
-    initial_released: &[usize],
+    forced_active: &[usize],
     initial_holds: &[(usize, bool)],
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
@@ -647,9 +647,10 @@ where
             if !slack_base.is_finite() {
                 continue;
             }
-            if mult_nat
-                .iter()
-                .any(|m| m.row == br.row && m.base > slack_base)
+            if forced_active.contains(&br.row)
+                || mult_nat
+                    .iter()
+                    .any(|m| m.row == br.row && m.base > slack_base)
             {
                 let side = if br.lower { 0 } else { 1 };
                 base_active_row[br.var_row][side] = Some(br.row);
@@ -665,11 +666,20 @@ where
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
     // Seeded state from the directional-derivative decision at a
-    // degenerate base point. Every weakly active row arrives released,
-    // since its order-one sigma is wrong for both sides of the kink,
-    // and the rows the accepted working set held arrive as holds with
+    // degenerate base point. A weakly active row the direction holds
+    // arrives released, since its order-one sigma is wrong once the
+    // direction later changes, and pinned through a Schur hold with
     // zero accumulated multiplier, exactly as a hold added at fraction
-    // zero would, so the drop test can end them later like any other.
+    // zero would, so the drop test can end it later like any other. A
+    // weakly active row the direction leaves goes into the
+    // base-activity table below instead, so the release scan frees it
+    // at the fraction where its multiplier actually reaches zero:
+    // essentially zero at an exact kink, and partway along the step
+    // when the held solve sits inside the ambiguous band, where the
+    // bound is genuinely active for the first stretch. Deciding those
+    // rows at fraction zero released them a sixth of a step early on
+    // the CSTR held at 75% of the breakpoint fraction, and overshot
+    // tenfold against the walk's own release.
     let mut holds: Vec<PathHold> = initial_holds
         .iter()
         .map(|&(row, lower)| PathHold {
@@ -678,7 +688,16 @@ where
             mult: 0.0,
         })
         .collect();
-    let mut released: Vec<usize> = initial_released.to_vec();
+    let mut released: Vec<usize> = initial_holds
+        .iter()
+        .filter_map(|&(var_row, lower)| {
+            bound_rows.as_ref().and_then(|rows| {
+                rows.iter()
+                    .find(|b| b.var_row == var_row && b.lower == lower)
+                    .map(|b| b.row)
+            })
+        })
+        .collect();
     let mut segments: Vec<PathSegment> = Vec::new();
     // Rows already changed at the fraction the path currently ends at.
     // A zero-length segment is where cycling comes from, so a row that

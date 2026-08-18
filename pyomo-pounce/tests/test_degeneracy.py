@@ -59,13 +59,53 @@ def test_one_sided_is_wrong_on_at_least_one_side():
         f"up {up[m.x]}, down {down[m.x]}")
 
 
-def test_the_record_shows_the_kink_resolving_at_fraction_zero():
+def test_the_record_shows_the_kink_resolving_essentially_at_zero():
+    """The departure is the walk's own release, at the fraction where
+    the residual multiplier the solve left reaches zero, tiny but not
+    stamped 0.0."""
     m = kink()
     rec = active_set_changes(m, [(m.p, 1.0)])
-    assert [(c.var, c.bound, c.action, c.fraction) for c in rec] == [
-        (m.x, "lower", "leaves", 0.0)], f"record: {rec}"
+    assert [(c.var, c.bound, c.action) for c in rec] == [
+        (m.x, "lower", "leaves")], f"record: {rec}"
+    assert rec[0].fraction == pytest.approx(0.0, abs=1e-3)
     assert active_set_changes(m, [(m.p, -1.0)]) == [], (
         "held through the whole change, nothing to record")
+
+
+def test_a_bound_inside_the_band_releases_where_its_multiplier_ends():
+    """Held slightly on the active side of the kink, the bound is
+    genuinely active with a small positive multiplier, and the true
+    solution releases it partway through the step, where that
+    multiplier reaches zero, not at the start. Deciding it at fraction
+    zero instead released it early and overshot tenfold on the CSTR
+    held at 75% of the breakpoint fraction, which is the defect this
+    test pins."""
+    eps = 1e-5
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=-eps, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-8})
+
+    # in the ambiguous band, which the gradient warning certifies
+    with pytest.warns(UserWarning, match="degenerate"):
+        gradient(m.x, wrt=m.p)
+
+    rec = active_set_changes(m, [(m.p, 1.0)])
+    assert [(c.var, c.bound, c.action) for c in rec] == [
+        (m.x, "lower", "leaves")], f"record: {rec}"
+    # The fraction is the zero crossing of the multiplier the solve
+    # left, which inside the band is of order sqrt(mu) rather than
+    # eps, since the residual barrier multiplier dominates the true
+    # one there. What discriminates the defect is that it is strictly
+    # positive: a decision stamped at fraction zero is the early
+    # release this test pins.
+    frac = rec[0].fraction
+    assert 1e-6 < frac < 1e-2, f"release at {frac}"
+
+    est = estimate(m, [(m.p, 1.0)], mode="path")
+    assert est[m.x] == pytest.approx(1.0, abs=1e-4)
 
 
 def test_gradient_warns_at_a_kink_and_not_at_a_clean_point():

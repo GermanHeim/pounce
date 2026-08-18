@@ -1694,9 +1694,12 @@ def active_set_changes(model, perturb, max_iter=16,
     the target, the same condition `estimate()` warns about.
 
     degeneracy matches `estimate()`'s argument of the same name. Under
-    "directional" (the default), a weakly active bound the QP decides
-    to leave appears in the record as a departure at fraction 0.0,
-    which is where the kink resolves.
+    "directional" (the default), a weakly active bound the perturbation
+    releases appears in the record as a departure at the fraction
+    where its multiplier reaches zero: essentially zero at an exact
+    kink, and partway along the step when the held solve sits inside
+    the ambiguous band, where the bound is genuinely active for the
+    first stretch.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None

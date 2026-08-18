@@ -765,23 +765,24 @@ impl Solver {
         let (_, pinned, trials) =
             crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
                 .map_err(SolverError::SensComputationFailed)?;
-        let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+        // Rows the direction holds are pinned from fraction zero. Rows
+        // it leaves are forced into the walk's base-activity table, so
+        // the release scan frees each at the fraction where its
+        // multiplier reaches zero: essentially zero at an exact kink,
+        // and partway along the step when the held solve sits inside
+        // the ambiguous band, where the bound is genuinely active for
+        // the first stretch of the perturbation.
         let holds: Vec<(usize, bool)> = weak
             .iter()
             .filter(|w| pinned.contains(&w.var_row))
             .map(|w| (w.var_row, w.lower))
             .collect();
-        let mut segments: Vec<crate::boundcheck::PathSegment> = weak
+        let forced_active: Vec<usize> = weak
             .iter()
             .filter(|w| !pinned.contains(&w.var_row))
-            .map(|w| crate::boundcheck::PathSegment {
-                at: 0.0,
-                var_row: w.var_row,
-                lower: w.lower,
-                pinned: false,
-            })
+            .map(|w| w.row)
             .collect();
-        let (dx, walked) = crate::boundcheck::step_along_path(
+        let (dx, segments) = crate::boundcheck::step_along_path(
             &state.backsolver,
             &rhs_plain,
             &ctx.x_curr,
@@ -789,11 +790,10 @@ impl Solver {
             &ctx.hi,
             &ctx.mults,
             max_iter,
-            &released,
+            &forced_active,
             &holds,
         )
         .map_err(SolverError::SensComputationFailed)?;
-        segments.extend(walked);
         Ok((dx[..ctx.n_x].to_vec(), segments, trials))
     }
 
