@@ -23,7 +23,7 @@
 //! (it is a flat sum of monomials), so evaluating it from its stored
 //! coefficients gives `g = 0` where its own tape gives 16 — a second,
 //! separate defect on the *storage* side of the same cancellation, reported
-//! rather than fixed here. Dropping the model into the corpus would fail
+//! as gh #685 rather than fixed here. Dropping the model into the corpus would fail
 //! `quad_evaluator_differential` for that reason instead of this one.
 
 use std::path::PathBuf;

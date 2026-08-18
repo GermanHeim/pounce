@@ -666,7 +666,7 @@ fn rng_below(rng: &mut Rng2, n: u64) -> u64 {
 /// fast path is evaluating a different function from the tape — by design,
 /// and wrongly: `2⁵³·x² + x² − 2⁵³·x²` reads out as the zero form while its
 /// own tape gives 16 at `x = 3`. That is the storage-side half of gh #683,
-/// filed separately; a battery that did not skip it would be reporting that
+/// filed as gh #685; a battery that did not skip it would be reporting that
 /// defect once per seed instead of guarding this one.
 #[test]
 fn a_synthetic_battery_evaluates_the_same_both_ways() {
