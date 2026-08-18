@@ -647,3 +647,47 @@ jobs:
           assert abs(sol[0] - 1) < 1e-6 and abs(sol[1] - 1) < 1e-6, sol
           print("wheel solves with the build tree hidden, x* =", sol)
           PY
+
+  # Compile the convexify name shim against every spelling of CasADi's
+  # runtime helper (gh#668). Cheap and hermetic: no CasADi, no Rust, no
+  # link step — mock declarations and a compiler.
+  #
+  # This job exists because the job above cannot cover it. CasADi renamed
+  # `convexify_eval` to `casadi_convexify_eval` after 3.7.2, and any one
+  # CasADi declares exactly one of the two, so a build against a real
+  # CasADi compiles one overload of the shim and leaves the other
+  # unchecked — and it is the *unchecked* one that most users get, since
+  # the wheel ships plugins for 3.6 and 3.7 and both take the fallback.
+  # The mock is what lets one runner compile both.
+  #
+  # Windows is here and nowhere else in this workflow: the Windows wheel is
+  # built with MSVC, and MSVC's two-phase lookup is the likeliest of the
+  # three to disagree about a dependent name that is not declared. That is
+  # the whole mechanism this shim rests on.
+  convexify-name-shim:
+    name: CasADi convexify name shim (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Compile against every spelling
+        if: runner.os != 'Windows'
+        run: python3 casadi/tests/convexify_compat/run.py
+
+      # `cl` is only on PATH inside a developer shell, and vswhere ships with
+      # every runner image, so no extra action is needed to find it.
+      - name: Compile against every spelling (MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
+          if not defined VSPATH (echo could not locate a Visual Studio install & exit /b 1)
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          python casadi\tests\convexify_compat\run.py --cxx cl

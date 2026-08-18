@@ -107,6 +107,12 @@ mismatch surfaces as an undefined-symbol error at load time.
 [`casadi/README.md`](https://github.com/jkitchin/pounce/blob/main/casadi/README.md)
 has the details and the failure signatures.
 
+Building against a CasADi *nightly* works too. CasADi renamed a runtime
+helper the plugin calls after 3.7.2 (gh#668), which broke the build for
+anyone on master; the source now detects which name the installed CasADi
+declares, so one tree compiles against 3.6, 3.7 and master unchanged,
+with no build flags to pass.
+
 ## Options
 
 | CasADi option | Meaning |

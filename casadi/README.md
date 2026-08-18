@@ -33,6 +33,11 @@ covers building and installing the plugin.
   `CasADi plugin parity` job.
 - `pounce_runtime.hpp` — the C the plugin emits into generated code, the
   counterpart of CasADi's `ipopt_runtime.hpp`.
+- `convexify_compat.hpp` — one shim, for one CasADi rename. See
+  *Source compatibility across CasADi versions* below.
+- `tests/convexify_compat/` — compiles that shim against every spelling,
+  with no CasADi installed. `make compat`, and the `CasADi convexify name
+  shim` job in CI.
 - `examples/` — eight runnable scripts, from hello-world to embedded codegen.
 
 ## Build
@@ -127,7 +132,38 @@ Uninstall with `make uninstall`.
 ```bash
 make test          # parity checks against ipopt — all should PASS
 make examples      # runs every script in examples/
+make compat        # the convexify name shim, against every CasADi spelling
 ```
+
+`make compat` is the odd one out: it needs neither CasADi nor the solver
+library, only a compiler. See below for what it is checking.
+
+## Source compatibility across CasADi versions
+
+CasADi renamed the runtime helper `convexify_eval` to
+`casadi_convexify_eval` after 3.7.2 (gh#668). The codegen SYMBOL name and
+the signature are unchanged, so the break is source-level only — but it is
+unconditional: the call sits in `cb_h`, which compiles whether or not
+`convexify_strategy` is ever used. A plugin built against current CasADi
+master fails for users who never convexify anything.
+
+Nothing in the version macros separates the two spellings — the nightly
+that first carried the rename reports the same
+`CASADI_MAJOR/MINOR/PATCH` as 3.7.2 — so `convexify_compat.hpp` detects
+which name the installed CasADi declares, by overload resolution. One
+source tree builds against 3.6, 3.7 and master with no build flags and no
+version test to revise at the next CasADi release.
+
+The catch, and the reason `tests/convexify_compat/` exists: a real CasADi
+declares exactly one of the two names, so building against one CasADi
+compiles one overload of the shim and leaves the other unchecked — and it
+is the unchecked one that most users get, since the wheel ships plugins
+for 3.6 and 3.7 and both take the fallback. `make compat` compiles both
+against mock declarations, so neither branch can rot unnoticed. Checked
+locally on g++ and clang; the MSVC leg — the toolchain the Windows wheel
+is built with, and the likeliest of the three to disagree about a
+dependent name — runs in CI. Add a compiler to `run.py` rather than
+trusting the mechanism on a new one.
 
 ## ABI: what has to match, and why
 
