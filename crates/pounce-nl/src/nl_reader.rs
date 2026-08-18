@@ -380,7 +380,7 @@ impl NlBody {
     /// digits on `(x − 500000)²` — so the gate is on both arms or on
     /// neither (gh #588, Q4; gh #673).
     ///
-    /// ## The second gate: a term that was dropped is a term that is missing
+    /// ## The second gate: a term that was *lost* is a term that is missing
     ///
     /// `is_expanded_quadratic` is a gate on the *shape* the coefficients
     /// were derived from. It says nothing about whether the derivation kept
@@ -397,7 +397,7 @@ impl NlBody {
     /// then walks the objective variable to its `-10⁶` floor and reports
     /// `Optimal`, where the same bytes down the tape stop at `-0.281`. On
     /// the default route, with no option set. So the form is admitted only
-    /// when [`Quad2::dropped_terms`] is clear (gh #685 part 1).
+    /// when [`Quad2::lost_terms`] is clear (gh #685 part 1).
     ///
     /// It has to be that flag and not an emptiness test. Partial
     /// cancellation is the same defect wearing a different face:
@@ -406,7 +406,13 @@ impl NlBody {
     /// while the read-out is still short an entire `x₀²`. A gate that looked
     /// at emptiness would pass this and stay wrong.
     ///
-    /// The cost is reach, not correctness: a dropped term sends the row back
+    /// And it is the *loss*, not the drop. `x₀² − x₀²` folds through
+    /// `fl(1) + fl(−1) = 0` with nothing rounded away, so its read-out is
+    /// the whole body and it keeps this fast path; gating on the drop
+    /// refused it alongside the absorbing row above, for arithmetic that
+    /// lost nothing (gh #687).
+    ///
+    /// The cost is reach, not correctness: a row that lost a term goes back
     /// to the AD tape, which is where it was before Q4.
     pub fn admitted_quad_form(&self) -> Option<QuadForm> {
         match self {
@@ -415,9 +421,9 @@ impl NlBody {
                     return None;
                 }
                 let form = recognize_expr(e)?;
-                (!form.dropped_terms()).then(|| quad_form_readout(&form))
+                (!form.lost_terms()).then(|| quad_form_readout(&form))
             }
-            NlBody::Quad(q) => (!q.form.dropped_terms()).then(|| quad_form_readout(&q.form)),
+            NlBody::Quad(q) => (!q.form.lost_terms()).then(|| quad_form_readout(&q.form)),
         }
     }
 
@@ -451,11 +457,17 @@ impl NlBody {
     /// froze those rows' Jacobians for the whole solve (gh #683).
     ///
     /// So an empty quadratic map is a proof of degree ≤ 1 only when no term
-    /// was dropped getting there, which is what
-    /// [`Quad2::dropped_terms`](crate::nl_quadratic::Quad2::dropped_terms)
-    /// records. When one was, this answers `None` — the state the contract
+    /// went missing getting there, which is what
+    /// [`Quad2::lost_terms`](crate::nl_quadratic::Quad2::lost_terms)
+    /// records. When one did, this answers `None` — the state the contract
     /// already reserved for "not established", which is why the fix needs
     /// nothing of its consumer.
+    ///
+    /// A term that cancelled **exactly** did not go missing, and gh #687 is
+    /// where that stopped costing a proof: `x₀² − x₀²` is degree 0 by an
+    /// add that rounded nothing, its tape holds `∂g/∂x` at zero for every
+    /// `x`, and answering `None` for it gave up a whole solve of frozen
+    /// Jacobian to be safe from arithmetic that never happened.
     ///
     /// Deliberately answers from the term maps rather than from
     /// [`Self::analyze_quadratic_full`]'s triplets: on `qssp180` that is
@@ -487,11 +499,11 @@ impl NlBody {
 /// form, in one place so both arms answer it the same way.
 ///
 /// A stored quadratic coefficient is a witness that the body is degree 2.
-/// An *absent* one is only a witness of the opposite when nothing was
-/// dropped on the way — see [`Quad2::dropped_terms`] and gh #683.
+/// An *absent* one is only a witness of the opposite when nothing went
+/// missing on the way — see [`Quad2::lost_terms`], gh #683 and gh #687.
 fn affine_from_form(q: &Quad2) -> Option<bool> {
     if q.quadratic().is_empty() {
-        (!q.dropped_terms()).then_some(true)
+        (!q.lost_terms()).then_some(true)
     } else {
         Some(false)
     }
@@ -2380,12 +2392,14 @@ fn apply_quad_op(op: QOp, vals: &mut Vec<Quad2>) -> Option<Quad2> {
             if d == 0.0 {
                 return None;
             }
-            a.scale(1.0 / d)
+            let mut out = a.div_by_constant(d);
+            out.absorb_flags(&b);
+            out
         }
         QOp::Pow => {
             let (a, b) = pop2(vals)?;
             let exp = b.as_constant()?;
-            if exp == 0.0 {
+            let mut out = if exp == 0.0 {
                 Quad2::of_constant(1.0)
             } else if exp == 1.0 {
                 a
@@ -2393,7 +2407,11 @@ fn apply_quad_op(op: QOp, vals: &mut Vec<Quad2>) -> Option<Quad2> {
                 a.mul(&a)?
             } else {
                 return None;
-            }
+            };
+            // The exponent is read out of a form with `as_constant`, which
+            // leaves its flags behind; `Div` above does the same.
+            out.absorb_flags(&b);
+            out
         }
         // `o82` is `Pow(base, Const(2.0))` with the exponent left implicit,
         // so it takes the `exp == 2.0` branch above.
