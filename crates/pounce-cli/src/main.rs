@@ -766,6 +766,15 @@ pub fn main() -> ExitCode {
             // `inner_tnlp` keeps the report in the user's own indices, and
             // running it here (not there) means it cannot fire twice.
             app.run_derivative_test(&inner_tnlp);
+            // Same reason, same place: `install_constant_derivative_hints`
+            // lives behind `optimize_tnlp`, so on this route the four
+            // constant-derivative hints are read by nothing. gh #588 Q6
+            // emptied the NLP path's unexploited-hint table — correctly,
+            // it exploits them now — and that silenced the convex route's
+            // warning too. Say it here, where the route is known.
+            for warning in app.convex_unexploited_hint_warnings() {
+                eprintln!("{warning}");
+            }
             // gh#483 follow-up: a forced convex solver plus a negative
             // `obj_scaling_factor` has no honest outcome — the engine cannot
             // maximize, and running it anyway hands back the minimizer of the

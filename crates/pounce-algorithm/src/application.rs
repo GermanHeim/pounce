@@ -1340,6 +1340,17 @@ impl IpoptApplication {
         crate::unimplemented_options::hint_warnings(&self.options, &self.reg_options)
     }
 
+    /// Warnings for the constant-derivative hints when the solve routes to
+    /// `pounce-convex` instead of here. Call site is the convex dispatch
+    /// in the CLI, next to the other guards that live there for the same
+    /// reason: that dispatch never reaches [`Self::optimize_tnlp`], so
+    /// `install_constant_derivative_hints` never runs and the hints are
+    /// unread. On the NLP route they are honoured, so this must not be
+    /// called there.
+    pub fn convex_unexploited_hint_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::convex_hint_warnings(&self.options, &self.reg_options)
+    }
+
     /// Resolve the four constant-derivative hints for this solve and
     /// install the result on the NLP (gh #588, phase Q6).
     ///
