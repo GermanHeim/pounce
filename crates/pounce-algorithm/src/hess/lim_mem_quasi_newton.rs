@@ -127,6 +127,23 @@ pub struct LimMemQuasiNewtonUpdater {
     /// `update_hessian` for why σ stays on the full diagonal where
     /// upstream drops it.
     pub nonlinear_vars: Option<Vec<Index>>,
+    /// `limited_memory_max_skipping` — consecutive skipped curvature
+    /// updates after which the whole approximation is discarded and
+    /// re-anchored at the current iterate. Upstream default 2
+    /// (`IpLimMemQuasiNewtonUpdater.cpp`, the
+    /// `lm_skipped_iter_ >= limited_memory_max_skipping_` branch).
+    ///
+    /// Without this the history never turns over: on a problem whose
+    /// Lagrangian curvature is persistently negative, every pair after
+    /// the first few is skipped and the model keeps representing
+    /// curvature the iterate left long ago. `inf_pr` converges while
+    /// `inf_du` plateaus. Reported with side-by-side instrumentation on
+    /// a 59,939-variable collocation model (#686): over 60 iterations
+    /// Ipopt reset 9 times and pounce 0, and the two iterate sequences
+    /// were bit-identical until one iteration after Ipopt's first reset.
+    pub max_skipping: Index,
+    /// Consecutive skips so far — upstream's `lm_skipped_iter_`.
+    pub skipped_iter: Index,
 }
 
 impl Default for LimMemQuasiNewtonUpdater {
@@ -144,6 +161,8 @@ impl Default for LimMemQuasiNewtonUpdater {
             last_jac_c: None,
             last_jac_d: None,
             nonlinear_vars: None,
+            max_skipping: 2,
+            skipped_iter: 0,
         }
     }
 }
@@ -244,14 +263,38 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
             // SR1 recurrences, the stored columns) then lives in the
             // reduced space, exactly as upstream does once `P_LM` is
             // present.
-            match self.active_mask(curr_x.dim()) {
+            let accepted = match self.active_mask(curr_x.dim()) {
                 Some(mask) => {
                     let s_red = project_onto(&*s, mask);
                     let y_red = project_onto(&*y, mask);
-                    self.ingest_pair(s_red, y_red);
+                    self.ingest_pair(s_red, y_red)
                 }
-                None => {
-                    self.ingest_pair(Rc::from(s), Rc::from(y));
+                None => self.ingest_pair(Rc::from(s), Rc::from(y)),
+            };
+
+            // `limited_memory_max_skipping` (#686). Upstream discards the
+            // whole approximation once the curvature update has been
+            // skipped this many times in a row
+            // (`IpLimMemQuasiNewtonUpdater.cpp`, the
+            // `lm_skipped_iter_ >= limited_memory_max_skipping_` branch,
+            // which also emits the `Wr` info string). pounce accumulated
+            // the skip but never acted on it, so a run whose curvature
+            // stays negative kept its opening pairs for the rest of the
+            // solve.
+            //
+            // The re-anchoring upstream does inside its reset branch
+            // (`last_x_`, `last_grad_f_`, `last_jac_c_`, `last_jac_d_`)
+            // is what the four assignments below this block already do
+            // unconditionally on every call, so clearing the history is
+            // the whole of it here.
+            if accepted {
+                self.skipped_iter = 0;
+            } else {
+                self.skipped_iter = self.skipped_iter.saturating_add(1);
+                if self.max_skipping > 0 && self.skipped_iter >= self.max_skipping {
+                    self.history.clear();
+                    self.skipped_iter = 0;
+                    data.borrow_mut().append_info_string("Wr");
                 }
             }
         }
@@ -677,7 +720,16 @@ pub fn powell_damping_theta(s_dot_y: Number, s_dot_b_s: Number) -> Number {
 /// `s^T y > eps * ||s|| ||y||`. Mirrors upstream's skip-criterion
 /// (`IpLimMemQuasiNewtonUpdater.cpp` ~line 750: `eps = 1e-8`).
 pub fn bfgs_curvature_pair_ok(s_dot_y: Number, s_norm: Number, y_norm: Number) -> bool {
-    let eps = 1e-8_f64;
+    // `sqrt(machine epsilon)`, matching upstream's
+    // `CheckSkippingBFGS` (`IpLimMemQuasiNewtonUpdater.cpp`):
+    //
+    //     Number tol = std::sqrt(std::numeric_limits<Number>::epsilon());
+    //     skipping = (sTy <= tol * snrm * ynrm);
+    //
+    // This was a hardcoded `1e-8` until #686, attributed to upstream but
+    // not equal to it — `sqrt(f64::EPSILON)` is 1.4901161193847656e-8,
+    // so the old value accepted a band of pairs upstream skips.
+    let eps = f64::EPSILON.sqrt();
     s_dot_y > eps * s_norm * y_norm
 }
 
@@ -832,6 +884,61 @@ mod tests {
         let accepted = updater.ingest_pair(rcv(&[1.0]), rcv(&[0.0]));
         assert!(!accepted);
         assert!(updater.history.is_empty());
+    }
+
+    /// The skip counter drives a reset, and a run of skips does not
+    /// leave stale curvature behind (#686).
+    ///
+    /// Upstream discards the whole approximation after
+    /// `limited_memory_max_skipping` consecutive skips. pounce counted
+    /// nothing and never discarded, so a problem whose curvature stays
+    /// negative kept its opening pairs for the rest of the solve — the
+    /// model stops describing where the iterate is, `inf_pr` converges
+    /// and `inf_du` plateaus.
+    ///
+    /// Driven through `ingest_pair` plus the counter logic rather than
+    /// through `update_hessian`, which needs a full data/cq fixture; the
+    /// corpus is what exercises the wired path (`cresc4` goes from
+    /// `Restoration_Failed` to solved at the exact-Hessian optimum).
+    #[test]
+    fn consecutive_skips_reset_the_approximation() {
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        assert_eq!(u.max_skipping, 2, "upstream default");
+
+        // Two good pairs establish a history.
+        assert!(u.ingest_pair(rcv(&[1.0, 0.0]), rcv(&[1.0, 0.0])));
+        assert!(u.ingest_pair(rcv(&[0.0, 1.0]), rcv(&[0.0, 1.0])));
+        assert_eq!(u.history.len(), 2);
+
+        // A skip alone must not discard anything — one bad pair on an
+        // otherwise healthy run is what the skip criterion is for.
+        assert!(!u.ingest_pair(rcv(&[1.0, 0.0]), rcv(&[-1.0, 0.0])));
+        u.skipped_iter += 1;
+        assert!(u.skipped_iter < u.max_skipping);
+        assert_eq!(u.history.len(), 2, "one skip must not reset");
+
+        // The second consecutive skip reaches the threshold.
+        assert!(!u.ingest_pair(rcv(&[0.0, 1.0]), rcv(&[0.0, -1.0])));
+        u.skipped_iter += 1;
+        assert!(u.skipped_iter >= u.max_skipping, "reset is due");
+    }
+
+    /// The skip tolerance is upstream's, not a round number (#686).
+    ///
+    /// `CheckSkippingBFGS` uses `sqrt(machine epsilon)`; pounce carried a
+    /// hardcoded `1e-8` attributed to upstream. The gap is small and it
+    /// is exactly the band where the two solvers disagree about whether
+    /// a pair is usable, which is where a side-by-side trace starts
+    /// drifting.
+    #[test]
+    fn skip_tolerance_is_sqrt_machine_epsilon() {
+        let eps = f64::EPSILON.sqrt();
+        assert!((eps - 1.4901161193847656e-8).abs() < 1e-24, "got {eps}");
+        // A pair inside the old-vs-new gap: accepted under 1e-8,
+        // skipped under sqrt(eps).
+        let s_dot_y = 1.2e-8;
+        assert!(s_dot_y > 1e-8, "would have been accepted before");
+        assert!(!bfgs_curvature_pair_ok(s_dot_y, 1.0, 1.0));
     }
 
     #[test]

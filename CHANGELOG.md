@@ -73,6 +73,44 @@ changes.
   their own when no exact Hessian is available, so that leg is what an
   embedder gets by default.
 
+- **L-BFGS resets its approximation after repeated skipped updates**
+  (#686), and the skip tolerance matches Ipopt.
+
+  Upstream discards the whole limited-memory approximation once the
+  curvature update has been skipped `limited_memory_max_skipping` times
+  in a row (default 2) and re-anchors at the current iterate. pounce
+  counted nothing and never discarded, so on a problem whose Lagrangian
+  curvature stays negative the model kept whatever pairs it accepted in
+  the opening iterations for the rest of the solve — it stops describing
+  the curvature where the iterate actually is.
+
+  Reported by @srikanth-gm with side-by-side instrumentation on a
+  59,939-variable collocation model: both solvers computed identical
+  `sᵀy`, `snrm`, `ynrm` and made identical skip decisions, and over 60
+  iterations Ipopt reset 9 times while pounce reset 0. The two iterate
+  sequences were bit-identical through iteration 5 and separated at 6 —
+  one iteration after Ipopt's first reset.
+
+  The skip tolerance was a hardcoded `1e-8` attributed to upstream;
+  upstream uses `sqrt(machine epsilon)` = 1.4901e-8, so pounce was
+  accepting a narrow band of pairs Ipopt skips. Both are fixed, and
+  `limited_memory_max_skipping` — registered since the option port and
+  never read — now works.
+
+  **`cresc4` under L-BFGS goes from `Restoration_Failed` at 976
+  iterations to solved at 190**, objective `0.8718975397` against the
+  exact-Hessian path's `0.8718975273`. `pooling_rt2stp` drops 413→292
+  iterations at the same objective and `eigenb2` 56→44. Two move the
+  other way and are not yet explained: `autocorr_bern55-06` converges in
+  66 iterations instead of 106 but to a worse local minimum
+  (−2256.0 against −2368.0), and `deb7` goes from a restoration failure
+  near the right objective to the iteration cap at `119.59`.
+
+  This does **not** fix the reporter's dual stall — they measured
+  `inf_du` plateauing at the same `0.155` with and without the change.
+  What it fixes is the early divergence: patched, pounce tracks Ipopt to
+  7–8 significant figures out to iteration 18 instead of splitting at 6.
+
 - **Restoration no longer densifies the L-BFGS Hessian** (#684).
 
   Entering restoration under `hessian_approximation=limited-memory`

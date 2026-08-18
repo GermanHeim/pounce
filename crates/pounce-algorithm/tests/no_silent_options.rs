@@ -445,7 +445,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     const MISC: &[&str] = &[
         "derivative_test_perturbation",
         "derivative_test_tol",
-        "limited_memory_max_skipping",
         "timing_statistics",
     ];
 

@@ -3377,6 +3377,17 @@ impl IpoptApplication {
         {
             builder.limited_memory_init_val = v;
         }
+        // `limited_memory_max_skipping` (#686) — registered and unread,
+        // and the feature behind it did not exist either: the updater
+        // counted nothing and never discarded its history.
+        if let Ok((v, true)) = self
+            .options
+            .get_integer_value("limited_memory_max_skipping", "")
+        {
+            if v >= 0 {
+                builder.limited_memory_max_skipping = v as Index;
+            }
+        }
         if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
             if found {
                 builder.line_search_method = match v.as_str() {

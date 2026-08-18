@@ -245,6 +245,10 @@ pub struct AlgorithmBuilder {
     /// curvature pair exists, and every iteration under
     /// `InitialApprox::Constant`. Upstream default 1.0.
     pub limited_memory_init_val: Number,
+    /// `limited_memory_max_skipping` — consecutive skipped curvature
+    /// updates before the approximation is discarded (#686). Upstream
+    /// default 2.
+    pub limited_memory_max_skipping: Index,
     /// Positions in the algorithm's compressed `x_var` space that enter
     /// the problem *nonlinearly* (gh#624). `None` — the default —
     /// approximates the Hessian over every variable, which is what the
@@ -938,6 +942,7 @@ impl Default for AlgorithmBuilder {
             limited_memory_init_val_min: 1e-8,
             limited_memory_initialization: InitialApprox::Scalar1,
             limited_memory_init_val: 1.0,
+            limited_memory_max_skipping: 2,
             limited_memory_nonlinear_vars: None,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
@@ -1268,6 +1273,7 @@ impl AlgorithmBuilder {
                 init_val_min: self.limited_memory_init_val_min,
                 initial_approx: self.limited_memory_initialization,
                 init_val: self.limited_memory_init_val,
+                max_skipping: self.limited_memory_max_skipping,
                 nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
                 ..LimMemQuasiNewtonUpdater::default()
             }),
@@ -1383,6 +1389,7 @@ mod tests {
                             limited_memory_init_val_min: 1e-8,
                             limited_memory_initialization: InitialApprox::Scalar1,
                             limited_memory_init_val: 1.0,
+                            limited_memory_max_skipping: 2,
                             limited_memory_nonlinear_vars: None,
                             line_search_method,
                             warm_start_init_point: false,

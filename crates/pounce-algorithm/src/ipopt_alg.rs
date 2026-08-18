@@ -3532,6 +3532,15 @@ impl IpoptAlgorithm {
             );
             return;
         }
+        // Mark the iteration, exactly as upstream does
+        // (`IpData().Append_info_string("y ")` in
+        // `IpIpoptAlg.cpp:AcceptTrialPoint`). Without it the iteration
+        // log gives no way to tell which iterations re-estimated `y`
+        // and which carried the Newton multipliers — and when a solve
+        // stalls with an oscillating `inf_du`, whether the oscillation
+        // tracks the re-estimation is the first thing worth knowing.
+        self.data.borrow_mut().append_info_string("y ");
+
         // Share x/s/z/v; swap only the equality/inequality multipliers.
         let curr = match self.data.borrow().curr.clone() {
             Some(c) => c,
