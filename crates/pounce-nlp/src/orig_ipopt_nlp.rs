@@ -295,6 +295,48 @@ pub struct OrigIpoptNlp {
     /// dependency); what pounce does differently is decide *when* it is
     /// allowed to (see [`crate::constant_derivatives`]).
     const_deriv: ConstantDerivatives,
+
+    /// Which forms a *fixed* variable can actually reach — the guard on
+    /// the `forget_variation` weakening in [`Self::derivative_proofs`].
+    /// All-clear (and unread) when the model fixes nothing.
+    fixed_reach: FixedVarReach,
+}
+
+/// Where `make_parameter`'s fixed variables are structurally reachable.
+///
+/// Fixing a variable can only *remove* variation from a derivative, so a
+/// `Varying` proof does not survive it — that is why
+/// [`DerivativeProof::forget_variation`] exists. But the weakening is
+/// not free: `Varying` refuses a false user hint, and `Unknown` honours
+/// it on trust (see the table in [`crate::constant_derivatives`]). Applied
+/// to a form no fixed variable can reach, it would trade a refusal pounce
+/// had earned for trust it has no basis for — on a model whose only sin
+/// was fixing one unrelated variable. So it is applied per form, and this
+/// records which forms qualify.
+///
+/// Both tests are read straight out of the sparsity the constructor
+/// already queries for the `make_parameter` remap, so neither costs an
+/// extra call into the user's TNLP.
+#[derive(Clone, Debug, Default)]
+struct FixedVarReach {
+    /// `g_row_touches_fixed[i]` — row `i` of the full TNLP Jacobian has a
+    /// declared nonzero in a fixed column. If `∂gᵢ/∂x_j` depends on a
+    /// fixed `x_p` then `gᵢ` depends on `x_p`, so `∂gᵢ/∂x_p ≢ 0` and the
+    /// entry is there: a row without one cannot change character.
+    /// Indexed by the model's own row order, like `DerivativeProofs::jac`.
+    g_row_touches_fixed: Vec<bool>,
+    /// Whether a fixed variable is reachable in *second* order — set when
+    /// the declared Hessian has an entry whose row or column is fixed, and
+    /// (conservatively) whenever the TNLP declines to declare a Hessian at
+    /// all, which leaves the question unanswerable.
+    ///
+    /// This is the test for both `∇f` and `∇²L`, because both are second
+    /// order in the fixed variable: if `∂f/∂x_j` depends on a fixed `x_p`
+    /// then `∂²f/∂x_j∂x_p ≢ 0`, and if `∂²L/∂x_j∂x_k` does then
+    /// `∂²L/∂x_j∂x_p ≢ 0` — either way a Hessian entry in a fixed
+    /// row/column is declared. A first-order-only appearance (`f` linear
+    /// in `x_p`) changes no derivative w.r.t. the remaining variables.
+    second_order_touches_fixed: bool,
 }
 
 #[derive(Clone)]
@@ -478,11 +520,16 @@ impl OrigIpoptNlp {
         // columns. Their contribution to f and g is constant under the
         // active-x search so they don't appear in the KKT.
         let full_to_var = &classification.full_to_var;
+        // Dropping an entry here *is* the observation "this row touches a
+        // fixed variable" — see `FixedVarReach`. Recording it costs one
+        // byte per row and no extra query.
+        let mut g_row_touches_fixed = vec![false; info.m as usize];
         for k in 0..info.nnz_jac_g as usize {
             let g_row_0 = (full_irow[k] - style_offset) as usize;
             let x_col_0 = (full_jcol[k] - style_offset) as usize;
             let var_col = full_to_var[x_col_0];
             if var_col < 0 {
+                g_row_touches_fixed[g_row_0] = true;
                 continue;
             }
             // Triplet output is 1-based (matches `GenTMatrix` convention).
@@ -520,6 +567,11 @@ impl OrigIpoptNlp {
         // `LowRankUpdateSymMatrixSpace` instead. -----
         let nnz_h_lag_full = info.nnz_h_lag;
         let mut h_entry_in_full: Vec<Index> = Vec::new();
+        // A TNLP with no `eval_h` leaves second-order reach unanswerable,
+        // so it starts out assumed. A structurally zero Hessian answers it:
+        // no second derivatives at all means no derivative w.r.t. the
+        // remaining variables can depend on a fixed one.
+        let mut second_order_touches_fixed = info.nnz_h_lag > 0;
         let h_space = if info.nnz_h_lag > 0 {
             let mut h_irow = vec![0 as Index; info.nnz_h_lag as usize];
             let mut h_jcol = vec![0 as Index; info.nnz_h_lag as usize];
@@ -539,6 +591,7 @@ impl OrigIpoptNlp {
                 )
             };
             if supports_h {
+                second_order_touches_fixed = false;
                 // `make_parameter`: drop Hessian entries where row OR
                 // column is fixed (the second derivatives w.r.t. a
                 // parameter are not needed in the active-x KKT). The
@@ -552,6 +605,7 @@ impl OrigIpoptNlp {
                     let i_var = full_to_var[i_full];
                     let j_var = full_to_var[j_full];
                     if i_var < 0 || j_var < 0 {
+                        second_order_touches_fixed = true;
                         continue;
                     }
                     h_irow_1.push(i_var + 1);
@@ -637,6 +691,10 @@ impl OrigIpoptNlp {
             info,
             timing: RefCell::new(None),
             const_deriv: ConstantDerivatives::default(),
+            fixed_reach: FixedVarReach {
+                g_row_touches_fixed,
+                second_order_touches_fixed,
+            },
         })
     }
 
@@ -702,22 +760,43 @@ impl OrigIpoptNlp {
     ///    refuse a hint that is true — the same kind of silent wrong
     ///    answer the phase exists to prevent, pointed the other way.
     pub fn derivative_proofs(&self) -> [DerivativeProof; 4] {
-        let proofs: DerivativeProofs = {
+        let mut proofs: DerivativeProofs = {
             let a = self.adapter.borrow();
             let mut t = a.tnlp().borrow_mut();
             t.derivative_proofs()
         };
         let cls = self.adapter.borrow().classification().clone();
-        let out = [
+        if cls.n_x_fixed > 0 {
+            // A proof is stated about the model the *user* wrote; pounce
+            // then solves a smaller one, with the fixed variables folded
+            // into the forms as constants. That can only remove variation,
+            // so `Varying` no longer holds — but only where a fixed
+            // variable is reachable. Weakening a form it cannot reach
+            // would convert a refusal into `Unknown`, which the hint layer
+            // honours **on trust**, and a model that fixes one unrelated
+            // variable would quietly lose the ability to refuse a false
+            // `hessian_constant=yes` on the rest of itself. See
+            // [`FixedVarReach`] for why each test is exactly right.
+            //
+            // Weakening happens per row, *before* the fold below, so a
+            // subsystem is only weakened by the rows that earned it.
+            let reach = &self.fixed_reach;
+            for (row, proof) in proofs.jac.iter_mut().enumerate() {
+                if reach.g_row_touches_fixed.get(row).copied().unwrap_or(true) {
+                    *proof = proof.forget_variation();
+                }
+            }
+            if reach.second_order_touches_fixed {
+                proofs.grad_f = proofs.grad_f.forget_variation();
+                proofs.hessian = proofs.hessian.forget_variation();
+            }
+        }
+        [
             proofs.grad_f,
             proofs.hessian,
             subsystem_proof(&proofs, &cls.c_map),
             subsystem_proof(&proofs, &cls.d_map),
-        ];
-        if cls.n_x_fixed == 0 {
-            return out;
-        }
-        out.map(DerivativeProof::forget_variation)
+        ]
     }
 
     /// Install the resolved hints. Called once, before the first
@@ -3095,6 +3174,159 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    /// Three-variable TNLP with `x[2]` fixed at 2.0, built so the fixed
+    /// variable's reach is *different* for every form:
+    ///
+    /// ```text
+    /// min  x0³                    ∇f, ∇²L vary; neither touches x2
+    /// s.t. x0·x1 - 1 == 0         (equality)  ∇g0 varies, no x2
+    ///      <row 1>       >= 0     (inequality) ∇g1 varies, touches x2
+    /// ```
+    ///
+    /// Row 1 is the knob: `second_order = false` makes it `x1² + x2`, where
+    /// x2 appears linearly and so reaches nothing but that row's Jacobian;
+    /// `true` makes it `x1·x2`, where x2 is coupled to a free variable and
+    /// so reaches ∇²L — and through it ∇f's and ∇g's character generally.
+    /// Every declared proof is honest: all four forms really do vary.
+    struct FixedVarReachModel {
+        second_order: bool,
+    }
+    impl TNLP for FixedVarReachModel {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 3,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-1.0e19, -1.0e19, 2.0]);
+            b.x_u.copy_from_slice(&[1.0e19, 1.0e19, 2.0]); // x[2] fixed
+            b.g_l.copy_from_slice(&[0.0, 0.0]);
+            b.g_u.copy_from_slice(&[0.0, 1.0e19]); // g0 equality, g1 inequality
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.0, 1.0, 2.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(x[0] * x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g.copy_from_slice(&[3.0 * x[0] * x[0], 0.0, 0.0]);
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[1] - 1.0;
+            g[1] = if self.second_order {
+                x[1] * x[2]
+            } else {
+                x[1] * x[1] + x[2]
+            };
+            true
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    // (0,0) (0,1) — row 0 is free-only; (1,1) (1,2) — row 1
+                    // has a nonzero in the fixed column.
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 1, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    let x = x.expect("values need x");
+                    values[0] = x[1];
+                    values[1] = x[0];
+                    let (d1, d2) = if self.second_order {
+                        (x[2], x[1])
+                    } else {
+                        (2.0 * x[1], 1.0)
+                    };
+                    values[2] = d1;
+                    values[3] = d2;
+                }
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            _: bool,
+            sigma: Number,
+            lambda: Option<&[Number]>,
+            _: bool,
+            m: SparsityRequest<'_>,
+        ) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    // ∂²f/∂x0², ∂²g0/∂x1∂x0, and row 1's own second
+                    // derivative — (1,1) when it is x1², (2,1) when it is
+                    // x1·x2, which is the only entry in a fixed index.
+                    irow.copy_from_slice(&[0, 1, if self.second_order { 2 } else { 1 }]);
+                    jcol.copy_from_slice(&[0, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    let (x, l) = (x.expect("values need x"), lambda.expect("values need λ"));
+                    values[0] = sigma * 6.0 * x[0];
+                    values[1] = l[0];
+                    values[2] = if self.second_order { l[1] } else { 2.0 * l[1] };
+                }
+            }
+            true
+        }
+        fn derivative_proofs(&mut self) -> DerivativeProofs {
+            DerivativeProofs {
+                grad_f: DerivativeProof::Varying,
+                hessian: DerivativeProof::Varying,
+                jac: vec![DerivativeProof::Varying; 2],
+            }
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    fn reach_proofs(second_order: bool) -> [DerivativeProof; 4] {
+        let tnlp: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(FixedVarReachModel { second_order }));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).unwrap();
+        nlp.derivative_proofs()
+    }
+
+    /// Fixing a variable weakens the forms it reaches — and only those.
+    ///
+    /// `Varying` is what lets pounce *refuse* a false `*_constant=yes`;
+    /// `Unknown` is honoured on trust. Weakening all four proofs because
+    /// the model happened to fix one variable would hand a model back its
+    /// own false hints on every form, which is the whole safety payload of
+    /// gh#588 Q6. Row 1 is the only form the fixed x[2] reaches here, so
+    /// it is the only one that may lose its refusal.
+    #[test]
+    fn only_the_forms_a_fixed_variable_reaches_lose_their_refusal() {
+        use DerivativeProof::*;
+        let [grad_f, hessian, jac_c, jac_d] = reach_proofs(false);
+        assert_eq!(grad_f, Varying, "x[2] is nowhere in ∇f");
+        assert_eq!(hessian, Varying, "x[2] appears linearly; ∇²L cannot see it");
+        assert_eq!(jac_c, Varying, "row 0 has no nonzero in the fixed column");
+        assert_eq!(jac_d, Unknown, "row 1 does, so fixing x[2] may flatten it");
+    }
+
+    /// The other direction: the weakening is not merely never applied.
+    /// Couple the fixed variable to a free one and ∇²L — and with it ∇f,
+    /// which is second-order in exactly the same sense — must give up its
+    /// refusal too.
+    #[test]
+    fn a_second_order_coupling_to_a_fixed_variable_weakens_the_hessian() {
+        use DerivativeProof::*;
+        let [grad_f, hessian, jac_c, jac_d] = reach_proofs(true);
+        assert_eq!(hessian, Unknown, "x1·x2 puts a fixed index in ∇²L");
+        assert_eq!(grad_f, Unknown, "same test, and ∇f is reached the same way");
+        assert_eq!(jac_c, Varying, "row 0 is still untouched by x[2]");
+        assert_eq!(jac_d, Unknown);
     }
 
     #[test]
