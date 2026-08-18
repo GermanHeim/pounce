@@ -247,6 +247,18 @@ so the header alone does **not** distinguish LP from QP:
 - Until Phase 4 (SOCP) lands, **ConvexQcqp** falls through to NLP-IPM;
   the distinct class is the dispatch seam the conic solver later
   intercepts (same pattern as `NonconvexQp`).
+- **A recovered `Q` is only usable if it is the whole row** (gh #685
+  part 2). The walk recovers coefficients by summing in floating point,
+  so `2⁵³·x² + x² − 2⁵³·x²` folds to an empty map: degree 2, stored as
+  nothing. Reading that map is how a row with real curvature came back
+  *linear*, the model classified **LP**, and the extractor folded an
+  empty linear part into `G` — the constraint left the problem, and
+  `min −x₀` walked to its bound and reported `Optimal`. The recognizer
+  records whether it dropped a term, and `analyze_quadratic_full`
+  refuses the form when it did, which is upstream of every consumer that
+  reads coefficients out (this walk and both extractors). The row's
+  model then goes to NLP and is evaluated from its tape — the
+  conservative fallback above, reached for one more reason.
 
 This mirrors how QP-capable AMPL solvers detect QPs (ASL's `nqpcheck`
 walks the nonlinear tree to recover `Q`); the header is a fast reject

@@ -33,8 +33,8 @@
 //!   tests in this module.
 
 use crate::nl_quadratic::{
-    Quad2, QuadForm, QuadHessian, analyze_quadratic_full, is_expanded_quadratic, is_trivially_zero,
-    quad_form_readout, recognize_expr,
+    Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero, quad_form_readout,
+    recognize_expr,
 };
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
@@ -358,15 +358,70 @@ impl NlBody {
     /// two answers are the same by construction and asserted to be so bit
     /// for bit; this is the accessor that keeps the corpus from being
     /// re-recognized once per consumer.
+    ///
+    /// `None` also when a term was dropped getting to the form — see
+    /// [`Self::analyze_quadratic_full`].
     pub fn analyze_quadratic(&self) -> Option<QuadHessian> {
         self.analyze_quadratic_full().map(|(h, _, _)| h)
     }
 
     /// [`Self::analyze_quadratic`] with the linear and constant parts.
+    ///
+    /// ## A form that dropped a term is not this body
+    ///
+    /// Everything downstream of here *reads coefficients out*: the
+    /// classifier decides a problem class from the Hessian, and
+    /// `qp_extract` builds `P`, `c`, `A` and `G` from all three parts. So
+    /// this accessor owes its callers a form that is the whole body, and
+    /// a recognized form is only that when nothing was dropped reaching
+    /// it. `2⁵³·x₀² + x₀² − 2⁵³·x₀²` folds to `x₀²` and stores nothing;
+    /// `(10⁻²⁰⁰·x₀)·(10⁻²⁰⁰·x₀)` underflows the same way (gh #683).
+    ///
+    /// Handing that form out is what routed the reproduction in gh #685
+    /// to the **LP** fast path: with the row's only quadratic term gone
+    /// the classifier saw a linear row, `qp_extract` folded an empty
+    /// linear part into `G`, and the constraint left the model
+    /// altogether — `min −x₀` subject to a vanished row walks `x₀` to its
+    /// `10⁶` bound and reports `Optimal`. A wrong answer, on the default
+    /// route, with no option set (gh #685 part 2).
+    ///
+    /// The gate is [`Quad2::dropped_terms`] and not an emptiness test,
+    /// for the reason spelled out on [`Self::admitted_quad_form`]:
+    /// partial cancellation leaves a non-empty map that is still short a
+    /// term. Refusing costs reach only — the row falls back to the AD
+    /// tape, and the model to the NLP path, which solves it soundly.
+    ///
+    /// It costs more reach than it strictly has to. `x − x` cancels
+    /// *exactly*, so that form is the body and could be kept; the flag
+    /// says a term was dropped, not whether the arithmetic that dropped
+    /// it was lossy, so this refuses that too. gh #687 tracks the sharper
+    /// gate (flag the inexact fold, which is where `2⁵³ + 1` loses the
+    /// `1`, rather than the drop it leads to).
+    ///
+    /// Use [`Self::quad_terms_dropped`] to tell the two `None`s apart.
     pub fn analyze_quadratic_full(&self) -> Option<QuadForm> {
         match self {
-            NlBody::Tree(e) => analyze_quadratic_full(e),
-            NlBody::Quad(q) => Some(quad_form_readout(&q.form)),
+            NlBody::Tree(e) => {
+                let form = recognize_expr(e)?;
+                (!form.dropped_terms()).then(|| quad_form_readout(&form))
+            }
+            NlBody::Quad(q) => (!q.form.dropped_terms()).then(|| quad_form_readout(&q.form)),
+        }
+    }
+
+    /// Whether the recognizer reached a degree-≤2 form for this body but
+    /// dropped at least one term getting there — the case
+    /// [`Self::analyze_quadratic_full`] refuses.
+    ///
+    /// `false` both for a body that recognized cleanly and for one that
+    /// did not recognize at all, so this separates the two reasons that
+    /// accessor answers `None`; it is not a nonlinearity test. Meant for
+    /// the *refusal* path (the classifier naming its reason), not the hot
+    /// one: on a tree it re-runs the recognizer.
+    pub fn quad_terms_dropped(&self) -> bool {
+        match self {
+            NlBody::Tree(e) => recognize_expr(e).is_some_and(|f| f.dropped_terms()),
+            NlBody::Quad(q) => q.form.dropped_terms(),
         }
     }
 

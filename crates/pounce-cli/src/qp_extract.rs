@@ -114,10 +114,13 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         // Combine the `.nl` linear section with any degree-≤1 terms AMPL
         // folded into the (here empty-Hessian) nonlinear tree — the
         // classifier admits constraint rows whose nonlinear expression
-        // reduces to degree ≤ 1 (`dispatch.rs`), e.g. cancelled
-        // quadratics or defined variables, and those linear/constant
-        // terms live in `con_nonlinear`, not `con_linear`. Dropping them
-        // silently solves the wrong constraint. The folded constant
+        // reduces to degree ≤ 1 (`dispatch.rs`), e.g. defined variables
+        // or a quadratic the writer wrote out and cancelled exactly, and
+        // those linear/constant terms live in `con_nonlinear`, not
+        // `con_linear`. Dropping them silently solves the wrong
+        // constraint. (A row whose coefficients cancelled *in the
+        // recognizer's own arithmetic* does not reach here at all: it
+        // never classifies LP/QP — gh #685.) The folded constant
         // shifts the bounds: `g_l ≤ row + k ≤ g_u  ⇔  g_l−k ≤ row ≤ g_u−k`.
         // This mirrors the SOCP extractor's linear-constraint handling.
         let (nl_lin, const_shift) = prob.con_nonlinear[row]

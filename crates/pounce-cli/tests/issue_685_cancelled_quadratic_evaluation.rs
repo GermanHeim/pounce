@@ -25,8 +25,12 @@
 //! read-out is still short an entire `x₀²`. An emptiness test passes that
 //! model and stays wrong.
 //!
-//! Part 2 of the issue — the classifier calling such a model an LP — is on
-//! `main`, predates this branch, and is not touched here.
+//! Part 2 of the issue — the classifier calling such a model an LP — was
+//! fixed after this one, in `issue_685_cancelled_quadratic_routing`. That
+//! fix moved the gate onto `analyze_quadratic_full` itself, so the models
+//! here now also refuse to hand a dropped form to the classifier; the
+//! `admitted_quad_form` gate this file asserts is the separate one that
+//! governs *evaluation*, and it stays where it is.
 
 use std::path::PathBuf;
 use std::process::Command;
