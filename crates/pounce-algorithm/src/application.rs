@@ -2820,6 +2820,10 @@ impl IpoptApplication {
         // default matches the registered default, so default runs are
         // unchanged.
         alg.kappa_sigma = builder.kappa_sigma;
+        // `recalc_y` (#677) — see the read site above for why the
+        // limited-memory path defaults it on.
+        alg.recalc_y = builder.recalc_y;
+        alg.recalc_y_feas_tol = builder.recalc_y_feas_tol;
         // Tiny-step and divergence guards (#191): registered but
         // previously never read. Struct defaults match the registered
         // defaults, so default runs are unchanged.
@@ -3286,10 +3290,11 @@ impl IpoptApplication {
         // `limited_memory_init_val_max`/`_min`) — this is the third
         // argument to that same `initial_hessian_scalar` call.
         //
-        // The *effective* default is deliberately left at `Scalar2` here
-        // rather than following the registry's `scalar1`: moving it
-        // reroutes every limited-memory solve and is a trajectory change
-        // owed a fixture sweep. Tracked on #677.
+        // The effective default now follows the registry (`scalar1`),
+        // matching Ipopt. σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)² ≥ 1 and
+        // is unbounded as the curvature pair degrades, so on an
+        // ill-conditioned problem `scalar2` inflates `B0 = σI` until it
+        // swamps the rank-2 corrections and the step collapses.
         if let Ok((v, found)) = self
             .options
             .get_string_value("limited_memory_initialization", "")
@@ -3314,6 +3319,47 @@ impl IpoptApplication {
                     _ => InitialApprox::Scalar2,
                 };
             }
+        }
+        // `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation
+        // of the equality multipliers once feasible (#677).
+        //
+        // Upstream registers `recalc_y` as `no`, but its own option text
+        // ends "If a limited memory quasi-Newton option is chosen, this
+        // is used by default", so upstream's effective default is
+        // conditional on the Hessian approximation.
+        //
+        // **pounce does not follow that, and the discrepancy is
+        // deliberate.** Auto-enabling it for the limited-memory path was
+        // implemented and measured against the fixture corpus first: it
+        // moved 16 of 57 fixtures on the L-BFGS leg and took **7 from
+        // solved to not solved, with nothing moving the other way** —
+        // `airport` 56 it → `SearchDirectionBecomesTooSmall` at 541,
+        // `pooling_rt2stp` 413 it → the same at 1775, all three `jit1`
+        // variants, `linear_eq_collapsed_box`, and `hs13_bigstart` to
+        // the iteration cap. The signature is consistent: re-estimating
+        // `y` on every feasible iteration overwrites Newton multipliers
+        // that were converging, the dual never settles, and the step
+        // vanishes short of the certificate.
+        //
+        // So the feature is available and off by default. That still
+        // closes the gap that mattered — until #677 the option was
+        // refused outright as unimplemented, so an L-BFGS user could not
+        // reach Ipopt's behaviour at all. They can now, by asking.
+        //
+        // Why it is worth having: a quasi-Newton model's dual step is
+        // computed from an approximate `W`, so L-BFGS can settle a
+        // feasible primal and still not drive `inf_du` to tolerance —
+        // the failure a 59,939-variable CasADi model hit, oscillating
+        // `inf_du` between 3.6e-3 and 1.8e+01 for 300 iterations with
+        // the objective already settled. On that shape it is the fix;
+        // on a corpus of small well-conditioned models it is a
+        // pessimisation. Matching upstream's conditional default needs
+        // to explain the 7 regressions first.
+        if let Ok((v, true)) = self.options.get_string_value("recalc_y", "") {
+            builder.recalc_y = v == "yes";
+        }
+        if let Ok((v, true)) = self.options.get_numeric_value("recalc_y_feas_tol", "") {
+            builder.recalc_y_feas_tol = v;
         }
         // `limited_memory_init_val` — σ before any curvature pair exists,
         // and every iteration under `constant`. Also unread until #677;
@@ -5153,6 +5199,49 @@ mod tests {
     }
 
     #[test]
+    fn application_recalc_y_is_wired_and_defaults_off() {
+        // #677. Upstream registers `recalc_y` as `no`, but its option
+        // text ends "If a limited memory quasi-Newton option is chosen,
+        // this is used by default" — the effective default is
+        // conditional on the Hessian approximation. pounce refused the
+        // option outright before this, so an L-BFGS user had no way to
+        // reach Ipopt's behaviour.
+
+        // Exact Hessian: off, matching the registered default.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let b = app.algorithm_builder_from_options();
+        assert!(!b.recalc_y, "exact-Hessian default must stay off");
+        assert_eq!(b.recalc_y_feas_tol, 1e-6, "default changed");
+
+        // Limited memory: also off. Upstream's option text says it is
+        // used by default there; pounce deliberately does not, because
+        // auto-enabling took 7 of 57 fixtures from solved to not solved
+        // on the L-BFGS leg with nothing moving the other way. See the
+        // read site in `algorithm_builder_from_options`. If this
+        // assertion is what fails, the auto-enable is being restored —
+        // re-run `scripts/sweep-fixtures.sh` and explain those 7 first.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("hessian_approximation limited-memory\n")
+            .unwrap();
+        assert!(
+            !app.algorithm_builder_from_options().recalc_y,
+            "limited-memory must not silently enable recalc_y"
+        );
+
+        // An explicit `yes` reaches the exact-Hessian path, which
+        // used to be refused as unimplemented.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("recalc_y yes\nrecalc_y_feas_tol 1e-3\n")
+            .unwrap();
+        let b = app.algorithm_builder_from_options();
+        assert!(b.recalc_y);
+        assert_eq!(b.recalc_y_feas_tol, 1e-3);
+    }
+
+    #[test]
     fn application_limited_memory_initialization_propagates_to_builder() {
         use crate::hess::lim_mem_quasi_newton::InitialApprox;
 
@@ -5196,15 +5285,15 @@ mod tests {
             4.5
         );
 
-        // The *effective* default deliberately stays `scalar2` even
-        // though the registry advertises `scalar1`: moving it is a
-        // trajectory change owed a fixture sweep (#677). If this
-        // assertion is what fails after that lands, update it — do not
-        // reach for it to make an unrelated change pass.
+        // The effective default matches the registry and Ipopt
+        // (`scalar1`). This is the assertion that would have caught #677
+        // when the option was first registered: it pins the *selection*,
+        // which the per-formula tests in `lim_mem_quasi_newton` cannot
+        // see. Do not relax it to make an unrelated change pass.
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
         let def = app.algorithm_builder_from_options();
-        assert_eq!(def.limited_memory_initialization, InitialApprox::Scalar2);
+        assert_eq!(def.limited_memory_initialization, InitialApprox::Scalar1);
         assert_eq!(def.limited_memory_init_val, 1.0);
     }
 

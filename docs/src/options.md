@@ -709,23 +709,32 @@ history; `σ` is the diagonal they are built on, and
 | `limited_memory_init_val` | `1.0` | `σ` on the first iteration, before any curvature pair exists — and every iteration under `constant`. |
 | `limited_memory_init_val_min` / `_max` | `1e-8` / `1e8` | Clamp applied to `σ` however it was computed. |
 
-**POUNCE's default differs from Ipopt's here.** Ipopt defaults to
-`scalar1`; POUNCE defaults to `scalar2`. The two are related by
-σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)², which is ≥ 1 by Cauchy–Schwarz
-and grows without bound as the curvature pair becomes ill-conditioned, so
-on a badly scaled problem they are not close. If you are comparing a
-POUNCE L-BFGS run against an Ipopt one and the trajectories separate at
-the iteration where the first curvature pair lands, set
+The default matches Ipopt's `scalar1`. Note that it changed in #677:
+every earlier release used `scalar2` and ignored this option entirely —
+it was registered but never read, so setting it had no effect and no
+warning. The two differ by σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)², which
+is ≥ 1 by Cauchy–Schwarz and grows without bound as the curvature pair
+becomes ill-conditioned, so on a badly scaled problem they are far
+apart. If you are reproducing results from an older POUNCE, set
+`limited_memory_initialization scalar2`.
 
-```
-limited_memory_initialization scalar1
-```
+### `recalc_y` under L-BFGS
 
-to match. Aligning this default with Ipopt's is tracked on
-[#677](https://github.com/jkitchin/pounce/issues/677); until then the
-option is how you get parity. Before #677 the option was registered but
-never read, so on any earlier release setting it has no effect and no
-warning.
+A quasi-Newton dual step is computed from an approximate Hessian, so an
+L-BFGS solve can settle a feasible primal and still fail to drive dual
+infeasibility to tolerance. `recalc_y yes` re-estimates the equality and
+inequality multipliers by least squares on every iteration whose
+constraint violation is below `recalc_y_feas_tol` (default `1e-6`),
+side-stepping the approximation. Each firing costs one extra
+augmented-system solve.
+
+Ipopt's option text says this is used by default with a quasi-Newton
+Hessian. **POUNCE does not enable it by default**, because doing so
+regressed 7 of 57 fixtures on the L-BFGS leg — re-estimating `y` every
+iteration also overwrites Newton multipliers that were converging
+perfectly well. Reach for it when dual infeasibility oscillates without
+descending while the objective and the primal have already settled; that
+is the shape it fixes.
 
 `σ` cannot be observed directly, but the symptom of a badly chosen one is
 recognisable: a search direction much larger than the problem's scale,

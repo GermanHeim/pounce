@@ -232,11 +232,9 @@ pub struct AlgorithmBuilder {
     pub limited_memory_init_val_max: Number,
     pub limited_memory_init_val_min: Number,
     /// `limited_memory_initialization` — which formula picks the initial
-    /// Hessian scalar σ. Upstream's default is `scalar1` (σ = sᵀy/sᵀs);
+    /// Hessian scalar σ. Matches upstream's `scalar1` (σ = sᵀy/sᵀs).
     /// pounce shipped `scalar2` (σ = yᵀy/sᵀy) with no way to change it,
-    /// because the option was registered and never read (#677). The
-    /// default here stays `Scalar2` for now: moving it is a trajectory
-    /// change and is tracked separately on that issue.
+    /// because the option was registered and never read (#677).
     pub limited_memory_initialization: InitialApprox,
     /// `limited_memory_init_val` — σ on the first iteration, before any
     /// curvature pair exists, and every iteration under
@@ -281,6 +279,14 @@ pub struct AlgorithmBuilder {
     /// default `1e10`. Baked onto [`crate::ipopt_alg::IpoptAlgorithm`] by
     /// the solve path.
     pub kappa_sigma: Number,
+    /// `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation of
+    /// the equality multipliers once feasible (#677). Registered
+    /// upstream, refused by pounce as unimplemented until now. Default
+    /// `false` matches the registry; the limited-memory path turns it on
+    /// for itself in `application.rs`, as upstream's own option text
+    /// says it does.
+    pub recalc_y: bool,
+    pub recalc_y_feas_tol: Number,
     /// `kappa_d` — weight of the linear damping term added to the barrier
     /// objective/gradient (and dual-infeasibility) to handle one-sided
     /// bounds. Mirrors `IpIpoptCalculatedQuantities.cpp`, default `1e-5`.
@@ -919,7 +925,7 @@ impl Default for AlgorithmBuilder {
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
             limited_memory_init_val_min: 1e-8,
-            limited_memory_initialization: InitialApprox::Scalar2,
+            limited_memory_initialization: InitialApprox::Scalar1,
             limited_memory_init_val: 1.0,
             limited_memory_nonlinear_vars: None,
             line_search_method: LineSearchChoice::Filter,
@@ -927,6 +933,8 @@ impl Default for AlgorithmBuilder {
             mehrotra_algorithm: false,
             fast_step_computation: false,
             kappa_sigma: 1e10,
+            recalc_y: false,
+            recalc_y_feas_tol: 1e-6,
             kappa_d: 1e-5,
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
@@ -1358,7 +1366,7 @@ mod tests {
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,
                             limited_memory_init_val_min: 1e-8,
-                            limited_memory_initialization: InitialApprox::Scalar2,
+                            limited_memory_initialization: InitialApprox::Scalar1,
                             limited_memory_init_val: 1.0,
                             limited_memory_nonlinear_vars: None,
                             line_search_method,
@@ -1366,6 +1374,8 @@ mod tests {
                             mehrotra_algorithm: false,
                             fast_step_computation: false,
                             kappa_sigma: 1e10,
+                            recalc_y: false,
+                            recalc_y_feas_tol: 1e-6,
                             kappa_d: 1e-5,
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,

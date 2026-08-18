@@ -133,7 +133,7 @@ impl Default for LimMemQuasiNewtonUpdater {
     fn default() -> Self {
         Self {
             update_type: UpdateType::Bfgs,
-            initial_approx: InitialApprox::Scalar2,
+            initial_approx: InitialApprox::Scalar1,
             max_history: 6,
             init_val_max: 1e8,
             init_val_min: 1e-8,

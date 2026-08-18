@@ -30,14 +30,58 @@ changes.
   value as the default, which is what kept the omission invisible — used
   to be.
 
-  **The effective default does not change**: it stays `scalar2`, so no
-  solve moves. Both fixture sweeps (default and forced
-  `hessian_approximation=limited-memory`) are identical to the previous
-  release, and `limited_memory_initialization=scalar1` reproduces a
-  hard-patched scalar1 build exactly across all 57 fixtures. Moving the
-  default to Ipopt's `scalar1` is a trajectory change and is tracked
-  separately on #677 — the measured effect is large in both directions.
-  Set the option explicitly to get Ipopt parity today.
+  **The default is now `scalar1`, matching Ipopt.** The exact-Hessian
+  path is untouched — all 57 fixtures identical — since σ is only
+  reachable under `hessian_approximation=limited-memory`. On the L-BFGS
+  leg 20 of 57 fixtures move, and the movement is one-directional:
+  `jit1`, `jit1_boxed` and `jit1_node` go from three different wrong
+  answers at the 3000-iteration cap to the same objective in ~35
+  iterations; `pooling_rt2stp` goes from `RestorationFailed` to solved;
+  `autocorr_bern55-06` goes from 2924 iterations to 106 with a better
+  objective. `deb7` reaches the right objective (97.5633 against a true
+  97.5599) where `scalar2` was 39% wrong. `cresc4` fails either way
+  under plain L-BFGS, but with the `mu_strategy=adaptive` it is
+  documented to need, `scalar1` solves it in 86 iterations to eight
+  matching digits while `scalar2` still hits the cap. No fixture is
+  worse in outcome.
+
+- **`recalc_y` and `recalc_y_feas_tol` are implemented** (#677).
+
+  Previously refused outright as unimplemented, so an L-BFGS user could
+  not reach Ipopt's behaviour at all. The multipliers are now
+  re-estimated by least squares once the constraint violation drops
+  below `recalc_y_feas_tol`, using the same calculator the initializer
+  uses.
+
+  **Default stays `no`, including under `limited-memory`, and that
+  differs from Ipopt deliberately.** Ipopt's own option text says it is
+  used by default with a quasi-Newton Hessian; auto-enabling it here was
+  implemented and then measured, and it took 7 of 57 fixtures from
+  solved to not solved on the L-BFGS leg with nothing moving the other
+  way. Re-estimating `y` on every feasible iteration overwrites Newton
+  multipliers that were converging, and the solve stalls short of the
+  certificate. It remains the right tool for the case it was built for —
+  a quasi-Newton solve that reaches a feasible primal and cannot drive
+  `inf_du` down — but it has to be asked for.
+
+- **The fixture sweep runs an L-BFGS leg** (#677).
+
+  `scripts/sweep-fixtures.sh` now sweeps every fixture twice, `exact` and
+  `lbfgs`, because the corpus previously ran the exact-Hessian path only
+  — which is why a wrong σ default survived since the option port. Both
+  the Python frontend and the CasADi plugin select `limited-memory` on
+  their own when no exact Hessian is available, so that leg is what an
+  embedder gets by default.
+
+- **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
+
+  Measures per-iteration wall time against `n` over a family of one
+  problem at geometrically increasing sizes, solving each size twice at
+  different `max_iter` so fixed setup cost cancels, and reports a log-log
+  slope. Run against the limited-memory path from `n = 2,000` to
+  `n = 128,000`: slope 1.05 (R² 0.993) — linear, as advertised, with no
+  hidden quadratic. The exact-Hessian leg reads 0.96 over the same
+  family.
 
 - **The CasADi plugin builds against CasADi master again** (#668).
 
