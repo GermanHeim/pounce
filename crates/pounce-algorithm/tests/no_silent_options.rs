@@ -386,7 +386,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     const LINE_SEARCH: &[&str] = &[
         "accept_after_max_steps",
         "alpha_for_y_tol",
-        "alpha_red_factor",
         "delta",
         "eta_penalty",
         "filter_margin_fact",
