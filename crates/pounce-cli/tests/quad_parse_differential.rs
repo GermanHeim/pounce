@@ -35,9 +35,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use pounce_cli::nl_reader::{
-    Expr, FuncallArg, NlBody, NlProblem, collect_vars, parse_nl_text_with_quadratic,
+    Expr, FuncallArg, NlBody, NlProblem, NlTnlp, collect_vars, parse_nl_text_with_quadratic,
 };
 use pounce_nl::nl_quadratic::{is_expanded_quadratic, recognize_expr};
+use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
 fn all_fixtures() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -515,13 +516,18 @@ fn a_factored_defined_variable_is_not_recognized() {
 }
 
 /// Summation order is observable, so the parse-time fold has to be the one
-/// `recognize_expr` performs — which is **last operand first**, because its
-/// work stack lowers a sumlist in reverse and then folds in `drain` order.
+/// `recognize_expr` performs — which is **first operand first**, matching
+/// the order the AD tape sums an `o54` in. Operands reach the parse-time
+/// fold in file order and are folded as they arrive; `recognize_expr`
+/// lowers them in reverse onto its work stack and so walks the drained
+/// region backwards to get the same order.
 ///
 /// The row is `1e16·x0² + 1·x0² + 1·x0²`. Folding front to back gives
 /// `1e16` (each `+1` is lost below the ulp); folding back to front gives
-/// `1e16 + 2`. One of those is what the tape-free path stores and the other
-/// is a silent one-ulp lie about a coefficient.
+/// `1e16 + 2`. The tape gives `1e16`, so anything else is a silent one-ulp
+/// lie about a coefficient — `a_sumlist_folds_the_way_the_tape_folds`
+/// pins that against the tape itself rather than against a sibling
+/// recognizer.
 const SUM_ORDER: &str = "g3 0 1 0
 1 1 1 0 0
 1 0
@@ -571,8 +577,64 @@ fn a_sumlist_folds_in_the_order_the_tree_walk_folds() {
     let got = form.quadratic()[&(0, 0)];
     assert_eq!(
         got.to_bits(),
-        (1.0e16_f64 + 2.0).to_bits(),
-        "expected the back-to-front fold, got {got:e}"
+        1.0e16_f64.to_bits(),
+        "expected the front-to-back fold, got {got:e}"
     );
-    assert_ne!(got.to_bits(), 1.0e16_f64.to_bits());
+    assert_ne!(got.to_bits(), (1.0e16_f64 + 2.0).to_bits());
+}
+
+/// The two recognizers agreeing only says they agree; it does not say they
+/// are right. The reference for *which* order is right is the AD tape,
+/// because that is what every non-recognized row is still evaluated with
+/// and what the pre-#588 solver produced for this row. So the same model is
+/// taken all the way to a Hessian both ways and compared bit for bit.
+///
+/// This is the assertion that fails if the sumlist fold is reversed; the
+/// two recognizers can be reversed together and still agree with each other.
+#[test]
+fn a_sumlist_folds_the_way_the_tape_folds() {
+    let q = parse_nl_text_with_quadratic(SUM_ORDER, true).expect("parse");
+    let t = parse_nl_text_with_quadratic(SUM_ORDER, false).expect("parse");
+    let mut fast = NlTnlp::try_new_with_quadratic(q, true).expect("quad tnlp");
+    let mut tape = NlTnlp::try_new_with_quadratic(t, false).expect("tape tnlp");
+
+    // One row, one variable: the Lagrangian Hessian is the row's, with the
+    // objective (`n0`) contributing nothing.
+    let x = [1.0_f64];
+    let lam = [1.0_f64];
+    let mut hf = [0.0_f64; 1];
+    let mut ht = [0.0_f64; 1];
+    assert!(
+        fast.eval_h(
+            Some(&x),
+            true,
+            0.0,
+            Some(&lam),
+            true,
+            SparsityRequest::Values { values: &mut hf }
+        ),
+        "eval_h (quad)"
+    );
+    assert!(
+        tape.eval_h(
+            Some(&x),
+            true,
+            0.0,
+            Some(&lam),
+            true,
+            SparsityRequest::Values { values: &mut ht }
+        ),
+        "eval_h (tape)"
+    );
+    assert_eq!(
+        hf[0].to_bits(),
+        ht[0].to_bits(),
+        "H(0,0): quad {:e} vs tape {:e} — the sumlist fold order disagrees \
+         with the tape",
+        hf[0],
+        ht[0]
+    );
+    // And the tape's own answer is the front-to-back one, so a future
+    // change to the tape has to be argued for here too.
+    assert_eq!(ht[0].to_bits(), (2.0 * 1.0e16_f64).to_bits());
 }

@@ -321,9 +321,11 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                 Expr::Sum(items) => {
                     work.push(Step::Apply(Op::Sum(items.len())));
                     // Pushed forward, so they pop back to front and land on
-                    // the value stack with item 0 on top — the sum then
-                    // accumulates front to back, the order the recursive
-                    // version summed in.
+                    // the value stack with item 0 on top — which puts item
+                    // 0 at the *end* of the region `Op::Sum` drains, and
+                    // item n-1 at its start. The fold there walks that
+                    // region in reverse so the sum still accumulates front
+                    // to back, the order the recursive version summed in.
                     for it in items {
                         work.push(Step::Visit(it));
                     }
@@ -363,10 +365,16 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                 let combined = match op {
                     Op::CacheCse(_) => unreachable!("handled above"),
                     Op::Sum(n) => {
-                        // The items are the top `n` values, item 0 on top.
+                        // The items are the top `n` values, item 0 on top,
+                        // so item 0 is the *last* thing `drain` yields and
+                        // item n-1 the first. Reverse it: floating-point
+                        // addition is not associative, and summing back to
+                        // front would disagree with the recursive
+                        // predecessor — and with the AD tape — by an ulp
+                        // whenever two items share a monomial key.
                         let at = vals.len().checked_sub(n)?;
                         let mut acc = Quad2::default();
-                        for p in vals.drain(at..) {
+                        for p in vals.drain(at..).rev() {
                             acc = Quad2::add(acc, p);
                         }
                         acc
@@ -706,13 +714,38 @@ mod tests {
     }
 
     #[test]
-    fn nary_sum_accumulates_front_to_back() {
-        // Σ xᵢ² over 5000 terms as one `o54` node.
+    fn a_wide_nary_sum_does_not_recurse() {
+        // Σ xᵢ² over 5000 terms as one `o54` node. Distinct keys, so this
+        // says nothing about *order* — see the test below for that.
         const N: usize = 5000;
         let e = Expr::Sum((0..N).map(sq).collect());
         let h = analyze_quadratic(&e).expect("sum of squares is a QP");
         assert_eq!(h.len(), N);
         assert_eq!(h.get(&(N - 1, N - 1)), Some(&2.0));
+    }
+
+    /// Summation order is only observable when two items land on the *same*
+    /// monomial key with magnitudes far enough apart that the addition
+    /// rounds. `1e16·x0² + x0² + x0²` folds to `1e16` front to back (each
+    /// `+1` falls below the ulp) and to `1e16 + 2` back to front. The tape
+    /// — the reference every non-recognized row is still evaluated with —
+    /// sums front to back, so that is the answer required here.
+    ///
+    /// The 5000-square test above is named for this property but cannot see
+    /// it: 5000 distinct keys never re-add anything.
+    #[test]
+    fn a_repeated_monomial_in_an_nary_sum_accumulates_front_to_back() {
+        let scaled =
+            |c: f64, i: usize| Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(sq(i)));
+        let e = Expr::Sum(vec![scaled(1.0e16, 0), scaled(1.0, 0), scaled(1.0, 0)]);
+        let h = analyze_quadratic(&e).expect("sum of squares is a QP");
+        let got = h[&(0, 0)];
+        assert_eq!(
+            got.to_bits(),
+            (2.0 * 1.0e16_f64).to_bits(),
+            "expected the front-to-back fold, got {got:e}"
+        );
+        assert_ne!(got.to_bits(), (2.0 * (1.0e16_f64 + 2.0)).to_bits());
     }
 
     /// The gate that decides whether a form may be evaluated from its

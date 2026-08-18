@@ -1739,10 +1739,11 @@ impl<'a> Parser<'a> {
     ///   the spine, everything under a `*`, `/` or `^` is read in monomial
     ///   mode, and a `+` seen in monomial mode gives up.
     /// * **The association.** `recognize_expr` folds an `o54` sumlist from
-    ///   the *last* operand to the first (its work stack lowers them in
-    ///   reverse, and `drain` then hands them back in that order), so this
-    ///   folds the same way. Summation order is not observable on distinct
-    ///   monomials and is exactly observable on repeated ones.
+    ///   the *first* operand to the last, which is also the order the AD
+    ///   tape sums in, so this folds the same way — operands arrive here in
+    ///   file order and are folded as they arrive. Summation order is not
+    ///   observable on distinct monomials and is exactly observable on
+    ///   repeated ones.
     ///
     /// On `None` the cursor is left wherever it stopped; the caller rewinds.
     fn parse_expr_quadratic(&mut self) -> Option<(Quad2, Vec<u32>, u32)> {
@@ -2288,12 +2289,12 @@ fn apply_quad_op(op: QOp, vals: &mut Vec<Quad2>) -> Option<Quad2> {
         QOp::Sum(n) => {
             let at = vals.len().checked_sub(n)?;
             let mut acc = Quad2::default();
-            // `recognize_expr` lowers a sumlist's operands in reverse and
-            // then folds them in the order `drain` yields, which is last
-            // operand first. Here they arrive in file order, so the fold is
-            // reversed to match. On repeated monomials the two orders do not
-            // agree bit for bit.
-            for p in vals.drain(at..).rev() {
+            // Operands arrive in file order, so `drain` already yields them
+            // front to back — the order `recognize_expr` folds in, and the
+            // order the AD tape sums in. Do not reverse this: floating-point
+            // addition is not associative, and on repeated monomials the two
+            // orders do not agree bit for bit.
+            for p in vals.drain(at..) {
                 acc = Quad2::add(acc, p);
             }
             acc
