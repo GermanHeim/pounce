@@ -73,6 +73,18 @@ changes.
   their own when no exact Hessian is available, so that leg is what an
   embedder gets by default.
 
+- **`linear_system_scaling=slack-based` now says it is doing nothing**
+  (#677).
+
+  The value is registered, so it was accepted, but it reached the
+  no-scaling fallback through a catch-all arm and emitted no notice —
+  `mc19` warned, `slack-based` did not, though a code comment claimed
+  both did. It is not an obscure setting: it is what Ipopt's recommended
+  configuration for large collocation NLPs uses, so the users most likely
+  to set it were the least likely to learn it was inert. It still falls
+  back to no scaling; it now warns when it does. (`ruiz` is implemented
+  and unaffected.)
+
 - **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
 
   Measures per-iteration wall time against `n` over a family of one

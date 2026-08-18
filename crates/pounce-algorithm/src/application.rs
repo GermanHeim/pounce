@@ -3466,12 +3466,29 @@ impl IpoptApplication {
         // equilibration in `RuizTSymScalingMethod`. "mc19" and
         // "slack-based" are accepted by the registry but not yet
         // implemented at this layer; they fall back to no scaling
-        // with a one-line stderr notice.
+        // with a one-line notice.
+        //
+        // `slack-based` used to reach that fallback through the
+        // catch-all arm, which meant it fell back **silently** — the
+        // comment above promised a notice that only `mc19` actually
+        // emitted. It is not a hypothetical value: it is what Ipopt's
+        // own recommended configuration for large collocation NLPs
+        // uses, so the users most likely to set it were the least
+        // likely to be told it did nothing. Named explicitly now, and
+        // the catch-all is left for genuinely unreachable input —
+        // `OptionsList` rejects anything the registry does not list.
         if let Ok((v, found)) = self.options.get_string_value("linear_system_scaling", "") {
             if found {
                 builder.linear_system_scaling = match v.as_str() {
                     "ruiz" => crate::alg_builder::LinearSystemScalingChoice::Ruiz,
                     "mc19" => crate::alg_builder::LinearSystemScalingChoice::Mc19,
+                    "slack-based" => {
+                        tracing::warn!(target: "pounce::algorithm",
+                            "pounce: linear_system_scaling=slack-based not yet \
+                             implemented; using no scaling"
+                        );
+                        crate::alg_builder::LinearSystemScalingChoice::None
+                    }
                     _ => crate::alg_builder::LinearSystemScalingChoice::None,
                 };
             }
