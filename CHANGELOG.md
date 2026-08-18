@@ -40,6 +40,45 @@ changes.
   warning. `gradient()` has no direction to decide with, so it warns
   at a degenerate base point and names the variables and bounds.
   Roadmap item 3.
+- **`alpha_red_factor` reaches the line search** (#678).
+
+  The option was registered, range-checked against its bounds `(0,1)`,
+  accepted without complaint — and never read. `LineSearchOptions` had
+  no such field, `application.rs` never asked the `OptionsList` for it,
+  and `alg_builder.rs` never assigned it, so the backtracking line
+  search kept the hard-coded 0.5 it gets from
+  `BacktrackingLineSearch::new` no matter what the user set. Asking it
+  to backtrack by 0.2 produced no error, no warning, and a bit-identical
+  trajectory.
+
+  It was the last unwired field of the ten on `BacktrackingLineSearch`;
+  the nine around it — including the `max_soc` block immediately
+  adjacent, which #191 fixed as its worked example of exactly this bug —
+  were already wired, which is why the block read as finished. The field
+  is genuinely consumed by the algorithm (it scales alpha at every
+  backtracking step) and the option name has eleven hits in
+  `backtracking.rs`, so neither a grep nor the compiler could see the
+  gap; only tracing the assignment path finds it.
+
+  **No default trajectory moves.** The registered default and the
+  hard-coded one are both 0.5, so an unset run is unchanged.
+  `scripts/sweep-fixtures.sh` over all 57 fixtures diffs empty against
+  the parent commit, and an explicit `alpha_red_factor=0.5` sweep also
+  diffs empty against the *pre-fix* binary. The same sweep at 0.2 moves
+  12 fixtures — that is what makes the two empty diffs mean "default
+  preserved" rather than "still unwired".
+
+  Per #551 the deliverable is a test that proves the option changes
+  behaviour, not one that proves the field is assigned:
+  `crates/pounce-cli/tests/issue_678_alpha_red_factor.rs` drives the CLI
+  and pins both halves. Note that `hs71_obj1e8`, the fixture in the
+  report, cannot serve — it accepts nearly every trial step at full
+  alpha, so it reads identical across the whole legal range even after
+  the fix. It demonstrated the bug; it cannot demonstrate the repair.
+  `hs13_bigstart` backtracks hard and does.
+
+  This is one option. The remaining registered names with no located
+  consumer are #551's ongoing work.
 
 - **The CasADi plugin builds against CasADi master again** (#668).
 
