@@ -36,8 +36,10 @@ changes.
   `QpSolution::obj`. The failure mode was a stopping test slightly too
   loose on models where presolve moved a large constant into the objective —
   an accuracy effect, which is the class gh#544 taught us not to wave
-  through on "it cannot produce a wrong answer". Fixture sweep, both legs:
-  **no diff**; the corrected constant moves no trajectory in the corpus.
+  through on "it cannot produce a wrong answer". Fixture sweep, both legs,
+  **for this change in isolation**: no diff — the corrected constant moves
+  no trajectory in the corpus. (Like the #689 sweeps in this section, that
+  is measured against the change this entry describes, not cumulatively.)
 
 - **HSDE no longer certifies `Optimal` a few hundred short of the optimum
   when the objective carries a large constant** (#689).
