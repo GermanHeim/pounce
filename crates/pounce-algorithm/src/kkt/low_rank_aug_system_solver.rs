@@ -1522,19 +1522,22 @@ mod tests {
                 dvec(&space_zero, &[]),
                 dvec(&space_zero, &[]),
             );
-            let mut sol = AugSysSol {
-                sol_x: &mut sx,
-                sol_s: &mut z1,
-                sol_c: &mut z2,
-                sol_d: &mut z3,
-            };
-            let status = if round == 0 {
-                solver.solve(&coeffs, &rhs, &mut sol, false, 0)
-            } else {
-                solver.resolve(&coeffs, &rhs, &mut sol)
-            };
-            assert_eq!(status, ESymSolverStatus::Success);
-            drop(sol);
+            // Scoped so the mutable borrow of `sx` ends before it is read,
+            // matching the other tests here.
+            {
+                let mut sol = AugSysSol {
+                    sol_x: &mut sx,
+                    sol_s: &mut z1,
+                    sol_c: &mut z2,
+                    sol_d: &mut z3,
+                };
+                let status = if round == 0 {
+                    solver.solve(&coeffs, &rhs, &mut sol, false, 0)
+                } else {
+                    solver.resolve(&coeffs, &rhs, &mut sol)
+                };
+                assert_eq!(status, ESymSolverStatus::Success);
+            }
             assert!(
                 (sx.expanded_values()[0] - expected).abs() < 1e-12,
                 "round {round} gave {:?}",

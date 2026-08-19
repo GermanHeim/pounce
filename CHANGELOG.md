@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+- **Large limited-memory solves do substantially less redundant work**
+  (#698, observations 1-4, reported with measurements by @srikanth-gm).
+
+  Four independent inefficiencies on the `hessian_approximation=limited-memory`
+  path, all of them work performed for a consumer that does not exist. None
+  changes an answer; the fixture sweep is bit-identical on both legs.
+
+  `LowRankAugSystemSolver` forwarded none of the three methods that exist to
+  avoid re-factorizing, so `resolve` fell through to a trait default that
+  factorizes. Since the interior-point solver's iterative-refinement loop and
+  its same-matrix fast path both enter through `resolve`, most augmented-system
+  solves re-factorized a matrix that had not changed, and the Sherman-Morrison-
+  Woodbury block issued one factorization per column. On the reporter's
+  118,276-dimension system that is **262.9 s of factorization down to 27.6 s**,
+  over an identical 170-iteration trajectory with every printed digit unchanged.
+
+  The Hessian is no longer evaluated at all when the problem declares no
+  Hessian structure — previously the user's `eval_h` callback was still called,
+  once per iteration, for a result that was structurally empty. Limited-memory
+  solves now never call it.
+
+  `pack_g_for_user` rebuilt an expansion vector inside its scatter loops rather
+  than once per call, which is felt on problems with many constraints.
+
+  The timing report gained rows for symbolic factorization and for time spent
+  inside the user's callbacks. `LinearSystemBackSolve` previously read
+  `0.000 s` on every run — not because back-solves were free but because its
+  only timer guard sat on a code path nothing reached. It now reports.
+
+- **`pounce.minimize` no longer declares a dense Hessian for problems that
+  have no Hessian** (#698).
+
+  A Python problem supplying `jac` but no `hess` runs limited-memory, but the
+  frontend still declared a dense `n(n+1)/2` Hessian triangle. At n = 60,000
+  that is a 14 GB structure described to the solver for a callback that returns
+  nothing. The CasADi plugin was never affected — it has always declared zero.
+
+
 - **`qp_presolve` now applies to convex QCQPs, where it was silently
   ignored** (#588, phase Q9, presolve half).
 
