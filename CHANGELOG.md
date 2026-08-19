@@ -29,8 +29,10 @@ changes.
   from 1 of 42 rows on the fast path to 42 of 42 plus its objective, and 24
   fixtures in total change how they are evaluated.
 
-  No answer changes: the evaluator differential test against the tape passes
-  with every tolerance and ulp pin as it was. The fixture sweep moves one
+  No model changes its answer: the evaluator differential test against the
+  tape passes with every tolerance and ulp pin as it was, and its randomized
+  battery now emits squared affine forms so the new read-out is covered by
+  more than the repository's fixtures. The fixture sweep moves one
   line of 116 — `airport.nl` under limited-memory takes 57 iterations where
   it took 59, at the same status and objective — and that is #702's
   compensated summation reaching 42 rows it could not reach before, not the
@@ -42,7 +44,11 @@ changes.
 
   A body mixing a square with a cross term `c·xᵢxⱼ`, one whose sum spine goes
   through a declared common expression, and one that lost a coefficient to
-  cancellation (#685) all still keep their tapes.
+  cancellation (#685) all still keep their tapes. That last case covers two
+  routes to the same loss, not one: a lossy body written as a flat sum of
+  monomials is refused for its shape, and a genuinely factored body that
+  loses a Hessian entry while its squares are combined is refused where
+  they are combined. Both fall back to the tape.
 
 - **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
   iterations** (#702).

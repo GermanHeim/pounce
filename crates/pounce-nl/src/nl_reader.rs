@@ -646,7 +646,10 @@ fn push_body_form(quad: &mut QuadraticStructure, body: &NlBody) -> Option<u32> {
             constant: t.constant,
         })
         .collect();
-    Some(quad.push_factored_form(&terms, &fq.linear, fq.constant))
+    // `None` here is the gh #685 gate on this arm: the body is factored,
+    // but assembling `Σ 2wₖbₖbₖᵀ` dropped an entry the tape will declare.
+    // Falls through to the tape, like any other refusal.
+    quad.push_factored_form(&terms, &fq.linear, fq.constant)
 }
 
 /// The degree read-out [`NlBody::provably_affine`] makes of a recognized

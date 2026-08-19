@@ -544,66 +544,12 @@ fn accumulate<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, t: f64) -> Merged {
     }
 }
 
-/// Was `a + b`, which came out as `s`, computed **exactly**?
-///
-/// Knuth's two-sum: `err` below is the part of the true sum that `s` could
-/// not represent, and it is itself exact for every finite pair — no
-/// tolerance, no magnitude test. Two extra flops per merge, which is the
-/// whole cost of telling `x − x` (exact, degree really 0) apart from
-/// `2⁵³·x + x − 2⁵³·x` (the `x` was absorbed by the first add, and the
-/// second only made it visible). See gh #687.
-///
-/// A non-finite operand — or a sum that overflowed — makes `err` a `NaN`,
-/// which answers *inexact*: the conservative direction, and the right one,
-/// since an infinity has lost every term it swallowed.
-fn add_is_exact(a: f64, b: f64, s: f64) -> bool {
-    let bb = s - a;
-    let err = (a - (s - bb)) + (b - bb);
-    err == 0.0
-}
-
-/// Was `a · b`, which came out as `p`, computed **exactly**?
-///
-/// `fma(a, b, −p)` is the multiply's rounding error, exactly, and `p` is
-/// exact iff that error is zero. The `±1` shortcut is not micro-optimizing
-/// for its own sake: every variable enters the recognizer with a
-/// coefficient of `1.0` (see [`Quad2::of_var`]), so it is the common case
-/// by a wide margin, and `f64::mul_add` is a libm call on targets without a
-/// hardware FMA.
-///
-/// A product that overflowed to an infinity answers *inexact* for the same
-/// reason a sum that did.
-fn mul_is_exact(a: f64, b: f64, p: f64) -> bool {
-    if a == 1.0 || a == -1.0 || b == 1.0 || b == -1.0 || a == 0.0 || b == 0.0 {
-        // Multiplying by ±1 or by an exact zero cannot round.
-        return true;
-    }
-    // A product that is not *normal* is one the exponent range could not
-    // hold: zero (`10⁻²⁰⁰ · 10⁻²⁰⁰`, from two nonzero factors), a subnormal
-    // that gave up bits at the bottom, or an infinity from overflow. The
-    // `fma` below cannot be asked about those — it rounds onto the same
-    // grid, and answers `0` for the underflowed product as readily as for
-    // an exact one — so they are answered here, inexact.
-    p.is_normal() && a.mul_add(b, -p) == 0.0
-}
-
-/// Is this coefficient worth **storing**? Exact zeros are dropped so that
-/// [`Quad2::degree`] and [`Quad2::as_constant`] stay `O(1)`, and so that a
-/// term that cancelled cannot make a later product look like degree 3.
-/// `NaN` is dropped for the same reason its predecessor's `c.abs() > 0.0`
-/// retention dropped it.
-///
-/// This is the *storage* question only. It used to be documented as making
-/// "has a quadratic term" a structural question, and it does not: it is
-/// applied to a **sum** of coefficients, so a degree-2 body whose
-/// coefficients cancel — or whose one coefficient underflows — stores
-/// nothing and looks affine. That is gh #683, and it is why every caller
-/// weighs the drop against the arithmetic that led to it and records the
-/// verdict in [`Quad2::lost_terms`]; the degree question is answered from
-/// *that*, not from this predicate.
-fn is_live(c: f64) -> bool {
-    c.abs() > 0.0
-}
+/// The exactness predicates this recognizer's fold is decided from live in
+/// `pounce-common` since gh #673, because the `.nl` pipeline grew a second
+/// fold — `Σ 2wₖbₖbₖᵀ` in `QuadraticStructure::push_factored_form` — in a
+/// crate that cannot name this one. See [`pounce_common::exact`] for what
+/// they answer and why it is an exact question rather than a tolerance.
+use pounce_common::exact::{add_is_exact, is_live, mul_is_exact};
 
 /// One entry on the recognizer's explicit work stack.
 enum Step<'a> {
@@ -1115,10 +1061,16 @@ pub fn recognize_factored_quadratic(e: &Expr) -> Option<FactoredQuadratic> {
 
     while let Some((e, sign)) = spine.pop() {
         match e {
-            // Pushed back to front so the leaves *pop* in source order:
-            // the degree-≤1 leftovers are folded into one `Quad2` by
-            // floating-point addition, and `recognize_expr` sums the same
-            // terms front to back. Two orders would be two answers.
+            // Pushed back to front so the leaves *pop* in source order.
+            // The degree-≤1 leftovers are folded into one `Quad2` by
+            // floating-point addition, and source order is the order a
+            // reader can reason about — not, to be exact about what this
+            // buys, the same association `recognize_expr` uses: that folds
+            // the *tree*, and `Quad2::add` additionally swaps its operands
+            // by map width. So the two can still differ in the last ulp on
+            // a leaning spine. What keeps that from mattering is
+            // `lost_terms`, which refuses any body where the difference
+            // could be a dropped term rather than a rounded one.
             Expr::Sum(items) => spine.extend(items.iter().rev().map(|it| (it, sign))),
             Expr::Binary(BinOp::Add, a, b) => {
                 spine.push((b, sign));
@@ -1221,6 +1173,13 @@ fn admit_square(weight: f64, base: &Expr) -> Option<SquaredAffine> {
 /// it must be a constant except for the single `Pow(base, 2)`, which may
 /// not sit under a division. Folding several constants into one `weight`
 /// reassociates the writer's own constants and nothing else.
+///
+/// The order is worth stating precisely, because it is not source order:
+/// this pops an explicit stack, so `a·(b·(c·s))` folds as `((1·c)·b)·a`.
+/// One multiply's worth of rounding either way, on constants the writer
+/// wrote next to each other — the same latitude `Quad2::scale` takes on the
+/// expanded arm — but a reader reconstructing a last-ulp difference by hand
+/// needs the real order, not the written one.
 fn peel_square(e: &Expr) -> Option<(f64, &Expr)> {
     let mut work: Vec<(&Expr, bool)> = vec![(e, false)];
     let mut weight = 1.0f64;

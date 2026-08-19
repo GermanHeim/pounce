@@ -324,6 +324,23 @@ def main(argv: list[str]) -> int:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
+
+    # `--residuals` / `--residual-nnz` only mean anything to the factored
+    # writer. Accepting them silently under `--form expanded` reads as
+    # "measured with 400 residuals" in a shell history that produced an
+    # expanded model (gh #711 review).
+    if args.form == "expanded":
+        supplied = [
+            f"--{name.replace('_', '-')}"
+            for name in ("residuals", "residual_nnz")
+            if f"--{name.replace('_', '-')}" in (argv if argv is not None else sys.argv[1:])
+        ]
+        if supplied:
+            p.error(
+                f"{', '.join(supplied)} apply to --form factored only; "
+                f"got --form expanded"
+            )
+
     fallback = dict(
         n=1000, quad_rows=7, quad_density=0.0419, linear_rows=5100,
         eqns=100, linear_nnz=11, dominance=1.02,
