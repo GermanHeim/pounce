@@ -297,7 +297,9 @@ fn pull_away() -> Rc<RefCell<dyn TNLP>> {
 /// Objective at the optimum of each model, to five decimals.
 const ROSEN_OBJ: Number = 0.0;
 const ROSEN_EQ_OBJ: Number = 3.99554730;
-const PULL_OBJ: Number = -1.41421356;
+/// `PullAway`'s optimum is exactly -sqrt(2); spelling it as a literal trips
+/// `clippy::approx_constant`, which is a correctness lint and denied in CI.
+const PULL_OBJ: Number = -std::f64::consts::SQRT_2;
 
 // ----------------------------------------------------- reaching the builder
 
