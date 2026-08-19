@@ -163,14 +163,17 @@ changes.
   of the magnitudes actually being computed — while `scale_g` supplies
   the gap's normalizer. That model now converges in 80.
 
-  Fixture sweep, both legs: the `qp_hsde=no` leg is unchanged, and on the
-  default leg only the four models with a large objective constant move —
+  Fixture sweep, both legs, **for this change in isolation**: the
+  `qp_hsde=no` leg is unchanged by it, and on the default leg only the
+  four models with a large objective constant move —
   `scaled_feasible_a` 16 → 123 iterations (`236.85` → `0`, KKT error
   `2.5e2` → `4.6e-3`), `scaled_feasible_b` 21 → 47 (`456.33` → `0`,
   `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 80 (KKT error
   `3.6e4` → `6.6e-15`), `feasible_x0_extreme_row` 32 → 33 (`7.6e-4` →
   `3.8e-5`). The counts are the cost of the work these solves were
-  previously skipping.
+  previously skipping. (The direct-driver cold-start entry below lands in
+  the same release and *does* move the `qp_hsde=no` leg; the two sweeps
+  are each measured against the change they describe, not cumulatively.)
 
 - **The direct convex QP driver no longer diverges on a badly-scaled
   feasible model** (#689).
