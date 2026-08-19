@@ -224,19 +224,6 @@ pub struct QpOptions {
     /// preserves the cone; the SOCP/conic driver never equilibrates, since
     /// per-row scaling is unsound for non-orthant cones. Default `true`.
     pub equilibrate: bool,
-    /// Run the LP-crossover phase ([`crate::crossover`]) after the interior-
-    /// point solve. For a **pure LP** (`P = 0`), crossover hands the near-
-    /// optimal interior iterate to the active-set engine ([`pounce_qp`]),
-    /// which pivots it to an *exact* optimal vertex basis. This closes the
-    /// gap on degenerate LPs (NETLIB GEN family), where strict
-    /// complementarity fails, the fraction-to-boundary step collapses, and a
-    /// pure IPM cannot certify the vertex to `tol` — exactly the
-    /// IPM-then-crossover pairing every commercial LP solver uses
-    /// (Andersen & Ye 1996). It is a strict, **never-regress** refinement: the
-    /// purified vertex is returned only when it is feasible and its KKT error
-    /// does not exceed the interior iterate's. A no-op for genuine QPs
-    /// (`P ≠ 0`) and for the warm-start / debug entry points.
-    ///
     /// A constant added to `½xᵀPx + cᵀx` to obtain the objective the **caller**
     /// reports. Default `0.0`.
     ///
@@ -267,6 +254,19 @@ pub struct QpOptions {
     /// tightest choice and reproduces the historical test whenever the true
     /// constant is small next to the objective.
     pub obj_constant: f64,
+    /// Run the LP-crossover phase ([`crate::crossover`]) after the interior-
+    /// point solve. For a **pure LP** (`P = 0`), crossover hands the near-
+    /// optimal interior iterate to the active-set engine ([`pounce_qp`]),
+    /// which pivots it to an *exact* optimal vertex basis. This closes the
+    /// gap on degenerate LPs (NETLIB GEN family), where strict
+    /// complementarity fails, the fraction-to-boundary step collapses, and a
+    /// pure IPM cannot certify the vertex to `tol` — exactly the
+    /// IPM-then-crossover pairing every commercial LP solver uses
+    /// (Andersen & Ye 1996). It is a strict, **never-regress** refinement: the
+    /// purified vertex is returned only when it is feasible and its KKT error
+    /// does not exceed the interior iterate's. A no-op for genuine QPs
+    /// (`P ≠ 0`) and for the warm-start / debug entry points.
+    ///
     /// **Default `false` — opt-in.** Crossover is correct (never-regress) but
     /// the active-set purification is currently *slow* on the degenerate /
     /// large NETLIB LPs it most targets: on the LP suite it regressed solve
