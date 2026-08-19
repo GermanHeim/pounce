@@ -41,6 +41,14 @@ changes.
   on different questions. Exhaustion falls back to the one-sided step as
   before, with the warning now naming the true engagement count.
 
+  The enumeration is removed, not kept alongside: `directional_step`
+  and its combination generator are gone, and the
+  `parametric_step_bounded_directional` /
+  `parametric_step_path_directional` entries and bindings with them
+  (their job, decide then consume, is now the decision plus the
+  `_decided` entries). `parametric_step_directional` remains the name
+  of the decision and is the QP implementation.
+
   Measured on the fixtures and the 62k-variable column: kink decisions
   identical to the enumeration's (direction difference 0 and 2e-19, in
   fewer solves), the notebook's held-breakpoint example bit-identical

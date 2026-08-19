@@ -1226,7 +1226,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # to the one-sided step and says so.
         try:
             step, held_rows, _ = (
-                session.solver.parametric_step_directional_qp(
+                session.solver.parametric_step_directional(
                     pin_idx, deltas, degeneracy_iter))
             if mode == "fix_relax":
                 step, pinned = (
@@ -1582,7 +1582,7 @@ def estimate_report(model, perturb, max_iter=16,
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:
-            step, _, _ = session.solver.parametric_step_directional_qp(
+            step, _, _ = session.solver.parametric_step_directional(
                 pin_idx, deltas, degeneracy_iter)
         except RuntimeError as e:
             if "directional derivative" not in str(e):
@@ -1722,7 +1722,7 @@ def active_set_changes(model, perturb, max_iter=16,
     if degeneracy == "directional":
         try:
             _, held_rows, _ = (
-                session.solver.parametric_step_directional_qp(
+                session.solver.parametric_step_directional(
                     pin_idx, deltas, degeneracy_iter))
             _, segments = session.solver.parametric_step_path_decided(
                 pin_idx, deltas, held_rows, max_iter)

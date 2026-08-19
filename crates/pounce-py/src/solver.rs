@@ -395,78 +395,7 @@ impl PySolver {
         Ok(weak.iter().map(|w| (w.var_row as i64, w.lower)).collect())
     }
 
-    /// `parametric_step` with the directional-derivative correction at
-    /// a degenerate base point (the 2012 paper's eq. 14 QP), as
-    /// `(dx, pinned_var_rows, trials)`. With no weakly active bounds
-    /// this is the plain step and `trials` is 0.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_directional<'py>(
-        &self,
-        py: Python<'py>,
-        pin_constraint_indices: Vec<i64>,
-        deltas: Vec<Number>,
-        max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, usize)> {
-        let s = self.state.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "parametric_step_directional: no converged factor (call solve() first)",
-            )
-        })?;
-        let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        if deltas.len() != pins.len() {
-            return Err(PyValueError::new_err(format!(
-                "deltas length {} must equal pin_constraint_indices length {}",
-                deltas.len(),
-                pins.len(),
-            )));
-        }
-        let (dx, pinned, trials) = s
-            .inner
-            .parametric_step_directional(&pins, &deltas, max_iter)
-            .map_err(solver_error_to_py)?;
-        Ok((
-            dx.into_pyarray_bound(py),
-            pinned.into_iter().map(|p| p as i64).collect(),
-            trials,
-        ))
-    }
-
-    /// `parametric_step_bounded` with the directional derivative as
-    /// its predictor at a degenerate base point, as
-    /// `(dx, pinned_rows, trials)`.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_bounded_directional<'py>(
-        &self,
-        py: Python<'py>,
-        pin_constraint_indices: Vec<i64>,
-        deltas: Vec<Number>,
-        max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, usize)> {
-        let s = self.state.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "parametric_step_bounded_directional: no converged factor (call solve() first)",
-            )
-        })?;
-        let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        if deltas.len() != pins.len() {
-            return Err(PyValueError::new_err(format!(
-                "deltas length {} must equal pin_constraint_indices length {}",
-                deltas.len(),
-                pins.len(),
-            )));
-        }
-        let (dx, pinned, trials) = s
-            .inner
-            .parametric_step_bounded_directional(&pins, &deltas, max_iter)
-            .map_err(solver_error_to_py)?;
-        Ok((
-            dx.into_pyarray_bound(py),
-            pinned.into_iter().map(|p| p as i64).collect(),
-            trials,
-        ))
-    }
-
-    /// `parametric_step_bounded_directional` with the weak-row decision
+    /// `parametric_step_bounded` with the weak-row decision
     /// supplied by the caller (var-x rows the direction holds) instead
     /// of searched for. Study surface for an externally solved eq. 14
     /// QP.
@@ -543,15 +472,15 @@ impl PySolver {
         ))
     }
 
-    /// `parametric_step_directional` with the decision computed by the
-    /// pounce-qp active-set engine on the reduced weak-row problem
-    /// instead of the working-set enumeration. `max_iter` is the total
+    /// The eq. 14 directional derivative, decided by the pounce-qp
+    /// active-set engine on the reduced weak-row problem. `max_iter`
+    /// is the total
     /// back-solve budget: the all-released solve plus one basis column
     /// per engaged weak row count against it, and a budget the weak
     /// set cannot fit fails before any factorization happens. Returns
     /// `(dx, held_var_rows, backsolves_spent)`.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_directional_qp<'py>(
+    fn parametric_step_directional<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
@@ -560,7 +489,7 @@ impl PySolver {
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, usize)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
-                "parametric_step_directional_qp: no converged factor (call solve() first)",
+                "parametric_step_directional: no converged factor (call solve() first)",
             )
         })?;
         let pins = validate_pins(&pin_constraint_indices, s.m)?;
@@ -573,57 +502,12 @@ impl PySolver {
         }
         let (dx, held, work) = s
             .inner
-            .parametric_step_directional_qp(&pins, &deltas, max_iter)
+            .parametric_step_directional(&pins, &deltas, max_iter)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
             held.into_iter().map(|p| p as i64).collect(),
             work,
-        ))
-    }
-
-    /// `parametric_step_path` with the directional-derivative decision
-    /// applied first at a degenerate base point, as
-    /// `(dx, segments, trials)`. Rows the accepted working set leaves
-    /// are forced into the walk's base-activity table, so the record
-    /// carries each departure at the fraction where its multiplier
-    /// reaches zero, essentially zero at an exact kink.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_path_directional<'py>(
-        &self,
-        py: Python<'py>,
-        pin_constraint_indices: Vec<i64>,
-        deltas: Vec<Number>,
-        max_iter: usize,
-    ) -> PyResult<(
-        Bound<'py, PyArray1<Number>>,
-        Vec<(Number, i64, bool, bool)>,
-        usize,
-    )> {
-        let s = self.state.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "parametric_step_path_directional: no converged factor (call solve() first)",
-            )
-        })?;
-        let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        if deltas.len() != pins.len() {
-            return Err(PyValueError::new_err(format!(
-                "deltas length {} must equal pin_constraint_indices length {}",
-                deltas.len(),
-                pins.len(),
-            )));
-        }
-        let (dx, segments, trials) = s
-            .inner
-            .parametric_step_path_directional(&pins, &deltas, max_iter)
-            .map_err(solver_error_to_py)?;
-        Ok((
-            dx.into_pyarray_bound(py),
-            segments
-                .into_iter()
-                .map(|g| (g.at, g.var_row as i64, g.lower, g.pinned))
-                .collect(),
-            trials,
         ))
     }
 

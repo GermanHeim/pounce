@@ -736,128 +736,7 @@ impl Solver {
         Ok((dx[..ctx.n_x].to_vec(), segments))
     }
 
-    /// [`Self::parametric_step_path`] with the directional-derivative
-    /// decision applied first at a degenerate base point.
-    ///
-    /// The weakly active bounds are decided by the eq. 14 QP for this
-    /// perturbation's own direction, the path starts with every weakly
-    /// active row released and the accepted working set held, and the
-    /// rows the working set leaves are forced into the walk's
-    /// base-activity table, so the record carries each departure at
-    /// the fraction where its multiplier reaches zero, essentially
-    /// zero at an exact kink. With no weakly active bounds this is
-    /// exactly [`Self::parametric_step_path`]. Returns the step, the
-    /// record, and the trials the decision spent.
-    pub fn parametric_step_path_directional(
-        &self,
-        pin_constraint_indices: &[Index],
-        deltas: &[Number],
-        max_iter: usize,
-    ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>, usize), SolverError> {
-        let weak = self.weakly_active_bounds()?;
-        if weak.is_empty() {
-            let (dx, segments) =
-                self.parametric_step_path(pin_constraint_indices, deltas, max_iter)?;
-            return Ok((dx, segments, 0));
-        }
-        let mut rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        // The barrier correction on a bound row assumes the bound is
-        // enforced by its sigma. A weak row's sigma is order one, so
-        // the correction folds into the variable's equation at order
-        // sqrt(mu), a constant offset the perturbation does not scale,
-        // which dominated steps of 1e-10. Released rows get their rhs
-        // zeroed inside solve_released; this does the same for the
-        // weak rows the walk carries in its table instead.
-        for w in &weak {
-            rhs_plain[w.row] = 0.0;
-        }
-        let ctx = self.bound_context()?;
-        let state = self.state.borrow();
-        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let (_, pinned, trials) =
-            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
-                .map_err(SolverError::SensComputationFailed)?;
-        // Rows the direction holds are pinned from fraction zero. Rows
-        // it leaves are forced into the walk's base-activity table, so
-        // the release scan frees each at the fraction where its
-        // multiplier reaches zero: essentially zero at an exact kink,
-        // and partway along the step when the held solve sits inside
-        // the ambiguous band, where the bound is genuinely active for
-        // the first stretch of the perturbation.
-        let holds: Vec<(usize, bool)> = weak
-            .iter()
-            .filter(|w| pinned.contains(&w.var_row))
-            .map(|w| (w.var_row, w.lower))
-            .collect();
-        let forced_active: Vec<usize> = weak
-            .iter()
-            .filter(|w| !pinned.contains(&w.var_row))
-            .map(|w| w.row)
-            .collect();
-        let (dx, segments) = crate::boundcheck::step_along_path(
-            &state.backsolver,
-            &rhs_plain,
-            &ctx.x_curr,
-            &ctx.lo,
-            &ctx.hi,
-            &ctx.mults,
-            max_iter,
-            &forced_active,
-            &holds,
-        )
-        .map_err(SolverError::SensComputationFailed)?;
-        Ok((dx[..ctx.n_x].to_vec(), segments, trials))
-    }
-
-    /// [`Self::parametric_step_bounded`] with the directional
-    /// derivative as its predictor at a degenerate base point.
-    ///
-    /// The refinement's own crossing and release decisions then run
-    /// unchanged on everything beyond the weakly active set. A weak
-    /// bound the working set held sits exactly on its bound in the
-    /// predictor and is not a crossing, and one it left moves into the
-    /// interior. With no weakly active bounds this is exactly
-    /// [`Self::parametric_step_bounded`]. Returns the step, the pinned
-    /// rows, and the trials the decision spent.
-    pub fn parametric_step_bounded_directional(
-        &self,
-        pin_constraint_indices: &[Index],
-        deltas: &[Number],
-        max_iter: usize,
-    ) -> Result<(Vec<Number>, Vec<Index>, usize), SolverError> {
-        let weak = self.weakly_active_bounds()?;
-        if weak.is_empty() {
-            let (dx, pinned) =
-                self.parametric_step_bounded(pin_constraint_indices, deltas, max_iter)?;
-            return Ok((dx, pinned, 0));
-        }
-        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        let ctx = self.bound_context()?;
-        let state = self.state.borrow();
-        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let (d, _, trials) =
-            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
-                .map_err(SolverError::SensComputationFailed)?;
-        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
-            &state.backsolver,
-            &d,
-            &ctx.x_curr,
-            &ctx.lo,
-            &ctx.hi,
-            &ctx.mults,
-            &rhs_plain,
-            ctx.eps,
-            max_iter,
-        )
-        .map_err(SolverError::SensComputationFailed)?;
-        Ok((
-            dx[..ctx.n_x].to_vec(),
-            pinned.into_iter().map(|p| p as Index).collect(),
-            trials,
-        ))
-    }
-
-    /// [`Self::parametric_step_path_directional`] with the weak-row
+    /// [`Self::parametric_step_path`] with the weak-row
     /// decision supplied by the caller instead of searched for.
     /// `held_var_rows` names the var-x rows of the weakly active
     /// bounds the direction holds; every other weakly active bound is
@@ -908,7 +787,7 @@ impl Solver {
         Ok((dx[..ctx.n_x].to_vec(), segments))
     }
 
-    /// [`Self::parametric_step_bounded_directional`] with the weak-row
+    /// [`Self::parametric_step_bounded`] with the weak-row
     /// decision supplied by the caller instead of searched for. The
     /// direction is computed for the given working set (all weak rows
     /// released, the held variables pinned through Schur rows), then
@@ -956,9 +835,8 @@ impl Solver {
         ))
     }
 
-    /// The eq. 14 directional derivative decided by pounce-qp instead
-    /// of the working-set enumeration of
-    /// [`Self::parametric_step_directional`].
+    /// The eq. 14 directional derivative, decided by pounce-qp over
+    /// the weak rows the direction engages.
     ///
     /// One released factorization serves the whole decision: the
     /// released `Σ` is built once and every solve passes the same
@@ -982,12 +860,11 @@ impl Solver {
     /// never enter and never make anything singular.
     ///
     /// `max_iter` is the total back-solve budget: the all-released
-    /// solve and every basis column count against it, so a model whose
-    /// weak set cannot fit the budget errs before any factorization
-    /// happens and the caller falls back to the one-sided step exactly
-    /// as it does for the enumeration today. Returns the direction,
+    /// solve and every basis column count against it, so a budget the
+    /// engagement cannot fit errs before the work happens and the
+    /// caller falls back to the one-sided step. Returns the direction,
     /// the var-x rows held, and the back-solves spent.
-    pub fn parametric_step_directional_qp(
+    pub fn parametric_step_directional(
         &self,
         pin_constraint_indices: &[Index],
         deltas: &[Number],
@@ -1283,45 +1160,6 @@ impl Solver {
             }
         }
         Ok(out)
-    }
-
-    /// The parametric step with the directional-derivative correction
-    /// at a degenerate base point (the 2012 paper's eq. 14 QP).
-    ///
-    /// With no weakly active bounds this is exactly
-    /// [`Self::parametric_step`]. Otherwise the weakly active rows are
-    /// released and an active-set search over them decides which
-    /// variables the direction holds on their bounds, so the returned
-    /// step is the one-sided derivative for the side the perturbation
-    /// asks about. Returns the primal step, the var-x rows the
-    /// accepted working set pinned, and the trials the search spent
-    /// against `max_iter`.
-    ///
-    /// Errors from the search (budget exhausted, no sign-consistent
-    /// working set) surface as [`SolverError::SensComputationFailed`];
-    /// the caller owns the fallback to the plain step and its warning.
-    pub fn parametric_step_directional(
-        &self,
-        pin_constraint_indices: &[Index],
-        deltas: &[Number],
-        max_iter: usize,
-    ) -> Result<(Vec<Number>, Vec<usize>, usize), SolverError> {
-        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        let weak = self.weakly_active_bounds()?;
-        let ctx = self.bound_context()?;
-        let state = self.state.borrow();
-        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        if weak.is_empty() {
-            let mut d = vec![0.0; state.backsolver.dim()];
-            if !state.backsolver.solve(&rhs_plain, &mut d) {
-                return Err(SolverError::BacksolveFailed);
-            }
-            return Ok((d[..ctx.n_x].to_vec(), Vec::new(), 0));
-        }
-        let (d, pinned, trials) =
-            crate::boundcheck::directional_step(&state.backsolver, &rhs_plain, &weak, max_iter)
-                .map_err(SolverError::SensComputationFailed)?;
-        Ok((d[..ctx.n_x].to_vec(), pinned, trials))
     }
 
     /// The bound geometry both bound-aware steps read: the primal
