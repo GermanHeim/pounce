@@ -27,7 +27,7 @@
 //! the acceptance rule is not passing correctors that hurt; they are not
 //! evidence that the scheme pays. The evidence that it pays is `lp_afiro`
 //! (NETLIB `afiro`) in
-//! `pounce-cli/tests/issue_588_gondzio_correctors.rs` — 135 -> 122 iterations
+//! `pounce-cli/tests/issue_588_gondzio_correctors.rs` — 10 -> 9 iterations
 //! on the direct driver, 15 -> 13 on HSDE.
 
 use pounce_convex::{
@@ -296,16 +296,12 @@ fn correctors_do_not_cost_iterations_on_a_warm_start() {
             on_total += on.iters;
         }
     }
-    // Bounded, not zero, and the bound is the point. Ungated this family runs
-    // 105 -> 117: every instance that regresses does so systematically, in the
-    // same direction, for the same reason. Gated it runs 105 -> 106 — a single
-    // instance losing a single iteration, which is the ordinary trajectory
-    // jitter of buying a longer step, not a tax. The 230-instance battery this
-    // family stands in for is exactly neutral (967 -> 967) at this threshold;
-    // see `correctors::ALPHA_MAX`. A tolerance of one iteration over 24 solves
-    // still fails loudly if the gate is removed or widened.
+    // Ungated this family runs 105 -> 117: every instance that regresses does
+    // so systematically, in the same direction, for the same reason. Gated it
+    // is exactly 105, and the 230-instance battery it stands in for is exactly
+    // neutral (967 -> 967). See `correctors::ALPHA_MAX`.
     assert!(
-        on_total <= off_total + 1,
+        on_total <= off_total,
         "correctors cost iterations on warm starts: {off_total} -> {on_total}"
     );
 }

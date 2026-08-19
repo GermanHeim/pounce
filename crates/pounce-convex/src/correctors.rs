@@ -98,49 +98,47 @@ pub(crate) fn trial_step(alpha: f64) -> f64 {
 /// (366 -> 403 iterations total). A step-length test cannot see that bill,
 /// because the corrector does exactly what it advertises: it buys α = 1.
 ///
-/// 0.9 is calibrated, not derived. It is deliberately **not** calibrated on
-/// `lp_afiro`, the fixture this phase has quoted throughout, because that
-/// model's iteration count is chaotic in the threshold and would fit noise:
+/// 0.85 is calibrated, not derived. It is deliberately **not** calibrated on
+/// `lp_afiro`, the fixture this phase quoted throughout, for two reasons: that
+/// model's count is chaotic in the threshold, and gh #689 has since cut its
+/// cold solve from 135 iterations to 10, leaving a one-iteration margin that
+/// cannot separate anything. The threshold is calibrated on two aggregates
+/// instead, both measured on this driver after #689:
 ///
-/// | α    | 2.0 | .99 | .95 | .92 | .90 | .88 | .86 | .85 | .82 | .80 | .70 |
-/// |------|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|
-/// | iter | 118 | 118 | 121 | 128 | 122 | 115 | 130 | 130 | 117 | 136 | 136 |
-///
-/// — clean asymptotes (118 gate-open, 136 gate-shut ≈ the 135 uncorrected
-/// baseline) with 15 iterations of noise in between. The threshold is instead
-/// calibrated on two aggregates, which separate sharply and agree:
-///
-/// | gate | 42 NETLIB LPs, cold | 230 warm QP/LPs |
+/// | gate | 52 NETLIB LPs, cold | 230 warm QP/LPs |
 /// |---|---|---|
-/// | no correctors | 1809 | 967 |
-/// | ungated | **1757** (-52) | 1004 (+37) |
-/// | α < 0.95 | 1757 (-52) | 1003 (+36) |
-/// | **α < 0.9** | **1759** (-50) | **967** (+0) |
-/// | α < 0.85 | 1781 (-28) | 967 (+0) |
+/// | no correctors | 688 | 967 |
+/// | ungated | 649 (-39) | 1004 (+37) |
+/// | α < 0.95 | 647 (-41) | 1003 (+36) |
+/// | α < 0.9 | 644 (-44) | 967 (+0) |
+/// | **α < 0.85** | **644** (-44) | **967** (+0) |
+/// | α < 0.8 | 651 (-37) | 967 (+0) |
 ///
-/// The cold column is the direct driver on every NETLIB LP that converges on
-/// it (only 42 of 365 do — the rest stall and fall back to the NLP path per
-/// gh #133), so the scheme's benefit is real and general: 27 models improve,
-/// 7 worsen. The warm column is the Python host, which is the surface that
-/// actually reaches this driver.
+/// The cold column is the direct driver over every NETLIB LP that converges on
+/// it — 96 of 365 after #689, up from 60 before it; the rest stall and fall
+/// back to the NLP path per gh #133 — restricted to the 52 that converge under
+/// every arm. So the scheme's benefit is real and general (29 models improve,
+/// 1 worsens), not a single-fixture artifact.
 ///
-/// 0.9 is where those two curves cross: it keeps 50 of the 52 cold iterations
-/// the scheme wins and returns the whole warm regression, while 0.95 keeps the
-/// cold win but fixes nothing warm, and 0.85 pays a quarter of the cold win for
-/// nothing further. Below 0.9 the cold column becomes chaotic too (0.85 and 0.8
-/// swap order on a second sample), which is a second reason not to tune there.
-/// The cut is sharp rather than gradual because at α ≥ 0.9 the most a corrector
-/// can win is 0.1 of a step, while the centering it pays is unbounded.
+/// The notable result is that the gate is not a trade. Gating **improves** the
+/// cold column too, from -39 to -44, and takes the models made *worse* by
+/// correctors from 3 down to 1. Correcting an already-long step was never
+/// paying for itself on either surface; the warm route is only where it was
+/// measurable, because that is where steps are long from the first iteration.
+/// 0.8 is past the useful range (-37) and 0.95 barely gates at all, so the
+/// floor and ceiling are both visible in the table. 0.9 ties 0.85 on both
+/// aggregates; 0.85 is taken because it also leaves the warm regression test's
+/// family at exactly its uncorrected total, where 0.9 leaks one iteration.
 ///
 /// A one-sided band — correcting only products *above* `BETA_HI·μ` and leaving
-/// low ones alone — was tried first and rejected: it takes `lp_afiro` to 135,
-/// exactly the uncorrected baseline. The win and the harm are the same action,
-/// so band shape cannot separate them and the step length must.
+/// low ones alone — was tried first and rejected: it left `lp_afiro` at the
+/// uncorrected baseline exactly. The win and the harm are the same action, so
+/// band shape cannot separate them and the step length must.
 ///
 /// HSDE deliberately does **not** gate: its correctors are long-standing and
 /// its blast radius is the shipped baseline, so leaving them exactly as they
 /// were keeps the default route byte-identical.
-pub(crate) const ALPHA_MAX: f64 = 0.9;
+pub(crate) const ALPHA_MAX: f64 = 0.85;
 
 /// Whether the Mehrotra step is short enough that correcting it can pay for
 /// itself. See [`ALPHA_MAX`].

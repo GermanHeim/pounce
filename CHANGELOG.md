@@ -60,30 +60,42 @@ changes.
   empty against the previous release at default options, at
   `nlp_scaling_method=none` and at `mu_strategy=adaptive`.
 
-  On NETLIB `afiro` the direct driver goes 135 → 122 iterations with
-  the final KKT error improving 2.10e-7 → 2.49e-8, and HSDE goes
-  15 → 13. On a generated 400-variable convex QP the direct driver goes
+  On NETLIB `afiro` HSDE goes 15 → 13. The direct driver's headline
+  for this fixture — a hundred-plus iteration margin off a 135-iteration
+  baseline — has been overtaken: the #689 cold-start
+  rescale in this same release solves `afiro` in 10 iterations unaided,
+  and the correctors take it to 9. The claim that the scheme pays on
+  the direct driver now rests on an aggregate rather than on one
+  model — over the 52 NETLIB LPs that converge on this driver under
+  every arm, 688 → 644 iterations, 29 models improving and 1
+  worsening. On a generated 400-variable convex QP the direct driver goes
   12 → 10 and HSDE 17 → 15, with 71–77% of the correctors accepted.
   Wall clock does not move measurably on either — this is an
   iteration-count change, and the machine's wall-clock noise floor is
   larger than the effect.
 
   On the **direct** driver the scheme is gated on the Mehrotra step
-  still being short (`min(α_p, α_d) < 0.9`). Ungated it is a net loss
+  still being short (`min(α_p, α_d) < 0.85`). Ungated it is a net loss
   on warm starts, which is the surface that actually reaches this
-  driver: the band is symmetric, so a product the affine step drove
+  driver — `pounce-py`'s `solve_qp` sends cold solves to HSDE but
+  warm-started ones here, a route `scripts/sweep-fixtures.sh` cannot
+  see. The band is symmetric, so a product the affine step drove
   *below* `0.1μ` — the superlinear tail — is corrected back **up** to
-  the band floor, pinning μ's descent at exactly 10× per iteration.
-  The acceptance test is step length alone and cannot see that bill.
-  Measured over 230 warm-started convex QP/LPs through the Python
-  host, ungated correctors cost 967 → 1004 iterations (37 of the 80
-  LPs lost exactly one, none gained); gated, the total is 967, per
-  instance identical to correctors off. The gate keeps the cold win:
-  over the 42 NETLIB LPs that converge on this driver, correctors save
-  52 iterations ungated and 50 gated. HSDE is **not** gated — its
-  correctors are long-standing and its blast radius is the shipped
-  baseline. See `correctors::ALPHA_MAX` for the calibration, including
-  why `lp_afiro` is not what the threshold was fitted to.
+  the band floor, pinning μ's descent at exactly 10× per iteration,
+  and the acceptance test is step length alone so it cannot see that
+  bill. Measured over 230 warm-started convex QP/LPs through the
+  Python host, ungated correctors cost 967 → 1004 iterations (37 of
+  the 80 LPs lost exactly one, none gained); gated, the total is 967,
+  per instance identical to correctors off.
+
+  The gate is not a trade. It also **improves** the cold aggregate,
+  688 → 644 against 649 ungated, and takes the models correctors make
+  worse from 3 down to 1: correcting an already-long step was never
+  paying for itself on either surface, and warm is merely where it was
+  measurable. HSDE is **not** gated — its correctors are long-standing
+  and its blast radius is the shipped baseline. See
+  `correctors::ALPHA_MAX` for the calibration, including why
+  `lp_afiro` is not what the threshold was fitted to.
 
   Two things it deliberately does **not** do. It cannot fire on a
   second-order or PSD block, because the complementarity product there

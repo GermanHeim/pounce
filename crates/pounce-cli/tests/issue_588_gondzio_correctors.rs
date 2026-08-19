@@ -90,11 +90,23 @@ fn iters(r: &SolveReport) -> usize {
 /// Claim 1: the correctors reach the direct driver, and they pay there.
 ///
 /// Both halves are asserted, but only the *direction* is — absolute counts are
-/// the most platform-sensitive numbers in a sweep. Measured on
-/// x86_64-unknown-linux-gnu at the shipping commit: 135 iterations with the
-/// correctors off, 122 with them on, and the final KKT error improves along
-/// with the count (2.10e-7 -> 2.49e-8), so the shorter trajectory is not
-/// bought by stopping earlier at a worse point.
+/// the most platform-sensitive numbers in a sweep. Measured at the shipping
+/// commit: 10 iterations with the correctors off, 9 with them on.
+///
+/// That margin used to be a hundred-plus iterations wide (135 off, low 120s
+/// on). gh #689 rescaled this driver's cold
+/// start and now solves `afiro` in 10 iterations unaided, so what is left here
+/// is a one-iteration difference — enough to prove the knob is *wired* to
+/// `run_ipm`, which is all this test claims, but no longer evidence that the
+/// scheme pays. The aggregate that carries that claim is in
+/// `correctors::ALPHA_MAX` (52 NETLIB LPs, 688 -> 644). Do not re-tune the
+/// gate against this fixture; its count is chaotic in the threshold.
+///
+/// The final KKT error does **not** improve along with the count here any
+/// more (2.25e-9 off, 6.72e-8 on). Both are converged and the objectives agree
+/// to the tolerance asserted below, but the old claim that the shorter
+/// trajectory also lands at a sharper point is not true on this model after
+/// #689, so it is not made.
 #[test]
 fn the_direct_driver_runs_the_correctors() {
     let off = solve("lp_afiro", &["qp_hsde=no", "qp_gondzio_corr=0"]);
