@@ -24,10 +24,57 @@ efficiently:
   (`n = 80000`, `m = 40000`).
 - **sparseqp** — convex sparse QP, tridiagonal `Q`, cyclic three-term
   inequality rows, box bounds. Default `n = 50000`.
+- **laptime** — minimum-lap-time vehicle trajectory on a closed circuit,
+  transcribed by degree-3 Radau direct collocation. Nonconvex objective,
+  saturating (Pacejka) tyre curves, a friction-ellipse path constraint, and a
+  periodicity row closing the lap. Default `N = 1000` intervals with 8
+  steering-lag states, i.e. `n_x = 14` — `n = 58014`, `m = 62014`, 2000
+  degrees of freedom. Added for pounce #698.
 
 These are intentionally synthetic rather than drawn from a public library so
 the size can be scaled freely without shipping giant fixtures, and so both
 solvers see the exact same problem.
+
+### Why `laptime` is not a sixth variation on the first five
+
+The first five are all large and sparse, and none of them is shaped like the
+models that have actually broken POUNCE's limited-memory path. `optcontrol`
+is the closest and it is a single-state, linear-dynamics, convex QP: two
+Jacobian entries per row, no active inequalities, no restoration, and an
+exact Hessian available for free.
+
+That gap is not hypothetical. `scripts/scaling-probe.sh` measured the
+limited-memory path as linear from `n = 2,000` to `n = 128,000` **on these
+families** and reported no hidden quadratic — while pounce #684 was, at that
+moment, allocating a dense `n(n+1)/2` Hessian triangle the instant
+restoration was entered under `hessian_approximation=limited-memory`. The
+probe was right about what it measured and blind to the defect, because none
+of its problems enters restoration.
+
+`laptime` is the shape that found #677, #684, #686 and #688: a 60,000-variable
+collocation model with analytic Jacobians and no analytic Hessian. It is an
+independent problem built from published vehicle-dynamics modelling, not a
+copy of the reporter's proprietary model.
+
+It already separates the two Hessian legs on its own. Mesh refinement, POUNCE
+0.10.0, 2 lag states, iterations to convergence:
+
+| `N` | exact | limited-memory | lap time (exact) |
+|---|---|---|---|
+| 40 | 27 | 71 | 65.658683 |
+| 80 | 29 | 144 | 65.462561 |
+| 160 | 33 | 276 | 65.370889 |
+| 320 | 89 | **884, `ErrorInStepComputation`** | 65.326142 |
+| 640 | 339 | **did not finish in 900 s** | 65.303131 |
+
+The exact-Hessian column is a well-behaved transcription: lap time converges
+first-order in the mesh (the differences halve — the expected rate for a
+minimum-time problem whose optimal control switches), and the solve stays
+cheap. The limited-memory column diverges from it by roughly 3x per
+refinement and then falls over at a size the exact path handles in 89
+iterations. Whether that is L-BFGS legitimately struggling on a hard
+nonconvex problem or a defect is **not established here** — but it is the
+first problem in this repo that poses the question at all.
 
 ## Contents
 

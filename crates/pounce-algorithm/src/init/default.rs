@@ -168,7 +168,7 @@ impl DefaultIterateInitializer {
     fn calculate_least_square_primals(
         &self,
         cq: &IpoptCqHandle,
-        _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
         aug_solver: &mut dyn AugSystemSolver,
         n_x: Index,
     ) -> Option<Rc<dyn Vector>> {
@@ -179,8 +179,10 @@ impl DefaultIterateInitializer {
         let j_d = cq_ref.curr_jac_d();
         // `zeroW` pins the W triplet structure in the linsol so later
         // calls with the real Hessian write into the right slots
-        // (mirrors `IpLeastSquareMults`).
-        let zero_w = cq_ref.curr_exact_hessian();
+        // (mirrors `IpLeastSquareMults`). Structure only — see the note
+        // in `eq_mult/least_square.rs`; evaluating the Hessian here asked
+        // a limited-memory NLP for a callback it may not have (gh#698).
+        let zero_w = nlp.borrow().uninitialized_h();
         drop(cq_ref);
 
         let n_s = curr_d.dim();

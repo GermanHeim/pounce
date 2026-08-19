@@ -110,7 +110,8 @@ is a dict of the same total plus its components:
 x, info = prob.solve(x0=...)
 t = info["timing"]
 print(t["overall_alg"])                    # total solve wall time
-print(t["linear_system_factorization"],    # KKT factorization vs …
+print(t["linear_system_symbolic_factorization"],  # symbolic analysis,
+      t["linear_system_factorization"],    # … KKT factorization,
       t["linear_system_back_solve"],        # … back-solve, and their
       t["linear_system_total"])             # sum (total linear algebra)
 print(t["eval_objective"], t["eval_gradient"],

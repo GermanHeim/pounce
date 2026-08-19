@@ -63,15 +63,23 @@ impl EqMultCalculator for LeastSquareMults {
         let grad_f = cq_ref.curr_grad_f();
         let j_c = cq_ref.curr_jac_c();
         let j_d = cq_ref.curr_jac_d();
+        drop(cq_ref);
+
+        let nlp_ref = nlp.borrow();
         // Upstream `IpLeastSquareMults.cpp:80` passes a `zeroW` SymMatrix
         // (same sparsity as the real Hessian) with `W_factor=0.0`. This
         // ensures `StdAugSystemSolver` pins its triplet structure with
         // the W slots present, so subsequent calls (with the actual
         // Hessian) write into those slots rather than skipping them.
-        let zero_w = cq_ref.curr_exact_hessian();
-        drop(cq_ref);
-
-        let nlp_ref = nlp.borrow();
+        //
+        // Structure only: upstream takes it from `IpNLP().uninitialized_h()`
+        // (`IpLeastSquareMults.cpp:38`), not from an evaluation. Using
+        // `curr_exact_hessian()` here — an unmemoized `eval_h` — invoked
+        // the user's Hessian callback once per `calculate_y_eq` even under
+        // `hessian_approximation = limited-memory`, where the whole point
+        // is that the user has declared they are not supplying one
+        // (gh#698). The values are never read: `w_factor` is 0.0.
+        let zero_w = nlp_ref.uninitialized_h();
 
         // rhs_x = −∇f + Pₗ z_L − Pᵤ z_U  (mirrors
         // `IpLeastSquareMults.cpp:54-57` exactly).
