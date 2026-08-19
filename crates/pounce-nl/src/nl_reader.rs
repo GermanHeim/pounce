@@ -33,13 +33,13 @@
 //!   tests in this module.
 
 use crate::nl_quadratic::{
-    Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero, quad_form_readout,
-    recognize_expr,
+    FactoredQuadratic, Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero,
+    quad_form_readout, recognize_expr, recognize_factored_quadratic,
 };
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::constant_derivatives::{DerivativeProof, DerivativeProofs};
-use pounce_nlp::quadratic::QuadraticStructure;
+use pounce_nlp::quadratic::{QuadraticStructure, SquareTerm};
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -432,7 +432,12 @@ impl NlBody {
     /// [`crate::nl_quadratic::is_expanded_quadratic`] applies to a tree.
     /// Reading a factored form out of stored coefficients cancels — five
     /// digits on `(x − 500000)²` — so the gate is on both arms or on
-    /// neither (gh #588, Q4; gh #673).
+    /// neither (gh #588, Q4).
+    ///
+    /// A body this refuses for that reason is not out of reach, only out of
+    /// *this* representation: [`Self::admitted_factored_form`] serves it by
+    /// keeping the squares factored (gh #673), and only a body neither can
+    /// express keeps its tape.
     ///
     /// ## The second gate: a term that was *lost* is a term that is missing
     ///
@@ -478,6 +483,56 @@ impl NlBody {
                 (!form.lost_terms()).then(|| quad_form_readout(&form))
             }
             NlBody::Quad(q) => (!q.form.lost_terms()).then(|| quad_form_readout(&q.form)),
+        }
+    }
+
+    /// The **factored** form the constant-structure evaluator may use when
+    /// [`Self::admitted_quad_form`] refuses (gh #673).
+    ///
+    /// That accessor's gate is `is_expanded_quadratic`, and what it refuses
+    /// is a body whose read-out would be an algebraic *expansion* of what
+    /// the writer wrote — `(x − 500000)²` read back as
+    /// `x² − 10⁶x + 2.5·10¹¹`, five digits gone. The refusal was never
+    /// about the body being unsuitable for constant-structure evaluation;
+    /// it was about the *representation*. So a body written as a sum of
+    /// squared residuals — which is every least-squares model, and 41 of
+    /// `airport.nl`'s 42 rows — is served here instead, by keeping the
+    /// writer's own grouping and squaring it at evaluation time exactly as
+    /// the tape does. See
+    /// [`recognize_factored_quadratic`](crate::nl_quadratic::recognize_factored_quadratic)
+    /// for what is admitted and why it costs no accuracy.
+    ///
+    /// Answers `None` for a body the parser recognized: a
+    /// [`NlBody::Quad`] is an already-flat sum of monomials by
+    /// construction, so it has no factoring left to keep and
+    /// [`Self::admitted_quad_form`] has already served it.
+    ///
+    /// ## This arm answers for the bodies refused on *shape*, and only those
+    ///
+    /// [`Self::admitted_quad_form`] says `None` for two different reasons,
+    /// and only one of them is this arm's. A body refused because its shape
+    /// is factored is what this serves. A body refused because a term went
+    /// **missing** in the fold ([`Quad2::lost_terms`], gh #685) keeps its
+    /// tape, and the explicit `is_expanded_quadratic` test here is what
+    /// keeps it there: those bodies are flat sums of monomials, so the
+    /// square-shaped ones among them — `2⁵³x₀² + x₀² − 2⁵³x₀²` is three —
+    /// would otherwise be admitted here by the back door. gh #685 decided
+    /// that trade (reach, not correctness) and it is not being reopened as
+    /// a side effect of gh #673.
+    ///
+    /// Callers must still try [`Self::admitted_quad_form`] first: both can
+    /// answer for the same body (a bare `x²` is a monomial and a square),
+    /// and the expanded arm is the cheaper evaluation — a matvec over a
+    /// merged row rather than one squaring per term.
+    pub fn admitted_factored_form(&self) -> Option<FactoredQuadratic> {
+        match self {
+            NlBody::Tree(e) => {
+                if is_trivially_zero(e) || is_expanded_quadratic(e) {
+                    return None;
+                }
+                recognize_factored_quadratic(e)
+            }
+            NlBody::Quad(_) => None,
         }
     }
 
@@ -547,6 +602,32 @@ impl NlBody {
             NlBody::Quad(q) => out.extend(q.vars.iter().map(|&v| v as usize)),
         }
     }
+}
+
+/// Give one body a constant-structure form, if either representation will
+/// take it, and return its id.
+///
+/// The order is the contract [`NlBody::admitted_factored_form`] states:
+/// the expanded read-out first, because it is the cheaper evaluation and
+/// because it is what the `qcqp*` family — the target of gh #588's Q4 —
+/// arrives as; the factored one only for the bodies that gate refuses
+/// (gh #673). A body neither admits keeps its AD tape, which is where every
+/// body was before Q4.
+fn push_body_form(quad: &mut QuadraticStructure, body: &NlBody) -> Option<u32> {
+    if let Some((h, lin, c)) = body.admitted_quad_form() {
+        return Some(quad.push_form(&h, &lin, c));
+    }
+    let fq = body.admitted_factored_form()?;
+    let terms: Vec<SquareTerm<'_>> = fq
+        .squares
+        .iter()
+        .map(|t| SquareTerm {
+            weight: t.weight,
+            coefs: &t.coefs,
+            constant: t.constant,
+        })
+        .collect();
+    Some(quad.push_factored_form(&terms, &fq.linear, fq.constant))
 }
 
 /// The degree read-out [`NlBody::provably_affine`] makes of a recognized
@@ -4120,13 +4201,17 @@ impl NlTnlp {
             // back, and still walks a tree for the bodies that kept one —
             // a `from_expressions` model, a factored row rewound by the
             // parser, or any body at all under `POUNCE_DBG_NO_QUAD`.
-            if let Some((h, lin, c)) = prob.obj_nonlinear.admitted_quad_form() {
-                let f = quad.push_form(&h, &lin, c);
+            //
+            // A form that gate refuses is offered the *factored* read-out
+            // before it falls back to a tape (gh #673): the gate is a
+            // verdict on the expansion, not on the body, and a sum of
+            // squared residuals keeps its structure by keeping its squares.
+            // `push_body_form` owns that order.
+            if let Some(f) = push_body_form(&mut quad, &prob.obj_nonlinear) {
                 quad.assign_objective(f);
             }
             for k in 0..prob.m {
-                if let Some((h, lin, c)) = prob.con_nonlinear[k].admitted_quad_form() {
-                    let f = quad.push_form(&h, &lin, c);
+                if let Some(f) = push_body_form(&mut quad, &prob.con_nonlinear[k]) {
                     quad.assign_row(k, f);
                 }
             }
