@@ -382,19 +382,12 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "wsmp_write_matrix_iteration",
     ];
 
-    // #551 section 1 — feature runs, read site missing.
-    const LINE_SEARCH: &[&str] = &[
-        "accept_after_max_steps",
-        "alpha_for_y_tol",
-        "delta",
-        "eta_penalty",
-        "filter_margin_fact",
-        "filter_max_margin",
-        "nu_inc",
-        "nu_init",
-        "rho",
-        "theta_min",
-    ];
+    // The line-search group is empty: every option that was in it is
+    // now either read (`alpha_red_factor` on #678, then
+    // `accept_after_max_steps`, `delta`, the four penalty-acceptor
+    // knobs and the two adaptive-filter margin knobs here) or declared
+    // unimplemented (`theta_min`, `alpha_for_y_tol`), so the group is
+    // gone rather than kept as an empty decoration.
 
     // #551 section 1 — feature runs, read site missing.
     const CORRECTOR: &[&str] = &[
@@ -450,7 +443,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
 
     let known_debt: BTreeSet<&str> = BACKEND_KNOBS
         .iter()
-        .chain(LINE_SEARCH)
         .chain(CORRECTOR)
         .chain(BARRIER_KKT)
         .chain(RESTORATION)
