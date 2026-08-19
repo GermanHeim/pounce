@@ -188,9 +188,23 @@ pub struct FeralConfig {
     /// The inner cap is hard-coded in feral 0.15.1
     /// (`solve_sparse_refined_core`, `max_steps = 10`), so pounce cannot
     /// narrow it without an upstream change; the knob here is
-    /// all-or-nothing. Asked for as feral#178 — one correction step
+    /// all-or-nothing. Asked for as feral#178 and implemented in
+    /// feral#179 (`RefineOptions { max_steps }`) — one correction step
     /// would plausibly serve the pinene_3200 case at a tenth of the
-    /// cost, which is what would let this default change.
+    /// cost, which is what would let this default change. Consuming it
+    /// needs a feral *release*: `Cargo.toml` pins the published
+    /// crates.io version and `check-release-consistency.sh` rejects a
+    /// git rev.
+    ///
+    /// Worth knowing before retuning this: feral#179 measured that
+    /// nothing merely ill-conditioned reaches the 10-step budget at all
+    /// (Hilbert n = 8..40 stops at 3-7, ill-conditioned bordered KKTs at
+    /// 1). It is only reachable when the factor is a genuinely perturbed
+    /// approximate inverse — which is pounce's case, because pounce
+    /// perturbs the L-factor. The full budget is therefore the normal
+    /// case here, not the tail.
+    ///
+    /// Tracked as gh#710, which carries the acceptance criteria.
     pub refine: bool,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
