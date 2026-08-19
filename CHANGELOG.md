@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+- **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
+  (#697).
+
+  An iterated presolve hands back a wrapper object whose per-pass layers
+  live in a `chain`; the wrapper substitutes nothing itself. The aggregate
+  objective offset was a stored field on that wrapper, initialized to `0.0`
+  and never filled in — only `postsolve` walked the chain — so any reduction
+  that took two or more layers reported no offset at all. The value is now
+  computed on demand by summing the chain (`obj_orig = obj_reduced +
+  Σₖ offsetₖ`, one term per layer, because layer `k+1` reduces layer `k`'s
+  reduced problem), and the field behind it is private, so it cannot be read
+  as complete when it is not.
+
+  The consumer is #689's `QpOptions::obj_constant`: the CLI adds presolve's
+  offset to the `.nl` constant before handing the reduced problem to the
+  solver. With the offset dropped, the "plus presolve's own objective
+  offset" half of that fix held only for single-layer reductions. Three
+  fixtures in the corpus are multi-layer with a nonzero offset —
+  `dual_scaled` (`-5999`), `dual_order` (`-59`) and `tame` (`1`) — and all
+  three were passing `0.0` through.
+
+  Same bounded blast radius as #689: `obj_constant` is a convergence-test
+  normalizer only, consumed by `scale_g` and the two cost scalings. It
+  enters no residual, no search direction, no dual, and not
+  `QpSolution::obj`. The failure mode was a stopping test slightly too
+  loose on models where presolve moved a large constant into the objective —
+  an accuracy effect, which is the class gh#544 taught us not to wave
+  through on "it cannot produce a wrong answer". Fixture sweep, both legs:
+  **no diff**; the corrected constant moves no trajectory in the corpus.
+
 - **HSDE no longer certifies `Optimal` a few hundred short of the optimum
   when the objective carries a large constant** (#689).
 

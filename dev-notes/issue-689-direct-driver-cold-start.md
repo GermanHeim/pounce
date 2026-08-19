@@ -124,7 +124,9 @@ The gap normalizer is right in form and wrong in its input. Told the objective
 constant, `scale_g` measures the objective the caller reads and everything
 follows: `QpOptions::obj_constant` (default `0.0`) carries it, the CLI sets it
 from the `.nl` degree-0 term it already tracks for reporting plus presolve's
-`obj_offset`, in the solver's minimize sense, and it travels through both cost
+`obj_offset()` (an accessor, and summed over the reduction chain, since gh
+#697 — the field it replaced read `0.0` for every multi-layer presolve),
+in the solver's minimize sense, and it travels through both cost
 scalings (divided by `hsde_cost_scale`'s `σ`, multiplied by Ruiz's). It is a
 convergence-test normalizer only — no residual, no direction, no dual, and not
 `QpSolution::obj` — and `0.0` is the *tightest* value, so nothing that does not
