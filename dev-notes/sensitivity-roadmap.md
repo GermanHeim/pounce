@@ -344,6 +344,67 @@ iterate when the residual stops decreasing monotonically, which
 reproduces the factor-once behavior exactly where it is needed and
 nowhere else.
 
+### Item 3 findings from the double column (2026-08-19)
+
+The same model exercised the shipped `degeneracy="directional"` search and
+an exact external solve of its eq. 14 QP. Results, each measured:
+
+- The shipped search spends 32 s exhausting its 16-trial budget over the
+  792 weakly active bounds and falls back to one-sided on every call. The
+  cost is one released refactorization per trial, and the trial count a
+  correct enumeration needs grows combinatorially with the weak set, so
+  no budget fixes it.
+- A candidate working set that holds a weak bound whose variable an
+  equality row already pins is singular by construction, and one singular
+  trial ends the whole search. The column has about twenty such rows, the
+  t=0 states under their initial conditions, and dynamic models generally
+  carry this class.
+- The weak set splits into 444 trace-composition lower bounds, present at
+  any operating point of this model family, and 348 tray-holdup bounds
+  from the transient level policy. The composition bounds also sit inside
+  equality-pinned initial conditions at t=0.
+- The exact QP, solved in the weak rows' reduced space against the held
+  factor: single-violator pivoting converges deterministically (1248
+  pivots, holds 84 of 792). Undamped and damped block pivoting both
+  cycle. Equality-pinned weak rows must start released and never pivot.
+  The cost floor for any factor-reuse implementation is one released
+  refactorization plus one released-factor column per row that enters
+  the working set, which on this model is several seconds even with
+  batched backsolves, above the 3.5 s warm re-solve.
+- An earlier two-way disagreement between pivoting variants was traced to
+  two sign-test defects in the harness (the multiplier baseline carried
+  the factor's upper-row sign, and the tolerance was scaled by the
+  multiplier block). Nonconvexity of the QP was not established: the one
+  tested difference direction had positive curvature. GSSOSC remains
+  unverified on this model class.
+- The mode machinery carries its own cost layers at this scale,
+  independent of any degeneracy handling: fix_relax's refinement is about
+  3 s per pin round (47.7 s per call here) and path about 1 s per walk
+  segment (15.0 s per call at its 16-segment cap). Supplying the QP
+  decision through the existing bordered machinery adds a column per
+  released row (105 s) or a walk segment per forced release (18 minutes,
+  capped, and the capped predictor is useless). Every mode that manages
+  bound activity costs more than the 3.5 s warm re-solve on this model.
+- Corrected results are predictor-independent: all four predictors
+  (fix_relax and path, one-sided and QP-decided) reach the 7.6e-7 floor
+  within three chord iterations at +1 percent, including the capped path
+  predictor whose own error was 0.13. A better predictor buys at most one
+  backsolve.
+- The predictor is the corrector's first iteration: chord started from
+  the base point evaluates the residual at the shifted parameters, and
+  its first backsolve reproduces the linear predictor up to the barrier
+  correction term. A predictor-only call stays meaningful as the variant
+  that needs no model evaluations, and as `corrector_iter=0` continuity.
+
+Design consequence for item 3: replace the enumeration's interior with
+single-violator pivoting on one in-place released refactorization, keep
+equality-pinned weak rows released, and add a regime guard: when the
+all-released solve reports many sign violations, skip the search and fall
+back immediately, because the decision then costs more than a re-solve
+and correction makes it unnecessary. The directional mode's documented
+scope is small weakly active sets. The recommended path on large models
+is `mode="linear"` with corrector iterations.
+
 ## API surface
 
 Three **modes** of `estimate()`, an ordered ladder on a single `mode`
