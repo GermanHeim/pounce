@@ -49,25 +49,34 @@ fn run(fixture_name: &str, tag: &str, opts: &[&str]) -> (Option<i32>, String) {
 /// table fails here rather than going quiet again.
 #[test]
 fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
-    for (i, (opt, needle)) in [
-        ("penalty_init_max=42", "CG-penalty"),
+    // (option, a phrase from its feature, the issue its group names)
+    for (i, (opt, needle, issue)) in [
+        ("penalty_init_max=42", "CG-penalty", "483"),
         (
             "gradient_approximation=finite-difference-values",
             "finite differences",
+            "483",
         ),
-        ("dependency_detector=mumps", "linear-dependency detection"),
-        ("check_derivatives_for_naninf=yes", "NaN/Inf"),
-        ("magic_steps=yes", "magic steps"),
+        (
+            "dependency_detector=mumps",
+            "linear-dependency detection",
+            "483",
+        ),
+        ("check_derivatives_for_naninf=yes", "NaN/Inf", "483"),
+        ("magic_steps=yes", "magic steps", "483"),
         // #551: the two line-search knobs whose *feature* is missing.
         // `theta_min` is the CG-penalty acceptor's threshold, not the
         // filter's (the filter derives its own from `theta_min_fact`);
         // `alpha_for_y_tol` only configures the `primal-and-full` /
         // `dual-and-full` multiplier-step rules, which pounce does not
         // have.
-        ("theta_min=1e-5", "CG-penalty acceptor"),
-        ("alpha_for_y_tol=1e-3", "primal-and-full"),
-        ("suppress_all_output=yes", "output controls"),
-        ("hsllib=libcoinhsl.so", "HSL loader"),
+        ("theta_min=1e-5", "CG-penalty acceptor", "551"),
+        ("alpha_for_y_tol=1e-3", "primal-and-full", "551"),
+        ("suppress_all_output=yes", "output controls", "483"),
+        ("hsllib=libcoinhsl.so", "HSL loader", "483"),
+        // #551/#677: pounce computes the single `sens_state_1`
+        // perturbation tier; upstream's further tiers do not exist here.
+        ("n_sens_steps=3", "perturbation tier", "677"),
     ]
     .into_iter()
     .enumerate()
@@ -78,9 +87,10 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
             err.contains(needle),
             "`{opt}` should mention `{needle}`; stderr:\n{err}",
         );
-        // Every group names its tracking issue; the older ones are
-        // gh#483, the #551 line-search pair carry 551.
-        assert!(err.contains("483") || err.contains("551"), "stderr:\n{err}",);
+        // Every entry names the issue its own group tracks, rather
+        // than an `||` over the issues in the table: a wrong-issue
+        // message would otherwise pass by borrowing a sibling's number.
+        assert!(err.contains(issue), "stderr:\n{err}");
     }
 }
 

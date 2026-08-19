@@ -251,6 +251,14 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "hessian_constant",
         "jac_c_constant",
         "jac_d_constant",
+        // The sIPOPT keys, read in `pounce-sensitivity/src/options.rs`
+        // through helpers deliberately named `read_yes` / `read_num`
+        // with `key` first, so this scan can find them. That crate is
+        // the furthest read site from here, which makes it the easiest
+        // one to lose in a refactor.
+        "run_sens",
+        "compute_red_hessian",
+        "sens_max_pdpert",
     ] {
         assert!(
             read.contains(probe),
@@ -415,16 +423,10 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     // The restoration group is empty: `max_resto_iter` has a read site
     // and the other four are refused (#551).
 
-    // #551 section 1 — feature runs, read site missing.
-    const SENSITIVITY: &[&str] = &[
-        "compute_red_hessian",
-        "n_sens_steps",
-        "rh_eigendecomp",
-        "run_sens",
-        "sens_bound_eps",
-        "sens_boundcheck",
-        "sens_max_pdpert",
-    ];
+    // The sIPOPT group is empty: six of the seven now reach
+    // `pounce_sensitivity::SensOptionOverrides`, and `n_sens_steps` is
+    // refused above its default because pounce computes the single
+    // `sens_state_1` perturbation tier (#551 / #677).
 
     // The NLP-hint and misc groups are empty, and both were scan false
     // positives rather than unwired options — which is worth stating,
@@ -434,7 +436,7 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     // helper, so the scan saw no literal key and reported them silent.
     // The probes above keep the literal-key form from regressing.
 
-    let known_debt: BTreeSet<&str> = BACKEND_KNOBS.iter().chain(SENSITIVITY).copied().collect();
+    let known_debt: BTreeSet<&str> = BACKEND_KNOBS.iter().copied().collect();
 
     let unexpected: Vec<&&String> = silent
         .iter()
