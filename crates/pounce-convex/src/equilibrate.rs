@@ -247,6 +247,15 @@ fn scale_bounds(bnd: &[f64], dcol: &[f64], inf: f64) -> Vec<f64> {
 }
 
 impl Scaling {
+    /// The scalar cost scaling `σ` applied to the objective (`1` for a QP, and
+    /// for any LP whose `‖ĉ‖` needs no normalization). The scaled problem's
+    /// objective is `σ` times the original's, so a caller carrying an objective
+    /// *constant* alongside the data must scale it by the same `σ` to keep the
+    /// two commensurate — see [`crate::ipm::QpOptions::obj_constant`].
+    pub(crate) fn sigma(&self) -> f64 {
+        self.sigma
+    }
+
     /// Map a solution of the scaled problem back to the original problem's
     /// variables and duals, in place. `orig` is the unscaled problem, used to
     /// recompute the objective `½xᵀPx + cᵀx` directly at the recovered `x`

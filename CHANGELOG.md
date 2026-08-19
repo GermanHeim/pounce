@@ -93,6 +93,138 @@ changes.
   solver by the reformulation-cost guards, and the members that do route
   conic carry SOC blocks). `POUNCE_DBG_GONDZIO=1` prints the per-solve
   corrector tally so this is checkable rather than assumed.
+- **HSDE no longer certifies `Optimal` a few hundred short of the optimum
+  when the objective carries a large constant** (#689).
+
+  The default route returned `Solve_Succeeded` on
+  `crates/pounce-cli/tests/fixtures/scaled_feasible_a.nl` at objective
+  `236.85`, and on `scaled_feasible_b` at `456.33`, where the true
+  optimum of both is **`0`** — each minimizes `Σ(xᵢ − aᵢ)²` with `a`
+  inside the feasible set, which the NLP route confirms at `1.0e-9` and
+  `3.8e-9`. Two more fixtures were doing the same thing:
+  `feasible_x0_wide_scale` returned a point with an `Overall NLP error`
+  of `3.6e4`, and `feasible_x0_extreme_row` one at `7.6e-4`.
+
+  HSDE's scale-relative stopping test normalizes the duality gap by the
+  objective magnitude — the standard convention, and correct. But
+  `QpProblem` models `½xᵀPx + cᵀx` only: a model whose objective has a
+  degree-0 term hands the solver an objective displaced by it, and for a
+  least-squares objective the constant is `Σaᵢ²` — `5.0e11` on this pair.
+  Normalizing by *that* turns `gap_rel < tol` into a blanket `tol·|Σaᵢ²|`
+  = `5e3` absolute slack on the gap. The gh #414 guard missed it for the
+  same reason (its complementarity normalizer is also the objective): it
+  read `4.9e-10` on a point whose absolute KKT error is `2.5e2`.
+
+  `QpOptions::obj_constant` (default `0.0`) now carries that constant,
+  and the CLI sets it from the `.nl` degree-0 term it already tracks for
+  reporting, plus presolve's own objective offset, in the solver's
+  minimize sense. It travels through both cost scalings — divided by
+  `hsde_cost_scale`'s `σ`, multiplied by Ruiz's. It is **only** a
+  convergence-test normalizer: it enters no residual, no search
+  direction, no dual, and not `QpSolution::obj`. The default `0.0` is the
+  *tightest* choice, so every library caller that does not set it, and
+  every problem whose objective genuinely is large (POWELL20 and the rest
+  of the large-data cluster the relative test exists for), is unchanged.
+
+  This was the alternative to two tempting fixes that do not work.
+  Requiring absolute complementarity in the relative arm separates this
+  fixture pair cleanly (`1.2e3`/`1.5e3` against `2.3e-11`/`1.1e-28` on
+  the corpus) but rejects the gh #286 huge-magnitude optima, whose
+  *genuine* complementarity is `1.5e9` and `1.4e13`; normalizing the gap
+  by the gradient scale instead of the objective is tighter by a factor
+  `‖x̂‖`, which rejects any problem whose magnitude lives in `‖x*‖` —
+  POWELL20 exactly. The constant is the only thing that actually
+  distinguishes the two families.
+
+  One knock-on had to be corrected with it. The `large_scale` gate that
+  admits the relative test at all is keyed on
+  `max(scale_d, scale_p, scale_g)`, so making `scale_g` *accurate* — small,
+  once the constant is accounted for — could **close** it, stripping the
+  primal and dual residuals of a relaxation they still need and that has
+  nothing to do with the objective constant. On `feasible_x0_wide_scale`
+  it did exactly that: the solve is converged by iteration 18 (`inf_pr`
+  on its own `5e-9` floor, `μ = 9e-18`) and then span for 180 more
+  iterations, twice collapsing into the denormals and restarting, before
+  reaching the cap at 198 with an answer it had found long before. The
+  gate now reads the objective's own magnitude — it is asked whether
+  absolute `tol` accuracy is reachable on this data, which is a property
+  of the magnitudes actually being computed — while `scale_g` supplies
+  the gap's normalizer. That model now converges in 80.
+
+  Fixture sweep, both legs: the `qp_hsde=no` leg is unchanged, and on the
+  default leg only the four models with a large objective constant move —
+  `scaled_feasible_a` 16 → 123 iterations (`236.85` → `0`, KKT error
+  `2.5e2` → `4.6e-3`), `scaled_feasible_b` 21 → 47 (`456.33` → `0`,
+  `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 80 (KKT error
+  `3.6e4` → `6.6e-15`), `feasible_x0_extreme_row` 32 → 33 (`7.6e-4` →
+  `3.8e-5`). The counts are the cost of the work these solves were
+  previously skipping.
+
+- **The direct convex QP driver no longer diverges on a badly-scaled
+  feasible model** (#689).
+
+  At `qp_hsde=no` — the driver `QpWarmStart`, the build-once
+  `QpFactorization` handle and the dual-infeasibility reverify guard all
+  use, and which cannot fall back to HSDE the way the one-shot path can —
+  `scaled_feasible_a` ran to the 199-iteration cap at `final_kkt_error
+  8.4e45`, `final_dual_inf 3.7e41` and objective `1.14e11`. It was
+  diverging, not converging slowly; HSDE solves the same model in 16.
+
+  The cause was the cold start. It was `s = z = e` regardless of the
+  data, and on this model the Ruiz-equilibrated feasible set sits at
+  `‖ĥ‖ ≈ 5e9`, so the starting slacks were nine orders too small: the
+  first Newton direction was correct (`‖dx‖ ≈ 2.9e9`, pointed at the
+  optimum) and fraction-to-boundary cut it to `α ≈ 8e-9`. The iterate
+  could not move, the corrector then divided `σμ` by slacks still pinned
+  at `1` and returned directions of `1e18`, and `z` ran away to `7e21`.
+  The cold seed now goes through the same Mehrotra recentering the warm
+  path already used, which takes the starting slacks from the implied
+  `s̃ = h − Gx` and so sizes them to the problem.
+
+  That alone reaches the optimum but cannot recognize it: `‖x̂‖ ≈ 5e9`
+  against `‖ĥ‖ ≈ 5e9` floors the primal residual at `5e-6 ≈ 4 ulp`, a
+  thousand times `tol`, so the loop ran 175 iterations past its own
+  answer (true KKT error `4e-25`) until `s` and `z` underflowed into the
+  denormals. The driver therefore also gets the scale-relative stopping
+  arm HSDE already has, under the same gate — but with complementarity
+  held **absolute**, since `μ = ⟨s,z⟩/deg` is a sum of products of
+  nonnegatives with no cancellation floor to excuse relaxing it.
+
+  Both fixtures now solve at `qp_hsde=no`: `scaled_feasible_a` in 27
+  iterations and `scaled_feasible_b` in 28, both at objective `0` — which
+  is the true optimum (each model minimizes `Σ(xᵢ − aᵢ)²` with `a` inside
+  the feasible set). This answers the second half of #689: the two are
+  *not* flat or degenerate optima, and HSDE's `236.85` / `456.33` on them
+  are iterates it stops at, not answers. Its relative gap test normalizes
+  by the objective magnitude, which on these models is `5e11` of constant
+  offset — a blanket `5e3` tolerance on the gap. HSDE is unchanged here
+  and still reports those values; the fixture pair should not be read as
+  an objective sentinel for the sweep until that is addressed. Full
+  analysis and the case for a follow-up:
+  `dev-notes/issue-689-direct-driver-cold-start.md` §3.
+
+  A direct-driver `Optimal` is now also re-checked in the caller's own
+  coordinates before it is returned. The driver's convergence test runs
+  inside the Ruiz metric, and Ruiz's dual map divides by the column
+  scaling, so a `Dc` spanning many decades inflates the recovered dual
+  residual: on `feasible_x0_extreme_row` the pre-fix direct route
+  returned `Solve_Succeeded` at objective `5.0e11` — with an unscaled
+  dual infeasibility of `2.6e6` — where the true optimum is `0`. That
+  false success, and the equivalent one the new stopping arm would
+  otherwise have produced on `feasible_x0_sentinel_bound`, are now
+  demoted to an honest failure.
+
+  The default (HSDE) route is bit-for-bit unchanged across the fixture
+  corpus, both legs. On the `qp_hsde=no` leg the sweep also shows
+  `lp_afiro` 135 → 10 iterations (and closer to the NETLIB optimum:
+  `-464.7531428` against `-464.7531419`), `rankdef_eq_qp` 12 → 6,
+  `wyndor_min` 7 → 6, `qcqp_ball` 15 → 12; `feasible_x0_wide_scale` 4 →
+  13 and `dual_order` / `dual_scaled` 4 → 5, the last three at a better
+  final KKT error. Three lines end slightly less accurate and are
+  recorded rather than waved past: `lp_row_constant` /
+  `lp_row_constant_expr` at `1.8e-8` against `7.2e-10`, and `qcqp_ball`
+  at `1.2e-8` against `7.3e-9` — all still inside the solved band. Per-
+  line detail: `dev-notes/issue-689-direct-driver-cold-start.md`.
 
 - **`recalc_y` no longer degrades the multipliers it exists to sharpen**
   (#688).

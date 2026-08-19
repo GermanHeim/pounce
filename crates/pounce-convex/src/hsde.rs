@@ -510,7 +510,21 @@ where
             .max(norm_b)
             .max(norm_h);
         let d_obj = -0.5 * xpx / (tau * tau) - bty / tau - htz / tau;
-        let scale_g = obj_hat.abs().max(d_obj.abs());
+        // Measured **including the caller's objective constant** (gh #689).
+        // `QpProblem` holds the quadratic form only, so on a model whose
+        // objective carries a degree-0 term — every least-squares objective —
+        // `obj_hat` is the caller's objective displaced by that constant, and
+        // the displacement is unbounded (`scaled_feasible_a`: caller optimum
+        // `0`, solver optimum `−5.0e11`). Normalizing the gap by the displaced
+        // magnitude turns `gap_rel < tol` into a blanket `tol·|constant|`
+        // absolute slack — `5e3` there — which is how this loop certified
+        // `Optimal` at a caller-visible `236.85`. `opts.obj_constant` is `0.0`
+        // unless a caller supplies it, so this is a no-op for everything else,
+        // including every problem whose objective genuinely *is* large
+        // (POWELL20 and the rest of the large-data cluster below).
+        let scale_g = (obj_hat + opts.obj_constant)
+            .abs()
+            .max((d_obj + opts.obj_constant).abs());
         let pres_rel = pres / (1.0 + scale_p);
         let dres_rel = dres / (1.0 + scale_d);
         let gap_rel = gap / (1.0 + scale_g);
@@ -523,7 +537,17 @@ where
         // scale ≲ 30) reach the tight absolute test, while the large-data
         // cluster (POWELL20/BOYD/QFORPLAN/QSHELL at scale 7e9–4e12) can only be
         // certified relatively.
-        let large_scale = relative_stop_permitted(scale_d.max(scale_p).max(scale_g), opts.tol);
+        // The gate is asked whether `tol`-level *absolute* accuracy is reachable
+        // on this data at all, which is a property of the magnitudes actually
+        // being computed — so it reads the objective's own magnitude, not the
+        // caller-relative one `scale_g` became in gh #689. Correcting `scale_g`
+        // by a constant that makes the caller's objective come out near zero
+        // must not *close* this gate: on `feasible_x0_wide_scale` it did, and
+        // the primal and dual residuals — which floor at `5e-9` and `5e-6` on
+        // data of this scale, and have nothing to do with the objective
+        // constant — lost a relaxation they still needed.
+        let scale_g_raw = obj_hat.abs().max(d_obj.abs());
+        let large_scale = relative_stop_permitted(scale_d.max(scale_p).max(scale_g_raw), opts.tol);
         // `res` (used only for the `near_opt` salvage check below) tracks
         // whichever test governs this iterate.
         let res = if large_scale {

@@ -2481,9 +2481,32 @@ fn run_convex_qp(
     let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
     let qp_opts = QpOptions {
         collect_iterates: want_trace,
+        // Tell the solver the objective constant it is *not* carrying (gh
+        // #689). `QpProblem` holds the quadratic form only, so on a
+        // least-squares-shaped objective the solver's `obj` is the reported one
+        // displaced by `obj_const` — unbounded displacement, `5e11` on the
+        // `scaled_feasible` pair — and the scale-relative stopping test then
+        // normalizes the duality gap by a magnitude that belongs to the
+        // constant rather than to the solution. In the solver's own (minimize)
+        // sense the constant is `sign · obj_const`, the inverse of the
+        // `reported_obj` line below. Convergence-test normalizer only: it
+        // changes no residual, no dual, and not `sol.obj`.
+        obj_constant: sign * obj_const,
         ..convex_opts
     };
-    let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
+    // The reduced problem presolve hands the solver differs from `qp` by
+    // `ps.obj_offset`, so the constant that makes *it* commensurate with the
+    // user's objective carries that offset too.
+    let solve_opts_offset = |offset: f64| {
+        convex_opts_with_remaining(
+            QpOptions {
+                obj_constant: qp_opts.obj_constant + offset,
+                ..qp_opts
+            },
+            t0,
+        )
+    };
+    let solve_opts = || solve_opts_offset(0.0);
     // What presolve did, held back until we know this solve is the one that
     // reports (gh #535). These lines describe the reduction, not the verdict,
     // but they are the *only* stdout a declined convex attempt would otherwise
@@ -2563,9 +2586,14 @@ fn run_convex_qp(
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
-                    solve_qp_active_set(&ps.reduced, &solve_opts(), &engine_overrides, &mut mk)
+                    solve_qp_active_set(
+                        &ps.reduced,
+                        &solve_opts_offset(ps.obj_offset),
+                        &engine_overrides,
+                        &mut mk,
+                    )
                 } else {
-                    solve_qp_ipm(&ps.reduced, &solve_opts(), backend)
+                    solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset), backend)
                 };
                 ps.postsolve(&red)
             }
@@ -2824,6 +2852,10 @@ fn run_convex_socp(
     let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
     let qp_opts = QpOptions {
         collect_iterates: want_trace,
+        // The objective constant the solver is not carrying, in its own
+        // (minimize) sense — see the QP path for what it is for (gh #689).
+        // This path does not presolve, so there is no reduction offset to add.
+        obj_constant: sign * obj_const,
         ..convex_opts
     };
     let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
