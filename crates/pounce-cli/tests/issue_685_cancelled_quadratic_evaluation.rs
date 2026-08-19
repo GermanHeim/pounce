@@ -185,6 +185,41 @@ fn a_row_that_dropped_a_term_is_not_admitted_for_evaluation() {
     }
 }
 
+/// The same gate, against the second door gh #673 opened.
+///
+/// `admitted_factored_form` serves the bodies `admitted_quad_form` refuses
+/// for their *shape*, and these are refused for their *loss* — but they are
+/// also, read structurally, sums of squares: `2⁵³·x₀·x₀ + x₀² − 2⁵³·x₀·x₀`
+/// is three of them. Without the explicit `is_expanded_quadratic` test in
+/// that accessor they walk straight back onto the fast path this file
+/// exists to keep them off.
+///
+/// It is worth knowing *what* goes wrong when they do, because it is not
+/// the value. The factored read-out sums the same three terms the tape
+/// does, so `eval_g` and `eval_jac_g` agree to the bit — measured, with the
+/// gate removed. What does not agree is the **Hessian pattern**: the tape
+/// declares a structural `(0, 0)` and writes `0.0` into it, while
+/// `Σ 2wₖbₖbₖᵀ` folds to exactly `0.0` there — `2⁵⁴ + 2` ties back to
+/// `2⁵⁴`, then `− 2⁵⁴` — and a zero entry is not stored. The model's
+/// `nnz_h` goes 2 → 1, and `the_cli_answer_does_not_depend_on_the_dropped_form`
+/// below moves from `−1.812` to `−0.571` on that alone.
+#[test]
+fn a_row_that_dropped_a_term_is_not_admitted_as_a_factored_form_either() {
+    for (what, txt) in [
+        ("cancellation", model(&cancelling_body())),
+        ("partial cancellation", model(&partially_cancelling_body())),
+        ("underflow", model(underflowing_body())),
+    ] {
+        for (path, prob) in both_paths(&txt) {
+            assert!(
+                prob.con_nonlinear[0].admitted_factored_form().is_none(),
+                "{what} ({path}): a row with a dropped term came back in \
+                 through the factored read-out",
+            );
+        }
+    }
+}
+
 /// The partial-cancellation model is the one an emptiness test would let
 /// through, and this is why: its term map is not empty and its *degree*
 /// answer is correct. Only the read-out is wrong.

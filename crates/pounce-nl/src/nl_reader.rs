@@ -516,9 +516,16 @@ impl NlBody {
     /// tape, and the explicit `is_expanded_quadratic` test here is what
     /// keeps it there: those bodies are flat sums of monomials, so the
     /// square-shaped ones among them — `2⁵³x₀² + x₀² − 2⁵³x₀²` is three —
-    /// would otherwise be admitted here by the back door. gh #685 decided
-    /// that trade (reach, not correctness) and it is not being reopened as
-    /// a side effect of gh #673.
+    /// would otherwise be admitted here by the back door.
+    ///
+    /// What breaks when they are is the **Hessian pattern**, not the value.
+    /// The factored read-out sums the same terms the tape does, so `g` and
+    /// `∂g/∂x` agree to the bit; but `Σ 2wₖbₖbₖᵀ` folds that row's `(0, 0)`
+    /// to exactly `0.0` — `2⁵⁴ + 2` ties back to `2⁵⁴` — and a zero entry
+    /// is not stored, while the tape declares the entry and writes zero
+    /// into it. Measured with this test removed: `nnz_h` 2 → 1 and gh
+    /// #685's reproduction moves from `−1.812` to `−0.571`. Pinned by
+    /// `a_row_that_dropped_a_term_is_not_admitted_as_a_factored_form_either`.
     ///
     /// Callers must still try [`Self::admitted_quad_form`] first: both can
     /// answer for the same body (a bare `x²` is a monomial and a square),

@@ -874,27 +874,32 @@ mod tests {
     }
 
     /// The weight multiplies the **square**, not the residual: `w·(l·l)`,
-    /// never `(w·l)·l`. The tape associates the first way, and on a body
-    /// whose terms then cancel the difference is not an ulp of the answer,
-    /// it is the answer — `2⁵³x² + x² − 2⁵³x²` is `x²`, and one rounding
-    /// step out of place turns it into something else entirely.
+    /// never `(w·l)·l`. The tape associates the first way — a `.nl` body
+    /// `o2 n7 o5 (x) n2` squares first and scales after — and the two
+    /// orders are not the same double.
+    ///
+    /// `7·(1.1)²` is the smallest witness this crate has: `7·(1.1·1.1)` is
+    /// `8.47` and `(7·1.1)·1.1` is `8.470000000000002`. That is one ulp on
+    /// its own, and on a body whose terms then cancel it is not one ulp of
+    /// the answer, it is the answer.
     #[test]
     fn the_weight_multiplies_the_square_not_the_residual() {
-        let big = 9_007_199_254_740_992.0f64; // 2⁵³
         let coefs = [(0usize, 1.0)];
-        let term = |w: f64| SquareTerm {
-            weight: w,
-            coefs: &coefs,
-            constant: 0.0,
-        };
         let mut qs = QuadraticStructure::new(0);
-        let f = qs.push_factored_form(&[term(big), term(1.0), term(-big)], &[], 0.0);
-        let x = [3.0];
-        // Exactly what the three summands sum to on a tape.
-        let taped = big * (x[0] * x[0]) + x[0] * x[0] - big * (x[0] * x[0]);
-        assert_eq!(qs.value(f, &x), taped);
-        // …and that is *not* the algebraic `x²`, which is the whole point
-        // of matching the tape rather than the mathematics.
-        assert_ne!(taped, x[0] * x[0]);
+        let f = qs.push_factored_form(
+            &[SquareTerm {
+                weight: 7.0,
+                coefs: &coefs,
+                constant: 0.0,
+            }],
+            &[],
+            0.0,
+        );
+        let x = [1.1];
+        assert_eq!(qs.value(f, &x), 7.0 * (x[0] * x[0]));
+        // The association this must not have — stated as a number so the
+        // test cannot pass by both sides being computed the same wrong way.
+        assert_eq!(qs.value(f, &x), 8.47);
+        assert_ne!((7.0 * x[0]) * x[0], 8.47);
     }
 }
