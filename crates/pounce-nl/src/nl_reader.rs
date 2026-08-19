@@ -385,32 +385,31 @@ impl NlBody {
     /// `10⁶` bound and reports `Optimal`. A wrong answer, on the default
     /// route, with no option set (gh #685 part 2).
     ///
-    /// The gate is [`Quad2::dropped_terms`] and not an emptiness test,
-    /// for the reason spelled out on [`Self::admitted_quad_form`]:
-    /// partial cancellation leaves a non-empty map that is still short a
-    /// term. Refusing costs reach only — the row falls back to the AD
-    /// tape, and the model to the NLP path, which solves it soundly.
+    /// The gate is [`Quad2::lost_terms`] and not an emptiness test, for
+    /// the reason spelled out on [`Self::admitted_quad_form`]: partial
+    /// cancellation leaves a non-empty map that is still short a term.
+    /// Refusing costs reach only — the row falls back to the AD tape,
+    /// and the model to the NLP path, which solves it soundly.
     ///
-    /// It costs more reach than it strictly has to. `x − x` cancels
-    /// *exactly*, so that form is the body and could be kept; the flag
-    /// says a term was dropped, not whether the arithmetic that dropped
-    /// it was lossy, so this refuses that too. gh #687 tracks the sharper
-    /// gate (flag the inexact fold, which is where `2⁵³ + 1` loses the
-    /// `1`, rather than the drop it leads to).
+    /// `lost_terms` is the *inexact fold* and not the drop it leads to
+    /// (gh #687), so the reach given up here is only the reach that has
+    /// to be. `x − x` cancels exactly — nothing was lost, the form is
+    /// the body, and it is still handed out; `2⁵³·x + x − 2⁵³·x` loses
+    /// the `x` at `fl(2⁵³ + 1)`, and that is what this refuses.
     ///
     /// Use [`Self::quad_terms_dropped`] to tell the two `None`s apart.
     pub fn analyze_quadratic_full(&self) -> Option<QuadForm> {
         match self {
             NlBody::Tree(e) => {
                 let form = recognize_expr(e)?;
-                (!form.dropped_terms()).then(|| quad_form_readout(&form))
+                (!form.lost_terms()).then(|| quad_form_readout(&form))
             }
-            NlBody::Quad(q) => (!q.form.dropped_terms()).then(|| quad_form_readout(&q.form)),
+            NlBody::Quad(q) => (!q.form.lost_terms()).then(|| quad_form_readout(&q.form)),
         }
     }
 
     /// Whether the recognizer reached a degree-≤2 form for this body but
-    /// dropped at least one term getting there — the case
+    /// lost at least one term getting there — the case
     /// [`Self::analyze_quadratic_full`] refuses.
     ///
     /// `false` both for a body that recognized cleanly and for one that
@@ -420,8 +419,8 @@ impl NlBody {
     /// one: on a tree it re-runs the recognizer.
     pub fn quad_terms_dropped(&self) -> bool {
         match self {
-            NlBody::Tree(e) => recognize_expr(e).is_some_and(|f| f.dropped_terms()),
-            NlBody::Quad(q) => q.form.dropped_terms(),
+            NlBody::Tree(e) => recognize_expr(e).is_some_and(|f| f.lost_terms()),
+            NlBody::Quad(q) => q.form.lost_terms(),
         }
     }
 

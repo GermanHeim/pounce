@@ -156,11 +156,14 @@ pub enum ClassReason {
     ObjectiveNotQuadratic,
     /// Row `row`'s nonlinear part is not a degree-2 polynomial.
     ConstraintNotQuadratic { row: usize },
-    /// The objective is degree ≤ 2, but the recognizer dropped a term
+    /// The objective is degree ≤ 2, but the recognizer *lost* a term
     /// reaching its coefficients, so they are not the whole objective.
     ObjectiveTermsDropped,
-    /// Row `row` is degree ≤ 2, but the recognizer dropped a term reaching
+    /// Row `row` is degree ≤ 2, but the recognizer *lost* a term reaching
     /// its coefficients, so they are not the whole row (gh #685).
+    ///
+    /// "Lost", not merely "dropped": a term that cancels exactly is not
+    /// missing from the form, so those rows keep the fast path (gh #687).
     ConstraintTermsDropped { row: usize },
     /// The sense-adjusted objective Hessian has a negative eigenvalue.
     ObjectiveHessianIndefinite,
@@ -198,14 +201,15 @@ impl ClassReason {
                 format!("row {row}'s nonlinear part is not a degree-2 polynomial")
             }
             ClassReason::ObjectiveTermsDropped => {
-                "the objective's quadratic form dropped a term to floating-point \
-                 cancellation or underflow, so its coefficients are not the whole \
-                 objective"
+                "the objective's quadratic form lost a term to an inexact \
+                 floating-point fold or a flush to zero, so its coefficients are \
+                 not the whole objective"
                     .to_string()
             }
             ClassReason::ConstraintTermsDropped { row } => format!(
-                "row {row}'s quadratic form dropped a term to floating-point \
-                 cancellation or underflow, so its coefficients are not the whole row"
+                "row {row}'s quadratic form lost a term to an inexact \
+                 floating-point fold or a flush to zero, so its coefficients are \
+                 not the whole row"
             ),
             ClassReason::ObjectiveHessianIndefinite => {
                 "the objective Hessian (sense-adjusted for minimization) is not PSD".to_string()
@@ -1506,13 +1510,42 @@ mod tests {
         );
 
         // x0 − x0 reaches degree 0 the other way: by the two coefficients
-        // summing to zero and the term being dropped. The recognizer cannot
-        // tell that from `2⁵³·x0 + x0 − 2⁵³·x0`, where the same drop loses a
-        // whole `x0` and the LP built from the read-out is a different
-        // problem — so it refuses both and the model goes to NLP (gh #685).
-        // The cost is reach: this one *was* linear.
+        // summing to zero and the term being dropped. That sum is *exact*
+        // — `fl(1) + fl(−1)` loses nothing — so the empty form really is
+        // the objective, and this stays LP. (gh #685 sent it to NLP; gh
+        // #687 sharpened the gate to the inexact fold and handed the reach
+        // back.)
         let cancels = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(Expr::Var(0)));
         let prob = qp_stub(cancels, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+
+        // 2⁵³·x0 + x0 − 2⁵³·x0 empties the same map, but the `x0` was lost
+        // at `fl(2⁵³ + 1) = 2⁵³` — an inexact add — so the read-out is a
+        // whole `x0` short of the objective and the LP built from it would
+        // be a different problem. This is the case that must not route LP
+        // (gh #685).
+        let big = 9007199254740992.0_f64; // 2⁵³
+        let loses = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Const(big)),
+                    Box::new(Expr::Var(0)),
+                )),
+                Box::new(Expr::Var(0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(big)),
+                Box::new(Expr::Var(0)),
+            )),
+        );
+        let prob = qp_stub(loses, vec![Expr::Const(0.0)]);
         assert_eq!(
             classify_problem_explained(&prob),
             (ProblemClass::Nlp, ClassReason::ObjectiveTermsDropped)
@@ -1736,25 +1769,49 @@ mod tests {
     }
 
     /// A nonlinear objective whose quadratic part cancels has an empty
-    /// Hessian — and an empty Hessian it *arrived at by dropping a term* is
-    /// not evidence of anything (gh #685). It used to classify `Lp` on the
-    /// strength of that map; it now goes to NLP, because the coefficient
-    /// arithmetic that emptied the map is the same arithmetic that empties
-    /// it for `2⁵³·x0² + x0² − 2⁵³·x0²`, which is `x0²`.
+    /// Hessian — and whether that empty map is evidence depends on how it
+    /// got empty. `x0² − x0²` cancels exactly, so the map is the whole
+    /// objective and the model is an LP. `2⁵³·x0² + x0² − 2⁵³·x0²` empties
+    /// the same map having lost an entire `x0²` at `fl(2⁵³ + 1)`, so the
+    /// read-out is not the objective and the model must go to NLP (gh
+    /// #685, gated on the inexact fold per gh #687).
     ///
-    /// The spurious-QP concern this test was written for is unaffected: the
-    /// empty Hessian still never reaches the QP IPM.
+    /// The spurious-QP concern this test was written for is unaffected in
+    /// either case: an empty Hessian never reaches the QP IPM.
     #[test]
-    fn classify_cancelling_quadratic_objective_is_not_lp() {
-        // x0² − x0²  ≡ 0: the degree-2 terms cancel in the polynomial walk.
-        let sq = || {
-            Expr::Binary(
+    fn classify_cancelling_quadratic_objective_routes_on_exactness() {
+        // x0² − x0²  ≡ 0: the degree-2 terms cancel in the polynomial walk,
+        // and the sum that cancels them is exact.
+        let sq = |c: f64| {
+            let p = Expr::Binary(
                 BinOp::Pow,
                 Box::new(Expr::Var(0)),
                 Box::new(Expr::Const(2.0)),
-            )
+            );
+            if c == 1.0 {
+                p
+            } else {
+                Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(p))
+            }
         };
-        let obj = Expr::Binary(BinOp::Sub, Box::new(sq()), Box::new(sq()));
+        let obj = Expr::Binary(BinOp::Sub, Box::new(sq(1.0)), Box::new(sq(1.0)));
+        let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+
+        // 2⁵³·x0² + x0² − 2⁵³·x0² ≡ x0²: same empty map, one lost term.
+        let big = 9007199254740992.0_f64; // 2⁵³
+        let obj = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(sq(big)),
+                Box::new(sq(1.0)),
+            )),
+            Box::new(sq(big)),
+        );
         let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
         assert_eq!(
             classify_problem_explained(&prob),

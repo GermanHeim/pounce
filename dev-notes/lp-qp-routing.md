@@ -254,11 +254,14 @@ so the header alone does **not** distinguish LP from QP:
   *linear*, the model classified **LP**, and the extractor folded an
   empty linear part into `G` — the constraint left the problem, and
   `min −x₀` walked to its bound and reported `Optimal`. The recognizer
-  records whether it dropped a term, and `analyze_quadratic_full`
+  records whether it *lost* a term — a drop behind arithmetic that
+  rounded (gh #687), not a drop as such — and `analyze_quadratic_full`
   refuses the form when it did, which is upstream of every consumer that
   reads coefficients out (this walk and both extractors). The row's
   model then goes to NLP and is evaluated from its tape — the
-  conservative fallback above, reached for one more reason.
+  conservative fallback above, reached for one more reason. An exactly
+  cancelling row (`x − x`) lost nothing, so the empty map really is the
+  row and it keeps the LP/QP route.
 
 This mirrors how QP-capable AMPL solvers detect QPs (ASL's `nqpcheck`
 walks the nonlinear tree to recover `Q`); the header is a fast reject

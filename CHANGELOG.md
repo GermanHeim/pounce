@@ -163,9 +163,9 @@ changes.
   records that a term was dropped and not whether the arithmetic that
   dropped it was exact. Nothing in the corpus is affected — no fixture
   body drops a term — but a model that spells a linear row that way loses
-  the LP path. #687 tracks the sharper gate (flag the inexact *fold*,
-  which is where `2⁵³ + 1` loses the `1`, rather than the drop it leads
-  to), which would give those models their fast path back.
+  the LP path. #687 is the sharper gate (flag the inexact *fold*, which
+  is where `2⁵³ + 1` loses the `1`, rather than the drop it leads to);
+  the next entry lands it and hands those models their fast path back.
 
 - **…and a row whose coefficients cancel *exactly* keeps both fast paths**
   (#687, sharpening the two above).
@@ -177,8 +177,8 @@ changes.
   coefficient map is a lower bound. `2⁵³·x² + x² − 2⁵³·x²` loses its `x²`
   at `fl(2⁵³ + 1) = 2⁵³`, an inexact add, and only then cancels. Both set
   the same flag, so both were refused, and the first one paid a proved
-  degree, a matrix evaluation, and (once the classifier gates on it) the
-  convex route for arithmetic that never rounded.
+  degree, a matrix evaluation, and — once the classifier gated on it too
+  — the LP/QP route, all for arithmetic that never rounded.
 
   The gate is now the **fold** rather than the drop: a form records
   whether its arithmetic rounded — a two-sum on every coefficient add, an

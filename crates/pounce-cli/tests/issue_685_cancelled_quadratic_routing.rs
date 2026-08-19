@@ -31,11 +31,12 @@
 //! rather than reporting it as "not a degree-2 polynomial", which is what
 //! the two new `ClassReason` variants are for.
 //!
-//! The refusal is conservative in a way worth knowing about: it keys off
-//! "a term was dropped", not off "the arithmetic that dropped it was
-//! lossy", so an exact `x − x` loses the LP path along with the
-//! catastrophic cases. Nothing in the fixture corpus drops a term at all,
-//! so nothing measurable moves; gh #687 tracks the sharper gate.
+//! The refusal was at first conservative in a way worth knowing about: it
+//! keyed off "a term was dropped", not off "the arithmetic that dropped
+//! it was lossy", so an exact `x − x` lost the LP path along with the
+//! catastrophic cases. gh #687 sharpened the flag to the inexact *fold*,
+//! so exact cancellations keep their fast path and only the lossy ones —
+//! the shape asserted below — route NLP.
 //!
 //! What is asserted here is the routing, not a numerical optimum. A body
 //! whose coefficients cancel in the recognizer's arithmetic cancels in the
