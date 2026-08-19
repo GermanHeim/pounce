@@ -903,11 +903,13 @@ impl Solver {
         };
 
         if weak.is_empty() {
+            // a clean base point takes the plain step and no decision
+            // happens, so the reported decision work is zero
             let mut d = vec![0.0; dim];
             if !bs.solve(&rhs_plain, &mut d) {
                 return Err(SolverError::BacksolveFailed);
             }
-            return Ok((d[..n_x].to_vec(), Vec::new(), 1));
+            return Ok((d[..n_x].to_vec(), Vec::new(), 0));
         }
 
         let budget = |need: usize, spent: usize| {
