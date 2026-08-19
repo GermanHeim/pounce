@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+- **Least-squares models now get the constant-structure fast path too**
+  (#673).
+
+  A degree-2 objective or row is evaluated from its constant matrix instead
+  of from an AD tape (#588, Q4), but only when the `.nl` writer had already
+  expanded it. A model written as a sum of squared residuals — which is
+  every least-squares model, and 41 of `airport.nl`'s 42 rows — kept its
+  tape, because reading `(x − 500000)²` back as `x² − 10⁶x + 2.5·10¹¹`
+  cancels five digits and is not a rewrite anyone should make behind a
+  user's back.
+
+  Such a body is now kept in the shape it was written: `Σ wₖ(bₖᵀx + dₖ)²`,
+  squared at evaluation time the way the tape squares it, so the fast path
+  costs no accuracy — and its terms are summed with the same compensation
+  #702 gave the expanded read-out, so it is not merely as good as the tape
+  but slightly better. The Hessian was never the problem — it is
+  constant either way — and is assembled once as before. `airport.nl` goes
+  from 1 of 42 rows on the fast path to 42 of 42 plus its objective, and 24
+  fixtures in total change how they are evaluated.
+
+  No model changes its answer: the evaluator differential test against the
+  tape passes with every tolerance and ulp pin as it was, and its randomized
+  battery now emits squared affine forms so the new read-out is covered by
+  more than the repository's fixtures. The fixture sweep moves one
+  line of 116 — `airport.nl` under limited-memory takes 57 iterations where
+  it took 59, at the same status and objective — and that is #702's
+  compensated summation reaching 42 rows it could not reach before, not the
+  new read-out: with the compensation left off, those rows evaluate
+  bit-identically to the tape they replace. On a generated 1000-variable
+  least-squares model, Lagrangian Hessian evaluation drops from 6.70 s to
+  0.26 s and the solve from 23.1 s to 15.4 s over an identical 53-iteration
+  trajectory.
+
+  A body mixing a square with a cross term `c·xᵢxⱼ`, one whose sum spine goes
+  through a declared common expression, and one that lost a coefficient to
+  cancellation (#685) all still keep their tapes. That last case covers two
+  routes to the same loss, not one: a lossy body written as a flat sum of
+  monomials is refused for its shape, and a genuinely factored body that
+  loses a Hessian entry while its squares are combined is refused where
+  they are combined. Both fall back to the tape.
+
 - **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
   iterations** (#702).
 
