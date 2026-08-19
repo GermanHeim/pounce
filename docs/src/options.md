@@ -124,6 +124,31 @@ that is what you meant. `alpha_for_y_tol` configures only the
 does not have; `alpha_for_y` supports `primal` (the default),
 `bound-mult`, `min`, `max` and `full`.
 
+Four **corrector** knobs joined it too. `corrector_type` and its
+safeguards `skip_corr_if_neg_curv`, `skip_corr_in_monotone_mode` and
+`corrector_compl_avrg_red_fact` select and gate the corrector step Ipopt
+tries *inside the line search* (`FilterLSAcceptor::TryCorrector`).
+POUNCE's line search takes no corrector trial at all. The
+predictor-corrector POUNCE does implement is Mehrotra's, applied to the
+search-direction right-hand side: `mehrotra_algorithm=yes` is read and
+honoured, and it also selects `mu_strategy=adaptive` and
+`mu_oracle=probing`.
+
+And three **sub-capabilities of features that do run**, where the
+refusal message has to say so or it reads as "restoration is missing":
+`expect_infeasible_problem_ctol` / `_ytol` steer
+`IpBacktrackingLineSearch`'s `count_successive_shortened_steps_`
+machinery, which POUNCE does not have — the restoration phase itself
+runs, and `expect_infeasible_problem` and
+`required_infeasibility_reduction` are read;
+`resto_failure_feasibility_threshold` asks for a threshold below which a
+stopped restoration is reclassified as a failure, and POUNCE has no such
+reclassification (`max_resto_iter`, below, is what bounds a restoration);
+and `limited_memory_special_for_resto=yes` asks for the special
+quasi-Newton update Ipopt dropped in Nov 2010 — L-BFGS runs in the
+restoration sub-solve with the regular update, which is what upstream's
+own default `no` asks for.
+
 The same rule applies one level down, to a single *value* of an option
 that otherwise works. `bound_mult_init_method` is read and honoured, but
 only its default `constant` is implemented; `mu-based` parses (an

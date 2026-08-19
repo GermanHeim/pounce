@@ -389,22 +389,16 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     // unimplemented (`theta_min`, `alpha_for_y_tol`), so the group is
     // gone rather than kept as an empty decoration.
 
-    // #551 section 1 — feature runs, read site missing.
-    const CORRECTOR: &[&str] = &[
-        "corrector_compl_avrg_red_fact",
-        "corrector_type",
-        "skip_corr_if_neg_curv",
-        "skip_corr_in_monotone_mode",
-    ];
+    // The barrier / KKT group is empty: `tau_min`, `s_max`,
+    // `neg_curv_test_tol` and `neg_curv_test_reg` now have read sites,
+    // and `fixed_mu_oracle` is refused (#551 / #677).
 
-    // #551 section 1 — feature runs, read site missing.
-    const RESTORATION: &[&str] = &[
-        "expect_infeasible_problem_ctol",
-        "expect_infeasible_problem_ytol",
-        "limited_memory_special_for_resto",
-        "max_resto_iter",
-        "resto_failure_feasibility_threshold",
-    ];
+    // The corrector group is empty: `corrector_type` and its three
+    // safeguards select `FilterLSAcceptor::TryCorrector`, which pounce
+    // does not have, and are refused (#551).
+
+    // The restoration group is empty: `max_resto_iter` has a read site
+    // and the other four are refused (#551).
 
     // #551 section 1 — feature runs, read site missing.
     const SENSITIVITY: &[&str] = &[
@@ -434,11 +428,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
 
     let known_debt: BTreeSet<&str> = BACKEND_KNOBS
         .iter()
-        .chain(CORRECTOR)
-        // The barrier / KKT group is empty: `tau_min`, `s_max`,
-        // `neg_curv_test_tol` and `neg_curv_test_reg` now have read
-        // sites, and `fixed_mu_oracle` is refused (#551 / #677).
-        .chain(RESTORATION)
         .chain(SENSITIVITY)
         .chain(NLP_HINTS)
         .chain(MISC)

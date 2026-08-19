@@ -480,6 +480,58 @@ changes.
   `dual-and-full` multiplier-step rules, which POUNCE does not have.
   Both now fail with a message naming the missing feature and the option
   to reach for instead, as the rest of the refusal table does.
+
+- **`max_resto_iter` reaches the restoration convergence check** (#551,
+  #677).
+
+  `RestoConvCheckAdapter` has capped *successive* restoration iterations
+  all along — under the field name `maximum_resto_iters`, which is why
+  grepping the option name found only the registry (#551's caution 2).
+  The number it enforced was a constant in `resto_inner_solver.rs`, so
+  setting `max_resto_iter` did nothing. It is now
+  `AlgorithmBuilder::resto::max_resto_iter`, read in
+  `algorithm_builder_from_options`.
+
+  **A registered default that POUNCE does not use, left as it was on
+  purpose.** The registry declares Ipopt's `3000000`; POUNCE has enforced
+  `3000` since the cap landed. Wiring the option must not move what an
+  unset option does, so the effective cap stays `3000` and only an
+  explicit `max_resto_iter` changes it. Adopting upstream's number would
+  let restorations POUNCE currently truncates run on — a trajectory
+  change, and one that needs its own measurement.
+  `max_resto_iter_default_is_pounces_cap_not_the_registered_one` pins
+  both halves so neither side can drift unnoticed.
+
+- **The corrector knobs and three restoration sub-capabilities are
+  refused rather than ignored** (#551).
+
+  `corrector_type`, `skip_corr_if_neg_curv`, `skip_corr_in_monotone_mode`
+  and `corrector_compl_avrg_red_fact` were classified as missing read
+  sites on the strength of POUNCE having *a* corrector. They configure a
+  different one: the registry files them under
+  `FilterLSAcceptor::RegisterOptions`, and what they select is
+  `FilterLSAcceptor::TryCorrector` — a corrector step tried *inside the
+  line search*. POUNCE's corrector is Mehrotra's, in the search-direction
+  right-hand side, reached through `mehrotra_algorithm`, which is read and
+  honoured. No acceptor here takes a corrector trial, so the four are
+  refused, and the message says which corrector POUNCE does have.
+
+  `expect_infeasible_problem_ctol` / `_ytol` steer
+  `IpBacktrackingLineSearch`'s `count_successive_shortened_steps_`
+  machinery, which POUNCE does not have;
+  `resto_failure_feasibility_threshold` asks for a reclassification of a
+  stopped restoration that POUNCE does not perform; and
+  `limited_memory_special_for_resto=yes` asks for the special
+  quasi-Newton update Ipopt dropped in Nov 2010. All three are
+  sub-capabilities of features that *do* run, so each message says what
+  the parent feature still does — restoration runs, L-BFGS runs in the
+  restoration sub-solve — rather than leaving a user to conclude
+  restoration is missing.
+
+  The default gate is unchanged: `corrector_type=none`,
+  `limited_memory_special_for_resto=no` and an `ipopt.opt` that spells
+  out any of these defaults still parse and solve.
+
 - **`tau_min`, `s_max`, `neg_curv_test_tol` and `neg_curv_test_reg` now do
   something; `fixed_mu_oracle` says it does not** (#551, #677).
 
