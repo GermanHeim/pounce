@@ -582,9 +582,16 @@ changes.
   legs.** Every struct default already equalled the registered default —
   0.99, 100, 0.0 and `yes` respectively — which is precisely why the
   omissions were invisible. What changes is that setting them now works:
-  `tau_min=0.5` moves 15 of 57 fixtures, `neg_curv_test_tol=1e-11` moves
-  10 (some sharply better, some sharply worse — it is a heuristic, and
-  `docs/src/options.md` now says so with the numbers).
+  `tau_min=0.5` moves 33 of 118 fixture-legs (`csfi2` 35 → 28, `deb7`
+  154 → 139, `cresc4` 81 → 1081), and `neg_curv_test_tol=1e-11` moves
+  11 of 59 fixtures — some sharply better
+  (`csfi2` 35 → 27 and to `Solve_Succeeded`), some sharply worse
+  (`eigenb2` 67 → 960), and, on `autocorr_bern55-06` and
+  `pooling_rt2stp`, to a **different, worse objective**. That last case
+  is the one worth naming: accepting a factorization whose inertia is
+  wrong can produce a tolerance-legal wrong answer, not merely a slower
+  one. It stays off by default, and `docs/src/options.md` now carries
+  the measured table rather than an assurance.
 
   `fixed_mu_oracle` is refused instead. POUNCE seeds μ on the switch out
   of free mode from the average complementarity, which is exactly the

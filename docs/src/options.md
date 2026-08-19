@@ -337,14 +337,36 @@ dxᵀ W dx + dxᵀ Σ_x dx + dsᵀ Σ_s ds [+ δ_x‖dx‖² + δ_s‖ds‖²]
 | `neg_curv_test_tol` | `0.0`   | `0` keeps the inertia check. Positive is the test's α_n: the factorization is accepted only if the direction clears the bound above, and otherwise δ_x is escalated exactly as a wrong inertia would. Upstream recommends `1e-12`–`1e-11`. |
 | `neg_curv_test_reg` | `yes`   | Whether the bracketed primal-regularization term counts toward the curvature. `no` is the original Ipopt form that ignores it. Only read when `neg_curv_test_tol > 0`. |
 
-**This is a heuristic, and turning it on is not free.** On POUNCE's
-fixture corpus at the recommended `1e-11`, ten models move: `csfi2`
-improves (`Solved_To_Acceptable_Level` in 35 iterations →
-`Optimal Solution Found` in 27) and `unbounded_cubic` reaches its verdict
-in 61 iterations instead of 290, while `eigena2` goes from 26 iterations
-to 282, `autocorr_bern55-06` from 72 to 1042, and `deb7` stops at
-`Error_In_Step_Computation`. It is off by default, and it is worth
-measuring on your model before leaving it on.
+**This is a heuristic, and turning it on is not free — it can change
+the answer, not just the path to it.** Measured over POUNCE's fixture
+corpus at the recommended `1e-11` (`scripts/sweep-fixtures.sh`, both
+legs), 11 of 59 models move:
+
+| model | default | `neg_curv_test_tol=1e-11` |
+|---|---|---|
+| `csfi2` | `Solved_To_Acceptable_Level`, 35 it | **`Solve_Succeeded`, 27 it** |
+| `unbounded_cubic` | `Diverging_Iterates`, 290 it | **`Diverging_Iterates`, 61 it** |
+| `cresc4` | 81 it | 90 it |
+| `infeasible_equalities` | `Infeasible_Problem_Detected`, 28 it | same, 37 it |
+| `unbounded_exp` | `Error_In_Step_Computation`, 27 it | same, 32 it |
+| `eigena2` | 26 it | **421 it** |
+| `eigenb2` | 67 it | **960 it** |
+| `autocorr_bern55-06` | `Solve_Succeeded`, 72 it, obj `-2304.000028` | **1042 it, obj `-2288.000022`** |
+| `pooling_rt2stp` | `Solve_Succeeded`, 298 it, obj `-3273.954992` | **`Solved_To_Acceptable_Level`, 537 it, obj `-3085.16078`** |
+| `deb7` | `Solve_Succeeded`, 154 it | **`Error_In_Step_Computation`, 183 it** |
+| `eigenb2` (L-BFGS leg) | `Solve_Succeeded`, 56 it | **`Error_In_Step_Computation`, 76 it** |
+
+The last four rows are the reason to read this before switching it on.
+`deb7` and `eigenb2`-under-L-BFGS stop converging at all;
+`autocorr_bern55-06` and `pooling_rt2stp` still report success but land
+on a **worse objective** — a tolerance-legal wrong answer, which is the
+failure mode that is invisible to a suite asserting status and
+objective-to-a-tolerance. Accepting a factorization whose inertia is
+wrong is exactly the kind of change that produces it.
+
+It is off by default (`neg_curv_test_tol=0` keeps the inertia check),
+and nothing above happens to a solve that leaves it alone. If you turn
+it on, measure your own model.
 
 ## Bound relaxation and `honor_original_bounds`
 
