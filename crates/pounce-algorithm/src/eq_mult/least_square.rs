@@ -49,6 +49,7 @@ impl EqMultCalculator for LeastSquareMults {
         aug_solver: &mut dyn AugSystemSolver,
         y_c: &mut dyn Vector,
         y_d: &mut dyn Vector,
+        unregularized: bool,
     ) -> bool {
         let curr = match data.borrow().curr.clone() {
             Some(c) => c,
@@ -103,49 +104,89 @@ impl EqMultCalculator for LeastSquareMults {
         let mut sol_x = rhs_x.make_new();
         let mut sol_s = rhs_s.make_new();
 
-        let coeffs = AugSysCoeffs {
-            w: Some(&*zero_w),
-            w_factor: 0.0,
-            d_x: None,
-            delta_x: 1.0,
-            d_s: None,
-            delta_s: 1.0,
-            j_c: &*j_c,
-            d_c: None,
-            // Tiny δ_c, δ_d (upstream `IpLeastSquareMults.cpp` uses 0).
-            // This is the SAME W=0 / structurally-zero (3,3)/(4,4)-block
-            // augmented system the dual initializer solves in
-            // `init/default.rs`, where pounce-feral's LDLᵀ mis-reports the
-            // inertia (it counted 0 negative eigenvalues on nuffield2_trap
-            // where the true count is n_c+n_d, raising WrongInertia). Here
-            // a spurious failure makes `calculate_y_eq` return false and the
-            // caller (`init/default.rs:388-390`) silently leaves y_c=y_d=0
-            // — the iter-0 `inf_du` blow-up this step exists to prevent.
-            // Perturbing by 1e-8 keeps the LS solution numerically identical
-            // (the constraint Jacobian dominates) while giving the diagonal
-            // something nonzero to pivot on. Mirrors the sibling workaround
-            // at `init/default.rs:171,174`; keep the two in sync.
-            delta_c: 1e-8,
-            j_d: &*j_d,
-            d_d: None,
-            delta_d: 1e-8,
-        };
-        let aug_rhs = AugSysRhs {
-            rhs_x: &*rhs_x,
-            rhs_s: &*rhs_s,
-            rhs_c: &*rhs_c,
-            rhs_d: &*rhs_d,
-        };
-        let mut sol = AugSysSol {
-            sol_x: &mut *sol_x,
-            sol_s: &mut *sol_s,
-            sol_c: y_c,
-            sol_d: y_d,
-        };
+        // δ_c = δ_d = 0, matching upstream `IpLeastSquareMults.cpp:80-81`,
+        // with a perturbed retry only if the unperturbed solve fails (#688).
+        //
+        // Eliminating `w` from this W=0 system gives
+        //
+        //     y = −(J Jᵀ + δ I)⁻¹ J · rhs_x
+        //
+        // so δ=0 returns the least-squares multiplier this calculator is
+        // named for, and δ>0 returns a Tikhonov-regularized one, damped
+        // by `O(δ / σ_min(J)²)` along the weakest singular directions.
+        //
+        // Review item M3 introduced δ=1e-8 here — the site previously
+        // matched upstream — to mirror the dual initializer's workaround
+        // for pounce-feral mis-reporting the inertia of a
+        // structurally-zero (3,3)/(4,4) block (0 negatives on
+        // nuffield2_trap against a true n_c+n_d, raising WrongInertia).
+        // A spurious failure makes this return false and the caller
+        // leaves y_c=y_d=0. M3 argued the perturbation was numerically
+        // inert because the suite stayed green — true, and true only
+        // while `σ_min(J)² ≫ δ`, which holds for every problem in this
+        // repo. That is a statement about the covered problems, not a
+        // scale-free property.
+        //
+        // Two things retired it. gh#540 and gh#592 fixed feral's inertia
+        // reporting at its source — `inertia_trust_floor` reports
+        // `Singular` rather than `WrongInertia` when the count is
+        // contradicted by a working-precision pivot, so `δ_c` is reached
+        // for where it actually repairs a rank-deficient constraint
+        // block — which is the defect M3 was compensating for from a
+        // distance. And #688 measured what the compensation costs on a
+        // problem that leaves the inert regime: on a ~59,000-variable
+        // collocation NLP the damping is `O(1)`, and because `recalc_y`
+        // recomputes `y` the same biased way every iteration the error is
+        // a fixed point of the estimator rather than a transient. It
+        // lands directly in `inf_du`. `recalc_y=yes` stalled at 1.55e-01,
+        // *worse* than `recalc_y=no` at 1.73e-02; at δ=0 the model
+        // converges, on both MA57 and FERAL.
+        //
+        // The retry keeps M3's protection without paying for it: the
+        // common case is now bit-identical to upstream, and a solve that
+        // genuinely fails still gets the perturbation before the caller
+        // falls back to zero. `nuffield2_trap` is not in this repo, so
+        // the retry cannot be regression-tested here — the same reason
+        // M3 shipped without a fail-first test, and why the guard is kept
+        // rather than dropped outright.
+        let mut status = ESymSolverStatus::Success;
+        let deltas: &[pounce_common::types::Number] =
+            if unregularized { &[0.0, 1e-8] } else { &[1e-8] };
+        for &delta in deltas {
+            let coeffs = AugSysCoeffs {
+                w: Some(&*zero_w),
+                w_factor: 0.0,
+                d_x: None,
+                delta_x: 1.0,
+                d_s: None,
+                delta_s: 1.0,
+                j_c: &*j_c,
+                d_c: None,
+                delta_c: delta,
+                j_d: &*j_d,
+                d_d: None,
+                delta_d: delta,
+            };
+            let aug_rhs = AugSysRhs {
+                rhs_x: &*rhs_x,
+                rhs_s: &*rhs_s,
+                rhs_c: &*rhs_c,
+                rhs_d: &*rhs_d,
+            };
+            let mut sol = AugSysSol {
+                sol_x: &mut *sol_x,
+                sol_s: &mut *sol_s,
+                sol_c: y_c,
+                sol_d: y_d,
+            };
 
-        let num_eq = aug_rhs.rhs_c.dim() + aug_rhs.rhs_d.dim();
-        let check_neg = aug_solver.provides_inertia();
-        let status = aug_solver.solve(&coeffs, &aug_rhs, &mut sol, check_neg, num_eq);
+            let num_eq = aug_rhs.rhs_c.dim() + aug_rhs.rhs_d.dim();
+            let check_neg = aug_solver.provides_inertia();
+            status = aug_solver.solve(&coeffs, &aug_rhs, &mut sol, check_neg, num_eq);
+            if matches!(status, ESymSolverStatus::Success) {
+                return true;
+            }
+        }
         matches!(status, ESymSolverStatus::Success)
     }
 }

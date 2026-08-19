@@ -462,6 +462,7 @@ impl RestorationPhase for MinC1NormRestoration {
                 aug_solver,
                 &mut *new_y_c,
                 &mut *new_y_d,
+                false,
             );
             if lsm_ok {
                 let yinitnrm = new_y_c.amax().max(new_y_d.amax());
@@ -887,6 +888,7 @@ mod tests {
             _aug: &mut dyn AugSystemSolver,
             y_c: &mut dyn Vector,
             y_d: &mut dyn Vector,
+            _unregularized: bool,
         ) -> bool {
             y_c.set(0.01);
             y_d.set(0.01);

@@ -129,7 +129,7 @@ that are above `nlp_scaling_max_gradient`.
 
 | Option | Default | Effect |
 |---|---|---|
-| `linear_system_scaling` | `none` | `none` / `ruiz`. `mc19` and `slack-based` are accepted by the option registry but not yet implemented — both fall back to `none`. |
+| `linear_system_scaling` | `none` | `none` / `ruiz` / `slack-based`. `mc19` is accepted by the option registry but not yet implemented and falls back to `none`. |
 | `linear_scaling_on_demand` | `yes` | Defer scaling computation until a linear solve is poor; reduces overhead for well-conditioned KKT systems. |
 
 The KKT augmented system is symmetric; all linear-system scalers in
@@ -143,14 +143,28 @@ FERAL/SSIDS).
   `ma57_automatic_scaling=yes` to get MA57's internal scaling instead.
 * **`ruiz`** — iterative symmetric ∞-norm equilibration (Ruiz,
   CERFACS TR/PA/01/14). Pure Rust, no Fortran dependency. Converges
-  geometrically; capped at 10 iterations. The only implemented
-  scaler today; recommended starting point when MA57's internal
-  scaling is off.
+  geometrically; capped at 10 iterations. A good starting point when
+  MA57's internal scaling is off.
+* **`slack-based`** — port of Ipopt's `IpSlackBasedTSymScalingMethod`.
+  Scales the `s` block by `min(Pd_L·slack_s_L + Pd_U·slack_s_U, 1)` and
+  leaves the `x`, `y_c` and `y_d` blocks at 1, so the rows whose barrier
+  terms are blowing up as a slack approaches its bound are damped and
+  nothing else is touched. This is the one scaler whose factors depend
+  on the **iterate** rather than on the matrix, so they are recomputed
+  every iteration.
+
+  Ipopt's recommended configuration for large collocation NLPs uses it.
+  It was accepted but inert before #677 — on any earlier release,
+  setting it silently did nothing.
 * **`mc19`** *(not yet implemented)* — intended HSL MC19 row/column
   scaling (Curtis-Reid 1972; minimizes Σ log²|a_ij|). Accepted by the
   registry but currently logs a warning and falls back to `none`.
-* **`slack-based`** *(not yet implemented)* — intended slack-aware
-  scaling. Accepted by the registry but falls back to `none`.
+
+Scaling choices only differ when scaling actually runs. With the default
+`linear_scaling_on_demand=yes`, factors are computed only once a solve
+looks troubled, so on a clean problem every choice behaves identically.
+Set `linear_scaling_on_demand=no` to compare them. On `cresc4`, forced
+on: `none` 81 iterations, `slack-based` 74, `ruiz` 61.
 
 ### Worked example — `nql180`
 

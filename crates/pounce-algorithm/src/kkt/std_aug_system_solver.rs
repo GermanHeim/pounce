@@ -620,6 +620,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.diagnostics = Some(diag);
     }
 
+    fn set_slack_scaling(&mut self, nx: Index, s_scale: &[Number]) {
+        self.linsol.set_slack_scaling(nx, s_scale);
+    }
+
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
         self.timing = Some(timing);
     }

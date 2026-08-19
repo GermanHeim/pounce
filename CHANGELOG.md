@@ -9,6 +9,276 @@ changes.
 
 ## [Unreleased]
 
+- **`recalc_y` no longer degrades the multipliers it exists to sharpen**
+  (#688).
+
+  The least-squares multiplier solve perturbed its `(3,3)`/`(4,4)` blocks
+  by `1e-8` where Ipopt passes `0`. Eliminating `w` from that system gives
+  `y = −(J Jᵀ + δ I)⁻¹ J·rhs_x`, so the perturbation returns a
+  Tikhonov-regularized multiplier rather than the least-squares one,
+  damped by `O(δ / σ_min(J)²)`. That is invisible while
+  `σ_min(J)² ≫ δ` — true of every problem in this repo — and `O(1)` on a
+  ~59,000-variable collocation NLP, where it was reported. Because
+  `recalc_y` recomputes `y` the same way every iteration the bias is a
+  fixed point rather than a transient, and it lands directly in
+  `inf_du`: `recalc_y=yes` stalled at `1.55e-01`, *worse* than
+  `recalc_y=no` at `1.73e-02`. At `δ=0` that model converges on both MA57
+  and FERAL.
+
+  The fix is scoped to the `recalc_y` path, which is the only caller that
+  overwrites `y` every iteration. The three callers that compute `y` once
+  — the dual initializer, the warm-start initializer and the restoration
+  inner solve — keep the perturbation: there a bias is transient and
+  corrected by the following Newton steps, while a *failed* solve costs a
+  fallback to `y = 0` and an iteration-0 `inf_du` blow-up, which is the
+  failure the perturbation was added for. On the `recalc_y` path the
+  trade runs the other way, and a failed solve is benign because the
+  Newton multipliers simply stand.
+
+  Default runs are untouched — `recalc_y` is off by default and the
+  fixture corpus is identical on both legs. With it on, `cresc4` under
+  limited-memory goes from `Infeasible_Problem_Detected` at 32 iterations
+  — a false verdict on a feasible model — to `Solve_Succeeded` at 109,
+  objective `0.8718975283` against the exact-Hessian path's
+  `0.8718975273`.
+
+- **`limited_memory_initialization` and `limited_memory_init_val` now do
+  something** (#677).
+
+  Both were registered with upstream's defaults and read nowhere, so
+  setting either was a silent no-op — no effect, and no warning. Every
+  limited-memory solve used `scalar2` (σ = yᵀy/sᵀy) for the initial
+  Hessian scalar, because that is what the updater's own default happened
+  to be. Ipopt uses `scalar1` (σ = sᵀy/sᵀs). The two differ by
+  (yᵀy·sᵀs)/(sᵀy)², which is ≥ 1 and unbounded as conditioning degrades,
+  so on a badly scaled problem an L-BFGS run could not be made to match
+  Ipopt's and there was no option that would fix it. Found while
+  diagnosing a 59,939-variable CasADi model whose duals diverged under
+  POUNCE + L-BFGS but not Ipopt + L-BFGS.
+
+  All five upstream keywords are now honored — `scalar1`, `scalar2`,
+  `scalar3` (arithmetic mean), `scalar4` (geometric mean) and `constant`;
+  the last three were not implemented at all. `limited_memory_init_val`
+  now sets σ on the first iteration, where a hard-coded `1.0` — the same
+  value as the default, which is what kept the omission invisible — used
+  to be.
+
+  **The default is now `scalar1`, matching Ipopt.** The exact-Hessian
+  path is untouched — all 57 fixtures identical — since σ is only
+  reachable under `hessian_approximation=limited-memory`. On the L-BFGS
+  leg 20 of 57 fixtures move, and the movement is one-directional:
+  `jit1`, `jit1_boxed` and `jit1_node` go from three different wrong
+  answers at the 3000-iteration cap to the same objective in ~35
+  iterations; `pooling_rt2stp` goes from `RestorationFailed` to solved;
+  `autocorr_bern55-06` goes from 2924 iterations to 106 with a better
+  objective. `deb7` reaches the right objective (97.5633 against a true
+  97.5599) where `scalar2` was 39% wrong. `cresc4` fails either way
+  under plain L-BFGS, but with the `mu_strategy=adaptive` it is
+  documented to need, `scalar1` solves it in 86 iterations to eight
+  matching digits while `scalar2` still hits the cap. No fixture is
+  worse in outcome.
+
+- **`recalc_y` and `recalc_y_feas_tol` are implemented** (#677).
+
+  Previously refused outright as unimplemented, so an L-BFGS user could
+  not reach Ipopt's behaviour at all. The multipliers are now
+  re-estimated by least squares once the constraint violation drops
+  below `recalc_y_feas_tol`, using the same calculator the initializer
+  uses.
+
+  **Default stays `no`, including under `limited-memory`, and that
+  differs from Ipopt deliberately.** Ipopt's own option text says it is
+  used by default with a quasi-Newton Hessian; auto-enabling it here was
+  implemented and then measured, and it took 7 of 57 fixtures from
+  solved to not solved on the L-BFGS leg with nothing moving the other
+  way. Re-estimating `y` on every feasible iteration overwrites Newton
+  multipliers that were converging, and the solve stalls short of the
+  certificate. It remains the right tool for the case it was built for —
+  a quasi-Newton solve that reaches a feasible primal and cannot drive
+  `inf_du` down — but it has to be asked for.
+
+- **The fixture sweep runs an L-BFGS leg** (#677).
+
+  `scripts/sweep-fixtures.sh` now sweeps every fixture twice, `exact` and
+  `lbfgs`, because the corpus previously ran the exact-Hessian path only
+  — which is why a wrong σ default survived since the option port. Both
+  the Python frontend and the CasADi plugin select `limited-memory` on
+  their own when no exact Hessian is available, so that leg is what an
+  embedder gets by default.
+
+- **L-BFGS resets its approximation after repeated skipped updates**
+  (#686), and the skip tolerance matches Ipopt.
+
+  Upstream discards the whole limited-memory approximation once the
+  curvature update has been skipped `limited_memory_max_skipping` times
+  in a row (default 2) and re-anchors at the current iterate. pounce
+  counted nothing and never discarded, so on a problem whose Lagrangian
+  curvature stays negative the model kept whatever pairs it accepted in
+  the opening iterations for the rest of the solve — it stops describing
+  the curvature where the iterate actually is.
+
+  Reported by @srikanth-gm with side-by-side instrumentation on a
+  59,939-variable collocation model: both solvers computed identical
+  `sᵀy`, `snrm`, `ynrm` and made identical skip decisions, and over 60
+  iterations Ipopt reset 9 times while pounce reset 0. The two iterate
+  sequences were bit-identical through iteration 5 and separated at 6 —
+  one iteration after Ipopt's first reset.
+
+  The skip tolerance was a hardcoded `1e-8` attributed to upstream;
+  upstream uses `sqrt(machine epsilon)` = 1.4901e-8, so pounce was
+  accepting a narrow band of pairs Ipopt skips. Both are fixed, and
+  `limited_memory_max_skipping` — registered since the option port and
+  never read — now works.
+
+  **`cresc4` under L-BFGS goes from `Restoration_Failed` at 976
+  iterations to solved at 190**, objective `0.8718975397` against the
+  exact-Hessian path's `0.8718975273`. `pooling_rt2stp` drops 413→292
+  iterations at the same objective and `eigenb2` 56→44.
+
+  Two fixtures move the other way, and both were run down rather than
+  accepted as a cost — neither is a loss of a correct result.
+
+  `autocorr_bern55-06` is nonconvex and its L-BFGS answer is unstable
+  under any perturbation. Sweeping `limited_memory_max_skipping` 1→50
+  gives −2336, −2256, −2252, −2368, −2368 — non-monotone, and *none* is
+  the exact-Hessian reference of −2304. Each is a certified KKT point of
+  a problem that has many; the −2368 this moved away from was not the
+  right answer either, just one draw.
+
+  `deb7` does not solve under L-BFGS at any setting — every value from 1
+  to 50 returns `Maximum_Iterations_Exceeded`,
+  `Error_In_Step_Computation` or `Restoration_Failed`, and only the
+  exact-Hessian path solves it (154 iterations, 97.5599345). The
+  objective it stops at does degrade with more resetting (119.59 at the
+  default against 97.56 with resetting off), but that is the objective
+  of a failed solve, not a result. Recorded as evidence that upstream's
+  default of 2 is aggressive on this model.
+
+  This does **not** fix the reporter's dual stall — they measured
+  `inf_du` plateauing at the same `0.155` with and without the change.
+  What it fixes is the early divergence: patched, pounce tracks Ipopt to
+  7–8 significant figures out to iteration 18 instead of splitting at 6.
+
+- **Restoration no longer densifies the L-BFGS Hessian** (#684).
+
+  Entering restoration under `hessian_approximation=limited-memory`
+  built a dense lower triangle of the full Hessian to hand the inner
+  solver. At 59,956 variables that is a single 14 GB allocation, which
+  aborts the process rather than failing the solve — reported on a
+  direct-collocation model where the solve stalled, restoration
+  triggered, and POUNCE died with `memory allocation of 14379225712
+  bytes failed`.
+
+  The dense form was wasteful on its own terms: `B = σI + VVᵀ − UUᵀ`
+  carries `O(n·rank)` of information with `rank ≤ 2·limited_memory_max_history`,
+  and squaring it up spends `n²` to store the same thing. Restoration
+  now hands the orig block over in factored form whenever the inner
+  solver applies a low-rank `W` by Sherman-Morrison-Woodbury — which is
+  what the main iteration has always done. The densification remains
+  as a fallback for inner solvers that cannot, and now refuses with an
+  explanation instead of asking the allocator for something no machine
+  will give.
+
+  Five L-BFGS-leg fixtures move, none on the default path. `eigenb2`
+  69→56 iterations and `eigena2` 178→163 to the same answers; `deb7`
+  597→593 with the objective identical to nine digits.
+
+- **L-BFGS no longer damps the curvature pairs it stores** (#686).
+
+  `build_low_rank` blended each accepted `y` toward `B·s` by a Powell
+  damping factor whenever `sᵀy < 0.2·sᵀBs`, citing
+  `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping`. No such function
+  exists. Upstream's `CheckSkippingBFGS` takes `const Vector&` for both
+  `s_new` and `y_new` and returns a bool, so it cannot modify a pair,
+  and nothing else in that file does either: upstream forms
+  `v_new = y_new / sqrt(sᵀy)` from the measured `y` and either stores a
+  pair as it stands or skips it. pounce now does the same.
+
+  This was never a documented deviation. It was present in the file's
+  first commit under a comment claiming to mirror upstream, no
+  registered option controlled it, and
+  `dev-notes/issue-131-monotone-lbfgs-stall.md` already named it as a
+  *cause*: "Powell-damped BFGS forces a PSD model, so the IPM's inertia
+  check never sees the indefiniteness, never fires regularization, and
+  never escapes." Powell damping is a real feature of this codebase —
+  `hessian_approximation=damped-bfgs` on the active-set-SQP path, where
+  it is named, selected and documented — and that path is independent of
+  this one and unchanged.
+
+  Exact leg identical, 57/57. On the L-BFGS leg, two fixtures move
+  closer to the exact-Hessian answer rather than merely faster:
+  `hs13_bigstart` 0.9945139766 → 0.985014399 against the exact path's
+  0.9849287152, and `cresc4` 0.8718975397 → 0.8718975252 against
+  0.8718975273, in 106 iterations instead of 190. `pooling_rt2stp` drops
+  292→203 at the same objective. `issue_508_infeasible_gap_1em2`
+  recovers the infeasibility certificate noted as lost above, and now
+  renders it at `obj 25` — the same point the exact leg certifies —
+  rather than the blown-up iterate it used to use.
+
+  Against that: `eigenb2` downgrades from `Solve_Succeeded` in 44
+  iterations to `Solved_To_Acceptable_Level` in 61, and
+  `autocorr_bern55-06` takes 1753 iterations instead of 66 (to
+  −2272, nearer the exact −2304 than the −2256 it gave before).
+  `eigenb2`'s downgrade is the one line here that is a plain loss.
+
+- **A feasible model is no longer reported infeasible after restoration
+  blows up** (#684).
+
+  Chasing the fixture above turned up a real defect. `cresc4` under
+  limited-memory reported `Infeasible_Problem_Detected` for a model the
+  exact-Hessian path solves to `0.8719`, at a point whose constraint
+  violation was `13.47` and whose restoration KKT error was `1.95e2` —
+  nowhere near the stationary point of the violation that a local
+  infeasibility certificate is a claim about.
+
+  The existing divergence guard measures a restoration call against its
+  own *entry*, which leaves it blind when the blow-up happened before
+  restoration was entered: entry and final agree, the ratio is 1, and
+  the step-failure gate certifies at the ruined point. There is now an
+  absolute companion — a point far worse than a violation this same
+  solve has already reached is not the best feasibility available near
+  here, because the solve has itself exhibited better. `cresc4` returns
+  the honest `Restoration_Failed`.
+
+  One certification is lost with it, and it was never sound:
+  `issue_508_infeasible_gap_1em2` on the L-BFGS leg was reaching the
+  right verdict from the wrong point — a blown-up iterate with inner KKT
+  error `1.5e2`, rather than the converged one at the model's true `1e-2`
+  gap two calls earlier. That fixture still certifies correctly on the
+  exact-Hessian path, which is where its detection was ever meaningful.
+  Every other infeasible fixture is unaffected on both legs.
+
+- **`linear_system_scaling=slack-based` is implemented** (#677).
+
+  The value was registered, so it was accepted, but it reached the
+  no-scaling fallback through a catch-all arm and emitted no notice —
+  `mc19` warned, `slack-based` did not, though a code comment claimed
+  both did. Setting it was indistinguishable from not setting it. It is
+  not an obscure setting: it is what Ipopt's recommended configuration
+  for large collocation NLPs uses, so the users most likely to set it
+  were the least likely to learn it was inert.
+
+  It now does what Ipopt's `IpSlackBasedTSymScalingMethod` does — scale
+  the augmented system's `s` block by
+  `min(Pd_L·slack_s_L + Pd_U·slack_s_U, 1)` and leave the `x`, `y_c` and
+  `y_d` blocks at 1. On `cresc4` with `linear_scaling_on_demand=no` it
+  takes 74 iterations against 81 for `none` and 61 for `ruiz` — its own
+  method, not an alias for either.
+
+  Default runs are untouched: the default is still `none`, and the
+  fixture corpus is identical on both legs. `mc19` remains unimplemented
+  and still falls back, now with a test pinning that so the fallback
+  stays deliberate.
+
+- **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
+
+  Measures per-iteration wall time against `n` over a family of one
+  problem at geometrically increasing sizes, solving each size twice at
+  different `max_iter` so fixed setup cost cancels, and reports a log-log
+  slope. Run against the limited-memory path from `n = 2,000` to
+  `n = 128,000`: slope 1.05 (R² 0.993) — linear, as advertised, with no
+  hidden quadratic. The exact-Hessian leg reads 0.96 over the same
+  family.
 - **Quadratic `.nl` rows are solved from their constant matrices instead
   of being re-derived every iteration** (#588, phases Q0–Q6).
 

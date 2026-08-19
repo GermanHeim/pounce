@@ -583,6 +583,14 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         self.inner.set_timing_stats(timing);
     }
 
+    fn set_slack_scaling(&mut self, nx: Index, s_scale: &[Number]) {
+        self.inner.set_slack_scaling(nx, s_scale);
+    }
+
+    fn handles_low_rank_w(&self) -> bool {
+        true
+    }
+
     fn solve(
         &mut self,
         coeffs: &AugSysCoeffs<'_>,
