@@ -498,9 +498,16 @@ enum Reduction {
 pub struct Presolve {
     /// The reduced problem to hand to the solver.
     pub reduced: QpProblem,
-    /// Constant added to the objective by variable substitutions; the
-    /// reduced objective plus this equals the original objective.
-    pub obj_offset: f64,
+    /// Constant **this layer's** variable substitutions moved into the
+    /// objective; the layer's reduced objective plus this equals the
+    /// objective of the problem the layer was built from.
+    ///
+    /// For an iterated presolve the wrapper performs no substitution of its
+    /// own — the offsets live one per layer in `chain` — so this is `0.0`
+    /// there and reading it as the reduction's total is wrong (gh #697).
+    /// [`Presolve::obj_offset`] is that total; keep this field private so
+    /// nothing outside can confuse the two.
+    layer_obj_offset: f64,
     /// Original problem dimensions.
     orig_n: usize,
     orig_m_eq: usize,
@@ -914,7 +921,9 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> Pre
     let reduced = chain.last().expect("chain non-empty").reduced.clone();
     PresolveOutcome::Reduced(Presolve {
         reduced,
-        obj_offset: 0.0,
+        // The wrapper substitutes nothing itself; each layer in `chain`
+        // carries its own offset and `Presolve::obj_offset` sums them.
+        layer_obj_offset: 0.0,
         orig_n: prob.n,
         orig_m_eq: prob.m_eq(),
         orig_m_ineq: prob.m_ineq(),
@@ -943,7 +952,7 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
     let (reduced, obj_offset) = crate::aggregate::reduce(prob, &plan)?;
     Some(Presolve {
         reduced,
-        obj_offset,
+        layer_obj_offset: obj_offset,
         orig_n: prob.n,
         orig_m_eq: prob.m_eq(),
         orig_m_ineq: prob.m_ineq(),
@@ -2009,7 +2018,7 @@ fn presolve_once(
 
     PresolveOutcome::Reduced(Presolve {
         reduced,
-        obj_offset: offset,
+        layer_obj_offset: offset,
         orig_n: n,
         orig_m_eq: m_eq,
         orig_m_ineq: m_ineq,
@@ -2478,6 +2487,22 @@ impl Presolve {
         s
     }
 
+    /// Constant the whole reduction moved into the objective: adding this
+    /// to the reduced problem's objective gives the original problem's.
+    ///
+    /// For an iterated presolve that is the **sum over the chain**, one term
+    /// per layer, because layer `k+1` reduces layer `k`'s reduced problem:
+    /// `obj_orig = obj_reduced + Σₖ offsetₖ`. The wrapper object itself
+    /// substitutes nothing, so reading a stored field instead reported `0.0`
+    /// for every multi-layer reduction — which this repo's own CHANGELOG
+    /// calls the common case (gh #697). Computed here so it cannot go stale.
+    pub fn obj_offset(&self) -> f64 {
+        if self.chain.is_empty() {
+            return self.layer_obj_offset;
+        }
+        self.chain.iter().map(|l| l.obj_offset()).sum()
+    }
+
     /// Expand a reduced-problem solution back to the original space,
     /// recovering primal `x` and duals `(y, z)`. For an iterated presolve,
     /// folds the per-round postsolves in reverse.
@@ -2507,9 +2532,9 @@ impl Presolve {
         // the *reduced* problem — which differs by exactly the constant any
         // substitution moved into the objective. Put it back, per layer, so
         // the chain composes to the user's objective.
-        if self.obj_offset != 0.0 {
+        if self.layer_obj_offset != 0.0 {
             for it in &mut out.iterates {
-                it.objective += self.obj_offset;
+                it.objective += self.layer_obj_offset;
             }
         }
         out

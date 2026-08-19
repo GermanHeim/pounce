@@ -2495,7 +2495,7 @@ fn run_convex_qp(
         ..convex_opts
     };
     // The reduced problem presolve hands the solver differs from `qp` by
-    // `ps.obj_offset`, so the constant that makes *it* commensurate with the
+    // `ps.obj_offset()`, so the constant that makes *it* commensurate with the
     // user's objective carries that offset too.
     let solve_opts_offset = |offset: f64| {
         convex_opts_with_remaining(
@@ -2588,12 +2588,12 @@ fn run_convex_qp(
                     let mut mk = backend;
                     solve_qp_active_set(
                         &ps.reduced,
-                        &solve_opts_offset(ps.obj_offset),
+                        &solve_opts_offset(ps.obj_offset()),
                         &engine_overrides,
                         &mut mk,
                     )
                 } else {
-                    solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset), backend)
+                    solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
                 };
                 ps.postsolve(&red)
             }
