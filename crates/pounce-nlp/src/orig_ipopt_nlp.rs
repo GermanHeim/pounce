@@ -2215,6 +2215,22 @@ impl Nlp for OrigIpoptNlp {
 }
 
 impl IpoptNlp for OrigIpoptNlp {
+    /// The Hessian's sparsity with zero values, built straight from
+    /// `h_space` — no `eval_h`, no callback, no cache traffic. Falls
+    /// back to a structurally empty block when the TNLP declared no
+    /// Hessian sparsity at all (`nnz_h_lag == 0`), which is the same
+    /// block the trait default would produce.
+    fn uninitialized_h(&self) -> Rc<dyn SymMatrix> {
+        match self.h_space.as_ref() {
+            Some(space) => Rc::new(crate::ipopt_nlp::zeroed_sym_t(Rc::clone(space))),
+            None => Rc::new(crate::ipopt_nlp::zeroed_sym_t(SymTMatrixSpace::new(
+                self.x_space.dim(),
+                Vec::new(),
+                Vec::new(),
+            ))),
+        }
+    }
+
     fn eval_counts(&self) -> [Index; 7] {
         [
             self.f_evals(),
