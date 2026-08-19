@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+- **A `NaN` or `inf` objective is no longer reported as a successful
+  solve** (#695).
+
+  A model whose objective evaluated to `NaN` while every derivative stayed
+  finite terminated `Solve_Succeeded` / `obj_val = nan` — `status = 0`
+  asserting the convergence test passed, next to an objective that is not
+  a number. A caller gating on `success` and then reading `fun` silently
+  received `NaN`.
+
+  The convergence test cannot notice on its own: it reads gradients,
+  residuals and complementarity, never the objective *value*. With finite
+  derivatives and a satisfied equality the KKT residuals are genuinely
+  small (`2.5e-9` on the reported model), and the returned point is
+  actually correct — `x = (0.5, 0.5)` really is the minimizer of `x·x`
+  subject to `x0 + x1 = 1`. Only the `Solve_Succeeded` / `nan` pair was
+  wrong.
+
+  Specific to the **equality**-constrained shape, which is how it survived
+  #292. That fix closed the `NaN`-*gradient* hole and recorded
+  `f`-returns-`NaN` as the safe contrast case — true of the shapes it
+  exercised (unconstrained and bounds-only fail at
+  `Error_In_Step_Computation`, inequality-constrained at
+  `Invalid_Number_Detected`) and not once an equality constraint is
+  present.
+
+  A successful verdict is now gated on a finite objective, reporting
+  `Invalid_Number_Detected` otherwise — the status Ipopt's `Eval_f` gives
+  a non-finite objective, and the one POUNCE's own inequality-constrained
+  shape already gave. This is not a new rule: the same
+  `curr_f().is_finite()` check already guarded the restoration
+  near-feasible exit (added for CUTE `himmelbj`); it now also guards the
+  ordinary convergence exit.
+
+  Callback-API only — an `.nl` model cannot express a `NaN` objective with
+  a consistent finite gradient, so no CLI model can reach it. The fixture
+  corpus is bit-identical.
+
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).
 
