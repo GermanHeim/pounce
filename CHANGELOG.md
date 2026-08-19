@@ -55,6 +55,50 @@ changes.
   frontend still declared a dense `n(n+1)/2` Hessian triangle. At n = 60,000
   that is a 14 GB structure described to the solver for a callback that returns
   nothing. The CasADi plugin was never affected — it has always declared zero.
+- **A `NaN` or `inf` objective is no longer reported as a successful
+  solve** (#695).
+
+  A model whose objective evaluated to `NaN` while every derivative stayed
+  finite terminated `Solve_Succeeded` / `obj_val = nan` — `status = 0`
+  asserting the convergence test passed, next to an objective that is not
+  a number. A caller gating on `success` and then reading `fun` silently
+  received `NaN`.
+
+  The convergence test cannot notice on its own: it reads gradients,
+  residuals and complementarity, never the objective *value*. With finite
+  derivatives and a satisfied equality the KKT residuals are genuinely
+  small (`2.5e-9` on the reported model), and the returned point is
+  actually correct — `x = (0.5, 0.5)` really is the minimizer of `x·x`
+  subject to `x0 + x1 = 1`. Only the `Solve_Succeeded` / `nan` pair was
+  wrong.
+
+  Specific to the **equality**-constrained shape, which is how it survived
+  #292. That fix closed the `NaN`-*gradient* hole and recorded
+  `f`-returns-`NaN` as the safe contrast case — true of the shapes it
+  exercised (unconstrained and bounds-only fail at
+  `Error_In_Step_Computation`, inequality-constrained at
+  `Invalid_Number_Detected`) and not once an equality constraint is
+  present.
+
+  A successful verdict is now gated on a finite objective, reporting
+  `Invalid_Number_Detected` otherwise — the status Ipopt's `Eval_f` gives
+  a non-finite objective, and the one POUNCE's own inequality-constrained
+  shape already gave. This is not a new rule: the same
+  `curr_f().is_finite()` check already guarded the restoration
+  near-feasible exit (added for CUTE `himmelbj`); it now also guards the
+  ordinary convergence exit.
+
+  No CLI model is known to reach it, and the fixture corpus is
+  bit-identical. Note that the reason is *not* that an `.nl` file cannot
+  express the shape: `log(x)` at `x < 0` evaluates to `NaN` with `f' = 1/x`
+  and `f'' = -1/x²` both finite, which is exactly the combination involved.
+  Such models are stopped by an earlier guard before the convergence test
+  is reached — three built to try to reach it (including the matching
+  equality-constrained shape, with `x` confined strictly negative) return
+  `Error_In_Step_Computation` or `Invalid_Number_Detected` identically on
+  both sides of this change. So the defect is callback-API only in
+  practice, by which path fires first, rather than by what the format can
+  represent.
 
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).
