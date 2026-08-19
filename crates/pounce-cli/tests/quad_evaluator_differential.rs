@@ -573,7 +573,7 @@ const BATTERY_WORST_REL: f64 = 1e-14;
 /// Coefficients stay within a few orders of magnitude on purpose. The
 /// ill-scaled case — where the sum of a row's coefficients is catastrophic
 /// and the two paths part company by more than any tolerance — is a real
-/// defect on the *storage* side (see the `dropped_terms` skip below), not
+/// defect on the *storage* side (see the `lost_terms` skip below), not
 /// something for this battery to rediscover once per seed.
 fn battery_monomial(rng: &mut Rng2) -> Expr {
     fn c(rng: &mut Rng2) -> Expr {
@@ -660,14 +660,23 @@ fn rng_below(rng: &mut Rng2, n: u64) -> u64 {
 /// The fast path and the tape, over expressions no `.nl` writer emitted.
 ///
 /// A body whose recognized form has
-/// [`dropped_terms`](pounce_cli::nl_quadratic::Quad2::dropped_terms) set is
+/// [`lost_terms`](pounce_cli::nl_quadratic::Quad2::lost_terms) set is
 /// **skipped**, and the skip is the honest part of this test. Such a body's
-/// coefficients cancelled or underflowed on the way into the form, so the
-/// fast path is evaluating a different function from the tape — by design,
-/// and wrongly: `2⁵³·x² + x² − 2⁵³·x²` reads out as the zero form while its
-/// own tape gives 16 at `x = 3`. That is the storage-side half of gh #683,
-/// filed as gh #685; a battery that did not skip it would be reporting that
-/// defect once per seed instead of guarding this one.
+/// coefficients were rounded and then cancelled, or underflowed, on the way
+/// into the form, so the fast path is evaluating a different function from
+/// the tape — by design, and wrongly: `2⁵³·x² + x² − 2⁵³·x²` reads out as
+/// the zero form while its own tape gives 16 at `x = 3`. That is the
+/// storage-side half of gh #683, filed as gh #685; a battery that did not
+/// skip it would be reporting that defect once per seed instead of guarding
+/// this one.
+///
+/// The skip used to fire on any drop, which took **204 of 1 500** seeds out
+/// of the comparison — most of them for cancellations that lost nothing
+/// (`c·xᵢxⱼ − c·xᵢxⱼ` is a shape this battery emits readily, and every
+/// coefficient it draws from is a power of two or a small integer). Since
+/// gh #687 it fires on the *loss*, 7 seeds remain skipped, and the 197
+/// problems that came back are compared like any other — at the same
+/// tolerance, which they meet.
 #[test]
 fn a_synthetic_battery_evaluates_the_same_both_ways() {
     let mut rep = Report::default();
@@ -682,8 +691,8 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
 
         // The skip. Asked of the same recognizer the evaluator asks, so it
         // cannot drift out of step with what the fast path admits.
-        let dropped = |e: &Expr| recognize_expr(e).is_some_and(|q| q.dropped_terms());
-        if dropped(&objective) || rows.iter().any(dropped) {
+        let lost = |e: &Expr| recognize_expr(e).is_some_and(|q| q.lost_terms());
+        if lost(&objective) || rows.iter().any(lost) {
             skipped += 1;
             continue;
         }
@@ -712,7 +721,7 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
 
     eprintln!(
         "[quad differential] battery: {seeds_used} problems built ({skipped} skipped for \
-         dropped terms), {} reached the fast path, {} quadratic rows, {} hessian entries \
+         lost terms), {} reached the fast path, {} quadratic rows, {} hessian entries \
          ({} not bit-identical, worst {} ulp at {}), worst g/jac rel deviation {:.3e}",
         rep.models_with_quadratic,
         rep.quadratic_rows,

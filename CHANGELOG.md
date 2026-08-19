@@ -433,9 +433,37 @@ changes.
   records that a term was dropped and not whether the arithmetic that
   dropped it was exact. Nothing in the corpus is affected — no fixture
   body drops a term — but a model that spells a linear row that way loses
-  the LP path. #687 tracks the sharper gate (flag the inexact *fold*,
-  which is where `2⁵³ + 1` loses the `1`, rather than the drop it leads
-  to), which would give those models their fast path back.
+  the LP path. #687 is the sharper gate (flag the inexact *fold*, which
+  is where `2⁵³ + 1` loses the `1`, rather than the drop it leads to);
+  the next entry lands it and hands those models their fast path back.
+
+- **…and a row whose coefficients cancel *exactly* keeps both fast paths**
+  (#687, sharpening the two above).
+
+  The flag those two fixes read said a coefficient had been **dropped**,
+  which is a different question from whether anything was lost. `x − x`
+  folds `fl(1) + fl(−1)` to zero and that add is exact — the term really
+  is absent, the body really is degree 0, and nothing about the
+  coefficient map is a lower bound. `2⁵³·x² + x² − 2⁵³·x²` loses its `x²`
+  at `fl(2⁵³ + 1) = 2⁵³`, an inexact add, and only then cancels. Both set
+  the same flag, so both were refused, and the first one paid a proved
+  degree, a matrix evaluation, and — once the classifier gated on it too
+  — the LP/QP route, all for arithmetic that never rounded.
+
+  The gate is now the **fold** rather than the drop: a form records
+  whether its arithmetic rounded — a two-sum on every coefficient add, an
+  FMA check on every product, and one on the reciprocal a `Div` scales by
+  — and a dropped term counts as missing only when something behind it
+  did. An underflowed or `NaN` coefficient still counts on its own; there
+  is no exact case to spare there.
+
+  No model in the corpus changes: the 57-fixture sweep and the
+  `Problem class:` line over every loadable `.nl` are both byte-identical
+  to the parent build, because no fixture body drops a term at all. What
+  moves is synthetic material that does: 197 rows of the ill-scaled
+  degree battery get their proof back, and the quadratic evaluator's
+  differential compares 197 more generated problems against their tapes
+  (bit-identical Hessians, worst `g`/Jacobian deviation `4.8e-15`).
 
 - **`least_square_init_primal=yes` costs one accepted downgrade on the
   fixture corpus, not two** (#681, revising the gh#616 measurement).

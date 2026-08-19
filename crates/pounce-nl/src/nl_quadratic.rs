@@ -72,26 +72,50 @@ pub type QuadForm = (QuadHessian, Vec<(usize, f64)>, f64);
 /// consumer guards on `!= 0.0`, and [`analyze_quadratic_full`] normalizes
 /// the sign on the way out.
 ///
-/// ### …and what dropping one costs
+/// ### …and when dropping one loses something
 ///
-/// Dropping is right for the *storage* question and wrong for the *degree*
-/// question, and [`dropped_terms`](Quad2::dropped_terms) is the difference
-/// (gh #683). A coefficient that reaches zero is a coefficient that was
-/// **summed**, not one that was proven absent: `2⁵³·x² + x² − 2⁵³·x²` folds
-/// to an empty `quadratic` map even though the body is degree 2, and so
-/// does `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)`, whose one coefficient underflows. The maps
-/// therefore record a *lower bound* on the degree, and the flag records
-/// whether that bound is tight.
+/// Dropping is right for the *storage* question and can be wrong for the
+/// *degree* question, and [`lost_terms`](Quad2::lost_terms) is the
+/// difference (gh #683, sharpened by gh #687). A coefficient that reaches
+/// zero is a coefficient that was **summed**, and it is the arithmetic of
+/// that sum — not the drop — that decides whether anything went missing:
+///
+/// * `x − x` folds `fl(1) + fl(−1)` to `0.0`, and that add is **exact**.
+///   The term really is absent, the body really is degree 0, and the maps
+///   are not a lower bound on anything.
+/// * `2⁵³·x² + x² − 2⁵³·x²` loses the `x²` at `fl(2⁵³ + 1) = 2⁵³`, which is
+///   an **inexact** add, and only then does `2⁵³ − 2⁵³` drop the survivor.
+///   The body is `x²`; the maps say degree 0.
+///
+/// The loss happens at the inexact fold; the drop is only where it becomes
+/// visible. So the flag is set from the *fold*: a form whose arithmetic
+/// never rounded — and never flushed a live coefficient to zero — carries
+/// coefficients that are exactly what real arithmetic on the writer's own
+/// literals would give, and a term missing from its maps is a term that is
+/// genuinely absent. Flagging the drop instead refused both of the above
+/// alike, which was sound and cost reach on the first (gh #687).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Quad2 {
     constant: f64,
     linear: BTreeMap<usize, f64>,
     quadratic: QuadHessian,
-    /// Set when a term was dropped as exactly zero (or as `NaN`) rather
-    /// than proven absent — see the type docs. Sticky: it survives every
-    /// operation the form takes part in, because a term that cancelled
-    /// three additions ago is no less missing now.
-    dropped_terms: bool,
+    /// Set when a term may be **missing** from the maps — see the type
+    /// docs and [`lost_terms`](Quad2::lost_terms). Sticky: it survives
+    /// every operation the form takes part in, because a term that went
+    /// missing three additions ago is no less missing now.
+    lost_terms: bool,
+    /// Set when some arithmetic in this form's construction **rounded**:
+    /// an add that could not represent its sum, or a product that could
+    /// not represent itself. Sticky, and for the same reason.
+    ///
+    /// Clear ⇒ every stored coefficient is exactly the real-arithmetic
+    /// value of the terms folded into it, so a coefficient that reached
+    /// zero reached it because the real value is zero. That is the whole
+    /// warrant for `lost_terms` staying clear across a cancellation, and
+    /// it is why an inexact *fold* sets this bit even when the coefficient
+    /// it produced is nonzero and stays stored: what it rounded away can
+    /// be cancelled out of sight later, by an add that is itself exact.
+    inexact: bool,
 }
 
 impl Quad2 {
@@ -112,8 +136,10 @@ impl Quad2 {
         &self.quadratic
     }
 
-    /// Whether some term of this form was **dropped as zero** (or as `NaN`)
-    /// on the way here, rather than shown to be absent.
+    /// Whether a term may be **missing** from this form's maps: something
+    /// was dropped on the way here *and* the arithmetic that produced it
+    /// had already rounded, or a live coefficient was flushed to zero (or
+    /// to `NaN`) outright.
     ///
     /// This is what turns the term maps from an answer about degree into a
     /// lower bound on it (gh #683). When it is set, an empty
@@ -125,19 +151,45 @@ impl Quad2 {
     /// reported as proved affine and had its Jacobian frozen for a whole
     /// solve.
     ///
+    /// It was originally set by the **drop** alone, which conflated an
+    /// exact cancellation with a lossy one and refused both (gh #687):
+    /// `x − x` is degree 0 by an exact add, and a consumer that treats it
+    /// as "not established" gives up a proved degree, a matrix evaluation
+    /// and — once the classifier gates on this too — the convex route, for
+    /// a body that lost nothing. The gate is now the fold, so the exact
+    /// case keeps its fast paths and the lossy one is refused for the
+    /// reason it deserves. [`inexact`](Quad2::inexact) is the other half of
+    /// that answer.
+    ///
     /// It is deliberately one bit for the whole form rather than a record
     /// per monomial: the consumer's question is about the form, and Q3's
     /// point was that a `Quad2` allocates nothing per term (gh #588, Q3).
+    /// Two bits, now, and still nothing per term — the cost of a per-key
+    /// provenance record is what keeps this a *conservative* answer: an
+    /// inexact fold on one monomial makes a cancellation on an unrelated
+    /// one count as lossy.
     ///
-    /// A *linear* or constant term that dropped sets it too, even though
-    /// dropping one cannot understate an affine body's degree by itself: it
-    /// can once the form is **multiplied**, because
+    /// A *linear* or constant term that goes missing sets it too, even
+    /// though losing one cannot understate an affine body's degree by
+    /// itself: it can once the form is **multiplied**, because
     /// [`mul`](Quad2::mul)'s degree guard reads the same maps —
     /// `(2⁵³ + 1 − 2⁵³)·x · x²` is degree 3 and folds to an apparent
-    /// degree 0. Distinguishing the two would take a second flag to buy
+    /// degree 0. Distinguishing the two would take a third flag to buy
     /// back reach that the corpus does not contain.
-    pub fn dropped_terms(&self) -> bool {
-        self.dropped_terms
+    pub fn lost_terms(&self) -> bool {
+        self.lost_terms
+    }
+
+    /// Whether any arithmetic behind this form's coefficients **rounded**.
+    ///
+    /// Clear means every stored coefficient is exact, which is what makes a
+    /// coefficient of zero a proof of absence rather than a lower bound —
+    /// see [`lost_terms`](Quad2::lost_terms), which is this bit read at the
+    /// moment a term is dropped. Public because it is the thing a test
+    /// about the sharpened gate has to be able to see; no consumer routes
+    /// on it.
+    pub fn inexact(&self) -> bool {
+        self.inexact
     }
 
     pub(crate) fn of_constant(c: f64) -> Self {
@@ -193,24 +245,40 @@ impl Quad2 {
         } else {
             (b, a)
         };
-        let mut dropped = small.dropped_terms;
+        // Whether anything either side already knew it had rounded. Read
+        // once, before any merge, so the verdict below does not depend on
+        // the order the maps happen to iterate in.
+        let carried_inexact = acc.inexact || small.inexact;
+        let (mut dropped, mut inexact) = (false, false);
         if small.constant != 0.0 {
             let was = acc.constant;
             acc.constant += small.constant;
             // Same rule as a coefficient, for the same reason: the degree-0
             // term is exempt from the "no stored zeros" invariant but not
             // from arithmetic, and `mul` reads `constant == 0.0` as
-            // *annihilates*. A constant that cancelled is not one that was
-            // proven absent (gh #683).
+            // *annihilates*. A constant that cancelled *inexactly* is not
+            // one that was proven absent (gh #683); one that cancelled
+            // exactly is (gh #687).
+            inexact |= !add_is_exact(was, small.constant, acc.constant);
             dropped |= was != 0.0 && acc.constant == 0.0;
         }
         for (i, c) in &small.linear {
-            dropped |= merge(&mut acc.linear, *i, *c);
+            let m = merge(&mut acc.linear, *i, *c);
+            dropped |= m.dropped;
+            inexact |= m.inexact;
         }
         for (k, c) in &small.quadratic {
-            dropped |= merge(&mut acc.quadratic, *k, *c);
+            let m = merge(&mut acc.quadratic, *k, *c);
+            dropped |= m.dropped;
+            inexact |= m.inexact;
         }
-        acc.dropped_terms |= dropped;
+        // A term is only *lost* if something was dropped and some fold on
+        // the way here could not represent itself. Neither half is enough
+        // alone: an exact cancellation drops a term that was really zero,
+        // and an inexact fold that keeps its coefficient has hidden
+        // nothing — yet.
+        acc.lost_terms |= small.lost_terms || (dropped && (carried_inexact || inexact));
+        acc.inexact = carried_inexact || inexact;
         acc
     }
 
@@ -230,49 +298,100 @@ impl Quad2 {
     /// The `prune` is not decoration, and neither is the flag it sets. A
     /// nonzero coefficient times a nonzero `s` can still land on zero by
     /// underflow — `1e-300 x0²` divided by `1e300` is reachable from a real
-    /// `.nl` body, through [`Op::Div`]'s `scale(1.0 / d)` — so this is the
+    /// `.nl` body, through [`Op::Div`]'s reciprocal — so this is the
     /// gh #683 shape again, arrived at by scaling rather than by summing.
     /// Leaving the flushed entry stored would make an arithmetically
     /// constant form report degree 2 to [`Quad2::degree`] and be refused as
     /// degree 3 the moment anything multiplied it; dropping it without
-    /// recording the drop would make a genuinely degree-2 body look affine
-    /// to [`Quad2::dropped_terms`]'s consumers. `prune` does both.
-    /// (`neg` needs neither: negation cannot reach zero from a coefficient
-    /// that was not already there.)
+    /// recording the loss would make a genuinely degree-2 body look affine
+    /// to [`Quad2::lost_terms`]'s consumers. `prune` does the first and
+    /// this does the second. (`neg` needs neither: negation cannot reach
+    /// zero from a coefficient that was not already there, and it never
+    /// rounds.)
+    ///
+    /// A coefficient here can only reach zero by **underflow** — both
+    /// factors are nonzero — so unlike a cancelling sum there is no exact
+    /// case to spare (gh #687): `10⁻³⁰⁰ · 10⁻³⁰⁰` is a term the form can no
+    /// longer see, whatever the flags said before.
     pub(crate) fn scale(mut self, s: f64) -> Quad2 {
         if s == 0.0 {
             // An exact zero annihilates every term, so this is a proof of
-            // degree 0 rather than a drop — nothing is being discarded that
-            // survived the multiplication. The flag still rides along: the
-            // one route here is division by an infinity, and `0 · NaN` is
-            // not zero.
+            // degree 0 rather than a loss — nothing is being discarded that
+            // survived the multiplication, and `x · 0` is exact. The flags
+            // still ride along: the one route here is division by an
+            // infinity, and `0 · NaN` is not zero.
             return Quad2 {
-                dropped_terms: self.dropped_terms,
+                lost_terms: self.lost_terms,
+                inexact: self.inexact,
                 ..Quad2::default()
             };
         }
         let was = self.constant;
         self.constant *= s;
-        self.dropped_terms |= was != 0.0 && self.constant == 0.0;
+        if was != 0.0 {
+            self.lost_terms |= self.constant == 0.0;
+            self.inexact |= !mul_is_exact(was, s, self.constant);
+        }
+        let mut inexact = false;
         for c in self.linear.values_mut() {
+            let was = *c;
             *c *= s;
+            inexact |= !mul_is_exact(was, s, *c);
         }
         for c in self.quadratic.values_mut() {
+            let was = *c;
             *c *= s;
+            inexact |= !mul_is_exact(was, s, *c);
         }
-        // A scale can underflow a live coefficient to zero, which is a
-        // dropped term like any other and used to be stored as a zero.
-        self.prune();
+        self.inexact |= inexact;
+        // A scale can underflow a live coefficient to zero, which is a lost
+        // term and used to be stored as a zero.
+        self.lost_terms |= self.prune();
         self
     }
 
     /// Restore the "no stored zeros" invariant after an operation wrote
-    /// coefficients in bulk, recording that something was dropped.
-    fn prune(&mut self) {
+    /// coefficients in bulk. Returns whether anything was dropped; what
+    /// that *means* is the caller's to say, because it depends on how the
+    /// coefficients got there (see [`scale`](Quad2::scale) and
+    /// [`mul`](Quad2::mul)).
+    fn prune(&mut self) -> bool {
         let before = self.width();
         self.linear.retain(|_, c| is_live(*c));
         self.quadratic.retain(|_, c| is_live(*c));
-        self.dropped_terms |= self.width() != before;
+        self.width() != before
+    }
+
+    /// `self / d`, for a constant `d` the caller has already checked is
+    /// nonzero.
+    ///
+    /// Scales by the **reciprocal** (not `c / d`) so the arithmetic matches
+    /// what the recursive predecessor produced bit for bit; what is new is
+    /// that `fl(1/d)` is the reciprocal only when `d` is a power of two,
+    /// and `fma(r, d, −1) == 0` says so exactly. Recording it matters
+    /// because a coefficient no real arithmetic produced can still cancel
+    /// *exactly* against another one later — and that cancellation would
+    /// otherwise be read as a proof of absence (gh #687).
+    pub(crate) fn div_by_constant(self, d: f64) -> Quad2 {
+        let r = 1.0 / d;
+        let exact = r.is_normal() && d.is_normal() && r.mul_add(d, -1.0) == 0.0;
+        let mut out = self.scale(r);
+        out.inexact |= !exact;
+        out
+    }
+
+    /// Take on another form's [`lost_terms`](Quad2::lost_terms) and
+    /// [`inexact`](Quad2::inexact) history.
+    ///
+    /// The operand a `Div` or a `Pow` reads as a *constant* is a [`Quad2`]
+    /// like any other, and its arithmetic is part of this form's: dividing
+    /// by `fl(10²⁰⁰ · 10²⁰⁰)` is dividing by an infinity, and dividing by a
+    /// constant that swallowed a variable term is worse than that. The
+    /// value is read out through [`as_constant`](Quad2::as_constant), which
+    /// keeps neither fact, so the caller hands the form itself over here.
+    pub(crate) fn absorb_flags(&mut self, other: &Quad2) {
+        self.lost_terms |= other.lost_terms;
+        self.inexact |= other.inexact;
     }
 
     /// `self · other`, or `None` when the product would exceed total
@@ -283,23 +402,45 @@ impl Quad2 {
             return None;
         }
         let mut out = Quad2::default();
+        // Either operand's missing term is missing from the product too,
+        // and so is either operand's rounding.
+        let mut lost = self.lost_terms || other.lost_terms;
+        let carried_inexact = self.inexact || other.inexact;
+        let mut inexact = false;
+        // A product of two live coefficients that lands on zero underflowed
+        // — `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)` is one monomial whose coefficient is not
+        // representable (gh #683) — and unlike a cancelling *sum* there is
+        // no exact case to spare, so `lost` is set on the spot rather than
+        // left to the cancellation rule below.
+        let product = |a: f64, b: f64, lost: &mut bool, inexact: &mut bool| -> f64 {
+            let t = a * b;
+            *lost |= !is_live(t);
+            *inexact |= !mul_is_exact(a, b, t);
+            t
+        };
         if self.constant != 0.0 && other.constant != 0.0 {
-            out.constant = self.constant * other.constant;
             // `10⁻²⁰⁰ · 10⁻²⁰⁰` is not zero, and the branches below read a
             // zero constant as an annihilating one — which would take a
             // degree-2 product down to nothing without a trace (gh #683).
-            out.dropped_terms = out.constant == 0.0;
+            out.constant = product(self.constant, other.constant, &mut lost, &mut inexact);
         }
+        let mut dropped = false;
         // constant × (linear, quadratic), both ways round.
         for (a, b) in [(self, other), (other, self)] {
             if a.constant == 0.0 {
                 continue;
             }
             for (i, c) in &b.linear {
-                *out.linear.entry(*i).or_insert(0.0) += a.constant * c;
+                let t = product(a.constant, *c, &mut lost, &mut inexact);
+                let m = accumulate(&mut out.linear, *i, t);
+                dropped |= m.dropped;
+                inexact |= m.inexact;
             }
             for (k, c) in &b.quadratic {
-                *out.quadratic.entry(*k).or_insert(0.0) += a.constant * c;
+                let t = product(a.constant, *c, &mut lost, &mut inexact);
+                let m = accumulate(&mut out.quadratic, *k, t);
+                dropped |= m.dropped;
+                inexact |= m.inexact;
             }
         }
         // linear × linear. The degree guard above means at most one of the
@@ -308,46 +449,142 @@ impl Quad2 {
         for (i, a) in &self.linear {
             for (j, b) in &other.linear {
                 let key = (*i.min(j), *i.max(j));
-                *out.quadratic.entry(key).or_insert(0.0) += a * b;
+                let t = product(*a, *b, &mut lost, &mut inexact);
+                let m = accumulate(&mut out.quadratic, key, t);
+                dropped |= m.dropped;
+                inexact |= m.inexact;
             }
         }
-        // Either operand's missing term is missing from the product too,
-        // and a product of two live coefficients can underflow to zero —
-        // `(10⁻²⁰⁰·x)·(10⁻²⁰⁰·x)` is one monomial whose coefficient is not
-        // representable (gh #683).
-        out.dropped_terms |= self.dropped_terms || other.dropped_terms;
-        out.prune();
+        // What `prune` drops here that `accumulate` did not already see is a
+        // key whose *first* contribution was a zero — an underflowed product,
+        // and `lost` is set for it above. So the cancellation rule is the
+        // same one `add` applies: a drop counts as a loss only when some fold
+        // behind it rounded.
+        dropped |= out.prune();
+        out.lost_terms = lost || (dropped && (carried_inexact || inexact));
+        out.inexact = carried_inexact || inexact;
         Some(out)
     }
 }
 
+/// What folding one coefficient into a map did — the two facts
+/// [`Quad2::lost_terms`] is decided from.
+#[derive(Clone, Copy)]
+struct Merged {
+    /// The key is no longer stored: the fold reached exactly zero, or
+    /// `NaN`.
+    dropped: bool,
+    /// The fold **rounded**: what is stored (or what cancelled) is not what
+    /// exact arithmetic on the same two numbers would have left.
+    inexact: bool,
+}
+
 /// Add `c` to `map[key]`, keeping the "no stored zeros" invariant. Returns
-/// whether a term was **dropped** doing so.
+/// what that did, as [`Merged`].
 ///
 /// Only the touched key can have become zero, which is what keeps a merge
 /// proportional to what it merged rather than to what it merged *into*.
-fn merge<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, c: f64) -> bool {
+fn merge<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, c: f64) -> Merged {
     use std::collections::btree_map::Entry;
     match map.entry(key) {
         Entry::Occupied(mut e) => {
-            let v = *e.get() + c;
+            let a = *e.get();
+            let v = a + c;
+            let inexact = !add_is_exact(a, c, v);
             if is_live(v) {
                 e.insert(v);
-                false
+                Merged {
+                    dropped: false,
+                    inexact,
+                }
             } else {
                 e.remove();
-                true
+                Merged {
+                    dropped: true,
+                    inexact,
+                }
             }
         }
+        // Nothing was added to anything: a live `c` is stored as it stands,
+        // and a dead one is only reachable from a caller that already knows
+        // what its own zero means (`mul`'s underflowed products; `add` only
+        // ever passes stored — hence live — coefficients).
         Entry::Vacant(e) => {
             if is_live(c) {
                 e.insert(c);
-                false
+                Merged {
+                    dropped: false,
+                    inexact: false,
+                }
             } else {
-                true
+                Merged {
+                    dropped: true,
+                    inexact: c.is_nan(),
+                }
             }
         }
     }
+}
+
+/// Accumulate `t` into `map[key]`, the way [`Quad2::mul`] builds a product
+/// up term by term, and report what the fold did.
+///
+/// Unlike [`merge`] this leaves a zero stored — `mul` prunes once at the
+/// end — because a key it lands on twice must see the first contribution as
+/// a plain `0.0 + t`, bit for bit what the `+=` this replaced produced.
+/// Only a key that was already nonzero can be said to have *dropped*
+/// anything.
+fn accumulate<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, t: f64) -> Merged {
+    let slot = map.entry(key).or_insert(0.0);
+    let was = *slot;
+    *slot = was + t;
+    Merged {
+        dropped: was != 0.0 && !is_live(*slot),
+        inexact: !add_is_exact(was, t, *slot),
+    }
+}
+
+/// Was `a + b`, which came out as `s`, computed **exactly**?
+///
+/// Knuth's two-sum: `err` below is the part of the true sum that `s` could
+/// not represent, and it is itself exact for every finite pair — no
+/// tolerance, no magnitude test. Two extra flops per merge, which is the
+/// whole cost of telling `x − x` (exact, degree really 0) apart from
+/// `2⁵³·x + x − 2⁵³·x` (the `x` was absorbed by the first add, and the
+/// second only made it visible). See gh #687.
+///
+/// A non-finite operand — or a sum that overflowed — makes `err` a `NaN`,
+/// which answers *inexact*: the conservative direction, and the right one,
+/// since an infinity has lost every term it swallowed.
+fn add_is_exact(a: f64, b: f64, s: f64) -> bool {
+    let bb = s - a;
+    let err = (a - (s - bb)) + (b - bb);
+    err == 0.0
+}
+
+/// Was `a · b`, which came out as `p`, computed **exactly**?
+///
+/// `fma(a, b, −p)` is the multiply's rounding error, exactly, and `p` is
+/// exact iff that error is zero. The `±1` shortcut is not micro-optimizing
+/// for its own sake: every variable enters the recognizer with a
+/// coefficient of `1.0` (see [`Quad2::of_var`]), so it is the common case
+/// by a wide margin, and `f64::mul_add` is a libm call on targets without a
+/// hardware FMA.
+///
+/// A product that overflowed to an infinity answers *inexact* for the same
+/// reason a sum that did.
+fn mul_is_exact(a: f64, b: f64, p: f64) -> bool {
+    if a == 1.0 || a == -1.0 || b == 1.0 || b == -1.0 || a == 0.0 || b == 0.0 {
+        // Multiplying by ±1 or by an exact zero cannot round.
+        return true;
+    }
+    // A product that is not *normal* is one the exponent range could not
+    // hold: zero (`10⁻²⁰⁰ · 10⁻²⁰⁰`, from two nonzero factors), a subnormal
+    // that gave up bits at the bottom, or an infinity from overflow. The
+    // `fma` below cannot be asked about those — it rounds onto the same
+    // grid, and answers `0` for the underflowed product as readily as for
+    // an exact one — so they are answered here, inexact.
+    p.is_normal() && a.mul_add(b, -p) == 0.0
 }
 
 /// Is this coefficient worth **storing**? Exact zeros are dropped so that
@@ -361,8 +598,9 @@ fn merge<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, c: f64) -> bool {
 /// applied to a **sum** of coefficients, so a degree-2 body whose
 /// coefficients cancel — or whose one coefficient underflows — stores
 /// nothing and looks affine. That is gh #683, and it is why every caller
-/// records the drop in [`Quad2::dropped_terms`]; the degree question is
-/// answered from *that*, not from this predicate.
+/// weighs the drop against the arithmetic that led to it and records the
+/// verdict in [`Quad2::lost_terms`]; the degree question is answered from
+/// *that*, not from this predicate.
 fn is_live(c: f64) -> bool {
     c.abs() > 0.0
 }
@@ -515,13 +753,18 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                         if d == 0.0 {
                             return None;
                         }
-                        a.scale(1.0 / d)
+                        let mut out = a.div_by_constant(d);
+                        // The divisor's own history comes along: `as_constant`
+                        // reads a number out of a form and leaves the flags
+                        // behind.
+                        out.absorb_flags(&b);
+                        out
                     }
                     Op::Pow => {
                         // Polynomial only for constant exponents in {0, 1, 2}.
                         let (a, b) = pop2(&mut vals)?;
                         let exp = b.as_constant()?;
-                        if exp == 0.0 {
+                        let mut out = if exp == 0.0 {
                             Quad2::of_constant(1.0)
                         } else if exp == 1.0 {
                             a
@@ -529,7 +772,12 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                             a.mul(&a)?
                         } else {
                             return None;
-                        }
+                        };
+                        // Same as `Div`: the exponent is read out of a form,
+                        // and one that lost a term is not the exponent it
+                        // looks like.
+                        out.absorb_flags(&b);
+                        out
                     }
                 };
                 vals.push(combined);
@@ -820,7 +1068,7 @@ mod tests {
         // "not established" rather than "yes".
         let q = recognize_expr(&flushed).expect("degree-2 at worst");
         assert!(
-            q.dropped_terms(),
+            q.lost_terms(),
             "a coefficient that underflowed in `scale` was dropped silently"
         );
         // And the degree has to go with it for the *storage* question:
@@ -843,6 +1091,183 @@ mod tests {
         assert!(h.is_empty());
         let times_x1 = Expr::Binary(BinOp::Mul, Box::new(zero), Box::new(Expr::Var(1)));
         assert!(analyze_quadratic(&times_x1).is_some());
+    }
+
+    /// The gh #687 distinction, at the level it is made: an **exact**
+    /// cancellation leaves the form complete, and an absorbed term does
+    /// not. Both bodies drop a coefficient; only one of them lost anything
+    /// doing it.
+    #[test]
+    fn an_exact_cancellation_is_not_a_lost_term() {
+        // x0² − x0²: `fl(1) + fl(−1)` is exactly `0`, so the body really is
+        // degree 0 and the maps say so with nothing held back.
+        let zero = Expr::Binary(BinOp::Sub, Box::new(sq(0)), Box::new(sq(0)));
+        let q = recognize_expr(&zero).expect("degree-2 at worst");
+        assert!(q.quadratic().is_empty());
+        assert!(!q.inexact(), "an exact fold reported rounding");
+        assert!(
+            !q.lost_terms(),
+            "x0² − x0² was refused a fast path it is entitled to",
+        );
+
+        // 2⁵³·x0² + x0² − 2⁵³·x0², front to back: the `x0²` is absorbed by
+        // `fl(2⁵³ + 1) = 2⁵³` — an inexact add — and the exact `− 2⁵³` only
+        // makes the loss visible.
+        let big = (1u64 << 53) as f64;
+        let scaled = |c: f64| Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(sq(0)));
+        let absorbing = Expr::Sum(vec![scaled(big), sq(0), scaled(-big)]);
+        let q = recognize_expr(&absorbing).expect("degree-2 at worst");
+        assert!(q.quadratic().is_empty());
+        assert!(q.inexact(), "the absorbing add was not seen to round");
+        assert!(
+            q.lost_terms(),
+            "a body whose x0² was absorbed was reported complete",
+        );
+    }
+
+    /// The absorption is recorded where it happens, which is the point of
+    /// the sharpened gate: `2⁵³·x0² + x0²` has lost the `x0²` already, and
+    /// the form says so before anything cancels — while its coefficient is
+    /// still stored and its degree is still 2.
+    #[test]
+    fn the_inexact_fold_is_flagged_before_anything_drops() {
+        let big = (1u64 << 53) as f64;
+        let scaled = |c: f64| Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(sq(0)));
+        let e = Expr::Binary(BinOp::Add, Box::new(scaled(big)), Box::new(sq(0)));
+        let q = recognize_expr(&e).expect("degree-2");
+        assert_eq!(q.quadratic().get(&(0, 0)), Some(&big));
+        assert!(q.inexact(), "fl(2⁵³ + 1) = 2⁵³ was called exact");
+        // Nothing is missing from the maps *yet*, so the consumers keep
+        // their fast paths: the degree is not in question here.
+        assert!(!q.lost_terms());
+    }
+
+    /// The sticky half of the same rule. The rounding and the drop are in
+    /// different subexpressions — `(2⁵³·x0 + x0)` absorbs, `− 2⁵³·x0`
+    /// cancels — and the verdict has to survive the trip between them.
+    #[test]
+    fn rounding_carried_from_a_subexpression_makes_a_later_drop_a_loss() {
+        let big = (1u64 << 53) as f64;
+        let scaled =
+            |c: f64| Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(Expr::Var(0)));
+        let absorbed = Expr::Binary(BinOp::Add, Box::new(scaled(big)), Box::new(Expr::Var(0)));
+        let e = Expr::Binary(BinOp::Sub, Box::new(absorbed), Box::new(scaled(big)));
+        let q = recognize_expr(&e).expect("degree-1 at worst");
+        assert!(q.linear().is_empty());
+        assert!(
+            q.lost_terms(),
+            "the x0 absorbed two additions ago is no less missing now",
+        );
+    }
+
+    /// Cancellation *inside a product*: `(x0 + x1)·(x0 − x1)` accumulates
+    /// `+x0x1` and `−x0x1` onto one key and they cancel exactly. The body
+    /// really has no cross term, so the form must not be demoted for
+    /// noticing.
+    #[test]
+    fn an_exact_cancellation_in_a_product_is_not_a_lost_term() {
+        let add = |a: Expr, b: Expr| Expr::Binary(BinOp::Add, Box::new(a), Box::new(b));
+        let sub = |a: Expr, b: Expr| Expr::Binary(BinOp::Sub, Box::new(a), Box::new(b));
+        let e = Expr::Binary(
+            BinOp::Mul,
+            Box::new(add(Expr::Var(0), Expr::Var(1))),
+            Box::new(sub(Expr::Var(0), Expr::Var(1))),
+        );
+        let q = recognize_expr(&e).expect("degree-2");
+        assert_eq!(q.quadratic().get(&(0, 0)), Some(&1.0));
+        assert_eq!(q.quadratic().get(&(1, 1)), Some(&-1.0));
+        assert_eq!(q.quadratic().get(&(0, 1)), None);
+        assert!(!q.lost_terms(), "x0² − x1² was reported incomplete");
+    }
+
+    /// An underflowing **multiply** has no exact case to spare: both
+    /// factors are nonzero and the product is a monomial the form can no
+    /// longer see. `(10⁻²⁰⁰·x0)·(10⁻²⁰⁰·x0)` stays refused, which is gh
+    /// #683's second reproduction and gh #687's second acceptance case.
+    #[test]
+    fn an_underflowing_product_is_still_a_lost_term() {
+        let tiny = |i: usize| {
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(1e-200)),
+                Box::new(Expr::Var(i)),
+            )
+        };
+        let e = Expr::Binary(BinOp::Mul, Box::new(tiny(0)), Box::new(tiny(0)));
+        let q = recognize_expr(&e).expect("degree-2 at worst");
+        assert!(q.quadratic().is_empty());
+        assert!(
+            q.lost_terms(),
+            "a coefficient that underflowed on the multiply was reported absent",
+        );
+    }
+
+    /// A constant folded away exactly is degree 0 for real — and `mul`
+    /// reads a zero constant as annihilating, so this is the one drop whose
+    /// verdict a *product* depends on.
+    #[test]
+    fn an_exactly_cancelled_constant_is_not_a_lost_term() {
+        let e = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Const(3.0)),
+            Box::new(Expr::Const(3.0)),
+        );
+        let q = recognize_expr(&e).expect("degree 0");
+        assert_eq!(q.as_constant(), Some(0.0));
+        assert!(!q.lost_terms());
+
+        // The same shape one ulp off: `fl(2⁵³ + 1) − 2⁵³` is `0.0` where the
+        // real value is `1`.
+        let big = (1u64 << 53) as f64;
+        let absorbed = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Const(big)),
+            Box::new(Expr::Const(1.0)),
+        );
+        let e = Expr::Binary(BinOp::Sub, Box::new(absorbed), Box::new(Expr::Const(big)));
+        let q = recognize_expr(&e).expect("degree 0");
+        assert_eq!(q.as_constant(), Some(0.0));
+        assert!(q.lost_terms(), "an absorbed constant was reported absent");
+    }
+
+    /// Rounding a coefficient is recorded even when nothing is dropped,
+    /// because that is what a later exact cancellation would be hiding:
+    /// `x0²/3` cannot be represented, and the form has to remember it.
+    #[test]
+    fn a_rounded_scale_is_inexact_but_loses_nothing() {
+        let e = Expr::Binary(BinOp::Div, Box::new(sq(0)), Box::new(Expr::Const(3.0)));
+        let q = recognize_expr(&e).expect("degree-2");
+        assert_eq!(q.quadratic().get(&(0, 0)), Some(&(1.0 / 3.0)));
+        assert!(q.inexact(), "1 · (1/3) was called exact");
+        assert!(
+            !q.lost_terms(),
+            "a rounded coefficient is not a missing one"
+        );
+
+        // Halving is exact, so the same shape by a power of two is not.
+        let e = Expr::Binary(BinOp::Div, Box::new(sq(0)), Box::new(Expr::Const(2.0)));
+        let q = recognize_expr(&e).expect("degree-2");
+        assert!(!q.inexact(), "x0²/2 rounds nothing");
+    }
+
+    /// The two-sum and the two-product, against the cases the recognizer
+    /// actually meets. Exactness is not a tolerance, so these are `==`.
+    #[test]
+    fn the_exactness_tests_agree_with_the_arithmetic() {
+        let big = (1u64 << 53) as f64;
+        assert!(add_is_exact(big, -big, big + -big));
+        assert!(add_is_exact(1.0, 2.0, 3.0));
+        assert!(!add_is_exact(big, 1.0, big + 1.0), "2⁵³ + 1 loses the 1");
+        assert!(!add_is_exact(0.1, 0.2, 0.1 + 0.2));
+        assert!(!add_is_exact(f64::INFINITY, 1.0, f64::INFINITY));
+        assert!(!add_is_exact(f64::NAN, 1.0, f64::NAN + 1.0));
+
+        assert!(mul_is_exact(3.0, 1.0, 3.0), "the ±1 shortcut");
+        assert!(mul_is_exact(3.0, 0.5, 1.5));
+        assert!(mul_is_exact(0.1, 4.0, 0.4));
+        assert!(!mul_is_exact(3.0, 1.0 / 3.0, 3.0 * (1.0 / 3.0)));
+        assert!(!mul_is_exact(1e-200, 1e-200, 1e-200 * 1e-200), "underflow");
+        assert!(!mul_is_exact(1e300, 1e300, 1e300 * 1e300), "overflow");
     }
 
     #[test]

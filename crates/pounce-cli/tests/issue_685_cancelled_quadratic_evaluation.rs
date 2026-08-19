@@ -18,7 +18,7 @@
 //! end of it — an objective of `-1.0e6` against a true optimum a couple of
 //! units away, reported `Optimal`.
 //!
-//! The fix keys off [`Quad2::dropped_terms`] and not off the map being
+//! The fix keys off [`Quad2::lost_terms`] and not off the map being
 //! empty, and the difference is the whole of `partial_cancellation` below:
 //! `2⁵³·x₀² + x₀² − 2⁵³·x₀² + x₁²` keeps `x₁²`, so the map is *not* empty
 //! and `provably_affine` says `Some(false)` quite correctly — while the
@@ -109,7 +109,7 @@ fn cancelling_body() -> String {
 /// `2⁵³·x₀² + x₀² − 2⁵³·x₀² + x₁²` — the same cancellation with a live term
 /// beside it. The map keeps `x₁²`, so it is not empty, and the degree
 /// answer is a correct `Some(false)`; the read-out is nonetheless missing
-/// `x₀²` entirely. This is the model that separates a `dropped_terms` gate
+/// `x₀²` entirely. This is the model that separates a `lost_terms` gate
 /// from an emptiness gate.
 fn partially_cancelling_body() -> String {
     let big = (1u64 << 53) as f64;
@@ -133,6 +133,14 @@ fn underflowing_body() -> &'static str {
 /// An honest degree-2 body, to check the gate did not simply close.
 fn ordinary_body() -> &'static str {
     "o54\n2\no2\nv0\nv0\no5\nv1\nn2\n"
+}
+
+/// `x₀·x₀ − x₀^2 + x₁²`: a term that cancels **exactly**, beside a live one.
+/// `fl(1) + fl(−1)` is `0` with nothing rounded away, so the read-out is the
+/// whole body and the row keeps its matrix evaluation (gh #687). The two
+/// spellings of `x₀²` keep the tape from hash-consing the pair.
+fn exactly_cancelling_body() -> &'static str {
+    "o54\n3\no2\nv0\nv0\no16\no5\nv0\nn2\no5\nv1\nn2\n"
 }
 
 /// Parse with parse-time quadratic recognition on and off — the two arms of
@@ -195,6 +203,37 @@ fn partial_cancellation_is_not_caught_by_looking_for_an_empty_form() {
             "{path}: a non-empty but incomplete form was admitted",
         );
     }
+}
+
+/// The gate is on the *loss*, not on the drop (gh #687): a row whose term
+/// cancelled exactly is admitted, because its read-out is the whole body.
+/// On the pre-#687 code this row was refused along with the absorbing one,
+/// and the row went back to the tape for nothing.
+#[test]
+fn an_exactly_cancelled_row_is_still_admitted_for_evaluation() {
+    for (path, prob) in both_paths(&model(exactly_cancelling_body())) {
+        let form = prob.con_nonlinear[0]
+            .admitted_quad_form()
+            .unwrap_or_else(|| panic!("{path}: an exactly cancelling row lost its fast path"));
+        let (h, _lin, _c) = form;
+        // The cancelled `x₀²` is absent because it is absent, and `x₁²` is
+        // there because it is there.
+        assert_eq!(h.get(&(0, 0)), None, "{path}");
+        assert_eq!(h.get(&(1, 1)), Some(&2.0), "{path}");
+    }
+
+    // And the fast path it keeps agrees with the tape it replaces.
+    let x = [3.0, 1.0];
+    let g = |quad: bool| -> f64 {
+        let prob =
+            parse_nl_text_with_quadratic(&model(exactly_cancelling_body()), true).expect("parse");
+        let mut t = NlTnlp::try_new_with_quadratic(prob, quad).expect("build TNLP");
+        let m = t.get_nlp_info().expect("nlp info").m as usize;
+        let mut out = vec![0.0; m];
+        assert!(t.eval_g(&x, true, &mut out), "eval_g failed");
+        out[0]
+    };
+    assert_eq!(g(true), g(false), "the admitted form is not the row");
 }
 
 /// The gate is on the drop, not on the shape: an ordinary `x₀² + x₁²` is
