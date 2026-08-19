@@ -362,17 +362,10 @@ where
     // over-condition the reduced KKT system and trip the factorization near the
     // boundary (a `NumericalFailure` that neither transform produces alone).
     // See `crate::equilibrate`.
-    if opts.equilibrate && !opts.use_hsde {
-        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
-        let inner = QpOptions {
-            equilibrate: false,
-            ..*opts
-        };
-        let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
-        scaling.unscale_solution(prob, &mut sol);
-        return sol;
-    }
     let mut make_backend = make_backend;
+    if opts.equilibrate && !opts.use_hsde {
+        return equilibrated_solve(prob, opts, /* use_hsde */ false, &mut make_backend);
+    }
     let sol = solve_qp_ipm_unscaled(prob, opts, &mut make_backend);
     // HSDE robustness fallback. The self-dual driver normally conditions itself
     // through its per-cone NT scaling and so deliberately skips Ruiz pre-scaling
@@ -543,7 +536,49 @@ where
     };
     let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
     scaling.unscale_solution(prob, &mut sol);
-    sol
+    if use_hsde {
+        sol
+    } else {
+        demote_false_equilibrated_optimum(prob, sol, opts.tol)
+    }
+}
+
+/// Re-check a direct-driver `Optimal` **in the caller's own coordinates**, and
+/// demote it when it does not survive the trip back out of the Ruiz metric.
+///
+/// The direct driver's convergence test — absolute or scale-relative — is
+/// applied to the *equilibrated* problem, and that is not the same statement as
+/// optimality of the point the caller receives. Ruiz is a diagonal change of
+/// variables `x = Dc x̂` whose dual map divides by `Dc`, so a `Dc` spanning many
+/// decades multiplies the recovered dual residual by up to `1/min Dc`. On
+/// `feasible_x0_sentinel_bound` (coefficients from `1e-320` to `1e30`, so
+/// `min Dc ≈ 6e-16`) the returned iterate reads `‖r_d‖ = 2.3e-9` in the scaled
+/// metric — comfortably converged — and `2.3` in the user's, at an objective of
+/// `1.30` against a true `0`. That is the same class of false success gh #414
+/// caught on the HSDE side, arriving through the opposite door: there the
+/// unscaled test was blind and the equilibrated one decisive, here it is the
+/// equilibrated test that is blind. So neither metric is trusted alone — a
+/// point has to look optimal in *both* to keep the verdict.
+///
+/// Costs nothing on a solve that converged outright: a point whose *absolute*
+/// KKT error in the user's coordinates is already within `tol` needs no
+/// argument at all and short-circuits before any extra work.
+///
+/// Demotes to [`QpStatus::NumericalFailure`] rather than
+/// [`QpStatus::OptimalInaccurate`], for the reason [`verify_or_repair_optimum`]
+/// gives: "usable at reduced accuracy" still reports `ok` / exit 0 through the
+/// CLI, which a point this far out is not.
+fn demote_false_equilibrated_optimum(prob: &QpProblem, sol: QpSolution, tol: f64) -> QpSolution {
+    if sol.status != QpStatus::Optimal
+        || sol.kkt_residuals(prob).kkt_error() <= tol
+        || normalized_optimum_is_genuine(prob, &sol)
+    {
+        return sol;
+    }
+    QpSolution {
+        status: QpStatus::NumericalFailure,
+        ..sol
+    }
 }
 
 /// The relative-KKT cut separating a genuine optimum from a scaling artifact,
@@ -895,7 +930,10 @@ where
         let scaled_warm = scaling.scale_warm_start(warm);
         let mut sol = solve_qp_ipm_warm_inner(&scaled, &direct, &scaled_warm, make_backend);
         scaling.unscale_solution(prob, &mut sol);
-        return sol;
+        // Same re-check the cold equilibrated path applies: a verdict reached
+        // inside the Ruiz metric is not yet a statement about the point the
+        // caller receives. See [`demote_false_equilibrated_optimum`].
+        return demote_false_equilibrated_optimum(prob, sol, opts.tol);
     }
     if !prob.has_bounds() {
         let w = WarmStart {
@@ -2126,20 +2164,120 @@ where
     Ok((kkt, fact))
 }
 
-/// Build the starting iterate `(x, y, z, s)` for [`run_ipm`].
+/// The **scale-relative** convergence arm of the direct driver: the primal and
+/// dual residuals measured against the natural magnitude of their own terms,
+/// and *permitted to conclude only* once `tol`-level absolute accuracy is below
+/// the finite-precision floor ([`crate::hsde::relative_stop_permitted`], the
+/// same gate and the same normalizers the HSDE loop already applies).
 ///
-/// With no warm start (`warm = None`) this is the cold default
-/// `x = 0, y = 0, z = 1, s = 1` — a perfectly centered interior point
-/// (`s∘z = 1`) — preserving the established cold-start behavior exactly.
+/// Without it the direct driver has no way to finish a solve whose data puts
+/// the absolute test out of reach. `scaled_feasible_a` (gh #689) is the
+/// canonical case: the Ruiz-equilibrated problem's optimum sits at `‖x̂‖ ≈ 5e9`
+/// against `‖ĥ‖ ≈ 5e9`, so forming `Gx + s − h` cancels two `5e9` quantities
+/// and the primal residual floors at `5e-6 ≈ 4 ulp` — a thousand times `tol` —
+/// while the iterate is the *exact* optimum (its true KKT error reads `4e-25`).
+/// The absolute test can never pass there, so the loop ran on past its own
+/// answer until `s` and `z` underflowed into the denormals and the
+/// factorization broke down: 175 iterations to a `NumericalFailure` sitting on
+/// the optimum. With this arm the same solve stops at 27.
 ///
-/// With a warm start it applies a **Mehrotra-style recentering** seeded
-/// from the warm point (Mehrotra 1992, §7, adapted for warm starting):
+/// **Complementarity is deliberately left absolute.** The relaxation is
+/// justified by *cancellation*, not by size: `Gx + s − h` and
+/// `Px + c + Aᵀy + Gᵀz` are differences of like-magnitude terms, so their
+/// achievable accuracy is `≈ scale·ε` and below that floor only a relative
+/// statement is meaningful. `μ = ⟨s,z⟩/deg` is a **sum of products of
+/// nonnegatives** — nothing cancels, and it converges to zero at any problem
+/// scale — so there is no floor to excuse relaxing it, and relaxing it costs
+/// real accuracy: normalizing `μ` by the objective magnitude (the shape
+/// [`equilibrated_kkt_rel_parts`] and HSDE's `gap_rel` use) hands a QP whose
+/// objective is dominated by a constant offset a blanket `|obj|`-sized
+/// tolerance on the gap. On `scaled_feasible_a` that offset is `5e11`, so the
+/// relative-gap form stops `~5e3` of objective early — the very
+/// objective instability gh #689 reports on this fixture pair. Holding `μ`
+/// absolute lands the same solve on the exact optimum.
 ///
-/// 1. Keep the warm primal `x` and equality multipliers `y`.
+/// Two gates, cheap-first. The outer one uses only quantities already to hand
+/// (`‖c‖, ‖b‖, ‖h‖, ‖s‖` — each a term of `scale_d`/`scale_p`, hence a lower
+/// bound on the natural scale, so it can only ever open *later* than the real
+/// gate), which keeps an ordinarily-scaled solve — every solve where this arm
+/// could not fire anyway — at one comparison and no matvecs.
+fn scale_relative_stop(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    s: &[f64],
+    pinf: f64,
+    dinf: f64,
+    mu: f64,
+    tol: f64,
+) -> bool {
+    if !(mu < tol) {
+        return false;
+    }
+    let norm_s = inf_norm(s);
+    let cheap = inf_norm(&prob.c)
+        .max(inf_norm(&prob.b))
+        .max(inf_norm(&prob.h))
+        .max(norm_s);
+    if !crate::hsde::relative_stop_permitted(cheap, tol) {
+        return false;
+    }
+    let (n, m_eq, m_ineq) = (prob.n, prob.m_eq(), prob.m_ineq());
+    let mut px = vec![0.0; n];
+    prob.p_mul(x, &mut px);
+    let mut aty = vec![0.0; n];
+    prob.at_mul(y, &mut aty);
+    let mut gtz = vec![0.0; n];
+    prob.gt_mul(z, &mut gtz);
+    let mut ax = vec![0.0; m_eq];
+    prob.a_mul(x, &mut ax);
+    let mut gx = vec![0.0; m_ineq];
+    prob.g_mul(x, &mut gx);
+
+    let scale_d = inf_norm(&px)
+        .max(inf_norm(&aty))
+        .max(inf_norm(&gtz))
+        .max(inf_norm(&prob.c));
+    let scale_p = inf_norm(&ax)
+        .max(inf_norm(&gx))
+        .max(norm_s)
+        .max(inf_norm(&prob.b))
+        .max(inf_norm(&prob.h));
+    if !crate::hsde::relative_stop_permitted(scale_d.max(scale_p), tol) {
+        return false;
+    }
+    pinf / (1.0 + scale_p) < tol && dinf / (1.0 + scale_d) < tol
+}
+
+/// Build the starting iterate `(x, y, z, s)` for [`run_ipm`] by **Mehrotra-style
+/// recentering** (Mehrotra 1992, §7) of a seed point — the warm start when one
+/// is supplied, otherwise the origin `x = 0, y = 0, z = e`.
+///
+/// The cold seed goes through the same recentering as a warm one, which is what
+/// sizes it to the problem's own data (gh #689). The historical cold start,
+/// `s = z = e` regardless of the data, is *not* a starting point: it is a fixed
+/// point of unit scale asserted over a problem whose slacks may live anywhere.
+/// On `scaled_feasible_a` the Ruiz-equilibrated feasible set sits at
+/// `‖h‖ ≈ 5e9`, so from `s = e` the very first Newton direction — a perfectly
+/// good `‖dx‖ ≈ 2.9e9`, pointed at the optimum — was cut by
+/// fraction-to-boundary to `α ≈ 8e-9`. The iterate could not move; the
+/// corrector, dividing `σμ` by slacks pinned at `1`, then returned directions
+/// of `1e18`, `z` blew up to `7e21`, and the solve diverged to the iteration
+/// cap at `kkt_error 8e45`. Seeding `s` from the implied slacks instead makes
+/// the same solve converge in 27 iterations. (This is the failure mode
+/// [`QpOptions::use_hsde`] documents the direct driver for — NETLIB `nl`,
+/// "`mu` to ~1e11" — with a measurement attached.)
+///
+/// The recentering, for either seed:
+///
+/// 1. Keep the seed primal `x` and equality multipliers `y`.
 /// 2. Take the implied slacks `s̃ = h − Gx` (their signs encode which
-///    inequalities the warm `x` makes active/violated) and the warm `z`.
+///    inequalities the seed `x` makes active/violated) and the seed `z`.
+///    From the origin this is `s̃ = h`, so the primal scale of the start is
+///    the problem's own.
 /// 3. Shift both into the strict interior by `δ = max(−1.5·min(·), floor)`.
-///    The `floor` is **adaptive**: it is the warm point's KKT residual `ρ`
+///    The `floor` is **adaptive**: it is the seed point's KKT residual `ρ`
 ///    on *this* problem, clamped to `[1e-9·scale, 0.1·scale]` with
 ///    `scale = max(1, ‖s̃‖∞, ‖z‖∞)`. A converged warm point sits on the
 ///    complementarity boundary (`s̃ᵢ` or `zᵢ ≈ 0`), so a floor is required
@@ -2150,13 +2288,15 @@ where
 ///    IPM exploits the warm duals — and softens toward the conservative
 ///    `0.1·scale` when the active set has moved (large `ρ`). This both
 ///    deepens the benefit on nearby problems and keeps it from ever doing
-///    worse than a centered start.
+///    worse than a centered start. From the cold seed the same rule reads
+///    as "size the interior floor to the residual the origin leaves", which
+///    is the scale the first Newton step has to work in.
 /// 4. A final centering shift `½(s·z)/Σz`, `½(s·z)/Σs` balances `s` and
 ///    `z` (Mehrotra's second step).
 ///
 /// The returned iterate always satisfies `s > 0, z > 0`. If `warm`'s
 /// dimensions don't match the (expanded) problem it is ignored and the
-/// cold start is used, so a stale warm start can never corrupt a solve.
+/// cold seed is used, so a stale warm start can never corrupt a solve.
 fn init_iterate(
     prob: &QpProblem,
     cone: &CompositeCone,
@@ -2165,33 +2305,32 @@ fn init_iterate(
     m_ineq: usize,
     warm: Option<&WarmStart>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    // Cold start at the cone identity e (orthant: all ones; SOC: (1,0,…)),
-    // a perfectly centered interior point (s∘z = e).
-    let cold = || {
-        let mut e = vec![0.0; m_ineq];
-        cone.identity(&mut e);
-        (vec![0.0; n], vec![0.0; m_eq], e.clone(), e)
-    };
-    // A matching primal `x` is enough to warm start; `y`/`z` fall back to
-    // the cold values when they don't match (so a primal-only warm start —
-    // e.g. feeding back just the previous primal — is supported).
-    let w = match warm {
-        Some(w) if w.x.len() == n => w,
-        _ => return cold(),
-    };
-
-    let x = w.x.clone();
-    let y = if w.y.len() == m_eq {
-        w.y.clone()
-    } else {
-        vec![0.0; m_eq]
-    };
-    let mut z = if w.z.len() == m_ineq {
-        w.z.clone()
-    } else {
-        let mut e = vec![0.0; m_ineq];
-        cone.identity(&mut e);
-        e
+    // The seed point. A matching warm primal `x` is enough to warm start;
+    // `y`/`z` fall back to the cold values when they don't match (so a
+    // primal-only warm start — e.g. feeding back just the previous primal —
+    // is supported). With no warm start the seed is the origin with the cone
+    // identity duals — the historical cold start's `(x, y, z)`.
+    //
+    // Both seeds then go through the *same* Mehrotra recentering below, which
+    // is what sizes the cold start to the problem's own data (gh #689). See
+    // this function's doc comment for why `s = z = e` is not a starting point.
+    let mut ident = vec![0.0; m_ineq];
+    cone.identity(&mut ident);
+    let (x, y, mut z) = match warm {
+        Some(w) if w.x.len() == n => (
+            w.x.clone(),
+            if w.y.len() == m_eq {
+                w.y.clone()
+            } else {
+                vec![0.0; m_eq]
+            },
+            if w.z.len() == m_ineq {
+                w.z.clone()
+            } else {
+                ident.clone()
+            },
+        ),
+        _ => (vec![0.0; n], vec![0.0; m_eq], ident.clone()),
     };
 
     // No cone: x/y are the whole iterate, s/z are empty.
@@ -2206,15 +2345,17 @@ fn init_iterate(
 
     let scale = 1.0_f64.max(inf_norm(&s)).max(inf_norm(&z));
 
-    // Adaptive interior floor sized to the warm point's KKT residual ρ on
-    // *this* problem. ρ measures how far the warm point is from satisfying
-    // the new KKT system: a small ρ (nearby problem, stable active set)
-    // lets the slacks/multipliers stay near their warm — correctly
-    // structured — values, so the IPM exploits the warm duals and needs
-    // few steps; a large ρ (the active set moved, so the warm point is
-    // badly infeasible) softens the floor toward the conservative cold
-    // level `0.1·scale`. This self-corrects: warm starting never does
-    // worse than a centered start, and gains the most when it can.
+    // Adaptive interior floor sized to the seed point's KKT residual ρ on
+    // *this* problem. ρ measures how far the seed is from satisfying the
+    // KKT system: a small ρ (nearby problem, stable active set) lets the
+    // slacks/multipliers stay near their warm — correctly structured —
+    // values, so the IPM exploits the warm duals and needs few steps; a
+    // large ρ (the active set moved, so the warm point is badly infeasible)
+    // softens the floor toward the conservative `0.1·scale`. This
+    // self-corrects: warm starting never does worse than a centered start,
+    // and gains the most when it can. From the cold seed ρ is just the
+    // residual the origin leaves, which is the scale the first Newton step
+    // has to work in.
     let floor = {
         let mut rd = prob.c.clone();
         prob.p_mul_add(&x, &mut rd);
@@ -2222,7 +2363,7 @@ fn init_iterate(
         prob.gt_mul_add(&z, &mut rd);
         let mut rp: Vec<f64> = prob.b.iter().map(|b| -b).collect();
         prob.a_mul_add(&x, &mut rp);
-        // Inequality infeasibility of the warm point: max(0, Gx − h) = −s̃.
+        // Inequality infeasibility of the seed point: max(0, Gx − h) = −s̃.
         let viol = s.iter().fold(0.0_f64, |m, &si| m.max((-si).max(0.0)));
         let rho = inf_norm(&rd).max(inf_norm(&rp)).max(viol);
         rho.clamp(1e-9 * scale, 0.1 * scale)
@@ -2360,7 +2501,7 @@ fn run_ipm(
             break;
         }
 
-        if res < opts.tol {
+        if res < opts.tol || scale_relative_stop(prob, &x, &y, &z, &s, pinf, dinf, mu, opts.tol) {
             status = QpStatus::Optimal;
             // Record the converged iterate so the trace *ends* at the
             // optimum, matching the NLP path's N+1 convention (a problem

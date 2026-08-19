@@ -9,6 +9,72 @@ changes.
 
 ## [Unreleased]
 
+- **The direct convex QP driver no longer diverges on a badly-scaled
+  feasible model** (#689).
+
+  At `qp_hsde=no` — the driver `QpWarmStart`, the build-once
+  `QpFactorization` handle and the dual-infeasibility reverify guard all
+  use, and which cannot fall back to HSDE the way the one-shot path can —
+  `scaled_feasible_a` ran to the 199-iteration cap at `final_kkt_error
+  8.4e45`, `final_dual_inf 3.7e41` and objective `1.14e11`. It was
+  diverging, not converging slowly; HSDE solves the same model in 16.
+
+  The cause was the cold start. It was `s = z = e` regardless of the
+  data, and on this model the Ruiz-equilibrated feasible set sits at
+  `‖ĥ‖ ≈ 5e9`, so the starting slacks were nine orders too small: the
+  first Newton direction was correct (`‖dx‖ ≈ 2.9e9`, pointed at the
+  optimum) and fraction-to-boundary cut it to `α ≈ 8e-9`. The iterate
+  could not move, the corrector then divided `σμ` by slacks still pinned
+  at `1` and returned directions of `1e18`, and `z` ran away to `7e21`.
+  The cold seed now goes through the same Mehrotra recentering the warm
+  path already used, which takes the starting slacks from the implied
+  `s̃ = h − Gx` and so sizes them to the problem.
+
+  That alone reaches the optimum but cannot recognize it: `‖x̂‖ ≈ 5e9`
+  against `‖ĥ‖ ≈ 5e9` floors the primal residual at `5e-6 ≈ 4 ulp`, a
+  thousand times `tol`, so the loop ran 175 iterations past its own
+  answer (true KKT error `4e-25`) until `s` and `z` underflowed into the
+  denormals. The driver therefore also gets the scale-relative stopping
+  arm HSDE already has, under the same gate — but with complementarity
+  held **absolute**, since `μ = ⟨s,z⟩/deg` is a sum of products of
+  nonnegatives with no cancellation floor to excuse relaxing it.
+
+  Both fixtures now solve at `qp_hsde=no`: `scaled_feasible_a` in 27
+  iterations and `scaled_feasible_b` in 28, both at objective `0` — which
+  is the true optimum (each model minimizes `Σ(xᵢ − aᵢ)²` with `a` inside
+  the feasible set). This answers the second half of #689: the two are
+  *not* flat or degenerate optima, and HSDE's `236.85` / `456.33` on them
+  are iterates it stops at, not answers. Its relative gap test normalizes
+  by the objective magnitude, which on these models is `5e11` of constant
+  offset — a blanket `5e3` tolerance on the gap. HSDE is unchanged here
+  and still reports those values; the fixture pair should not be read as
+  an objective sentinel for the sweep until that is addressed. Full
+  analysis and the case for a follow-up:
+  `dev-notes/issue-689-direct-driver-cold-start.md` §3.
+
+  A direct-driver `Optimal` is now also re-checked in the caller's own
+  coordinates before it is returned. The driver's convergence test runs
+  inside the Ruiz metric, and Ruiz's dual map divides by the column
+  scaling, so a `Dc` spanning many decades inflates the recovered dual
+  residual: on `feasible_x0_extreme_row` the pre-fix direct route
+  returned `Solve_Succeeded` at objective `5.0e11` — with an unscaled
+  dual infeasibility of `2.6e6` — where the true optimum is `0`. That
+  false success, and the equivalent one the new stopping arm would
+  otherwise have produced on `feasible_x0_sentinel_bound`, are now
+  demoted to an honest failure.
+
+  The default (HSDE) route is bit-for-bit unchanged across the fixture
+  corpus, both legs. On the `qp_hsde=no` leg the sweep also shows
+  `lp_afiro` 135 → 10 iterations (and closer to the NETLIB optimum:
+  `-464.7531428` against `-464.7531419`), `rankdef_eq_qp` 12 → 6,
+  `wyndor_min` 7 → 6, `qcqp_ball` 15 → 12; `feasible_x0_wide_scale` 4 →
+  13 and `dual_order` / `dual_scaled` 4 → 5, the last three at a better
+  final KKT error. Three lines end slightly less accurate and are
+  recorded rather than waved past: `lp_row_constant` /
+  `lp_row_constant_expr` at `1.8e-8` against `7.2e-10`, and `qcqp_ball`
+  at `1.2e-8` against `7.3e-9` — all still inside the solved band. Per-
+  line detail: `dev-notes/issue-689-direct-driver-cold-start.md`.
+
 - **`recalc_y` no longer degrades the multipliers it exists to sharpen**
   (#688).
 
