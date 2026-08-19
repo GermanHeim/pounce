@@ -185,9 +185,12 @@ pub struct FeralConfig {
     /// residual floor is left uncorrected) is not in the fixture corpus
     /// and has not been re-measured against the outer loop alone.
     ///
-    /// The inner cap is hard-coded in feral 0.15.1 (`RefinementStep`),
-    /// so pounce cannot narrow it without an upstream change; the knob
-    /// here is all-or-nothing.
+    /// The inner cap is hard-coded in feral 0.15.1
+    /// (`solve_sparse_refined_core`, `max_steps = 10`), so pounce cannot
+    /// narrow it without an upstream change; the knob here is
+    /// all-or-nothing. Asked for as feral#178 — one correction step
+    /// would plausibly serve the pinene_3200 case at a tenth of the
+    /// cost, which is what would let this default change.
     pub refine: bool,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
@@ -909,7 +912,8 @@ impl FeralSolverInterface {
                 // entry point returns an owned `Vec` and none writes in
                 // place, so this allocates and copies `dim * nrhs`
                 // doubles per back-solve (~946 KB at n = 118 276).
-                // Removing it needs an in-place variant upstream.
+                // Removing it needs an in-place variant upstream
+                // (feral#178, part 2).
                 rhs_vals.copy_from_slice(&x);
                 ESymSolverStatus::Success
             }
