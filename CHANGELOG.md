@@ -47,13 +47,17 @@ changes.
   models do move, and one of the moves is a cost. `eigenb2` returns to the
   `SolvedToAcceptableLevel` that #616 originally measured — Q4 had nudged it
   across the accept band for one release, which #681 caught and #616's test
-  already described as an accident rather than a fix. `eigena2` goes the other
-  way, to `SolvedToAcceptableLevel` in 127 iterations against 51, for an
-  objective still correct to 82.50000000000348. Neither status was ever a
-  property of the accept test: the safeguard reads bit-for-bit identical
-  inputs on the two models under all three associations, which is #616's
-  conclusion re-derived. The `eigena2` cost is tracked as #706 rather than written
-  off.
+  already described as an accident rather than a fix. `eigena2` becomes
+  **platform-dependent**: `SolveSucceeded` on Linux, `SolvedToAcceptableLevel`
+  in 127 iterations on macOS against 51 before, for an objective correct to
+  82.50000000000348 either way. It is the only model in that file whose status
+  is not the same on both, which is why it is tracked as #706 rather than
+  shrugged off — and it was caught by CI rejecting a pinned macOS reading, not
+  by inspection.
+
+  Neither status was ever a property of the accept test: the safeguard reads
+  bit-for-bit identical inputs on the two models under all three associations,
+  which is #616's conclusion re-derived on a second independent perturbation.
 
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).

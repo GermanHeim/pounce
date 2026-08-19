@@ -382,27 +382,36 @@ fn the_safeguards_measured_cost_is_csfi2_and_eigenb2() {
 /// safeguard reports by a few ulps, each moves **both models by the
 /// same amount**, and nothing else the accept test reads changes at all:
 ///
-/// | route                    | `violation_final`    | `eigena2` | `eigenb2` |
-/// |--------------------------|----------------------|-----------|-----------|
-/// | tape                     | 0.2500000062500001   | succeeded | acceptable|
-/// | Q4, uncompensated        | 0.2500000062500003   | succeeded | succeeded |
-/// | Q4, compensated (gh#702) | 0.25000000624999996  | acceptable| acceptable|
+/// | route                    | `violation_final`    | `eigena2`  | `eigenb2` |
+/// |--------------------------|----------------------|------------|-----------|
+/// | tape                     | 0.2500000062500001   | succeeded  | acceptable|
+/// | Q4, uncompensated        | 0.2500000062500003   | succeeded  | succeeded |
+/// | Q4, compensated (gh#702) | 0.25000000624999996  | *platform* | acceptable|
 ///
-/// Three associations, three verdicts on the pair — agreeing, agreeing,
-/// and disagreeing — off inputs that stay bit-for-bit identical between
-/// the two models every time. So neither model's status was ever a
-/// property of the accept test: both are decided downstream, by where
-/// the iteration after the safeguard lands relative to the acceptable
-/// band, and one reassociated sum in `eval_g` is enough to move either.
-/// An accept test tightened to chase `eigenb2` would have been tuned
-/// against round-off — gh#616's conclusion, now re-derived twice.
+/// Three associations, three verdicts on the pair, off inputs that stay
+/// bit-for-bit identical between the two models every time. So neither
+/// model's status was ever a property of the accept test: both are
+/// decided downstream, by where the iteration after the safeguard lands
+/// relative to the acceptable band, and one reassociated sum in `eval_g`
+/// is enough to move either. An accept test tightened to chase `eigenb2`
+/// would have been tuned against round-off — gh#616's conclusion, now
+/// re-derived twice.
 ///
-/// The compensated row is the one that costs something: `eigena2` takes
-/// 127 iterations there against 51 on the uncompensated fast path and
-/// 65 on the tape, for an objective still correct to 82.50000000000348.
-/// That is tracked as its own defect (gh#706) and it is a cost, not a
-/// wash. The question there is not how to get 51 back — that number was
-/// luck — but why a last-ulp change moves this model 76 iterations.
+/// **`eigena2` is why that last row says *platform*.** Under gh#702's
+/// compensated sum it reaches `SolveSucceeded` on Linux and
+/// `SolvedToAcceptableLevel` in 127 iterations on macOS, for an objective
+/// correct to 82.50000000000348 either way. That is not a status this
+/// file can pin, and the attempt to pin it is what caught the fact: the
+/// first version of this assertion asserted the macOS reading and failed
+/// on CI.
+///
+/// So the assertion below is deliberately two-valued, and the *fact* is
+/// tracked as gh#706. This is the only place in this file where a status
+/// is platform-dependent, which makes it worth a defect rather than a
+/// shrug: every other model here lands the same way on both. The question
+/// for gh#706 is not how to get 51 iterations back — that number was luck
+/// — but why this model sits close enough to the band that libm decides
+/// it.
 ///
 /// The absolute values pinned below are the ones the accept test reads
 /// (`violation_initial`, `alpha`, `rejected_trials`, `termination`).
@@ -449,12 +458,21 @@ fn eigena2_and_eigenb2_hand_the_safeguard_identical_numbers() {
     // the other status. Pinned so that the pair moving is a finding
     // rather than a surprise; the premise above is what gh#616 rests
     // on, and these two are downstream round-off.
-    assert_eq!(
-        status_of(&solve("eigena2", true)),
-        "SolvedToAcceptableLevel",
-        "eigena2 accepts the alpha = 0.5 step; where it lands relative \
-         to the acceptable band is decided by round-off downstream, and \
-         gh#702's compensated sum puts it inside rather than through",
+    // Two-valued on purpose — see the note above. `eigena2` is the one
+    // model in this file whose status is platform-dependent since
+    // gh#702, and gh#706 tracks that. What must not happen is a third
+    // outcome: this model still solves, on every platform, to 82.5.
+    let eigena2 = solve("eigena2", true);
+    assert!(
+        matches!(
+            status_of(&eigena2).as_str(),
+            "SolveSucceeded" | "SolvedToAcceptableLevel"
+        ),
+        "eigena2 accepts the alpha = 0.5 step and must still converge; \
+         gh#702's compensated sum leaves it close enough to the accept \
+         band that the platform decides which side (gh#706), but \
+         anything outside those two is a different defect. Got: {}",
+        status_of(&eigena2),
     );
     assert_eq!(
         status_of(&solve("eigenb2", true)),
