@@ -8,17 +8,25 @@
 //! at `SolvedToAcceptableLevel` where the unsafeguarded step reached
 //! `SolveSucceeded`.
 //!
-//! **One of those two is gone, and nobody went looking for it** (gh#681).
-//! gh#588's Q4 evaluates a recognized degree-≤2 row from its constant
-//! matrix instead of rebuilding an AD tape every iteration, which
-//! reassociates the sums in `eval_g` and `eval_jac_g` —
+//! **For one release, one of those two was gone, and nobody went looking
+//! for it** (gh#681). gh#588's Q4 evaluates a recognized degree-≤2 row
+//! from its constant matrix instead of rebuilding an AD tape every
+//! iteration, which reassociates the sums in `eval_g` and `eval_jac_g` —
 //! `quad_evaluator_differential.rs` declares those two comparisons
 //! non-bitwise in advance, for exactly this reason. `eigenb2` sat close
-//! enough to the accept band for the reassociation to carry it across:
-//! it reaches `SolveSucceeded` at 1.5999999999925176 in 54 iterations
-//! where the tape stalls at `SolvedToAcceptableLevel`, 1.5999999913471497
-//! in 57. `csfi2` does not move at all, to the bit — the safeguard
-//! declines there, so no evaluator change can reach it.
+//! enough to the accept band for the reassociation to carry it across,
+//! reaching `SolveSucceeded` in 54 iterations where the tape stalled at
+//! `SolvedToAcceptableLevel` in 57. `csfi2` does not move at all, to the
+//! bit — the safeguard declines there, so no evaluator change can reach
+//! it.
+//!
+//! gh#702 then compensated that same sum, because the uncompensated
+//! association was costing a 1500-variable QCQP 28 extra iterations, and
+//! `eigenb2` came back to `SolvedToAcceptableLevel`. So the count is two
+//! again, as gh#616 measured it. The lesson is not that either verdict is
+//! right: it is that on these two models the status is **downstream
+//! round-off**, and the tests below are written to make that visible
+//! rather than to defend a particular one.
 //!
 //! That is a trajectory change and it is pinned as one: the tests below
 //! assert both legs, so the fast path's verdict and the tape's are each
@@ -286,19 +294,31 @@ fn safeguard_decision(model: &str) -> BTreeMap<String, String> {
 /// trial there — a decline is not a step, so there is no trajectory for
 /// an evaluator change to perturb.
 ///
-/// `eigenb2` no longer downgrades: 1.5999999999925176 in 54 iterations
-/// against the tape's 1.5999999913471497 in 57. That is **not** a
-/// better safeguard, and it is not a fix for gh#616 — it is gh#588's Q4
-/// reassociating `eval_g`, on a model that sat close enough to the
-/// accept band to be moved by it.
+/// `eigenb2` downgrades too, which is what gh#616 measured in the first
+/// place. It spent one release not doing so: gh#588's Q4 reassociated
+/// `eval_g` and nudged this model — which sat close enough to the accept
+/// band to be nudged — across it. That was never a better safeguard, and
+/// the version of this test written against it said so.
 ///
-/// The `POUNCE_DBG_NO_QUAD=1` leg is the load-bearing half, and it is
-/// the reason this test is not simply a relaxed assertion. It pins the
-/// cause: with the fast path off, gh#616's downgrade is back exactly as
-/// measured. If `eigenb2` moves again, the two legs together say
-/// whether the evaluator did it or something else did.
+/// gh#702 compensated the same sum and put `eigenb2` back where gh#616
+/// found it. Three associations of one dot product, three answers:
+///
+/// | route                       | status                    | iters | objective          |
+/// |-----------------------------|---------------------------|-------|--------------------|
+/// | tape (`POUNCE_DBG_NO_QUAD`) | `SolvedToAcceptableLevel` |    57 | 1.59999999134715   |
+/// | Q4, uncompensated           | `SolveSucceeded`          |    54 | 1.599999999992518  |
+/// | Q4, compensated (gh#702)    | `SolvedToAcceptableLevel` |    48 | 1.599999996403372  |
+///
+/// Two of the three agree with gh#616, and the odd one out is the one
+/// nobody designed. Do not read the recovery as progress if it comes
+/// back — check which association produced it.
+///
+/// The `POUNCE_DBG_NO_QUAD=1` leg no longer discriminates, since both
+/// evaluator routes now downgrade. It stays as a cross-check: the two
+/// routes agreeing on this model is the normal state, and Q4's window
+/// was the exception.
 #[test]
-fn the_safeguards_measured_cost_is_csfi2_and_no_longer_eigenb2() {
+fn the_safeguards_measured_cost_is_csfi2_and_eigenb2() {
     let csfi2 = solve("csfi2", true);
     assert_eq!(
         status_of(&csfi2),
@@ -315,11 +335,11 @@ fn the_safeguards_measured_cost_is_csfi2_and_no_longer_eigenb2() {
     let eigenb2 = solve("eigenb2", true);
     assert_eq!(
         status_of(&eigenb2),
-        "SolveSucceeded",
-        "gh#588's Q4 moved eigenb2 off gh#616's downgrade (gh#681). \
-         `SolvedToAcceptableLevel` here means the fast path stopped \
-         reaching this model; anything else means gh#616's cost has to \
-         be re-measured rather than re-asserted",
+        "SolvedToAcceptableLevel",
+        "gh#616 measured this downgrade and gh#702 restored it. \
+         `SolveSucceeded` here means something reassociated `eval_g` \
+         again and landed on the lucky side of the accept band — that \
+         is what gh#588's Q4 did, and it is not a fix",
     );
     assert!(
         (eigenb2.solution.objective - 1.6).abs() < 1e-6,
@@ -331,10 +351,10 @@ fn the_safeguards_measured_cost_is_csfi2_and_no_longer_eigenb2() {
     assert_eq!(
         status_of(&tape),
         "SolvedToAcceptableLevel",
-        "with Q4's fast path off, eigenb2 must still reproduce gh#616's \
-         measurement — that is what attributes the recovery above to the \
-         evaluator. If this passes only with the fast path on, the cause \
-         is somewhere else and has to be found",
+        "with the fast path off, eigenb2 must still reproduce gh#616's \
+         measurement. Since gh#702 the fast path reproduces it too, so \
+         the two routes agree here; a disagreement means one of them \
+         moved and the diff says which",
     );
     assert!(
         (tape.solution.objective - 1.6).abs() < 1e-6,
@@ -352,23 +372,37 @@ fn the_safeguards_measured_cost_is_csfi2_and_no_longer_eigenb2() {
 /// decisions, different outcomes, therefore no criterion computed from
 /// the safeguard's own inputs separates them, therefore tightening the
 /// accept test could not rescue `eigenb2` without also reaching
-/// `eigena2`, which needed no rescuing. gh#588's Q4 ended the
-/// disagreement — both now reach `SolveSucceeded` — so this test
-/// asserts the premise **directly**, off the attribution channel,
-/// instead of inferring it from the outcomes.
+/// `eigena2`, which needed no rescuing. That disagreement has since
+/// opened and closed twice, so this test asserts the premise
+/// **directly**, off the attribution channel, instead of inferring it
+/// from the outcomes.
 ///
-/// The conclusion survives on better evidence than it had. `eigenb2`
-/// crossed from `SolvedToAcceptableLevel` to `SolveSucceeded` while the
-/// safeguard's decision stayed identical apart from **two ulps** in the
-/// `violation_final` it reports — 0.2500000062500001 on the tape,
-/// 0.2500000062500003 on the fast path, and both models move together.
-/// Nothing the accept test reads changed. So `eigenb2`'s downgrade was
-/// never a property of the accept test: it was decided downstream, by
-/// where the iteration after the safeguard landed relative to the
-/// acceptable band, and one reassociated sum in `eval_g` was enough to
-/// move it. An accept test tightened to chase `eigenb2` would have been
-/// tuned against round-off — which is gh#616's conclusion, re-derived
-/// rather than assumed.
+/// The conclusion now rests on three independent reassociations of one
+/// dot product rather than one. Each moves the `violation_final` the
+/// safeguard reports by a few ulps, each moves **both models by the
+/// same amount**, and nothing else the accept test reads changes at all:
+///
+/// | route                    | `violation_final`    | `eigena2` | `eigenb2` |
+/// |--------------------------|----------------------|-----------|-----------|
+/// | tape                     | 0.2500000062500001   | succeeded | acceptable|
+/// | Q4, uncompensated        | 0.2500000062500003   | succeeded | succeeded |
+/// | Q4, compensated (gh#702) | 0.25000000624999996  | acceptable| acceptable|
+///
+/// Three associations, three verdicts on the pair — agreeing, agreeing,
+/// and disagreeing — off inputs that stay bit-for-bit identical between
+/// the two models every time. So neither model's status was ever a
+/// property of the accept test: both are decided downstream, by where
+/// the iteration after the safeguard lands relative to the acceptable
+/// band, and one reassociated sum in `eval_g` is enough to move either.
+/// An accept test tightened to chase `eigenb2` would have been tuned
+/// against round-off — gh#616's conclusion, now re-derived twice.
+///
+/// The compensated row is the one that costs something: `eigena2` takes
+/// 127 iterations there against 51 on the uncompensated fast path and
+/// 65 on the tape, for an objective still correct to 82.50000000000348.
+/// That is tracked as its own defect (gh#706) and it is a cost, not a
+/// wash. The question there is not how to get 51 back — that number was
+/// luck — but why a last-ulp change moves this model 76 iterations.
 ///
 /// The absolute values pinned below are the ones the accept test reads
 /// (`violation_initial`, `alpha`, `rejected_trials`, `termination`).
@@ -411,19 +445,22 @@ fn eigena2_and_eigenb2_hand_the_safeguard_identical_numbers() {
     assert_eq!(at("rejected_trials"), Some("1"));
     assert_eq!(at("termination"), Some("accepted"));
 
-    // Same decision, and — since Q4 — the same verdict. Pinned so that
-    // the pair diverging again is a finding rather than a surprise.
+    // Same decision, and — since gh#702 — the same verdict again, at
+    // the other status. Pinned so that the pair moving is a finding
+    // rather than a surprise; the premise above is what gh#616 rests
+    // on, and these two are downstream round-off.
     assert_eq!(
         status_of(&solve("eigena2", true)),
-        "SolveSucceeded",
-        "eigena2 accepts the alpha = 0.5 step and converges to full \
-         tolerance; that half has never moved",
+        "SolvedToAcceptableLevel",
+        "eigena2 accepts the alpha = 0.5 step; where it lands relative \
+         to the acceptable band is decided by round-off downstream, and \
+         gh#702's compensated sum puts it inside rather than through",
     );
     assert_eq!(
         status_of(&solve("eigenb2", true)),
-        "SolveSucceeded",
-        "see the test above — Q4 moved this one, and the tape leg there \
-         is what attributes it",
+        "SolvedToAcceptableLevel",
+        "see the test above — this is gh#616's originally measured \
+         downgrade, restored by gh#702",
     );
     assert!(
         (solve("eigena2", true).solution.objective - 82.5).abs() < 1e-6,

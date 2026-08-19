@@ -9,6 +9,52 @@ changes.
 
 ## [Unreleased]
 
+- **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
+  iterations** (#702).
+
+  #588's Q4 evaluates a recognized degree-≤2 row from its coefficient matrix,
+  walking it row-major and summing one merged row at a time. The AD tape it
+  replaced summed AMPL's flat list of `½·c·xᵢ·xⱼ` terms front-to-back in file
+  order. Both are correct and they agree on the coefficients bit for bit —
+  Q5's recognizer is exact — but they are different *associations* of the same
+  real number, so they round differently. On a dense QCQP constraint the outer
+  accumulator takes thousands of same-sign terms, outgrows them, and the two
+  answers separate in the last few ulps.
+
+  That is invisible to an answer and not invisible to a trajectory. On the
+  Mittelmann instance `qcqp1500-1c` the matrix path took 131 iterations and
+  207.6 s where the tape took 103; `POUNCE_DBG_NO_QUAD=1` reproduces the tape's
+  count exactly, which is what attributes it. The outer accumulators in
+  `QuadraticStructure::value` now use Neumaier compensated summation, and the
+  same model solves in **100 iterations and 129.5 s** — better than either
+  association, because the compensated sum is much less dependent on the order
+  in the first place.
+
+  Only the outer sums are compensated. The inner per-row dot product was
+  measured to move nothing — not in the corpus, not on the Mittelmann QCQP
+  family, not on the `eigen*` fixtures — and it is the O(nnz) loop, where the
+  outer one is O(rows). Best of three against the previous release on four
+  other QCQPs: +1.0%, +0.3%, +0.1%, +1.3% wall clock, at *identical* iteration
+  counts, so nothing else in that family reroutes at all.
+
+  Fixture sweep, both legs, for this change in isolation: 116 legs, two lines
+  move, both L-BFGS and both `eigen*`, neither a status or objective change —
+  `eigenb2` 62 → 56 iterations, and `eigena2` 253 → 265 on a fixture that
+  reports `ErrorInStepComputation` either way. The exact-Hessian leg is
+  byte-identical.
+
+  Under `least_square_init_primal=yes` (off by default) the two `eigen*`
+  models do move, and one of the moves is a cost. `eigenb2` returns to the
+  `SolvedToAcceptableLevel` that #616 originally measured — Q4 had nudged it
+  across the accept band for one release, which #681 caught and #616's test
+  already described as an accident rather than a fix. `eigena2` goes the other
+  way, to `SolvedToAcceptableLevel` in 127 iterations against 51, for an
+  objective still correct to 82.50000000000348. Neither status was ever a
+  property of the accept test: the safeguard reads bit-for-bit identical
+  inputs on the two models under all three associations, which is #616's
+  conclusion re-derived. The `eigena2` cost is tracked as #706 rather than written
+  off.
+
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).
 
