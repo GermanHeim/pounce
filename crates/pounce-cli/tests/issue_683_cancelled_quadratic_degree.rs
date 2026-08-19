@@ -153,6 +153,41 @@ fn a_cancelled_quadratic_row_is_never_proved_affine() {
     }
 }
 
+/// The other side of the demotion, sharpened in gh #687: a row whose terms
+/// cancel **exactly** keeps its proof. `x₀² − x₀²` is degree 0 — the add
+/// `fl(1) + fl(−1)` loses nothing — and the tape agrees, so demoting it to
+/// "not established" would give up a whole solve's worth of frozen
+/// Jacobian for arithmetic that never rounded.
+///
+/// This is what separates the gh #687 gate from the drop-based one it
+/// replaces: on the pre-#687 code every assertion below reads `None`.
+#[test]
+fn an_exactly_cancelled_quadratic_row_is_still_proved_affine() {
+    // `x₀·x₀ − x₀^2`, the two spellings, so the tape does not hash-cons the
+    // pair into one node and cancel the comparison away with them.
+    let body = "o1\no2\nv0\nv0\no5\nv0\nn2\n";
+    for (path, prob) in ["recognizing", "trees"]
+        .iter()
+        .zip(both_paths(&model(body)))
+    {
+        assert_eq!(
+            prob.con_nonlinear[0].provably_affine(),
+            Some(true),
+            "{path}: an exactly cancelling row lost its degree proof",
+        );
+    }
+
+    // And the claim is true of the body: the tape's ∂g₀/∂x really does hold
+    // still, because `2x₀ − 2x₀` is `0` at every `x₀`.
+    let prob = parse_nl_text_with_quadratic(&model(body), true).expect("parse");
+    let mut t = NlTnlp::try_new(prob).expect("build TNLP");
+    assert_eq!(
+        t.derivative_proofs().row(0),
+        DerivativeProof::Constant,
+        "the row's Jacobian was not proved constant",
+    );
+}
+
 /// A row the recognizer has nothing to say about is still `None` and not
 /// `Some(false)` — the demotion must not have turned into "everything is
 /// suspicious", which would be correct and useless.
@@ -278,6 +313,17 @@ fn the_cli_does_not_reuse_the_inequality_jacobian() {
 // whose repeated monomials hash-cons into one node can have one of exactly
 // zero); `None` asserts nothing by construction.
 
+/// How far a proved-affine row's tape Jacobian may drift between probes
+/// before this battery calls it a moving derivative.
+///
+/// Bitwise equality is what almost every row gives, and what every row gave
+/// before gh #687 admitted the exactly-cancelling ones. Exactly one body in
+/// 3 000 seeds drifts at all — seed 1293, whose adjoint accumulation sums
+/// `±10³⁰⁸` against `−10³⁰⁰` — and it drifts by `4.5e-12`. This is three
+/// orders above that and eleven below the smallest change a *degree* defect
+/// produces (those move a derivative off zero, or by factors of `x`).
+const TAPE_WOBBLE_REL: f64 = 1e-9;
+
 /// A deterministic xorshift, so a failure names a reproducible seed.
 struct Rng(u64);
 
@@ -359,9 +405,13 @@ fn a_proved_affine_body_has_a_jacobian_its_own_tape_holds_still() {
         [1e-8, 2.0, 1e8],
     ];
     let (mut affine, mut quadratic, mut refused) = (0usize, 0usize, 0usize);
+    // Probe entries skipped because the tape itself overflowed — see the
+    // comment at the comparison.
+    let mut non_finite = 0usize;
+    let mut worst_rel = 0.0f64;
     // Of the refusals, how many are this fix talking — a form the recognizer
-    // *did* lower, demoted because it dropped a term — as opposed to a body
-    // it never lowered at all (a degree-3 product).
+    // *did* lower, demoted because a term went missing — as opposed to a
+    // body it never lowered at all (a degree-3 product).
     let mut demoted = 0usize;
 
     for seed in 1..=3_000u64 {
@@ -396,7 +446,7 @@ fn a_proved_affine_body_has_a_jacobian_its_own_tape_holds_still() {
                     refused += 1;
                     if b.tree()
                         .and_then(recognize_expr)
-                        .is_some_and(|q| q.dropped_terms())
+                        .is_some_and(|q| q.lost_terms())
                     {
                         demoted += 1;
                     }
@@ -435,11 +485,44 @@ fn a_proved_affine_body_has_a_jacobian_its_own_tape_holds_still() {
                 if claims[row] != Some(true) {
                     continue;
                 }
-                assert_eq!(
-                    first[k].to_bits(),
-                    here[k].to_bits(),
+                // A probe where the *tape* overflowed is not evidence about
+                // the body. Seed 565 is the case: `x₀²·((x₁ − x₁)·x₁)·10³⁰⁰`
+                // is identically zero, and the recognizer proves it — the
+                // `x₁ − x₁` cancels exactly and annihilates the product. Its
+                // tape multiplies before it sums, so at `x₀ = 10⁸` the
+                // adjoint reaches `10³⁰⁰ · 10¹⁶ = ∞` and then `∞ · 0 = NaN`,
+                // where every finite probe reads `0`. A `NaN` is not a
+                // derivative that moved; it is a derivative the tape could
+                // not compute, and the frozen `0` is the value it gives
+                // wherever it gives a number at all. Both directions of the
+                // comparison have to be numbers for the comparison to mean
+                // anything (gh #687 admitted these rows; before it they were
+                // refused for the cancellation and never reached here).
+                if !first[k].is_finite() || !here[k].is_finite() {
+                    non_finite += 1;
+                    continue;
+                }
+                if first[k].to_bits() == here[k].to_bits() {
+                    continue;
+                }
+                // Bitwise is the assertion; this is the one escape, and it
+                // is about the *tape's* conditioning rather than the claim.
+                // Since gh #687 an exactly cancelling row is proved affine,
+                // and the tape re-does that cancellation with `x`-scaled
+                // adjoints: seed 1293's row sums `±10³⁰⁸` contributions that
+                // cancel mathematically into a running total of `−10³⁰⁰`, so
+                // the constant it lands on drifts a few ulps with `x`. The
+                // *body* is affine, and the frozen derivative is the value
+                // the drift is around. What this rules out is a derivative
+                // that genuinely moves, which is orders of magnitude, not
+                // parts in 10¹²: the gh #683 reproductions move from `0`.
+                let rel = (first[k] - here[k]).abs()
+                    / first[k].abs().max(here[k].abs()).max(f64::MIN_POSITIVE);
+                worst_rel = worst_rel.max(rel);
+                assert!(
+                    rel <= TAPE_WOBBLE_REL,
                     "seed {seed}: row {row} was proved affine, but ∂g/∂x[{}] moved \
-                     from {} to {} between {:?} and {x:?}",
+                     from {} to {} (rel {rel:e}) between {:?} and {x:?}",
                     jcol[k],
                     first[k],
                     here[k],
@@ -451,7 +534,9 @@ fn a_proved_affine_body_has_a_jacobian_its_own_tape_holds_still() {
 
     eprintln!(
         "[gh683 battery] {affine} rows proved affine, {quadratic} proved degree 2, \
-         {refused} not established ({demoted} of them demoted for a dropped term)"
+         {refused} not established ({demoted} of them demoted for a lost term); \
+         {non_finite} probe entries skipped as non-finite on the tape; \
+         worst surviving Jacobian drift {worst_rel:e}"
     );
     // All three verdicts have to be represented, or the battery is asserting
     // something about a set it never reached. `refused` in particular is the

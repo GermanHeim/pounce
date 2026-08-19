@@ -118,6 +118,31 @@ pub trait AugSystemSolver {
     /// in the dump path.
     fn set_diagnostics(&mut self, _diag: Rc<pounce_common::diagnostics::DiagnosticsState>) {}
 
+    /// Push the per-iterate part of `linear_system_scaling=slack-based`
+    /// down to the linear solver's scaling method. Default no-op;
+    /// `StdAugSystemSolver` forwards to its `TSymLinearSolver`, and
+    /// composite solvers forward to their inner solver.
+    ///
+    /// Called once per iteration rather than once per solve: the
+    /// quantity is a function of the iterate and several augmented
+    /// solves share one. See `IpoptCq::curr_slack_based_s_scaling`.
+    fn set_slack_scaling(&mut self, _nx: Index, _s_scale: &[Number]) {}
+
+    /// Whether this solver can consume a `LowRankUpdateSymMatrix` as
+    /// `coeffs.w` directly, applying it by Sherman-Morrison-Woodbury
+    /// rather than needing an assembled triplet matrix.
+    ///
+    /// Default `false`: a triplet-based backend must be handed triplets.
+    /// `LowRankAugSystemSolver` overrides it, and composite solvers
+    /// forward their inner solver's answer.
+    ///
+    /// Exists so restoration can ask before choosing between handing its
+    /// orig block over in factored form and densifying it — the dense
+    /// form is `O(n²)` and aborts the process at 60k variables (#684).
+    fn handles_low_rank_w(&self) -> bool {
+        false
+    }
+
     /// One factor + back-substitution for the full 4×4 block system.
     /// `check_neg_evals=true` asks the linsol to verify that the
     /// observed inertia equals `num_neg_evals`; on mismatch the

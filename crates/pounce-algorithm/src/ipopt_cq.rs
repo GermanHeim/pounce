@@ -806,6 +806,60 @@ impl IpoptCalculatedQuantities {
         v
     }
 
+    /// Slack-based symmetric scaling factors for the `s` block —
+    /// `min(Pd_L · slack_s_L + Pd_U · slack_s_U, 1)`.
+    ///
+    /// Port of `IpSlackBasedTSymScalingMethod.cpp:ComputeSymTScalingFactors`,
+    /// which builds the whole augmented-system scaling vector as
+    /// `[1 (x block) | this (s block) | 1 (y_c, y_d blocks)]`. Only the
+    /// `s` block is computed here; the surrounding ones are constants
+    /// the scaling method writes itself.
+    ///
+    /// Upstream's method is an algorithm-strategy object with direct
+    /// access to `IpCq()`/`IpNLP()`. pounce's `TSymScalingMethod` lives
+    /// in `pounce-linsol`, which cannot see the iterate, so the quantity
+    /// is computed here and pushed down before the factorization. That
+    /// is why this is a CQ method rather than logic inside the scaling
+    /// method itself.
+    ///
+    /// The cap at 1 is upstream's `slack_scale_max`. A component whose
+    /// `d` row has no bound at all contributes nothing to either
+    /// product and would scale that row by zero, which would wipe the
+    /// row out of the factorization; the floor guards that. It cannot
+    /// arise from a well-formed NLP — an inequality row has at least one
+    /// bound or it would not be an inequality — but the augmented system
+    /// is assembled from whatever the caller passes.
+    pub fn curr_slack_based_s_scaling(&self) -> Option<Vec<Number>> {
+        let iv = self.curr_iv();
+        let slack_l = self.curr_slack_s_l();
+        let slack_u = self.curr_slack_s_u();
+        let nlp = self.nlp.borrow();
+
+        let mut tmp = iv.s.make_new();
+        nlp.pd_l().mult_vector(1.0, &*slack_l, 0.0, &mut *tmp);
+        nlp.pd_u().mult_vector(1.0, &*slack_u, 1.0, &mut *tmp);
+
+        let mut cap = iv.s.make_new();
+        cap.set(1.0);
+        tmp.element_wise_min(&*cap);
+
+        // The `Vector` trait exposes no generic value read, so this
+        // downcasts. `s` is dense on the main solve; the restoration
+        // sub-IPM's primal is a 5-block `CompoundVector` whose `s` is a
+        // different space, and slack-based scaling is not wired there.
+        // Returning `None` rather than panicking means an unexpected
+        // vector type costs the scaling, not the solve.
+        let dense = tmp.as_any().downcast_ref::<DenseVector>()?;
+        let mut out = dense.expanded_values();
+        for v in out.iter_mut() {
+            // Guard the zero case described above, and any NaN.
+            if !(*v > 0.0) {
+                *v = 1.0;
+            }
+        }
+        Some(out)
+    }
+
     pub fn curr_sigma_s(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
         {

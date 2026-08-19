@@ -26,7 +26,6 @@
 //!
 //! Update kernels:
 //!   - [`initial_hessian_scalar`] (sigma per `LIM_MEM_INIT`)
-//!   - [`powell_damping_theta`] (modified-y damping for BFGS)
 //!   - [`bfgs_curvature_pair_ok`] (skip-criterion for L-BFGS)
 //!   - [`sr1_denominator_ok`] (skip-criterion for SR1)
 
@@ -59,11 +58,24 @@ pub enum UpdateType {
     Sr1,
 }
 
+/// `limited_memory_initialization` — how the diagonal `B0 = σ I` is
+/// chosen before the rank-2 updates. Upstream registers five values
+/// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`); `Identity` has no
+/// upstream keyword and exists for callers constructing the updater
+/// directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialApprox {
     Identity,
+    /// `scalar1` — σ = sᵀy / sᵀs. Upstream's default.
     Scalar1,
+    /// `scalar2` — σ = yᵀy / sᵀy.
     Scalar2,
+    /// `scalar3` — arithmetic mean of `scalar1` and `scalar2`.
+    Scalar3,
+    /// `scalar4` — geometric mean of `scalar1` and `scalar2`.
+    Scalar4,
+    /// `constant` — σ = `limited_memory_init_val`, every iteration.
+    Constant,
 }
 
 pub struct LimMemQuasiNewtonUpdater {
@@ -76,6 +88,15 @@ pub struct LimMemQuasiNewtonUpdater {
     /// the damping coefficient is hard-coded at 0.2 in the BFGS path.
     pub init_val_max: Number,
     pub init_val_min: Number,
+    /// `limited_memory_init_val` — the multiple of the identity `B0`
+    /// takes on the first iteration, before any curvature pair has been
+    /// formed, and on every iteration under
+    /// [`InitialApprox::Constant`]. Upstream default `1.0`
+    /// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`). Was a
+    /// hard-coded `1.0` in the empty-history branch until #677 — the
+    /// same value, but not settable, and `constant` had nowhere to read
+    /// its σ from.
+    pub init_val: Number,
     /// Rolling FIFO of curvature pairs, oldest at index 0. Capped at
     /// `max_history`; insertion drops the front.
     pub history: Vec<CurvaturePair>,
@@ -105,22 +126,42 @@ pub struct LimMemQuasiNewtonUpdater {
     /// `update_hessian` for why σ stays on the full diagonal where
     /// upstream drops it.
     pub nonlinear_vars: Option<Vec<Index>>,
+    /// `limited_memory_max_skipping` — consecutive skipped curvature
+    /// updates after which the whole approximation is discarded and
+    /// re-anchored at the current iterate. Upstream default 2
+    /// (`IpLimMemQuasiNewtonUpdater.cpp`, the
+    /// `lm_skipped_iter_ >= limited_memory_max_skipping_` branch).
+    ///
+    /// Without this the history never turns over: on a problem whose
+    /// Lagrangian curvature is persistently negative, every pair after
+    /// the first few is skipped and the model keeps representing
+    /// curvature the iterate left long ago. `inf_pr` converges while
+    /// `inf_du` plateaus. Reported with side-by-side instrumentation on
+    /// a 59,939-variable collocation model (#686): over 60 iterations
+    /// Ipopt reset 9 times and pounce 0, and the two iterate sequences
+    /// were bit-identical until one iteration after Ipopt's first reset.
+    pub max_skipping: Index,
+    /// Consecutive skips so far — upstream's `lm_skipped_iter_`.
+    pub skipped_iter: Index,
 }
 
 impl Default for LimMemQuasiNewtonUpdater {
     fn default() -> Self {
         Self {
             update_type: UpdateType::Bfgs,
-            initial_approx: InitialApprox::Scalar2,
+            initial_approx: InitialApprox::Scalar1,
             max_history: 6,
             init_val_max: 1e8,
             init_val_min: 1e-8,
+            init_val: 1.0,
             history: Vec::new(),
             last_x: None,
             last_grad_f: None,
             last_jac_c: None,
             last_jac_d: None,
             nonlinear_vars: None,
+            max_skipping: 2,
+            skipped_iter: 0,
         }
     }
 }
@@ -221,14 +262,38 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
             // SR1 recurrences, the stored columns) then lives in the
             // reduced space, exactly as upstream does once `P_LM` is
             // present.
-            match self.active_mask(curr_x.dim()) {
+            let accepted = match self.active_mask(curr_x.dim()) {
                 Some(mask) => {
                     let s_red = project_onto(&*s, mask);
                     let y_red = project_onto(&*y, mask);
-                    self.ingest_pair(s_red, y_red);
+                    self.ingest_pair(s_red, y_red)
                 }
-                None => {
-                    self.ingest_pair(Rc::from(s), Rc::from(y));
+                None => self.ingest_pair(Rc::from(s), Rc::from(y)),
+            };
+
+            // `limited_memory_max_skipping` (#686). Upstream discards the
+            // whole approximation once the curvature update has been
+            // skipped this many times in a row
+            // (`IpLimMemQuasiNewtonUpdater.cpp`, the
+            // `lm_skipped_iter_ >= limited_memory_max_skipping_` branch,
+            // which also emits the `Wr` info string). pounce accumulated
+            // the skip but never acted on it, so a run whose curvature
+            // stays negative kept its opening pairs for the rest of the
+            // solve.
+            //
+            // The re-anchoring upstream does inside its reset branch
+            // (`last_x_`, `last_grad_f_`, `last_jac_c_`, `last_jac_d_`)
+            // is what the four assignments below this block already do
+            // unconditionally on every call, so clearing the history is
+            // the whole of it here.
+            if accepted {
+                self.skipped_iter = 0;
+            } else {
+                self.skipped_iter = self.skipped_iter.saturating_add(1);
+                if self.max_skipping > 0 && self.skipped_iter >= self.max_skipping {
+                    self.history.clear();
+                    self.skipped_iter = 0;
+                    data.borrow_mut().append_info_string("Wr");
                 }
             }
         }
@@ -390,7 +455,9 @@ impl LimMemQuasiNewtonUpdater {
 
     fn compute_sigma_bfgs(&self) -> Number {
         if self.history.is_empty() {
-            return 1.0;
+            // Upstream: `B0 = limited_memory_init_val * I` "in the first
+            // iteration (when no updates have been performed yet)".
+            return self.init_val;
         }
         let last = self.history.last().unwrap();
         let s_dot_s = last.s_norm * last.s_norm;
@@ -400,6 +467,7 @@ impl LimMemQuasiNewtonUpdater {
             s_dot_s,
             last.s_dot_y,
             y_dot_y,
+            self.init_val,
             self.init_val_min,
             self.init_val_max,
         )
@@ -448,21 +516,44 @@ impl LimMemQuasiNewtonUpdater {
                     if s_bs <= 0.0 {
                         continue;
                     }
+                    // Textbook BFGS, which is what upstream forms:
+                    //
+                    //     v_new = y_new / sqrt(sᵀy)        (positive column)
+                    //     u_new = B₀·S·C                    (negative column)
+                    //
+                    // `y` is used as it stands. pounce used to blend it
+                    // toward `B s` by a Powell damping factor whenever
+                    // `sᵀy < 0.2·sᵀBs`, citing
+                    // `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping` —
+                    // a function that does not exist. Upstream's
+                    // `CheckSkippingBFGS` takes `const Vector&` for both
+                    // `s_new` and `y_new` and returns a bool, so it
+                    // cannot modify a pair, and nothing else in that file
+                    // does either: a pair is skipped or it is stored as
+                    // measured (#686).
+                    //
+                    // Damping was not a harmless extra safeguard. It
+                    // fired on every accepted pair with marginal
+                    // curvature and silently replaced the measured
+                    // curvature with a synthetic one, on a path where
+                    // upstream's answer to marginal curvature is to skip
+                    // the pair and — after `limited_memory_max_skipping`
+                    // of them — discard the history. That strategy is
+                    // complete on its own, and it is now implemented.
+                    //
+                    // `sᵀy > sqrt(eps)·‖s‖·‖y‖ > 0` holds for every pair
+                    // in `history` by the skip criterion, so the square
+                    // root below is of a positive number without needing
+                    // the damped `sr` guard that used to stand here.
                     let sy = pair.s_dot_y;
-                    let theta = powell_damping_theta(sy, s_bs);
-                    let sr = theta * sy + (1.0 - theta) * s_bs;
-                    if sr <= 0.0 {
+                    if sy <= 0.0 {
                         continue;
                     }
-                    let r_scale = 1.0 / sr.sqrt();
+                    let y_scale = 1.0 / sy.sqrt();
                     let bs_scale = 1.0 / s_bs.sqrt();
-                    // r rᵀ / sr  →  positive column r/√sr.
-                    v_cols.push(
-                        (0..n)
-                            .map(|i| (theta * y[i] + (1.0 - theta) * bs[i]) * r_scale)
-                            .collect(),
-                    );
-                    // −(Bs)(Bs)ᵀ / s_bs  →  negative column Bs/√s_bs.
+                    // y yᵀ / sᵀy  →  positive column y/√(sᵀy).
+                    v_cols.push(y.iter().map(|&yi| yi * y_scale).collect());
+                    // −(Bs)(Bs)ᵀ / sᵀBs  →  negative column Bs/√(sᵀBs).
                     u_cols.push(bs.iter().map(|&bi| bi * bs_scale).collect());
                 }
                 UpdateType::Sr1 => {
@@ -566,13 +657,23 @@ fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
 }
 
 /// Initial Hessian scalar used as the diagonal of `B_0` before the
-/// rank-2 updates are applied. Mirrors upstream's three options
-/// (`limited_memory_initialization` in
-/// `IpLimMemQuasiNewtonUpdater.cpp`):
+/// rank-2 updates are applied. Mirrors upstream's
+/// `limited_memory_initialization` values
+/// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`):
 ///
-/// * `Identity` → `1.0`
-/// * `Scalar1` → `(s^T y) / (s^T s)`
+/// * `Scalar1` → `(s^T y) / (s^T s)` — upstream's default
 /// * `Scalar2` → `(y^T y) / (s^T y)`
+/// * `Scalar3` → arithmetic mean of `Scalar1` and `Scalar2`
+/// * `Scalar4` → geometric mean of `Scalar1` and `Scalar2`
+/// * `Constant` → `init_val` (`limited_memory_init_val`)
+/// * `Identity` → `1.0` (no upstream keyword; direct callers only)
+///
+/// Each degenerate denominator falls back to `1.0` independently, so
+/// `Scalar3`/`Scalar4` degrade to the mean of whichever term is
+/// well-defined rather than to a single fallback for the pair.
+/// `Scalar4`'s geometric mean is taken on the product of two
+/// non-negative terms; a non-positive product falls back to `1.0`
+/// rather than producing a NaN.
 ///
 /// Result is clamped to `[min_val, max_val]` per upstream's
 /// `limited_memory_init_val_{min,max}` defaults.
@@ -581,58 +682,52 @@ pub fn initial_hessian_scalar(
     s_dot_s: Number,
     s_dot_y: Number,
     y_dot_y: Number,
+    init_val: Number,
     min_val: Number,
     max_val: Number,
 ) -> Number {
-    let raw = match init {
-        InitialApprox::Identity => 1.0,
-        InitialApprox::Scalar1 => {
-            if s_dot_s > 0.0 {
-                s_dot_y / s_dot_s
-            } else {
-                1.0
-            }
-        }
-        InitialApprox::Scalar2 => {
-            if s_dot_y > 0.0 {
-                y_dot_y / s_dot_y
-            } else {
-                1.0
-            }
-        }
-    };
-    raw.clamp(min_val, max_val)
-}
-
-/// Powell damping coefficient `theta` for the modified-y BFGS update.
-/// When the curvature pair `(s, y)` violates `s^T y >= 0.2 * s^T B s`,
-/// we replace `y` by `y_bar = theta * y + (1 - theta) * B s` so that
-/// the resulting update is positive-definite.
-///
-/// ```text
-///   if s^T y >= 0.2 * s^T B s:  theta = 1
-///   else:                        theta = (0.8 * s^T B s) / (s^T B s - s^T y)
-/// ```
-///
-/// Mirrors upstream's `IpLimMemQuasiNewtonUpdater.cpp:PowellDamping`.
-pub fn powell_damping_theta(s_dot_y: Number, s_dot_b_s: Number) -> Number {
-    if s_dot_y >= 0.2 * s_dot_b_s {
-        1.0
-    } else {
-        let denom = s_dot_b_s - s_dot_y;
-        if denom > 0.0 {
-            0.8 * s_dot_b_s / denom
+    let scalar1 = || {
+        if s_dot_s > 0.0 {
+            s_dot_y / s_dot_s
         } else {
             1.0
         }
-    }
+    };
+    let scalar2 = || {
+        if s_dot_y > 0.0 {
+            y_dot_y / s_dot_y
+        } else {
+            1.0
+        }
+    };
+    let raw = match init {
+        InitialApprox::Identity => 1.0,
+        InitialApprox::Scalar1 => scalar1(),
+        InitialApprox::Scalar2 => scalar2(),
+        InitialApprox::Scalar3 => 0.5 * (scalar1() + scalar2()),
+        InitialApprox::Scalar4 => {
+            let prod = scalar1() * scalar2();
+            if prod > 0.0 { prod.sqrt() } else { 1.0 }
+        }
+        InitialApprox::Constant => init_val,
+    };
+    raw.clamp(min_val, max_val)
 }
 
 /// L-BFGS curvature-pair acceptance: include `(s, y)` in history iff
 /// `s^T y > eps * ||s|| ||y||`. Mirrors upstream's skip-criterion
 /// (`IpLimMemQuasiNewtonUpdater.cpp` ~line 750: `eps = 1e-8`).
 pub fn bfgs_curvature_pair_ok(s_dot_y: Number, s_norm: Number, y_norm: Number) -> bool {
-    let eps = 1e-8_f64;
+    // `sqrt(machine epsilon)`, matching upstream's
+    // `CheckSkippingBFGS` (`IpLimMemQuasiNewtonUpdater.cpp`):
+    //
+    //     Number tol = std::sqrt(std::numeric_limits<Number>::epsilon());
+    //     skipping = (sTy <= tol * snrm * ynrm);
+    //
+    // This was a hardcoded `1e-8` until #686, attributed to upstream but
+    // not equal to it — `sqrt(f64::EPSILON)` is 1.4901161193847656e-8,
+    // so the old value accepted a band of pairs upstream skips.
+    let eps = f64::EPSILON.sqrt();
     s_dot_y > eps * s_norm * y_norm
 }
 
@@ -651,7 +746,7 @@ mod tests {
     #[test]
     fn identity_init_returns_one() {
         assert_eq!(
-            initial_hessian_scalar(InitialApprox::Identity, 1.0, 1.0, 1.0, 1e-8, 1e8),
+            initial_hessian_scalar(InitialApprox::Identity, 1.0, 1.0, 1.0, 1.0, 1e-8, 1e8),
             1.0
         );
     }
@@ -659,40 +754,76 @@ mod tests {
     #[test]
     fn scalar1_init_is_sy_over_ss() {
         // s_dot_s=4, s_dot_y=2 → 2/4 = 0.5.
-        let v = initial_hessian_scalar(InitialApprox::Scalar1, 4.0, 2.0, 0.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar1, 4.0, 2.0, 0.0, 1.0, 1e-8, 1e8);
         assert!((v - 0.5).abs() < 1e-15);
     }
 
     #[test]
     fn scalar2_init_is_yy_over_sy() {
         // y_dot_y=8, s_dot_y=2 → 4.
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 2.0, 8.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
         assert!((v - 4.0).abs() < 1e-15);
     }
 
     #[test]
+    fn scalar3_init_is_arithmetic_mean_of_scalar1_and_scalar2() {
+        // s_dot_s=4, s_dot_y=2 → scalar1 = 0.5; y_dot_y=8 → scalar2 = 4.
+        let v = initial_hessian_scalar(InitialApprox::Scalar3, 4.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!((v - 2.25).abs() < 1e-15, "got {v}");
+    }
+
+    #[test]
+    fn scalar4_init_is_geometric_mean_of_scalar1_and_scalar2() {
+        // scalar1 = 0.5, scalar2 = 4 → sqrt(2).
+        let v = initial_hessian_scalar(InitialApprox::Scalar4, 4.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!((v - 2.0_f64.sqrt()).abs() < 1e-15, "got {v}");
+    }
+
+    #[test]
+    fn scalar4_falls_back_rather_than_producing_nan() {
+        // s_dot_y < 0 makes scalar1 negative while scalar2 falls back to
+        // 1.0, so the product is negative — sqrt would be NaN. A NaN σ
+        // would propagate silently into the whole `B0` diagonal.
+        let v = initial_hessian_scalar(InitialApprox::Scalar4, 4.0, -2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!(v.is_finite(), "sigma must stay finite, got {v}");
+        assert_eq!(v, 1.0);
+    }
+
+    #[test]
+    fn constant_init_returns_init_val_not_the_curvature_formula() {
+        // Same (s, y) that gives scalar2 = 4 above; `constant` must
+        // ignore the pair entirely and return `init_val`.
+        let v = initial_hessian_scalar(InitialApprox::Constant, 4.0, 2.0, 8.0, 7.5, 1e-8, 1e8);
+        assert_eq!(v, 7.5);
+    }
+
+    #[test]
+    fn constant_init_is_still_clamped() {
+        let v = initial_hessian_scalar(InitialApprox::Constant, 4.0, 2.0, 8.0, 1e20, 1e-8, 1e8);
+        assert_eq!(v, 1e8);
+    }
+
+    #[test]
+    fn empty_history_sigma_honours_init_val() {
+        // Upstream's "B0 = limited_memory_init_val * I in the first
+        // iteration". This branch returned a hard-coded 1.0 before #677,
+        // which silently matched the default and hid the missing wiring.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.init_val = 3.0;
+        assert!(u.history.is_empty());
+        assert_eq!(u.compute_sigma_bfgs(), 3.0);
+    }
+
+    #[test]
     fn init_clamped_to_max() {
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e-20, 1.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e-20, 1.0, 1.0, 1e-8, 1e8);
         assert_eq!(v, 1e8);
     }
 
     #[test]
     fn init_clamped_to_min() {
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e20, 1.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e20, 1.0, 1.0, 1e-8, 1e8);
         assert_eq!(v, 1e-8);
-    }
-
-    #[test]
-    fn powell_no_damping_when_curvature_ok() {
-        // s^T y = 1, s^T B s = 1; 1 >= 0.2 * 1 → theta = 1.
-        assert_eq!(powell_damping_theta(1.0, 1.0), 1.0);
-    }
-
-    #[test]
-    fn powell_damps_when_curvature_violated() {
-        // s^T y = 0.1, s^T B s = 1; 0.1 < 0.2 → theta = 0.8/(1-0.1) = 8/9.
-        let theta = powell_damping_theta(0.1, 1.0);
-        assert!((theta - 8.0 / 9.0).abs() < 1e-15);
     }
 
     #[test]
@@ -738,6 +869,61 @@ mod tests {
         let accepted = updater.ingest_pair(rcv(&[1.0]), rcv(&[0.0]));
         assert!(!accepted);
         assert!(updater.history.is_empty());
+    }
+
+    /// The skip counter drives a reset, and a run of skips does not
+    /// leave stale curvature behind (#686).
+    ///
+    /// Upstream discards the whole approximation after
+    /// `limited_memory_max_skipping` consecutive skips. pounce counted
+    /// nothing and never discarded, so a problem whose curvature stays
+    /// negative kept its opening pairs for the rest of the solve — the
+    /// model stops describing where the iterate is, `inf_pr` converges
+    /// and `inf_du` plateaus.
+    ///
+    /// Driven through `ingest_pair` plus the counter logic rather than
+    /// through `update_hessian`, which needs a full data/cq fixture; the
+    /// corpus is what exercises the wired path (`cresc4` goes from
+    /// `Restoration_Failed` to solved at the exact-Hessian optimum).
+    #[test]
+    fn consecutive_skips_reset_the_approximation() {
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        assert_eq!(u.max_skipping, 2, "upstream default");
+
+        // Two good pairs establish a history.
+        assert!(u.ingest_pair(rcv(&[1.0, 0.0]), rcv(&[1.0, 0.0])));
+        assert!(u.ingest_pair(rcv(&[0.0, 1.0]), rcv(&[0.0, 1.0])));
+        assert_eq!(u.history.len(), 2);
+
+        // A skip alone must not discard anything — one bad pair on an
+        // otherwise healthy run is what the skip criterion is for.
+        assert!(!u.ingest_pair(rcv(&[1.0, 0.0]), rcv(&[-1.0, 0.0])));
+        u.skipped_iter += 1;
+        assert!(u.skipped_iter < u.max_skipping);
+        assert_eq!(u.history.len(), 2, "one skip must not reset");
+
+        // The second consecutive skip reaches the threshold.
+        assert!(!u.ingest_pair(rcv(&[0.0, 1.0]), rcv(&[0.0, -1.0])));
+        u.skipped_iter += 1;
+        assert!(u.skipped_iter >= u.max_skipping, "reset is due");
+    }
+
+    /// The skip tolerance is upstream's, not a round number (#686).
+    ///
+    /// `CheckSkippingBFGS` uses `sqrt(machine epsilon)`; pounce carried a
+    /// hardcoded `1e-8` attributed to upstream. The gap is small and it
+    /// is exactly the band where the two solvers disagree about whether
+    /// a pair is usable, which is where a side-by-side trace starts
+    /// drifting.
+    #[test]
+    fn skip_tolerance_is_sqrt_machine_epsilon() {
+        let eps = f64::EPSILON.sqrt();
+        assert!((eps - 1.4901161193847656e-8).abs() < 1e-24, "got {eps}");
+        // A pair inside the old-vs-new gap: accepted under 1e-8,
+        // skipped under sqrt(eps).
+        let s_dot_y = 1.2e-8;
+        assert!(s_dot_y > 1e-8, "would have been accepted before");
+        assert!(!bfgs_curvature_pair_ok(s_dot_y, 1.0, 1.0));
     }
 
     #[test]

@@ -156,6 +156,15 @@ pub enum ClassReason {
     ObjectiveNotQuadratic,
     /// Row `row`'s nonlinear part is not a degree-2 polynomial.
     ConstraintNotQuadratic { row: usize },
+    /// The objective is degree ≤ 2, but the recognizer *lost* a term
+    /// reaching its coefficients, so they are not the whole objective.
+    ObjectiveTermsDropped,
+    /// Row `row` is degree ≤ 2, but the recognizer *lost* a term reaching
+    /// its coefficients, so they are not the whole row (gh #685).
+    ///
+    /// "Lost", not merely "dropped": a term that cancels exactly is not
+    /// missing from the form, so those rows keep the fast path (gh #687).
+    ConstraintTermsDropped { row: usize },
     /// The sense-adjusted objective Hessian has a negative eigenvalue.
     ObjectiveHessianIndefinite,
     /// Row `row` is quadratic with a PSD Hessian, but its bound sense
@@ -191,6 +200,17 @@ impl ClassReason {
             ClassReason::ConstraintNotQuadratic { row } => {
                 format!("row {row}'s nonlinear part is not a degree-2 polynomial")
             }
+            ClassReason::ObjectiveTermsDropped => {
+                "the objective's quadratic form lost a term to an inexact \
+                 floating-point fold or a flush to zero, so its coefficients are \
+                 not the whole objective"
+                    .to_string()
+            }
+            ClassReason::ConstraintTermsDropped { row } => format!(
+                "row {row}'s quadratic form lost a term to an inexact \
+                 floating-point fold or a flush to zero, so its coefficients are \
+                 not the whole row"
+            ),
             ClassReason::ObjectiveHessianIndefinite => {
                 "the objective Hessian (sense-adjusted for minimization) is not PSD".to_string()
             }
@@ -380,8 +400,18 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
     }
 
     // Objective curvature.
+    //
+    // The `None` arm covers two findings, and they are not the same
+    // finding: a genuinely non-quadratic term, and a degree-≤2 form the
+    // recognizer could not carry every coefficient of (gh #685). Both route
+    // NLP — the second *must*, since every consumer past this point reads
+    // those coefficients out — but a user reading `POUNCE_DBG_CLASSIFY=1` on
+    // a model they know is a QP is owed the difference.
     let obj_quad = match prob.obj_nonlinear.analyze_quadratic() {
         Some(q) => q,
+        None if prob.obj_nonlinear.quad_terms_dropped() => {
+            return (ProblemClass::Nlp, ClassReason::ObjectiveTermsDropped);
+        }
         // Objective has a non-quadratic nonlinear term ⇒ NLP.
         None => return (ProblemClass::Nlp, ClassReason::ObjectiveNotQuadratic),
     };
@@ -394,8 +424,20 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
             continue;
         }
         match c.analyze_quadratic() {
-            Some(q) if q.is_empty() => {} // purely linear after all
+            // Purely linear after all — and provably so. `analyze_quadratic`
+            // refuses a form that dropped a term, so an empty Hessian here
+            // is the absence of curvature rather than the failure to keep
+            // it. Before gh #685 it was not: a row whose quadratic
+            // coefficients cancelled arrived here empty, classified linear,
+            // and then vanished out of the extracted LP entirely.
+            Some(q) if q.is_empty() => {}
             Some(_) => any_quadratic_constraint = true,
+            None if c.quad_terms_dropped() => {
+                return (
+                    ProblemClass::Nlp,
+                    ClassReason::ConstraintTermsDropped { row },
+                );
+            }
             None => {
                 return (
                     ProblemClass::Nlp,
@@ -483,6 +525,17 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
                         );
                     }
                     reform_flops = reform_flops.saturating_add(socp_reform_flops(&q));
+                }
+                // Both `None` arms are defensive here: the curvature loop
+                // above walks the same rows and has already returned for
+                // any row that answers `None`. They are kept so this
+                // `match` stays correct on its own terms rather than on
+                // the order of two loops.
+                None if c.quad_terms_dropped() => {
+                    return (
+                        ProblemClass::Nlp,
+                        ClassReason::ConstraintTermsDropped { row },
+                    );
                 }
                 None => {
                     return (
@@ -1431,9 +1484,10 @@ mod tests {
         assert_eq!(reason, ClassReason::ConstraintHessianIndefinite { row: 0 });
     }
 
-    /// The LP fast path reports *why* it is an LP, and the two ways of
-    /// getting there are told apart: nothing nonlinear at all, versus
-    /// nonlinear parts that expanded to nothing quadratic.
+    /// The LP fast path reports *why* it is an LP, and the ways of getting
+    /// there are told apart: nothing nonlinear at all, versus a nonlinear
+    /// part that expanded to something of degree ≤ 1 — versus one that only
+    /// *looks* that way because a coefficient was dropped.
     #[test]
     fn lp_reasons_distinguish_absent_from_cancelled() {
         let prob = qp_stub(Expr::Const(0.0), vec![Expr::Const(0.0)]);
@@ -1442,13 +1496,59 @@ mod tests {
             (ProblemClass::Lp, ClassReason::NoNonlinearParts)
         );
 
-        // x0 − x0 in the objective's nonlinear part: present, but degree 0
-        // once expanded.
+        // 2·x0 in the objective's nonlinear part: present, nonlinear to the
+        // header, degree 1 once expanded, and nothing dropped getting there.
+        let expands = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(2.0)),
+            Box::new(Expr::Var(0)),
+        );
+        let prob = qp_stub(expands, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+
+        // x0 − x0 reaches degree 0 the other way: by the two coefficients
+        // summing to zero and the term being dropped. That sum is *exact*
+        // — `fl(1) + fl(−1)` loses nothing — so the empty form really is
+        // the objective, and this stays LP. (gh #685 sent it to NLP; gh
+        // #687 sharpened the gate to the inexact fold and handed the reach
+        // back.)
         let cancels = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(Expr::Var(0)));
         let prob = qp_stub(cancels, vec![Expr::Const(0.0)]);
         assert_eq!(
             classify_problem_explained(&prob),
             (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+
+        // 2⁵³·x0 + x0 − 2⁵³·x0 empties the same map, but the `x0` was lost
+        // at `fl(2⁵³ + 1) = 2⁵³` — an inexact add — so the read-out is a
+        // whole `x0` short of the objective and the LP built from it would
+        // be a different problem. This is the case that must not route LP
+        // (gh #685).
+        let big = 9007199254740992.0_f64; // 2⁵³
+        let loses = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Const(big)),
+                    Box::new(Expr::Var(0)),
+                )),
+                Box::new(Expr::Var(0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(big)),
+                Box::new(Expr::Var(0)),
+            )),
+        );
+        let prob = qp_stub(loses, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Nlp, ClassReason::ObjectiveTermsDropped)
         );
     }
 
@@ -1668,22 +1768,55 @@ mod tests {
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
     }
 
-    /// A nonlinear objective expression whose quadratic part algebraically
-    /// cancels has an empty Hessian ⇒ classify as `Lp`, not a spurious QP
-    /// (which would otherwise route a linear problem to the QP IPM).
+    /// A nonlinear objective whose quadratic part cancels has an empty
+    /// Hessian — and whether that empty map is evidence depends on how it
+    /// got empty. `x0² − x0²` cancels exactly, so the map is the whole
+    /// objective and the model is an LP. `2⁵³·x0² + x0² − 2⁵³·x0²` empties
+    /// the same map having lost an entire `x0²` at `fl(2⁵³ + 1)`, so the
+    /// read-out is not the objective and the model must go to NLP (gh
+    /// #685, gated on the inexact fold per gh #687).
+    ///
+    /// The spurious-QP concern this test was written for is unaffected in
+    /// either case: an empty Hessian never reaches the QP IPM.
     #[test]
-    fn classify_cancelling_quadratic_objective_is_lp() {
-        // x0² − x0²  ≡ 0: the degree-2 terms cancel in the polynomial walk.
-        let sq = || {
-            Expr::Binary(
+    fn classify_cancelling_quadratic_objective_routes_on_exactness() {
+        // x0² − x0²  ≡ 0: the degree-2 terms cancel in the polynomial walk,
+        // and the sum that cancels them is exact.
+        let sq = |c: f64| {
+            let p = Expr::Binary(
                 BinOp::Pow,
                 Box::new(Expr::Var(0)),
                 Box::new(Expr::Const(2.0)),
-            )
+            );
+            if c == 1.0 {
+                p
+            } else {
+                Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(p))
+            }
         };
-        let obj = Expr::Binary(BinOp::Sub, Box::new(sq()), Box::new(sq()));
+        let obj = Expr::Binary(BinOp::Sub, Box::new(sq(1.0)), Box::new(sq(1.0)));
         let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
-        assert_eq!(classify_problem(&prob), ProblemClass::Lp);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Lp, ClassReason::NonlinearPartsCancelled)
+        );
+
+        // 2⁵³·x0² + x0² − 2⁵³·x0² ≡ x0²: same empty map, one lost term.
+        let big = 9007199254740992.0_f64; // 2⁵³
+        let obj = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(sq(big)),
+                Box::new(sq(1.0)),
+            )),
+            Box::new(sq(big)),
+        );
+        let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        assert_eq!(
+            classify_problem_explained(&prob),
+            (ProblemClass::Nlp, ClassReason::ObjectiveTermsDropped)
+        );
     }
 
     #[test]

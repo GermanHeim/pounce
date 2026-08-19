@@ -711,7 +711,8 @@ impl IterateInitializer for DefaultIterateInitializer {
             let mut new_y_c = DenseVectorSpace::new(n_yc).make_new_dense();
             let mut new_y_d = DenseVectorSpace::new(n_yd).make_new_dense();
             let calc = self.eq_mult_calculator.as_mut().unwrap();
-            let ok = calc.calculate_y_eq(data, cq, nlp, aug_solver, &mut new_y_c, &mut new_y_d);
+            let ok =
+                calc.calculate_y_eq(data, cq, nlp, aug_solver, &mut new_y_c, &mut new_y_d, false);
             if !ok {
                 // Solver failed → leave at zero (already the case).
                 data.borrow_mut().append_info_string("y0");
@@ -1121,6 +1122,7 @@ mod option_behavior {
             _aug_solver: &mut dyn AugSystemSolver,
             y_c: &mut dyn Vector,
             y_d: &mut dyn Vector,
+            _unregularized: bool,
         ) -> bool {
             y_c.set(self.0);
             y_d.set(self.0);
