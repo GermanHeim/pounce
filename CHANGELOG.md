@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+- **`degeneracy="directional"` decides through the active-set QP engine,
+  budgeted by its own `degeneracy_iter`.**
+
+  The shipped decision enumerated candidate working sets over the weakly
+  active bounds, one released re-factorization per trial. On a dynamic
+  column model with 792 weakly active bounds that spent 32 s exhausting
+  its budget on every call before falling back, no budget could reach a
+  meaningful candidate, and any candidate holding a bound whose variable
+  an initial-condition equality already pins was singular, one such trial
+  ending the whole search. Both defects are structural to enumeration,
+  not tuning.
+
+  The decision is now solved as the QP it is: one released factorization
+  serves the whole call (the released `Sigma` is built once and every
+  solve reuses it, where rebuilding it per call was most of the old
+  per-trial cost), the released direction's violations name the engaged
+  rows, and their pin forces solve a small bound-constrained QP through
+  `pounce-qp` whose complementarity conditions are eq. 14's. Equality-
+  pinned rows never violate, so they never enter and nothing is singular.
+  Engagement uses a band of sqrt(mu) relative to the direction's norm: a
+  weak bound's slack and multiplier carry uncertainty equal to their own
+  size, and a movement below that band cannot be resolved against the
+  bound, so it keeps the released treatment rather than an asserted-exact
+  decision.
+
+  `degeneracy_iter` (default 16, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`) budgets the decision's back-solves, replacing
+  the borrowed `max_iter`, which keeps its meaning as the mode's own
+  work; the split matters because the two are different resources spent
+  on different questions. Exhaustion falls back to the one-sided step as
+  before, with the warning now naming the true engagement count.
+
+  Measured on the fixtures and the 62k-variable column: kink decisions
+  identical to the enumeration's (direction difference 0 and 2e-19, in
+  fewer solves), the notebook's held-breakpoint example bit-identical
+  including its record, the column's default-budget call falling back
+  diagnosed in 5 s against 32 s, and the exact decision at a raised
+  budget, which enumeration cannot produce at all, terminating in 20 s
+  (230 back-solves, 76 of 792 held). The engine's `use_schur_updates`
+  path hits `MaxIter` on dense reduced problems of hundreds of rows and
+  stays off here; that is engine-side follow-up work.
+
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).
 

@@ -314,22 +314,33 @@ estimate(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
 
 `"directional"` decides each weakly active bound for the
 perturbation's own direction by the directional-derivative QP (the
-sIPOPT paper's eq. 14), solved as an active-set search over those
-bounds on the held factorization. The weakly active rows are released,
-removing the order-one `sigma`, a candidate working set pins their
-variables through Schur rows, and a candidate is accepted when every
-variable left out moves into its feasible side and every pin is
-necessary, meaning its removal alone makes its variable violate. The
-accepted direction is unique even when the working set is not, by the
-QP's strict convexity. All three modes consume the decision: `linear`
-takes the QP direction itself, `fix_relax` takes it as the predictor
-its refinement iterates from, and `path` starts with the held rows
-pinned and the left rows in its base-activity table, so a bound that
-is genuinely active for the first stretch of the perturbation, which
-happens when the held solve sits inside the ambiguous band rather
-than exactly at the kink, releases at the fraction where its
-multiplier reaches zero rather than at the start. The record then
-carries that departure at its measured fraction.
+sIPOPT paper's eq. 14). The weakly active rows are released, removing
+the order-one `sigma`, in one factorization that serves the whole
+decision, and the direction of the released system is computed. Rows
+it moves into violation are the ones the direction engages, and their
+pin forces solve a small quadratic program, one variable per engaged
+row with a nonnegativity bound, whose optimality conditions are
+eq. 14's complementarity: each engaged bound either holds with a
+nonnegative force or releases and moves feasibly. The active-set QP
+engine solves it, the decided direction is checked against every weak
+row, and the engaged set grows until no new row violates.
+
+A row engages only when its movement exceeds the square root of the
+barrier parameter relative to the direction's norm. A weak bound's
+slack and multiplier carry an uncertainty equal to their own size,
+so a movement below that band cannot be resolved against the bound,
+and deciding it exactly would assert precision the solve does not
+contain.
+
+All three modes consume the decision: `linear` takes the QP direction
+itself, `fix_relax` takes it as the predictor its refinement iterates
+from, and `path` starts with the held rows pinned and the left rows
+in its base-activity table, so a bound that is genuinely active for
+the first stretch of the perturbation, which happens when the held
+solve sits inside the ambiguous band rather than exactly at the kink,
+releases at the fraction where its multiplier reaches zero rather
+than at the start. The record then carries that departure at its
+measured fraction.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
@@ -340,13 +351,15 @@ at 0.0018, and `fix_relax` reaches 0.0018 either way because its own
 release test happens to read the right sign there, a favorable read
 that `directional` replaces with a guarantee.
 
-The cost is gated by the condition. Detection is a scan over the
-bound rows, orders of magnitude below the backsolve every call
-already pays, and the QP runs only at a degenerate base point, at
-roughly one Schur trial per candidate working set with both the
-trials and the size of the attempt bounded by the shared `max_iter`.
-Past the budget, or when no candidate is sign-consistent, the call
-falls back to the one-sided step and warns. Detection also returns
+The cost is gated by the condition, and budgeted by
+`degeneracy_iter` (default 16): the released solve and one further
+back-solve per engaged row count against it, so the decision costs a
+handful of back-solves at a kink that engages a handful of bounds.
+A direction that engages more rows than the budget covers fails
+before any of that work happens, and the call falls back to the
+one-sided step with a warning naming the engagement count, which is
+also the retry price. `max_iter` keeps its meaning as the mode's own
+work and plays no part in the decision. Detection also returns
 nothing on a solve with relaxed bounds, where the classifier cannot
 read the slacks.
 

@@ -1127,7 +1127,7 @@ def _perturbation_deltas(session, perturb):
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
-             max_iter=16, degeneracy="directional"):
+             max_iter=16, degeneracy="directional", degeneracy_iter=16):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
@@ -1169,8 +1169,12 @@ def estimate(model, perturb, clamp=True, mode="linear",
     "directional" (the default) decides the weakly active bounds by the
     directional-derivative QP for the perturbation's own direction, in
     every mode, at the cost of a few extra backsolves paid only at a
-    kink. "one_sided" takes the single-sided value today's thresholds
-    produce, bit-identical to the release before this option existed.
+    kink. degeneracy_iter budgets those backsolves: the all-released
+    solve and one basis column per engaged bound count against it, and
+    a budget the engagement cannot fit falls back to the one-sided
+    step with a warning naming the counts. "one_sided" takes the
+    single-sided value today's thresholds produce, bit-identical to
+    the release before this option existed.
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
@@ -1221,17 +1225,17 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # (budget exhausted, no sign-consistent working set) falls back
         # to the one-sided step and says so.
         try:
+            step, held_rows, _ = (
+                session.solver.parametric_step_directional_qp(
+                    pin_idx, deltas, degeneracy_iter))
             if mode == "fix_relax":
-                step, pinned, _ = (
-                    session.solver.parametric_step_bounded_directional(
-                        pin_idx, deltas, max_iter))
+                step, pinned = (
+                    session.solver.parametric_step_bounded_decided(
+                        pin_idx, deltas, held_rows, max_iter))
             elif mode == "path":
-                step, segments, _ = (
-                    session.solver.parametric_step_path_directional(
-                        pin_idx, deltas, max_iter))
-            else:
-                step, _, _ = session.solver.parametric_step_directional(
-                    pin_idx, deltas, max_iter)
+                step, segments = (
+                    session.solver.parametric_step_path_decided(
+                        pin_idx, deltas, held_rows, max_iter))
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
@@ -1540,14 +1544,15 @@ def _user_row_names(session):
 
 
 def estimate_report(model, perturb, max_iter=16,
-                    degeneracy="directional"):
+                    degeneracy="directional", degeneracy_iter=16):
     """Report what `estimate()`'s linear step does about the bounds.
 
-    degeneracy and max_iter match `estimate()`'s arguments of the same
-    names, so the step measured here is the step `estimate()` takes
-    for the same arguments, including the directional-derivative
-    correction at a degenerate base point. max_iter budgets only that
-    correction here.
+    degeneracy and degeneracy_iter match `estimate()`'s arguments of
+    the same names, so the step measured here is the step `estimate()`
+    takes for the same arguments, including the directional-derivative
+    correction at a degenerate base point. degeneracy_iter budgets that
+    correction's back-solves. max_iter is accepted for signature
+    parity with `estimate()` and is unused here.
 
     Takes the same perturbation argument `estimate()` takes and returns
     an EstimateReport. Nothing about the estimate changes: this runs
@@ -1577,8 +1582,8 @@ def estimate_report(model, perturb, max_iter=16,
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:
-            step, _, _ = session.solver.parametric_step_directional(
-                pin_idx, deltas, max_iter)
+            step, _, _ = session.solver.parametric_step_directional_qp(
+                pin_idx, deltas, degeneracy_iter)
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
@@ -1676,7 +1681,7 @@ ActiveSetChange = namedtuple(
 
 
 def active_set_changes(model, perturb, max_iter=16,
-                       degeneracy="directional"):
+                       degeneracy="directional", degeneracy_iter=16):
     """The active-set changes `estimate(mode="path")` applies, in order.
 
     Takes the same perturbation argument `estimate()` takes and returns
@@ -1716,8 +1721,11 @@ def active_set_changes(model, perturb, max_iter=16,
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:
-            _, segments, _ = session.solver.parametric_step_path_directional(
-                pin_idx, deltas, max_iter)
+            _, held_rows, _ = (
+                session.solver.parametric_step_directional_qp(
+                    pin_idx, deltas, degeneracy_iter))
+            _, segments = session.solver.parametric_step_path_decided(
+                pin_idx, deltas, held_rows, max_iter)
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
