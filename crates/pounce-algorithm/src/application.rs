@@ -1222,8 +1222,18 @@ impl IpoptApplication {
     /// feature pounce does not implement, or `None`. Public so the CLI
     /// can refuse before routing — the convex dispatch never reaches
     /// `optimize_tnlp`. See [`crate::unimplemented_options`].
+    ///
+    /// A run configuring nothing but backends pounce does not ship is
+    /// refused here too, after the per-option table has had its say —
+    /// see [`crate::unimplemented_options::backend_only_refusal`]. It
+    /// is folded in rather than given its own accessor so that every
+    /// surface already refusing on this method refuses on it as well;
+    /// the CLI is not the only frontend, and a condition worth failing
+    /// on is not worth failing on only from the CLI.
     pub fn unimplemented_option_refusal(&self) -> Option<String> {
-        crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+        crate::unimplemented_options::refusal(&self.options, &self.reg_options).or_else(|| {
+            crate::unimplemented_options::backend_only_refusal(&self.options, &self.reg_options)
+        })
     }
 
     /// The message for the first string option the caller set to a

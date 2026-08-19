@@ -292,11 +292,11 @@ buys.
 The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
 `pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
 `ipopt.opt`-compatibility reason. They are unreachable now that their
-backend cannot be selected, so setting one **warns and solves** — it does
-not fail the run:
+backend cannot be selected, so setting one alongside options POUNCE does
+read **warns and solves** — it does not fail the run:
 
 ```
-$ pounce model.nl ma97_order=metis
+$ pounce model.nl ma97_order=metis tol=1e-8
 pounce: warning: `ma97_order` configures the HSL MA97 sparse symmetric linear
 solver, which pounce does not implement, so it is ignored — as is every other
 `ma97_*` option. pounce factors the KKT system with `feral` (pure Rust, the
@@ -317,6 +317,40 @@ nothing said about it. `pardisolib` warns with the `pardiso_*` family;
 `hsllib` is still refused, because POUNCE *has* an HSL backend (MA57) and
 the refusal points you at `--features ma57` rather than leaving you to
 believe a library was loaded.
+
+#### …unless they are all you set
+
+That reasoning assumes the file has other business here. If the backend
+knobs are *everything* the run sets, nothing in the file survives, and
+warning-then-solving would answer "tune the linear solver" by tuning
+nothing and reporting success. That case is **refused**:
+
+```
+$ pounce model.nl ma97_order=metis
+pounce: error: every option this run sets configures a linear-solver backend
+pounce does not implement, so there is nothing left for it to act on. […] Set
+`linear_solver=feral` (or `ma57`) if the defaults are what you want.
+```
+
+The rule in full:
+
+| what the run sets | result |
+|---|---|
+| backend knobs only | **error**, exit 2 |
+| backend knobs + any option POUNCE reads | warning, solve continues |
+| backend knobs at their registered defaults | silent, solve continues |
+| no backend knobs | silent, solve continues |
+
+Two details worth knowing. The second row counts an option's *presence*,
+not whether you changed it — writing `tol` at its default is still a
+statement about this solve, and it is enough to put you back on the
+warning path. And `option_file_name` does not count as content: it says
+where the options came from, not what to solve, so pointing at a
+backend-only `ipopt.opt` is refused exactly as passing the same knobs on
+the command line would be.
+
+A file that *selects* the backend it tunes never reaches this: `linear_solver=ma97`
+is refused on its own, as [above](#choosing-a-linear-solver).
 
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 

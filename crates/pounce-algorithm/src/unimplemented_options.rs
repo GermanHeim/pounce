@@ -125,12 +125,36 @@
 //! loaded. `pardisolib` has no such other route (there is no Pardiso
 //! here by any means), so it warns with the rest of its family.
 //!
+//! ## …unless they are all there is
+//!
+//! The rule above rests on one premise, stated in it: the file has
+//! other business here, and failing the run over `ma97_order` would
+//! reject something the caller wanted for the sake of a knob it never
+//! touches. When the backend knobs are *all* that is there, the premise
+//! is gone. Nothing in the file survives, so there is no working run
+//! left to protect, and warning-then-solving answers "tune the linear
+//! solver" by tuning nothing and reporting success — the shape of
+//! gh#677, not a fix for it.
+//!
+//! So [`backend_only_refusal`] refuses that one case. It is the
+//! boundary of the warn rule rather than an exception to it: every file
+//! the portability argument was ever about still warns and still
+//! solves, because every such file has something else in it.
+//!
+//! Note that a file which *selects* the backend it tunes never reaches
+//! here — `linear_solver=ma97` is refused earlier, by
+//! [`crate::application::IpoptApplication::unimplemented_linear_solver`].
+//! What this catches is the file that tunes MA97 without ever saying
+//! so, which is the case that used to run FERAL and report success.
+//!
 //! # The default gate
 //!
 //! Only an explicit value **different from the registered default** is
 //! refused. `corrector_type` left alone, or an `ipopt.opt` that spells
 //! out defaults, must keep working: those ask for nothing. Refusing them
 //! would break the very compatibility the registry exists to provide.
+//! This gate binds [`backend_only_refusal`] too: a file of nothing but
+//! backend knobs at their registered defaults is silent, not refused.
 
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::{DefaultValue, RegisteredOptions};
@@ -720,6 +744,91 @@ pub fn backend_warnings(options: &OptionsList, reg: &RegisteredOptions) -> Vec<S
         .collect()
 }
 
+/// Names that say where the options came from, not what to solve.
+///
+/// `option_file_name` is the mechanism that delivered the rest of the
+/// list, so counting it as content would mean "the file you pointed me
+/// at configures nothing" is exactly the case that never fires — and
+/// pointing at a file is one of the two normal ways to supply one.
+/// Contrast `print_level`, which is deliberately *not* here: a caller
+/// who raises it asked for something and got it.
+const DELIVERY_MECHANISM: &[&str] = &["option_file_name"];
+
+/// Every backend-knob name in [`UNIMPLEMENTED_BACKENDS`].
+fn is_backend_knob(name: &str) -> bool {
+    UNIMPLEMENTED_BACKENDS
+        .iter()
+        .any(|group| group.options.contains(&name))
+}
+
+/// The refusal for a run whose options configure *nothing but* backends
+/// pounce does not ship, or `None`.
+///
+/// This is the boundary of the warn-don't-refuse rule above, not an
+/// exception to it. That rule rests on one premise: the file has other
+/// business here, and failing it over `ma97_order` would reject a run
+/// the caller wanted for the sake of a knob it never touches. When the
+/// backend knobs are *all* that is there, the premise is gone — nothing
+/// in the file survives, so there is no working run left to protect.
+/// Warning and solving anyway answers a request to tune the linear
+/// solver by tuning nothing and reporting success, which is the shape
+/// of gh#677 rather than a fix for it.
+///
+/// Two gates, and both are needed:
+///
+/// 1. **Something was actually asked for** — at least one backend knob
+///    is set to a non-default. A file that spells out `ma97_u 1e-8`
+///    (the registered default) asks for nothing and still gets nothing
+///    said about it, exactly as `a_backend_knob_at_its_default_is_silent`
+///    requires.
+/// 2. **Nothing else was mentioned at all.** The test is *presence* in
+///    the options list, not `set_to_a_non_default`: a caller who writes
+///    `tol 1e-8` has stated a real intention about this solve even
+///    when `1e-8` is the default, and a file with real content in it is
+///    the portable-`ipopt.opt` case the warning exists for. Presence is
+///    also the safe direction to be wrong in — it can only make this
+///    refusal rarer. [`DELIVERY_MECHANISM`] is the one exemption, and
+///    it exists so that pointing at a backend-only file with
+///    `option_file_name` is not permanently exempt from the refusal
+///    that file has earned.
+///
+/// Note that a file selecting the backend it tunes never reaches here:
+/// `linear_solver=ma97` is refused before this, by
+/// [`crate::application::IpoptApplication::unimplemented_linear_solver`].
+/// What lands here is the file that tunes MA97 without ever saying so.
+pub fn backend_only_refusal(options: &OptionsList, reg: &RegisteredOptions) -> Option<String> {
+    let asked_for_something = UNIMPLEMENTED_BACKENDS.iter().any(|group| {
+        group
+            .options
+            .iter()
+            .any(|name| set_to_a_non_default(options, reg, name))
+    });
+    if !asked_for_something {
+        return None;
+    }
+    let mentions_something_real = options
+        .names()
+        .any(|name| !is_backend_knob(name) && !DELIVERY_MECHANISM.contains(&name));
+    if mentions_something_real {
+        return None;
+    }
+    Some(
+        "pounce: error: every option this run sets configures a linear-solver \
+         backend pounce does not implement, so there is nothing left for it to \
+         act on. pounce factors the KKT system with `feral` (pure Rust, the \
+         default) or MA57 (`linear_solver=ma57`, in a `--features ma57` \
+         build); no setting written for another backend transfers to either. \
+         These names are registered so an `ipopt.opt` written for Ipopt still \
+         parses unchanged, and a file that also carries options pounce reads \
+         is warned about rather than refused — but a file that carries only \
+         these would run as if it had configured the solver when it \
+         configured nothing. Set `linear_solver=feral` (or `ma57`) if the \
+         defaults are what you want. Tracking issue: \
+         https://github.com/jkitchin/pounce/issues/551"
+            .to_string(),
+    )
+}
+
 /// An option set to something the registry says is not its default.
 ///
 /// Both halves matter. `found` alone would fire on an `ipopt.opt` that
@@ -987,6 +1096,83 @@ mod tests {
             backend_warnings(&opts, &reg).is_empty(),
             "a default run must stay silent",
         );
+        assert_eq!(
+            backend_only_refusal(&opts, &reg),
+            None,
+            "an empty list sets no backend knob, so there is nothing to refuse",
+        );
+    }
+
+    /// Backend knobs with nothing else in the list are refused; adding
+    /// one option pounce reads turns the same knobs back into a
+    /// warning. This is the whole rule, in one test.
+    #[test]
+    fn backend_only_is_refused_but_a_mixed_list_is_not() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("ma97_order", "metis", true, false)
+            .unwrap();
+        let refused = backend_only_refusal(&opts, &reg)
+            .expect("a list of nothing but backend knobs must be refused");
+        assert!(
+            refused.contains("every option this run sets"),
+            "the message is about the whole list, not one knob: {refused}",
+        );
+        assert!(
+            !backend_warnings(&opts, &reg).is_empty(),
+            "the per-family warning still describes the knob; the refusal is              what stops the run",
+        );
+
+        opts.set_numeric_value("tol", 1e-8, true, false).unwrap();
+        assert_eq!(
+            backend_only_refusal(&opts, &reg),
+            None,
+            "one option pounce reads is enough content to protect",
+        );
+    }
+
+    /// The default gate applies to the refusal too: a list that spells
+    /// out a backend knob's registered default has asked for nothing.
+    #[test]
+    fn a_backend_knob_at_its_default_is_not_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("ma97_order", "auto", true, false)
+            .unwrap();
+        assert_eq!(backend_only_refusal(&opts, &reg), None);
+    }
+
+    /// `option_file_name` says where the options came from, not what to
+    /// solve, so it does not count as content — otherwise pointing at a
+    /// backend-only file would be permanently exempt from the refusal
+    /// that file has earned.
+    #[test]
+    fn the_delivery_mechanism_is_not_content() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("ma97_order", "metis", true, false)
+            .unwrap();
+        opts.set_string_value("option_file_name", "ipopt.opt", true, false)
+            .unwrap();
+        assert!(
+            backend_only_refusal(&opts, &reg).is_some(),
+            "naming the file that carried the knobs is not a reason to spare it",
+        );
+    }
+
+    /// Every name in [`DELIVERY_MECHANISM`] must actually be a
+    /// registered option — a typo there would silently widen the
+    /// exemption to nothing and narrow it to nothing at once.
+    #[test]
+    fn the_delivery_mechanism_names_are_registered() {
+        let (_, reg) = fixture();
+        for name in DELIVERY_MECHANISM {
+            assert!(
+                reg.get_option(name).is_some(),
+                "`{name}` is not a registered option",
+            );
+            assert!(
+                !is_backend_knob(name),
+                "`{name}` is a backend knob; exempting it is meaningless",
+            );
+        }
     }
 
     /// A backend knob warns and solves — it never refuses. Refusing

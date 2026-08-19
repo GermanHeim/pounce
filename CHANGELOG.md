@@ -827,8 +827,8 @@ changes.
   and still falls back, now with a test pinning that so the fallback
   stays deliberate.
 
-- **The 111 per-backend linear-solver knobs now warn instead of going
-  silent** (#551, #677).
+- **The 111 per-backend linear-solver knobs warn instead of going
+  silent, and are refused when they are all a run sets** (#551, #677).
 
   `ma27_*`, `ma77_*`, `ma86_*`, `ma97_*`, `mumps_*`, `pardiso_*`,
   `pardisomkl_*`, `spral_*`, `wsmp_*` and `pardisolib` tune backends
@@ -837,14 +837,29 @@ changes.
   now prints a warning naming the backend and every knob of that family
   it saw, and the solve continues.
 
-  **Warning and not refusal, deliberately.** A portable `ipopt.opt`
-  routinely configures several backends at once so one file runs
-  everywhere; refusing would fail that file over knobs the run never
-  touches, breaking the compatibility the registry exists to provide.
-  This follows the precedent set for the caching hints (`hessian_constant`
-  and friends), which warn for the same reason. One line per backend
-  family, not per option, and only for a value that differs from the
-  registered default — a default run is still completely silent.
+  **Warning and not refusal — except when they are all there is.** A
+  portable `ipopt.opt` routinely configures several backends at once so
+  one file runs everywhere; refusing would fail that file over knobs the
+  run never touches, breaking the compatibility the registry exists to
+  provide. This follows the precedent set for the caching hints
+  (`hessian_constant` and friends), which warn for the same reason. One
+  line per backend family, not per option, and only for a value that
+  differs from the registered default — a default run is still
+  completely silent.
+
+  That argument has a premise, though: the file has other business here.
+  A run whose options are *nothing but* backend knobs is **refused**,
+  because nothing in it survives — warning and solving would answer a
+  request to tune the linear solver by tuning nothing and reporting
+  success, which is the shape of the defect rather than a fix for it.
+  One option POUNCE reads is enough to put the file back on the warning
+  path, and it counts by being *mentioned*: `tol` at its default is
+  still a statement about this solve. `option_file_name` is the one
+  exemption — it says where the options came from, not what to solve, so
+  pointing at a backend-only file is refused just as passing the same
+  knobs on the command line is. A file that names the backend it tunes
+  never gets this far; `linear_solver=ma97` is refused on its own.
+
   `hsllib` keeps its refusal: POUNCE *has* an HSL backend, so that one is
   a caller reaching for a solver it can actually run, by a mechanism it
   does not have.
