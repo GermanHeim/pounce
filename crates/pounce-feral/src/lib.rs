@@ -161,6 +161,33 @@ pub struct FeralConfig {
     /// pre-Phase-B behaviour.
     pub cascade_break: Option<bool>,
     pub fma: bool,
+    /// Whether every back-solve runs feral's own iterative refinement
+    /// (`solve_refined` / `solve_many_refined` rather than `solve` /
+    /// `solve_many`). Defaults to `true`, which is right for callers
+    /// driving feral directly: nothing else is correcting the residual.
+    ///
+    /// Under pounce's IPM it is a **nested** loop, and that is worth
+    /// knowing before tuning it. `PdFullSpaceSolver` runs Ipopt's own
+    /// refinement (`min/max_refinement_steps`, `residual_ratio_max`) over
+    /// the augmented system, and feral's inner loop runs up to 10
+    /// correction steps plus the initial solve inside *each* of those —
+    /// up to 10x11 substitution passes for one aug-system solve, each
+    /// preceded by a matvec against the original matrix. The outer loop
+    /// is the one that measures the residual ratio and decides; the
+    /// inner one drives a residual nobody consults to a tolerance nobody
+    /// set. `Ma57SolverInterface` and `TSymLinearSolver` have no
+    /// in-backend refinement, so this is feral-only.
+    ///
+    /// Measured on a 118 276-dimension KKT (gh#698): `feral_refine = no`
+    /// cut back-solve time 60% and wall time 20% and still converged.
+    /// The default stays `true` because the case that motivated it
+    /// (pinene_3200, whose IPM tail stalls when the cascade-break
+    /// residual floor is left uncorrected) is not in the fixture corpus
+    /// and has not been re-measured against the outer loop alone.
+    ///
+    /// The inner cap is hard-coded in feral 0.15.1 (`RefinementStep`),
+    /// so pounce cannot narrow it without an upstream change; the knob
+    /// here is all-or-nothing.
     pub refine: bool,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
@@ -868,6 +895,8 @@ impl FeralSolverInterface {
         let nrhs = nrhs as usize;
         debug_assert_eq!(rhs_vals.len(), n * nrhs);
 
+        // See `FeralConfig::refine`: under the IPM this inner refinement
+        // is nested inside `PdFullSpaceSolver`'s own loop (gh#698).
         let solved = match (self.refine, self.matrix.as_ref(), nrhs == 1) {
             (true, Some(m), true) => self.solver.solve_refined(m, rhs_vals),
             (true, Some(m), false) => self.solver.solve_many_refined(m, rhs_vals, nrhs),
@@ -876,6 +905,11 @@ impl FeralSolverInterface {
         };
         match solved {
             Ok(x) => {
+                // The copy back is forced by feral's API: every solve
+                // entry point returns an owned `Vec` and none writes in
+                // place, so this allocates and copies `dim * nrhs`
+                // doubles per back-solve (~946 KB at n = 118 276).
+                // Removing it needs an in-place variant upstream.
                 rhs_vals.copy_from_slice(&x);
                 ESymSolverStatus::Success
             }
