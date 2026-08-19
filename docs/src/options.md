@@ -68,7 +68,7 @@ the time it is read. POUNCE warns about that rather than ignoring it.
 | `linear_solver` | KKT linear-solver backend: `feral` (default) or `ma57` (needs a `--features ma57` build). Any other registered name is **refused**. See below. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
-| `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
+| `qp_presolve`   | Presolve on the convex LP/QP path, and on the conic (convex QCQP) path with the cone rows protected (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
 | `obj_scaling_factor` | Constant multiplier on the objective; **negative maximizes**. See below. |
 | `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve (default `1e-8`). |
 | `honor_original_bounds` | Project the reported point back into the un-relaxed bounds (`yes` / `no`, default `no`). See below. |

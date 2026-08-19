@@ -256,13 +256,41 @@ compare timings or isolate a solver issue):
 pounce model.nl qp_presolve=no
 ```
 
+### Presolve on a convex QCQP
+
+The switch applies to the conic driver too — the one that solves convex
+QCQPs. Two things about it differ from the LP/QP path, and both follow from
+the same fact: a quadratic constraint is reformulated into a second-order
+cone *block*, and a cone block's rows are coupled to one another.
+
+**Only the ordinary linear rows are reduced.** Every row of a cone block is
+protected: it is never dropped, never merged with another row, never used to
+tighten a variable bound, and the variables it couples are excluded from the
+dominated-column reduction. Dropping any single row of a block would change
+which constraint the block encodes, with nothing to signal it — the answer
+would simply come back wrong. So on a model that is a variable box plus
+quadratic constraints and nothing else, presolve has nothing to act on and
+prints no summary line. That is the expected result, not a failure.
+
+**The loop runs once, not to a fixpoint.** The reduced cone partition has to
+be readable off the surviving rows, which holds for a single pass. There is
+no `cap-truncated` suffix on this path for the same reason.
+
+Where a QCQP *does* carry ordinary linear inequalities — which is the common
+shape — those are reduced exactly as on the LP/QP path, and the summary line
+looks the same:
+
+```text
+Presolve: 4 → 4 vars, 9 → 7 rows (fixed 0, free-fixed 0, substituted 0, forcing 0, dominated 0, tightened 0)
+```
+
 ## Tuning the convex IPM
 
 Beyond the shared `tol` and `max_iter`, the convex engine takes these:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `qp_presolve` | `yes` | Presolve before the solve (above). |
+| `qp_presolve` | `yes` | Presolve before the solve (above). Applies to the conic driver as well, with the cone rows protected — see [Presolve on a convex QCQP](#presolve-on-a-convex-qcqp). |
 | `qp_tau` | `0.95` | Fraction-to-boundary τ ∈ (0,1): the floor of the adaptive rule, and the flat value on the predictor step and on second-order / PSD cone blocks. |
 | `qp_tau_max` | `1 − 1e-12` | Ceiling of the adaptive (Mehrotra-tail) τ on orthant blocks. Set equal to `qp_tau` to pin τ flat. |
 | `qp_reg` | `1e-10` | Static KKT regularization δ ≥ 0, for a stable LDLᵀ inertia. |

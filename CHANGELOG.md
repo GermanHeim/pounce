@@ -9,6 +9,35 @@ changes.
 
 ## [Unreleased]
 
+- **`qp_presolve` now applies to convex QCQPs, where it was silently
+  ignored** (#588, phase Q9, presolve half).
+
+  `qp_presolve` (and its `presolve` alias) is documented as the convex
+  path's presolve switch and defaults on, but the conic driver — the one
+  that solves convex QCQPs — did not presolve at all. Setting the option
+  to `yes` or to `no` had no effect on those models in either direction.
+  It is honoured now.
+
+  The reduction runs through the **cone-aware** entry point, which is the
+  part that matters. A quadratic constraint is reformulated into a
+  second-order cone block whose first two rows are the constraint's
+  *linear* part, verbatim. Two quadratic constraints that share a linear
+  part therefore produce identical rows in different cones — and the
+  duplicate-row reduction compares rows on their linear coefficients. Run
+  without cone protection it calls them duplicates, keeps one, and returns
+  `Optimal` with an objective 67% wrong on a model whose optimum is known
+  in closed form. The protection that prevents this was already in the
+  solver; what is new is that it is now exercised, demonstrated, and held
+  down by a 64-instance differential test.
+
+  **No speedup is claimed.** On models that are purely a variable box plus
+  quadratic constraints there are no ordinary linear rows for the
+  reduction to act on, and nothing changes. Where there are — the new
+  `qcqp_shared_linear_rows` regression model drops two redundant rows of
+  nine — the solve takes one more iteration and finishes an order of
+  magnitude more accurate (final NLP error 9.9e-10 → 8.1e-11). The fixture
+  sweep at four option sets moves that model and nothing else.
+
 - **Gondzio multiple centrality correctors reach the direct convex IPM,
   and are now switchable** (#588, phase Q9, corrector half).
 
