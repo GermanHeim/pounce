@@ -1637,6 +1637,41 @@ mod tests {
         run(&lr1_rc, &mut solver);
         let after_first = stats.factorizations.get();
 
+        // Preconditions, asserted rather than assumed. Without these the
+        // test still passes if the fixtures drift out from under it, but
+        // stops testing the empty-history path -- it would be checking an
+        // ordinary rebuild and reporting a pass. (The same vacuity trap
+        // feral#179 hit building its full-budget refinement oracle: nothing
+        // merely ill-conditioned reaches the budget, so an oracle that is
+        // not pinned proves nothing.)
+        //
+        // 1. Round 1 must have left the hazard live: a factor cached and
+        //    `inner_has_factor` set. That flag is private, so assert its
+        //    observable consequence -- an identical re-solve reuses it.
+        let repeat = run(&lr1_rc, &mut solver);
+        assert_eq!(
+            stats.factorizations.get(),
+            after_first,
+            "round 1 must leave a reusable factor, else round 2 has no \
+             stale factor to wrongly reuse and this test is vacuous"
+        );
+        // 1/(2 + 0.5^2): the inner solve answers 1/2 from the cached
+        // Wdiag factor and the SMW correction for V then applies on top.
+        // Round 2 has no V, which is why its expected value below is the
+        // bare 1/7 and why a stale factor there shows up as 1/2.
+        assert!(
+            (repeat - 4.0 / 9.0).abs() < 1e-12,
+            "round 1 re-solve should answer 4/9 from the cached factor, \
+             got {repeat}"
+        );
+
+        // 2. Round 2's matrix must genuinely carry no history, which is what
+        //    makes `update_factorization` perform zero inner solves.
+        assert!(
+            lr2_rc.get_v().is_none() && lr2_rc.get_u().is_none(),
+            "round 2 fixture must have empty L-BFGS history"
+        );
+
         let got = run(&lr2_rc, &mut solver);
 
         assert_eq!(
