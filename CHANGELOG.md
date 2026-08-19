@@ -9,6 +9,60 @@ changes.
 
 ## [Unreleased]
 
+- **HSDE no longer certifies `Optimal` a few hundred short of the optimum
+  when the objective carries a large constant** (#689).
+
+  The default route returned `Solve_Succeeded` on
+  `crates/pounce-cli/tests/fixtures/scaled_feasible_a.nl` at objective
+  `236.85`, and on `scaled_feasible_b` at `456.33`, where the true
+  optimum of both is **`0`** — each minimizes `Σ(xᵢ − aᵢ)²` with `a`
+  inside the feasible set, which the NLP route confirms at `1.0e-9` and
+  `3.8e-9`. Two more fixtures were doing the same thing:
+  `feasible_x0_wide_scale` returned a point with an `Overall NLP error`
+  of `3.6e4`, and `feasible_x0_extreme_row` one at `7.6e-4`.
+
+  HSDE's scale-relative stopping test normalizes the duality gap by the
+  objective magnitude — the standard convention, and correct. But
+  `QpProblem` models `½xᵀPx + cᵀx` only: a model whose objective has a
+  degree-0 term hands the solver an objective displaced by it, and for a
+  least-squares objective the constant is `Σaᵢ²` — `5.0e11` on this pair.
+  Normalizing by *that* turns `gap_rel < tol` into a blanket `tol·|Σaᵢ²|`
+  = `5e3` absolute slack on the gap. The gh #414 guard missed it for the
+  same reason (its complementarity normalizer is also the objective): it
+  read `4.9e-10` on a point whose absolute KKT error is `2.5e2`.
+
+  `QpOptions::obj_constant` (default `0.0`) now carries that constant,
+  and the CLI sets it from the `.nl` degree-0 term it already tracks for
+  reporting, plus presolve's own objective offset, in the solver's
+  minimize sense. It travels through both cost scalings — divided by
+  `hsde_cost_scale`'s `σ`, multiplied by Ruiz's. It is **only** a
+  convergence-test normalizer: it enters no residual, no search
+  direction, no dual, and not `QpSolution::obj`. The default `0.0` is the
+  *tightest* choice, so every library caller that does not set it, and
+  every problem whose objective genuinely is large (POWELL20 and the rest
+  of the large-data cluster the relative test exists for), is unchanged.
+
+  This was the alternative to two tempting fixes that do not work.
+  Requiring absolute complementarity in the relative arm separates this
+  fixture pair cleanly (`1.2e3`/`1.5e3` against `2.3e-11`/`1.1e-28` on
+  the corpus) but rejects the gh #286 huge-magnitude optima, whose
+  *genuine* complementarity is `1.5e9` and `1.4e13`; normalizing the gap
+  by the gradient scale instead of the objective is tighter by a factor
+  `‖x̂‖`, which rejects any problem whose magnitude lives in `‖x*‖` —
+  POWELL20 exactly. The constant is the only thing that actually
+  distinguishes the two families.
+
+  Fixture sweep, both legs: the `qp_hsde=no` leg is unchanged, and on the
+  default leg only the four models with a large objective constant move —
+  `scaled_feasible_a` 16 → 123 iterations (`236.85` → `0`, KKT error
+  `2.5e2` → `4.6e-3`), `scaled_feasible_b` 21 → 47 (`456.33` → `0`,
+  `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 198 (KKT error
+  `3.6e4` → `6.6e-15`), `feasible_x0_extreme_row` 32 → 33 (`7.6e-4` →
+  `3.8e-5`). The iteration counts are the honest cost of the work these
+  solves were previously skipping; `feasible_x0_wide_scale` at 198
+  against a 200 cap is thin margin and is called out in
+  `dev-notes/issue-689-direct-driver-cold-start.md` §5.
+
 - **The direct convex QP driver no longer diverges on a badly-scaled
   feasible model** (#689).
 

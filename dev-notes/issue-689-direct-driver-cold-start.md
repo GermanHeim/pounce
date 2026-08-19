@@ -1,8 +1,8 @@
 # gh #689 — the direct convex driver's cold start, and what the
 # `scaled_feasible` pair actually measures
 
-Two findings: one fixed here, one measured and left for a separate change
-(HSDE's stopping rule — see §3).
+Two defects, both fixed: the direct driver's cold start (§1–§2) and HSDE's
+scale-relative stopping test (§3).
 
 ## 1. The divergence: a cold start with no relation to the data
 
@@ -118,11 +118,49 @@ the relative test. Until HSDE's stopping rule is revisited, an objective move
 on `scaled_feasible_a`/`_b` on the default leg should not be read as a
 trajectory regression — the iteration count still should.
 
-HSDE is deliberately **not** changed here. Its stopping rule is the default
-path for every LP/QP; changing it is a trajectory change across the whole
-corpus and needs its own sweep and its own issue. `crates/pounce-cli/tests/
-issue_689_direct_driver_scaled_feasible.rs` pins the current HSDE behaviour so
-the change, when it comes, is visible.
+### The fix, and the two that do not work
+
+The gap normalizer is right in form and wrong in its input. Told the objective
+constant, `scale_g` measures the objective the caller reads and everything
+follows: `QpOptions::obj_constant` (default `0.0`) carries it, the CLI sets it
+from the `.nl` degree-0 term it already tracks for reporting plus presolve's
+`obj_offset`, in the solver's minimize sense, and it travels through both cost
+scalings (divided by `hsde_cost_scale`'s `σ`, multiplied by Ruiz's). It is a
+convergence-test normalizer only — no residual, no direction, no dual, and not
+`QpSolution::obj` — and `0.0` is the *tightest* value, so nothing that does not
+set it changes.
+
+Two tighter-looking rules were measured first and rejected, both on the same
+evidence:
+
+*Require absolute complementarity in the relative arm* — the rule the direct
+driver uses (§2). Across the whole fixture corpus exactly five models reach the
+relative arm, and it separates them perfectly:
+
+| fixture | `⟨ŝ,ẑ⟩` at the stop | verdict |
+|---|---|---|
+| `feasible_x0_extreme_row` | 2.3e-11 | genuine |
+| `feasible_x0_sentinel_bound` | 1.1e-28 | genuine |
+| `feasible_x0_wide_scale` | 7.8e2 | false (KKT error 3.6e4) |
+| `scaled_feasible_a` | 1.2e3 | false |
+| `scaled_feasible_b` | 1.5e3 | false |
+
+Thirteen orders of separation — and it still fails, because the *genuine*
+gh #286 huge-magnitude optima sit at `⟨ŝ,ẑ⟩` of `1.5e9`
+(`huge_magnitude_qp_recovers_exact_optimum_at_default_budget`) and `1.4e13`
+(`issue_286_illconditioned_huge_scale_is_optimal_and_feasible`). Those are
+points the tests certify against an exact oracle; absolute complementarity is
+genuinely unreachable there (`x` is `O(1)` with duals at `1e18`, so the products
+floor at `~1e9`), which is what the relative arm exists for.
+
+*Normalize the gap by the gradient scale `scale_d` instead of the objective* —
+offset-invariant, and it rejects all three false stops. But `|obj| ≈ ‖∇f‖·‖x̂‖`,
+so this is tighter than the current rule by a factor `‖x̂‖`: it rejects any
+problem whose magnitude lives in `‖x*‖` rather than in its coefficients, which
+is POWELL20 (`‖x*‖ ~ 1e7`, `‖Px̂‖ ~ 7.5e3`, gap `4e2` — `5e-2` under this rule).
+
+The constant is the only thing that actually separates the two families, so the
+constant is what the fix supplies.
 
 ## 4. A false success the fix exposed, and the guard for it
 
@@ -177,3 +215,34 @@ path from a different start, not a change in what the driver certifies — the
 same sweep shows the reverse sign on `wyndor_min` (`1.7e-8 → 9.6e-10`),
 `lp_afiro` (`2.1e-7 → 2.3e-9`), `dual_order` (`1.6e-9 → 1.5e-11`) and
 `feasible_x0_wide_scale` (`6.7e-16 → 5.0e-17`).
+
+## 5. Sweep — the HSDE half
+
+`scripts/sweep-fixtures.sh`, both legs, after §3's fix.
+
+* **`qp_hsde=no` leg: empty diff.** `obj_constant` enters only HSDE's
+  `scale_g`; the direct driver's tests do not read it.
+* **Default (HSDE) leg**, every line that moved — all four are models with a
+  large objective constant, which is the whole affected class:
+
+| fixture | before | after | KKT error |
+|---|---|---|---|
+| `scaled_feasible_a` | Optimal 16, obj 236.85 | Optimal 123, obj 0 | 2.5e2 → 4.6e-3 |
+| `scaled_feasible_b` | Optimal 21, obj 456.33 | Optimal 47, obj 0 | 9.3e2 → 1.2e-10 |
+| `feasible_x0_wide_scale` | Optimal 16 | Optimal 198 | 3.6e4 → 6.6e-15 |
+| `feasible_x0_extreme_row` | Optimal 32 | Optimal 33 | 7.6e-4 → 3.8e-5 |
+
+Three of the four were false optima — `feasible_x0_wide_scale` was returning a
+point with a KKT error of `3.6e4` under a `Solve_Succeeded`. The iteration
+counts are the cost of the work those solves were skipping: with the constant
+supplied, `scale_g` on these models is the *caller's* objective, which tends to
+`0` at the optimum, so the relative test degenerates to the absolute one and
+HSDE has to drive the gap to `tol` outright — which is exactly what the direct
+driver does on the same models in 27 and 28 iterations.
+
+**`feasible_x0_wide_scale` at 198 against a 200 cap is thin margin** and is the
+one line here that should not be left unwatched: a change that costs this solve
+three iterations turns a correct answer into `IterationLimit`. It is recorded
+rather than tuned away — raising the cap or loosening the test to buy margin
+would be trading the correctness this change just bought for a number that
+looks better.

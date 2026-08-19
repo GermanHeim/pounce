@@ -237,6 +237,36 @@ pub struct QpOptions {
     /// does not exceed the interior iterate's. A no-op for genuine QPs
     /// (`P ≠ 0`) and for the warm-start / debug entry points.
     ///
+    /// A constant added to `½xᵀPx + cᵀx` to obtain the objective the **caller**
+    /// reports. Default `0.0`.
+    ///
+    /// [`QpProblem`] models the quadratic form only, so a model whose objective
+    /// carries a degree-0 term hands the solver an objective displaced by that
+    /// term. Least-squares objectives — `Σ(xᵢ − aᵢ)²`, constant `Σaᵢ²` — are the
+    /// common case, and the displacement is unbounded: on the
+    /// `scaled_feasible_a` fixture the caller's optimum is `0` while the
+    /// solver's is `−5.0e11`.
+    ///
+    /// That matters because the scale-relative stopping test
+    /// ([`crate::hsde::relative_stop_permitted`]) normalizes the duality gap by
+    /// the objective *magnitude*, the standard convention. Under a large
+    /// displacement that magnitude is a property of the constant and not of the
+    /// solution, so `tol`-relative becomes a blanket `tol·|constant|` absolute
+    /// slack on the gap: HSDE certified `Optimal` on `scaled_feasible_a` at a
+    /// caller-visible objective of `236.85` — `4.7e-10` relative in *its* metric
+    /// and 100% wrong in the caller's (gh #689). Told the constant, the same
+    /// solve normalizes by the objective the caller actually reads and runs on
+    /// to the true optimum.
+    ///
+    /// **Purely a convergence-test normalizer.** It never enters the KKT
+    /// system, the search direction, the duals, or [`QpSolution::obj`] (which
+    /// stays the quadratic form's own value, as before — the caller adds the
+    /// constant back exactly as it always did). A wrong or missing value can
+    /// therefore only make the gap test tighter or looser, never unsound; `0.0`
+    /// — the default, and what every caller that does not set it gets — is the
+    /// tightest choice and reproduces the historical test whenever the true
+    /// constant is small next to the objective.
+    pub obj_constant: f64,
     /// **Default `false` — opt-in.** Crossover is correct (never-regress) but
     /// the active-set purification is currently *slow* on the degenerate /
     /// large NETLIB LPs it most targets: on the LP suite it regressed solve
@@ -270,6 +300,7 @@ impl Default for QpOptions {
             use_hsde: true,
             collect_iterates: false,
             equilibrate: true,
+            obj_constant: 0.0,
             // Opt-in: off by default. See the field doc — correct but slow on
             // the LPs it targets, and does not yet reach Optimal on GEN (#133).
             crossover: false,
@@ -532,6 +563,10 @@ where
     let inner = QpOptions {
         equilibrate: false,
         use_hsde,
+        // The equilibrated objective is `σ` times the original's, so the
+        // objective constant travels with it (`σ = 1` for a QP; only a pure
+        // LP's cost normalization makes this anything else).
+        obj_constant: opts.obj_constant * scaling.sigma(),
         ..*opts
     };
     let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
@@ -922,12 +957,18 @@ where
         equilibrate: false,
         ..*opts
     };
+    // (`direct.obj_constant` is fixed up below for the equilibrated branch,
+    // whose scaled objective carries the cost scaling `σ`.)
     // Equilibrate (default on) just as the cold path does, mapping the
     // warm-start point into the scaled coordinates so the warm benefit is
     // preserved and the two paths run on identically-conditioned data.
     if opts.equilibrate {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
         let scaled_warm = scaling.scale_warm_start(warm);
+        let direct = QpOptions {
+            obj_constant: direct.obj_constant * scaling.sigma(),
+            ..direct
+        };
         let mut sol = solve_qp_ipm_warm_inner(&scaled, &direct, &scaled_warm, make_backend);
         scaling.unscale_solution(prob, &mut sol);
         // Same re-check the cold equilibrated path applies: a verdict reached
@@ -2082,8 +2123,15 @@ where
         let sigma = hsde_cost_scale(prob, opts.tol);
         if sigma != 1.0 {
             let scaled = prob.scaled_objective(1.0 / sigma);
+            // The normalized objective is the original divided by `σ`; the
+            // caller's objective constant is in the original metric, so it is
+            // divided too (see [`QpOptions::obj_constant`]).
+            let inner = QpOptions {
+                obj_constant: opts.obj_constant / sigma,
+                ..*opts
+            };
             let mut sol =
-                crate::hsde::solve_conic_hsde(&scaled, cone, opts, &mut make_backend, None);
+                crate::hsde::solve_conic_hsde(&scaled, cone, &inner, &mut make_backend, None);
             for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
                 *v *= sigma;
             }
