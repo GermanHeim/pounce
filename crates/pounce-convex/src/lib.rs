@@ -27,6 +27,7 @@ pub mod active_set;
 pub(crate) mod aggregate;
 pub mod batch;
 pub mod cones;
+pub(crate) mod correctors;
 pub mod crossover;
 mod deadline;
 pub(crate) mod debug;

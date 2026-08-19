@@ -725,6 +725,20 @@ struct Row {
 /// through tolerances but only ever *report* — empty rows, activity ranges,
 /// parallel rows, an emptied row's residual — so no infeasibility class the
 /// catalog could detect before is lost.
+///
+/// # This entry point is orthant-only, and pointing it at a cone is a wrong
+/// answer, not an error
+///
+/// Every inequality row here is taken to be an independent `gᵢx ≤ hᵢ`. A
+/// problem carrying a second-order, exponential, power or PSD block must go
+/// through [`presolve_conic`], which is handed the partition and protects it.
+/// The failure mode is silent: on a conic problem this function returns a
+/// perfectly well-formed reduced problem that encodes *different constraints*.
+/// `crates/pounce-convex/tests/presolve_conic_quadratic_rows.rs` walks one —
+/// a QCQP whose two quadratic rows share a linear part, which
+/// `extract_socp_with_map` writes as byte-identical `G` rows in different
+/// cones. The unprotected merge calls them duplicates, keeps one, and the
+/// solve reports `Optimal` at an objective 67% off (gh #588 §7).
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled) {
         PresolveOutcome::Infeasible(trigger) => {
@@ -954,7 +968,21 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
 /// and the columns coupled to them untouched. A **single pass** (the
 /// fixpoint loop is orthant-only), so the reduced cone partition is
 /// recoverable from the kept rows — see [`Presolve::reduced_cones`].
+///
+/// `cones` must partition the **whole** inequality block. Rows past the end
+/// of the partition are treated as orthant here — and then panic in
+/// [`Presolve::reduced_cones`], which has no cone to attribute them to. The
+/// assertion below names the contract at the call rather than leaving it to
+/// an index panic three frames away; `run_convex_socp`, the only production
+/// caller, satisfies it by construction (`extract_socp_with_map` emits the
+/// nonnegative block and one cone per quadratic row, covering `G` exactly).
 pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
+    debug_assert_eq!(
+        cones.iter().map(ConeSpec::dim).sum::<usize>(),
+        prob.m_ineq(),
+        "the cone partition must cover every inequality row; an uncovered \
+         tail is silently unprotected here and unattributable in reduced_cones"
+    );
     // Protect the rows of every non-orthant cone. The orthant `≤`-row
     // reductions (empty-row infeasibility, activity-redundancy drop, forcing,
     // bound tightening, parallel/duplicate) are sound only for the nonnegative

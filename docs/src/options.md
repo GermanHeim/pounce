@@ -68,7 +68,7 @@ the time it is read. POUNCE warns about that rather than ignoring it.
 | `linear_solver` | KKT linear-solver backend: `feral` (default) or `ma57` (needs a `--features ma57` build). Any other registered name is **refused**. See below. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
-| `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
+| `qp_presolve`   | Presolve on the convex LP/QP path, and on the conic (convex QCQP) path with the cone rows protected (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
 | `obj_scaling_factor` | Constant multiplier on the objective; **negative maximizes**. See below. |
 | `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve (default `1e-8`). |
 | `honor_original_bounds` | Project the reported point back into the un-relaxed bounds (`yes` / `no`, default `no`). See below. |
@@ -1073,6 +1073,7 @@ of the stable interface, and may change between releases.
 | `POUNCE_DBG_TAPE_STATS` | — (stderr) | AD tape counts after parsing an `.nl` model. Printed straight to stderr; no `RUST_LOG` needed. |
 | `POUNCE_DBG_CLASSIFY` | — (stderr) | The detected problem class and the finding that produced it, next to the `.nl` header's own nonlinearity census. This is the line to read when a model routed to a solver you did not expect. No `RUST_LOG` needed. |
 | `POUNCE_DBG_CONSTDERIV` | — (stderr) | Which of the three [constant-derivative](#options-pounce-does-not-implement) cases fired for each of the four `*_constant` hints — the proof, whether you asserted it, and whether the derivative is reused. No `RUST_LOG` needed. |
+| `POUNCE_DBG_GONDZIO` | — (stderr) | One line per convex (LP/QP/conic) solve: which driver ran, its iteration count, and how many Gondzio centrality correctors were attempted, how many accepted, and their mean step-length gain. Read it to tell whether `qp_gondzio_corr` is doing anything on your model — an `attempted=0` line means the cone is not a pure orthant, or the option is `0`. No `RUST_LOG` needed. |
 | `POUNCE_DBG_NO_QUAD` | — (no output) | **Changes what runs, rather than emitting.** Turns off parse-time quadratic recognition, so every `.nl` body keeps its expression tree and is evaluated through the AD tape instead of from constant matrices. This is the A/B switch the quadratic evaluator is measured with: if a model's numbers move when it is set, the evaluator is the difference. Slower by construction, and larger in memory. It is **not** a general "pre-quadratic" switch — in particular the constant-derivative proofs behind the four `*_constant` hints read the same recognizer through the tree, so they resolve identically either way and `POUNCE_DBG_CONSTDERIV=1` prints the same verdicts with it set. |
 | `POUNCE_SIMPLEX_DEBUG` | — (stderr) | Convex/LP-QP simplex pivoting trace. Printed straight to stderr; no `RUST_LOG` needed. |
 

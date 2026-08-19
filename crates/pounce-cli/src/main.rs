@@ -160,6 +160,7 @@ pub fn main() -> ExitCode {
     app.set_convex_routing_available(true);
 
     // NOTE: the convex LP/QP knobs (`qp_tau`, `qp_tau_max`, `qp_reg`,
+    // `qp_gondzio_corr`,
     // `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate`, `qp_crossover`) and the
     // active-set SQP QP-subproblem knobs (`sqp_qp_feas_tol`, `sqp_qp_opt_tol`,
     // `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`) used to
@@ -899,6 +900,16 @@ pub fn main() -> ExitCode {
                 // asked for. Charge the declined attempt against the budget; see
                 // the deduction below the block.
                 let convex_t0 = std::time::Instant::now();
+                // Resolve the convex-path presolve switch (#139) once, above
+                // the driver split: both convex drivers honour it. See
+                // `resolve_convex_presolve` for the aliasing rationale.
+                let presolve_on = {
+                    let opts = app.options();
+                    resolve_convex_presolve(
+                        opts.get_string_value("qp_presolve", "").ok(),
+                        opts.get_string_value("presolve", "").ok(),
+                    )
+                };
                 if matches!(choice, SolverChoice::SocpIpm) {
                     // `None` means the conic solve came back without a verified
                     // KKT point and declined the problem (only possible under
@@ -913,18 +924,12 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        presolve_on,
                         socp_nlp_fallback,
                     ) {
                         return code;
                     }
                 } else {
-                    // Resolve the convex-path presolve switch (#139). See
-                    // `resolve_convex_presolve` for the aliasing rationale.
-                    let opts = app.options();
-                    let presolve_on = resolve_convex_presolve(
-                        opts.get_string_value("qp_presolve", "").ok(),
-                        opts.get_string_value("presolve", "").ok(),
-                    );
                     // The interactive debugger is a pdb-for-the-IPM: it pauses on
                     // barrier-IPM iterations (mu, search direction, fraction-to-
                     // the-boundary). The active-set engine is a different
@@ -2314,6 +2319,9 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     if let Ok((v, true)) = opt.get_numeric_value("qp_reg", "") {
         o.reg = v;
     }
+    if let Ok((v, true)) = opt.get_integer_value("qp_gondzio_corr", "") {
+        o.gondzio_max_corr = v.max(0) as usize;
+    }
     if let Ok((v, true)) = opt.get_numeric_value("qp_infeas_tol", "") {
         o.infeas_tol = v;
     }
@@ -2808,9 +2816,16 @@ fn run_convex_socp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // #139 / gh #588 (Q9b): the shared convex-path presolve switch. Q1 left
+    // this driver with no presolve at all, so `qp_presolve` was silently
+    // ignored on every convex QCQP; it is honoured here through the
+    // *cone-aware* entry point, never the orthant one — see the call below.
+    presolve_on: bool,
+    // gh #535: may an unverified conic solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
+    use pounce_convex::presolve::{PresolveOutcome, presolve_conic};
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
@@ -2844,23 +2859,90 @@ fn run_convex_socp(
         ..convex_opts
     };
     let solve_opts = || convex_opts_with_remaining(qp_opts, t0);
+    let trivial = |status| pounce_convex::QpSolution {
+        status,
+        x: vec![0.0; qp.n],
+        y: vec![0.0; qp.m_eq()],
+        z: vec![0.0; qp.m_ineq()],
+        z_lb: vec![0.0; qp.n],
+        z_ub: vec![0.0; qp.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    // Held back until we know this solve is the one that reports (gh #535),
+    // exactly as `run_convex_qp` does: these lines describe the reduction,
+    // not the verdict, and a declined conic attempt must leave no stdout.
+    let mut presolve_log: Vec<String> = Vec::new();
     let sol = if qp_opts.max_iter == 0 {
         // `max_iter=0` cannot reach optimality — stop before any solve, the
         // same zero-iteration contract the QP path enforces (pounce#186).
-        pounce_convex::QpSolution {
-            status: pounce_convex::QpStatus::IterationLimit,
-            x: vec![0.0; qp.n],
-            y: vec![0.0; qp.m_eq()],
-            z: vec![0.0; qp.m_ineq()],
-            z_lb: vec![0.0; qp.n],
-            z_ub: vec![0.0; qp.n],
-            obj: 0.0,
-            iters: 0,
-            iterates: Vec::new(),
-        }
+        // Above the presolve arm for the same reason it is on the QP path:
+        // presolve can otherwise settle a trivial problem without iterating.
+        trivial(pounce_convex::QpStatus::IterationLimit)
     } else if let Some(hook) = debug_hook {
+        // Interactive debug steps the conic IPM on the *extracted* problem,
+        // so the debugger's blocks correspond to the user's rows rather than
+        // a reduced set. Same carve-out as the QP path.
         let mut h = hook.borrow_mut();
         solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
+    } else if presolve_on {
+        // **`presolve_conic`, never `presolve`.** The orthant entry point
+        // would hand `dedup_rows` an unprotected row list, and this driver's
+        // rows are exactly the shape that breaks it: `extract_socp_with_map`
+        // emits each quadratic row's linear part `aᵢ` *verbatim* as SOC rows
+        // 0 and 1 of its block, so two quadratic constraints sharing a linear
+        // part produce byte-identical rows in different cones.
+        // `parallel_signature` hashes on the linear triplets alone, sees a
+        // duplicate, and drops one — silently deleting half of one cone. See
+        // `crates/pounce-convex/tests/presolve_conic_quadratic_rows.rs`.
+        // `presolve_conic` protects every non-orthant row, which is what
+        // makes this call safe; §7 of `dev-notes/quadratic-structure-
+        // exploitation.md` is the validity table.
+        match presolve_conic(&qp, &cones) {
+            PresolveOutcome::Reduced(ps) => {
+                if let Some(trigger) = ps.discarded_infeasibility() {
+                    presolve_log.push(format!(
+                        "Presolve: discarded an unconfirmed infeasibility claim — \
+                         {trigger}; solving normally"
+                    ));
+                }
+                let st = ps.stats();
+                if st.reduced_anything() {
+                    // No `cap-truncated` suffix here: `presolve_conic` is a
+                    // single pass by construction (gh #527's round cap is a
+                    // fixpoint notion), so `rounds` is always 1.
+                    presolve_log.push(format!(
+                        "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
+                         free-fixed {}, substituted {}, forcing {}, \
+                         dominated {}, tightened {})",
+                        st.orig_vars,
+                        st.reduced_vars,
+                        st.orig_rows,
+                        st.reduced_rows,
+                        st.fixed_vars,
+                        st.free_cols_fixed,
+                        st.free_col_singletons,
+                        st.forcing_rows,
+                        st.dominated_cols,
+                        st.tightened_bounds,
+                    ));
+                }
+                // The reduced cone partition: orthant blocks may shrink or
+                // vanish, cone blocks pass through whole (that is what the
+                // protection buys). `postsolve` restores `z` at the original
+                // row indices, so `con_map`'s `z_row0`/`z_row1` — and hence
+                // `recover_socp_duals` below — need no remapping.
+                let red_cones = ps.reduced_cones(&cones);
+                let red = solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend);
+                ps.postsolve(&red)
+            }
+            PresolveOutcome::Infeasible(trigger) => {
+                presolve_log.push(format!("Presolve: proved primal infeasible — {trigger}"));
+                trivial(pounce_convex::QpStatus::PrimalInfeasible)
+            }
+            PresolveOutcome::Unbounded => trivial(pounce_convex::QpStatus::DualInfeasible),
+        }
     } else {
         solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
     };
@@ -2893,6 +2975,12 @@ fn run_convex_socp(
             res.kkt_error(),
         );
         return None;
+    }
+
+    // This solve is the one that reports, so what presolve did belongs on the
+    // record after all.
+    for line in &presolve_log {
+        println!("{line}");
     }
 
     let reported_obj = sign * sol.obj + obj_const;
