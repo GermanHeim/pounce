@@ -52,16 +52,29 @@ changes.
   POWELL20 exactly. The constant is the only thing that actually
   distinguishes the two families.
 
+  One knock-on had to be corrected with it. The `large_scale` gate that
+  admits the relative test at all is keyed on
+  `max(scale_d, scale_p, scale_g)`, so making `scale_g` *accurate* — small,
+  once the constant is accounted for — could **close** it, stripping the
+  primal and dual residuals of a relaxation they still need and that has
+  nothing to do with the objective constant. On `feasible_x0_wide_scale`
+  it did exactly that: the solve is converged by iteration 18 (`inf_pr`
+  on its own `5e-9` floor, `μ = 9e-18`) and then span for 180 more
+  iterations, twice collapsing into the denormals and restarting, before
+  reaching the cap at 198 with an answer it had found long before. The
+  gate now reads the objective's own magnitude — it is asked whether
+  absolute `tol` accuracy is reachable on this data, which is a property
+  of the magnitudes actually being computed — while `scale_g` supplies
+  the gap's normalizer. That model now converges in 80.
+
   Fixture sweep, both legs: the `qp_hsde=no` leg is unchanged, and on the
   default leg only the four models with a large objective constant move —
   `scaled_feasible_a` 16 → 123 iterations (`236.85` → `0`, KKT error
   `2.5e2` → `4.6e-3`), `scaled_feasible_b` 21 → 47 (`456.33` → `0`,
-  `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 198 (KKT error
+  `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 80 (KKT error
   `3.6e4` → `6.6e-15`), `feasible_x0_extreme_row` 32 → 33 (`7.6e-4` →
-  `3.8e-5`). The iteration counts are the honest cost of the work these
-  solves were previously skipping; `feasible_x0_wide_scale` at 198
-  against a 200 cap is thin margin and is called out in
-  `dev-notes/issue-689-direct-driver-cold-start.md` §5.
+  `3.8e-5`). The counts are the cost of the work these solves were
+  previously skipping.
 
 - **The direct convex QP driver no longer diverges on a badly-scaled
   feasible model** (#689).

@@ -229,7 +229,7 @@ same sweep shows the reverse sign on `wyndor_min` (`1.7e-8 → 9.6e-10`),
 |---|---|---|---|
 | `scaled_feasible_a` | Optimal 16, obj 236.85 | Optimal 123, obj 0 | 2.5e2 → 4.6e-3 |
 | `scaled_feasible_b` | Optimal 21, obj 456.33 | Optimal 47, obj 0 | 9.3e2 → 1.2e-10 |
-| `feasible_x0_wide_scale` | Optimal 16 | Optimal 198 | 3.6e4 → 6.6e-15 |
+| `feasible_x0_wide_scale` | Optimal 16 | Optimal 80 | 3.6e4 → 6.6e-15 |
 | `feasible_x0_extreme_row` | Optimal 32 | Optimal 33 | 7.6e-4 → 3.8e-5 |
 
 Three of the four were false optima — `feasible_x0_wide_scale` was returning a
@@ -240,9 +240,44 @@ supplied, `scale_g` on these models is the *caller's* objective, which tends to
 HSDE has to drive the gap to `tol` outright — which is exactly what the direct
 driver does on the same models in 27 and 28 iterations.
 
-**`feasible_x0_wide_scale` at 198 against a 200 cap is thin margin** and is the
-one line here that should not be left unwatched: a change that costs this solve
-three iterations turns a correct answer into `IterationLimit`. It is recorded
-rather than tuned away — raising the cap or loosening the test to buy margin
-would be trading the correctness this change just bought for a number that
-looks better.
+### The gate, and why `feasible_x0_wide_scale` first went to 198
+
+Correcting `scale_g` had one knock-on that had to be corrected with it, and it
+is the more interesting half. `large_scale` — the gate that admits the relative
+test at all — is keyed on `max(scale_d, scale_p, scale_g)`. Making `scale_g`
+*accurate* makes it *small* on exactly the models this change targets, and on
+`feasible_x0_wide_scale` that closed the gate outright, leaving only the
+absolute test. The primal and dual residuals there floor at `5e-9` and `5e-6`
+on `5e13`-scale data — facts about the constraint system, with nothing to do
+with the objective constant — so the solve could never finish:
+
+```
+it=18 inf_pr=5.089e-09 inf_du=4.929e-05 mu=9.062e-18 a_p=9.813e-01
+it=20 inf_pr=5.007e-09 inf_du=8.332e-06 mu=1.088e-19 a_p=1.000e+00
+it=25 inf_pr=5.102e-09 inf_du=4.496e-06 mu=1.448e-24 a_p=1.000e+00
+...
+it=120 inf_pr=5.051e-09 inf_du=4.927e-08 mu=1.621e-119    <- denormals
+it=130 inf_pr=5.040e-09 inf_du=6.687e-11 mu=3.465e-118 a_p=2.784e-07
+it=140 inf_pr=4.343e-01 inf_du=4.984e-05 mu=1.823e+05    <- iterate discarded
+it=180 inf_pr=4.846e-09 inf_du=2.023e-07 mu=1.641e+09    <- and again
+```
+
+Converged at 18, then 180 iterations of collapse-and-restart, terminating at
+198 against a 200 cap on an answer it had found long before — and
+`crates/pounce-cli/tests/false_local_infeasibility.rs::the_convex_route_still_solves_both_shapes`
+asserts `solve_result_num == 0` on this model, so that was two iterations from
+a red test, not just an ugly sweep line.
+
+The gate is asked whether `tol`-level *absolute* accuracy is reachable on this
+data at all. That is a property of the magnitudes actually being computed, not
+of where the caller's zero happens to sit, so it reads the objective's own
+magnitude (`scale_g_raw`) while `scale_g` supplies the gap's *normalizer*. With
+that split the model converges in 80.
+
+A gap floor (`gap ≤ N·ε·max|term|`, the same "relax to the arithmetic floor"
+rule §2 applies to the direct driver) was tried on top and **dropped**. It is
+faster — 23/28/39/32 iterations at `N = 8` — but it costs real accuracy on the
+two fixtures the issue is about (`scaled_feasible_a` reports `6.1e-5` and `_b`
+`2.4e-4` instead of `0`), and every `N` large enough to matter is a constant
+fitted to one fixture's `τ`-collapse noise. The gate correction alone is
+exact everywhere and needs no such constant.
