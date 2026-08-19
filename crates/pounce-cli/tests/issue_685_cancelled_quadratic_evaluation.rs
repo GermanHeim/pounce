@@ -194,15 +194,23 @@ fn a_row_that_dropped_a_term_is_not_admitted_for_evaluation() {
 /// that accessor they walk straight back onto the fast path this file
 /// exists to keep them off.
 ///
-/// It is worth knowing *what* goes wrong when they do, because it is not
-/// the value. The factored read-out sums the same three terms the tape
-/// does, so `eval_g` and `eval_jac_g` agree to the bit — measured, with the
-/// gate removed. What does not agree is the **Hessian pattern**: the tape
-/// declares a structural `(0, 0)` and writes `0.0` into it, while
-/// `Σ 2wₖbₖbₖᵀ` folds to exactly `0.0` there — `2⁵⁴ + 2` ties back to
-/// `2⁵⁴`, then `− 2⁵⁴` — and a zero entry is not stored. The model's
-/// `nnz_h` goes 2 → 1, and `the_cli_answer_does_not_depend_on_the_dropped_form`
-/// below moves from `−1.812` to `−0.571` on that alone.
+/// It is worth knowing what goes wrong when they do, because it is not that
+/// the fast path gets *worse*. Measured, with the gate removed: this row's
+/// tape answers `16.0` at `x₀ = 3` and the factored arm answers `9.0` —
+/// and `9.0` is the right value of `x₀²`, which the compensated outer sum
+/// (gh #702) recovers where the tape's naive fold cannot.
+/// `the_cli_answer_does_not_depend_on_the_dropped_form` below then moves
+/// from `−1.812` to `−2.236`, which is `−√5`: the true optimum of the model
+/// these bytes describe.
+///
+/// That is still the defect. As this file's own doc comment puts it, the
+/// tape is the reference because it is what the row means *to this solver*,
+/// not because it is exact — and two routes over the same bytes answering
+/// `9` and `16` is exactly the divergence gh #685 is about, whichever of
+/// them is closer to the algebra. The Hessian **pattern** parts company
+/// too: `Σ 2wₖbₖbₖᵀ` folds `(0, 0)` to exactly `0.0` (`2⁵⁴ + 2` ties back
+/// to `2⁵⁴`) and a zero entry is not stored, while the tape declares one —
+/// `nnz_h` 2 → 1.
 #[test]
 fn a_row_that_dropped_a_term_is_not_admitted_as_a_factored_form_either() {
     for (what, txt) in [

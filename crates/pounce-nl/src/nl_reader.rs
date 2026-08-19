@@ -518,13 +518,25 @@ impl NlBody {
     /// square-shaped ones among them — `2⁵³x₀² + x₀² − 2⁵³x₀²` is three —
     /// would otherwise be admitted here by the back door.
     ///
-    /// What breaks when they are is the **Hessian pattern**, not the value.
-    /// The factored read-out sums the same terms the tape does, so `g` and
-    /// `∂g/∂x` agree to the bit; but `Σ 2wₖbₖbₖᵀ` folds that row's `(0, 0)`
-    /// to exactly `0.0` — `2⁵⁴ + 2` ties back to `2⁵⁴` — and a zero entry
-    /// is not stored, while the tape declares the entry and writes zero
-    /// into it. Measured with this test removed: `nnz_h` 2 → 1 and gh
-    /// #685's reproduction moves from `−1.812` to `−0.571`. Pinned by
+    /// What breaks when they are is worth stating, because it is *not* that
+    /// the fast path becomes less accurate. Measured with this test
+    /// removed: the row whose tape answers `16.0` at `x₀ = 3` is answered
+    /// `9.0` by the factored arm — and `9.0` is the mathematically right
+    /// value of `x₀²`, which the compensated outer sum (gh #702) recovers
+    /// and the tape's naive fold does not. End to end the reproduction
+    /// moves from `−1.812` to `−2.236`, which is `−√5`, the true optimum of
+    /// the model those bytes describe.
+    ///
+    /// It is still a defect, for the reason this file's own doc comment
+    /// gives: the tape is the reference because it is what the row means
+    /// *to this solver*, not because it is exact. Two routes over the same
+    /// bytes that answer `9` and `16` are a `POUNCE_DBG_NO_QUAD`-shaped
+    /// divergence whichever one is closer to the algebra. (The Hessian
+    /// **pattern** diverges too — `Σ 2wₖbₖbₖᵀ` folds that row's `(0, 0)` to
+    /// exactly `0.0`, `2⁵⁴ + 2` tying back to `2⁵⁴`, and a zero entry is
+    /// not stored where the tape declares one: `nnz_h` 2 → 1.)
+    ///
+    /// Pinned by
     /// `a_row_that_dropped_a_term_is_not_admitted_as_a_factored_form_either`.
     ///
     /// Callers must still try [`Self::admitted_quad_form`] first: both can

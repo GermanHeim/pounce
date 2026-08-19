@@ -21,17 +21,24 @@ changes.
   user's back.
 
   Such a body is now kept in the shape it was written: `Σ wₖ(bₖᵀx + dₖ)²`,
-  squared at evaluation time exactly as the tape squares it, so the fast
-  path costs no accuracy. The Hessian was never the problem — it is
+  squared at evaluation time the way the tape squares it, so the fast path
+  costs no accuracy — and its terms are summed with the same compensation
+  #702 gave the expanded read-out, so it is not merely as good as the tape
+  but slightly better. The Hessian was never the problem — it is
   constant either way — and is assembled once as before. `airport.nl` goes
   from 1 of 42 rows on the fast path to 42 of 42 plus its objective, and 24
   fixtures in total change how they are evaluated.
 
   No answer changes: the evaluator differential test against the tape passes
-  with every tolerance and ulp pin as it was, and the fixture sweep is
-  byte-identical over both legs. On a generated 1000-variable least-squares
-  model, Lagrangian Hessian evaluation drops from 6.98 s to 0.24 s and the
-  solve from 22.5 s to 15.6 s over an identical 53-iteration trajectory.
+  with every tolerance and ulp pin as it was. The fixture sweep moves one
+  line of 116 — `airport.nl` under limited-memory takes 57 iterations where
+  it took 59, at the same status and objective — and that is #702's
+  compensated summation reaching 42 rows it could not reach before, not the
+  new read-out: with the compensation left off, those rows evaluate
+  bit-identically to the tape they replace. On a generated 1000-variable
+  least-squares model, Lagrangian Hessian evaluation drops from 6.70 s to
+  0.26 s and the solve from 23.1 s to 15.4 s over an identical 53-iteration
+  trajectory.
 
   A body mixing a square with a cross term `c·xᵢxⱼ`, one whose sum spine goes
   through a declared common expression, and one that lost a coefficient to

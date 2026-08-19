@@ -1078,7 +1078,14 @@ pub struct FactoredQuadratic {
 /// own constants into `w` — the same latitude [`Quad2::add`] and
 /// [`Quad2::scale`] already take on the expanded path — and *not* an
 /// algebraic expansion. The `2.4e-5` disagreement gh #673 records for
-/// `(x − 500000)²` comes from the expansion; there is none here.
+/// `(x − 500000)²` comes from the expansion; there is none here. Measured
+/// end to end: with the outer sum left naive, `airport.nl`'s 42 rows
+/// evaluate bit-identically to the 42 tapes they replace.
+///
+/// The *terms* are the tape's; the sum over them is not, because
+/// `QuadraticStructure::value` compensates it (gh #702). That makes the
+/// read-out slightly better than the tape rather than equal to it, which is
+/// gh #702's deliberate trade and the one line the fixture sweep moves.
 ///
 /// The degree-≤1 leftovers are held to the same [`Quad2::lost_terms`] gate
 /// the expanded path uses (gh #685), so a leftover that cancelled inexactly
