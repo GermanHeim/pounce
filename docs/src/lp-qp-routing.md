@@ -256,13 +256,41 @@ compare timings or isolate a solver issue):
 pounce model.nl qp_presolve=no
 ```
 
+### Presolve on a convex QCQP
+
+The switch applies to the conic driver too — the one that solves convex
+QCQPs. Two things about it differ from the LP/QP path, and both follow from
+the same fact: a quadratic constraint is reformulated into a second-order
+cone *block*, and a cone block's rows are coupled to one another.
+
+**Only the ordinary linear rows are reduced.** Every row of a cone block is
+protected: it is never dropped, never merged with another row, never used to
+tighten a variable bound, and the variables it couples are excluded from the
+dominated-column reduction. Dropping any single row of a block would change
+which constraint the block encodes, with nothing to signal it — the answer
+would simply come back wrong. So on a model that is a variable box plus
+quadratic constraints and nothing else, presolve has nothing to act on and
+prints no summary line. That is the expected result, not a failure.
+
+**The loop runs once, not to a fixpoint.** The reduced cone partition has to
+be readable off the surviving rows, which holds for a single pass. There is
+no `cap-truncated` suffix on this path for the same reason.
+
+Where a QCQP *does* carry ordinary linear inequalities — which is the common
+shape — those are reduced exactly as on the LP/QP path, and the summary line
+looks the same:
+
+```text
+Presolve: 4 → 4 vars, 9 → 7 rows (fixed 0, free-fixed 0, substituted 0, forcing 0, dominated 0, tightened 0)
+```
+
 ## Tuning the convex IPM
 
 Beyond the shared `tol` and `max_iter`, the convex engine takes these:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `qp_presolve` | `yes` | Presolve before the solve (above). |
+| `qp_presolve` | `yes` | Presolve before the solve (above). Applies to the conic driver as well, with the cone rows protected — see [Presolve on a convex QCQP](#presolve-on-a-convex-qcqp). |
 | `qp_tau` | `0.95` | Fraction-to-boundary τ ∈ (0,1): the floor of the adaptive rule, and the flat value on the predictor step and on second-order / PSD cone blocks. |
 | `qp_tau_max` | `1 − 1e-12` | Ceiling of the adaptive (Mehrotra-tail) τ on orthant blocks. Set equal to `qp_tau` to pin τ flat. |
 | `qp_reg` | `1e-10` | Static KKT regularization δ ≥ 0, for a stable LDLᵀ inertia. |
@@ -270,6 +298,18 @@ Beyond the shared `tol` and `max_iter`, the convex engine takes these:
 | `qp_hsde` | `yes` | Homogeneous self-dual embedding (self-starting, native certificates) vs. the infeasible-start primal–dual method. |
 | `qp_equilibrate` | `yes` | Ruiz-equilibrate the data first. Only when `qp_hsde=no`; HSDE conditions internally. |
 | `qp_crossover` | `no` | Pure LPs only: purify the interior iterate to an exact vertex. Opt-in; slow on large degenerate LPs (#133). |
+| `qp_gondzio_corr` | `3` | Maximum Gondzio multiple centrality correctors per iteration, on nonnegative-orthant blocks only. Each is one extra back-solve through the factorization already in hand, kept only if it lengthens the step. `0` disables. Both drivers honour it. |
+
+`qp_gondzio_corr` is worth a sentence on where it does and does not
+apply. The correctors box-project the complementarity products `sᵢzᵢ`
+back into `[0.1·μ, 10·μ]`, which needs the product to be *elementwise* —
+so the loop is gated on the cone being a pure nonnegative orthant and a
+solve carrying a single second-order or PSD block never enters it. That
+includes convex QCQP on the conic route, whose whole point is the SOC
+reformulation. `POUNCE_DBG_GONDZIO=1` prints one line per convex solve —
+iterations, correctors attempted, correctors accepted and the mean step
+gain — which is the direct way to check whether the scheme is doing
+anything on your model before tuning the number.
 
 These reach the engine through the `pounce` CLI, which is the one entry
 point that classifies a `.nl` model and routes it. **A library solve

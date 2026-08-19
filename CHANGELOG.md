@@ -41,6 +41,102 @@ changes.
   no trajectory in the corpus. (Like the #689 sweeps in this section, that
   is measured against the change this entry describes, not cumulatively.)
 
+- **`qp_presolve` now applies to convex QCQPs, where it was silently
+  ignored** (#588, phase Q9, presolve half).
+
+  `qp_presolve` (and its `presolve` alias) is documented as the convex
+  path's presolve switch and defaults on, but the conic driver — the one
+  that solves convex QCQPs — did not presolve at all. Setting the option
+  to `yes` or to `no` had no effect on those models in either direction.
+  It is honoured now.
+
+  The reduction runs through the **cone-aware** entry point, which is the
+  part that matters. A quadratic constraint is reformulated into a
+  second-order cone block whose first two rows are the constraint's
+  *linear* part, verbatim. Two quadratic constraints that share a linear
+  part therefore produce identical rows in different cones — and the
+  duplicate-row reduction compares rows on their linear coefficients. Run
+  without cone protection it calls them duplicates, keeps one, and returns
+  `Optimal` with an objective 67% wrong on a model whose optimum is known
+  in closed form. The protection that prevents this was already in the
+  solver; what is new is that it is now exercised, demonstrated, and held
+  down by a 64-instance differential test.
+
+  **No speedup is claimed.** On models that are purely a variable box plus
+  quadratic constraints there are no ordinary linear rows for the
+  reduction to act on, and nothing changes. Where there are — the new
+  `qcqp_shared_linear_rows` regression model drops two redundant rows of
+  nine — the solve takes one more iteration and finishes an order of
+  magnitude more accurate (final NLP error 9.9e-10 → 8.1e-11). The fixture
+  sweep at four option sets moves that model and nothing else.
+
+- **Gondzio multiple centrality correctors reach the direct convex IPM,
+  and are now switchable** (#588, phase Q9, corrector half).
+
+  New option `qp_gondzio_corr` (integer 0–10, **default 3**) bounds the
+  Gondzio multiple centrality corrections computed after the Mehrotra
+  corrector on nonnegative-orthant blocks. Each is one extra back-solve
+  through the factorization the iteration already paid for — never a
+  refactorization — and is kept only if it lengthens the
+  fraction-to-boundary step, so a well-centered solve stops after the
+  first trial.
+
+  The scheme itself is not new: the HSDE driver has run it since the
+  NETLIB GEN degenerate-face work. What is new is that it also runs on
+  the **direct** driver — the route taken by warm starts, the
+  build-once `QpFactorization` handle, the dual-infeasibility reverify
+  guard and `qp_hsde=no` — and that both drivers read the same knob, so
+  a corrector regression in the field now has a bisection handle. The
+  default is the value HSDE hard-coded before, so an unset run is
+  bit-for-bit unchanged: the fixture sweep over all 57 models diffs
+  empty against the previous release at default options, at
+  `nlp_scaling_method=none` and at `mu_strategy=adaptive`.
+
+  On NETLIB `afiro` HSDE goes 15 → 13. The direct driver's headline
+  for this fixture — a hundred-plus iteration margin off a 135-iteration
+  baseline — has been overtaken: the #689 cold-start
+  rescale in this same release solves `afiro` in 10 iterations unaided,
+  and the correctors take it to 9. The claim that the scheme pays on
+  the direct driver now rests on an aggregate rather than on one
+  model — over the 52 NETLIB LPs that converge on this driver under
+  every arm, 688 → 644 iterations, 29 models improving and 1
+  worsening. On a generated 400-variable convex QP the direct driver goes
+  12 → 10 and HSDE 17 → 15, with 71–77% of the correctors accepted.
+  Wall clock does not move measurably on either — this is an
+  iteration-count change, and the machine's wall-clock noise floor is
+  larger than the effect.
+
+  On the **direct** driver the scheme is gated on the Mehrotra step
+  still being short (`min(α_p, α_d) < 0.85`). Ungated it is a net loss
+  on warm starts, which is the surface that actually reaches this
+  driver — `pounce-py`'s `solve_qp` sends cold solves to HSDE but
+  warm-started ones here, a route `scripts/sweep-fixtures.sh` cannot
+  see. The band is symmetric, so a product the affine step drove
+  *below* `0.1μ` — the superlinear tail — is corrected back **up** to
+  the band floor, pinning μ's descent at exactly 10× per iteration,
+  and the acceptance test is step length alone so it cannot see that
+  bill. Measured over 230 warm-started convex QP/LPs through the
+  Python host, ungated correctors cost 967 → 1004 iterations (37 of
+  the 80 LPs lost exactly one, none gained); gated, the total is 967,
+  per instance identical to correctors off.
+
+  The gate is not a trade. It also **improves** the cold aggregate,
+  688 → 644 against 649 ungated, and takes the models correctors make
+  worse from 3 down to 1: correcting an already-long step was never
+  paying for itself on either surface, and warm is merely where it was
+  measurable. HSDE is **not** gated — its correctors are long-standing
+  and its blast radius is the shipped baseline. See
+  `correctors::ALPHA_MAX` for the calibration, including why
+  `lp_afiro` is not what the threshold was fitted to.
+
+  Two things it deliberately does **not** do. It cannot fire on a
+  second-order or PSD block, because the complementarity product there
+  is not elementwise and cannot be box-projected componentwise; and the
+  Mittelmann `qcqp*` family that motivated the phase does not reach
+  either convex driver in the first place (it is routed to the NLP
+  solver by the reformulation-cost guards, and the members that do route
+  conic carry SOC blocks). `POUNCE_DBG_GONDZIO=1` prints the per-solve
+  corrector tally so this is checkable rather than assumed.
 - **HSDE no longer certifies `Optimal` a few hundred short of the optimum
   when the objective carries a large constant** (#689).
 
