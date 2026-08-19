@@ -287,11 +287,18 @@ pub struct TimingStatistics {
     pub compute_acceptable_trial_point: TimedTask,
     pub accept_trial_point: TimedTask,
     pub check_convergence: TimedTask,
+    /// The per-iteration intermediate-callback fire, including the
+    /// convergence quantities `build_iter_stats` pulls to populate it.
+    /// Those pulls are lazy, so on a problem whose gradient is expensive
+    /// this is where that evaluation actually lands — upstream reaches
+    /// the same quantities from `CheckConvergence` and reports the cost
+    /// there instead. Without a guard here the phase rows do not cover
+    /// the run and the report cannot attribute a solve (gh#698).
+    pub fire_intermediate: TimedTask,
 
+    pub linear_system_symbolic_factorization: TimedTask,
     pub linear_system_factorization: TimedTask,
     pub linear_system_back_solve: TimedTask,
-    pub linear_system_structure_converter: TimedTask,
-    pub linear_system_structure_converter_init: TimedTask,
     pub quality_function_search: TimedTask,
     pub total_callback_time: TimedTask,
     pub total_function_evaluation_time: TimedTask,
@@ -372,6 +379,16 @@ impl TimingStatistics {
         );
         row(
             &mut s,
+            " FireIntermediateCallback...........:",
+            &self.fire_intermediate,
+        );
+        row(
+            &mut s,
+            "LinearSystemSymbolicFactorization...:",
+            &self.linear_system_symbolic_factorization,
+        );
+        row(
+            &mut s,
             "LinearSystemFactorization...........:",
             &self.linear_system_factorization,
         );
@@ -434,6 +451,9 @@ impl TimingStatistics {
     /// Table-6-style "where did the time go" analysis for a
     /// reduced-space / variable-aggregation solve.
     pub fn wall_time_breakdown(&self) -> Vec<(&'static str, Number)> {
+        let symbolic = self
+            .linear_system_symbolic_factorization
+            .total_wallclock_time();
         let factorization = self.linear_system_factorization.total_wallclock_time();
         let back_solve = self.linear_system_back_solve.total_wallclock_time();
         vec![
@@ -443,7 +463,8 @@ impl TimingStatistics {
                 "compute_search_direction",
                 self.compute_search_direction.total_wallclock_time(),
             ),
-            ("linear_system_total", factorization + back_solve),
+            ("linear_system_total", symbolic + factorization + back_solve),
+            ("linear_system_symbolic_factorization", symbolic),
             ("linear_system_factorization", factorization),
             ("linear_system_back_solve", back_solve),
             (
@@ -464,6 +485,10 @@ impl TimingStatistics {
             (
                 "total_callback",
                 self.total_callback_time.total_wallclock_time(),
+            ),
+            (
+                "fire_intermediate",
+                self.fire_intermediate.total_wallclock_time(),
             ),
         ]
     }
@@ -502,10 +527,10 @@ impl TimingStatistics {
         set(&self.compute_acceptable_trial_point);
         set(&self.accept_trial_point);
         set(&self.check_convergence);
+        set(&self.fire_intermediate);
+        set(&self.linear_system_symbolic_factorization);
         set(&self.linear_system_factorization);
         set(&self.linear_system_back_solve);
-        set(&self.linear_system_structure_converter);
-        set(&self.linear_system_structure_converter_init);
         set(&self.quality_function_search);
         set(&self.total_callback_time);
         set(&self.total_function_evaluation_time);
@@ -528,10 +553,10 @@ impl TimingStatistics {
         self.compute_acceptable_trial_point.reset();
         self.accept_trial_point.reset();
         self.check_convergence.reset();
+        self.fire_intermediate.reset();
+        self.linear_system_symbolic_factorization.reset();
         self.linear_system_factorization.reset();
         self.linear_system_back_solve.reset();
-        self.linear_system_structure_converter.reset();
-        self.linear_system_structure_converter_init.reset();
         self.quality_function_search.reset();
         self.total_callback_time.reset();
         self.total_function_evaluation_time.reset();
@@ -714,15 +739,43 @@ mod tests {
             "eval_constraints",
             "eval_constraint_jacobian",
             "eval_lagrangian_hessian",
+            "linear_system_symbolic_factorization",
+            "fire_intermediate",
         ] {
             assert!(get(key).is_some(), "missing breakdown key {key}");
             assert!(get(key).unwrap() >= 0.0, "negative time for {key}");
         }
 
-        // linear_system_total == factorization + back_solve, exactly.
+        // linear_system_total == symbolic + factorization + back_solve.
         let total = get("linear_system_total").unwrap();
+        let sym = get("linear_system_symbolic_factorization").unwrap();
         let fact = get("linear_system_factorization").unwrap();
         let back = get("linear_system_back_solve").unwrap();
-        assert_eq!(total, fact + back);
+        assert_eq!(total, sym + fact + back);
+    }
+
+    /// gh#698: the printed report must carry a row for every phase the
+    /// solver can spend time in. `LinearSystemSymbolicFactorization` and
+    /// `FireIntermediateCallback` were the two missing ones — the first
+    /// had no row at all, the second no timer, which together were most
+    /// of why summing the phase rows fell tens of percent short of
+    /// `OverallAlgorithm`.
+    #[test]
+    fn report_carries_the_symbolic_and_intermediate_rows() {
+        let stats = TimingStatistics::new();
+        stats.linear_system_symbolic_factorization.start();
+        stats.linear_system_symbolic_factorization.end();
+        stats.fire_intermediate.start();
+        stats.fire_intermediate.end();
+
+        let text = stats.report();
+        assert!(
+            text.contains("LinearSystemSymbolicFactorization"),
+            "no symbolic-factorization row in:\n{text}"
+        );
+        assert!(
+            text.contains("FireIntermediateCallback"),
+            "no intermediate-callback row in:\n{text}"
+        );
     }
 }
