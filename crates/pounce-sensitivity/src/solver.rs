@@ -986,12 +986,13 @@ impl Solver {
             let mut vals = Vec::new();
             for i in 0..ke {
                 for j in i..ke {
-                    let xi = cols[engaged[j]].as_ref().expect("column built");
-                    let xj = cols[engaged[i]].as_ref().expect("column built");
-                    // symmetrize: S is symmetric in exact arithmetic
+                    let col_j = cols[engaged[j]].as_ref().expect("column built");
+                    let col_i = cols[engaged[i]].as_ref().expect("column built");
+                    // S_ij = a_i^T X_j; symmetrize, since S is
+                    // symmetric in exact arithmetic
                     let s_ij = 0.5
-                        * (sign(engaged[i]) * xi[weak[engaged[i]].var_row]
-                            + sign(engaged[j]) * xj[weak[engaged[j]].var_row]);
+                        * (sign(engaged[i]) * col_j[weak[engaged[i]].var_row]
+                            + sign(engaged[j]) * col_i[weak[engaged[j]].var_row]);
                     // pounce-linalg triplets are one-based
                     irows.push((i + 1) as Index);
                     jcols.push((j + 1) as Index);
@@ -999,21 +1000,28 @@ impl Solver {
                 }
             }
             // The engine's feasibility and optimality tolerances are
-            // absolute, and the decision's semantics are relative to
-            // the direction's scale (a 1e-10 perturbation must decide
-            // the same way a 1e-2 one does). Hand the engine an
-            // order-one gradient and unscale the multipliers on
-            // return; the QP is homogeneous in g at fixed H, so the
-            // scaled solve is exact.
+            // absolute and act on the QP's variables, which are the
+            // pin forces, so both sides of the problem are scaled to
+            // order one: the gradient against the direction's scale
+            // (a 1e-10 perturbation must decide the same way a 1e-2
+            // one does) and S against its largest entry, which is a
+            // compliance in the model's units. The joint scaling maps
+            // the solution by g_scale / s_scale exactly, so the
+            // scaled solve loses nothing.
             let g_raw: Vec<Number> = engaged.iter().map(|&k| movement(k, &d0)).collect();
             let g_scale = g_raw
                 .iter()
                 .fold(0.0_f64, |a, &b| a.max(b.abs()))
                 .max(1e-300);
             let g: Vec<Number> = g_raw.iter().map(|&v| v / g_scale).collect();
+            let s_scale = vals
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b.abs()))
+                .max(1e-300);
+            let vals_scaled: Vec<Number> = vals.iter().map(|&v| v / s_scale).collect();
             let space = SymTMatrixSpace::new(ke as Index, irows, jcols);
             let mut h = SymTMatrix::new(space);
-            h.set_values(&vals);
+            h.set_values(&vals_scaled);
             let a_space = GenTMatrixSpace::new(0, ke as Index, Vec::new(), Vec::new());
             let a = GenTMatrix::new(a_space);
             let xl = vec![0.0; ke];
@@ -1051,7 +1059,7 @@ impl Solver {
                     sol.status
                 )));
             }
-            let lambda: Vec<Number> = sol.x.iter().map(|&v| v * g_scale).collect();
+            let lambda: Vec<Number> = sol.x.iter().map(|&v| v * (g_scale / s_scale)).collect();
 
             d.copy_from_slice(&d0);
             // plus, not minus: the QP's optimality gradient is
