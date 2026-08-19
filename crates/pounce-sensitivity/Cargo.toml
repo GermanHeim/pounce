@@ -12,7 +12,9 @@ categories = ["mathematics", "algorithms", "science"]
 
 [dependencies]
 pounce-common.workspace = true
+pounce-feral.workspace = true
 pounce-linalg.workspace = true
+pounce-qp.workspace = true
 pounce-algorithm.workspace = true
 pounce-nlp.workspace = true
 tracing.workspace = true

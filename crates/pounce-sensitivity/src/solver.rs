@@ -857,6 +857,370 @@ impl Solver {
         ))
     }
 
+    /// [`Self::parametric_step_path_directional`] with the weak-row
+    /// decision supplied by the caller instead of searched for.
+    /// `held_var_rows` names the var-x rows of the weakly active
+    /// bounds the direction holds; every other weakly active bound is
+    /// forced into the walk's base-activity table as a leaving row.
+    /// Study surface for an externally solved eq. 14 QP.
+    pub fn parametric_step_path_decided(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+        held_var_rows: &[Index],
+    ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>), SolverError> {
+        let weak = self.weakly_active_bounds()?;
+        if weak.is_empty() {
+            return self.parametric_step_path(pin_constraint_indices, deltas, max_iter);
+        }
+        let mut rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        for w in &weak {
+            rhs_plain[w.row] = 0.0;
+        }
+        let held: std::collections::HashSet<usize> =
+            held_var_rows.iter().map(|&r| r as usize).collect();
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let holds: Vec<(usize, bool)> = weak
+            .iter()
+            .filter(|w| held.contains(&w.var_row))
+            .map(|w| (w.var_row, w.lower))
+            .collect();
+        let forced_active: Vec<usize> = weak
+            .iter()
+            .filter(|w| !held.contains(&w.var_row))
+            .map(|w| w.row)
+            .collect();
+        let (dx, segments) = crate::boundcheck::step_along_path(
+            &state.backsolver,
+            &rhs_plain,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            max_iter,
+            &forced_active,
+            &holds,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((dx[..ctx.n_x].to_vec(), segments))
+    }
+
+    /// [`Self::parametric_step_bounded_directional`] with the weak-row
+    /// decision supplied by the caller instead of searched for. The
+    /// direction is computed for the given working set (all weak rows
+    /// released, the held variables pinned through Schur rows), then
+    /// refined onto the bounds exactly as the searched variant does.
+    /// Study surface for an externally solved eq. 14 QP.
+    pub fn parametric_step_bounded_decided(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+        held_var_rows: &[Index],
+    ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
+        let weak = self.weakly_active_bounds()?;
+        if weak.is_empty() {
+            return self.parametric_step_bounded(pin_constraint_indices, deltas, max_iter);
+        }
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+        let pinned_rows: Vec<usize> = held_var_rows.iter().map(|&r| r as usize).collect();
+        let (d, _) = crate::boundcheck::path_direction(
+            &state.backsolver,
+            &rhs_plain,
+            &released,
+            &pinned_rows,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+            &state.backsolver,
+            &d,
+            &ctx.x_curr,
+            &ctx.lo,
+            &ctx.hi,
+            &ctx.mults,
+            &rhs_plain,
+            ctx.eps,
+            max_iter,
+        )
+        .map_err(SolverError::SensComputationFailed)?;
+        Ok((
+            dx[..ctx.n_x].to_vec(),
+            pinned.into_iter().map(|p| p as Index).collect(),
+        ))
+    }
+
+    /// The eq. 14 directional derivative decided by pounce-qp instead
+    /// of the working-set enumeration of
+    /// [`Self::parametric_step_directional`].
+    ///
+    /// One released factorization serves the whole decision: the
+    /// released `Σ` is built once and every solve passes the same
+    /// object, so the factorization cache reuses the factor across the
+    /// all-released direction and the basis columns. The decision
+    /// itself is the dual of eq. 14 restricted to the weak rows the
+    /// direction engages: with `a_k` the signed unit vector of weak
+    /// row `k` (positive for a lower bound), `X_k = K_rel^{-1} a_k`,
+    /// `S = aᵀX` and `m = aᵀd0`, the pin forces `λ` solve
+    ///
+    /// ```text
+    ///     min  ½ λᵀ S λ + mᵀ λ    s.t.  λ ≥ 0
+    /// ```
+    ///
+    /// whose KKT conditions are eq. 14's complementarity: a released
+    /// row moves to its feasible side (the QP gradient `Sλ + m ≥ 0`)
+    /// and a held row's pin force is nonnegative. Rows outside the
+    /// engaged set are verified against the decided direction and the
+    /// set expands until no new row violates, so rows the equalities
+    /// already pin (movement exactly zero under every candidate)
+    /// never enter and never make anything singular.
+    ///
+    /// `max_iter` is the total back-solve budget: the all-released
+    /// solve and every basis column count against it, so a model whose
+    /// weak set cannot fit the budget errs before any factorization
+    /// happens and the caller falls back to the one-sided step exactly
+    /// as it does for the enumeration today. Returns the direction,
+    /// the var-x rows held, and the back-solves spent.
+    pub fn parametric_step_directional_qp(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, Vec<usize>, usize), SolverError> {
+        use pounce_common::types::NLP_UPPER_BOUND_INF;
+        use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+        use pounce_qp::QpStatus;
+        use pounce_qp::options::QpOptions;
+        use pounce_qp::problem::{HessianInertia, QpProblem};
+        use pounce_qp::solver::{ParametricActiveSetSolver, QpSolver};
+
+        const EPS_REL: Number = 1e-9;
+
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let weak = self.weakly_active_bounds()?;
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let bs = &state.backsolver;
+        let dim = bs.dim();
+        let n_x = ctx.n_x;
+        let nw = weak.len();
+        let mut work = 0usize;
+        // A weak bound's slack and multiplier are both of order
+        // sqrt(mu) and their uncertainty equals their magnitude, so a
+        // movement below sqrt(mu) of the direction's scale cannot be
+        // resolved against the bound and does not warrant an exact
+        // complementarity decision. The engagement and expansion
+        // tests use this band; acceptance-level roundoff tests keep
+        // EPS_REL.
+        let band = {
+            let (data, _, _) = bs.activity_handles();
+            let mu = data.borrow().curr_mu;
+            mu.max(0.0).sqrt().max(EPS_REL)
+        };
+
+        if weak.is_empty() {
+            let mut d = vec![0.0; dim];
+            if !bs.solve(&rhs_plain, &mut d) {
+                return Err(SolverError::BacksolveFailed);
+            }
+            return Ok((d[..n_x].to_vec(), Vec::new(), 1));
+        }
+
+        let budget = |need: usize, spent: usize| {
+            SolverError::SensComputationFailed(format!(
+                "directional derivative: {need} more back-solve(s) needed \
+                 with {spent} of {max_iter} spent over {nw} weakly active \
+                 bound(s)"
+            ))
+        };
+        let fail = |what: &str| {
+            SolverError::SensComputationFailed(format!("directional derivative: {what}"))
+        };
+
+        let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+        let sigma = bs
+            .released_sigma_x(&released)
+            .ok_or_else(|| fail("released sigma unavailable"))?;
+        if work + 1 > max_iter {
+            return Err(budget(1, work));
+        }
+        let mut d0 = vec![0.0; dim];
+        // shift = false, matching `path_direction`'s all-released
+        // solve: a weak bound's multiplier is order sqrt(mu) and the
+        // released convention holds it at exactly zero, so the step
+        // shift's multiplier injection is deliberately omitted.
+        if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &rhs_plain, &mut d0, false) {
+            return Err(SolverError::BacksolveFailed);
+        }
+        work += 1;
+
+        // movement of weak row k under a direction: positive is the
+        // feasible side for that row's bound
+        let sign = |k: usize| if weak[k].lower { 1.0 } else { -1.0 };
+        let movement = |k: usize, d: &[Number]| -> Number { sign(k) * d[weak[k].var_row] };
+        let scale_of = |d: &[Number]| -> Number {
+            d[..n_x]
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b.abs()))
+                .max(1e-300)
+        };
+
+        let tol0 = band * scale_of(&d0);
+        let mut engaged: Vec<usize> = (0..nw).filter(|&k| movement(k, &d0) < -tol0).collect();
+        if engaged.is_empty() {
+            return Ok((d0[..n_x].to_vec(), Vec::new(), work));
+        }
+
+        let mut cols: Vec<Option<Vec<Number>>> = vec![None; nw];
+        let mut d = d0.clone();
+        let held: Vec<usize>;
+        loop {
+            for &k in &engaged {
+                if cols[k].is_some() {
+                    continue;
+                }
+                if work + 1 > max_iter {
+                    return Err(budget(1, work));
+                }
+                let mut unit = vec![0.0; dim];
+                unit[weak[k].var_row] = sign(k);
+                let mut xk = vec![0.0; dim];
+                if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &unit, &mut xk, false)
+                {
+                    return Err(SolverError::BacksolveFailed);
+                }
+                work += 1;
+                cols[k] = Some(xk);
+            }
+
+            // dense reduced data over the engaged rows, upper triangle
+            let ke = engaged.len();
+            let mut irows = Vec::new();
+            let mut jcols = Vec::new();
+            let mut vals = Vec::new();
+            for i in 0..ke {
+                for j in i..ke {
+                    let xi = cols[engaged[j]].as_ref().expect("column built");
+                    let xj = cols[engaged[i]].as_ref().expect("column built");
+                    // symmetrize: S is symmetric in exact arithmetic
+                    let s_ij = 0.5
+                        * (sign(engaged[i]) * xi[weak[engaged[i]].var_row]
+                            + sign(engaged[j]) * xj[weak[engaged[j]].var_row]);
+                    // pounce-linalg triplets are one-based
+                    irows.push((i + 1) as Index);
+                    jcols.push((j + 1) as Index);
+                    vals.push(s_ij);
+                }
+            }
+            // The engine's feasibility and optimality tolerances are
+            // absolute, and the decision's semantics are relative to
+            // the direction's scale (a 1e-10 perturbation must decide
+            // the same way a 1e-2 one does). Hand the engine an
+            // order-one gradient and unscale the multipliers on
+            // return; the QP is homogeneous in g at fixed H, so the
+            // scaled solve is exact.
+            let g_raw: Vec<Number> = engaged.iter().map(|&k| movement(k, &d0)).collect();
+            let g_scale = g_raw
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b.abs()))
+                .max(1e-300);
+            let g: Vec<Number> = g_raw.iter().map(|&v| v / g_scale).collect();
+            let space = SymTMatrixSpace::new(ke as Index, irows, jcols);
+            let mut h = SymTMatrix::new(space);
+            h.set_values(&vals);
+            let a_space = GenTMatrixSpace::new(0, ke as Index, Vec::new(), Vec::new());
+            let a = GenTMatrix::new(a_space);
+            let xl = vec![0.0; ke];
+            let xu = vec![NLP_UPPER_BOUND_INF; ke];
+            let qp = QpProblem {
+                n: ke,
+                m: 0,
+                h: &h,
+                g: &g,
+                a: &a,
+                bl: &[],
+                bu: &[],
+                xl: &xl,
+                xu: &xu,
+                hessian_inertia: HessianInertia::Unknown,
+            };
+            let opts = QpOptions {
+                max_iter: (10 * ke as u32).max(200),
+                // the engine's Schur-update path (use_schur_updates)
+                // hits MaxIter on a dense reduced problem of hundreds
+                // of rows where the refactorizing path terminates
+                // Optimal, so the default stays; the heavy-direction
+                // exact decision pays engine refactorizations and is
+                // priced accordingly in the docs
+                ..QpOptions::default()
+            };
+            let mut engine =
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+            let sol = engine
+                .solve(&qp, None, &opts)
+                .map_err(|e| fail(&format!("reduced QP failed: {e:?}")))?;
+            if sol.status != QpStatus::Optimal {
+                return Err(fail(&format!(
+                    "reduced QP terminated {:?} over {ke} engaged row(s)",
+                    sol.status
+                )));
+            }
+            let lambda: Vec<Number> = sol.x.iter().map(|&v| v * g_scale).collect();
+
+            d.copy_from_slice(&d0);
+            // plus, not minus: the QP's optimality gradient is
+            // S lambda + m, so the direction's movement must be
+            // m + lambda S, which is d0 + lambda X applied here
+            for (i, &k) in engaged.iter().enumerate() {
+                let lk = lambda[i];
+                if lk != 0.0 {
+                    let xk = cols[k].as_ref().expect("column built");
+                    for (dv, &xv) in d.iter_mut().zip(xk.iter()) {
+                        *dv += lk * xv;
+                    }
+                }
+            }
+
+            let tol = band * scale_of(&d);
+            let mut grew = false;
+            for k in 0..nw {
+                if engaged.contains(&k) {
+                    continue;
+                }
+                if movement(k, &d) < -tol {
+                    engaged.push(k);
+                    grew = true;
+                }
+            }
+            if !grew {
+                // relative to the largest pin force, with no absolute
+                // floor: a 1e-10-scale perturbation's pins are as real
+                // as a 1e-2 one's, and a floor here silently unlabels
+                // them while the direction still carries the pin
+                let lam_scale = lambda
+                    .iter()
+                    .fold(0.0_f64, |a, &b| a.max(b.abs()))
+                    .max(1e-300);
+                held = engaged
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| lambda[*i] > EPS_REL * lam_scale)
+                    .map(|(_, &k)| weak[k].var_row)
+                    .collect();
+                break;
+            }
+        }
+
+        Ok((d[..n_x].to_vec(), held, work))
+    }
+
     /// The bounds the activity classifier could not call at the base
     /// point: on the bound with a multiplier of the same order as the
     /// slack. Each entry is a bound row present in the held

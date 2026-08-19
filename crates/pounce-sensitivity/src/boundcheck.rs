@@ -1068,7 +1068,7 @@ fn next_combination(combo: &mut [usize], n: usize) -> bool {
     false
 }
 
-fn path_direction<B>(
+pub(crate) fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
     released: &[usize],
