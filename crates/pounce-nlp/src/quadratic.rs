@@ -113,6 +113,45 @@ pub struct QuadraticStructure {
     obj_form: FormId,
 }
 
+/// Neumaier compensated summation.
+///
+/// Kahan's compensation with Neumaier's fix for the case where the incoming
+/// term is larger in magnitude than the running sum — which is the common
+/// case here, since the outer accumulator starts at zero.
+///
+/// This exists for gh#702. See [`QuadraticStructure::value`].
+#[derive(Clone, Copy)]
+struct Neumaier {
+    sum: f64,
+    comp: f64,
+}
+
+impl Neumaier {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            sum: 0.0,
+            comp: 0.0,
+        }
+    }
+
+    #[inline]
+    fn add(&mut self, t: f64) {
+        let y = self.sum + t;
+        self.comp += if self.sum.abs() >= t.abs() {
+            (self.sum - y) + t
+        } else {
+            (t - y) + self.sum
+        };
+        self.sum = y;
+    }
+
+    #[inline]
+    fn sum(self) -> f64 {
+        self.sum + self.comp
+    }
+}
+
 impl QuadraticStructure {
     /// An empty structure over `m` constraint rows: nothing recognized, so
     /// every caller behaves exactly as it did before this module existed.
@@ -305,13 +344,34 @@ impl QuadraticStructure {
 
     /// `½xᵀHx + aᵀx + c`.
     ///
-    /// The `½` is applied once at the end rather than per row, which is both
-    /// cheaper and closer to what the tape did (it never scaled a partial
-    /// sum).
+    /// The `½` is applied once at the end rather than per row. That is
+    /// cheaper and it is exactly equivalent: scaling by `0.5` only decrements
+    /// a binary exponent, so it neither rounds nor reassociates.
+    ///
+    /// # Why the outer sums are compensated (gh#702)
+    ///
+    /// The tape sums AMPL's flat list of `½·c·xᵢ·xⱼ` terms front-to-back in file
+    /// order. This walks the coefficient matrix row-major and sums one merged
+    /// row at a time. Both are correct; they are different *associations* of
+    /// the same real number, so they round differently. On the constraints of
+    /// a dense QCQP the outer accumulator takes thousands of same-sign terms
+    /// and the two answers separate in the last few ulps.
+    ///
+    /// That is normally invisible, but the interior-point trajectory is
+    /// sensitive to it: on `qcqp1500-1c` the naive row-major sum took 131
+    /// iterations where the tape took 103. Compensating the outer accumulator
+    /// makes the result far less dependent on the association and takes the
+    /// same model to 100 iterations — better than either.
+    ///
+    /// Only the *outer* sums are compensated. The inner per-row dot product
+    /// was measured to contribute nothing (compensating it changes no
+    /// trajectory in the corpus, on the Mittelmann QCQP family, or on the
+    /// `eigen*` fixtures), and it is the O(nnz) loop — compensating it costs
+    /// real time. The outer loop is O(rows), so this is close to free.
     pub fn value(&self, f: FormId, x: &[f64]) -> f64 {
         let fi = f as usize;
         let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
-        let mut quad = 0.0;
+        let mut quad = Neumaier::new();
         for k in lo..hi {
             let r = self.sup[k] as usize;
             let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
@@ -319,13 +379,13 @@ impl QuadraticStructure {
             for e in a..b {
                 t += self.val[e] * x[self.col[e] as usize];
             }
-            quad += x[r] * t;
+            quad.add(x[r] * t);
         }
-        let mut lin = 0.0;
+        let mut lin = Neumaier::new();
         for e in self.form_lin[fi] as usize..self.form_lin[fi + 1] as usize {
-            lin += self.lin_val[e] * x[self.lin_idx[e] as usize];
+            lin.add(self.lin_val[e] * x[self.lin_idx[e] as usize]);
         }
-        0.5 * quad + lin + self.constant[fi]
+        0.5 * quad.sum() + lin.sum() + self.constant[fi]
     }
 
     /// `out += w · (Hx + a)`, touching only the form's gradient support.
@@ -489,6 +549,52 @@ mod tests {
         let f = qs.push_form(&h, &[(2, 0.0)], 0.0);
         assert_eq!(qs.lower_triangle(f).count(), 1);
         assert_eq!(qs.gradient_support(f), &[0, 1]);
+    }
+
+    /// gh#702: the outer accumulation over Hessian rows is compensated,
+    /// so `value` does not depend on where a large row sits in the order.
+    ///
+    /// The construction is the worst case in miniature. One row carries
+    /// `1e18`, a hundred carry `2`, and the last carries `-1e18`. Summed
+    /// front-to-back every `2` falls off the bottom of the running total —
+    /// `1e18 + 2` *is* `1e18` in binary64 — and the cancellation at the end
+    /// leaves zero. The true value is 100.
+    ///
+    /// A dense QCQP constraint row is the same shape with less contrast:
+    /// thousands of same-sign terms, a running total that outgrows them, and
+    /// a result that depends on the order they arrive in. That dependence is
+    /// what took `qcqp1500-1c` from 103 iterations on the tape to 131 on the
+    /// matrix path.
+    #[test]
+    fn the_outer_row_sum_does_not_lose_small_terms() {
+        let mut h = BTreeMap::new();
+        h.insert((0, 0), 1e18);
+        for r in 1..=100usize {
+            h.insert((r, r), 2.0);
+        }
+        h.insert((101, 101), -1e18);
+
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs.push_form(&h, &[], 0.0);
+
+        let x = [1.0; 102];
+        // ½·(1e18 + 100·2 − 1e18). Naive summation answers 0.0 here.
+        assert_eq!(qs.value(f, &x), 100.0);
+    }
+
+    /// The same property for the linear accumulator, which is summed the
+    /// same way and compensated the same way (gh#702).
+    #[test]
+    fn the_linear_sum_does_not_lose_small_terms() {
+        let mut lin = vec![(0usize, 1e18)];
+        lin.extend((1..=100usize).map(|i| (i, 2.0)));
+        lin.push((101, -1e18));
+
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs.push_form(&BTreeMap::new(), &lin, 0.0);
+
+        let x = [1.0; 102];
+        assert_eq!(qs.value(f, &x), 200.0);
     }
 
     #[test]

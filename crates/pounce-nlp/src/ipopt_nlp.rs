@@ -11,7 +11,7 @@
 //! `crate::ipopt_nlp::IpoptNlp` path.
 
 use pounce_common::types::{Index, Number};
-use pounce_linalg::{DenseVector, Matrix, SymMatrix, Vector};
+use pounce_linalg::{DenseVector, Matrix, SymMatrix, SymTMatrix, SymTMatrixSpace, Vector};
 use std::rc::Rc;
 
 /// Human-readable names projected into the algorithm's *split* space —
@@ -82,6 +82,18 @@ pub trait Nlp {
 /// Algorithm-side NLP (adds scaling-aware variants and provides the
 /// bound expansion matrices `Px_L`, `Px_U`, `Pd_L`, `Pd_U`). Mirrors
 /// upstream `Ipopt::IpoptNLP`.
+/// A `SymTMatrix` over `space` with all values explicitly set to zero.
+///
+/// `SymTMatrix::new` leaves a non-empty matrix flagged uninitialized, and
+/// `values()` asserts on that — so a zero-W block built for its sparsity
+/// alone has to be zeroed before anything walks it.
+pub fn zeroed_sym_t(space: Rc<SymTMatrixSpace>) -> SymTMatrix {
+    let nz = space.nonzeros() as usize;
+    let mut m = SymTMatrix::new(space);
+    m.set_values(&vec![0.0; nz]);
+    m
+}
+
 pub trait IpoptNlp: Nlp {
     /// Per-evaluation call counts accumulated over the solve, ordered
     /// `[f, grad_f, c, d, jac_c, jac_d, h]`. Populates the end-of-run
@@ -90,6 +102,37 @@ pub trait IpoptNlp: Nlp {
     /// counters.
     fn eval_counts(&self) -> [Index; 7] {
         [0; 7]
+    }
+
+    /// A zero-valued `SymMatrix` carrying the Lagrangian Hessian's
+    /// *sparsity* and nothing else — upstream's `IpNLP::uninitialized_h`
+    /// (`IpIpoptNLP.hpp`), which `IpLeastSquareMults.cpp:38` uses to
+    /// build its `zeroW` block.
+    ///
+    /// The multiplier least-squares system and the default initializer
+    /// need a W block only so `StdAugSystemSolver` pins its triplet
+    /// structure with the W slots present; they pass `w_factor = 0.0`, so
+    /// the values are never read. Reaching for `curr_exact_hessian()`
+    /// there — an unmemoized `eval_h` — asks the user for a Hessian they
+    /// may have declared they cannot supply, which is exactly the case
+    /// under `hessian_approximation = limited-memory` (gh#698).
+    ///
+    /// Unlike upstream, the values are explicitly **zeroed** rather than
+    /// left uninitialized. Upstream can hand over uninitialized storage
+    /// because `w_factor = 0.0` means nothing reads it; pounce's
+    /// `StdAugSystemSolver::refill_values` still walks the W slots to
+    /// scale them, so the matrix has to be readable.
+    ///
+    /// The default implementation returns an empty (zero-nonzero) block
+    /// of the right dimension, which is correct for any NLP whose W is
+    /// structurally empty and safe for the rest: a caller that passes
+    /// `w_factor = 0.0` only ever needed the slots.
+    fn uninitialized_h(&self) -> Rc<dyn SymMatrix> {
+        Rc::new(zeroed_sym_t(SymTMatrixSpace::new(
+            self.x_l().dim(),
+            Vec::new(),
+            Vec::new(),
+        )))
     }
 
     fn x_l(&self) -> &dyn Vector;

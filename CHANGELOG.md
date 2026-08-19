@@ -58,6 +58,145 @@ changes.
   (230 back-solves, 76 of 792 held). The engine's `use_schur_updates`
   path hits `MaxIter` on dense reduced problems of hundreds of rows and
   stays off here; that is engine-side follow-up work.
+- **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
+  iterations** (#702).
+
+  #588's Q4 evaluates a recognized degree-≤2 row from its coefficient matrix,
+  walking it row-major and summing one merged row at a time. The AD tape it
+  replaced summed AMPL's flat list of `½·c·xᵢ·xⱼ` terms front-to-back in file
+  order. Both are correct and they agree on the coefficients bit for bit —
+  Q5's recognizer is exact — but they are different *associations* of the same
+  real number, so they round differently. On a dense QCQP constraint the outer
+  accumulator takes thousands of same-sign terms, outgrows them, and the two
+  answers separate in the last few ulps.
+
+  That is invisible to an answer and not invisible to a trajectory. On the
+  Mittelmann instance `qcqp1500-1c` the matrix path took 131 iterations and
+  207.6 s where the tape took 103; `POUNCE_DBG_NO_QUAD=1` reproduces the tape's
+  count exactly, which is what attributes it. The outer accumulators in
+  `QuadraticStructure::value` now use Neumaier compensated summation, and the
+  same model solves in **100 iterations and 129.5 s** — better than either
+  association, because the compensated sum is much less dependent on the order
+  in the first place.
+
+  Only the outer sums are compensated. The inner per-row dot product was
+  measured to move nothing — not in the corpus, not on the Mittelmann QCQP
+  family, not on the `eigen*` fixtures — and it is the O(nnz) loop, where the
+  outer one is O(rows). Best of three against the previous release on four
+  other QCQPs: +1.0%, +0.3%, +0.1%, +1.3% wall clock, at *identical* iteration
+  counts, so nothing else in that family reroutes at all.
+
+  Fixture sweep, both legs, for this change in isolation: 116 legs, two lines
+  move, both L-BFGS and both `eigen*`, neither a status or objective change —
+  `eigenb2` 62 → 56 iterations, and `eigena2` 253 → 265 on a fixture that
+  reports `ErrorInStepComputation` either way. The exact-Hessian leg is
+  byte-identical.
+
+  Under `least_square_init_primal=yes` (off by default) the two `eigen*`
+  models do move, and one of the moves is a cost. `eigenb2` returns to the
+  `SolvedToAcceptableLevel` that #616 originally measured — Q4 had nudged it
+  across the accept band for one release, which #681 caught and #616's test
+  already described as an accident rather than a fix. `eigena2` becomes
+  **platform-dependent**: `SolveSucceeded` on Linux, `SolvedToAcceptableLevel`
+  in 127 iterations on macOS against 51 before, for an objective correct to
+  82.50000000000348 either way. It is the only model in that file whose status
+  is not the same on both, which is why it is tracked as #706 rather than
+  shrugged off — and it was caught by CI rejecting a pinned macOS reading, not
+  by inspection.
+
+  Neither status was ever a property of the accept test: the safeguard reads
+  bit-for-bit identical inputs on the two models under all three associations,
+  which is #616's conclusion re-derived on a second independent perturbation.
+- **Large limited-memory solves do substantially less redundant work**
+  (#698, observations 1-4, reported with measurements by @srikanth-gm).
+
+  Four independent inefficiencies on the `hessian_approximation=limited-memory`
+  path, all of them work performed for a consumer that does not exist. None
+  changes an answer; the fixture sweep is bit-identical on both legs.
+
+  `LowRankAugSystemSolver` forwarded none of the three methods that exist to
+  avoid re-factorizing, so `resolve` fell through to a trait default that
+  factorizes. Since the interior-point solver's iterative-refinement loop and
+  its same-matrix fast path both enter through `resolve`, most augmented-system
+  solves re-factorized a matrix that had not changed, and the Sherman-Morrison-
+  Woodbury block issued one factorization per column. On the reporter's
+  118,276-dimension system that is **262.9 s of factorization down to 27.6 s**,
+  over an identical 170-iteration trajectory with every printed digit unchanged.
+
+  The Hessian is no longer evaluated at all when the problem declares no
+  Hessian structure — previously the user's `eval_h` callback was still called,
+  once per iteration, for a result that was structurally empty. Limited-memory
+  solves now never call it.
+
+  `pack_g_for_user` rebuilt an expansion vector inside its scatter loops rather
+  than once per call, which is felt on problems with many constraints.
+
+  The timing report gained rows for symbolic factorization and for time spent
+  inside the user's callbacks. `LinearSystemBackSolve` previously read
+  `0.000 s` on every run — not because back-solves were free but because its
+  only timer guard sat on a code path nothing reached. It now reports.
+
+  Note for consumers of the programmatic breakdown (`res.timing` /
+  `info["timing"]`): `linear_system_total` is still the sum of its parts, but
+  there are now three of them — it is
+  `linear_system_symbolic_factorization + linear_system_factorization +
+  linear_system_back_solve`, where before it was the latter two. Symbolic
+  factorization time was previously folded into whichever caller invoked it
+  and invisible in the breakdown, so the new key adds a part rather than
+  moving one; no existing key changes meaning, but `linear_system_total`
+  does grow by whatever that analysis actually cost.
+
+- **`pounce.minimize` no longer declares a dense Hessian for problems that
+  have no Hessian** (#698).
+
+  A Python problem supplying `jac` but no `hess` runs limited-memory, but the
+  frontend still declared a dense `n(n+1)/2` Hessian triangle. At n = 60,000
+  that is a 14 GB structure described to the solver for a callback that returns
+  nothing. The CasADi plugin was never affected — it has always declared zero.
+- **A `NaN` or `inf` objective is no longer reported as a successful
+  solve** (#695).
+
+  A model whose objective evaluated to `NaN` while every derivative stayed
+  finite terminated `Solve_Succeeded` / `obj_val = nan` — `status = 0`
+  asserting the convergence test passed, next to an objective that is not
+  a number. A caller gating on `success` and then reading `fun` silently
+  received `NaN`.
+
+  The convergence test cannot notice on its own: it reads gradients,
+  residuals and complementarity, never the objective *value*. With finite
+  derivatives and a satisfied equality the KKT residuals are genuinely
+  small (`2.5e-9` on the reported model), and the returned point is
+  actually correct — `x = (0.5, 0.5)` really is the minimizer of `x·x`
+  subject to `x0 + x1 = 1`. Only the `Solve_Succeeded` / `nan` pair was
+  wrong.
+
+  Specific to the **equality**-constrained shape, which is how it survived
+  #292. That fix closed the `NaN`-*gradient* hole and recorded
+  `f`-returns-`NaN` as the safe contrast case — true of the shapes it
+  exercised (unconstrained and bounds-only fail at
+  `Error_In_Step_Computation`, inequality-constrained at
+  `Invalid_Number_Detected`) and not once an equality constraint is
+  present.
+
+  A successful verdict is now gated on a finite objective, reporting
+  `Invalid_Number_Detected` otherwise — the status Ipopt's `Eval_f` gives
+  a non-finite objective, and the one POUNCE's own inequality-constrained
+  shape already gave. This is not a new rule: the same
+  `curr_f().is_finite()` check already guarded the restoration
+  near-feasible exit (added for CUTE `himmelbj`); it now also guards the
+  ordinary convergence exit.
+
+  No CLI model is known to reach it, and the fixture corpus is
+  bit-identical. Note that the reason is *not* that an `.nl` file cannot
+  express the shape: `log(x)` at `x < 0` evaluates to `NaN` with `f' = 1/x`
+  and `f'' = -1/x²` both finite, which is exactly the combination involved.
+  Such models are stopped by an earlier guard before the convergence test
+  is reached — three built to try to reach it (including the matching
+  equality-constrained shape, with `x` confined strictly negative) return
+  `Error_In_Step_Computation` or `Invalid_Number_Detected` identically on
+  both sides of this change. So the defect is callback-API only in
+  practice, by which path fires first, rather than by what the format can
+  represent.
 
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).

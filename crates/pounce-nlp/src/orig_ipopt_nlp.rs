@@ -2215,6 +2215,22 @@ impl Nlp for OrigIpoptNlp {
 }
 
 impl IpoptNlp for OrigIpoptNlp {
+    /// The Hessian's sparsity with zero values, built straight from
+    /// `h_space` — no `eval_h`, no callback, no cache traffic. Falls
+    /// back to a structurally empty block when the TNLP declared no
+    /// Hessian sparsity at all (`nnz_h_lag == 0`), which is the same
+    /// block the trait default would produce.
+    fn uninitialized_h(&self) -> Rc<dyn SymMatrix> {
+        match self.h_space.as_ref() {
+            Some(space) => Rc::new(crate::ipopt_nlp::zeroed_sym_t(Rc::clone(space))),
+            None => Rc::new(crate::ipopt_nlp::zeroed_sym_t(SymTMatrixSpace::new(
+                self.x_space.dim(),
+                Vec::new(),
+                Vec::new(),
+            ))),
+        }
+    }
+
     fn eval_counts(&self) -> [Index; 7] {
         [
             self.f_evals(),
@@ -2557,8 +2573,18 @@ impl IpoptNlp for OrigIpoptNlp {
                 panic!("OrigIpoptNlp expects DenseVector for c");
             };
             let cs = self.c_scale.borrow();
+            // Hoisted out of the loop on purpose. `expanded_values`
+            // materializes a fresh `Vec` on every call (it has no cached
+            // `expanded_values_` the way upstream's `DenseVector` does), so
+            // calling it per row makes this scatter quadratic in the
+            // constraint count: on 58k equality constraints that is 58k
+            // allocations of 58k doubles, ~27 GB of memcpy and ~610 ms, once
+            // per iteration for any caller that passes a non-NULL `g` to
+            // `GetIpoptCurrentIterate`. The sibling `pack_z_*_for_user` /
+            // `pack_lambda_for_user` scatters already lift it out. gh#698.
+            let c_vals = dc.expanded_values();
             for (i, &g_idx) in cls.c_map.iter().enumerate() {
-                let v = dc.expanded_values()[i];
+                let v = c_vals[i];
                 g[g_idx as usize] = match cs.as_ref() {
                     Some(s) => v / s[i],
                     None => v,
@@ -2570,8 +2596,10 @@ impl IpoptNlp for OrigIpoptNlp {
                 panic!("OrigIpoptNlp expects DenseVector for d");
             };
             let ds = self.d_scale.borrow();
+            // Same hoist as the `c` block above.
+            let d_vals = dd.expanded_values();
             for (i, &g_idx) in cls.d_map.iter().enumerate() {
-                let v = dd.expanded_values()[i];
+                let v = d_vals[i];
                 g[g_idx as usize] = match ds.as_ref() {
                     Some(s) => v / s[i],
                     None => v,
