@@ -2100,6 +2100,37 @@ impl IpoptAlgorithm {
             self.vetoed_acceptable_seen = true;
             self.vetoed_acceptable = self.snapshot_current(iter_count);
         }
+        // gh #695: a successful verdict asserts the convergence test passed;
+        // reporting one alongside a non-finite objective is self-contradictory,
+        // and a caller that gates on `status` and then reads `obj_val` silently
+        // receives `NaN`. The convergence test cannot notice on its own — it
+        // reads gradients, residuals and complementarity, never the objective
+        // *value* — so with finite derivatives and a satisfied equality the KKT
+        // residuals are genuinely small and the solve converges on a point
+        // whose objective is not a number.
+        //
+        // Only the *equality*-constrained shape reached here: the unconstrained
+        // and bounds-only shapes fail in the step computation and the
+        // inequality-constrained one already trips an invalid-number guard, so
+        // this closes the one column of that matrix that was reporting success.
+        // gh #292 closed the NaN-*gradient* hole and recorded `f`-returns-NaN as
+        // the safe contrast case, which held for the shapes it exercised and not
+        // for this one.
+        //
+        // `Invalid_Number_Detected` is the status Ipopt's `Eval_f` gives a
+        // non-finite objective, which POUNCE's own inequality-constrained shape
+        // already agreed with. The same check already guards the restoration
+        // near-feasible exit below, for the same reason on a different path
+        // (CUTE `himmelbj`); this extends it to the ordinary convergence exit
+        // rather than adding a second rule.
+        let converged_success = matches!(
+            conv_status,
+            ConvergenceStatus::Converged | ConvergenceStatus::ConvergedToAcceptable
+        );
+        if converged_success && !self.cq.borrow().curr_f().is_finite() {
+            timing.check_convergence.end();
+            return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
+        }
         match conv_status {
             ConvergenceStatus::Continue => {}
             ConvergenceStatus::Converged => {
