@@ -46,6 +46,37 @@ changes.
   that is a 14 GB structure described to the solver for a callback that returns
   nothing. The CasADi plugin was never affected — it has always declared zero.
 
+- **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
+  (#697).
+
+  An iterated presolve hands back a wrapper object whose per-pass layers
+  live in a `chain`; the wrapper substitutes nothing itself. The aggregate
+  objective offset was a stored field on that wrapper, initialized to `0.0`
+  and never filled in — only `postsolve` walked the chain — so any reduction
+  that took two or more layers reported no offset at all. The value is now
+  computed on demand by summing the chain (`obj_orig = obj_reduced +
+  Σₖ offsetₖ`, one term per layer, because layer `k+1` reduces layer `k`'s
+  reduced problem), and the field behind it is private, so it cannot be read
+  as complete when it is not.
+
+  The consumer is #689's `QpOptions::obj_constant`: the CLI adds presolve's
+  offset to the `.nl` constant before handing the reduced problem to the
+  solver. With the offset dropped, the "plus presolve's own objective
+  offset" half of that fix held only for single-layer reductions. Three
+  fixtures in the corpus are multi-layer with a nonzero offset —
+  `dual_scaled` (`-5999`), `dual_order` (`-59`) and `tame` (`1`) — and all
+  three were passing `0.0` through.
+
+  Same bounded blast radius as #689: `obj_constant` is a convergence-test
+  normalizer only, consumed by `scale_g` and the two cost scalings. It
+  enters no residual, no search direction, no dual, and not
+  `QpSolution::obj`. The failure mode was a stopping test slightly too
+  loose on models where presolve moved a large constant into the objective —
+  an accuracy effect, which is the class gh#544 taught us not to wave
+  through on "it cannot produce a wrong answer". Fixture sweep, both legs,
+  **for this change in isolation**: no diff — the corrected constant moves
+  no trajectory in the corpus. (Like the #689 sweeps in this section, that
+  is measured against the change this entry describes, not cumulatively.)
 
 - **`qp_presolve` now applies to convex QCQPs, where it was silently
   ignored** (#588, phase Q9, presolve half).
@@ -201,14 +232,17 @@ changes.
   of the magnitudes actually being computed — while `scale_g` supplies
   the gap's normalizer. That model now converges in 80.
 
-  Fixture sweep, both legs: the `qp_hsde=no` leg is unchanged, and on the
-  default leg only the four models with a large objective constant move —
+  Fixture sweep, both legs, **for this change in isolation**: the
+  `qp_hsde=no` leg is unchanged by it, and on the default leg only the
+  four models with a large objective constant move —
   `scaled_feasible_a` 16 → 123 iterations (`236.85` → `0`, KKT error
   `2.5e2` → `4.6e-3`), `scaled_feasible_b` 21 → 47 (`456.33` → `0`,
   `9.3e2` → `1.2e-10`), `feasible_x0_wide_scale` 16 → 80 (KKT error
   `3.6e4` → `6.6e-15`), `feasible_x0_extreme_row` 32 → 33 (`7.6e-4` →
   `3.8e-5`). The counts are the cost of the work these solves were
-  previously skipping.
+  previously skipping. (The direct-driver cold-start entry below lands in
+  the same release and *does* move the `qp_hsde=no` leg; the two sweeps
+  are each measured against the change they describe, not cumulatively.)
 
 - **The direct convex QP driver no longer diverges on a badly-scaled
   feasible model** (#689).
