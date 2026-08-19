@@ -27,10 +27,12 @@
 //! the acceptance rule is not passing correctors that hurt; they are not
 //! evidence that the scheme pays. The evidence that it pays is `lp_afiro`
 //! (NETLIB `afiro`) in
-//! `pounce-cli/tests/issue_588_gondzio_correctors.rs` — 135 -> 118 iterations
+//! `pounce-cli/tests/issue_588_gondzio_correctors.rs` — 135 -> 122 iterations
 //! on the direct driver, 15 -> 13 on HSDE.
 
-use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
+use pounce_convex::{
+    QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet, solve_qp_ipm, solve_qp_ipm_warm,
+};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -96,6 +98,38 @@ fn spread_lp(theta: f64, n: usize) -> QpProblem {
         h: (0..n).map(|i| 0.5 + 0.01 * (i as f64 + theta)).collect(),
         lb: vec![0.0; n],
         ub: vec![],
+    }
+}
+
+/// A box-bounded LP with a dense-ish `G`, in the shape the Python QP host
+/// actually solves. Deterministic: a plain LCG stands in for the RNG so the
+/// family is reproducible without a dependency.
+fn boxed_lp(seed: u64, n: usize, m: usize) -> QpProblem {
+    let mut st = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    let mut next = || {
+        st = st
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((st >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+    };
+    let c: Vec<f64> = (0..n).map(|_| next()).collect();
+    let mut g = Vec::with_capacity(n * m);
+    for r in 0..m {
+        for j in 0..n {
+            g.push(Triplet::new(r, j, next()));
+        }
+    }
+    let h: Vec<f64> = (0..m).map(|_| next().abs() + 1.0).collect();
+    QpProblem {
+        n,
+        p_lower: vec![],
+        c,
+        a: vec![],
+        b: vec![],
+        g,
+        h,
+        lb: vec![-10.0; n],
+        ub: vec![10.0; n],
     }
 }
 
@@ -204,5 +238,74 @@ fn correctors_do_not_cost_iterations_on_the_spread_family() {
     assert!(
         on_total <= off_total,
         "correctors cost iterations: {off_total} -> {on_total}"
+    );
+}
+
+/// gh #588 (Q9a). The two families above solve **cold**, and cold is the case
+/// the correctors were written for — a step blocked short, where lengthening
+/// it *is* the progress. Warm is where the scheme can hurt, and nothing above
+/// covers it.
+///
+/// It matters because warm is not a corner: the `.nl` CLI route runs HSDE, but
+/// `pounce-py`'s `solve_qp` calls straight into this driver, so a warm-started
+/// Python solve is the *default* path through the corrected code. The fixture
+/// sweep cannot see that route at all.
+///
+/// The failure this pins is real and was measured, not imagined: with the
+/// correctors ungated, 37 of 80 warm-started LPs each lost exactly one
+/// iteration and none gained one (366 -> 403), because the band is symmetric
+/// and pulls products that the affine step drove *below* `BETA_LO·μ` back up
+/// to it — capping μ's descent at exactly 1/`BETA_LO` per iteration and
+/// spending the superlinear tail to buy α = 1. See `correctors::ALPHA_MAX`.
+#[test]
+fn correctors_do_not_cost_iterations_on_a_warm_start() {
+    let (mut off_total, mut on_total) = (0usize, 0usize);
+    for n in [8usize, 14, 22] {
+        for k in 0..8 {
+            let m = (n / 2).max(2);
+            let prob = boxed_lp(k as u64, n, m);
+            // Solve once, perturb the linear term, re-solve from the previous
+            // point — the sequential-QP shape `qp_tau_max` exists for.
+            let base = solve_qp_ipm(&prob, &direct(0), backend);
+            if base.status != QpStatus::Optimal {
+                continue;
+            }
+            let warm = QpWarmStart::from_solution(&base);
+            let mut next = boxed_lp(k as u64, n, m);
+            for c in next.c.iter_mut() {
+                *c *= 1.05;
+            }
+            let off = solve_qp_ipm_warm(&next, &direct(0), &warm, backend);
+            let on = solve_qp_ipm_warm(
+                &next,
+                &direct(QpOptions::default().gondzio_max_corr),
+                &warm,
+                backend,
+            );
+            assert_eq!(off.status, on.status, "warm: the verdict changed");
+            if off.status == QpStatus::Optimal {
+                let scale = off.obj.abs().max(1.0);
+                assert!(
+                    (off.obj - on.obj).abs() <= 1e-6 * scale,
+                    "warm: objective moved {} -> {}",
+                    off.obj,
+                    on.obj
+                );
+            }
+            off_total += off.iters;
+            on_total += on.iters;
+        }
+    }
+    // Bounded, not zero, and the bound is the point. Ungated this family runs
+    // 105 -> 117: every instance that regresses does so systematically, in the
+    // same direction, for the same reason. Gated it runs 105 -> 106 — a single
+    // instance losing a single iteration, which is the ordinary trajectory
+    // jitter of buying a longer step, not a tax. The 230-instance battery this
+    // family stands in for is exactly neutral (967 -> 967) at this threshold;
+    // see `correctors::ALPHA_MAX`. A tolerance of one iteration over 24 solves
+    // still fails loudly if the gate is removed or widened.
+    assert!(
+        on_total <= off_total + 1,
+        "correctors cost iterations on warm starts: {off_total} -> {on_total}"
     );
 }

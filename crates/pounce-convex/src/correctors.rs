@@ -79,6 +79,75 @@ pub(crate) fn trial_step(alpha: f64) -> f64 {
     (alpha + DELTA).min(1.0)
 }
 
+/// Longest Mehrotra step still worth correcting on the direct driver.
+///
+/// Gondzio's scheme is written for a step *blocked short* by a handful of
+/// badly-centered products: there, lengthening the step is the progress, and
+/// the acceptance rule can be stated in step length alone. When the predictor
+/// already moves nearly the whole way the trade reverses, because the band is
+/// symmetric — a product that has fallen *below* `BETA_LO·μ` is corrected back
+/// **up** to it. On a warm start that is precisely backwards: the affine step
+/// drives products far below μ, which is the superlinear tail one wants, and
+/// raising them pins μ to the band floor.
+///
+/// Measured, before this gate, on 80 warm-started convex LPs through the
+/// Python host (which reaches this driver, unlike the `.nl` CLI route): the
+/// corrected runs stepped μ down by a factor of *exactly* 10 = 1/`BETA_LO`
+/// three iterations running where the uncorrected run managed 17x, then 276x,
+/// then 8000x — costing an iteration on 37 of the 80 and saving one on none
+/// (366 -> 403 iterations total). A step-length test cannot see that bill,
+/// because the corrector does exactly what it advertises: it buys α = 1.
+///
+/// 0.9 is calibrated, not derived. It is deliberately **not** calibrated on
+/// `lp_afiro`, the fixture this phase has quoted throughout, because that
+/// model's iteration count is chaotic in the threshold and would fit noise:
+///
+/// | α    | 2.0 | .99 | .95 | .92 | .90 | .88 | .86 | .85 | .82 | .80 | .70 |
+/// |------|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|
+/// | iter | 118 | 118 | 121 | 128 | 122 | 115 | 130 | 130 | 117 | 136 | 136 |
+///
+/// — clean asymptotes (118 gate-open, 136 gate-shut ≈ the 135 uncorrected
+/// baseline) with 15 iterations of noise in between. The threshold is instead
+/// calibrated on two aggregates, which separate sharply and agree:
+///
+/// | gate | 42 NETLIB LPs, cold | 230 warm QP/LPs |
+/// |---|---|---|
+/// | no correctors | 1809 | 967 |
+/// | ungated | **1757** (-52) | 1004 (+37) |
+/// | α < 0.95 | 1757 (-52) | 1003 (+36) |
+/// | **α < 0.9** | **1759** (-50) | **967** (+0) |
+/// | α < 0.85 | 1781 (-28) | 967 (+0) |
+///
+/// The cold column is the direct driver on every NETLIB LP that converges on
+/// it (only 42 of 365 do — the rest stall and fall back to the NLP path per
+/// gh #133), so the scheme's benefit is real and general: 27 models improve,
+/// 7 worsen. The warm column is the Python host, which is the surface that
+/// actually reaches this driver.
+///
+/// 0.9 is where those two curves cross: it keeps 50 of the 52 cold iterations
+/// the scheme wins and returns the whole warm regression, while 0.95 keeps the
+/// cold win but fixes nothing warm, and 0.85 pays a quarter of the cold win for
+/// nothing further. Below 0.9 the cold column becomes chaotic too (0.85 and 0.8
+/// swap order on a second sample), which is a second reason not to tune there.
+/// The cut is sharp rather than gradual because at α ≥ 0.9 the most a corrector
+/// can win is 0.1 of a step, while the centering it pays is unbounded.
+///
+/// A one-sided band — correcting only products *above* `BETA_HI·μ` and leaving
+/// low ones alone — was tried first and rejected: it takes `lp_afiro` to 135,
+/// exactly the uncorrected baseline. The win and the harm are the same action,
+/// so band shape cannot separate them and the step length must.
+///
+/// HSDE deliberately does **not** gate: its correctors are long-standing and
+/// its blast radius is the shipped baseline, so leaving them exactly as they
+/// were keeps the default route byte-identical.
+pub(crate) const ALPHA_MAX: f64 = 0.9;
+
+/// Whether the Mehrotra step is short enough that correcting it can pay for
+/// itself. See [`ALPHA_MAX`].
+pub(crate) fn worth_correcting((step_p, step_d): (f64, f64)) -> bool {
+    step_p.min(step_d) < ALPHA_MAX
+}
+
 /// Whether a corrector earned its back-solve: it must lengthen the step by at
 /// least `GAMMA·DELTA`, otherwise the caller stops correcting.
 pub(crate) fn accepts(alpha_new: f64, alpha: f64) -> bool {

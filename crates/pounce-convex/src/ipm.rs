@@ -2536,7 +2536,10 @@ fn run_ipm(
             // known gain for an unknown loss, and this driver's residuals are
             // not symmetric in the two, so the conservative conjunction is what
             // ships.
-            if correcting && mu > 0.0 {
+            // Gated on the Mehrotra step still being short: correcting an
+            // already-long step trades the superlinear tail for at most 0.1 of
+            // a step. See `correctors::ALPHA_MAX` for the measurement.
+            if correcting && mu > 0.0 && correctors::worth_correcting((step_p, step_d)) {
                 let band = correctors::Band::around(mu);
                 let taus = (adaptive_tau(mu, opts), opts.tau);
                 tally.iters += 1;

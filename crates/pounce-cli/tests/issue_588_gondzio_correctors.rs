@@ -92,8 +92,8 @@ fn iters(r: &SolveReport) -> usize {
 /// Both halves are asserted, but only the *direction* is — absolute counts are
 /// the most platform-sensitive numbers in a sweep. Measured on
 /// x86_64-unknown-linux-gnu at the shipping commit: 135 iterations with the
-/// correctors off, 118 with them on, and the final KKT error improves along
-/// with the count (2.10e-7 -> 1.35e-8), so the shorter trajectory is not
+/// correctors off, 122 with them on, and the final KKT error improves along
+/// with the count (2.10e-7 -> 2.49e-8), so the shorter trajectory is not
 /// bought by stopping earlier at a worse point.
 #[test]
 fn the_direct_driver_runs_the_correctors() {
