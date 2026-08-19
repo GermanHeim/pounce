@@ -481,6 +481,37 @@ changes.
   Both now fail with a message naming the missing feature and the option
   to reach for instead, as the rest of the refusal table does.
 
+- **Seven options were on the silent list by mistake — the scan could
+  not see their read sites** (#551, #677).
+
+  `timing_statistics`, `derivative_test_perturbation`,
+  `derivative_test_tol` and the four constant-derivative hints
+  (`grad_f_constant`, `hessian_constant`, `jac_c_constant`,
+  `jac_d_constant`) were all wired and consumed. Each reached its
+  accessor through a loop variable (`["timing_statistics",
+  "print_timing_statistics"].iter().any(…)`,
+  `HINT_OPTIONS.map(|name| …)`) or a local helper named `num` rather than
+  `read_num`, and `no_silent_options.rs` keys on the option name **as it
+  appears at the accessor**, so all seven read as "no key here" and sat
+  in the debt list as if they did nothing.
+
+  This is #551's caution 2 turned inside out — the scan is right to key
+  on the name at the accessor, and the read sites now spell the name out
+  there. No behaviour changed for any of the seven; what changed is that
+  the tool can see them, and probes in the scan's own sanity check keep
+  the literal-key form from regressing and handing any of them its
+  silence back.
+
+  The rewrite is also pinned where it could go wrong:
+  `each_constant_derivative_hint_lights_up_its_own_slot` asserts that
+  setting one hint lights up that hint's slot and no other, since
+  `reconcile` pairs each flag with the model's proof for the same index
+  and a transposed pair would reuse the wrong derivative.
+  `the_derivative_checker_knobs_change_the_verdict` drives an exactly
+  correct gradient through the checker and shows a coarse
+  `derivative_test_perturbation` making it look wrong and
+  `derivative_test_tol` clearing it again.
+
 - **`max_resto_iter` reaches the restoration convergence check** (#551,
   #677).
 

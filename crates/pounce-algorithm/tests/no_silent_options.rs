@@ -236,6 +236,21 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "tol",
         "max_iter",
         "limited_memory_initialization",
+        // Wired since #190, but through a loop over an array of names
+        // until #551 — the accessor saw a variable, not a literal, so a
+        // wired option sat in the silent list. Same story for the four
+        // constant-derivative hints, which gh#588 Q6 made pounce
+        // *exploit*, and for the two `derivative_test_*` knobs, whose
+        // local helper was named `num` rather than `read_num`. These
+        // probes keep the literal-key form from quietly regressing and
+        // handing any of them its silence back.
+        "timing_statistics",
+        "derivative_test_perturbation",
+        "derivative_test_tol",
+        "grad_f_constant",
+        "hessian_constant",
+        "jac_c_constant",
+        "jac_d_constant",
     ] {
         assert!(
             read.contains(probe),
@@ -411,28 +426,15 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "sens_max_pdpert",
     ];
 
-    // #551 section 1 — feature runs, read site missing.
-    const NLP_HINTS: &[&str] = &[
-        "grad_f_constant",
-        "hessian_constant",
-        "jac_c_constant",
-        "jac_d_constant",
-    ];
+    // The NLP-hint and misc groups are empty, and both were scan false
+    // positives rather than unwired options — which is worth stating,
+    // because the fix was to the read site's *shape*, not to the
+    // algorithm. All seven were wired and consumed; each reached its
+    // accessor through a loop variable or a differently-named local
+    // helper, so the scan saw no literal key and reported them silent.
+    // The probes above keep the literal-key form from regressing.
 
-    // #551 section 1 — feature runs, read site missing.
-    const MISC: &[&str] = &[
-        "derivative_test_perturbation",
-        "derivative_test_tol",
-        "timing_statistics",
-    ];
-
-    let known_debt: BTreeSet<&str> = BACKEND_KNOBS
-        .iter()
-        .chain(SENSITIVITY)
-        .chain(NLP_HINTS)
-        .chain(MISC)
-        .copied()
-        .collect();
+    let known_debt: BTreeSet<&str> = BACKEND_KNOBS.iter().chain(SENSITIVITY).copied().collect();
 
     let unexpected: Vec<&&String> = silent
         .iter()

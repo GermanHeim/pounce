@@ -1351,6 +1351,36 @@ impl IpoptApplication {
         crate::unimplemented_options::convex_hint_warnings(&self.options, &self.reg_options)
     }
 
+    /// Which of the four constant-derivative hints the caller actually
+    /// asserted, in [`pounce_nlp::constant_derivatives::HINT_OPTIONS`]
+    /// order — the order [`reconcile`] pairs against the model's own
+    /// proofs.
+    ///
+    /// Each name is read as a literal rather than through the loop
+    /// variable the caller used to use. The registered-but-unread scan
+    /// (`tests/no_silent_options.rs`) keys on the option name as it
+    /// appears at the accessor, so `get_bool_value(name, "")` over an
+    /// array read as "no key here" and left all four sitting in the
+    /// silent list while they were fully wired and consumed (#551 /
+    /// #677).
+    ///
+    /// Matching over `HINT_OPTIONS` rather than writing a bare array
+    /// keeps the slots right by construction, and a fifth hint added to
+    /// `HINT_OPTIONS` trips the fallback arm instead of silently reading
+    /// as "not asserted" — which is the failure mode this whole line of
+    /// work exists to kill.
+    fn asserted_constant_derivative_hints(&self) -> [bool; 4] {
+        use pounce_nlp::constant_derivatives::HINT_OPTIONS;
+        let read_yes = |key: &str| matches!(self.options.get_bool_value(key, ""), Ok((true, true)));
+        HINT_OPTIONS.map(|name| match name {
+            "grad_f_constant" => read_yes("grad_f_constant"),
+            "hessian_constant" => read_yes("hessian_constant"),
+            "jac_c_constant" => read_yes("jac_c_constant"),
+            "jac_d_constant" => read_yes("jac_d_constant"),
+            other => unreachable!("`{other}` is in HINT_OPTIONS with no read site"),
+        })
+    }
+
     /// Resolve the four constant-derivative hints for this solve and
     /// install the result on the NLP (gh #588, phase Q6).
     ///
@@ -1368,10 +1398,22 @@ impl IpoptApplication {
     /// overriding the caller there would be its own wrong answer.
     fn install_constant_derivative_hints(&self, orig_nlp: &mut OrigIpoptNlp) {
         use pounce_common::journalist::JournalCategory;
-        use pounce_nlp::constant_derivatives::{HINT_OPTIONS, reconcile};
+        use pounce_nlp::constant_derivatives::reconcile;
 
-        let asserted = HINT_OPTIONS
-            .map(|name| matches!(self.options.get_bool_value(name, ""), Ok((true, true))));
+        // Each name is read as a literal rather than through the loop
+        // variable: the registered-but-unread scan
+        // (`tests/no_silent_options.rs`) keys on the option name as it
+        // appears at the accessor, so `get_bool_value(name, "")` read as
+        // "no key here" and left all four of these sitting in the silent
+        // list while they were fully wired and consumed (#551 / #677).
+        //
+        // Matching over `HINT_OPTIONS` rather than writing a bare array
+        // keeps the order right by construction — `reconcile` pairs
+        // `asserted[k]` with `proofs[k]` — and a fifth hint added to
+        // `HINT_OPTIONS` trips the fallback arm instead of silently
+        // reading as "not asserted", which is the failure mode this
+        // whole line of work exists to kill.
+        let asserted = self.asserted_constant_derivative_hints();
         let proofs = orig_nlp.derivative_proofs();
         let (outcomes, enabled) = reconcile(proofs, asserted);
 
@@ -1401,8 +1443,15 @@ impl IpoptApplication {
     /// first-order` ran no test and printed nothing — a checker that
     /// silently checks nothing reports success by omission (gh#483
     /// follow-up).
+    ///
+    /// The numeric helper is named `read_num` to match the accessor
+    /// idiom the rest of this file uses: the registered-but-unread scan
+    /// (`tests/no_silent_options.rs`) discovers `read_*` helpers and the
+    /// literal key passed to them, so a differently-named local closure
+    /// made `derivative_test_perturbation` and `derivative_test_tol`
+    /// read as silent when they are wired and consumed (#677, #551).
     fn derivative_test_options(&self) -> DerivativeTestOptions {
-        let num = |key: &str, default: Number| -> Number {
+        let read_num = |key: &str, default: Number| -> Number {
             self.options
                 .get_numeric_value(key, "")
                 .ok()
@@ -1417,8 +1466,8 @@ impl IpoptApplication {
                 .and_then(|(v, f)| f.then_some(v))
                 .map(|v| DerivativeTest::from_option(&v))
                 .unwrap_or_default(),
-            perturbation: num("derivative_test_perturbation", 1e-8),
-            tol: num("derivative_test_tol", 1e-4),
+            perturbation: read_num("derivative_test_perturbation", 1e-8),
+            tol: read_num("derivative_test_tol", 1e-4),
             first_index: self
                 .options
                 .get_integer_value("derivative_test_first_index", "")
@@ -2461,15 +2510,21 @@ impl IpoptApplication {
         // one enables the detailed timers. `overall_alg` is started
         // unconditionally below: it feeds the `max_cpu_time` check and is
         // reported regardless of the option.
-        let timing_enabled = ["timing_statistics", "print_timing_statistics"]
-            .iter()
-            .any(|opt| {
-                self.options
-                    .get_bool_value(opt, "")
-                    .ok()
-                    .and_then(|(v, f)| f.then_some(v))
-                    .unwrap_or(false)
-            });
+        //
+        // Each name is read as a literal rather than looped over an
+        // array: the registered-but-unread scan
+        // (`tests/no_silent_options.rs`) keys on the option name as it
+        // appears at the accessor, so a loop variable reads as "no key
+        // here" and hid `timing_statistics` among the silent options
+        // when it has been wired since #190 (#677, #551).
+        let read_yes = |key: &str| -> bool {
+            self.options
+                .get_bool_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(false)
+        };
+        let timing_enabled = read_yes("timing_statistics") || read_yes("print_timing_statistics");
         timing.set_detailed_enabled(timing_enabled);
         timing.overall_alg.start();
 
@@ -5590,5 +5645,174 @@ mod tests {
         assert_eq!(info.m, 2);
         assert_eq!(info.nnz_jac_g, 8);
         assert_eq!(info.nnz_h_lag, 10);
+    }
+
+    /// Each of the four constant-derivative hints reaches the algorithm,
+    /// and reaches its *own* slot (#551 / #677).
+    ///
+    /// All four were wired and consumed — gh#588 Q6 made pounce exploit
+    /// them — but the read site looped over
+    /// `constant_derivatives::HINT_OPTIONS`, so the registered-but-unread
+    /// scan saw a loop variable where it needs a literal key and reported
+    /// all four as silent no-ops. They are literals now, and this pins
+    /// what a literal-per-name rewrite can get wrong that a loop could
+    /// not: setting one hint must light up that hint's slot and no other,
+    /// because `reconcile` pairs `asserted[k]` with the model's proof for
+    /// `HINT_OPTIONS[k]` and a transposed pair would reuse the wrong
+    /// derivative.
+    #[test]
+    fn each_constant_derivative_hint_lights_up_its_own_slot() {
+        use pounce_nlp::constant_derivatives::HINT_OPTIONS;
+
+        let app = IpoptApplication::new();
+        assert_eq!(
+            app.asserted_constant_derivative_hints(),
+            [false; 4],
+            "no hint is asserted on a fresh options list",
+        );
+
+        for (k, name) in HINT_OPTIONS.iter().enumerate() {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!("{name} yes\n"))
+                .unwrap();
+            let mut expected = [false; 4];
+            expected[k] = true;
+            assert_eq!(
+                app.asserted_constant_derivative_hints(),
+                expected,
+                "`{name}=yes` must set slot {k} and nothing else",
+            );
+
+            // …and the registered default asks for nothing, so an
+            // `ipopt.opt` that spells it out changes no derivative reuse.
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!("{name} no\n"))
+                .unwrap();
+            assert_eq!(
+                app.asserted_constant_derivative_hints(),
+                [false; 4],
+                "`{name}=no` is the registered default and asserts nothing",
+            );
+        }
+    }
+
+    /// `min x²` on `[-10, 10]` from `x = 1`, with an *exactly correct*
+    /// gradient `2x`. Unconstrained and one-dimensional so the only
+    /// thing the derivative checker can react to is its own step size
+    /// and threshold.
+    ///
+    /// The forward difference at step `h` is `((1+h)² − 1)/h = 2 + h`,
+    /// so the deviation from the analytic `2` is exactly `h`, and the
+    /// relative test flags it when `h > tol·(2 + h)`. That makes the
+    /// verdict a closed-form function of the two knobs under test.
+    struct ExactQuadratic;
+    impl TNLP for ExactQuadratic {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-10.0]);
+            b.x_u.copy_from_slice(&[10.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad[0] = 2.0 * x[0];
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool {
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _obj_factor: Number,
+            _lambda: Option<&[Number]>,
+            _new_lambda: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    fn derivative_test_verdict(extra: &str) -> pounce_nlp::derivative_test::DerivativeTestReport {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(&format!("derivative_test first-order\n{extra}"))
+            .unwrap();
+        let opts = app.derivative_test_options();
+        pounce_nlp::derivative_test::run(&mut ExactQuadratic, &opts).expect("a report")
+    }
+
+    /// `derivative_test_perturbation` and `derivative_test_tol` were
+    /// registered, read into [`DerivativeTestOptions`], and consumed by
+    /// the checker — but nothing proved a *set value* reached it, which
+    /// is the only assertion that distinguishes a read site from a
+    /// parse-and-discard (#677, #551).
+    ///
+    /// Each of the three verdicts below differs from the one above it by
+    /// exactly one option, so a knob that stopped reaching the checker
+    /// would collapse two of them together and fail here.
+    #[test]
+    fn the_derivative_checker_knobs_change_the_verdict() {
+        // Registered defaults (1e-8 / 1e-4), which are also the read
+        // site's fallbacks: a correct gradient looks correct.
+        let clean = derivative_test_verdict("");
+        assert_eq!(clean.checked, 1);
+        assert_eq!(clean.suspicious, 0, "{:#?}", clean.lines);
+
+        // A coarse step makes the *same correct gradient* look wrong:
+        // deviation 0.5 > 1e-4·2.5. Only `derivative_test_perturbation`
+        // changed, so this is that option and nothing else.
+        let coarse = derivative_test_verdict("derivative_test_perturbation 0.5\n");
+        assert_eq!(coarse.checked, 1);
+        assert_eq!(
+            coarse.suspicious, 1,
+            "derivative_test_perturbation never reached the checker: {:#?}",
+            coarse.lines,
+        );
+
+        // …and loosening the threshold at that same coarse step clears
+        // it again: 0.5 < 0.5·2.5. Only `derivative_test_tol` changed.
+        let tolerant =
+            derivative_test_verdict("derivative_test_perturbation 0.5\nderivative_test_tol 0.5\n");
+        assert_eq!(tolerant.checked, 1);
+        assert_eq!(
+            tolerant.suspicious, 0,
+            "derivative_test_tol never reached the checker: {:#?}",
+            tolerant.lines,
+        );
+
+        // The report also prints what it used, so a user reading the
+        // output can tell which step and threshold produced the verdict.
+        assert!(
+            tolerant.lines[0].contains("5.0e-1"),
+            "{:#?}",
+            tolerant.lines,
+        );
     }
 }
