@@ -42,9 +42,17 @@ changes.
   near-feasible exit (added for CUTE `himmelbj`); it now also guards the
   ordinary convergence exit.
 
-  Callback-API only — an `.nl` model cannot express a `NaN` objective with
-  a consistent finite gradient, so no CLI model can reach it. The fixture
-  corpus is bit-identical.
+  No CLI model is known to reach it, and the fixture corpus is
+  bit-identical. Note that the reason is *not* that an `.nl` file cannot
+  express the shape: `log(x)` at `x < 0` evaluates to `NaN` with `f' = 1/x`
+  and `f'' = -1/x²` both finite, which is exactly the combination involved.
+  Such models are stopped by an earlier guard before the convergence test
+  is reached — three built to try to reach it (including the matching
+  equality-constrained shape, with `x` confined strictly negative) return
+  `Error_In_Step_Computation` or `Invalid_Number_Detected` identically on
+  both sides of this change. So the defect is callback-API only in
+  practice, by which path fires first, rather than by what the format can
+  represent.
 
 - **`Presolve::obj_offset` reported `0.0` for every multi-layer presolve**
   (#697).
