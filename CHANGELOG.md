@@ -38,6 +38,16 @@ changes.
   `0.000 s` on every run — not because back-solves were free but because its
   only timer guard sat on a code path nothing reached. It now reports.
 
+  Note for consumers of the programmatic breakdown (`res.timing` /
+  `info["timing"]`): `linear_system_total` is still the sum of its parts, but
+  there are now three of them — it is
+  `linear_system_symbolic_factorization + linear_system_factorization +
+  linear_system_back_solve`, where before it was the latter two. Symbolic
+  factorization time was previously folded into whichever caller invoked it
+  and invisible in the breakdown, so the new key adds a part rather than
+  moving one; no existing key changes meaning, but `linear_system_total`
+  does grow by whatever that analysis actually cost.
+
 - **`pounce.minimize` no longer declares a dense Hessian for problems that
   have no Hessian** (#698).
 

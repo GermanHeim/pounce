@@ -443,8 +443,9 @@ impl TimingStatistics {
     /// or patching the solver.
     ///
     /// Ordered coarse→fine: the overall algorithm total; the
-    /// linear-algebra split (`linear_system_total` = factorization +
-    /// back-solve, with factorization broken out); and the per-callback
+    /// linear-algebra split (`linear_system_total` = symbolic
+    /// factorization + numeric factorization + back-solve, with each
+    /// part broken out alongside it); and the per-callback
     /// function-evaluation split (objective / gradient / constraints /
     /// Jacobian / Lagrangian Hessian). This is exactly the func /
     /// Jacobian / Hessian time split issue #180 needs to reproduce a
