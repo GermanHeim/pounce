@@ -48,6 +48,25 @@ pub struct LowRankAugSystemSolver {
     cache: AugSysCache,
     /// SMW factorization state (cleared on each rebuild).
     factor: Factorization,
+    /// Whether `inner` currently holds a numeric factorization of the
+    /// matrix `inner_coeffs(&self.factor, coeffs)` describes — i.e. the
+    /// `Wdiag`-substituted augmented system for the coefficients in
+    /// `self.cache`.
+    ///
+    /// Set **only** immediately after an `inner.solve` returns `Success`
+    /// against exactly that matrix, never as a side effect of a rebuild:
+    /// `update_factorization` can legitimately perform zero inner solves
+    /// (empty L-BFGS history — `get_v()` and `get_u()` both `None`, which
+    /// happens on the first iteration and again whenever
+    /// `limited_memory_max_skipping` clears the history mid-solve), and
+    /// in that case the inner solver is still holding the *previous*
+    /// iterate's factor of a different `Wdiag`.
+    inner_has_factor: bool,
+    /// The `num_neg_evals` target the cached factor was validated
+    /// against, or `None` if it was produced without an inertia check.
+    /// A fast path that skips re-factorizing must not also skip an
+    /// inertia check the caller asked for against a different target.
+    inner_factor_neg_evals: Option<Index>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +134,8 @@ impl LowRankAugSystemSolver {
             num_neg_evals: 0,
             cache: AugSysCache::default(),
             factor: Factorization::default(),
+            inner_has_factor: false,
+            inner_factor_neg_evals: None,
         }
     }
 
@@ -221,6 +242,17 @@ impl LowRankAugSystemSolver {
         check_neg_evals: bool,
         num_neg_evals: Index,
     ) -> ESymSolverStatus {
+        // `Wdiag` is about to be replaced, so whatever the inner solver
+        // holds is a factor of the *old* matrix from here on. Clearing
+        // first (rather than setting the flag at the end) is what makes
+        // the zero-column rebuild safe: when the L-BFGS history is empty
+        // both `get_v()` and `get_u()` are `None`, this function performs
+        // no inner solve at all, and the flag must stay false so the
+        // diagonal solve in `solve` factorizes instead of back-solving
+        // against the previous iterate's factor.
+        self.inner_has_factor = false;
+        self.inner_factor_neg_evals = None;
+
         let proto_x = downcast_dense(proto.rhs_x);
         let proto_s = downcast_dense(proto.rhs_s);
         let proto_c = downcast_dense(proto.rhs_c);
@@ -480,6 +512,13 @@ impl LowRankAugSystemSolver {
             sol_c.set(0.0);
             sol_d.set(0.0);
             let inner_coeffs = inner_coeffs(&self.factor, coeffs);
+            // Every column here shares one matrix, so only the first one
+            // needs a factorization; the rest are back-substitutions
+            // against it. Upstream gets the same effect by issuing a
+            // single `MultiSolve` for all `nrhs` columns
+            // (`IpLowRankAugSystemSolver.cpp:487`), which reaches
+            // `StdAugSystemSolver::MultiSolve` and factorizes once.
+            let reuse = self.inner_has_factor;
             let status = {
                 let mut sol = AugSysSol {
                     sol_x: &mut sol_x,
@@ -487,19 +526,29 @@ impl LowRankAugSystemSolver {
                     sol_c: &mut sol_c,
                     sol_d: &mut sol_d,
                 };
-                self.inner.solve(
-                    &inner_coeffs,
-                    &inner_rhs,
-                    &mut sol,
-                    check_neg_evals,
-                    num_neg_evals,
-                )
+                if reuse {
+                    self.inner.resolve(&inner_coeffs, &inner_rhs, &mut sol)
+                } else {
+                    self.inner.solve(
+                        &inner_coeffs,
+                        &inner_rhs,
+                        &mut sol,
+                        check_neg_evals,
+                        num_neg_evals,
+                    )
+                }
             };
             if self.inner.provides_inertia() {
                 self.num_neg_evals = self.inner.number_of_neg_evals();
             }
             if status != ESymSolverStatus::Success {
+                self.inner_has_factor = false;
+                self.inner_factor_neg_evals = None;
                 return (Err(status), out_s, out_c, out_d);
+            }
+            if !reuse {
+                self.inner_has_factor = true;
+                self.inner_factor_neg_evals = check_neg_evals.then_some(num_neg_evals);
             }
             out_x.set_vector(k, Rc::new(sol_x) as Rc<dyn Vector>);
             out_s.set_vector(k, Rc::new(sol_s) as Rc<dyn Vector>);
@@ -572,6 +621,10 @@ impl AugSystemSolver for LowRankAugSystemSolver {
     }
 
     fn increase_quality(&mut self) -> bool {
+        // The inner solver drops its cached factor here (it re-pivots at
+        // a tighter tolerance), so ours is stale too.
+        self.inner_has_factor = false;
+        self.inner_factor_neg_evals = None;
         self.inner.increase_quality()
     }
 
@@ -618,6 +671,11 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             .w
             .and_then(|w| w.as_any().downcast_ref::<LowRankUpdateSymMatrix>());
         let Some(lr_w) = lr_w_opt else {
+            // The inner solver is about to factor a *different* matrix
+            // (the caller's own W, not our `Wdiag` substitution), so any
+            // cached SMW factor state no longer describes what it holds.
+            self.inner_has_factor = false;
+            self.inner_factor_neg_evals = None;
             let status = self
                 .inner
                 .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
@@ -638,16 +696,38 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             self.first_call = false;
         }
 
-        // 1. Diagonal solve through the inner aug-system solver.
+        // 1. Diagonal solve through the inner aug-system solver. When we
+        //    already hold a factor of this exact matrix — the rebuild
+        //    above just produced one while solving for the SMW columns,
+        //    or nothing has changed since the last call — this is a
+        //    back-substitution rather than a fresh factorization.
+        //
+        //    Skipping the factorization also skips the inertia check that
+        //    goes with it, so only take the fast path when the cached
+        //    factor was already validated against the same target. In
+        //    practice it always has been: a rebuild runs its first column
+        //    with this call's own `check_neg_evals`/`num_neg_evals` and
+        //    bails on `WrongInertia` before reaching here.
+        let reuse = self.inner_has_factor
+            && (!check_neg_evals || self.inner_factor_neg_evals == Some(num_neg_evals));
         let ic = inner_coeffs(&self.factor, coeffs);
-        let status = self
-            .inner
-            .solve(&ic, rhs, sol, check_neg_evals, num_neg_evals);
+        let status = if reuse {
+            self.inner.resolve(&ic, rhs, sol)
+        } else {
+            self.inner
+                .solve(&ic, rhs, sol, check_neg_evals, num_neg_evals)
+        };
         if self.inner.provides_inertia() {
             self.num_neg_evals = self.inner.number_of_neg_evals();
         }
         if status != ESymSolverStatus::Success {
+            self.inner_has_factor = false;
+            self.inner_factor_neg_evals = None;
             return status;
+        }
+        if !reuse {
+            self.inner_has_factor = true;
+            self.inner_factor_neg_evals = check_neg_evals.then_some(num_neg_evals);
         }
 
         // 2. SMW correction terms — mirror upstream's order:
@@ -661,6 +741,82 @@ impl AugSystemSolver for LowRankAugSystemSolver {
 
         ESymSolverStatus::Success
     }
+
+    /// Back-substitution against the cached factor, plus the same SMW
+    /// corrections `solve` applies.
+    ///
+    /// Without this override the trait default falls through to `solve`,
+    /// which re-factorizes — and because `PdFullSpaceSolver`'s iterative
+    /// refinement and its same-matrix fast path both come in through
+    /// `resolve`, that made the majority of the augmented-system solves
+    /// on the limited-memory path re-factorize a matrix that had not
+    /// changed. It also left `LinearSystemBackSolve` reading 0.000 s for
+    /// a whole run, since the only back-solve timer guard lives on the
+    /// path nothing reached (gh#698).
+    ///
+    /// Every condition that cannot be served falls back to `solve`, so
+    /// this can lose an optimization but cannot change an answer — the
+    /// same defensive shape as `StdAugSystemSolver::resolve`'s own
+    /// `have_factor` fallback.
+    fn resolve(
+        &mut self,
+        coeffs: &AugSysCoeffs<'_>,
+        rhs: &AugSysRhs<'_>,
+        sol: &mut AugSysSol<'_>,
+    ) -> ESymSolverStatus {
+        // The fast path is only valid for a low-rank W whose SMW
+        // factorization we hold and whose coefficients have not moved
+        // since we built it. `first_call` additionally guarantees
+        // `self.factor.wdiag` is populated for `inner_coeffs`.
+        //
+        // The non-low-rank bypass deliberately falls through to `solve`
+        // rather than forwarding to `inner.resolve`: on that path the
+        // inner solver's factor is of the caller's own W, which our
+        // tag cache does not track, so we cannot certify it here.
+        let is_low_rank = coeffs
+            .w
+            .and_then(|w| w.as_any().downcast_ref::<LowRankUpdateSymMatrix>())
+            .is_some();
+        if !is_low_rank
+            || self.first_call
+            || !self.inner_has_factor
+            || self.augmented_system_requires_change(coeffs)
+        {
+            return self.solve(coeffs, rhs, sol, false, 0);
+        }
+
+        let ic = inner_coeffs(&self.factor, coeffs);
+        let status = self.inner.resolve(&ic, rhs, sol);
+        if status != ESymSolverStatus::Success {
+            self.inner_has_factor = false;
+            self.inner_factor_neg_evals = None;
+            return status;
+        }
+
+        // Same correction order as `solve` (cpp:210-227).
+        if self.factor.utilde2_x.is_some() {
+            self.apply_smw(/*sign=*/ 1.0, /*use_u=*/ true, rhs, sol);
+        }
+        if self.factor.vtilde1_x.is_some() {
+            self.apply_smw(/*sign=*/ -1.0, /*use_u=*/ false, rhs, sol);
+        }
+
+        ESymSolverStatus::Success
+    }
+
+    // `try_resolve_many_flat` is deliberately **not** overridden here.
+    //
+    // It hands back a raw `K⁻¹`-applied result that the caller
+    // (`PdFullSpaceSolver::solve_many_cached`) unpacks and uses directly,
+    // with no hook to apply the SMW correction afterwards. Our operator
+    // is `(K + low-rank)⁻¹`, so forwarding the flat path to the inner
+    // solver would silently drop the correction on every column and
+    // return a plausible, wrong solution under a `Success` status.
+    //
+    // The trait default returns `None`, which the caller documents as
+    // "fast path not taken, fall back to looping `solve`" — correct, and
+    // the only safe answer for this wrapper unless the packed path grows
+    // a way to post-process each column.
 }
 
 impl LowRankAugSystemSolver {
@@ -717,7 +873,7 @@ mod tests {
     use super::*;
     use pounce_linalg::dense_vector::DenseVectorSpace;
     use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     /// Diagonal-solve stub: pretends the augmented system is just
     /// `(W + δ_x I) · sol_x = rhs_x` with `m_c = m_d = n_s = 0`. Reads
@@ -775,6 +931,110 @@ mod tests {
                 .unwrap();
             sol_x_dv.set_values(&out);
             // Other blocks stay zero — fixture has m_c = m_d = n_s = 0.
+            ESymSolverStatus::Success
+        }
+    }
+
+    /// Inner mock that models `StdAugSystemSolver`'s factor / back-solve
+    /// split, which `DiagInner` above does not: `solve` "factorizes" by
+    /// capturing the diagonal it was handed, and `resolve` back-solves
+    /// against whatever was captured last.
+    ///
+    /// `resolve` deliberately ignores the coefficients it is passed and
+    /// uses the cached ones. That is what a real cached factorization
+    /// does, and it means a wrapper that back-solves against a stale
+    /// factor produces a visibly *wrong answer* here, not merely a wrong
+    /// count.
+    #[derive(Default)]
+    struct InnerStats {
+        factorizations: Cell<usize>,
+        backsolves: Cell<usize>,
+        factored_diag: RefCell<Vec<Number>>,
+        factored_delta_x: Cell<Number>,
+    }
+
+    struct CountingInner {
+        stats: Rc<InnerStats>,
+    }
+
+    impl CountingInner {
+        /// Returns the mock and a handle on its counters, so the test can
+        /// read them after the solver has taken ownership of the box.
+        fn new() -> (Self, Rc<InnerStats>) {
+            let stats = Rc::new(InnerStats::default());
+            (
+                Self {
+                    stats: Rc::clone(&stats),
+                },
+                stats,
+            )
+        }
+
+        /// `sol_x = rhs_x / (diag + delta_x)`, from the captured factor.
+        fn apply_cached(&self, rhs: &AugSysRhs<'_>, sol: &mut AugSysSol<'_>) {
+            let rhs_x = downcast_dense(rhs.rhs_x).expanded_values();
+            let diag = self.stats.factored_diag.borrow();
+            let delta_x = self.stats.factored_delta_x.get();
+            let out: Vec<Number> = (0..rhs_x.len())
+                .map(|i| rhs_x[i] / (diag[i] + delta_x))
+                .collect();
+            sol.sol_x
+                .as_any_mut()
+                .downcast_mut::<DenseVector>()
+                .unwrap()
+                .set_values(&out);
+        }
+    }
+
+    impl AugSystemSolver for CountingInner {
+        fn provides_inertia(&self) -> bool {
+            false
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            0
+        }
+        fn increase_quality(&mut self) -> bool {
+            false
+        }
+        fn last_solve_status(&self) -> ESymSolverStatus {
+            ESymSolverStatus::Success
+        }
+        fn solve(
+            &mut self,
+            coeffs: &AugSysCoeffs<'_>,
+            rhs: &AugSysRhs<'_>,
+            sol: &mut AugSysSol<'_>,
+            _check_neg_evals: bool,
+            _num_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            self.stats
+                .factorizations
+                .set(self.stats.factorizations.get() + 1);
+            let wdiag = coeffs
+                .w
+                .expect("CountingInner requires W")
+                .as_any()
+                .downcast_ref::<DiagMatrix>()
+                .expect("CountingInner requires W to be a DiagMatrix");
+            let diag_rc = wdiag.get_diag().expect("Wdiag has no diag set").clone();
+            *self.stats.factored_diag.borrow_mut() =
+                downcast_dense(diag_rc.as_ref()).expanded_values();
+            self.stats.factored_delta_x.set(coeffs.delta_x);
+            self.apply_cached(rhs, sol);
+            ESymSolverStatus::Success
+        }
+        fn resolve(
+            &mut self,
+            _coeffs: &AugSysCoeffs<'_>,
+            rhs: &AugSysRhs<'_>,
+            sol: &mut AugSysSol<'_>,
+        ) -> ESymSolverStatus {
+            assert!(
+                !self.stats.factored_diag.borrow().is_empty(),
+                "resolve reached with no cached factor"
+            );
+            self.stats.backsolves.set(self.stats.backsolves.get() + 1);
+            self.apply_cached(rhs, sol);
             ESymSolverStatus::Success
         }
     }
@@ -1120,5 +1380,315 @@ mod tests {
         }
         // Same coeffs → cache reports no change.
         assert!(!lr_solver.augmented_system_requires_change(&coeffs));
+    }
+
+    // ---- gh#698: factorization reuse ----
+
+    /// The empty `m_c = m_d = 0` Jacobians every fixture in this section
+    /// uses, over `n_x` variables.
+    fn empty_jacobians(
+        n_x: Index,
+    ) -> (
+        pounce_linalg::dense_gen_matrix::DenseGenMatrix,
+        pounce_linalg::dense_gen_matrix::DenseGenMatrix,
+    ) {
+        (
+            pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, n_x).make_new_dense_gen(),
+            pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, n_x).make_new_dense_gen(),
+        )
+    }
+
+    #[test]
+    fn smw_columns_share_one_factorization() {
+        // W = diag(2) + v vᵀ with a 3-column V. Upstream issues a single
+        // `MultiSolve` for all columns and factorizes once; we must do
+        // the same: 1 factorization, then back-solves for the remaining
+        // two columns and for the diagonal solve.
+        let space_x = DenseVectorSpace::new(3);
+        let space_zero = DenseVectorSpace::new(0);
+        let lr_space = LowRankUpdateSymMatrixSpace::new(3, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(dvec_rc(&space_x, &[2.0, 3.0, 4.0]));
+        let v_space = MultiVectorMatrixSpace::new(3, Rc::clone(&space_x));
+        let mut v = v_space.make_new_multi_vector();
+        v.set_vector(0, dvec_rc(&space_x, &[0.5, 0.0, 0.0]));
+        v.set_vector(1, dvec_rc(&space_x, &[0.0, 0.5, 0.0]));
+        v.set_vector(2, dvec_rc(&space_x, &[0.0, 0.0, 0.5]));
+        lr.set_v(Rc::new(v));
+        let lr_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr);
+        let (j_c, j_d) = empty_jacobians(3);
+        let delta_x = 0.0;
+
+        let (inner, stats) = CountingInner::new();
+        let mut solver = LowRankAugSystemSolver::new(Box::new(inner));
+
+        let coeffs = AugSysCoeffs {
+            w: Some(lr_rc.as_ref() as &dyn SymMatrix),
+            w_factor: 1.0,
+            d_x: None,
+            delta_x,
+            d_s: None,
+            delta_s: 0.0,
+            j_c: &j_c as &dyn Matrix,
+            d_c: None,
+            delta_c: 0.0,
+            j_d: &j_d as &dyn Matrix,
+            d_d: None,
+            delta_d: 0.0,
+        };
+        let rhs_x = dvec(&space_x, &[1.0, 1.0, 1.0]);
+        let rhs_zero = dvec(&space_zero, &[]);
+        let rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_zero,
+            rhs_c: &rhs_zero,
+            rhs_d: &rhs_zero,
+        };
+        let (mut sx, mut z1, mut z2, mut z3) = (
+            dvec(&space_x, &[0.0, 0.0, 0.0]),
+            dvec(&space_zero, &[]),
+            dvec(&space_zero, &[]),
+            dvec(&space_zero, &[]),
+        );
+        {
+            let mut sol = AugSysSol {
+                sol_x: &mut sx,
+                sol_s: &mut z1,
+                sol_c: &mut z2,
+                sol_d: &mut z3,
+            };
+            assert_eq!(
+                solver.solve(&coeffs, &rhs, &mut sol, false, 0),
+                ESymSolverStatus::Success
+            );
+        }
+        assert_eq!(
+            stats.factorizations.get(),
+            1,
+            "three SMW columns plus the diagonal solve must share one factorization"
+        );
+        assert_eq!(
+            stats.backsolves.get(),
+            3,
+            "2 remaining V columns + diagonal solve"
+        );
+    }
+
+    #[test]
+    fn resolve_reuses_the_factor_instead_of_refactorizing() {
+        // `PdFullSpaceSolver`'s refinement loop and its same-matrix fast
+        // path both come in through `resolve`. Against an unchanged
+        // matrix that must be a pure back-substitution.
+        let space_x = DenseVectorSpace::new(1);
+        let space_zero = DenseVectorSpace::new(0);
+        let lr_space = LowRankUpdateSymMatrixSpace::new(1, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(dvec_rc(&space_x, &[2.0]));
+        let lr_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr);
+        let (j_c, j_d) = empty_jacobians(1);
+        let delta_x = 0.001;
+
+        let (inner, stats) = CountingInner::new();
+        let mut solver = LowRankAugSystemSolver::new(Box::new(inner));
+
+        let coeffs = AugSysCoeffs {
+            w: Some(lr_rc.as_ref() as &dyn SymMatrix),
+            w_factor: 1.0,
+            d_x: None,
+            delta_x,
+            d_s: None,
+            delta_s: 0.0,
+            j_c: &j_c as &dyn Matrix,
+            d_c: None,
+            delta_c: 0.0,
+            j_d: &j_d as &dyn Matrix,
+            d_d: None,
+            delta_d: 0.0,
+        };
+        let rhs_x = dvec(&space_x, &[1.0]);
+        let rhs_zero = dvec(&space_zero, &[]);
+        let rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_zero,
+            rhs_c: &rhs_zero,
+            rhs_d: &rhs_zero,
+        };
+        let expected = 1.0 / (2.0 + delta_x);
+
+        for round in 0..4 {
+            let (mut sx, mut z1, mut z2, mut z3) = (
+                dvec(&space_x, &[0.0]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+            );
+            // Scoped so the mutable borrow of `sx` ends before it is read,
+            // matching the other tests here.
+            {
+                let mut sol = AugSysSol {
+                    sol_x: &mut sx,
+                    sol_s: &mut z1,
+                    sol_c: &mut z2,
+                    sol_d: &mut z3,
+                };
+                let status = if round == 0 {
+                    solver.solve(&coeffs, &rhs, &mut sol, false, 0)
+                } else {
+                    solver.resolve(&coeffs, &rhs, &mut sol)
+                };
+                assert_eq!(status, ESymSolverStatus::Success);
+            }
+            assert!(
+                (sx.expanded_values()[0] - expected).abs() < 1e-12,
+                "round {round} gave {:?}",
+                sx.expanded_values()
+            );
+        }
+        assert_eq!(
+            stats.factorizations.get(),
+            1,
+            "three refinement re-solves must not re-factorize"
+        );
+    }
+
+    #[test]
+    fn rebuild_with_empty_history_still_factorizes() {
+        // Regression guard for the sharp edge in this optimization.
+        //
+        // `update_factorization` performs *zero* inner solves when the
+        // L-BFGS history is empty (`get_v()` and `get_u()` both `None`).
+        // That happens on the first iteration and again whenever
+        // `limited_memory_max_skipping` clears the history mid-solve
+        // (gh#686, the `Wr` info string) — so it is reachable with the
+        // inner solver warm, holding the *previous* iterate's factor.
+        //
+        // If `inner_has_factor` were set as a consequence of the rebuild
+        // rather than of an actual inner solve, the diagonal solve would
+        // back-substitute against that stale factor: wrong direction, no
+        // error, and `StdAugSystemSolver::have_factor` would not catch it
+        // because it is not cold. `CountingInner::resolve` reproduces
+        // exactly that by answering from its cached diagonal, so this
+        // asserts on the value as well as the count.
+        let space_x = DenseVectorSpace::new(1);
+        let space_zero = DenseVectorSpace::new(0);
+        let space_lr = LowRankUpdateSymMatrixSpace::new(1, None, false);
+
+        // Round 1: history present, σ = 2.
+        let mut lr1 = space_lr.make_new_low_rank();
+        lr1.set_diag(dvec_rc(&space_x, &[2.0]));
+        let v_space = MultiVectorMatrixSpace::new(1, Rc::clone(&space_x));
+        let mut v = v_space.make_new_multi_vector();
+        v.set_vector(0, dvec_rc(&space_x, &[0.5]));
+        lr1.set_v(Rc::new(v));
+        let lr1_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr1);
+
+        // Round 2: history cleared, σ moved to 7. No V, no U.
+        let mut lr2 = LowRankUpdateSymMatrixSpace::new(1, None, false).make_new_low_rank();
+        lr2.set_diag(dvec_rc(&space_x, &[7.0]));
+        let lr2_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr2);
+
+        let (j_c, j_d) = empty_jacobians(1);
+
+        let (inner, stats) = CountingInner::new();
+        let mut solver = LowRankAugSystemSolver::new(Box::new(inner));
+
+        let rhs_x = dvec(&space_x, &[1.0]);
+        let rhs_zero = dvec(&space_zero, &[]);
+        let rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_zero,
+            rhs_c: &rhs_zero,
+            rhs_d: &rhs_zero,
+        };
+
+        let run = |lr: &Rc<LowRankUpdateSymMatrix>, solver: &mut LowRankAugSystemSolver| {
+            let coeffs = AugSysCoeffs {
+                w: Some(lr.as_ref() as &dyn SymMatrix),
+                w_factor: 1.0,
+                d_x: None,
+                delta_x: 0.0,
+                d_s: None,
+                delta_s: 0.0,
+                j_c: &j_c as &dyn Matrix,
+                d_c: None,
+                delta_c: 0.0,
+                j_d: &j_d as &dyn Matrix,
+                d_d: None,
+                delta_d: 0.0,
+            };
+            let (mut sx, mut z1, mut z2, mut z3) = (
+                dvec(&space_x, &[0.0]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+            );
+            {
+                let mut sol = AugSysSol {
+                    sol_x: &mut sx,
+                    sol_s: &mut z1,
+                    sol_c: &mut z2,
+                    sol_d: &mut z3,
+                };
+                assert_eq!(
+                    solver.solve(&coeffs, &rhs, &mut sol, false, 0),
+                    ESymSolverStatus::Success
+                );
+            }
+            sx.expanded_values()[0]
+        };
+
+        run(&lr1_rc, &mut solver);
+        let after_first = stats.factorizations.get();
+
+        // Preconditions, asserted rather than assumed. Without these the
+        // test still passes if the fixtures drift out from under it, but
+        // stops testing the empty-history path -- it would be checking an
+        // ordinary rebuild and reporting a pass. (The same vacuity trap
+        // feral#179 hit building its full-budget refinement oracle: nothing
+        // merely ill-conditioned reaches the budget, so an oracle that is
+        // not pinned proves nothing.)
+        //
+        // 1. Round 1 must have left the hazard live: a factor cached and
+        //    `inner_has_factor` set. That flag is private, so assert its
+        //    observable consequence -- an identical re-solve reuses it.
+        let repeat = run(&lr1_rc, &mut solver);
+        assert_eq!(
+            stats.factorizations.get(),
+            after_first,
+            "round 1 must leave a reusable factor, else round 2 has no \
+             stale factor to wrongly reuse and this test is vacuous"
+        );
+        // 1/(2 + 0.5^2): the inner solve answers 1/2 from the cached
+        // Wdiag factor and the SMW correction for V then applies on top.
+        // Round 2 has no V, which is why its expected value below is the
+        // bare 1/7 and why a stale factor there shows up as 1/2.
+        assert!(
+            (repeat - 4.0 / 9.0).abs() < 1e-12,
+            "round 1 re-solve should answer 4/9 from the cached factor, \
+             got {repeat}"
+        );
+
+        // 2. Round 2's matrix must genuinely carry no history, which is what
+        //    makes `update_factorization` perform zero inner solves.
+        assert!(
+            lr2_rc.get_v().is_none() && lr2_rc.get_u().is_none(),
+            "round 2 fixture must have empty L-BFGS history"
+        );
+
+        let got = run(&lr2_rc, &mut solver);
+
+        assert_eq!(
+            stats.factorizations.get(),
+            after_first + 1,
+            "a rebuild that performs no inner solve of its own must leave \
+             the diagonal solve to factorize the new Wdiag"
+        );
+        // No V and no U, so the SMW correction is empty and the answer is
+        // just the diagonal solve against the *new* σ. Back-solving
+        // against round 1's factor would give 1/2, not 1/7.
+        assert!(
+            (got - 1.0 / 7.0).abs() < 1e-12,
+            "expected the new Wdiag (1/7), got {got} — stale factor reused"
+        );
     }
 }

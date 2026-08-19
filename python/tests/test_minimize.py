@@ -89,6 +89,7 @@ def test_minimize_reports_timing_breakdown():
     expected_keys = {
         "overall_alg",
         "linear_system_total",
+        "linear_system_symbolic_factorization",
         "linear_system_factorization",
         "linear_system_back_solve",
         "function_evaluations_total",
@@ -101,8 +102,12 @@ def test_minimize_reports_timing_breakdown():
     assert expected_keys <= set(res.timing)
     for key in expected_keys:
         assert res.timing[key] >= 0.0, key
+    # gh#698: symbolic factorization is a third linear-system component.
+    # It was previously folded into whatever called it and invisible here,
+    # so `linear_system_total` gained a part rather than changing meaning.
     assert res.timing["linear_system_total"] == pytest.approx(
-        res.timing["linear_system_factorization"]
+        res.timing["linear_system_symbolic_factorization"]
+        + res.timing["linear_system_factorization"]
         + res.timing["linear_system_back_solve"]
     )
 
@@ -133,6 +138,7 @@ def test_minimize_timing_breakdown_gated_by_default():
         "eval_objective",
         "eval_gradient",
         "function_evaluations_total",
+        "linear_system_symbolic_factorization",
         "linear_system_factorization",
         "linear_system_back_solve",
     ):

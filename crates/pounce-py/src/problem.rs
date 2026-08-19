@@ -1034,28 +1034,34 @@ impl PyProblem {
             (Vec::new(), Vec::new(), 0)
         };
 
-        // Hessian sparsity. When the user provides one, use it
-        // verbatim. Without one we still need a non-empty pattern: the
-        // L-BFGS updater pins its work-space sparsity from
-        // `curr_exact_hessian()`, so an empty space means nowhere for
-        // the quasi-Newton approximation to land. Declare the dense
-        // lower triangle — `eval_h(Values)` returns zeros and the
-        // updater overwrites them with its rank-update approximation.
+        // Hessian sparsity. When the user provides one, use it verbatim;
+        // without one, declare nothing.
+        //
+        // This used to declare the dense lower triangle, on the premise
+        // that "the L-BFGS updater pins its work-space sparsity from
+        // `curr_exact_hessian()`, so an empty space means nowhere for the
+        // quasi-Newton approximation to land." That premise does not hold
+        // for any path a Hessian-less problem can take. On the IPM path
+        // `LimMemQuasiNewtonUpdater` builds its own
+        // `LowRankUpdateSymMatrix` and never consults `h_space`; on the
+        // active-set-SQP path `SqpHessianSource::{DampedBfgs, Lbfgs}`
+        // build their own triplets and only `Exact` calls `eval_h` — and
+        // `has_hessian == false` already downgrades an explicit `exact`
+        // request below. The one remaining consumer, the zero-W structure
+        // block, stopped evaluating the Hessian in gh#698 and is happy
+        // with an empty space.
+        //
+        // The cost of the old fallback was quadratic and paid up front:
+        // `n(n+1)/2` entries, which at n = 60 000 is ~1.8e9 index pairs
+        // (~14 GB across the two vectors) and overflows the `i32` nele_hess
+        // at n = 65 536. It made large Hessian-less problems unreachable
+        // from Python for a work space nothing used.
         let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
             let s = call0(&self.problem_obj, "hessianstructure")?;
             let (rows, cols) = decode_structure_inferred(&s)?;
             (rows.clone(), cols.clone(), rows.len() as Index)
         } else {
-            let mut rows = Vec::with_capacity(n * (n + 1) / 2);
-            let mut cols = Vec::with_capacity(n * (n + 1) / 2);
-            for i in 0..n {
-                for j in 0..=i {
-                    rows.push(i as Index);
-                    cols.push(j as Index);
-                }
-            }
-            let nele = rows.len() as Index;
-            (rows, cols, nele)
+            (Vec::new(), Vec::new(), 0)
         };
 
         Ok(PyTnlpInit {

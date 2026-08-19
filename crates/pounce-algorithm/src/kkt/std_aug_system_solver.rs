@@ -359,6 +359,21 @@ impl StdAugSystemSolver {
             )
         };
         if !self.initialized || self.struct_sig != Some(sig) {
+            // `build_structure` ends in `linsol.initialize_structure`,
+            // which drives the backend's symbolic factorization (MA57
+            // ANALYZE). That sits outside the `linear_system_factorization`
+            // guard `solve` takes below, so without this the time is
+            // attributed to no phase at all and there is no row for it —
+            // upstream prints `LinearSystemSymbolicFactorization`
+            // separately. It matters because the structure signature keys
+            // on `w_nnz`, so a run that alternates W sparsities re-analyzes
+            // (gh#698).
+            // Cloned rather than borrowed so `build_structure`'s
+            // `&mut self` does not collide with the guard.
+            let timing = self.timing.clone();
+            let _sym_guard = timing
+                .as_deref()
+                .map(|t| t.linear_system_symbolic_factorization.guard());
             let s = self.build_structure(coeffs);
             if s != ESymSolverStatus::Success {
                 self.last_status = Some(s);

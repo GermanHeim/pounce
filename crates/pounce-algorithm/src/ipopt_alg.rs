@@ -1699,6 +1699,8 @@ impl IpoptAlgorithm {
     /// `GetIpoptCurrent*`) can read live state for the duration. Returns
     /// `true` to continue, `false` if the user requested termination.
     fn fire_intermediate(&self) -> bool {
+        let timing = self.data.borrow().timing.clone();
+        let _guard = timing.fire_intermediate.guard();
         let Some(tnlp) = self.tnlp.as_ref() else {
             return true;
         };
