@@ -20,7 +20,7 @@ You can configure them independently. Defaults match upstream Ipopt:
 
 | Option | Default | Effect |
 |---|---|---|
-| `nlp_scaling_method` | `gradient-based` | `none` / `gradient-based` / `user-scaling`. |
+| `nlp_scaling_method` | `gradient-based` | `none` / `gradient-based` / `user-scaling` / `curvature-based`. |
 | `nlp_scaling_max_gradient` | `100.0` | Cutoff above which gradient-based scaling applies. Per-row scale = `min(1, max_gradient / ‖∇c_i‖_∞)`. |
 | `nlp_scaling_min_value` | `1e-8` | Floor on computed scale factors — prevents inverting near-zero gradients. |
 | `nlp_scaling_obj_target_gradient` | `0.0` | When `> 0`, *pins* the scaled objective gradient ∞-norm to this value. Overrides the `max_gradient` cutoff. |
@@ -36,6 +36,131 @@ would invalidate the filter's history (Wächter, 2013).
 
 The clamp at 1.0 means scaling never *amplifies* a small row; it only
 damps large ones.
+
+Two consequences of the single shot are worth knowing before you rely
+on it. The cutoff is a **per-block gate**: unless some row of a block
+(the equalities, or the inequalities) exceeds
+`nlp_scaling_max_gradient`, no scale vector is produced for that block
+at all. And the sample is only as informative as the point it is taken
+at — which is the next section.
+
+### Quadratic rows the sampler cannot see
+
+A row written `½·x'Qx ≤ b` about the origin has `∇g(0) = 0`. Started
+from `x0 = 0` — the default for a model with free variables and no
+initial guess — the sample reads nothing, and the row is assigned
+factor **1.0** however far `Q` and `b` disagree in magnitude. This is
+not a cutoff set too high: `100/0` and `1e-6/0` both clamp to 1.0, so
+no value of `nlp_scaling_max_gradient` reaches the row.
+
+It matters because the row's slack `s = −g(x)` then inherits the
+right-hand side's scale, and so does the `−s/λ` diagonal of the KKT
+system. On a QCQP whose right-hand sides run four orders of magnitude
+above its curvature, supplying the row scales by hand is worth several
+times the iteration count.
+
+`pounce check-x0` reports both halves — the factors the sampler will
+pick, and the coefficient magnitudes it cannot see:
+
+```sh
+pounce check-x0 model.nl
+```
+
+```text
+  automatic scaling at x0 (nlp_scaling_method=gradient-based, nlp_scaling_max_gradient=100):
+    objective: ||grad f|| 9.983e1 -> factor 1.000e0  (below the cutoff: unscaled)
+    inequalities: 5007 row(s), no row above the cutoff -> the whole block is unscaled
+                  7 row(s) have an all-zero Jacobian at x0 (the sample cannot scale them)
+    quadratic rows: 7 recognized; 7 left at factor 1.0, 7 with a zero Jacobian at x0
+                    worst |b|/||Q||_inf mismatch 5.588e1
+```
+
+`||Q||_inf` is the largest absolute row sum of the row's Hessian —
+Gershgorin's bound on its largest eigenvalue, so the reported mismatch
+is a *lower* estimate of the real one. `--scaling-max-gradient` previews
+a different cutoff; `--json` puts the same numbers under a `scaling`
+key.
+
+`curvature-based` below computes exactly that correction for you;
+`user-scaling` lets you supply it by hand. See
+`dev-notes/quadratic-structure-exploitation.md` §8 for the derivation
+and the measurements.
+
+### `curvature-based`
+
+Derives the scaling from the model's **quadratic coefficients** instead of
+from a derivative sample, so a row's factor does not depend on where the
+modeller happened to start. Two stages, both from
+`dev-notes/quadratic-structure-exploitation.md` §8:
+
+1. one **joint** variable scaling `D`, Ruiz-equilibrated across the whole
+   pencil `Q_0 + Σ λ_i Q_i` — via the λ-independent magnitude envelope of
+   that family, so it balances every constraint at once rather than each
+   `Q_i` against its own column scaling;
+2. a per-row `e_i = 1 / max(‖D Q_i D‖_∞, ‖D a_i‖_∞, |b_i|)`.
+
+The objective is deliberately left unscaled: the Ruiz pass already anchors
+the Hessian block against the constraint blocks, and shrinking it below the
+constraint scale costs strong convexity.
+
+```sh
+pounce model.nl model.sol nlp_scaling_method=curvature-based
+```
+
+**It requires every row and the objective to be degree ≤ 2** — the envelope
+above exists only because each `Q_i` is a constant matrix — and it refuses
+with a message rather than silently solving unscaled. A model with a
+genuine nonlinearity is not one this method is defined for.
+
+What it buys is best stated as invariance rather than speed. Given a QCQP
+and the same QCQP with an exact change of variables `x_j → x_j / c_j`
+spanning nine orders of magnitude:
+
+| column span | `gradient-based` | `curvature-based` |
+|---|---|---|
+| 1 | 75 it, `2.4779690299303e4` | 16 it, `2.4779690299303e4` |
+| 1e3 | 92 it, `2.4779690302194e4` | 16 it, `2.4779690299303e4` |
+| 1e6 | 154 it, `2.4779690388034e4` | 16 it, `2.4779690299303e4` |
+| 1e9 | `Maximum_Iterations_Exceeded` | 16 it, `2.4779690299303e4` |
+
+Three caveats, all measured over POUNCE's own CLI fixture corpus (66
+models, of which this method accepts 47 and refuses 19):
+
+* **It is off by default, and asking for it is not free.** Of the 47 it
+  accepts, **33 change status, iteration count or objective** and 14 do not.
+  This is not a knob to turn on speculatively: it is the answer to a
+  specific pathology (a `Q` the default's gradient sample cannot see), and
+  on a model that does not have that pathology it is simply a different
+  scaling with different behaviour.
+* **Asking for it can change which engine runs.** The factors reach the
+  solver through the `get_scaling_parameters` callback, which the convex
+  drivers never call, so on a convex-classified model `solver_selection=auto`
+  declines the fast path and uses the general NLP interior-point solver — the
+  same bargain `user-scaling` has made since
+  [#483](https://github.com/jkitchin/pounce/issues/483). It says so on
+  stderr. That reroute is what the option costs on `convex_qp_share1b`:
+  28 iterations on the convex driver, 218 on the general one, same objective.
+  It also means the general path's verdicts apply: a handful of corpus models
+  that the convex presolve rejects as `Infeasible_Problem_Detected` are
+  reported by the NLP path as `Invalid_Problem_Definition` or
+  `Not_Enough_Degrees_Of_Freedom` instead. Every one of those is reachable
+  today by passing `solver_selection=nlp`; none is new.
+  **Exception:** a model with no quadratic coefficient at all — an LP is
+  degree ≤ 2 with every `Q` empty — has no curvature to read, so the scheme
+  degenerates to Ruiz equilibration of `[A b]`, which the convex driver
+  already does internally. Those keep the fast path unchanged, with a note
+  saying so. Without that exception `lp_israel` went from 29 iterations to
+  296 for asking.
+* **On a nonconvex model, changing the scaling changes which local minimum
+  you reach — and which one is a coin flip, not a property of the method.**
+  On one draw `pooling_rt2stp` goes from `-3273.955` in 128 iterations to
+  `-4391.826` (the published global optimum of that instance) in 1083. Do
+  not read that as "curvature-based finds better optima, slowly": this model
+  is bistable between those two values, and across 11 round-off-scale
+  perturbations of `mu_init` the default lands on the better optimum 3 times
+  out of 11 and `curvature-based` 4 out of 11, with median iteration counts
+  of 204 and 108 respectively. Treat a nonconvex re-scale as a different
+  search whose outcome is not carried over from the old one.
 
 ### `user-scaling`
 
@@ -227,6 +352,14 @@ Reach for non-default scaling when:
   problem-specific target gradients.
 * You know the natural units of your problem better than the solver
   can infer from gradients at `x_0`. Wire `user-scaling`.
+* The model has quadratic constraints written about the origin and
+  started from zero. `gradient-based` cannot scale those rows at all —
+  see [Quadratic rows the sampler cannot
+  see](#quadratic-rows-the-sampler-cannot-see) — and `pounce check-x0`
+  will say so. Try `curvature-based`.
+* The model is a QCQP whose variables are in wildly different units.
+  `curvature-based` equilibrates the columns jointly across every
+  quadratic form; `gradient-based` has no column stage at all.
 
 Otherwise the upstream-Ipopt-style defaults (`gradient-based` at the
 NLP level, `none` at the linear-system level with MA57's internal

@@ -129,6 +129,87 @@ pub enum ScalingMethod {
     UserScaling,
 }
 
+/// The objective scale `df` gradient-based scaling picks from
+/// `‖∇f(x₀)‖_∞`.
+///
+/// Free rather than inlined into [`OrigIpoptNlp::determine_scaling_from_starting_point`]
+/// so a diagnostic can report the number the solver *will* use without
+/// re-deriving it: `pounce check-x0` calls this, and a copy there would be
+/// free to drift from the copy that runs (gh #703).
+///
+/// `obj_target_gradient > 0` (`nlp_scaling_obj_target_gradient`) pins the
+/// scaled gradient's ∞-norm to that value and overrides both the
+/// `max_gradient` cutoff and the 1.0 clamp; otherwise the objective is
+/// scaled only when its gradient exceeds the cutoff. The result is floored
+/// at `min_value`.
+pub fn gradient_obj_scale(
+    max_grad_f: Number,
+    max_gradient: Number,
+    min_value: Number,
+    obj_target_gradient: Number,
+) -> Number {
+    let mut df = 1.0;
+    if obj_target_gradient > 0.0 && max_grad_f > 0.0 {
+        // Target overrides the cutoff (and the 1.0 clamp):
+        // pin gradient ∞-norm to the requested value.
+        df = obj_target_gradient / max_grad_f;
+    } else if max_grad_f > max_gradient {
+        df = max_gradient / max_grad_f;
+    }
+    if df < min_value {
+        df = min_value;
+    }
+    df
+}
+
+/// The scale gradient-based scaling assigns one constraint row, given that
+/// row's Jacobian ∞-norm at the starting point.
+///
+/// With `constr_target_gradient > 0` the user is asking for a *fixed*
+/// gradient ∞-norm per row (overrides the cutoff and the 1.0 clamp).
+/// Otherwise: scale only rows that exceed the cutoff, never amplify (clamp
+/// at 1). Floored at `min_value`.
+///
+/// **A row whose Jacobian is entirely zero at the sampling point gets 1.0**
+/// — `row_max` arrives as `f64::MIN_POSITIVE` (upstream's `dbl_min` seed),
+/// the raw ratio overflows the clamp, and the row comes out unscaled. That
+/// is the right answer for a row with no derivative at all, and the wrong
+/// one for a row whose derivative merely *vanishes at x₀* — a
+/// `½xᵀQx ≤ b` written about the origin and started from `x₀ = 0`, which
+/// is how AMPL emits `qcqp1000-2c`. See `pounce check-x0`'s scaling
+/// section and `dev-notes/quadratic-structure-exploitation.md` §8
+/// (gh #703).
+pub fn gradient_row_scale(
+    row_max: Number,
+    max_gradient: Number,
+    min_value: Number,
+    constr_target_gradient: Number,
+) -> Number {
+    let mut s = if constr_target_gradient > 0.0 {
+        constr_target_gradient / row_max
+    } else {
+        let raw = max_gradient / row_max;
+        if raw > 1.0 { 1.0 } else { raw }
+    };
+    if s < min_value {
+        s = min_value;
+    }
+    s
+}
+
+/// Whether gradient-based scaling produces a scale vector at all for a
+/// block of rows (the `c` equalities and the `d` inequalities are gated
+/// separately). Unless some row exceeds the cutoff the whole block is left
+/// unscaled, so a per-row scale below 1 elsewhere in the model does not
+/// imply this block got one.
+pub fn gradient_scaling_fires(
+    row_max: &[Number],
+    max_gradient: Number,
+    constr_target_gradient: Number,
+) -> bool {
+    constr_target_gradient > 0.0 || row_max.iter().any(|&v| v > max_gradient)
+}
+
 /// Concrete `IpoptNlp` over a `TNLPAdapter`. Mirrors upstream
 /// `Ipopt::OrigIpoptNLP`.
 pub struct OrigIpoptNlp {
@@ -1111,16 +1192,7 @@ impl OrigIpoptNlp {
                     max_grad_f = v;
                 }
             }
-            if obj_target_gradient > 0.0 && max_grad_f > 0.0 {
-                // Target overrides the cutoff (and the 1.0 clamp):
-                // pin gradient ∞-norm to the requested value.
-                df = obj_target_gradient / max_grad_f;
-            } else if max_grad_f > max_gradient {
-                df = max_gradient / max_grad_f;
-            }
-            if df < min_value {
-                df = min_value;
-            }
+            df = gradient_obj_scale(max_grad_f, max_gradient, min_value, obj_target_gradient);
         }
         self.computed_obj_scale.set(df);
         self.obj_scale_factor.set(df * user_obj_factor);
@@ -1204,23 +1276,10 @@ impl OrigIpoptNlp {
         }
 
         let row_max_to_scale = |row_max: Number| -> Number {
-            // With `constr_target_gradient` > 0 the user is asking for
-            // a *fixed* gradient ∞-norm per row (overrides the cutoff
-            // and the 1.0 clamp). Otherwise: scale only rows that
-            // exceed the cutoff, never amplify (clamp at 1).
-            let mut s = if constr_target_gradient > 0.0 {
-                constr_target_gradient / row_max
-            } else {
-                let raw = max_gradient / row_max;
-                if raw > 1.0 { 1.0 } else { raw }
-            };
-            if s < min_value {
-                s = min_value;
-            }
-            s
+            gradient_row_scale(row_max, max_gradient, min_value, constr_target_gradient)
         };
         let any_row_above = |rows: &[Number]| -> bool {
-            constr_target_gradient > 0.0 || rows.iter().any(|&v| v > max_gradient)
+            gradient_scaling_fires(rows, max_gradient, constr_target_gradient)
         };
 
         if n_c > 0 && any_row_above(&c_row_max) {

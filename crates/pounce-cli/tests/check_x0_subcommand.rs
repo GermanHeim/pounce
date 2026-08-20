@@ -122,3 +122,58 @@ fn x0_file_overrides_start_and_infeasibility_is_not_fatal() {
     let _ = std::fs::remove_file(&far);
     let _ = std::fs::remove_file(&report);
 }
+
+/// gh #703 — the scaling section reports the factors gradient-based
+/// scaling will pick, and the coefficient magnitudes it cannot see.
+///
+/// `qcqp_ball.nl` is `x₀² + x₁² ≤ 4` started from the origin: the row's
+/// Jacobian there is identically zero, so the sample reads nothing and
+/// the row keeps factor 1.0 however `Q` and `b` compare.
+#[test]
+fn scaling_block_reports_the_quadratic_blind_spot() {
+    let mut nl = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    nl.push("tests");
+    nl.push("fixtures");
+    nl.push("qcqp_ball.nl");
+
+    let out = Command::new(pounce_exe())
+        .arg("check-x0")
+        .arg(&nl)
+        .arg("--json")
+        .output()
+        .expect("spawn pounce check-x0");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is a JSON report");
+    let s = &v["scaling"];
+    assert_eq!(s["method"], "gradient-based");
+    assert_eq!(s["nlp_scaling_max_gradient"], 100.0);
+    let q = &s["quadratic_rows"];
+    assert_eq!(q["n_rows"], 1);
+    assert_eq!(q["n_zero_jacobian_at_x0"], 1);
+    assert_eq!(q["n_unscaled"], 1);
+    let worst = &q["worst"][0];
+    assert_eq!(worst["factor"], 1.0);
+    assert_eq!(worst["jacobian_inf_norm_at_x0"], 0.0);
+    assert!(worst["curvature_inf_norm"].as_f64().unwrap() > 0.0);
+
+    // The cutoff is a real knob, not a printed constant.
+    let out = Command::new(pounce_exe())
+        .arg("check-x0")
+        .arg(&nl)
+        .arg("--json")
+        .arg("--scaling-max-gradient")
+        .arg("0.5")
+        .output()
+        .expect("spawn pounce check-x0");
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is a JSON report");
+    assert_eq!(v["scaling"]["nlp_scaling_max_gradient"], 0.5);
+    // …and it still cannot reach the quadratic row.
+    assert_eq!(v["scaling"]["quadratic_rows"]["n_unscaled"], 1);
+}

@@ -926,12 +926,14 @@ parameter trajectory via `JaxProblem`; see
 The first stop is the preflight check, which evaluates the model once
 at its starting point (no solve) and reports everything this page has
 warned about: NaN/inf evaluations, bound violations, how far the
-interior clamp will move the point, initial constraint violation, and
-derivative scale spread.
+interior clamp will move the point, initial constraint violation,
+derivative scale spread, and the factors automatic scaling will pick
+here.
 
 ```sh
 pounce check-x0 model.nl              # text report; --json for tools
 pounce check-x0 model.nl --x0-file candidate.txt
+pounce check-x0 model.nl --scaling-max-gradient 10   # preview another cutoff
 ```
 
 ```python
@@ -948,6 +950,15 @@ Exit code 0 means the model evaluates cleanly at x0 (warnings allowed);
   The interior clamp only repairs bound violations; it cannot fix
   domain errors on free variables. Move the start into the domain,
   or add bounds that keep the clamp inside it.
+* **The `automatic scaling at x0` section** shows what
+  `nlp_scaling_method=gradient-based` will actually do here: the
+  objective factor, whether each row block clears the
+  `nlp_scaling_max_gradient` cutoff at all, and — for a `.nl` model —
+  the coefficient magnitudes of its quadratic rows. That last part
+  exists because the automatic scaler is a *point sample*: a row like
+  `x'Qx <= b` written about the origin has a zero Jacobian at
+  `x0 = 0`, so it is left unscaled no matter how far `Q` and `b`
+  disagree. See [Scaling](scaling.md#quadratic-rows-the-sampler-cannot-see).
 * **`derivative_test=first-order`** runs the derivative checker at
   the starting point; wrong derivatives look exactly like a bad
   start (immediate restoration, tiny steps).
