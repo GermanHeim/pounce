@@ -1107,7 +1107,7 @@ documented in [Auxiliary-Equality Preprocessing](auxiliary-presolve.md):
 
 `linear_solver=feral` (the default — see
 [Commonly used options](#commonly-used-options)) is configurable
-through seven `feral_*` options. Defaults are tuned for the IPM
+through ten `feral_*` options. Defaults are tuned for the IPM
 workload and rarely need changing; reach for these when profiling a
 specific problem. Each also falls back to a matching `POUNCE_FERAL_*`
 environment variable when left unset on the OptionsList (see
@@ -1118,6 +1118,7 @@ environment variable when left unset on the OptionsList (see
 | `feral_ordering`             | `auto`  | Fill-reducing ordering method (see table below). `auto` lets feral's adaptive dispatcher pick per-matrix; `auto_race` measures the actual symbolic outcome and keeps the best.            |
 | `feral_pivtol`               | `1e-8`  | Relative Bunch-Kaufman partial-pivoting threshold `u`. Analog of `ma27_pivtol` / `ma57_pivtol`. Smaller → sparser `L`, faster, less stable; larger → more 2×2 blocks, denser, more stable. LAPACK's textbook maximum-stability value is `0.5`. |
 | `feral_refine`               | `yes`   | Iterative refinement on every back-solve. Closes the residual floor from cascade-break's `L`-factor perturbation; disable only when timing the bare factor + back-solve in isolation.     |
+| `feral_refine_steps`         | `10`    | Maximum correction steps FERAL's inner iterative refinement may take on a single back-solve, when `feral_refine` is on. An **upper bound**, not a step count: refinement still exits early on its own convergence test, so lowering this only truncates the solves that were going to run long. `0` leaves refinement enabled but caps it at zero corrections — that still costs the residual evaluation, so use `feral_refine=no` to switch refinement off outright. Reach for a small cap (`1`) on very large, badly conditioned KKT systems where the interior-point tail spends most of its wall clock inside refinement rather than the factor (gh#710) — but check the answer, not just the clock: sweeping the fixture corpus at `1` moves 15 of 118 legs and loses two, `deb7` (exact) from `SolveSucceeded` to `ErrorInStepComputation` and `cresc4` (limited-memory) from `SolveSucceeded` to `InfeasibleProblemDetected`, while others improve. A per-problem lever, not a global one. Ignored when `feral_refine=no`. |
 | `feral_cascade_break`        | (unset) | Tri-state. Unset → inherit feral's Phase B default (CB on with bounded delayed-pivot catchment). `yes` records explicit intent (no behavioural change). `no` reproduces pre-Phase-B behaviour by surfacing `DelayBudgetExceeded` on non-root cascade victims.  |
 | `feral_fma`                  | `no`    | Dispatch dense kernels through fused multiply-add intrinsics. Roughly 2× throughput on aarch64 / x86_v3, at the cost of per-pivot rounding drift that trips more `WrongInertia` checks. Turn on when kernel throughput dominates and the IPM tolerates a noisier inertia signal. |
 | `feral_singular_pivot_floor` | `1e-20` | Pounce's analog of MA57's `CNTL(2)`. After a successful factor, the smallest accepted `D`-block pivot magnitude (scaled space) is compared against this absolute floor; if it falls below, the factor is reported `Singular` so the IPM bumps `δ_w`. `0` disables. |
@@ -1192,12 +1193,23 @@ embeddings).
 | `POUNCE_FERAL_SCALING`              | `feral_scaling`              |
 | `POUNCE_FERAL_PIVTOL`               | `feral_pivtol` (deprecated bare `FERAL_PIVTOL` also accepted) |
 | `POUNCE_FERAL_REFINE`               | `feral_refine`               |
+| `POUNCE_FERAL_REFINE_STEPS`         | `feral_refine_steps`         |
 | `POUNCE_FERAL_CASCADE_BREAK`        | `feral_cascade_break`        |
 | `POUNCE_FERAL_FMA`                  | `feral_fma`                  |
 | `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` | `feral_singular_pivot_floor` |
 | `POUNCE_FERAL_INERTIA_PIVOT_FLOOR`  | `feral_inertia_pivot_floor`  |
 | `POUNCE_FERAL_MIN_PAR_FLOPS`        | `feral_min_par_flops`        |
 | `POUNCE_FERAL_STATIC_PIVOTING`      | `feral_static_pivoting`      |
+
+These variables are parsed by `feral::env` (feral#176), which accepts the
+same spellings the option parser does — including scientific notation, so
+`POUNCE_FERAL_MIN_PAR_FLOPS=1e8` sets the documented default rather than
+being silently discarded, as it was before feral 0.17.0 when pounce parsed
+these with a bare `str::parse`. A value that is out of range for the
+target type is clamped to the maximum; a value that cannot be parsed at
+all, or that fails the knob's stated requirement (e.g. a negative pivot
+floor), is refused with a one-time warning on stderr and the default is
+used. A refused variable never silently changes numerics.
 
 `FERAL_PARALLEL` (legacy, no `POUNCE_` prefix) forces feral's internal
 factor serial or parallel process-wide — `0`/`off`/`false`/`no` to force

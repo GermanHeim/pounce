@@ -208,6 +208,15 @@ impl TSymLinearSolver {
             static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
             static DUMPED: AtomicBool = AtomicBool::new(false);
             let n_call = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            // Deliberately still a bare `str::parse`, unlike the
+            // `POUNCE_FERAL_*` numerics knobs, which were moved onto
+            // `feral::env` (feral#176) because a refused value there
+            // silently changed the solve. This is the same *shape* of
+            // parse, but not the same defect: a refused value here only
+            // dumps the wrong `multi_solve` call, which is immediately
+            // visible to whoever set the variable, and pounce-linsol has
+            // no feral dependency to borrow the parser from. The knob is
+            // deprecated in favour of `--dump kkt:<spec>` in any case.
             let skip: usize = std::env::var("POUNCE_DBG_KKT_DUMP_SKIP")
                 .ok()
                 .and_then(|s| s.parse().ok())

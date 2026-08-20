@@ -156,13 +156,82 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.10.0
 # feral's, and `feral_min_par_flops` / `POUNCE_FERAL_MIN_PAR_FLOPS` remain the
 # override if the calibration turns out to want re-tuning.
 #
-# 0.15.1 is the current pin. If you ever need to develop against an unreleased
+# 0.16.0 changes the default LU pivoting rule: `SparseLu::factor` now runs
+# threshold-Markowitz (feral#171) instead of factoring in the column order its
+# `SparseLuSymbolic` argument carries. Markowitz picks the column order *during*
+# the factorization, so it **ignores the symbolic entirely** — a caller that
+# supplies an ordering and expects it honoured silently factors something else.
+# All three pounce call sites do supply one, so all three now pass
+# `pivoting: LuPivoting::GilbertPeierls` explicitly and are unchanged by the
+# bump: `pounce-convex/src/simplex.rs` (crossover basis),
+# `pounce-feral/src/lib.rs` (the AMD order the dependent-row/rank scan is
+# written against) and `pounce-py/src/sparse_lu.rs` (whose docstring promises a
+# cached symbolic makes a re-factor numeric-only — untrue under a rule that has
+# no symbolic). Markowitz is a large *reported* win on LP bases
+# (`factor_nnz()/nnz(B)` geomean 2.77x -> 1.06x over 16 preserved bases) at the
+# cost of stability (max|U|/max|B| = 81.8 on QPLIB_1157_rlt1 against SuperLU's
+# 2.56), so adopting it anywhere here is a measured change of its own and not
+# part of a version bump. 0.16.0 also adds `LuParams::sparse_rhs_max_density`
+# (feral#164), a density guard on the sparse-rhs ftran/btran entry points that
+# pounce does not currently call.
+#
+# 0.17.0 is the release pounce asked for. Four items, in the order they matter
+# here:
+#
+# (#178) `RefineOptions { max_steps }` and in-place solve entry points, both
+# requested by gh#698 observation 5 and tracked as gh#710. feral's inner
+# refinement budget was hard-coded at 10 correction steps, which is right for a
+# caller that solves `Ax = b` and keeps the answer and wrong for one running its
+# own refinement over the same system. `PdFullSpaceSolver` is the latter, so the
+# loops nested: up to 10x11 substitution passes per augmented-system solve,
+# measured at 60% of back-solve time (147.3 s vs 58.3 s) on a 118 276-dimension
+# KKT. Only 10 and 0 were expressible before. `pounce-feral` now exposes the
+# budget as `feral_refine_steps`, and it stays at feral's 10 by default: the
+# case gh#710 nominated to justify lowering it (pinene_3200, said to stall in
+# the IPM tail without refinement) does not object — measured, it converges to
+# the same objective at 10, 1, 0 and refine-off — but the fixture corpus does,
+# losing `deb7` (exact) and `cresc4` (L-BFGS) at a cap of 1. So the knob ships
+# opt-in. The `_into` forms remove the owned `Vec` every solve entry point used
+# to return, ~946 KB of allocate-plus-copy per right-hand side at that
+# dimension.
+#
+# (#177) refined solves now choose between the shared-vector and
+# contribution-block solve cores from the factor's structure alone, where the
+# choice used to come from `rayon::current_num_threads()`. The two cores are
+# different (equally valid) floating-point reassociations, so the same feral on
+# the same matrix with the same factor returned different bits on machines with
+# different core counts — and feral#16 established that a ULP here is amplified
+# by the filter line search into trajectory-level outcomes (141 vs 888 outer
+# iterations on qcqp1000-1nc). **This one can move our numbers**, and upstream
+# says so in as many words: it is the fix, not a side effect, but a host on the
+# other side of the old gate sees its refined solves move in the last bits. It
+# is also why the fixture sweep for this bump was run against a 0.15.1 baseline
+# rather than reasoned about.
+#
+# (#134 item B) the scaling router's dense-head gate now counts *symmetric*
+# degree rather than the length of a stored lower-triangle column, which was a
+# property of the index order and not of the matrix. The IPOPT variable
+# convention puts the duals last, so the shape this misrouted is exactly the one
+# pounce emits. Monotone — symmetric degree is never below stored degree, so the
+# gate only becomes easier to pass — and all 15 families that change route gain
+# `Mc64Symmetric`, with identical inertia under both routes on all 15.
+#
+# (#176) every numeric `FERAL_*` knob was read as
+# `env::var(N).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)`, which
+# silently discards scientific notation: `FERAL_CB_THRESH=1e18` parsed as
+# nothing and was replaced by the built-in default while the docs wrote that
+# same default as `1e6`. The policy now lives in a public `feral::env` module so
+# a caller can apply the same rules to its own knobs — and pounce had the
+# identical defect on `POUNCE_FERAL_MIN_PAR_FLOPS`, whose documented default we
+# print as `1e8`. Those reads now go through `feral::env`.
+#
+# 0.17.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.15.1" }
+feral = { version = "0.17.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
