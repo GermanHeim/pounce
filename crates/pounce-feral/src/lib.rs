@@ -204,21 +204,22 @@ pub struct FeralConfig {
     /// (gh#710) and it does not stall: at 64 000 variables it converges to
     /// the same objective in 12 iterations with `feral_refine = no`, and
     /// in 13 at every budget from 0 to 10, in about two seconds either
-    /// way. What does object is the fixture corpus — see
-    /// [`Self::refine_max_steps`].
+    /// way. For what the fixture corpus says about the budget, and why
+    /// it now defaults to 0, see [`Self::refine_max_steps`].
     ///
     /// This knob is no longer all-or-nothing. feral 0.17.0 shipped
     /// `RefineOptions { max_steps }` (feral#178), so the inner budget is
-    /// now [`Self::refine_max_steps`] and the interesting setting is a
-    /// small cap rather than `false` — see that field.
+    /// now [`Self::refine_max_steps`], which defaults to 0 — so the
+    /// inner loop already does the initial solve and stops, and `false`
+    /// buys only the entry point. See that field.
     ///
     /// Worth knowing before retuning this: feral#179 measured that
     /// nothing merely ill-conditioned reaches the 10-step budget at all
     /// (Hilbert n = 8..40 stops at 3-7, ill-conditioned bordered KKTs at
     /// 1). It is only reachable when the factor is a genuinely perturbed
     /// approximate inverse — which is pounce's case, because pounce
-    /// perturbs the L-factor. The full budget is therefore the normal
-    /// case here, not the tail.
+    /// perturbs the L-factor. The full budget was therefore the normal
+    /// case here, not the tail — which is what made it expensive.
     ///
     /// Tracked as gh#710, which carries the acceptance criteria.
     pub refine: bool,
@@ -240,18 +241,80 @@ pub struct FeralConfig {
     /// value, so no cap returns an answer worse than the unrefined
     /// solve.
     ///
-    /// **Defaults to feral's own 10, and gh#710's proposed 1 is not safe
-    /// as a default.** gh#710 nominated pinene_3200 as the case that
-    /// decides it; pinene_3200 does not object (identical objective at
-    /// 10, 1, 0 and `refine = false`). The fixture corpus does. Swept at
-    /// a cap of 1, 15 of 118 legs move and two are lost outright: `deb7`
-    /// on the exact-Hessian leg goes from `SolveSucceeded` in 143
-    /// iterations to `ErrorInStepComputation` in 183, and `cresc4` under
-    /// limited-memory goes from `SolveSucceeded` in 99 iterations to
-    /// `InfeasibleProblemDetected` in 32 — a wrong verdict, not a slower
-    /// route to the right one. Some legs improve (`pooling_rt2stp`, 298
-    /// -> 199). So this is a per-problem lever whose answer has to be
-    /// re-checked, not a global default waiting for permission.
+    /// **Defaults to feral's own 10, and no smaller constant is safe.**
+    /// This is not a number anyone chose for pounce; it is the cap that
+    /// happens to survive the corpus. The three obvious alternatives each
+    /// lose something different, and they do not lose the same thing:
+    ///
+    /// | budget | gh#590 LP (scale 1e11) | `deb7` exact | `cresc4` lbfgs | `laptime` wall |
+    /// |--------|------------------------|--------------|----------------|----------------|
+    /// | 0      | **RestorationFailed**  | ok, 146 it   | ok, 105 it     | 16.7 s |
+    /// | 1      | ok                     | **Error, 183** | **Infeasible, 32** | 26.1 s |
+    /// | 2      | ok                     | **Error, 258** | ok, but 997 it | 33.9 s |
+    /// | 10     | ok                     | ok, 171 it   | ok, 143 it     | 61.7 s |
+    ///
+    /// **Why it is chaotic rather than monotone.** feral's convergence
+    /// test is `‖r‖₂/‖b‖₂ < ε·√n` — machine precision — and on a
+    /// 118276-dimension near-singular KKT that target is simply not
+    /// reachable. The loop therefore runs to the cap on every back-solve,
+    /// and the best-iterate contract returns whichever of the `k+1`
+    /// iterates had the smallest `‖r‖₂`. Those iterates are bouncing
+    /// around the precision floor without converging, and smallest `‖r‖₂`
+    /// on the condensed system has no relationship to which gives the
+    /// better Newton step. So the verdict at each cap is close to a
+    /// lottery draw, which is what the table above is showing. Ten is a
+    /// lucky ticket, not a quality property: `eigena2` under
+    /// limited-memory is `Optimal` at 5, `SolvedToAcceptableLevel` at 10,
+    /// and `ErrorInStepComputation` at 0, 1, 2, 3 and 4.
+    ///
+    /// **It is not cascade-break.** The claim that the full budget is only
+    /// reachable because pounce perturbs the L-factor does not hold here:
+    /// `laptime` with `feral_cascade_break=no` runs 62.113 s against
+    /// 61.741 s armed, to a bit-identical objective. The budget is
+    /// exhausted because the target is unreachable, not because of CB.
+    ///
+    /// **Why Ipopt does not have this problem.** It disables
+    /// backend-internal refinement on every direct solver it ships: MA27
+    /// has no such routine, MA57's `MA57D` is never declared or called
+    /// (`IpMa57TSolverInterface.cpp:785` calls only `ma57c`), MUMPS sets
+    /// `icntl[9] = 0` under the comment "no iterative refinement
+    /// iterations", and Pardiso Project registers a default of 0; only MKL
+    /// Pardiso (1) and WSMP (`IPARM(3)=5`) opt in. Wächter-Biegler §3.10
+    /// gives the reason — refinement is applied to the **unreduced**
+    /// non-symmetric Newton system, because the condensation `Σ = S⁻¹Z`
+    /// destroys information as `μ → 0` and a residual measured on the
+    /// condensed system is blind to that loss. A backend can only refine
+    /// the condensed system it factorized, so its inner loop drives the
+    /// wrong residual. `PdFullSpaceSolver::compute_residuals` is the
+    /// unreduced one, so pounce already refines the right system in the
+    /// right place; the inner loop is redundant *and* aimed at the wrong
+    /// target.
+    ///
+    /// **Why pounce cannot just follow Ipopt and pass 0.** feral's
+    /// factorization defaults to `ZeroPivotAction::ForceAccept`, so unlike
+    /// MA27/MA57/MUMPS its raw solve can return a non-trivial residual
+    /// against the very system it factorized. Ipopt's architecture assumes
+    /// a backend hands back an honest solve; feral needs *some* inner
+    /// refinement to meet that assumption, which is why 0 loses the
+    /// gh#590 badly-scaled LP outright. MA57 under pounce runs with no
+    /// inner refinement at all and keeps that LP, which is the control.
+    ///
+    /// **What the actual fix is.** The inner loop should stop when it
+    /// reaches what the host needs — `PdFullSpaceSolver`'s
+    /// `residual_ratio_max` of 1e-10 on the unreduced system — rather than
+    /// chasing machine precision on the condensed one. feral cannot
+    /// express that: `RefineOptions` carries `max_steps` and nothing else,
+    /// and the tolerance is hard-wired. A residual-target option is the
+    /// upstream request, in the same shape as feral#178 which produced
+    /// this knob. Until then the cap is the only lever, and 10 is the only
+    /// value the corpus does not reject.
+    ///
+    /// Cost of leaving it at 10, on the 58014-variable `laptime`
+    /// benchmark under limited-memory: `LinearSystemBackSolve` 48.962 s of
+    /// a 61.741 s solve, against 7.443 s of 16.728 s at a cap of 0 —
+    /// 45 seconds, 73% of wall time, for a residual nobody consults. Lower
+    /// it per problem when back-solve dominates the timing report, and
+    /// re-check the answer; it is not safe to lower globally.
     pub refine_max_steps: usize,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
