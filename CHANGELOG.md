@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+- **`pounce check-x0` now reports what automatic scaling will do — and, for a
+  quadratic row, what it cannot see** (#703).
+
+  `nlp_scaling_method=gradient-based` (the default) is a point sample: it
+  reads `∇f` and the Jacobian once at x₀ and never looks again. A row written
+  `½xᵀQx ≤ b` about the origin has `∇g(0) = 0`, so started from `x₀ = 0` the
+  sample reads nothing and the row is assigned factor **1.0** however far `Q`
+  and `b` disagree. No value of `nlp_scaling_max_gradient` reaches it — `100/0`
+  and `1e-6/0` both clamp to 1 — and the cutoff is a per-block gate besides,
+  so a block with no row above it gets no scale vector at all. Across the CLI
+  fixture corpus that is **196 of 196 quadratic rows left unscaled**, including
+  one at 250× and one at 52× right-hand-side-to-curvature mismatch.
+
+  The preflight's new `automatic scaling at x0` section reports the objective
+  factor, the per-block gate and the per-row factors — computed by the
+  solver's own arithmetic, not a copy of it — beside the coefficient
+  magnitudes (`‖Q‖_∞`, `‖a‖_∞`, `|b|`) that the sample cannot report. A
+  warning fires when a model has rows in that blind spot *and* a mismatch
+  above 100×, naming `nlp_scaling_method=user-scaling` as the remedy. The
+  remedy is a real one: supplying `eᵢ = 1/max(‖Qᵢ‖_∞, ‖aᵢ‖_∞, |bᵢ|)` through
+  the existing `scaling_factor` suffixes takes two QCQPs shaped like the
+  Mittelmann family from 75 → 15 and 50 → 33 iterations at an identical
+  objective, while `gradient-based` and `nlp_scaling_method=none` are
+  bit-identical on both.
+
+  Diagnostic only — no solver behaviour changes, and the fixture sweep is
+  empty on both the exact-Hessian and limited-memory legs. New:
+  `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
+  report. Background and measurements:
+  `dev-notes/quadratic-structure-exploitation.md` §8.
+
 - **A least-squares model could report `Solve_Succeeded` on a point it never
   reached, and the iteration budget decided which** (#712).
 

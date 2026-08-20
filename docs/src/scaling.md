@@ -37,6 +37,55 @@ would invalidate the filter's history (Wächter, 2013).
 The clamp at 1.0 means scaling never *amplifies* a small row; it only
 damps large ones.
 
+Two consequences of the single shot are worth knowing before you rely
+on it. The cutoff is a **per-block gate**: unless some row of a block
+(the equalities, or the inequalities) exceeds
+`nlp_scaling_max_gradient`, no scale vector is produced for that block
+at all. And the sample is only as informative as the point it is taken
+at — which is the next section.
+
+### Quadratic rows the sampler cannot see
+
+A row written `½·x'Qx ≤ b` about the origin has `∇g(0) = 0`. Started
+from `x0 = 0` — the default for a model with free variables and no
+initial guess — the sample reads nothing, and the row is assigned
+factor **1.0** however far `Q` and `b` disagree in magnitude. This is
+not a cutoff set too high: `100/0` and `1e-6/0` both clamp to 1.0, so
+no value of `nlp_scaling_max_gradient` reaches the row.
+
+It matters because the row's slack `s = −g(x)` then inherits the
+right-hand side's scale, and so does the `−s/λ` diagonal of the KKT
+system. On a QCQP whose right-hand sides run four orders of magnitude
+above its curvature, supplying the row scales by hand is worth several
+times the iteration count.
+
+`pounce check-x0` reports both halves — the factors the sampler will
+pick, and the coefficient magnitudes it cannot see:
+
+```sh
+pounce check-x0 model.nl
+```
+
+```text
+  automatic scaling at x0 (nlp_scaling_method=gradient-based, nlp_scaling_max_gradient=100):
+    objective: ||grad f|| 9.983e1 -> factor 1.000e0  (below the cutoff: unscaled)
+    inequalities: 5007 row(s), no row above the cutoff -> the whole block is unscaled
+                  7 row(s) have an all-zero Jacobian at x0 (the sample cannot scale them)
+    quadratic rows: 7 recognized; 7 left at factor 1.0, 7 with a zero Jacobian at x0
+                    worst |b|/||Q||_inf mismatch 5.588e1
+```
+
+`||Q||_inf` is the largest absolute row sum of the row's Hessian —
+Gershgorin's bound on its largest eigenvalue, so the reported mismatch
+is a *lower* estimate of the real one. `--scaling-max-gradient` previews
+a different cutoff; `--json` puts the same numbers under a `scaling`
+key.
+
+The fix is `user-scaling` below, with `e_i = 1/max(‖Q_i‖_∞, ‖a_i‖_∞,
+|b_i|)` on each quadratic row. See
+`dev-notes/quadratic-structure-exploitation.md` §8 for the derivation
+and the measurements.
+
 ### `user-scaling`
 
 The TNLP is asked for `obj_scaling`, a per-variable `x_scaling`, and a
@@ -227,6 +276,11 @@ Reach for non-default scaling when:
   problem-specific target gradients.
 * You know the natural units of your problem better than the solver
   can infer from gradients at `x_0`. Wire `user-scaling`.
+* The model has quadratic constraints written about the origin and
+  started from zero. `gradient-based` cannot scale those rows at all —
+  see [Quadratic rows the sampler cannot
+  see](#quadratic-rows-the-sampler-cannot-see) — and `pounce check-x0`
+  will say so.
 
 Otherwise the upstream-Ipopt-style defaults (`gradient-based` at the
 NLP level, `none` at the linear-system level with MA57's internal
