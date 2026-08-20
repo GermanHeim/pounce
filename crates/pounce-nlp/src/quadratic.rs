@@ -1298,4 +1298,51 @@ mod tests {
         let mut qs = QuadraticStructure::new(0);
         assert!(qs.push_factored_form(&terms, &[], 0.0).is_none());
     }
+
+    /// The other half of the same guard, and the half gh #711 left
+    /// untested: a product that *underflows* to zero out of two nonzero
+    /// factors. `2·w·b₀·b₁` with `w = 1` and both `b` at `1e-200` is
+    /// `2e-400`, which is not representable, so the off-diagonal entry
+    /// would silently not exist while the tape still reports one.
+    ///
+    /// This is the underflow case the `product_lost` comment names. It
+    /// was verified to be the *only* thing standing behind that branch:
+    /// with `product_lost` disabled and this test absent, the whole
+    /// workspace stays green.
+    #[test]
+    fn a_product_that_underflows_to_zero_is_refused() {
+        let coefs = [(0usize, 1e-200), (1usize, 1e-200)];
+        let terms = [SquareTerm {
+            weight: 1.0,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_none(),
+            "2·1·1e-200·1e-200 underflows to zero out of two nonzero \
+             factors, so the (0,1) entry would be missing from a map the \
+             tape still populates",
+        );
+    }
+
+    /// The bound on the above: an underflow guard that refuses whenever
+    /// a product is merely *small* would push ordinary well-scaled-but-
+    /// tiny models onto the tape. `1e-160` squared is `1e-320`, which is
+    /// subnormal but still nonzero, and must stay on the fast path.
+    #[test]
+    fn a_subnormal_but_nonzero_product_is_still_admitted() {
+        let coefs = [(0usize, 1e-160), (1usize, 1e-160)];
+        let terms = [SquareTerm {
+            weight: 1.0,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_some(),
+            "a subnormal product is representable; refusing it would send \
+             ordinary tiny-coefficient models to the tape for nothing",
+        );
+    }
 }
