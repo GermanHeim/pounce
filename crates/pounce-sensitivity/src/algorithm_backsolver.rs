@@ -446,6 +446,22 @@ impl PdSensBacksolver {
         &self,
         released: &[usize],
     ) -> Option<Rc<dyn pounce_linalg::Vector>> {
+        self.active_set_sigma_x(released, &[])
+    }
+
+    /// [`Self::released_sigma_x`], also raising the diagonal on
+    /// variables a step brings onto a bound.
+    ///
+    /// The two directions an active set can move are the same
+    /// modification to one diagonal. A bound that leaves has its
+    /// `z / s` taken off the variable it constrains, and a bound that
+    /// becomes active has one put on, so a single vector describes
+    /// both and a single factorization serves the whole correction.
+    pub(crate) fn active_set_sigma_x(
+        &self,
+        released: &[usize],
+        pinned: &[(usize, Number)],
+    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let rows = self.bound_vars.as_deref()?;
         let base_row = rows.first()?.row;
@@ -496,6 +512,9 @@ impl PdSensBacksolver {
                 fresh += z / s;
             }
             *sigma.get_mut(br.var_row)? = fresh;
+        }
+        for &(var_row, add) in pinned {
+            *sigma.get_mut(var_row)? += add;
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);

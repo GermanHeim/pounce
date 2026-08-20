@@ -592,7 +592,14 @@ impl PySolver {
         deltas: Vec<Number>,
         step: Vec<Number>,
         max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, usize, Number, Number, bool)> {
+    ) -> PyResult<(
+        Bound<'py, PyArray1<Number>>,
+        usize,
+        Number,
+        Number,
+        bool,
+        usize,
+    )> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("correct_step: no converged factor (call solve() first)")
         })?;
@@ -614,6 +621,7 @@ impl PySolver {
             rep.residual,
             rep.initial_residual,
             rep.converged,
+            rep.released,
         ))
     }
 

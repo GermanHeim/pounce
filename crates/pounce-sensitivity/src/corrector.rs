@@ -29,6 +29,8 @@
 //! held factorization was built from, so nothing here disturbs the
 //! factor or any other consumer of the session.
 
+use std::rc::Rc;
+
 use pounce_common::types::{Index, Number};
 
 use crate::backsolver::SensBacksolver;
@@ -58,6 +60,9 @@ pub struct CorrectorReport {
     /// improve on the best residual seen, rather than because it ran
     /// out of budget.
     pub converged: bool,
+    /// Bounds the step took out of the active set, which the corrector
+    /// removed from the operator once before iterating.
+    pub released: usize,
 }
 
 impl CorrectorReport {
@@ -179,6 +184,93 @@ fn slacks_and_directions(
     (s, ds)
 }
 
+/// The bounds the step takes out of the active set.
+///
+/// A bound the solve held tightly contributes `z / s` to the barrier
+/// diagonal, which at a small `mu` is a very large number, and the
+/// held factorization carries it. If the perturbation moves that
+/// variable off its bound, iterating against that operator cannot
+/// follow: the stiffness the base point had is still there. The way
+/// out is to take the bound out of the operator once, before
+/// iterating, which is what `solve_released` does.
+///
+/// Which bounds those are is the predictor's answer, read off the step
+/// it produced rather than decided here. A bound is released when the
+/// solve held it, meaning its barrier diagonal is above one, and the
+/// step carries the variable off it by more than roundoff. Reading the
+/// primal endpoint works for every mode: `fix_relax` and `path` have
+/// already applied their releases by the time the step is handed over,
+/// and the plain step shows the same crossing in the coordinate it
+/// carries past the bound.
+fn released_rows(
+    rows: &[crate::backsolver::BoundRow],
+    base: &[Number],
+    end: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    for b in rows {
+        let i = b.var_row;
+        let (s_base, s_end) = if b.lower {
+            (base[i] - lo[i], end[i] - lo[i])
+        } else {
+            (hi[i] - base[i], hi[i] - end[i])
+        };
+        let z_base = base[b.row];
+        if s_base <= 0.0 || z_base / s_base <= 1.0 {
+            continue; // the solve did not hold this bound
+        }
+        // Off the bound by more than the slack it sat at, and by more
+        // than roundoff against the variable's own size.
+        if s_end > 10.0 * s_base && s_end > 1e-9 * (1.0 + base[i].abs()) {
+            out.push(b.row);
+        }
+    }
+    out
+}
+
+/// The bounds the step brings into the active set, with the barrier
+/// stiffness each one needs.
+///
+/// A variable the solve left interior contributes almost nothing to
+/// the barrier diagonal, `mu / s²` at a slack of order one, so the
+/// held factorization treats it as free. If the step carries it onto a
+/// bound, iterating against that operator pushes it straight back out
+/// and the fraction-to-boundary rule refuses the step, which is the
+/// same failure a released bound causes, in the other direction.
+///
+/// The stiffness a bound at slack `s` carries is `mu / s²`, which is
+/// what the barrier itself would assign there, so that is what goes on
+/// the diagonal. The variable sits at the margin the start put it at.
+fn pinned_rows(
+    rows: &[crate::backsolver::BoundRow],
+    base: &[Number],
+    end: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+    mu: Number,
+) -> Vec<(usize, Number)> {
+    let mut out = Vec::new();
+    for b in rows {
+        let i = b.var_row;
+        let (s_base, s_end) = if b.lower {
+            (base[i] - lo[i], end[i] - lo[i])
+        } else {
+            (hi[i] - base[i], hi[i] - end[i])
+        };
+        let z_base = base[b.row];
+        if s_base <= 0.0 || z_base / s_base > 1.0 {
+            continue; // the solve already held this bound
+        }
+        // On the bound now, and it was not before.
+        if s_end > 0.0 && s_end < 0.1 * s_base && s_end < 1e-6 * (1.0 + base[i].abs()) {
+            out.push((i, mu / (s_end * s_end)));
+        }
+    }
+    out
+}
+
 /// Run the corrector.
 ///
 /// `start` is the caller's compound step, `base` the converged
@@ -230,8 +322,43 @@ pub(crate) fn run(
         *z = z.max(1e-12);
     }
 
+    // The bounds the step takes out of the active set, decided once
+    // here and held for every iteration. Their barrier terms come out
+    // of the operator, their multipliers are held at zero, and their
+    // complementarity rows leave the system, which is what an inactive
+    // bound means. Everything else keeps the base point's barrier term.
+    let released = released_rows(&rows, base, &iterate, lo, hi);
+    let pinned = pinned_rows(&rows, base, &iterate, lo, hi, mu);
+    let sigma = if released.is_empty() && pinned.is_empty() {
+        None
+    } else {
+        for &r in &released {
+            iterate[r] = 0.0;
+        }
+        Some(bs.active_set_sigma_x(&released, &pinned).ok_or_else(|| {
+            SolverError::SensComputationFailed("corrector: active-set sigma unavailable".into())
+        })?)
+    };
+    let solve = |rhs: &[Number], lhs: &mut [Number]| -> bool {
+        match sigma.as_ref() {
+            // The same Rc every call: the factorization cache keys on
+            // its tag, so the released operator is factored once and
+            // every later solve is a back-solve.
+            Some(s) => bs.solve_released_prebuilt(&released, Rc::clone(s), rhs, lhs, false),
+            None => bs.solve(rhs, lhs),
+        }
+    };
+    // A released bound has no equation left, so its row does not count
+    // toward the residual the stopping rule reads.
+    let clear = |v: &mut [Number]| {
+        for &r in &released {
+            v[r] = 0.0;
+        }
+    };
+
     let mut resid = vec![0.0; dim];
     residual_at(bs, &iterate, pins, deltas, mu, &mut resid)?;
+    clear(&mut resid);
     let norm = |v: &[Number]| v.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
     let initial_residual = norm(&resid);
 
@@ -246,7 +373,7 @@ pub(crate) fn run(
         for (r, s) in rhs.iter_mut().zip(&resid) {
             *r = -s;
         }
-        if !bs.solve(&rhs, &mut dir) {
+        if !solve(&rhs, &mut dir) {
             return Err(SolverError::BacksolveFailed);
         }
         iterations += 1;
@@ -262,8 +389,15 @@ pub(crate) fn run(
         for i in off[4]..off[8] {
             iterate[i] = (iterate[i] + alpha_d * dir[i]).max(1e-14);
         }
+        // A released multiplier stays at zero: the bound is out of the
+        // active set for the whole correction, not something the
+        // iterations decide again each step.
+        for &r in &released {
+            iterate[r] = 0.0;
+        }
 
         residual_at(bs, &iterate, pins, deltas, mu, &mut resid)?;
+        clear(&mut resid);
         let now = norm(&resid);
         if now < best_residual {
             best_residual = now;
@@ -285,6 +419,7 @@ pub(crate) fn run(
             residual: best_residual,
             initial_residual,
             converged,
+            released: released.len() + pinned.len(),
         },
     ))
 }
