@@ -20,6 +20,5 @@ pub trait EqMultCalculator {
         aug_solver: &mut dyn AugSystemSolver,
         y_c: &mut dyn Vector,
         y_d: &mut dyn Vector,
-        unregularized: bool,
     ) -> bool;
 }

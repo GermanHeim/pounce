@@ -3548,22 +3548,14 @@ impl IpoptAlgorithm {
         let mut new_y_c = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yc).make_new_dense();
         let mut new_y_d = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yd).make_new_dense();
         let mut pd_guard = sd.pd_solver_mut();
-        // `unregularized = true` — the only caller that asks for it (#688).
-        //
-        // The other three call sites compute `y` **once**, as a starting
-        // guess the IPM then corrects with Newton steps, and a failed
-        // solve there costs a fallback to `y = 0` and an iteration-0
-        // `inf_du` blow-up. They keep the 1e-8 perturbation review item
-        // M3 added for exactly that failure mode.
-        //
-        // `recalc_y` is different in both respects. It overwrites `y`
-        // every iteration, so a bias in the estimator is a *fixed point*
-        // rather than a transient — nothing downstream corrects it, and
-        // it lands directly in `inf_du`, the quantity the run is judged
-        // on. And a failed solve here is benign: the Newton multipliers
-        // simply stand. So this path takes the exact least-squares
-        // multiplier upstream computes, with the perturbed solve kept
-        // only as a retry if the unregularized one fails outright.
+        // This was the first call site to drop review item M3's 1e-8
+        // perturbation (#688), on the argument that `recalc_y` overwrites
+        // `y` every iteration — so a bias in the estimator is a *fixed
+        // point* rather than a transient, nothing downstream corrects it,
+        // and it lands directly in `inf_du`, the quantity the run is
+        // judged on. gh#693 extended the same treatment to the other
+        // three sites, so `calculate_y_eq` no longer takes a flag: every
+        // caller now gets δ=0 with the perturbed solve as a retry.
         let ok = self.bundle.eq_mult.calculate_y_eq(
             &self.data,
             &self.cq,
@@ -3571,7 +3563,6 @@ impl IpoptAlgorithm {
             pd_guard.aug_solver_mut(),
             &mut new_y_c,
             &mut new_y_d,
-            true,
         );
         drop(pd_guard);
         if !ok {

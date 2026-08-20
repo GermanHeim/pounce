@@ -19,11 +19,68 @@
 //! discards it is the same silent no-op this whole line of work exists
 //! to kill, and it is indistinguishable from a real fix by inspection.
 //! That test is the deliverable, not the line that reads the field."
+//!
+//! ## Why this stopped comparing iteration counts (gh#693)
+//!
+//! The original guard read: `slack-based` must not take the *same number
+//! of iterations* as `none`. That is a proxy for the real property, and
+//! it turned out to be a bad one in two independent ways.
+//!
+//! It is **platform-fragile**. Iteration counts are the most
+//! platform-sensitive numbers a solver reports, and on macOS at
+//! `ac18ba6d` — before gh#693 — this file already failed, on the
+//! `slack-based` vs `ruiz` leg: both took 103 iterations on `cresc4`
+//! while CI's Linux runners saw them differ. A guard that is red on a
+//! developer's machine and green in CI gets read as noise, which is how
+//! it stops being a guard.
+//!
+//! It is **fixture-dependent in a way the property is not**. gh#693
+//! left `cresc4` better conditioned, and all four scaling choices now
+//! reach the optimum in 69 iterations. Nothing is wrong: `slack-based`
+//! still reaches the linear solver and still changes the arithmetic —
+//! `cresc4`'s objective is 0.8718975393087962 under `none` and
+//! 0.8718975392737567 under `slack-based`. The *option* works; the
+//! *proxy* went quiet, and an assertion on the proxy would have gone
+//! quiet with it while claiming to guard gh#677.
+//!
+//! So the comparison is now on the solve's numerical output, which is
+//! what gh#677's defect actually looked like — the report above says it
+//! in as many words: "`slack-based` produced byte-identical output to
+//! `none`, because it *was* `none`." An option routed to a catch-all
+//! cannot perturb a single bit, on any platform, so byte-identity is
+//! both the exact signal and a portable one.
+//!
+//! Three relations are pinned, on three fixtures, and they hold
+//! identically on `ac18ba6d` and after gh#693:
+//!
+//! ```text
+//!                 slack != none   slack != ruiz   mc19 == none
+//!   cresc4              yes             yes            yes
+//!   airport             yes             yes            yes
+//!   csfi2               yes             yes            yes
+//! ```
+//!
+//! `mc19 == none` is the positive control and it is the more valuable
+//! half: it is a genuine fallback, so it proves the comparison can still
+//! see a no-op. A test that only ever asserts "these differ" cannot tell
+//! a working option from a comparison that has broken open.
+//!
+//! (`eigenb2` is a fixture where `slack-based` and `none` *do* agree
+//! bit for bit, on both builds. It is named here so the next reader
+//! knows the relation is a property of the fixture as well as the
+//! option, and does not add a fixture to this list without checking.)
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Solve a fixture and return `(status, iteration_count)`.
+/// Scratch directories must not collide: the two tests here run
+/// concurrently and both solve the same fixtures, so naming the
+/// directory after the fixture and the scaling choice is not enough —
+/// one test's cleanup would delete the other's output mid-run.
+static RUN: AtomicUsize = AtomicUsize::new(0);
+
+/// Solve a fixture and return the raw JSON report as text.
 ///
 /// `linear_scaling_on_demand=no` is essential: the default is `yes`,
 /// which computes scaling only on a factorization that already looks
@@ -31,8 +88,10 @@ use std::process::Command;
 /// then identical — which is exactly how a test could "pass" against an
 /// unimplemented option. Forcing scaling on every factorization is what
 /// makes the comparison meaningful.
-fn solve(fixture: &str, tag: &str, scaling: &str) -> (String, u64) {
-    let dir = std::env::temp_dir().join(format!("pounce_linscale_{tag}"));
+fn solve_output(fixture: &str, scaling: &str) -> String {
+    let run = RUN.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("pounce_linscale_{}_{run}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let nl = dir.join(fixture);
     let mut src = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -58,80 +117,97 @@ fn solve(fixture: &str, tag: &str, scaling: &str) -> (String, u64) {
     );
     let text = std::fs::read_to_string(&json).expect("read json");
     let _ = std::fs::remove_dir_all(&dir);
-
-    // Small hand parse rather than pulling serde into this test.
-    let field = |key: &str| -> String {
-        let at = text
-            .find(&format!("\"{key}\""))
-            .unwrap_or_else(|| panic!("no `{key}` in JSON:\n{text}"));
-        let rest = &text[at + key.len() + 2..];
-        let colon = rest.find(':').expect("colon");
-        let tail = rest[colon + 1..].trim_start();
-        if let Some(stripped) = tail.strip_prefix('"') {
-            stripped[..stripped.find('"').expect("close quote")].to_string()
-        } else {
-            tail.chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '.' || *c == 'e')
-                .collect()
-        }
-    };
-    let iters: u64 = field("iteration_count").parse().expect("iteration_count");
-    (field("status"), iters)
+    text
 }
 
+/// The numerical content of a solve, with the parts that cannot be
+/// compared across two runs removed: the whole `fair_metadata` block
+/// (a result id, timestamps, an elapsed time, and the scratch path the
+/// fixture was copied to) and the two wall-clock timings. Everything
+/// left is deterministic for a fixed binary and a fixed set of options.
+fn numeric_output(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth: i32 = 0;
+    let mut in_metadata = false;
+    for line in text.lines() {
+        let key = line.trim_start();
+        if in_metadata {
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            if depth <= 0 {
+                in_metadata = false;
+            }
+            continue;
+        }
+        if key.starts_with("\"fair_metadata\"") {
+            in_metadata = true;
+            depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if depth <= 0 {
+                in_metadata = false;
+            }
+            continue;
+        }
+        if key.starts_with("\"total_wallclock_time_secs\"")
+            || key.starts_with("\"restoration_wall_secs\"")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// gh#677's defect, stated as the property it actually was: setting
+/// `slack-based` must not be indistinguishable from not setting it.
+///
+/// An option parsed into a catch-all arm cannot change a single bit of
+/// the answer, so comparing the numerical output is exact — and unlike
+/// an iteration count it means the same thing on every platform.
 #[test]
 fn slack_based_scaling_changes_the_solve() {
-    // cresc4 is sensitive to augmented-system scaling — `ruiz` already
-    // moved it before this option existed, which is what makes it a
-    // usable probe. A fixture where every choice agrees (airport, csfi2)
-    // cannot tell an implemented scaling from an ignored one.
-    let (none_status, none_iters) = solve("cresc4.nl", "none", "none");
-    let (slack_status, slack_iters) = solve("cresc4.nl", "slack", "slack-based");
-    let (ruiz_status, ruiz_iters) = solve("cresc4.nl", "ruiz", "ruiz");
+    for fixture in ["cresc4.nl", "airport.nl", "csfi2.nl"] {
+        let none = solve_output(fixture, "none");
+        let slack = solve_output(fixture, "slack-based");
+        let ruiz = solve_output(fixture, "ruiz");
 
-    // All three must still reach the same answer; scaling is a
-    // conditioning choice, not a different problem.
-    for (name, status) in [
-        ("none", &none_status),
-        ("slack-based", &slack_status),
-        ("ruiz", &ruiz_status),
-    ] {
-        assert_eq!(
-            status, "SolveSucceeded",
-            "linear_system_scaling={name} did not solve cresc4",
+        assert_ne!(
+            numeric_output(&slack),
+            numeric_output(&none),
+            "linear_system_scaling=slack-based produced output identical to \
+             `none` on {fixture} — that is exactly gh#677: the option is \
+             parsed but not reaching the linear solver",
+        );
+        assert_ne!(
+            numeric_output(&slack),
+            numeric_output(&ruiz),
+            "slack-based and ruiz produced identical output on {fixture}, \
+             which is suspicious enough to check the wiring before \
+             trusting it — slack-based is its own method, not an alias \
+             for the one that already worked",
         );
     }
-
-    // The actual regression guard. Before #677 this assertion failed:
-    // `slack-based` produced byte-identical output to `none`, because it
-    // *was* `none`.
-    assert_ne!(
-        slack_iters, none_iters,
-        "linear_system_scaling=slack-based took the same {none_iters} iterations as \
-         `none` — the option is parsed but not reaching the linear solver",
-    );
-
-    // And it is its own method, not an alias for the one that already
-    // worked.
-    assert_ne!(
-        slack_iters, ruiz_iters,
-        "slack-based and ruiz agree at {ruiz_iters} iterations, which is suspicious \
-         enough to check the wiring before trusting it",
-    );
 }
 
-/// `mc19` is still unimplemented and still falls back. Pinned so that if
-/// someone implements it, this test fails and reminds them to say so —
-/// and so the fallback stays deliberate rather than becoming another
-/// silent one.
+/// The positive control for the test above, and the more valuable half.
+///
+/// `mc19` is still unimplemented and still falls back to no scaling, so
+/// its output must be *identical* to `none`. That pins two things at
+/// once: the fallback stays deliberate rather than becoming another
+/// silent one, and `numeric_output` can still see a no-op — a file that
+/// only ever asserted "these differ" would pass just as happily if the
+/// comparison itself broke open.
 #[test]
 fn mc19_still_falls_back_to_no_scaling() {
-    let (status, mc19_iters) = solve("cresc4.nl", "mc19", "mc19");
-    let (_, none_iters) = solve("cresc4.nl", "mc19none", "none");
-    assert_eq!(status, "SolveSucceeded");
-    assert_eq!(
-        mc19_iters, none_iters,
-        "mc19 now differs from `none` — if it was implemented, update this test, \
-         the CHANGELOG, and `docs/src/options.md`",
-    );
+    for fixture in ["cresc4.nl", "airport.nl", "csfi2.nl"] {
+        let mc19 = solve_output(fixture, "mc19");
+        let none = solve_output(fixture, "none");
+        assert_eq!(
+            numeric_output(&mc19),
+            numeric_output(&none),
+            "mc19 now differs from `none` on {fixture} — if it was \
+             implemented, update this test, the CHANGELOG, and \
+             `docs/src/options.md`",
+        );
+    }
 }
