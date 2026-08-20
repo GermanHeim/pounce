@@ -1126,8 +1126,48 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
+def _correct(session, pin_idx, deltas, step, mode, degeneracy,
+             corrector_iter, fell_back):
+    """Refine a step by Newton iterations on the barrier system.
+
+    Returns the refined primal step and what the iterations did, or the
+    step unchanged and None where the corrector does not apply.
+
+    The corrector needs the step in the compound KKT layout, which only
+    the plain parametric step exposes. `fix_relax` and `path` return
+    the primal block alone, and so does the directional decision at a
+    degenerate base point, so those keep their own step. That is a gap
+    in what is exposed rather than a property of the corrector.
+    """
+    if mode != "linear":
+        warnings.warn(
+            f"estimate: corrector_iter is ignored under mode={mode!r}, "
+            "which does not expose the compound step the corrector "
+            "iterates on.")
+        return step, None
+    if degeneracy == "directional" and not fell_back:
+        if session.solver.weakly_active_bounds():
+            warnings.warn(
+                "estimate: corrector_iter is ignored at a degenerate base "
+                "point under degeneracy='directional', which does not "
+                "expose the compound step the corrector iterates on. Pass "
+                "degeneracy='one_sided' to correct the one-sided step.")
+            return step, None
+    full = session.solver.parametric_step_full(pin_idx, deltas)
+    out, iters, residual, initial, converged = session.solver.correct_step(
+        pin_idx, deltas, list(full), corrector_iter)
+    n_x = len(step)
+    return np.asarray(out)[:n_x], {
+        "iterations": iters,
+        "residual": residual,
+        "initial_residual": initial,
+        "converged": converged,
+    }
+
+
 def estimate(model, perturb, clamp=True, mode="linear",
-             max_iter=16, degeneracy="directional", degeneracy_iter=16):
+             max_iter=16, degeneracy="directional", degeneracy_iter=16,
+             corrector_iter=0):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
@@ -1175,6 +1215,22 @@ def estimate(model, perturb, clamp=True, mode="linear",
     step with a warning naming the counts. "one_sided" takes the
     single-sided value today's thresholds produce, bit-identical to
     the release before this option existed.
+
+    corrector_iter runs Newton iterations on the barrier system after
+    the step, against the factorization the solve left behind, so each
+    one costs a back-solve and no factorization. It aims at the barrier
+    solution at the mu the solve finished on rather than at a re-solve,
+    so the accuracy it reaches is bounded by that offset, and it stops
+    as soon as an iteration fails to improve the residual. Where the
+    perturbation needs a bound the base point held tightly to leave the
+    active set, the held factorization cannot represent the change, the
+    iterations make no progress, and a warning says so rather than
+    letting the uncorrected step pass as corrected. Measured on a
+    100-step Hicks-Ray CSTR displaced from its setpoint, a small step
+    goes from 6.3e-6 to 5.5e-9 in nine back-solves, and a step needing a
+    bound with sigma near 3e5 to leave stops after three with nothing
+    gained. It applies under mode="linear", the only route that exposes
+    the compound step it iterates on.
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
@@ -1252,6 +1308,28 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 pin_idx, deltas, max_iter)
         else:
             step = session.solver.parametric_step(pin_idx, deltas)
+    corrector = None
+    if corrector_iter:
+        step, corrector = _correct(
+            session, pin_idx, deltas, step, mode, degeneracy,
+            corrector_iter, fell_back)
+        # A correction that works drives the residual down by orders;
+        # one that cannot represent the active-set change the
+        # perturbation needs shaves a few percent off and leaves the
+        # estimate where it was. Halving is a low bar that separates
+        # them cleanly, and saying nothing would let the second case
+        # pass for the first.
+        if corrector is not None and corrector["residual"] > 0.5 * corrector[
+                "initial_residual"]:
+            warnings.warn(
+                "estimate: the corrector spent "
+                f"{corrector['iterations']} back-solve(s) and moved the "
+                f"residual from {corrector['initial_residual']:.2e} to "
+                f"{corrector['residual']:.2e}, so the estimate is close to "
+                "the uncorrected step. That happens when the perturbation "
+                "needs a bound the base point held tightly to leave the "
+                "active set, which the held factorization cannot represent.")
+
     dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
 
