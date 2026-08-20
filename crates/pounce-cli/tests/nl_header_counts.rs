@@ -9,9 +9,9 @@
 //!
 //! | claim | holds on |
 //! |---|---|
-//! | the header carries a parseable census | 58 of 61 fixtures |
-//! | variables that appear nonlinearly are inside the `nlvc + nlvo − nlvb` prefix | **58 of 58** |
-//! | rows that are nonlinear are inside the `nlc` prefix | 55 of 58 |
+//! | the header carries a parseable census | 65 of 68 fixtures |
+//! | variables that appear nonlinearly are inside the `nlvc + nlvo − nlvb` prefix | **65 of 65** |
+//! | rows that are nonlinear are inside the `nlc` prefix | 61 of 65 |
 //!
 //! The row claim fails in both directions, and the two directions cost
 //! different things:
