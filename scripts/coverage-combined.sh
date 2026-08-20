@@ -48,7 +48,15 @@ export LLVM_PROFILE_FILE="$PROFDIR/pounce-%p-%m.profraw"
 
 echo "==> [1/5] building instrumented Rust test binaries"
 # --no-run so nothing executes before every artifact exists.
-cargo test --workspace --no-run --message-format=json 2>/dev/null \
+#
+# `--exclude pounce-hsl` matches ci.yml. That crate FFI-links libcoinhsl, which
+# is licensed and absent from CI and from most checkouts, so linking its test
+# binary fails. It contributes no coverage either way: without COINHSL_DIR its
+# build.rs emits no link directives and the MA57 paths are unreachable. Leaving
+# it in made the failure invisible here — the 2>/dev/null below swallows it —
+# and silently dropped every OTHER crate's test binary from objects.txt on the
+# same cargo invocation.
+cargo test --workspace --exclude pounce-hsl --no-run --message-format=json 2>/dev/null \
   | python3 -c '
 import json,sys
 for line in sys.stdin:
@@ -60,10 +68,28 @@ for line in sys.stdin:
 echo "    $(wc -l < "$COV_OUT/objects.txt") test binaries"
 
 echo "==> [2/5] building instrumented CLI + Python extension"
-cargo build --workspace >/dev/null 2>&1
+cargo build --workspace --exclude pounce-hsl >/dev/null 2>&1
 # Absolute path: cargo's JSON already reports absolute executables, so a
 # relative entry here would hand llvm-cov the same object twice.
 [ -x target/debug/pounce ] && echo "$REPO/target/debug/pounce" >> "$COV_OUT/objects.txt"
+
+# Stage the instrumented CLI where the pounce package (and, through it, the
+# pyomo-pounce plugin) looks for a bundled binary. This has to happen BEFORE
+# `maturin develop`, which copies python/pounce/ into site-packages.
+#
+# Without it the CLI is listed as an -object above but nothing ever executes
+# it: pyomo-pounce/tests/conftest.py finds no bundled binary, refuses to trust
+# whatever `pounce` happens to be on PATH (gh #403), and skips the suite — so
+# every CLI and `.nl` path reports 0% and the report understates in exactly the
+# way this script exists to prevent. The conftest docstring recommends this
+# staging by hand; doing it here means the measurement no longer depends on
+# whether the caller remembered. python/pounce/bin/ is gitignored and is where
+# the release workflow stages the binary too.
+if [ -x target/debug/pounce ]; then
+  mkdir -p python/pounce/bin
+  cp target/debug/pounce python/pounce/bin/pounce
+fi
+
 (cd python && maturin develop --release 2>&1 | tail -1)
 SO="$(python -c 'import pounce._pounce as m; print(m.__file__)')"
 echo "$SO" >> "$COV_OUT/objects.txt"
@@ -81,7 +107,7 @@ run_pytest() {
 }
 
 echo "==> [3/5] running Rust tests"
-cargo test --workspace >/dev/null 2>&1
+cargo test --workspace --exclude pounce-hsl >/dev/null 2>&1
 echo "==> [4/5] running Python + pyomo suites"
 if [ "$QUICK" = "1" ]; then
   (cd python && run_pytest python python -m pytest tests/ -q -x -k "problem or minimize")
@@ -145,3 +171,6 @@ echo
 echo "NOTE: this leaves python/pounce/_pounce.abi3.so built WITH instrumentation"
 echo "      (slower, and timing-sensitive tests may fail). Restore with:"
 echo "      cd python && maturin develop --release"
+echo "      It also stages an instrumented debug CLI at python/pounce/bin/pounce."
+echo "      Remove it, or replace it with a release build, when you are done:"
+echo "      rm -f python/pounce/bin/pounce"

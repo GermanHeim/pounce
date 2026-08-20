@@ -78,6 +78,14 @@ These run on every PR; run them locally before pushing to get fast feedback:
 Use `make coverage` (or `make coverage-quick` to skip the slow pytest suite),
 **not** `cargo llvm-cov --workspace`.
 
+`.github/workflows/coverage.yml` runs the same script on every PR and every
+push to `main` and uploads the result to
+[Codecov](https://codecov.io/gh/jkitchin/pounce) — so the badge, the Codecov
+diff, and what you get locally are all produced by one code path. That job is
+a *measurement*, not a test gate: it deliberately does not fail on a failing
+test (`ci.yml` does that). It does fail if the report is untrustworthy — see
+the `pounce-py` sanity check below, which it asserts.
+
 `cargo llvm-cov` instruments and runs only the Rust test suite. Large parts of
 POUNCE are exercised solely through the Python extension (`pounce._pounce`) or
 through the CLI driven by pytest/pyomo, and those paths read as 0% in a
@@ -108,7 +116,12 @@ Three things to know before running it:
 
 - **The run leaves `python/pounce/_pounce*.so` built with instrumentation**,
   which is slower and can upset timing-sensitive tests. Restore it with
-  `make python-ext` (or `cd python && maturin develop --release`).
+  `make python-ext` (or `cd python && maturin develop --release`). It also
+  stages an instrumented debug CLI at `python/pounce/bin/pounce`, so that the
+  pyomo-pounce suite has a bundled binary it will trust (its `conftest.py`
+  refuses an unvetted `pounce` on `PATH`) and the CLI paths get measured
+  instead of reading 0%. Both are gitignored; `rm -f python/pounce/bin/pounce`
+  when you want the plain source checkout back.
 - **`test_qp_solve_releases_the_gil` fails during the run.** That is expected,
   not a regression: it asserts that a QP solve actually releases the GIL by
   timing concurrent threads, and the instrumentation overhead breaks the

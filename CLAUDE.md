@@ -49,7 +49,21 @@ docs deploy — gates its first job on `github.repository ==
 succeed there, so without the gate a contributor's fork sync is a failed run
 and an email. Keep the gate on the job every other job reaches through
 `needs`; `pull_request` runs in the base repo's context, so PR checks are
-unaffected.
+unaffected. `coverage.yml` carries the same gate for the same reason — it is
+not a publishing workflow, but it needs `secrets.CODECOV_TOKEN`, which no fork
+has, and it fails loudly on a bad upload.
+
+## Coverage is measured combined, never Rust-only
+
+`.github/workflows/coverage.yml` runs `scripts/coverage-combined.sh` (i.e.
+`make coverage`) and uploads to Codecov. It does **not** run `cargo llvm-cov
+--workspace`: large parts of POUNCE are reachable only through the
+`pounce._pounce` extension module or the CLI, and a Rust-only report shows
+those at 0% — inventing gaps in code that is well covered. The job asserts the
+attribution worked before uploading, by checking that `crates/pounce-py/*`
+does not read ~0% (it can only be reached through the `.so`). Requires the
+`CODECOV_TOKEN` repository secret. Full rationale: CONTRIBUTING.md,
+"Measuring coverage".
 
 ## Trajectory changes need the fixture sweep
 
