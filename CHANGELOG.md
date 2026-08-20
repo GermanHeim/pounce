@@ -38,10 +38,10 @@ changes.
   rather than second-guessed after the fact, and the unaided answer is closer
   to the reference than the ladder-promoted one was.
 
-  **Fixture sweep, both legs, every moving line.** 116 legs, 16 move, three of
+  **Fixture sweep, both legs, every moving line.** 118 legs, 15 move, three of
   them statuses:
 
-  | leg | fixture | 0.10.0 | this change |
+  | leg | fixture | before this change | after |
   |---|---|---|---|
   | exact | `cresc4` | 75 it | 69 it |
   | exact | `deb7` | 143 it | 171 it |
@@ -50,7 +50,6 @@ changes.
   | exact | `pooling_rt2stp` | 298 it | **128 it** |
   | exact | `hs13_bigstart` | obj …7152 | obj …7153 |
   | exact | `unbounded_cubic`, `unbounded_exp` | diverging | diverging |
-  | lbfgs | `airport` | 59 it | 57 it |
   | lbfgs | `convex_qp_sens` | obj 1.77e-30 | obj 4.44e-31 |
   | lbfgs | `cresc4` | 99 it | 143 it |
   | lbfgs | `eigenb2` | 56 it | 59 it |
@@ -59,12 +58,12 @@ changes.
   | lbfgs | `deb7` | `MaximumIterationsExceeded` 3000 | `RestorationFailed` 2941 |
   | lbfgs | `pooling_rt2stp` | `SolveSucceeded` 233, obj −4391.826001 | **`RestorationFailed` 27, obj 9.323117531** |
 
-  The exact leg has no status changes and goes 2275 → 2078 iterations (−8.7%).
-  **The L-BFGS leg's headline −4.5% is not real** and should not be quoted:
-  5431 → 5188 counts `pooling_rt2stp` failing at 27 instead of succeeding at
+  The exact leg has no status changes and goes 2284 → 2087 iterations (−8.6%).
+  **The L-BFGS leg's headline −4.4% is not real** and should not be quoted:
+  5437 → 5196 counts `pooling_rt2stp` failing at 27 instead of succeeding at
   233, and `deb7` failing at 2941 instead of capping at 3000, as savings.
-  Excluding the three models whose status changed, the L-BFGS leg is 1933 →
-  1978, **+2.3%** — slightly worse.
+  Excluding the three models whose status changed, the L-BFGS leg is 1939 →
+  1986, **+2.4%** — slightly worse.
 
   **The three L-BFGS status changes are all chaos, and the evidence for that
   is quantitative.** `pooling_rt2stp` on this leg is not a regression, even
