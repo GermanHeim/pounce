@@ -23,14 +23,40 @@
 //! contract. The gating tests below — a named engine, a user-set budget, a
 //! certified solve, a non-LP class — are the half that keeps the fallback from
 //! firing anywhere it should not.
+//!
+//! gh #724 is the third uncertified exit, `NumericalFailure`, which the gate
+//! omitted: the same `lp_afiro` at the same unreachable tolerance, with the
+//! documented `qp_tau` option raising the fraction-to-boundary parameter,
+//! reaches a singular KKT system *before* the budget runs out and was reported
+//! `InternalError` with the uncertified iterate as the answer — on a model the
+//! NLP path in the same binary solves to afiro's published optimum. The two
+//! failures differ only in which one the convex path happens to hit first, so
+//! the tests here assert the **reroute**, not the failure-mode string that
+//! produced it.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+use pounce_cli::solve_report::SolveReport;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 
 /// Well below the ~5.7e-14 KKT error the convex IPM floors at on `afiro`, so
 /// the solve provably cannot certify — on any machine, without depending on a
 /// fixture that happens to sit on the accuracy knife-edge.
 const UNREACHABLE_TOL: &str = "tol=1e-20";
+
+/// The gh #724 trigger. `qp_tau` is the documented fraction-to-boundary
+/// parameter; raising it drives the iterates harder against the boundary, so
+/// the KKT system goes singular and the post-solve verification refuses the
+/// point at iteration ~157 rather than the budget expiring at 199. Nothing
+/// about the model changes — only which uncertified exit the convex path
+/// reaches, which is exactly the distinction the gate must not make.
+const NUMERICAL_FAILURE_TRIGGER: &str = "qp_tau=0.99";
+
+/// afiro's published optimum. The NLP path reaches it on this model whichever
+/// way the convex attempt failed, which is what makes reporting the convex
+/// failure as the final answer a defect and not a limitation.
+const AFIRO_OPT: f64 = -464.753_142_857_142_85;
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -60,6 +86,33 @@ fn run_on(name: &str, args: &[&str]) -> (String, String, Option<i32>) {
 
 fn run(args: &[&str]) -> (String, String, Option<i32>) {
     run_on("lp_afiro.nl", args)
+}
+
+/// Same, but capturing the JSON report — the reported *status* is what a
+/// caller sees, and it is where gh #724 showed up as `InternalError`.
+fn run_json(args: &[&str]) -> (String, String, SolveReport) {
+    let json = std::env::temp_dir().join(format!(
+        "pounce_535_{}_{}.json",
+        std::process::id(),
+        args.join("_").replace(['=', '.', '/'], "-")
+    ));
+    let out = Command::new(pounce_exe())
+        .arg(fixture("lp_afiro.nl"))
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json)
+        .args(args)
+        .output()
+        .expect("spawn pounce");
+    let report: SolveReport =
+        serde_json::from_str(&std::fs::read_to_string(&json).expect("read JSON report"))
+            .expect("parse JSON report");
+    let _ = std::fs::remove_file(&json);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        report,
+    )
 }
 
 /// The convex status line, which a rerouted solve must not print.
@@ -171,24 +224,112 @@ fn a_certified_lp_still_answers_from_the_convex_path() {
 /// A named engine keeps its verdict. This is what makes the convex stall
 /// observable at all, and how the convex result stays available to anyone
 /// working on the convex solver itself.
+///
+/// Asserted as "the convex engine reported, and it did not certify" rather
+/// than as a particular failure-mode string. Which uncertified exit `afiro`
+/// reaches here is a property of the step rule, not of this contract — this
+/// test used to hard-code `"Maximum iterations exceeded"` and went red under a
+/// step-rule study (gh #690) that changed nothing it exists to check. Both
+/// exits are swept: the budget expiring, and the gh #724 numerical failure.
 #[test]
 fn an_explicitly_selected_convex_solve_is_not_rerouted() {
-    for sel in ["solver_selection=qp-ipm", "solver_selection=lp-ipm"] {
-        let (stdout, stderr, _code) = run(&[sel, UNREACHABLE_TOL]);
-        assert_eq!(
-            convex_verdict_lines(&stdout).len(),
-            1,
-            "{sel} must report the convex engine's own result; stdout=\n{stdout}"
-        );
-        assert!(
-            stdout.contains("Maximum iterations exceeded"),
-            "{sel}: the convex verdict must stand; stdout=\n{stdout}"
-        );
-        assert!(
-            !stderr.to_lowercase().contains("did not certify"),
-            "{sel} must not be rerouted; stderr=\n{stderr}"
-        );
+    for extra in [
+        vec![UNREACHABLE_TOL],
+        vec![UNREACHABLE_TOL, NUMERICAL_FAILURE_TRIGGER],
+    ] {
+        for sel in ["solver_selection=qp-ipm", "solver_selection=lp-ipm"] {
+            let mut args = vec![sel];
+            args.extend_from_slice(&extra);
+            let (stdout, stderr, _code) = run(&args);
+            let verdicts = convex_verdict_lines(&stdout);
+            assert_eq!(
+                verdicts.len(),
+                1,
+                "{args:?} must report the convex engine's own result; stdout=\n{stdout}"
+            );
+            assert!(
+                !verdicts[0].contains("Optimal Solution Found"),
+                "{args:?}: precondition — the convex solve must fail to certify \
+                 at this tolerance; stdout=\n{stdout}"
+            );
+            assert!(
+                !stderr.to_lowercase().contains("did not certify"),
+                "{args:?} must not be rerouted; stderr=\n{stderr}"
+            );
+        }
     }
+}
+
+/// gh #724: the same LP, failing the other way. `qp_tau=0.99` makes the convex
+/// path exit `NumericalFailure` instead of `IterationLimit`, and that status
+/// was missing from the reroute gate — so this run reported `InternalError`
+/// with the uncertified convex iterate as the answer.
+///
+/// The precondition is checked structurally: `InternalError` is the return
+/// status only `NumericalFailure` maps to (`qp_status_to_ars`), so a
+/// named-engine run reporting it is proof this configuration reaches that exit
+/// and that the test is still exercising the branch it was written for.
+#[test]
+fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
+    let (named_out, _, named) = run_json(&[
+        "solver_selection=lp-ipm",
+        UNREACHABLE_TOL,
+        NUMERICAL_FAILURE_TRIGGER,
+    ]);
+    assert_eq!(
+        named.solution.status,
+        ApplicationReturnStatus::InternalError,
+        "precondition: this configuration must reach NumericalFailure on the \
+         convex path — it is the only status that reports InternalError; \
+         stdout=\n{named_out}"
+    );
+
+    let (stdout, stderr, report) = run_json(&[
+        "solver_selection=auto",
+        UNREACHABLE_TOL,
+        NUMERICAL_FAILURE_TRIGGER,
+    ]);
+    assert!(
+        stderr
+            .to_lowercase()
+            .contains("did not certify a kkt point"),
+        "an LP the convex path could not verify must reroute, whichever way it \
+         failed; stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+    assert!(
+        convex_verdict_lines(&stdout).is_empty(),
+        "the discarded convex attempt must not also report; stdout=\n{stdout}"
+    );
+    assert_ne!(
+        report.solution.status,
+        ApplicationReturnStatus::InternalError,
+        "the uncertified convex result must not be the reported verdict; \
+         stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+}
+
+/// …and the answer it reroutes to is afiro's optimum. This is the part that
+/// makes gh #724 a defect rather than a naming quibble: the binary reported
+/// `InternalError` on a model it solves, and the objective was right there in
+/// the same JSON report the status came from.
+#[test]
+fn the_rerouted_numerical_failure_reaches_the_published_optimum() {
+    let (stdout, stderr, report) = run_json(&[
+        "solver_selection=auto",
+        UNREACHABLE_TOL,
+        NUMERICAL_FAILURE_TRIGGER,
+    ]);
+    // Relative, and loose. `tol=1e-20` is unreachable on the NLP path too, so
+    // it stops on a vanishing search direction rather than a certificate and
+    // lands ~1e-8 relative from the vertex. Eight figures of afiro's optimum
+    // is the claim being made here — the reported answer is the model's — not
+    // that an unreachable tolerance was somehow met.
+    let obj = report.solution.objective;
+    assert!(
+        ((obj - AFIRO_OPT) / AFIRO_OPT).abs() < 1e-6,
+        "rerouted objective {obj} is not afiro's optimum {AFIRO_OPT}; \
+         stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
 }
 
 /// A user-set iteration budget is the question being asked, so its answer

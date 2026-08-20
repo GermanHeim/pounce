@@ -71,6 +71,49 @@ changes.
   `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
   report. Background and measurements:
   `dev-notes/quadratic-structure-exploitation.md` §8.
+- **An LP whose convex solve ended in numerical failure was reported as the
+  final answer, on models the NLP path solves** (#724).
+
+  gh #535 gave the LP path a reroute: when the convex driver returns without a
+  certified KKT point, the model is re-solved on the general NLP path rather
+  than reported. The gate listed `Optimal_Inaccurate` and `Iteration_Limit`
+  and omitted `Numerical_Failure` — the *strongest* of the three signals, and
+  the only one the conic path (`run_convex_socp`) has ever rerouted on. So the
+  two paths disagreed about the same verdict, and an LP that drove its KKT
+  system singular before exhausting its iteration budget came back as
+  `Internal_Error` with no second attempt. `pounce lp_afiro.nl
+  solver_selection=auto tol=1e-20 qp_tau=0.99` is the reproduction; it now
+  reroutes and returns afiro's published optimum.
+
+  The reroute is not reachable on the default corpus — every fixture that
+  fails to certify does so by exhausting iterations — so this changes no
+  trajectory here. It was wrong on its face, and the fix is a gate that names
+  all three uncertified exits. `Time_Limit` still does not reroute: a budget
+  the user set is not a solver failure.
+
+- **The convex fixture corpus can now measure an HSDE step-rule change**
+  (#690).
+
+  Four fixtures join `crates/pounce-cli/tests/fixtures`, all regenerated from
+  cached upstream data by the benchmark harnesses already in the tree:
+  `lp_degen2` (NETLIB `degen2`, 534 vars, primal-degenerate), `lp_share1b`
+  (NETLIB `share1b`, 225 vars, ill-conditioned), `lp_israel` (NETLIB `israel`,
+  142 vars, dense columns), and `convex_qp_share1b` (Maros–Mészáros
+  `QSHARE1B`, the same model with a quadratic objective). Each carries a
+  published optimum from its source collection, and each solves in under
+  0.11 s, so both sweep legs stay cheap.
+
+  They exist because `scripts/sweep-fixtures.sh` — the tool that gates every
+  trajectory change — could not see the convex driver. Every convex fixture in
+  the corpus had been added as a *routing or verdict* witness, which two or
+  three variables do perfectly well; none was a trajectory witness, and
+  `lp_afiro` at 32 variables was the largest one that moved at all. gh #690
+  measured an adaptive-τ HSDE tail three times and declined it on the third
+  pass for exactly that reason: −4.2% corpus-wide was arithmetic over models of
+  one to three variables. Under the same fraction-to-boundary perturbation the
+  new fixtures move 15 → 11, 32 → 25, 29 → 23 and 28 → 22 iterations.
+  `dev-notes/convex-fixture-corpus.md` records the selection and the
+  measurements.
 - **Coverage no longer runs on pull requests; it is measured on `main`.**
 
   The combined coverage job takes 33–40 minutes (three measured runs: 33.2,

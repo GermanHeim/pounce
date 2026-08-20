@@ -2221,15 +2221,22 @@ fn resolve_scaling_retry_outcome(
 /// * **`ProblemClass::Lp`** — `P = 0`, per the issue. A convex QP that stalls
 ///   is a different (and unmeasured) population; leave it to the engine that
 ///   was chosen for it.
-/// * **the status** — only the two that mean "no certificate": a
-///   reduced-accuracy exit and an exhausted budget. `Optimal` needs no help,
-///   and `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
-///   *verified*, which a second solve must not be allowed to overwrite.
-///   `NumericalFailure` is left alone here for the same reason the QP path has
-///   always reported it: it is the post-solve verification refusing a point,
-///   and the LP corpus has no case of it that the NLP path recovers. Nor does
-///   `TimeLimit`, which is a spent budget rather than a stall — rerouting it
-///   would answer "stop after `max_wall_time`" with a second solve.
+/// * **the status** — the three that mean "no certificate": a reduced-accuracy
+///   exit, an exhausted budget, and a numerical failure. `Optimal` needs no
+///   help, and `PrimalInfeasible` / `DualInfeasible` are verdicts the convex
+///   solver *verified*, which a second solve must not be allowed to overwrite.
+///   `NumericalFailure` was excluded until gh #724 on the grounds that it is
+///   the post-solve verification refusing a point and no LP in the corpus
+///   reached it. Both halves of that are the wrong test. It is the *strongest*
+///   of the three "did not certify" signals — the point on offer missed even
+///   the acceptable band — and it is the one status `run_convex_socp` reroutes
+///   on for the conic path, so omitting it here made the LP and SOCP paths
+///   disagree about what an unverified convex result means. An LP that reached
+///   it was reported `InternalError` on a model the NLP path in the same
+///   binary solves (gh #724 reproduces this on `lp_afiro` with `qp_tau=0.99`).
+///   `TimeLimit` still does not reroute: it is a spent budget rather than a
+///   stall, and rerouting it would answer "stop after `max_wall_time`" with a
+///   second solve.
 ///
 /// Note what this deliberately is **not**: the issue's "never-regress" variant,
 /// which would keep whichever of the two results certifies at the lower KKT
@@ -2250,7 +2257,7 @@ fn lp_declines_to_nlp(
         && class == pounce_cli::dispatch::ProblemClass::Lp
         && matches!(
             status,
-            QpStatus::OptimalInaccurate | QpStatus::IterationLimit
+            QpStatus::OptimalInaccurate | QpStatus::IterationLimit | QpStatus::NumericalFailure
         )
 }
 
@@ -3616,14 +3623,20 @@ mod lp_nlp_fallback_tests {
         QpStatus::NumericalFailure,
     ];
 
-    /// gh #535: the two statuses that mean "the convex solve produced no
+    /// gh #535: the statuses that mean "the convex solve produced no
     /// certificate" are what hands an LP to the NLP path. `OptimalInaccurate`
     /// is the NETLIB `gen`/`gen1` exit (199 of 200 iterations, primal residual
     /// 1.4e-7 against `tol = 1e-8`); `IterationLimit` is the same stall when
-    /// the reduced-accuracy band is missed too.
+    /// the reduced-accuracy band is missed too; `NumericalFailure` (gh #724)
+    /// is the post-solve verification refusing the point outright, which is a
+    /// stronger statement of the same thing and not a weaker one.
     #[test]
     fn an_uncertified_lp_is_handed_to_the_nlp_path() {
-        for status in [QpStatus::OptimalInaccurate, QpStatus::IterationLimit] {
+        for status in [
+            QpStatus::OptimalInaccurate,
+            QpStatus::IterationLimit,
+            QpStatus::NumericalFailure,
+        ] {
             assert!(
                 lp_declines_to_nlp(ProblemClass::Lp, status, true),
                 "{status:?} on an LP must reroute"
@@ -3645,21 +3658,30 @@ mod lp_nlp_fallback_tests {
     /// `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
     /// *verified*. Rerouting them would let a second solve overwrite a proof
     /// with a numerical opinion — the same reason `run_convex_socp` reroutes
-    /// only `NumericalFailure`. `NumericalFailure` itself is left alone here:
-    /// it is the post-solve verification refusing a point, and the LP corpus
-    /// has no case of it the NLP path recovers.
+    /// only `NumericalFailure` and not these.
     #[test]
-    fn verified_verdicts_and_numerical_failure_stand() {
-        for status in [
-            QpStatus::PrimalInfeasible,
-            QpStatus::DualInfeasible,
-            QpStatus::NumericalFailure,
-        ] {
+    fn verified_verdicts_stand() {
+        for status in [QpStatus::PrimalInfeasible, QpStatus::DualInfeasible] {
             assert!(
                 !lp_declines_to_nlp(ProblemClass::Lp, status, true),
                 "{status:?} must not reroute"
             );
         }
+    }
+
+    /// gh #724: the LP gate and the SOCP gate must agree about what an
+    /// uncertified convex result means. `run_convex_socp` reroutes exactly
+    /// `NumericalFailure`; if the LP gate excludes it, the same failure to
+    /// verify is a fallback on one path and a final `InternalError` on the
+    /// other. This is the assertion that was inverted before gh #724, so it is
+    /// stated as the invariant rather than as one more status in a list.
+    #[test]
+    fn an_unverified_convex_result_reroutes_on_the_lp_path_as_it_does_on_the_conic_one() {
+        assert!(
+            lp_declines_to_nlp(ProblemClass::Lp, QpStatus::NumericalFailure, true),
+            "NumericalFailure is what the conic path reroutes on; the LP path \
+             must not report it as the last word"
+        );
     }
 
     /// A wall-clock budget is a budget, exactly as `max_iter` is: `TimeLimit`
