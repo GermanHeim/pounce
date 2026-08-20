@@ -479,6 +479,20 @@ changes.
   at a `1e-12` perturbation — which is a simpler and worse explanation. It is
   deterministic now.
 
+  **#706 is closed on a stronger measurement than the ulp screen above.**
+  `mu_init` is what that screen perturbs, and on `eigena2` it no longer
+  perturbs anything: moved from `0.1` to `100` — three decades, not an ulp —
+  every iterate of the `=yes` run is bit-identical (objective, `inf_pr`,
+  `‖d‖`, both step sizes, 17 iterations), and only the printed `lg(mu)` column
+  differs. On #693's parent the same model swings between 61 and 127
+  iterations and both statuses under a `1e-12` change to the same option. A
+  trajectory that ignores a thousandfold change in the barrier parameter is
+  not sitting on a tolerance band, so the `eigena2` pin in
+  `issue_616_ls_init_downgrades.rs` — two-valued while #706 was open, because
+  CI had caught the platforms disagreeing — is single-valued again, and the
+  barrier-independence itself is now asserted alongside it rather than
+  described.
+
 - **A test and a doc page asserted opposite things about `pooling_rt2stp`,
   and both were written from one draw** (#616).
 
