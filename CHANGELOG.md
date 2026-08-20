@@ -9,6 +9,91 @@ changes.
 
 ## [Unreleased]
 
+- **`linear_system_scaling`'s regression test was failing on macOS for a
+  reason that had nothing to do with the option.**
+
+  `slack_based_scaling_changes_the_solve` (#677) asserts that `slack-based`
+  is a real method and not an alias for `ruiz`, and it made that argument
+  from iteration counts alone. On aarch64-apple-darwin both take exactly 103
+  iterations on `cresc4` while landing on demonstrably different points —
+  objective `0.8718975394` against `0.8718975393` — so the test failed
+  against a correctly wired option. It compares the whole
+  `(iterations, objective)` fingerprint now, which still catches what it was
+  written to catch (the #677 defect made the two byte-identical) without
+  depending on a coincidence of counts holding on every host. Present on
+  `main` before the FERAL bump; unrelated to it.
+
+- **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
+  (#710).
+
+  The pin moves three minor versions at once, and each one carries something
+  pounce has to answer for.
+
+  **0.16.0 changed a default out from under three call sites** (feral#171).
+  `LuParams::default().pivoting` became `LuPivoting::Markowitz`, which picks
+  its column order *during* the factorization and therefore ignores the
+  `SparseLuSymbolic` handed to `SparseLu::factor`. Every pounce caller of that
+  API passes a symbolic it computed on purpose — the simplex basis factor in
+  `pounce-convex`, the rank-detection LU in `pounce-feral`, and the Python
+  `SparseLu` binding, whose docstring promises that "repeated Newton
+  factorizations pay only the numeric cost". Under Markowitz that promise is
+  false and the symbolic is dead weight. All three now pass
+  `pivoting: LuPivoting::GilbertPeierls` explicitly, which is the pre-0.16
+  behaviour; none of them is opting out of a better default so much as
+  declining one that discards the work they already did.
+
+  **0.17.0 makes FERAL's inner refinement budget a caller's decision**
+  (feral#178, asked for by gh#698 observation 5). On the IPM path FERAL's
+  refinement loop is nested inside `PdFullSpaceSolver`'s own — Ipopt's, capped
+  at `max_refinement_steps` — and only the outer loop computes a residual
+  ratio and decides whether the answer is good enough. The inner one drove a
+  residual nobody consulted to a tolerance nobody set, ten corrections at a
+  time, and it was hard-coded upstream so `feral_refine=no` was the only lever.
+  The new `feral_refine_steps` option (env `POUNCE_FERAL_REFINE_STEPS`) caps it
+  without leaving the refined entry point.
+
+  **The default stays at ten.** gh#710 named `pinene_3200` as the case that
+  decides whether it could move, on the grounds that the accuracy argument for
+  the inner loop rests on it. It does not object: at 64,000 variables it
+  converges to `19.8721669342` in 13 iterations at a budget of ten, of one,
+  and of zero, and in 12 iterations with refinement off entirely — about two
+  seconds each way, no tail stall at any setting. The blocker turned out to be
+  somewhere gh#710 was not looking. Sweeping the fixture corpus at
+  `feral_refine_steps=1` moves 15 of 118 legs, and two of them are outright
+  losses: `deb7` on the exact-Hessian leg goes from `SolveSucceeded` in 143
+  iterations to `ErrorInStepComputation` in 183, and `cresc4` under
+  limited-memory goes from `SolveSucceeded` in 99 iterations to
+  `InfeasibleProblemDetected` in 32 — a converged solve and a *wrong verdict*,
+  not a slower path to the same answer. (Some legs improve: `pooling_rt2stp`
+  takes 199 iterations where it took 298.) So the knob ships opt-in, the
+  default is unchanged, and the case for changing it now needs a corpus
+  answer, not just a `pinene_3200` answer.
+
+  **The back-solve no longer allocates.** 0.17.0's `solve_into` /
+  `solve_refined_into` / `solve_many_into` / `solve_many_refined_into` write
+  into a caller-owned buffer, so `FeralSolverInterface` keeps one scratch
+  vector instead of letting FERAL allocate a fresh solution on every
+  back-solve — about 946 KB per right-hand side on the 118,276-dimension KKT
+  that motivated gh#698, so roughly 1.9 MB per predictor-corrector step.
+
+  **`POUNCE_FERAL_MIN_PAR_FLOPS=1e8` was silently doing nothing** — feral#176's
+  defect, in pounce. The documented default for that knob is `1e8`, the option
+  spelling `feral_min_par_flops` is registered as a *number* option and
+  accepted it all along, and the environment spelling parsed with
+  `str::parse::<u64>()`, which rejects scientific notation. So the same knob
+  took a value one way and dropped it the other without a word. 0.17.0 made
+  `feral::env` public for exactly this: the numeric `POUNCE_FERAL_*` reads now
+  go through it, which accepts what the option parser accepts, clamps an
+  over-range magnitude instead of discarding it, and warns once on stderr for
+  anything it refuses rather than letting a refused value quietly change the
+  numerics.
+
+  **Nothing in the corpus moves.** The fixture sweep against a 0.15.1 baseline
+  is bit-identical on all 118 legs, both exact-Hessian and limited-memory —
+  including 0.17.0's rework of how a refined solve picks its core, which
+  upstream flags as able to change a caller's numbers (feral#177), and the
+  scaling router's new symmetric-degree gate (feral#134 item B).
+
 - **Least-squares models now get the constant-structure fast path too**
   (#673).
 

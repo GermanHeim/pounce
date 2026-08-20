@@ -23,7 +23,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Solve a fixture and return `(status, iteration_count)`.
+/// Solve a fixture and return `(status, iteration_count, objective)`.
+///
+/// The objective is carried as its printed text, not as an `f64`: this is
+/// a fingerprint for "did the solve take a different path", and two paths
+/// that differ in the last printed digit are different paths. Comparing
+/// parsed floats with a tolerance would erase exactly the signal.
 ///
 /// `linear_scaling_on_demand=no` is essential: the default is `yes`,
 /// which computes scaling only on a factorization that already looks
@@ -31,7 +36,7 @@ use std::process::Command;
 /// then identical — which is exactly how a test could "pass" against an
 /// unimplemented option. Forcing scaling on every factorization is what
 /// makes the comparison meaningful.
-fn solve(fixture: &str, tag: &str, scaling: &str) -> (String, u64) {
+fn solve(fixture: &str, tag: &str, scaling: &str) -> (String, u64, String) {
     let dir = std::env::temp_dir().join(format!("pounce_linscale_{tag}"));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let nl = dir.join(fixture);
@@ -76,7 +81,7 @@ fn solve(fixture: &str, tag: &str, scaling: &str) -> (String, u64) {
         }
     };
     let iters: u64 = field("iteration_count").parse().expect("iteration_count");
-    (field("status"), iters)
+    (field("status"), iters, field("objective"))
 }
 
 #[test]
@@ -85,9 +90,9 @@ fn slack_based_scaling_changes_the_solve() {
     // moved it before this option existed, which is what makes it a
     // usable probe. A fixture where every choice agrees (airport, csfi2)
     // cannot tell an implemented scaling from an ignored one.
-    let (none_status, none_iters) = solve("cresc4.nl", "none", "none");
-    let (slack_status, slack_iters) = solve("cresc4.nl", "slack", "slack-based");
-    let (ruiz_status, ruiz_iters) = solve("cresc4.nl", "ruiz", "ruiz");
+    let (none_status, none_iters, none_obj) = solve("cresc4.nl", "none", "none");
+    let (slack_status, slack_iters, slack_obj) = solve("cresc4.nl", "slack", "slack-based");
+    let (ruiz_status, ruiz_iters, ruiz_obj) = solve("cresc4.nl", "ruiz", "ruiz");
 
     // All three must still reach the same answer; scaling is a
     // conditioning choice, not a different problem.
@@ -106,17 +111,31 @@ fn slack_based_scaling_changes_the_solve() {
     // `slack-based` produced byte-identical output to `none`, because it
     // *was* `none`.
     assert_ne!(
-        slack_iters, none_iters,
-        "linear_system_scaling=slack-based took the same {none_iters} iterations as \
-         `none` — the option is parsed but not reaching the linear solver",
+        (slack_iters, &slack_obj),
+        (none_iters, &none_obj),
+        "linear_system_scaling=slack-based produced the same trajectory as `none` \
+         ({none_iters} iterations, objective {none_obj}) — the option is parsed but \
+         not reaching the linear solver",
     );
 
     // And it is its own method, not an alias for the one that already
     // worked.
+    //
+    // Compared on the whole (iterations, objective) fingerprint rather than
+    // on the iteration count alone. The count alone is not a reliable
+    // discriminator: on aarch64-apple-darwin both methods happen to land on
+    // cresc4 in 103 iterations while arriving at demonstrably different
+    // points (0.8718975394 vs 0.8718975393), so the count-only assertion
+    // failed there against a correctly wired option — a platform-dependent
+    // false alarm, not the alias this test is guarding against. The bug it
+    // does guard against (#677: `slack-based` routed to `None` by a
+    // catch-all arm) makes the two byte-identical, which this still catches.
     assert_ne!(
-        slack_iters, ruiz_iters,
-        "slack-based and ruiz agree at {ruiz_iters} iterations, which is suspicious \
-         enough to check the wiring before trusting it",
+        (slack_iters, &slack_obj),
+        (ruiz_iters, &ruiz_obj),
+        "slack-based and ruiz produced identical results ({ruiz_iters} iterations, \
+         objective {ruiz_obj}), which is suspicious enough to check the wiring \
+         before trusting it",
     );
 }
 
@@ -126,11 +145,12 @@ fn slack_based_scaling_changes_the_solve() {
 /// silent one.
 #[test]
 fn mc19_still_falls_back_to_no_scaling() {
-    let (status, mc19_iters) = solve("cresc4.nl", "mc19", "mc19");
-    let (_, none_iters) = solve("cresc4.nl", "mc19none", "none");
+    let (status, mc19_iters, mc19_obj) = solve("cresc4.nl", "mc19", "mc19");
+    let (_, none_iters, none_obj) = solve("cresc4.nl", "mc19none", "none");
     assert_eq!(status, "SolveSucceeded");
     assert_eq!(
-        mc19_iters, none_iters,
+        (mc19_iters, mc19_obj),
+        (none_iters, none_obj),
         "mc19 now differs from `none` — if it was implemented, update this test, \
          the CHANGELOG, and `docs/src/options.md`",
     );
