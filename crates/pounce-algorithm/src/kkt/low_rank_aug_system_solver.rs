@@ -67,6 +67,19 @@ pub struct LowRankAugSystemSolver {
     /// A fast path that skips re-factorizing must not also skip an
     /// inertia check the caller asked for against a different target.
     inner_factor_neg_evals: Option<Index>,
+    /// Separate inner solver dedicated to the Hessian-free solves that
+    /// take the bypass in [`LowRankAugSystemSolver::solve`], so that
+    /// neither solver ever sees more than one W sparsity (gh#730).
+    ///
+    /// `None` restores the single-solver arrangement, in which both
+    /// shapes share one inner solver and each alternation re-runs the
+    /// backend's symbolic factorization. Unit tests that drive a stub
+    /// inner solver directly use that arrangement; the builder always
+    /// supplies a bypass solver on the limited-memory path.
+    bypass: Option<Box<dyn AugSystemSolver>>,
+    /// Whether the most recent `solve` took the Hessian-free bypass, so
+    /// `last_solve_status` reports the solver that actually ran.
+    last_solve_took_bypass: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +149,53 @@ impl LowRankAugSystemSolver {
             factor: Factorization::default(),
             inner_has_factor: false,
             inner_factor_neg_evals: None,
+            bypass: None,
+            last_solve_took_bypass: false,
+        }
+    }
+
+    /// Same as [`Self::new`] but routes the Hessian-free solves through
+    /// their own inner solver.
+    ///
+    /// Under limited-memory this solver drives its inner solver with two
+    /// different (1,1) shapes: an empty W for the least-square multiplier
+    /// initialization and the equality-multiplier estimates, and an
+    /// `n`-diagonal `B0` for the main primal-dual solves.
+    /// `StdAugSystemSolver` keys its structure signature on W's nonzero
+    /// count, so the two alternate and every alternation re-runs the
+    /// backend's symbolic factorization — for MA57 with
+    /// `ma57_pivot_order = 5` a full MeTiS nested dissection of the whole
+    /// KKT system, ~0.4 s per call on a 118 276-row model (gh#730).
+    ///
+    /// Ipopt never pays this because its low-rank layer owns those
+    /// solves, so its inner solver sees one shape for its whole life —
+    /// `IpTSymLinearSolver.cpp:182` asserts exactly that. Giving the
+    /// bypass its own solver reproduces that invariant on both sides
+    /// instead of on neither.
+    ///
+    /// Deliberately **not** done by making the two shapes agree — e.g.
+    /// substituting a zeroed `n`-diagonal for the empty W, which is what
+    /// the shape proposed in gh#730 does. That is numerically exact, but
+    /// it changes the pattern the backend orders, and a different
+    /// ordering rounds differently: swept, it takes `pooling_rt2stp`
+    /// under MA57 from `obj = -4391.83` to `-3273.95` (both "Optimal",
+    /// 25% apart) and `cresc4` from 110 to 267 iterations. Two solvers
+    /// hand each path exactly the matrix and the ordering it already
+    /// had, so the win is free of trajectory movement rather than paid
+    /// for with it.
+    ///
+    /// The cost is one additional numeric factorization resident at
+    /// once. That is the deliberate trade: memory is measurable and
+    /// boundable, and a trajectory regression is what has repeatedly
+    /// shipped here undetected (`dev-notes/trajectory-regressions-and-\
+    /// the-fixture-sweep.md`).
+    pub fn with_bypass_solver(
+        inner: Box<dyn AugSystemSolver>,
+        bypass: Box<dyn AugSystemSolver>,
+    ) -> Self {
+        Self {
+            bypass: Some(bypass),
+            ..Self::new(inner)
         }
     }
 
@@ -625,18 +685,43 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         // a tighter tolerance), so ours is stale too.
         self.inner_has_factor = false;
         self.inner_factor_neg_evals = None;
-        self.inner.increase_quality()
+        // Escalate both: a caller asking for tighter pivoting wants it on
+        // the next solve whichever path that takes, and the two solvers
+        // hold independent backend state.
+        let inner = self.inner.increase_quality();
+        let bypass = self
+            .bypass
+            .as_deref_mut()
+            .map(|b| b.increase_quality())
+            .unwrap_or(false);
+        inner || bypass
     }
 
     fn last_solve_status(&self) -> ESymSolverStatus {
-        self.inner.last_solve_status()
+        // Whichever solver actually ran last — otherwise a bypass solve
+        // reports the stale status of the previous main solve.
+        match (self.last_solve_took_bypass, self.bypass.as_deref()) {
+            (true, Some(bypass)) => bypass.last_solve_status(),
+            _ => self.inner.last_solve_status(),
+        }
     }
 
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
+        // Both, or the bypass solver's symbolic and factorization time
+        // lands in no phase at all — which is precisely the row gh#730
+        // is about.
+        if let Some(bypass) = self.bypass.as_deref_mut() {
+            bypass.set_timing_stats(Rc::clone(&timing));
+        }
         self.inner.set_timing_stats(timing);
     }
 
     fn set_slack_scaling(&mut self, nx: Index, s_scale: &[Number]) {
+        // Both: the bypass solver assembles the same (2,2) slack block
+        // and would otherwise scale it differently from the main path.
+        if let Some(bypass) = self.bypass.as_deref_mut() {
+            bypass.set_slack_scaling(nx, s_scale);
+        }
         self.inner.set_slack_scaling(nx, s_scale);
     }
 
@@ -674,16 +759,32 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             // The inner solver is about to factor a *different* matrix
             // (the caller's own W, not our `Wdiag` substitution), so any
             // cached SMW factor state no longer describes what it holds.
-            self.inner_has_factor = false;
-            self.inner_factor_neg_evals = None;
-            let status = self
-                .inner
-                .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
-            if self.inner.provides_inertia() {
-                self.num_neg_evals = self.inner.number_of_neg_evals();
+            // Only invalidate the shared-solver cache when the solve is
+            // actually about to land on `self.inner`. With a dedicated
+            // bypass solver `self.inner` keeps holding a valid factor of
+            // the `Wdiag`-substituted system, and dropping it here would
+            // force a needless refactorization on the next main solve.
+            self.last_solve_took_bypass = true;
+            let target = match self.bypass.as_deref_mut() {
+                Some(bypass) => bypass,
+                None => {
+                    // The inner solver is about to factor a *different*
+                    // matrix (the caller's own W, not our `Wdiag`
+                    // substitution), so any cached SMW factor state no
+                    // longer describes what it holds.
+                    self.inner_has_factor = false;
+                    self.inner_factor_neg_evals = None;
+                    self.inner.as_mut()
+                }
+            };
+            let status = target.solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
+            if target.provides_inertia() {
+                self.num_neg_evals = target.number_of_neg_evals();
             }
             return status;
         };
+
+        self.last_solve_took_bypass = false;
 
         let needs_rebuild = self.first_call || self.augmented_system_requires_change(coeffs);
         if needs_rebuild {
