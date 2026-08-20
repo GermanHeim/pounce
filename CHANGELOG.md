@@ -69,6 +69,279 @@ changes.
   exact decision. The engine's `use_schur_updates`
   path hits `MaxIter` on dense reduced problems of hundreds of rows and
   stays off here; that is engine-side follow-up work.
+- **`nlp_scaling_method=curvature-based`: scale a QCQP by its coefficients
+  instead of by one derivative sample** (#703).
+
+  The default `gradient-based` scaling reads `∇f` and the Jacobian once, at
+  x₀. A row `½xᵀQx ≤ b` written about the origin has `∇g(0) = 0`, so started
+  from `x₀ = 0` it is assigned factor **1.0** however far `Q` and `b` disagree
+  — at every value of `nlp_scaling_max_gradient`, since `100/0` and `1e-6/0`
+  both clamp to 1. There is also no column stage at all. Across POUNCE's own
+  fixture corpus that is 196 of 196 quadratic rows left unscaled.
+
+  The new method derives both from the model's quadratic coefficients: one
+  **joint** variable scaling `D`, Ruiz-equilibrated across the whole pencil
+  `Q₀ + Σλᵢ Qᵢ` through its λ-independent magnitude envelope, then a per-row
+  `eᵢ = 1/max(‖D Qᵢ D‖_∞, ‖D aᵢ‖_∞, |bᵢ|)`. The objective is deliberately
+  left unscaled.
+
+  The claim it is validated on is invariance rather than speed. Given a QCQP
+  and the same QCQP under an exact change of variables spanning nine orders
+  of magnitude, `curvature-based` returns the same answer to fourteen digits
+  in the same 16 iterations at every span, while `gradient-based` degrades
+  from 75 to 154 iterations and then fails outright with
+  `Maximum_Iterations_Exceeded`. On two QCQPs shaped like the Mittelmann
+  `qcqp*` family it is 75 → 15 and 50 → 33 iterations at an identical
+  objective.
+
+  **Off by default, and not free when asked for.** It requires every row and
+  the objective to be degree ≤ 2 and refuses with a message otherwise, rather
+  than accepting the option and solving unscaled. Of the 47 CLI fixtures it
+  accepts, 33 change status, iteration count or objective and 14 do not — it
+  answers a specific pathology, and is a different scaling everywhere else.
+  On a nonconvex model a change of scaling changes which local minimum you
+  reach, and which one is not a property of the method: on one draw
+  `pooling_rt2stp` goes from `-3273.955` in 128 iterations to `-4391.826`
+  (the published global optimum) in 1083, but across 11 round-off-scale
+  perturbations of `mu_init` the default reaches the better optimum 3 times
+  in 11 and `curvature-based` 4 in 11, at median 204 and 108 iterations. The
+  model is bistable — see #713, closed as not-a-regression on this same
+  mistake — so treat a nonconvex re-scale as a different search. Because the
+  option is off by default, the fixture sweep is unaffected by all of this.
+
+  **Asking for it declines the convex fast path** (`solver_selection=auto`),
+  the same bargain #483 established for `user-scaling`. The factors reach the
+  engine through `TNLP::get_scaling_parameters`, which the convex solvers
+  never call — and the models this method is defined for are exactly the
+  models with quadratic rows, which is the population `auto` routes to those
+  solvers: 38 of the 47 fixtures it accepts classify convex, including both
+  fixtures added for it. Left ungated the headline feature would have been
+  silently inert on most of them. Under an explicit convex `solver_selection`
+  the forced choice is respected and the skipped option is reported instead.
+
+  The reroute is paid only where there is curvature to read. A model with no
+  quadratic coefficient anywhere — an LP is degree ≤ 2 with every `Q` empty —
+  makes the scheme degenerate to Ruiz equilibration of `[A b]`, which
+  `pounce-convex` already does internally, so those 7 fixtures keep the fast
+  path bit-for-bit and get a note rather than a reroute. Without that
+  exception, asking for this scaling took `lp_israel` from 29 iterations to
+  296 (29 → 135 for the engine switch, 135 → 296 for a scaling scheme with
+  nothing to read).
+
+- **`pounce check-x0` now reports what automatic scaling will do — and, for a
+  quadratic row, what it cannot see** (#703).
+
+  `nlp_scaling_method=gradient-based` (the default) is a point sample: it
+  reads `∇f` and the Jacobian once at x₀ and never looks again. A row written
+  `½xᵀQx ≤ b` about the origin has `∇g(0) = 0`, so started from `x₀ = 0` the
+  sample reads nothing and the row is assigned factor **1.0** however far `Q`
+  and `b` disagree. No value of `nlp_scaling_max_gradient` reaches it — `100/0`
+  and `1e-6/0` both clamp to 1 — and the cutoff is a per-block gate besides,
+  so a block with no row above it gets no scale vector at all. Across the CLI
+  fixture corpus that is **196 of 196 quadratic rows left unscaled**, including
+  one at 250× and one at 52× right-hand-side-to-curvature mismatch.
+
+  The preflight's new `automatic scaling at x0` section reports the objective
+  factor, the per-block gate and the per-row factors — computed by the
+  solver's own arithmetic, not a copy of it — beside the coefficient
+  magnitudes (`‖Q‖_∞`, `‖a‖_∞`, `|b|`) that the sample cannot report. A
+  warning fires when a model has rows in that blind spot *and* a mismatch
+  above 100×, naming `nlp_scaling_method=user-scaling` as the remedy. The
+  remedy is a real one: supplying `eᵢ = 1/max(‖Qᵢ‖_∞, ‖aᵢ‖_∞, |bᵢ|)` through
+  the existing `scaling_factor` suffixes takes two QCQPs shaped like the
+  Mittelmann family from 75 → 15 and 50 → 33 iterations at an identical
+  objective, while `gradient-based` and `nlp_scaling_method=none` are
+  bit-identical on both.
+
+  Diagnostic only — no solver behaviour changes. New:
+  `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
+  report. Background and measurements:
+  `dev-notes/quadratic-structure-exploitation.md` §8.
+- **A badly column-scaled convex QCQP could be reduced to the wrong cone and
+  the wrong answer reported as a success** (found by #703's fixtures).
+
+  Reducing `½xᵀQx ≤ b` to a second-order cone factors `Σ_k f_k f_kᵀ = Q` by
+  pivoted Cholesky, and the number of factor rows is the dimension of the
+  cone. The rank test cut at `1e-12 · max_diag` — one absolute threshold for
+  the whole matrix — so it asked how a pivot compared to the model's units
+  rather than how far its own downdate had moved it. On a model whose columns
+  span eight orders of magnitude that discarded **7 of 24** genuine
+  directions, making the cone larger than the constraint it stood for.
+
+  The solve then reached a better objective than the true optimum
+  (`-400.652` against `-364.210`, 10% out) and certified it: status
+  `SolveSucceeded`, self-reported constraint violation `2.66e-15`. Evaluating
+  the returned point against the actual model violates the quadratic row by
+  `4.948e+01` — 38% of its right-hand side. A relative residual check would
+  not have caught it either (`5.4e-13` against `‖Q‖ = 4.3e9`).
+
+  The test is now relative to each pivot's own starting diagonal, which is
+  invariant under the diagonal congruence `Q → CQC` that a change of units
+  is, and the loop settles a failed pivot and keeps looking rather than
+  stopping — with a relative threshold, pivot order and rank order are no
+  longer the same order. Affects the conic route only (`solver_selection`
+  `auto` or `socp` on a convex QCQP); the NLP path was always correct. The
+  fixture sweep moves two lines, both of them the fixture that exposed it.
+
+- **An LP whose convex solve ended in numerical failure was reported as the
+  final answer, on models the NLP path solves** (#724).
+
+  gh #535 gave the LP path a reroute: when the convex driver returns without a
+  certified KKT point, the model is re-solved on the general NLP path rather
+  than reported. The gate listed `Optimal_Inaccurate` and `Iteration_Limit`
+  and omitted `Numerical_Failure` — the *strongest* of the three signals, and
+  the only one the conic path (`run_convex_socp`) has ever rerouted on. So the
+  two paths disagreed about the same verdict, and an LP that drove its KKT
+  system singular before exhausting its iteration budget came back as
+  `Internal_Error` with no second attempt. `pounce lp_afiro.nl
+  solver_selection=auto tol=1e-20 qp_tau=0.99` is the reproduction; it now
+  reroutes and returns afiro's published optimum.
+
+  The reroute is not reachable on the default corpus — every fixture that
+  fails to certify does so by exhausting iterations — so this changes no
+  trajectory here. It was wrong on its face, and the fix is a gate that names
+  all three uncertified exits. `Time_Limit` still does not reroute: a budget
+  the user set is not a solver failure.
+
+- **The convex fixture corpus can now measure an HSDE step-rule change**
+  (#690).
+
+  Four fixtures join `crates/pounce-cli/tests/fixtures`, all regenerated from
+  cached upstream data by the benchmark harnesses already in the tree:
+  `lp_degen2` (NETLIB `degen2`, 534 vars, primal-degenerate), `lp_share1b`
+  (NETLIB `share1b`, 225 vars, ill-conditioned), `lp_israel` (NETLIB `israel`,
+  142 vars, dense columns), and `convex_qp_share1b` (Maros–Mészáros
+  `QSHARE1B`, the same model with a quadratic objective). Each carries a
+  published optimum from its source collection, and each solves in under
+  0.11 s, so both sweep legs stay cheap.
+
+  They exist because `scripts/sweep-fixtures.sh` — the tool that gates every
+  trajectory change — could not see the convex driver. Every convex fixture in
+  the corpus had been added as a *routing or verdict* witness, which two or
+  three variables do perfectly well; none was a trajectory witness, and
+  `lp_afiro` at 32 variables was the largest one that moved at all. gh #690
+  measured an adaptive-τ HSDE tail three times and declined it on the third
+  pass for exactly that reason: −4.2% corpus-wide was arithmetic over models of
+  one to three variables. Under the same fraction-to-boundary perturbation the
+  new fixtures move 15 → 11, 32 → 25, 29 → 23 and 28 → 22 iterations.
+  `dev-notes/convex-fixture-corpus.md` records the selection and the
+  measurements.
+- **Coverage no longer runs on pull requests; it is measured on `main`.**
+
+  The combined coverage job takes 33–40 minutes (three measured runs: 33.2,
+  40.4, 33.3, the spread coming from cargo-cache warmth). `ci.yml` — everything
+  that can actually reject a change — finishes in about 10. Running both on a
+  PR meant the PR sat visibly un-green for another half hour after the checks
+  that matter had passed, and a reviewer looking at a spinner cannot tell "the
+  tests are still running" from "the measurement is still running". Nothing
+  blocked on the number: `codecov.yml` marks both statuses `informational`.
+
+  `coverage.yml` now triggers on pushes to `main` plus `workflow_dispatch`.
+  Every merge still produces exactly one run, on the commit the badge and the
+  Codecov trend actually refer to. A branch that needs a number before it
+  merges can get one on demand (Actions → Coverage → Run workflow → pick the
+  branch).
+
+  Two costs, both stated rather than discovered later. Codecov's per-PR
+  patch-coverage status is gone, because no report is uploaded for a PR head —
+  it was informational, so it could not have blocked anything. And a PR that
+  edits `coverage.yml` no longer exercises the workflow before merging, since
+  `pull_request` was what used to do that; dispatch such a branch by hand
+  first.
+
+  `timeout-minutes` also drops from 120 to 90. The 120 was a guess made before
+  any run existed; 90 keeps better than 2x headroom over the slowest run seen.
+
+- **The coverage upload was shipping two GAMS listing fixtures to Codecov
+  alongside the real report.**
+
+  The first live run of `.github/workflows/coverage.yml` logged `Found 3
+  coverage files to report`, and the two it found on its own were
+  `studio/mcp/fixtures/ex8_3_10.lst` and `spawn_failed.lst` — solver listing
+  fixtures, not coverage data. Naming a report in the action's `files:` input
+  does not turn its directory search off, and `.lst` is one of the extensions
+  that search looks for.
+
+  Nothing went red, which is the part worth remembering: Codecov processes an
+  uploaded report asynchronously, well after the step exits, so a junk report
+  cannot fail the job that sent it. It would have surfaced as an unexplained
+  number on the badge. And since the step sets `fail_ci_if_error`, a later
+  rejection of an unparseable fixture would have failed the coverage job for a
+  reason nothing in the diff explained. Fixed with `disable_search: true`: the
+  report is assembled deliberately by `scripts/coverage-combined.sh`, so there
+  is nothing for a search to contribute.
+
+- **Coverage is measured in CI, and the DOI badge no longer depends on
+  Zenodo's badge service.**
+
+  `.github/workflows/coverage.yml` runs `scripts/coverage-combined.sh` (i.e.
+  `make coverage`) on every PR and every push to `main` and uploads the result
+  to Codecov. It deliberately does *not* run `cargo llvm-cov --workspace`:
+  large parts of POUNCE are reachable only through the `pounce._pounce`
+  extension module or through the CLI, and a Rust-only report shows those at
+  0% — inventing gaps in code that is well covered, which is the one failure
+  mode that makes a coverage number worse than no number. Running the same
+  script CI and contributors run also means the badge and a local `make
+  coverage` cannot disagree.
+
+  The job asserts its own trustworthiness before uploading. `crates/pounce-py`
+  is reachable *only* through the `.so`, so if the extension module fails to
+  get attributed to the profile it reads ~0% — and llvm-cov reports that as a
+  complete, plausible, badly wrong number rather than as an error. The check
+  fails the job with the cause named instead of moving the badge by tens of
+  points. Requires the `CODECOV_TOKEN` repository secret; the job carries the
+  same `github.repository ==` gate the publishing workflows do, so a fork sync
+  does not produce a red run for a token it cannot have.
+
+  Two fixes to the script fell out of wiring it up. It now excludes
+  `pounce-hsl` from its cargo invocations, as ci.yml does — that crate cannot
+  link without licensed HSL, and the failure was invisible because the same
+  `2>/dev/null` that hid it also dropped every *other* crate's test binary from
+  `objects.txt`. And it stages the instrumented CLI at
+  `python/pounce/bin/pounce` before `maturin develop`, so the pyomo-pounce
+  suite has a bundled binary it will trust (its `conftest.py` refuses an
+  unvetted `pounce` on `PATH`, gh #403) rather than skipping — previously the
+  CLI was passed to llvm-cov as an `-object` that nothing ever executed, and
+  every CLI and `.nl` path reported 0%.
+
+  Separately, the README DOI badge now comes from shields.io rather than
+  `zenodo.org/badge/DOI/....svg`. Zenodo's badge endpoint has broken the badge
+  more than once, and GitHub's Camo image proxy *caches* the error, so one bad
+  fetch outlives the outage that caused it. The concept DOI is stable by
+  definition, so a static shields badge cannot go stale, and the README's PyPI
+  badges already come from the same host. `dev-notes/zenodo-setup.md` no longer
+  tells the next person to copy the badge markdown off the Zenodo record page,
+  which is how it came back the last time.
+
+- **A least-squares model could report `Solve_Succeeded` on a point it never
+  reached, and the iteration budget decided which** (#712).
+
+  `crates/pounce-cli/tests/fixtures/scaled_feasible_a.nl` — `min Σ(xᵢ − aᵢ)²`
+  with `a` feasible, so the optimum is exactly `0` — returned
+  `Solve_Succeeded` at the default 200-iteration budget on a point whose
+  absolute KKT error is `2.3e3`. Raising `max_iter` past the point where the
+  solve converges on its own changed the answer by twelve orders while the
+  status stayed the same, which is the part a user could not have caught: a
+  budget cap must not change the accuracy of a solve that reports success.
+
+  Two things had to be true at once. The convex QP driver models
+  `½xᵀPx + cᵀx` only, so on a least-squares objective the constant `Σaᵢ²`
+  (`5e11` here) is a displacement the solver is not carrying, and #696 taught
+  the in-loop stopping test about it — but not the *second* place that
+  magnitude normalizes a duality gap, the check that decides whether an
+  `Optimal` is genuine. And the Ruiz-equilibrated retry that produces this
+  verdict returned its `Optimal` without consulting that check at all. Both
+  are fixed, and a complementarity product whose slack is smaller than the
+  rounding quantum of the subtraction that produced it no longer counts as a
+  violation — without which the correction rejects converged points on
+  models whose data is large enough that a slack of `7e-9` is 46 ulps.
+
+  The model now reports `Maximum_Iterations_Exceeded` at the default budget,
+  which is the honest verdict: it needs ~3596 iterations to reach a genuine
+  optimum, and reaches it with `max_iter` raised. No other model in the
+  fixture corpus changes status, objective or iteration count on either the
+  exact-Hessian or the limited-memory leg.
+
 - **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
   (#710).
 
@@ -422,6 +695,20 @@ changes.
   dependent. It is round-off-dependent on a single platform — 6 draws in 17
   at a `1e-12` perturbation — which is a simpler and worse explanation. It is
   deterministic now.
+
+  **#706 is closed on a stronger measurement than the ulp screen above.**
+  `mu_init` is what that screen perturbs, and on `eigena2` it no longer
+  perturbs anything: moved from `0.1` to `100` — three decades, not an ulp —
+  every iterate of the `=yes` run is bit-identical (objective, `inf_pr`,
+  `‖d‖`, both step sizes, 17 iterations), and only the printed `lg(mu)` column
+  differs. On #693's parent the same model swings between 61 and 127
+  iterations and both statuses under a `1e-12` change to the same option. A
+  trajectory that ignores a thousandfold change in the barrier parameter is
+  not sitting on a tolerance band, so the `eigena2` pin in
+  `issue_616_ls_init_downgrades.rs` — two-valued while #706 was open, because
+  CI had caught the platforms disagreeing — is single-valued again, and the
+  barrier-independence itself is now asserted alongside it rather than
+  described.
 
 - **A test and a doc page asserted opposite things about `pooling_rt2stp`,
   and both were written from one draw** (#616).

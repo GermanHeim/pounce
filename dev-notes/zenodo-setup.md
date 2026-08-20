@@ -34,11 +34,34 @@ record (it's listed as "Cite all versions"). Replace the placeholder
 in `README.md`:
 
 ```markdown
-[![DOI](https://zenodo.org/badge/DOI/<CONCEPT_DOI>.svg)](https://doi.org/<CONCEPT_DOI>)
+[![DOI](https://img.shields.io/badge/DOI-<CONCEPT_DOI_URLENCODED>-blue.svg)](https://doi.org/<CONCEPT_DOI>)
 ```
 
-Or, easier: copy the **DOI badge** markdown directly from the Zenodo
-record page (there's a "Cite as" / badge widget on the right sidebar).
+`<CONCEPT_DOI_URLENCODED>` is the DOI with its `/` written `%2F` — shields
+reads `/` as a path separator, so `10.5281/zenodo.20387011` goes in as
+`10.5281%2Fzenodo.20387011`. (Any literal `-` would likewise need doubling
+to `--`; Zenodo DOIs don't contain one.)
+
+**Do not** use the badge markdown Zenodo offers on the record page
+(the "Cite as" widget on the right sidebar). It points at
+
+```
+https://zenodo.org/badge/DOI/<CONCEPT_DOI>.svg
+```
+
+which is Zenodo's own badge service, and that endpoint is unreliable enough
+that the README badge has broken more than once. The failure is worse than a
+missing image: GitHub proxies README images through Camo, and Camo *caches*
+what it gets — including an error or a timeout — so one bad fetch leaves a
+broken badge sitting on the repo front page long after Zenodo has recovered,
+with nothing in the repo to explain it. The shields.io form above has no
+Zenodo dependency at all; it is a static label, and the concept DOI is stable
+by definition (that is the whole point of a concept DOI), so it cannot go
+stale. The README's PyPI and download badges already come from shields, so
+this also means one image host to trust instead of two.
+
+Nothing needs updating here on a new release — the concept DOI does not
+change. If a *version* DOI ever goes in the README, that one does.
 
 ## Editing the deposit metadata
 

@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/jkitchin/pounce/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/pounce/actions/workflows/ci.yml)
 [![Docs](https://github.com/jkitchin/pounce/actions/workflows/docs.yml/badge.svg)](https://jkitchin.github.io/pounce/)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20387011.svg)](https://doi.org/10.5281/zenodo.20387011)
+[![Coverage](https://codecov.io/gh/jkitchin/pounce/branch/main/graph/badge.svg)](https://codecov.io/gh/jkitchin/pounce)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20387011-blue.svg)](https://doi.org/10.5281/zenodo.20387011)
 
 [![PyPI: pounce-solver](https://img.shields.io/pypi/v/pounce-solver.svg?label=pypi%3A%20pounce-solver)](https://pypi.org/project/pounce-solver/)
 [![Downloads: pounce-solver](https://static.pepy.tech/badge/pounce-solver)](https://pepy.tech/project/pounce-solver)

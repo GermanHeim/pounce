@@ -30,5 +30,6 @@ pub mod nl_external;
 pub mod nl_fbbt_translate;
 pub mod nl_quadratic;
 pub mod nl_reader;
+pub mod nl_scaling;
 pub mod nl_tape;
 pub mod sol_writer;

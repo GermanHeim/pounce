@@ -3193,6 +3193,13 @@ pub struct NlTnlp {
     /// use is `k = 1`, where a fresh `Vec` would be pure overhead on every
     /// Krylov iteration.
     hvp_live: Vec<bool>,
+    /// Model-derived scaling factors (gh #703), computed on demand by
+    /// [`NlTnlp::enable_curvature_scaling`] and served through
+    /// [`TNLP::get_scaling_parameters`]. `None` until asked for, which is
+    /// the state every solve that does not select `curvature-based` stays
+    /// in — computing them costs a pass over every stored Hessian entry
+    /// and nothing else reads them.
+    curvature_scaling: Option<crate::nl_scaling::CurvatureScaling>,
 }
 
 // ---------------------------------------------------------------------
@@ -4578,6 +4585,7 @@ impl NlTnlp {
             adj_dot_scratch: vec![0.0; max_tape_n],
             compressed,
             hvp_live: Vec::new(),
+            curvature_scaling: None,
         };
         me.veto_ill_conditioned_peels();
         Ok(me)
@@ -4764,6 +4772,48 @@ impl NlTnlp {
     /// [`Self::variant`].
     pub fn problem(&self) -> &NlProblem {
         &self.prob
+    }
+
+    /// Opt this model in to **curvature-based** scaling (gh #703): compute
+    /// the per-variable and per-row factors of
+    /// [`crate::nl_scaling::curvature_scaling`] and serve them from
+    /// [`TNLP::get_scaling_parameters`], so `nlp_scaling_method` reaches
+    /// them through the channel it already has for user factors.
+    ///
+    /// Returns `false` when the model is not one the scheme is defined for
+    /// — some row or the objective is not degree ≤ 2, so no constant `Qᵢ`
+    /// exists. The caller must surface that as an error rather than solving
+    /// unscaled: an accepted scaling option that is then quietly not applied
+    /// is exactly the gh #483 failure.
+    ///
+    /// Costs one pass over every stored Hessian entry plus `RUIZ_SWEEPS`
+    /// passes over the magnitude surrogates, and nothing at all for a solve
+    /// that never calls it.
+    pub fn enable_curvature_scaling(&mut self) -> bool {
+        match crate::nl_scaling::curvature_scaling(&self.prob) {
+            Some(sc) => {
+                self.curvature_scaling = Some(sc);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether [`Self::enable_curvature_scaling`] has been called and
+    /// succeeded.
+    pub fn curvature_scaling_enabled(&self) -> bool {
+        self.curvature_scaling.is_some()
+    }
+
+    /// Whether the enabled curvature scaling actually read any curvature —
+    /// see [`crate::nl_scaling::CurvatureScaling::quadratic`]. `false` when
+    /// scaling is not enabled, and `false` for a degree-≤2 model whose every
+    /// `Q` is empty (an LP), where the scheme degenerates to plain Ruiz
+    /// equilibration of `[A b]`.
+    pub fn curvature_scaling_read_curvature(&self) -> bool {
+        self.curvature_scaling
+            .as_ref()
+            .is_some_and(|sc| sc.quadratic)
     }
 
     /// Is constraint row `i` evaluated from a constant quadratic form
@@ -5212,8 +5262,48 @@ impl TNLP for NlTnlp {
         let obj = sfx.obj_real.get(NAME);
         let var = sfx.var_real.get(NAME);
         let con = sfx.con_real.get(NAME);
-        if obj.is_none() && var.is_none() && con.is_none() {
+        let computed = self.curvature_scaling.as_ref();
+        if obj.is_none() && var.is_none() && con.is_none() && computed.is_none() {
             return false;
+        }
+        // Curvature-based factors (gh #703) are the *base*; a
+        // `scaling_factor` suffix the model actually carries overrides
+        // them component by component, because an explicit factor from the
+        // modeller beats one inferred from the coefficients. A model with
+        // no suffixes is the ordinary case and gets the computed vectors
+        // whole.
+        if let Some(sc) = computed {
+            // The length guards are a `copy_from_slice` panic guard, not a
+            // policy: `curvature_scaling` sizes both vectors from the same
+            // `NlProblem` this callback is answering for, so a mismatch is a
+            // bug upstream, not a model the scheme declines. Declining is the
+            // *worst* available response to it — `use_*_scaling` stays false,
+            // the engine reads that as "user supplied nothing", and the run
+            // proceeds unscaled with the option accepted, which is gh #483
+            // again. Assert it in debug builds so a mismatch is found here,
+            // where it is one line, instead of as a slow solve later.
+            debug_assert_eq!(
+                sc.x.len(),
+                req.x_scaling.len(),
+                "curvature x-scaling sized {} for a {}-variable request",
+                sc.x.len(),
+                req.x_scaling.len()
+            );
+            debug_assert_eq!(
+                sc.g.len(),
+                req.g_scaling.len(),
+                "curvature g-scaling sized {} for a {}-row request",
+                sc.g.len(),
+                req.g_scaling.len()
+            );
+            if sc.x.len() == req.x_scaling.len() {
+                req.x_scaling.copy_from_slice(&sc.x);
+                *req.use_x_scaling = true;
+            }
+            if sc.g.len() == req.g_scaling.len() {
+                req.g_scaling.copy_from_slice(&sc.g);
+                *req.use_g_scaling = true;
+            }
         }
         // Objective 0 is the one `NlTnlp` evaluates (extra `O` segments
         // are parsed and ignored), so its entry is the objective scale.
@@ -5221,24 +5311,35 @@ impl TNLP for NlTnlp {
             .and_then(|v| v.first().copied())
             .filter(|&s| s != 0.0)
             .unwrap_or(1.0);
-        *req.use_x_scaling = match var {
-            Some(v) if v.len() == req.x_scaling.len() => {
-                for (slot, &s) in req.x_scaling.iter_mut().zip(v) {
-                    *slot = if s == 0.0 { 1.0 } else { s };
+        // A zero entry is AMPL's "untagged" default, not a scale factor.
+        // An untagged component therefore falls back to the base: the
+        // curvature factor when one was computed, and an explicit 1.0
+        // otherwise — explicit because the callback's contract is to fill
+        // the buffer, not to assume the caller pre-filled it with ones.
+        if let Some(v) = var.filter(|v| v.len() == req.x_scaling.len()) {
+            for (slot, &s) in req.x_scaling.iter_mut().zip(v) {
+                if s != 0.0 {
+                    *slot = s;
+                } else if computed.is_none() {
+                    *slot = 1.0;
                 }
-                true
             }
-            _ => false,
-        };
-        *req.use_g_scaling = match con {
-            Some(g) if g.len() == req.g_scaling.len() => {
-                for (slot, &s) in req.g_scaling.iter_mut().zip(g) {
-                    *slot = if s == 0.0 { 1.0 } else { s };
+            *req.use_x_scaling = true;
+        } else if computed.is_none() {
+            *req.use_x_scaling = false;
+        }
+        if let Some(g) = con.filter(|g| g.len() == req.g_scaling.len()) {
+            for (slot, &s) in req.g_scaling.iter_mut().zip(g) {
+                if s != 0.0 {
+                    *slot = s;
+                } else if computed.is_none() {
+                    *slot = 1.0;
                 }
-                true
             }
-            _ => false,
-        };
+            *req.use_g_scaling = true;
+        } else if computed.is_none() {
+            *req.use_g_scaling = false;
+        }
         true
     }
 
@@ -7542,6 +7643,41 @@ S1 2 sens_init_constr
         assert!(ok);
         assert!(use_x, "variable factors must reach the engine");
         assert_eq!(x, vec![1.0, 3.0]);
+    }
+
+    /// gh #703: with curvature-based scaling switched on, the computed
+    /// factors are the base and a `scaling_factor` suffix the model
+    /// actually carries wins **component by component** — an explicit
+    /// factor from the modeller beats one inferred from the coefficients,
+    /// and the components they did not tag keep the inferred one rather
+    /// than snapping back to 1.
+    #[test]
+    fn a_user_suffix_overrides_the_computed_factor_component_wise() {
+        let baseline = {
+            let p = parse_nl_text(WITH_CON_SUFFIX).expect("parse");
+            let mut t = NlTnlp::new(p);
+            assert!(t.enable_curvature_scaling(), "an LP is degree ≤ 2");
+            scaling_of(&mut t).5
+        };
+        assert!(
+            baseline.iter().all(|v| *v > 0.0),
+            "curvature scaling should produce usable row factors, got {baseline:?}"
+        );
+
+        // Tag row 0 only. AMPL's untagged default is 0, which must read as
+        // "not tagged" and leave row 1 on the computed factor.
+        let nl = WITH_CON_SUFFIX.to_string() + "S5 1 scaling_factor\n0 7.0\n";
+        let p = parse_nl_text(&nl).expect("parse");
+        let mut t = NlTnlp::new(p);
+        assert!(t.enable_curvature_scaling());
+        let (ok, _obj, use_x, _x, use_g, g) = scaling_of(&mut t);
+        assert!(ok);
+        assert!(use_g && use_x);
+        assert_eq!(g[0], 7.0, "the tagged row takes the user's factor");
+        assert_eq!(
+            g[1], baseline[1],
+            "the untagged row keeps the computed one, not 1.0"
+        );
     }
 
     /// No `scaling_factor` suffix ⇒ "the user supplied nothing", the

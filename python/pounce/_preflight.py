@@ -18,6 +18,13 @@ constructor does::
         raise ValueError(str(report))
     x, info = pounce.Problem(n, m, problem_obj=problem_obj,
                              lb=lb, ub=ub, cl=cl, cu=cu).solve(x0=x0)
+
+The two reports share a schema name but are not key-for-key identical:
+this one carries ``evaluation.errors``, and the CLI's carries a
+``scaling`` block reporting what ``nlp_scaling_method=gradient-based``
+will do at x0 plus the coefficient magnitudes of any quadratic rows the
+sample cannot see (gh #703). That block is read off the ``.nl`` file,
+which a Python-defined problem does not have.
 """
 
 from __future__ import annotations

@@ -1,0 +1,250 @@
+name: Coverage
+
+# Coverage does NOT run on pull requests, deliberately.
+#
+# This job is the most expensive thing in the repo: it builds the whole
+# workspace unoptimized and instrumented, then runs the Rust, Python and pyomo
+# suites on top of that. Three measured runs: 33, 40 and 33 minutes. ci.yml —
+# the checks that can actually reject a change — finishes in about 10. Running
+# coverage on PRs meant a PR sat visibly un-green for another half hour after
+# everything that could reject it had already passed, and a reviewer looking at
+# a spinner does not distinguish "the tests are still running" from "the
+# measurement is still running". The wait bought nothing: nobody blocks a merge
+# on this number, and codecov.yml marks both statuses `informational`.
+#
+# So the number is tracked on `main`. Every merge produces exactly one run, on
+# the commit the badge and the Codecov trend line actually refer to. What that
+# gives up is Codecov's per-PR patch-coverage status — which, being
+# informational, could not have blocked anything either.
+#
+# `workflow_dispatch` covers a branch that genuinely needs a number before it
+# merges: Actions -> Coverage -> Run workflow -> pick the branch. It is also
+# the only way left to exercise a change to THIS FILE before it lands. Without
+# a `pull_request` trigger, a PR editing this workflow no longer proves the
+# workflow still runs — so dispatch it from the branch before merging one.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A superseded coverage run is ~40 minutes of runner time nobody will read.
+# Never cancel on `main`, where each commit's number is the record of that
+# commit and the baseline every later commit is compared against. That leaves
+# `workflow_dispatch` runs on a branch, where re-dispatching after a push
+# should supersede the run you have just invalidated.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  coverage:
+    name: combined coverage -> Codecov
+    # Same gate every publishing workflow here carries, for the same reason
+    # (see CLAUDE.md): `push: branches: [main]` fires in a fork when the owner
+    # syncs, CODECOV_TOKEN does not exist there, and `fail_ci_if_error: true`
+    # below turns that into a red run and an email for a contributor who did
+    # nothing. Now that `push` is the only automatic trigger, this gate is the
+    # only thing standing between a fork sync and that email.
+    if: github.repository == 'jkitchin/pounce'
+    runs-on: ubuntu-latest
+    # 120 was a guess made before any run existed. Measured since: 33.2, 40.4
+    # and 33.3 minutes, the spread coming from how warm the cargo cache is. 90
+    # keeps better than 2x headroom over the slowest of those (and well over
+    # the cold-cache case, which none of the three was) while making a hung job
+    # fail in an hour and a half rather than burning the 6 h default.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # `llvm-profdata` / `llvm-cov`, which coverage-combined.sh drives
+          # directly. Without this it exits with a FATAL naming the component.
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct from ci.yml's cache: everything here is built with
+          # `-C instrument-coverage`, so the artifacts are not interchangeable
+          # and sharing a key would just thrash both.
+          shared-key: coverage
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      # `maturin develop` refuses to run outside a virtualenv, and the script
+      # calls it. Activating the venv for every later step (rather than
+      # `source`-ing it inside one) also means the script's own
+      # `python -c 'import pounce._pounce'` probe resolves to the interpreter
+      # that maturin just installed into.
+      - name: Create and activate a virtualenv
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # The point of coverage-combined.sh is that paths reachable only through
+      # the extension module or the CLI stop reading as 0%. That only holds if
+      # the suites those paths live behind can actually run: an absent optional
+      # dependency does not fail a test, it skips it, and a skipped test is
+      # indistinguishable from dead code in the report. So install what
+      # ci.yml's `python-test` and `pyomo-pounce-smoke` jobs install.
+      #
+      # torch is deliberately not here. Its wheel is ~800 MB and the torch
+      # suites drive the same Rust solve paths the jax ones do, so it costs a
+      # lot of runner time to move the number very little. ci.yml's
+      # `python-test-torch` job is what keeps that frontend honest.
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest
+          python -m pip install scipy "jax[cpu]" diffrax
+          # pyomo-pounce's suite: pyomo itself, plus the numpy/pandas/networkx
+          # /scipy set that keeps its incidence and sensitivity tests from
+          # importorskip-ing away (see the same list in ci.yml).
+          python -m pip install pyomo numpy pandas networkx
+          # --no-deps: the declared `pounce-solver` dependency is satisfied by
+          # the local `maturin develop` the script runs, not by PyPI. Without
+          # this pip would pull the last *released* wheel over it.
+          python -m pip install --no-deps ./pyomo-pounce
+
+      # This is `make coverage`. Running the same script CI and contributors
+      # run means the number on the badge and the number you get locally are
+      # produced by the same code path — a CI-only reimplementation would
+      # drift, and the two would disagree with no way to tell which was right.
+      #
+      # Note what this step does NOT do: gate on test results. The script runs
+      # under `set -uo pipefail` without `-e` and keeps going through failures
+      # on purpose — a partial profile is still a measurement, and
+      # `test_qp_solve_releases_the_gil` is a *known* casualty of running under
+      # instrumentation (it times concurrent threads to prove a QP solve
+      # releases the GIL, and the counter overhead breaks the margin). ci.yml
+      # is the test gate; this job is the measurement. What it does gate on is
+      # the report being trustworthy — see the next step.
+      - name: Measure combined Rust + Python coverage
+        run: scripts/coverage-combined.sh
+
+      # CONTRIBUTING.md's sanity check, as an assertion.
+      #
+      # crates/pounce-py/* is reachable ONLY through the extension module, so
+      # it reads 0% in any Rust-only report and 60-90% here. If it reads zero,
+      # the .so did not get attributed — and the failure is silent: llvm-cov
+      # emits a complete, plausible, badly wrong report rather than an error.
+      # Uploading that would move the badge by tens of points and read as a
+      # genuine coverage collapse. Fail here instead, where the cause is named.
+      - name: Report is trustworthy (extension module was attributed)
+        run: |
+          python3 - <<'PY'
+          import sys
+          rows = []
+          for line in open("target/coverage-combined/summary.txt"):
+              parts = line.split()
+              if len(parts) < 4 or "crates/pounce-py/" not in parts[0]:
+                  continue
+              try:
+                  rows.append((parts[0], int(parts[1]), int(parts[2])))
+              except ValueError:
+                  pass
+          if not rows:
+              sys.exit("::error::no crates/pounce-py rows in the report at all; "
+                       "the extension module was not measured")
+          total = sum(r[1] for r in rows)
+          missed = sum(r[2] for r in rows)
+          covered = 100 * (1 - missed / total) if total else 0.0
+          print(f"pounce-py: {covered:.1f}% region coverage "
+                f"({total - missed} of {total} regions, {len(rows)} files)")
+          if covered < 1.0:
+              sys.exit("::error::crates/pounce-py reads ~0%, which is the "
+                       "signature of the .so not being attributed to the "
+                       "profile. The whole report is suspect - do not upload "
+                       "it. See CONTRIBUTING.md, 'Measuring coverage'.")
+          PY
+
+      # A percentage is only readable next to what it covers. core.txt is the
+      # numerical core ranked by uncovered regions — the gaps where a miss can
+      # hide a silently-wrong answer, as opposed to an unexercised diagnostic
+      # printer. Putting it in the job summary means a reviewer sees the
+      # ranking without opening Codecov.
+      - name: Surface the numerical-core ranking
+        if: always()
+        run: |
+          {
+            echo "### Numerical-core coverage"
+            echo ""
+            echo '```'
+            cat target/coverage-combined/core.txt 2>/dev/null \
+              || echo "core.txt was not produced - the run did not reach the report step"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # llvm-cov writes absolute `SF:` paths. Codecov's own path fixing can
+      # usually guess the prefix, but "usually" here means the whole report
+      # silently maps to no files and shows as an empty diff. Strip the
+      # workspace prefix ourselves so the mapping is not a guess.
+      - name: Rewrite lcov paths as repo-relative
+        run: |
+          set -euo pipefail
+          lcov=target/coverage-combined/lcov.info
+          test -s "$lcov" || { echo "::error::$lcov is missing or empty"; exit 1; }
+          sed -i "s|^SF:${GITHUB_WORKSPACE}/|SF:|" "$lcov"
+          # Anything still absolute is outside the repo (a registry or sysroot
+          # path the ignore regex missed) and Codecov cannot map it. Report
+          # rather than upload rows that will read as untracked files.
+          if grep -q '^SF:/' "$lcov"; then
+            echo "::warning::lcov still contains absolute paths outside the repo:"
+            grep '^SF:/' "$lcov" | sort -u | head -20
+          fi
+          echo "$(grep -c '^SF:' "$lcov") files in the report"
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage-combined/lcov.info
+          # `files:` names a report to upload; it does NOT stop the uploader
+          # from also globbing the tree for anything that looks like one. On
+          # the first real run that glob found two GAMS listing fixtures --
+          # studio/mcp/fixtures/ex8_3_10.lst and spawn_failed.lst -- and
+          # shipped them as coverage reports ("Found 3 coverage files to
+          # report"). `.lst` is a coverage extension to Codecov and a solver
+          # log to us. Nothing failed, because report *processing* is async
+          # and happens after the step exits, so the damage would have shown
+          # up as an unexplained number on the badge rather than as a red
+          # check -- and with fail_ci_if_error set, a future rejection of an
+          # unparseable fixture would fail this job for a reason nothing in
+          # the diff would explain. This report is assembled deliberately by
+          # coverage-combined.sh; there is nothing for a search to find.
+          disable_search: true
+          flags: combined
+          # Fail loudly on a broken upload. A silently-missing upload leaves
+          # Codecov comparing against a stale baseline, which is worse than a
+          # red check because it looks like a real coverage change.
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      # The full per-file table and the pytest logs, for when the number moves
+      # and the Codecov diff does not explain why (a suite that skipped rather
+      # than ran shows up here as FAILED/ERROR lines, and nowhere else).
+      - name: Upload the raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: |
+            target/coverage-combined/summary.txt
+            target/coverage-combined/core.txt
+            target/coverage-combined/lcov.info
+            target/coverage-combined/objects.txt
+            target/coverage-combined/pytest-*.log
+          if-no-files-found: warn
+          retention-days: 14

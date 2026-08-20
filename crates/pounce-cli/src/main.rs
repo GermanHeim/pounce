@@ -87,6 +87,18 @@ fn presolve_verdict(
     }
 }
 
+/// Whether the resolved options select `nlp_scaling_method=curvature-based`
+/// (gh #703). Read off the `OptionsList` rather than the raw argv so the
+/// option file, the `pounce_options` environment variable and the
+/// command line are all honoured in the order they are applied.
+fn curvature_scaling_requested(app: &pounce_algorithm::application::IpoptApplication) -> bool {
+    app.options()
+        .get_string_value("nlp_scaling_method", "")
+        .ok()
+        .and_then(|(v, f)| f.then_some(v))
+        .is_some_and(|v| v == "curvature-based")
+}
+
 pub fn main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
@@ -462,6 +474,12 @@ pub fn main() -> ExitCode {
     // (re-parsing doubled parse time / peak memory on large models — code
     // review L24). `None` for builtins (treated as general NLP).
     let mut nl_class: Option<pounce_cli::dispatch::ProblemClass> = None;
+    // gh #703: set alongside `nl_class` when curvature-based scaling is
+    // switched on below, and only then. Records whether the model handed the
+    // scheme any second-order coefficient to work with — see
+    // `decline_convex_for_curvature_scaling` for why the answer decides
+    // whether the request is worth the convex fast path.
+    let mut nl_curvature_read_curvature = false;
     // `nl_expr_provider` shadows `inner_tnlp` for the `.nl`-file path:
     // both point at the same `NlTnlp`, but the second handle is typed
     // as `dyn ExpressionProvider` so the presolve wrapper can use it
@@ -535,6 +553,30 @@ pub fn main() -> ExitCode {
                     // LP/QP dispatch block below.
                     nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    // gh #703: `nlp_scaling_method=curvature-based` derives
+                    // its factors from the model's coefficients, so it has
+                    // to be switched on here — while the handle is still
+                    // the concrete `NlTnlp` that owns them, and before any
+                    // wrapper (presolve, penalty, the variable-scaling
+                    // substitution itself) sits in front of it. The
+                    // wrappers forward `get_scaling_parameters` and project
+                    // the indices, so the factors reach the engine through
+                    // the channel user factors already use.
+                    if curvature_scaling_requested(&app)
+                        && !nl_rc.borrow_mut().enable_curvature_scaling()
+                    {
+                        eprintln!(
+                            "pounce: nlp_scaling_method=curvature-based needs \
+                             every row and the objective to be degree <= 2 (it \
+                             scales a model by its quadratic coefficients, and \
+                             a genuine nonlinearity has none). This model has \
+                             at least one row it cannot read that way. Use \
+                             gradient-based, or user-scaling with your own \
+                             scaling_factor suffixes."
+                        );
+                        return ExitCode::from(2);
+                    }
+                    nl_curvature_read_curvature = nl_rc.borrow().curvature_scaling_read_curvature();
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
                     let t: Rc<RefCell<dyn TNLP>> = nl_rc;
@@ -592,6 +634,20 @@ pub fn main() -> ExitCode {
                 || s.con_real.contains_key("scaling_factor")
                 || s.var_real.contains_key("scaling_factor")
         });
+    // gh #703, gh#483 again: `nlp_scaling_method=curvature-based` reaches the
+    // engine through exactly the same channel as `user-scaling` — the TNLP's
+    // `get_scaling_parameters` callback — and the convex solvers do not call
+    // it. They equilibrate internally, so routing a curvature-scaling request
+    // there accepts the option and means "not this scaling".
+    //
+    // That is not a corner case for *this* option: the models it is defined
+    // for are the models with quadratic rows, which is precisely the
+    // population `classify_problem` sends to the convex path. Both fixtures
+    // gh #703 added are convex QCQPs, and of the 47 corpus models the option
+    // accepts, 38 classify convex. Without this gate the headline feature is
+    // inert by default on the majority of the models it exists for, which is
+    // the gh#483 failure verbatim.
+    let wants_curvature_scaling = curvature_scaling_requested(&app);
     // gh#483 follow-up: `obj_scaling_factor` is an NLP-path knob — the convex
     // solvers run their own equilibration and never read it. A *negative*
     // factor is upstream's documented spelling for "maximize", so dropping it
@@ -718,6 +774,29 @@ pub fn main() -> ExitCode {
         let decline_convex_for_user_scaling =
             wants_user_scaling && matches!(selection, SolverSelection::Auto);
 
+        // gh #703: and again for curvature-based scaling, for the same reason
+        // and through the same callback — but only when the model handed the
+        // scheme some curvature to read.
+        //
+        // The `user-scaling` gate above already has this shape: it requires
+        // the option *and* a `scaling_factor` suffix in the `.nl` for the
+        // solver to read, because rerouting a model that carries no suffixes
+        // buys a different engine and nothing else. The same test applies
+        // here, and it is not cosmetic. Leaving it out was measured on the
+        // corpus: `nlp_scaling_method=curvature-based` on `lp_israel`, a pure
+        // LP, went from 29 iterations on the convex path to 296 on the
+        // general one — 29 → 135 for the engine and 135 → 296 for a scaling
+        // scheme whose defining input, `Qᵢ`, is empty in every row. On an LP
+        // §8 degenerates to Ruiz equilibration of `[A b]`, which is what
+        // `pounce-convex` already does internally, so the fast path is not
+        // "quietly meaning none" here — it is doing the same kind of work by
+        // its own route. That is a claim worth making out loud rather than
+        // silently, so the no-curvature case still prints (below); what it
+        // does not do is pay for an engine switch that cannot help.
+        let decline_convex_for_curvature_scaling = wants_curvature_scaling
+            && nl_curvature_read_curvature
+            && matches!(selection, SolverSelection::Auto);
+
         // gh#483 follow-up: a negative `obj_scaling_factor` means maximize,
         // which the convex path cannot express. Unlike the two requests above
         // — where the fast path merely skips *extra* work — taking it here
@@ -728,6 +807,7 @@ pub fn main() -> ExitCode {
         // Any of these declines the fast path; the messages below say which.
         let decline_convex = decline_convex_for_postopt
             || decline_convex_for_user_scaling
+            || decline_convex_for_curvature_scaling
             || decline_convex_for_obj_scaling;
 
         // Same bargain for a conic solve that finishes without a verified KKT
@@ -871,6 +951,43 @@ pub fn main() -> ExitCode {
                          (pounce-convex), which equilibrates internally and does \
                          not read them; the requested scaling will be skipped. \
                          Use solver_selection=nlp or auto to apply it."
+                    );
+                }
+            }
+            // gh #703: same treatment for `nlp_scaling_method=curvature-based`,
+            // with a third case the other requests do not have — a model that
+            // is degree <= 2 (so the option was accepted) but carries no
+            // second-order coefficient at all.
+            if wants_curvature_scaling {
+                if decline_convex_for_curvature_scaling {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but \
+                         nlp_scaling_method=curvature-based asks for factors \
+                         derived from the model's quadratic coefficients, which \
+                         the convex solver (pounce-convex) does not read; \
+                         routing to the general NLP interior-point path so the \
+                         scaling is honored.",
+                        class.name()
+                    );
+                } else if !nl_curvature_read_curvature {
+                    eprintln!(
+                        "pounce: note: nlp_scaling_method=curvature-based was \
+                         accepted, but every quadratic coefficient in this \
+                         model is zero, so the scheme reduces to Ruiz \
+                         equilibration of the linear rows; the convex solver \
+                         (pounce-convex) equilibrates internally and keeps the \
+                         fast path. Use solver_selection=nlp to run the scheme \
+                         on the general path anyway."
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: nlp_scaling_method=curvature-based \
+                         asks for factors derived from the model's quadratic \
+                         coefficients, but solver_selection={sel_str} forces \
+                         the convex solver (pounce-convex), which equilibrates \
+                         internally and does not read them; the requested \
+                         scaling will be skipped. Use solver_selection=nlp or \
+                         auto to apply it."
                     );
                 }
             }
@@ -2186,15 +2303,22 @@ fn resolve_scaling_retry_outcome(
 /// * **`ProblemClass::Lp`** — `P = 0`, per the issue. A convex QP that stalls
 ///   is a different (and unmeasured) population; leave it to the engine that
 ///   was chosen for it.
-/// * **the status** — only the two that mean "no certificate": a
-///   reduced-accuracy exit and an exhausted budget. `Optimal` needs no help,
-///   and `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
-///   *verified*, which a second solve must not be allowed to overwrite.
-///   `NumericalFailure` is left alone here for the same reason the QP path has
-///   always reported it: it is the post-solve verification refusing a point,
-///   and the LP corpus has no case of it that the NLP path recovers. Nor does
-///   `TimeLimit`, which is a spent budget rather than a stall — rerouting it
-///   would answer "stop after `max_wall_time`" with a second solve.
+/// * **the status** — the three that mean "no certificate": a reduced-accuracy
+///   exit, an exhausted budget, and a numerical failure. `Optimal` needs no
+///   help, and `PrimalInfeasible` / `DualInfeasible` are verdicts the convex
+///   solver *verified*, which a second solve must not be allowed to overwrite.
+///   `NumericalFailure` was excluded until gh #724 on the grounds that it is
+///   the post-solve verification refusing a point and no LP in the corpus
+///   reached it. Both halves of that are the wrong test. It is the *strongest*
+///   of the three "did not certify" signals — the point on offer missed even
+///   the acceptable band — and it is the one status `run_convex_socp` reroutes
+///   on for the conic path, so omitting it here made the LP and SOCP paths
+///   disagree about what an unverified convex result means. An LP that reached
+///   it was reported `InternalError` on a model the NLP path in the same
+///   binary solves (gh #724 reproduces this on `lp_afiro` with `qp_tau=0.99`).
+///   `TimeLimit` still does not reroute: it is a spent budget rather than a
+///   stall, and rerouting it would answer "stop after `max_wall_time`" with a
+///   second solve.
 ///
 /// Note what this deliberately is **not**: the issue's "never-regress" variant,
 /// which would keep whichever of the two results certifies at the lower KKT
@@ -2215,7 +2339,7 @@ fn lp_declines_to_nlp(
         && class == pounce_cli::dispatch::ProblemClass::Lp
         && matches!(
             status,
-            QpStatus::OptimalInaccurate | QpStatus::IterationLimit
+            QpStatus::OptimalInaccurate | QpStatus::IterationLimit | QpStatus::NumericalFailure
         )
 }
 
@@ -3581,14 +3705,20 @@ mod lp_nlp_fallback_tests {
         QpStatus::NumericalFailure,
     ];
 
-    /// gh #535: the two statuses that mean "the convex solve produced no
+    /// gh #535: the statuses that mean "the convex solve produced no
     /// certificate" are what hands an LP to the NLP path. `OptimalInaccurate`
     /// is the NETLIB `gen`/`gen1` exit (199 of 200 iterations, primal residual
     /// 1.4e-7 against `tol = 1e-8`); `IterationLimit` is the same stall when
-    /// the reduced-accuracy band is missed too.
+    /// the reduced-accuracy band is missed too; `NumericalFailure` (gh #724)
+    /// is the post-solve verification refusing the point outright, which is a
+    /// stronger statement of the same thing and not a weaker one.
     #[test]
     fn an_uncertified_lp_is_handed_to_the_nlp_path() {
-        for status in [QpStatus::OptimalInaccurate, QpStatus::IterationLimit] {
+        for status in [
+            QpStatus::OptimalInaccurate,
+            QpStatus::IterationLimit,
+            QpStatus::NumericalFailure,
+        ] {
             assert!(
                 lp_declines_to_nlp(ProblemClass::Lp, status, true),
                 "{status:?} on an LP must reroute"
@@ -3610,21 +3740,30 @@ mod lp_nlp_fallback_tests {
     /// `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
     /// *verified*. Rerouting them would let a second solve overwrite a proof
     /// with a numerical opinion — the same reason `run_convex_socp` reroutes
-    /// only `NumericalFailure`. `NumericalFailure` itself is left alone here:
-    /// it is the post-solve verification refusing a point, and the LP corpus
-    /// has no case of it the NLP path recovers.
+    /// only `NumericalFailure` and not these.
     #[test]
-    fn verified_verdicts_and_numerical_failure_stand() {
-        for status in [
-            QpStatus::PrimalInfeasible,
-            QpStatus::DualInfeasible,
-            QpStatus::NumericalFailure,
-        ] {
+    fn verified_verdicts_stand() {
+        for status in [QpStatus::PrimalInfeasible, QpStatus::DualInfeasible] {
             assert!(
                 !lp_declines_to_nlp(ProblemClass::Lp, status, true),
                 "{status:?} must not reroute"
             );
         }
+    }
+
+    /// gh #724: the LP gate and the SOCP gate must agree about what an
+    /// uncertified convex result means. `run_convex_socp` reroutes exactly
+    /// `NumericalFailure`; if the LP gate excludes it, the same failure to
+    /// verify is a fallback on one path and a final `InternalError` on the
+    /// other. This is the assertion that was inverted before gh #724, so it is
+    /// stated as the invariant rather than as one more status in a list.
+    #[test]
+    fn an_unverified_convex_result_reroutes_on_the_lp_path_as_it_does_on_the_conic_one() {
+        assert!(
+            lp_declines_to_nlp(ProblemClass::Lp, QpStatus::NumericalFailure, true),
+            "NumericalFailure is what the conic path reroutes on; the LP path \
+             must not report it as the last word"
+        );
     }
 
     /// A wall-clock budget is a budget, exactly as `max_iter` is: `TimeLimit`
