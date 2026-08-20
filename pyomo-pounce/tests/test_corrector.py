@@ -82,13 +82,21 @@ def test_more_iterations_do_not_make_it_worse():
         f"a larger budget should not lose accuracy: {errs}")
 
 
-def test_the_other_modes_say_they_ignore_it():
+def test_it_applies_under_every_mode():
+    """Each mode produces a step and the corrector refines whichever
+    one ran, so asking for iterations under fix_relax or path must
+    improve on that mode's own answer rather than being ignored."""
     m = solved()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        estimate(m, [(m.p, 1.6)], mode="fix_relax", corrector_iter=4)
-    assert any("corrector_iter is ignored" in str(x.message) for x in w), (
-        f"expected a warning about the mode, got {[str(x.message) for x in w]}")
+    target = 1.6
+    tx, ty = resolve_at(target)
+    for mode in ("linear", "fix_relax", "path"):
+        px, py = estimated(m, target, mode=mode)
+        cx, cy = estimated(m, target, mode=mode, corrector_iter=8)
+        plain = max(abs(px - tx), abs(py - ty))
+        corr = max(abs(cx - tx), abs(cy - ty))
+        assert corr < plain / 10, (
+            f"mode={mode}: the corrector should improve on the mode's own "
+            f"step, {plain:.3e} -> {corr:.3e}")
 
 
 def test_a_correction_that_achieves_nothing_says_so():

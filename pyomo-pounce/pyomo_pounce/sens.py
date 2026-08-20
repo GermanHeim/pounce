@@ -1130,33 +1130,20 @@ def _correct(session, pin_idx, deltas, step, mode, degeneracy,
              corrector_iter, fell_back):
     """Refine a step by Newton iterations on the barrier system.
 
-    Returns the refined primal step and what the iterations did, or the
-    step unchanged and None where the corrector does not apply.
+    Returns the refined primal step and what the iterations did.
 
-    The corrector needs the step in the compound KKT layout, which only
-    the plain parametric step exposes. `fix_relax` and `path` return
-    the primal block alone, and so does the directional decision at a
-    degenerate base point, so those keep their own step. That is a gap
-    in what is exposed rather than a property of the corrector.
+    The corrector starts from a point, so it needs the multipliers as
+    well as the primal step, and only the plain parametric step reports
+    both. Every mode refines the same underlying step, so the start is
+    the mode's own primal block carrying the plain step's multipliers.
+    The iterations correct the multipliers from there, which is what
+    they are for.
     """
-    if mode != "linear":
-        warnings.warn(
-            f"estimate: corrector_iter is ignored under mode={mode!r}, "
-            "which does not expose the compound step the corrector "
-            "iterates on.")
-        return step, None
-    if degeneracy == "directional" and not fell_back:
-        if session.solver.weakly_active_bounds():
-            warnings.warn(
-                "estimate: corrector_iter is ignored at a degenerate base "
-                "point under degeneracy='directional', which does not "
-                "expose the compound step the corrector iterates on. Pass "
-                "degeneracy='one_sided' to correct the one-sided step.")
-            return step, None
-    full = session.solver.parametric_step_full(pin_idx, deltas)
+    full = np.asarray(session.solver.parametric_step_full(pin_idx, deltas))
+    n_x = len(step)
+    full[:n_x] = np.asarray(step)
     out, iters, residual, initial, converged = session.solver.correct_step(
         pin_idx, deltas, list(full), corrector_iter)
-    n_x = len(step)
     return np.asarray(out)[:n_x], {
         "iterations": iters,
         "residual": residual,
@@ -1229,8 +1216,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
     100-step Hicks-Ray CSTR displaced from its setpoint, a small step
     goes from 6.3e-6 to 5.5e-9 in nine back-solves, and a step needing a
     bound with sigma near 3e5 to leave stops after three with nothing
-    gained. It applies under mode="linear", the only route that exposes
-    the compound step it iterates on.
+    gained. It applies under every mode, refining whatever step that
+    mode produced.
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
