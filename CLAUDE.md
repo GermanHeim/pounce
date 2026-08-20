@@ -56,8 +56,15 @@ has, and it fails loudly on a bad upload.
 ## Coverage is measured combined, never Rust-only
 
 `.github/workflows/coverage.yml` runs `scripts/coverage-combined.sh` (i.e.
-`make coverage`) and uploads to Codecov. It does **not** run `cargo llvm-cov
---workspace`: large parts of POUNCE are reachable only through the
+`make coverage`) and uploads to Codecov. It runs on **pushes to `main` only** —
+plus `workflow_dispatch` for an on-demand run against a branch. It was on
+`pull_request` too until the wait proved indefensible: 33–40 minutes against
+ci.yml's ~10, holding every PR visibly un-green long after the checks that can
+reject it had passed, for a number nothing blocks on. The cost of that choice
+is the per-PR patch-coverage status, which was `informational` anyway; the
+other cost is that a PR editing `coverage.yml` no longer exercises it, so
+dispatch such a branch manually before merging. It does **not** run `cargo
+llvm-cov --workspace`: large parts of POUNCE are reachable only through the
 `pounce._pounce` extension module or the CLI, and a Rust-only report shows
 those at 0% — inventing gaps in code that is well covered. The job asserts the
 attribution worked before uploading, by checking that `crates/pounce-py/*`

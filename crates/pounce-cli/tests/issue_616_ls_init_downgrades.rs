@@ -163,6 +163,13 @@ fn solve(model: &str, ls_init: bool) -> SolveReport {
 /// which is how a fixture that moved under gh#588's Q4 is made to say
 /// so instead of being asserted around.
 fn solve_with_env(model: &str, ls_init: bool, env: &[(&str, &str)]) -> SolveReport {
+    solve_with(model, ls_init, env, &[])
+}
+
+/// `solve_with_env`, plus extra CLI options appended verbatim. Used by
+/// the barrier-independence screen below, which is the same run at two
+/// values of `mu_init`.
+fn solve_with(model: &str, ls_init: bool, env: &[(&str, &str)], opts: &[&str]) -> SolveReport {
     let json = tmp_path(model, "json");
     // Explicit, so a fixture that solves does not drop a `.sol` beside
     // the `.nl` in the source tree.
@@ -178,6 +185,9 @@ fn solve_with_env(model: &str, ls_init: bool, env: &[(&str, &str)]) -> SolveRepo
         .arg("print_level=0");
     if ls_init {
         cmd.arg("least_square_init_primal=yes");
+    }
+    for o in opts {
+        cmd.arg(o);
     }
     for (k, v) in env {
         cmd.env(k, v);
@@ -459,6 +469,13 @@ fn the_safeguards_measured_cost_is_now_csfi2_alone() {
 /// | tape                     | 0.2500000062500001   | succeeded  | acceptable|
 /// | Q4, uncompensated        | 0.2500000062500003   | succeeded  | succeeded |
 /// | Q4, compensated (gh#702) | 0.25000000624999996  | *platform* | acceptable|
+/// | …plus gh#693 (`main`)    | 0.25000000624999996  | succeeded  | succeeded |
+///
+/// The last row is the current one, and it is bit-identical to the row
+/// above it in every field the safeguard reads — gh#693 changes nothing
+/// this test asserts about the decision, only where the iteration after
+/// it lands. That is the fourth reassociation and the third verdict on
+/// the pair, which is the point: the accept test never decided either.
 ///
 /// Three associations, three verdicts on the pair, off inputs that stay
 /// bit-for-bit identical between the two models every time. So neither
@@ -469,21 +486,44 @@ fn the_safeguards_measured_cost_is_now_csfi2_alone() {
 /// would have been tuned against round-off — gh#616's conclusion, now
 /// re-derived twice.
 ///
-/// **`eigena2` is why that last row says *platform*.** Under gh#702's
-/// compensated sum it reaches `SolveSucceeded` on Linux and
+/// **`eigena2` is why that third row says *platform*.** Under gh#702's
+/// compensated sum it reached `SolveSucceeded` on Linux and
 /// `SolvedToAcceptableLevel` in 127 iterations on macOS, for an objective
-/// correct to 82.50000000000348 either way. That is not a status this
-/// file can pin, and the attempt to pin it is what caught the fact: the
+/// correct to 82.50000000000348 either way. That was not a status this
+/// file could pin, and the attempt to pin it is what caught the fact: the
 /// first version of this assertion asserted the macOS reading and failed
-/// on CI.
+/// on CI. It was filed as gh#706, whose question was not how to get 51
+/// iterations back — that number was luck — but why a model this
+/// well-behaved sat close enough to the band that libm decided it.
 ///
-/// So the assertion below is deliberately two-valued, and the *fact* is
-/// tracked as gh#706. This is the only place in this file where a status
-/// is platform-dependent, which makes it worth a defect rather than a
-/// shrug: every other model here lands the same way on both. The question
-/// for gh#706 is not how to get 51 iterations back — that number was luck
-/// — but why this model sits close enough to the band that libm decides
-/// it.
+/// gh#693 answered that, and not by carrying the model across the band:
+/// it took the barrier parameter out of this model's steering
+/// altogether. Measured on gh#693's parent (`fe631b0c^`) against `main`,
+/// same machine, same fixture, `least_square_init_primal=yes`:
+///
+/// ```text
+///                mu_init screen at 1e-12      mu_init 0.1 -> 100 (1000x)
+///   fe631b0c^    11 succeeded / 6 acceptable  n/a: the 1e-12 screen
+///                iterations 61 … 127          already moves it 2x
+///   main         17 succeeded, 17 iterations  every iterate bit-identical
+///                every time                   — objective, inf_pr, ‖d‖,
+///                                             both alphas; only the
+///                                             printed lg(mu) column moves
+/// ```
+///
+/// A trajectory that swings 61 → 127 iterations on a last-ulp change in
+/// `mu_init` is what "sitting on the band" meant here. One that does not
+/// move at all when `mu_init` moves three decades is not near one, and
+/// the cause was the Tikhonov `δ` in the multiplier initializer rather
+/// than gh#702's compensated sum. The tape route now agrees with the
+/// compensated one bit-for-bit on the objective, where gh#706 recorded
+/// three different values across the three routes above.
+///
+/// So the assertion below is single-valued again. If it starts failing on
+/// one platform's CI leg only, that is gh#706 returning and the two-valued
+/// pin was load-bearing after all — say so in the issue rather than
+/// widening the `matches!` back out, which is how a defect becomes a
+/// shrug.
 ///
 /// The absolute values pinned below are the ones the accept test reads
 /// (`violation_initial`, `alpha`, `rejected_trials`, `termination`).
@@ -526,25 +566,27 @@ fn eigena2_and_eigenb2_hand_the_safeguard_identical_numbers() {
     assert_eq!(at("rejected_trials"), Some("1"));
     assert_eq!(at("termination"), Some("accepted"));
 
-    // Same decision, and — since gh#702 — the same verdict again, at
-    // the other status. Pinned so that the pair moving is a finding
-    // rather than a surprise; the premise above is what gh#616 rests
-    // on, and these two are downstream round-off.
-    // Two-valued on purpose — see the note above. `eigena2` is the one
-    // model in this file whose status is platform-dependent since
-    // gh#702, and gh#706 tracks that. What must not happen is a third
-    // outcome: this model still solves, on every platform, to 82.5.
+    // Same decision, same verdict — and since gh#693, the same verdict
+    // on both models on every platform. Pinned so that the pair moving
+    // is a finding rather than a surprise; the premise above is what
+    // gh#616 rests on, and these two used to be downstream round-off.
+    //
+    // Single-valued, and deliberately: this assertion was two-valued
+    // while gh#706 was open because gh#702's compensated sum left the
+    // model close enough to the band for the platform to pick a side.
+    // gh#693 moved it off — 17 iterations, and `mu_init` across three
+    // decades does not change a single iterate — so a two-valued pin
+    // here would now assert less than is known and let a return to
+    // `SolvedToAcceptableLevel` in 127 iterations pass unnoticed, which
+    // is the failure mode this whole file exists to prevent.
     let eigena2 = solve("eigena2", true);
-    assert!(
-        matches!(
-            status_of(&eigena2).as_str(),
-            "SolveSucceeded" | "SolvedToAcceptableLevel"
-        ),
-        "eigena2 accepts the alpha = 0.5 step and must still converge; \
-         gh#702's compensated sum leaves it close enough to the accept \
-         band that the platform decides which side (gh#706), but \
-         anything outside those two is a different defect. Got: {}",
+    assert_eq!(
         status_of(&eigena2),
+        "SolveSucceeded",
+        "eigena2 accepts the alpha = 0.5 step and, since gh#693, \
+         converges cleanly from it — see the round-off screen in the \
+         note above. A `SolvedToAcceptableLevel` here is gh#706 \
+         returning, not a tolerance to widen the pin for.",
     );
     assert_eq!(
         status_of(&solve("eigenb2", true)),
@@ -556,6 +598,43 @@ fn eigena2_and_eigenb2_hand_the_safeguard_identical_numbers() {
     assert!(
         (solve("eigena2", true).solution.objective - 82.5).abs() < 1e-6,
         "eigena2 objective drifted",
+    );
+}
+
+/// The measurement that makes the single-valued pin above safe, kept as
+/// an assertion instead of as a paragraph: `eigena2`'s trajectory no
+/// longer depends on the barrier parameter at all.
+///
+/// `mu_init` is what gh#706's round-off screen perturbed, and on gh#693's
+/// parent a change of one part in `1e12` swung this model between 61 and
+/// 127 iterations and between both statuses. Here it moves by three
+/// decades — a thousandfold, not an ulp — and the run does not notice:
+/// same iteration count, same objective to the bit. Only the printed
+/// `lg(mu)` column differs.
+///
+/// A model whose steps are steered by the barrier parameter cannot
+/// produce that. So a failure here says the pin above has stopped being
+/// safe for the reason it was tightened — the status is a coin flip
+/// again, whether or not it has yet landed on the wrong side of the band
+/// on this platform.
+#[test]
+fn eigena2_no_longer_takes_its_trajectory_from_the_barrier_parameter() {
+    let default_mu = solve_with("eigena2", true, &[], &[]);
+    let big_mu = solve_with("eigena2", true, &[], &["mu_init=100.0"]);
+
+    assert_eq!(
+        default_mu.statistics.iteration_count, big_mu.statistics.iteration_count,
+        "mu_init 0.1 -> 100 moved eigena2's iteration count, so the \
+         barrier parameter steers this model again and gh#706's coin \
+         flip is back within reach",
+    );
+    assert_eq!(
+        default_mu.solution.objective.to_bits(),
+        big_mu.solution.objective.to_bits(),
+        "mu_init 0.1 -> 100 moved eigena2's objective ({} vs {}); the \
+         iterates are supposed to be identical, not merely close",
+        default_mu.solution.objective,
+        big_mu.solution.objective,
     );
 }
 
