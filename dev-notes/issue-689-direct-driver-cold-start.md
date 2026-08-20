@@ -346,6 +346,35 @@ tell, and the product it forms with a large multiplier measures the quantum, not
 a violation. Only the *relative* measure abstains — the absolute residual, which
 `optimum_is_genuine` consults first, is untouched.
 
+**Note the two halves reach callers differently, because it decides whether a
+change here needs a sweep.** The `+ obj_constant·σ` term is genuinely inert for
+a caller that does not set it: `obj_constant` defaults to `0.0` and only the
+CLI's QP and SOCP routes assign it, so every library caller reads the same
+`cscale` as before, bit for bit. The numerator filter is **not** — it replaces
+the complementarity residual *unconditionally*, on every point that reaches this
+measure, on every route. That is deliberate: "this slack is under the quantum of
+the subtraction that produced it" is a statement about the arithmetic, not about
+where the caller's zero sits, and gating it on a non-zero constant would switch
+it off exactly where the arithmetic is worst. But it means the filter is a
+behaviour change for every caller, and the corpus sweep is what stands behind
+it.
+
+**And it is load-bearing, not a companion tidy-up.** The #719 review measured
+the control directly — the shared `obj_constant` term alone, with the filter
+neutralized:
+
+| | `scaled_feasible_a` | `feasible_x0_wide_scale` |
+|---|---|---|
+| main | `SolveSucceeded` 123 | `SolveSucceeded` 80 |
+| control (constant only) | `MaximumIterationsExceeded` 199 ✓ | `SolveSucceeded` **199** ✗ |
+| + numerator filter | `MaximumIterationsExceeded` 199 ✓ | `SolveSucceeded` **80** ✓ |
+
+Restoring the constant on its own fixes the target model and pays for it with a
+2.5× trajectory regression on `feasible_x0_wide_scale` — still `SolveSucceeded`,
+still the right objective, just 199 iterations against a 200 cap. That is the
+gh #544 signature exactly: the right answer, slowly, invisible to a suite that
+asserts status and objective. The filter is what buys it back.
+
 `FALSE_OPTIMUM_REL_TOL` did not move. It could not have: the two points are
 `0.13` and `2.3e3` once the normalizer is honest, and no cut between them
 survives the #414 and #286 families the constant is calibrated against.
