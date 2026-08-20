@@ -49,27 +49,41 @@
 //! is only one way an entry gets two writers: `k` **recognized forms** that
 //! share a variable write the same diagonal entry too, and the fast path
 //! scatters them one form at a time while the tape sums them in one pass.
-//! The corpus had no dense model with a quadratic objective *and* quadratic
-//! rows over the same variables, so it never showed. Adding
-//! `qcqp_columns_{wellcond,illcond}.nl` did, and the ulp distance tracks the
-//! number of writers: with a quadratic objective and **one** quadratic row
-//! (two writers per shared diagonal entry) the worst distance stays at 1 and
-//! the mark stays on `eigena2`; at **two** rows (three writers) it is 2,
-//! measured. Those fixtures carry one quadratic row for that reason — the
-//! bound below is a measurement, so a corpus addition must not be allowed to
-//! quietly loosen it.
+//! The corpus had no model with a quadratic objective *and* quadratic rows
+//! over the same variables, so it never showed. Adding
+//! `qcqp_columns_{wellcond,illcond}.nl` did.
 //!
-//! What the pair does move is *how often* the disagreement occurs: they add
-//! ~96 one-ulp entries where the rest of the corpus produces 2, which is why
-//! the frequency assertion below is stated at 1% rather than 0.1%. The ulp
-//! bound is the guarantee that matters (the error is bounded); the frequency
-//! is a shape statistic about which models overlap.
+//! **How far apart the two orders can land is set by cancellation, not by
+//! the number of writers.** That is worth stating flatly because the first
+//! draft of this note said the opposite — that the distance "tracks the
+//! number of writers", one ulp per extra writer — and used it to argue a
+//! two-row fixture would reach exactly 2. It is not true, and
+//! `the_ulp_pin_is_a_corpus_measurement_and_the_relative_bound_is_the_guarantee`
+//! measures the counter-example: a dense **two**-row model reaches 8 ulp,
+//! and a dense **four**-row model reaches 2. Reassociating a sum of `k`
+//! terms carries a relative error of order `(k−1)·eps·Σ|terms|/|Σ terms|`,
+//! and it is that last factor — the conditioning of the sum — that runs
+//! away, while `k` barely moves.
 //!
-//! The disagreement is therefore bounded, not asserted away: the worst ulp
-//! distance over the corpus is pinned at `MAX_HESS_ULPS`. Q1's 2-ulp line is
-//! why that is a pin and not a tolerance — a one-ulp coefficient difference
-//! moved a fixture from 17 to 12 conic iterations, and only a differential
-//! check saw it.
+//! So there are two numbers here and they do different jobs:
+//!
+//! * `WORST_OBSERVED_HESS_REL` is the **guarantee**: the largest *relative*
+//!   deviation any entry shows, one eps over the whole corpus. Cancellation
+//!   cannot inflate it, so a regression that made the fast path compute
+//!   something genuinely wrong has to move it.
+//! * `MAX_HESS_ULPS` is a **corpus measurement**, pinned because gh #711
+//!   showed a one-ulp coefficient difference moving a fixture from 17 conic
+//!   iterations to 12 — a change worth noticing even when nothing is wrong.
+//!   It is not a property of the evaluator, and a future dense multi-row
+//!   fixture will exceed it legitimately. When that happens, re-measure it
+//!   and check the relative number.
+//!
+//! The corpus fixtures added here carry one quadratic row each, so
+//! `MAX_HESS_ULPS` stays at 1 and the mark stays on `eigena2`. What the pair
+//! does move is *how often* the disagreement occurs: they add ~96 one-ulp
+//! entries where the rest of the corpus produces 2, which is why the
+//! frequency assertion below is stated at 1% rather than 0.1%. The frequency
+//! is a shape statistic about which models overlap, and carries no claim.
 //!
 //! `f` and `∇f` are compared too, and that is not decoration: on a model
 //! whose *rows* are not quadratic the objective is the only thing the phase
@@ -113,6 +127,22 @@ const WORST_OBSERVED_REL: f64 = 1e-14;
 /// and the corpus refutes it in general while confirming it on the shape the
 /// note reasoned about.
 const MAX_HESS_ULPS: u64 = 1;
+
+/// The worst *relative* Hessian deviation the corpus produces — `2.2e-16`,
+/// one eps, on `eigena2`'s `(8, 8)`.
+///
+/// This is the number that carries the correctness claim, and
+/// [`MAX_HESS_ULPS`] is not. An ulp distance measures cancellation as much
+/// as error, so it can be large while both answers are right; a relative
+/// deviation cannot. See
+/// `the_ulp_pin_is_a_corpus_measurement_and_the_relative_bound_is_the_guarantee`.
+const WORST_OBSERVED_HESS_REL: f64 = 1e-15;
+
+/// The same quantity on the deliberately adversarial dense multi-row models
+/// that test builds, where the ulp distance reaches 8. Measured at
+/// `1.2e-15`; pinned with a little headroom, because the point of the number
+/// is that it stays *small* while the ulp count does not.
+const DENSE_MULTI_ROW_HESS_REL: f64 = 4e-15;
 
 // ---------------------------------------------------------------------
 // Probing one model both ways
@@ -211,6 +241,10 @@ struct Report {
     hess_bit_diffs: usize,
     worst_hess_ulps: u64,
     worst_hess_where: String,
+    /// Worst *relative* deviation on a Hessian entry, and where. This is the
+    /// quantity that is actually bounded — see the module docs.
+    worst_hess_rel: f64,
+    worst_hess_rel_where: String,
     /// `eval_f` and `eval_grad_f` values compared, and how many were not
     /// bit-identical.
     obj_entries: usize,
@@ -401,6 +435,11 @@ fn compare_problem(name: &str, prob: NlProblem, floor: f64, rep: &mut Report) {
                     rep.worst_hess_ulps = u;
                     rep.worst_hess_where = format!("{name}: probe {p}: hessian {key:?}");
                 }
+                let r = rel_dev(a, b, floor);
+                if r > rep.worst_hess_rel {
+                    rep.worst_hess_rel = r;
+                    rep.worst_hess_rel_where = format!("{name}: probe {p}: hessian {key:?}");
+                }
             }
         }
     }
@@ -491,6 +530,21 @@ fn every_quadratic_fixture_evaluates_the_same_both_ways() {
         rep.worst_hess_ulps,
         rep.worst_hess_where,
         rep.worst_rel
+    );
+    eprintln!(
+        "[quad differential] worst hessian relative deviation {:.3e} at {}",
+        rep.worst_hess_rel, rep.worst_hess_rel_where
+    );
+    // The bound that is a guarantee rather than a corpus statistic. Asserted
+    // alongside the ulp pin, not instead of it: the ulp pin catches a
+    // *changed* coefficient (gh #711 — one ulp moved a fixture from 17 conic
+    // iterations to 12), this catches a *wrong* one.
+    assert!(
+        rep.worst_hess_rel <= WORST_OBSERVED_HESS_REL,
+        "hessian relative deviation grew past what the corpus produced: \
+         {:.3e} > {WORST_OBSERVED_HESS_REL:.0e} at {}",
+        rep.worst_hess_rel,
+        rep.worst_hess_rel_where
     );
     eprintln!(
         "[quad differential] objective: {} values compared, {} not bit-identical",
@@ -850,6 +904,17 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
         rep.worst_hess_where,
         rep.worst_rel,
     );
+    eprintln!(
+        "[quad differential] battery: worst hessian relative deviation {:.3e} at {}",
+        rep.worst_hess_rel, rep.worst_hess_rel_where
+    );
+    assert!(
+        rep.worst_hess_rel <= WORST_OBSERVED_HESS_REL,
+        "hessian relative deviation grew past what the battery produced: \
+         {:.3e} > {WORST_OBSERVED_HESS_REL:.0e} at {}",
+        rep.worst_hess_rel,
+        rep.worst_hess_rel_where
+    );
 
     // gh #711: the battery must actually reach gh #673's arm. Before the
     // squared-affine leaf was added this counted **zero** — every factored
@@ -886,5 +951,134 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
         rep.worst_rel <= BATTERY_WORST_REL,
         "g/jac deviation grew past what the battery produced: {:.3e} > {BATTERY_WORST_REL:.0e}",
         rep.worst_rel
+    );
+}
+
+// ---------------------------------------------------------------------
+// What the ulp pin is, and what it is not
+// ---------------------------------------------------------------------
+
+/// A dense expanded quadratic form `Σ_{i≤j} c_ij x_i x_j` over `n`
+/// variables, coefficients drawn deterministically from `seed`. Expanded
+/// term by term, because that is what the `.nl` writer emits and what
+/// `is_expanded_quadratic` admits.
+fn dense_quad(n: usize, seed: u64) -> Expr {
+    let mut r = Rng2(seed | 1);
+    let mut acc: Option<Expr> = None;
+    for i in 0..n {
+        for j in i..n {
+            let c = (rng_below(&mut r, 2001) as f64 - 1000.0) / 97.0;
+            let t = Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(c)),
+                Box::new(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Var(i)),
+                    Box::new(Expr::Var(j)),
+                )),
+            );
+            acc = Some(match acc {
+                None => t,
+                Some(a) => Expr::Binary(BinOp::Add, Box::new(a), Box::new(t)),
+            });
+        }
+    }
+    acc.expect("n >= 1")
+}
+
+/// `rows` dense quadratic constraints plus a dense quadratic objective,
+/// all over the same `n` variables, so every Hessian diagonal entry has
+/// `rows + 1` writers.
+fn dense_quad_model(rows: usize, n: usize) -> NlProblem {
+    let cons: Vec<Expr> = (0..rows)
+        .map(|k| dense_quad(n, 1234 + k as u64 * 7919))
+        .collect();
+    let m = cons.len();
+    NlProblem::from_expressions(NlProblemParts {
+        minimize: true,
+        objective: dense_quad(n, 999_983),
+        obj_constant: 0.0,
+        constraints: cons,
+        x_l: vec![-1e19; n],
+        x_u: vec![1e19; n],
+        x0: (0..n).map(|i| 0.7 + i as f64 * 0.3).collect(),
+        g_l: vec![-1e19; m],
+        g_u: vec![1.0; m],
+        var_names: Vec::new(),
+        con_names: Vec::new(),
+    })
+    .expect("assemble dense quadratic model")
+}
+
+/// **`MAX_HESS_ULPS` is a measurement of this corpus, not a property of the
+/// evaluator, and this test is what says so out loud.**
+///
+/// The distinction matters because the constant reads like a guarantee and
+/// is not one. An entry both paths write more than once is summed in a
+/// different order by each, and the size of a reassociation error is set by
+/// the *cancellation* in the sum — `Σ|terms| / |Σ terms|` — not by how many
+/// terms there are. A model whose contributions nearly cancel can put the
+/// two answers many ulps apart while both remain correct to within a couple
+/// of eps of the exact value.
+///
+/// gh #703's first draft of the module note got this wrong in a way worth
+/// pinning against: it said the ulp distance "tracks the number of writers",
+/// one per extra writer, and used that to argue a two-quadratic-row fixture
+/// would reach exactly 2. Measured here, a dense two-row model reaches
+/// **8** — and a *four*-row model reaches 2, which is the same
+/// counter-example from the other direction. There is no monotone
+/// relationship to curate fixtures against.
+///
+/// So the two assertions below are deliberately opposite in sign:
+///
+/// * the ulp distance **exceeds** `MAX_HESS_ULPS`, so nobody can read that
+///   constant as a bound the evaluator promises. If a change ever made this
+///   fail, the fast path would have become bit-identical on a shape where it
+///   is not today — good news, but news, and the module note would be wrong
+///   again in the other direction;
+/// * the *relative* deviation stays within a few eps, which is the bound
+///   that does hold and the one that says the fast path is correct.
+///
+/// The practical consequence for a future fixture author: adding a dense
+/// QCQP with two or more quadratic rows over shared variables **will** trip
+/// `every_quadratic_fixture_evaluates_the_same_both_ways`, and that is not a
+/// bug in the fixture or in the evaluator. Re-measure `MAX_HESS_ULPS`,
+/// record what the new corpus produces, and check `WORST_OBSERVED_HESS_REL`
+/// — the relative number is the one a regression would have to move.
+#[test]
+fn the_ulp_pin_is_a_corpus_measurement_and_the_relative_bound_is_the_guarantee() {
+    let mut worst_ulps = 0u64;
+    let mut worst_rel = 0.0f64;
+    for rows in 1..=4usize {
+        let mut rep = Report::default();
+        compare_problem(
+            &format!("dense quadratic, {rows} rows"),
+            dense_quad_model(rows, 6),
+            0.0,
+            &mut rep,
+        );
+        assert!(
+            rep.hess_entries >= 20,
+            "{rows} rows: nothing was compared ({} entries)",
+            rep.hess_entries
+        );
+        eprintln!(
+            "[quad differential] dense {rows}-row model: {} of {} entries differ,              worst {} ulp, worst rel {:.3e}",
+            rep.hess_bit_diffs, rep.hess_entries, rep.worst_hess_ulps, rep.worst_hess_rel
+        );
+        worst_ulps = worst_ulps.max(rep.worst_hess_ulps);
+        worst_rel = worst_rel.max(rep.worst_hess_rel);
+    }
+    assert!(
+        worst_ulps > MAX_HESS_ULPS,
+        "the corpus ulp pin ({MAX_HESS_ULPS}) is being read as an evaluator \
+         guarantee, but a dense multi-row model reached only {worst_ulps} ulp; \
+         if the fast path really did become bit-identical here, update the \
+         module note — it currently says the opposite"
+    );
+    assert!(
+        worst_rel <= DENSE_MULTI_ROW_HESS_REL,
+        "the bound that actually holds moved: {worst_rel:.3e} > \
+         {DENSE_MULTI_ROW_HESS_REL:.0e}"
     );
 }

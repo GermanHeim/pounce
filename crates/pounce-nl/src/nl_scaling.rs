@@ -207,6 +207,20 @@ pub struct CurvatureScaling {
     /// Per-row factors `eᵢ`, multiplying the row exactly as
     /// gradient-based scaling's `c_scale` / `d_scale` do.
     pub g: Vec<Number>,
+    /// Whether the model this was computed from actually carries a nonzero
+    /// second-order coefficient — in the objective's `P` or in some row's
+    /// `Qᵢ`.
+    ///
+    /// A model of degree ≤ 2 need not have any: an LP is degree ≤ 2 with
+    /// every `Q` empty, and the scheme still returns factors for it, but
+    /// with `‖D Qᵢ D‖_∞ = 0` throughout, stage 2 collapses to
+    /// `eᵢ = 1/max(‖D aᵢ‖_∞, |bᵢ|)` and stage 1's `K̂` loses its `P̂`
+    /// block. What is left is plain Ruiz equilibration of `[A b]` — a
+    /// perfectly good scaling, but not one that read any curvature, because
+    /// there was none to read. The caller needs to know the difference: it
+    /// is the whole justification for spending the convex fast path on this
+    /// option (gh #703, gh#483).
+    pub quadratic: bool,
 }
 
 /// One row's degree-≤2 read-out, as [`curvature_scaling`] needs it: the
@@ -355,6 +369,12 @@ pub fn curvature_scaling(prob: &NlProblem) -> Option<CurvatureScaling> {
     Some(CurvatureScaling {
         x: d.iter().map(|v| 1.0 / v).collect(),
         g,
+        // Nonzero, not merely present: `analyze_quadratic_full` reports the
+        // support it found, and a stored explicit zero is not curvature.
+        quadratic: obj_hess
+            .values()
+            .chain(rows.iter().flat_map(|r| r.hess.values()))
+            .any(|v| *v != 0.0),
     })
 }
 
@@ -555,5 +575,72 @@ G0 1
         assert!((r.curvature - 4.0).abs() < 1e-12);
         assert_eq!(r.linear, 0.0);
         assert!((r.rhs - 1.0e5).abs() < 1e-9);
+    }
+
+    /// gh #703 / gh#483: the `quadratic` flag distinguishes a model the
+    /// scheme *read curvature from* from one that merely satisfies its
+    /// degree-≤2 precondition. An LP is degree ≤ 2 with every `Qᵢ` empty,
+    /// so `curvature_scaling` returns factors — good ones, but the ones
+    /// plain Ruiz equilibration of `[A b]` would give, because there was no
+    /// second-order coefficient anywhere to read. The CLI spends the convex
+    /// fast path on this option only when the answer here is `true`; see
+    /// `decline_convex_for_curvature_scaling` in `pounce-cli`.
+    #[test]
+    fn quadratic_is_false_exactly_when_no_second_order_coefficient_exists() {
+        // A pure LP: `min x0 + x1` s.t. `x0 + x1 >= 1`, `x0, x1 >= 0`.
+        let lp = "\
+g3 0 1 0
+ 2 1 1 0 0
+ 0 0
+ 0 0
+ 0 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 2 2
+ 0 0
+ 0 0 0 0 0
+C0
+n0
+O0 0
+n0
+x2
+0 0
+1 0
+r
+2 1
+b
+2 0
+2 0
+k1
+2
+J0 2
+0 1
+1 1
+G0 2
+0 1
+1 1
+";
+        let prob = crate::nl_reader::parse_nl_text(lp).expect("parse LP");
+        let sc = curvature_scaling(&prob).expect("an LP is degree <= 2");
+        assert!(
+            !sc.quadratic,
+            "an LP has no `Q` to read; factors {:?} / {:?}",
+            sc.x, sc.g
+        );
+
+        // The same model with a quadratic objective bolted on is the other
+        // side of the same test: identical rows, one nonzero second-order
+        // coefficient, and the flag flips.
+        let qp = lp.replace(
+            "O0 0
+n0",
+            "O0 0
+o5
+v0
+n2",
+        );
+        let prob = crate::nl_reader::parse_nl_text(&qp).expect("parse QP");
+        let sc = curvature_scaling(&prob).expect("x0^2 is degree 2");
+        assert!(sc.quadratic, "`x0^2` is a second-order coefficient");
     }
 }

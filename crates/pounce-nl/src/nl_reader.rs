@@ -4774,12 +4774,6 @@ impl NlTnlp {
         &self.prob
     }
 
-    /// Is constraint row `i` evaluated from a constant quadratic form
-    /// rather than from an AD tape (gh #588, Q4)?
-    ///
-    /// Structural, so it answers before any evaluation. Exposed for the
-    /// differential test, which has to know which models exercise the fast
-    /// path at all, and for `POUNCE_DBG_TAPE_STATS`.
     /// Opt this model in to **curvature-based** scaling (gh #703): compute
     /// the per-variable and per-row factors of
     /// [`crate::nl_scaling::curvature_scaling`] and serve them from
@@ -4811,6 +4805,23 @@ impl NlTnlp {
         self.curvature_scaling.is_some()
     }
 
+    /// Whether the enabled curvature scaling actually read any curvature —
+    /// see [`crate::nl_scaling::CurvatureScaling::quadratic`]. `false` when
+    /// scaling is not enabled, and `false` for a degree-≤2 model whose every
+    /// `Q` is empty (an LP), where the scheme degenerates to plain Ruiz
+    /// equilibration of `[A b]`.
+    pub fn curvature_scaling_read_curvature(&self) -> bool {
+        self.curvature_scaling
+            .as_ref()
+            .is_some_and(|sc| sc.quadratic)
+    }
+
+    /// Is constraint row `i` evaluated from a constant quadratic form
+    /// rather than from an AD tape (gh #588, Q4)?
+    ///
+    /// Structural, so it answers before any evaluation. Exposed for the
+    /// differential test, which has to know which models exercise the fast
+    /// path at all, and for `POUNCE_DBG_TAPE_STATS`.
     pub fn quadratic_row(&self, i: usize) -> bool {
         self.quad.row_form(i).is_some()
     }
@@ -5262,6 +5273,29 @@ impl TNLP for NlTnlp {
         // no suffixes is the ordinary case and gets the computed vectors
         // whole.
         if let Some(sc) = computed {
+            // The length guards are a `copy_from_slice` panic guard, not a
+            // policy: `curvature_scaling` sizes both vectors from the same
+            // `NlProblem` this callback is answering for, so a mismatch is a
+            // bug upstream, not a model the scheme declines. Declining is the
+            // *worst* available response to it — `use_*_scaling` stays false,
+            // the engine reads that as "user supplied nothing", and the run
+            // proceeds unscaled with the option accepted, which is gh #483
+            // again. Assert it in debug builds so a mismatch is found here,
+            // where it is one line, instead of as a slow solve later.
+            debug_assert_eq!(
+                sc.x.len(),
+                req.x_scaling.len(),
+                "curvature x-scaling sized {} for a {}-variable request",
+                sc.x.len(),
+                req.x_scaling.len()
+            );
+            debug_assert_eq!(
+                sc.g.len(),
+                req.g_scaling.len(),
+                "curvature g-scaling sized {} for a {}-row request",
+                sc.g.len(),
+                req.g_scaling.len()
+            );
             if sc.x.len() == req.x_scaling.len() {
                 req.x_scaling.copy_from_slice(&sc.x);
                 *req.use_x_scaling = true;

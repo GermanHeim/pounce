@@ -621,7 +621,13 @@ fn socp_factor_rows(
         //
         //  * the tolerance is the same expression `psd_outer_factor` uses, so
         //    both drop exactly the same entries and agree on the cone's
-        //    dimension;
+        //    dimension. Since gh #703 that expression is **relative to the
+        //    entry's own magnitude**, not to the largest diagonal: on a
+        //    diagonal `Q` no downdate ever touches another pivot, so every
+        //    positive entry is a genuine eigenvalue whatever its size, and the
+        //    filter here is simply `v > 0`. Cutting at `1e-12 · max_diag`
+        //    instead discarded real directions on a column-scaled model — see
+        //    `psd_outer_factor`;
         //  * the value is `d / √d`, not `√d`. They differ by an ulp — `√2` is
         //    `0x1.6a09e667f3bcdp+0` and `2/√2` is `0x1.6a09e667f3bccp+0` — and
         //    `d / √d` is what the general path's `a[i][p] / d_pivot` computes.
@@ -637,11 +643,9 @@ fn socp_factor_rows(
         //    `‖Fx‖` does not care about row order, but `G` does: the rows land
         //    in the KKT matrix and the ordering feeds the fill-reducing
         //    permutation.
-        let max_diag = hmap.values().fold(0.0_f64, |m, &v| m.max(v));
-        let tol = 1e-12 * max_diag.max(1.0);
         let mut diag: Vec<(usize, f64)> = hmap
             .iter()
-            .filter(|&(_, &v)| v > tol)
+            .filter(|&(_, &v)| v > 0.0)
             .map(|(&(i, _), &v)| (i, v))
             .collect();
         diag.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("PSD diagonal is finite"));
@@ -711,26 +715,84 @@ fn dense_symmetric_on_support(
 /// numerical rank, so a rank-deficient `Q` (e.g. `Q = vvᵀ`) yields the
 /// minimal cone. Complete diagonal pivoting keeps the factorization stable
 /// on the indefinite-looking-but-PSD matrices finite precision can produce.
+///
+/// # The rank test is relative to each pivot's own starting magnitude (gh #703)
+///
+/// This used to cut at `1e-12 · max_diag` — a *global* threshold — and that
+/// is not a rank test, it is a units test. Rank deficiency is what the
+/// rank-1 downdate reveals: a direction already spanned by the pivots taken
+/// so far has its residual diagonal driven from `Q_pp` to (numerically)
+/// zero. A direction that is merely *small in the coordinates the model was
+/// written in* has its residual diagonal stay a healthy fraction of `Q_pp`,
+/// and is a genuine eigenvalue however far below `max_diag` it sits.
+///
+/// The global cut confused the two, and silently. On
+/// `qcqp_columns_illcond.nl` — the well-conditioned fixture under the exact
+/// substitution `x_j → x_j / c_j`, so a matrix of provably identical rank —
+/// the diagonal spans `[1.5e-7, 4.3e9]`, `1e-12 · max_diag ≈ 4.3e-3`
+/// discarded **7 of 24** directions, and the cone `‖Fx‖ ≤ t` stopped
+/// constraining them. The conic solver then satisfied *its* cone to
+/// `2.66e-15` and reported `SolveSucceeded` at an objective 10% away from
+/// the true optimum, on a point that violates the original quadratic row by
+/// `4.948e+01` — 38% of its right-hand side. A relative residual check
+/// would not have caught it either: measured against `‖Q‖ = 4.3e9` the
+/// reconstruction error is `5.4e-13`. The dropped rank is the only signal.
+///
+/// `a[p][p] > 1e-12 · Q_pp` is that test, and it is invariant under the
+/// diagonal congruence `Q → CQC` that provoked the bug, since both sides
+/// scale by `c_p²`. It changes nothing about the pivot *order* (still the
+/// largest remaining diagonal), so a well-scaled matrix factors bit for bit
+/// as before, and it keeps the diagonal shortcut above interchangeable with
+/// this path: on a diagonal `Q` no downdate touches a pivot, so both keep
+/// exactly the positive entries.
 fn psd_outer_factor(mut a: Vec<f64>, n: usize) -> Vec<Vec<f64>> {
     let mut rows: Vec<Vec<f64>> = Vec::new();
-    // Tolerance relative to the largest initial diagonal: pivots at or below
-    // this are treated as the zero eigenvalues of the PSD matrix.
-    let max_diag = (0..n).map(|i| a[i * n + i]).fold(0.0_f64, f64::max);
-    let tol = 1e-12 * max_diag.max(1.0);
+    // Each pivot's *initial* diagonal, so the rank test below can ask how far
+    // the downdate has moved it rather than how it compares to the model's
+    // units. Clamped at zero: a PSD matrix has `Q_ii ≥ 0`, and an entry that
+    // finite precision has pushed slightly negative must not produce a
+    // negative threshold that admits it.
+    let d0: Vec<f64> = (0..n).map(|i| a[i * n + i].max(0.0)).collect();
+    // Columns already decided — either factored out, or ruled a zero
+    // eigenvalue. A pivoted Cholesky never revisits a pivot, and the residual
+    // it leaves on that diagonal is roundoff, not a candidate.
+    let mut settled = vec![false; n];
     for _ in 0..n {
-        // Largest remaining diagonal pivot.
-        let mut p = 0usize;
+        // Largest undecided diagonal pivot.
+        let mut p = usize::MAX;
         let mut best = f64::NEG_INFINITY;
         for i in 0..n {
+            if settled[i] {
+                continue;
+            }
             let d = a[i * n + i];
             if d > best {
                 best = d;
                 p = i;
             }
         }
-        if best <= tol {
+        if p == usize::MAX {
             break;
         }
+        // Rule it a zero eigenvalue when the downdate has reduced it to a
+        // negligible fraction of where it started — that is the residual
+        // saying the direction is already spanned. `best <= 0` (including a
+        // pivot whose `d0` is zero, where the threshold is zero) rules it out
+        // too.
+        //
+        // `continue`, not `break`: with an *absolute* threshold the pivot
+        // order and the rank order were the same order, so the first failure
+        // ended it. A relative threshold decouples them — a column whose `d0`
+        // is `1e-20` is still live at a residual of `1e-20`, while a spent
+        // column with `d0 = 2` is dead at the `4e-16` of roundoff it carries,
+        // and the dead one sorts first. Breaking there would drop the live
+        // column and make the rank depend on the model's units again, which
+        // is the whole defect this test was rewritten to fix.
+        if best <= 1e-12 * d0[p] || best <= 0.0 {
+            settled[p] = true;
+            continue;
+        }
+        settled[p] = true;
         let d = best.sqrt();
         // f = column p of the residual, scaled by 1/d.
         let mut f = vec![0.0; n];
@@ -1012,9 +1074,13 @@ mod tests {
     /// diagonal shortcut and the general pivoted Cholesky — so the contract is
     /// asserted directly rather than inferred from the shortcut's derivation.
     ///
-    /// The near-zero diagonal entry is the rank agreement: it sits below the
-    /// `1e-12 · max_diag` cut, and both paths must drop it, or the two would
-    /// build cones of different dimension for the same constraint.
+    /// The near-zero diagonal entry is the rank agreement. Since gh #703 the
+    /// rank test is relative to each pivot's *own* starting magnitude rather
+    /// than to `max_diag`, so a diagonal matrix has no zero eigenvalues at
+    /// all: `1e-20` on its own row is a genuine, tiny eigenvalue and both
+    /// paths must **keep** it. What must not differ is which of them thinks
+    /// so — a disagreement would build cones of different dimension for the
+    /// same constraint.
     #[test]
     fn both_factor_paths_reconstruct_q_and_agree_on_rank() {
         let recon = |rows: &[Vec<(usize, f64)>]| {
@@ -1030,16 +1096,20 @@ mod tests {
             q
         };
 
-        // Diagonal path, with one entry far below the rank tolerance.
-        // Deliberately *not* descending by index: the largest entry sits on
-        // the highest variable, so a shortcut that emitted in index order
-        // would produce the right cone with the rows in the wrong order.
+        // Diagonal path, with one entry twenty orders of magnitude below the
+        // largest. Deliberately *not* descending by index: the largest entry
+        // sits on the highest variable, so a shortcut that emitted in index
+        // order would produce the right cone with the rows in the wrong order.
         let diag: std::collections::BTreeMap<(usize, usize), f64> =
             [((3, 3), 2.0), ((8, 8), 9.0), ((9, 9), 1e-20)]
                 .into_iter()
                 .collect();
         let drows = socp_factor_rows(&diag);
-        assert_eq!(drows.len(), 2, "the 1e-20 pivot is a zero eigenvalue");
+        assert_eq!(
+            drows.len(),
+            3,
+            "1e-20 on its own row is a small eigenvalue, not a missing one"
+        );
 
         // The shortcut must be *bit*-identical to the general path, not merely
         // close: a 2-ulp difference in one `G` entry visibly moved `qcqp_ball`'s
@@ -1060,7 +1130,17 @@ mod tests {
         );
         assert_eq!(drows[0][0].0, 8, "largest diagonal pivots first");
         assert_eq!(drows[1][0].0, 3);
+        assert_eq!(drows[2][0].0, 9, "then the smallest, still emitted");
+        assert!(
+            (drows[2][0].1 - 1e-10).abs() < 1e-22,
+            "√1e-20 = 1e-10, got {}",
+            drows[2][0].1
+        );
         let dq = recon(&drows);
+        // Two entries, not three: `recon` drops anything under `1e-12`, and
+        // `(1e-10)² = 1e-20` is under it. The row is in the factor; its
+        // contribution to `Q` is genuinely below what a reconstruction can
+        // see, which is the whole reason the *pivot* test cannot be absolute.
         assert_eq!(dq.len(), 2);
         assert!((dq[&(3, 3)] - 2.0).abs() < 1e-12);
         assert!((dq[&(8, 8)] - 9.0).abs() < 1e-12);
@@ -1071,7 +1151,7 @@ mod tests {
         let mut coupled = diag.clone();
         coupled.insert((3, 8), 1.0);
         let grows = socp_factor_rows(&coupled);
-        assert_eq!(grows.len(), 2);
+        assert_eq!(grows.len(), 3, "2 from the coupled block, 1 from `1e-20`");
         let gq = recon(&grows);
         assert!((gq[&(3, 3)] - 2.0).abs() < 1e-10);
         assert!((gq[&(8, 8)] - 9.0).abs() < 1e-10);
@@ -1079,7 +1159,7 @@ mod tests {
         assert!((gq[&(8, 3)] - 1.0).abs() < 1e-10);
         assert!(
             !gq.contains_key(&(9, 9)),
-            "zero eigenvalue must not reappear"
+            "1e-20 is below what the reconstruction resolves"
         );
     }
 
@@ -1103,6 +1183,132 @@ mod tests {
         for k in 0..4 {
             assert!((recon[k] - q[k]).abs() < 1e-9, "recon[{k}]={}", recon[k]);
         }
+    }
+
+    /// **The rank of `Q` is a property of `Q`, not of the units its variables
+    /// are measured in.** `psd_outer_factor` decides the dimension of the cone
+    /// a QCQP row becomes, so if a change of units can change that number, the
+    /// solver builds a different — smaller — feasible set for the same model
+    /// and reports success on the answer to a different problem.
+    ///
+    /// That is exactly what gh #703 hit. The rank test used to be
+    /// `1e-12 · max_diag`, one absolute cut for the whole matrix, which asks
+    /// how a pivot compares to the *largest* entry rather than how far its own
+    /// downdate has moved it. Rescaling the columns of `qcqp_columns` by
+    /// `10^{-4}…10^{4}` spread `max_diag` over nineteen orders of magnitude and
+    /// took the rank of a full-rank 24×24 row from 24 to **17** — seven real
+    /// directions dropped, `SolveSucceeded`, a self-reported violation of
+    /// `2.66e-15` against an actual one of `4.948e+01`, and an objective 10%
+    /// off its well-conditioned twin.
+    ///
+    /// Diagonal congruence `Q → C Q C` with `C ≻ 0` diagonal is precisely a
+    /// change of units, and it preserves rank exactly (Sylvester). So the test
+    /// is: factor the same `Q` under a spread of column scalings and require
+    /// the row count never to move.
+    #[test]
+    fn rank_does_not_depend_on_the_units_the_columns_are_measured_in() {
+        // A 4×4 PSD matrix of exact rank 3: `Q = Σ_{k<3} v_k v_kᵀ` over three
+        // independent vectors, so one direction is genuinely absent and the
+        // factorization must find that too — an invariance test that only ever
+        // returned `n` would be satisfied by a rank test that never fires.
+        let vs = [
+            [1.0, 2.0, 0.0, -1.0],
+            [0.0, 1.0, 3.0, 1.0],
+            [2.0, 0.0, 1.0, 4.0],
+        ];
+        let n = 4;
+        let mut q = vec![0.0; n * n];
+        for v in &vs {
+            for i in 0..n {
+                for j in 0..n {
+                    q[i * n + j] += v[i] * v[j];
+                }
+            }
+        }
+        assert_eq!(psd_outer_factor(q.clone(), n).len(), 3, "unscaled rank");
+
+        // `C = diag(10^e)`. The exponents run over the same range the
+        // `qcqp_columns` fixtures use, and are deliberately *not* uniform: a
+        // uniform scaling is a scalar multiple, which even an absolute
+        // threshold survives.
+        for spread in [1i32, 2, 3, 4, 6] {
+            for sign in [1i32, -1] {
+                let c: Vec<f64> = (0..n)
+                    .map(|i| 10f64.powi(sign * spread * (i as i32 - 1)))
+                    .collect();
+                let mut scaled = vec![0.0; n * n];
+                for i in 0..n {
+                    for j in 0..n {
+                        scaled[i * n + j] = c[i] * q[i * n + j] * c[j];
+                    }
+                }
+                let rank = psd_outer_factor(scaled, n).len();
+                assert_eq!(
+                    rank, 3,
+                    "C Q C with C = diag(10^({sign}·{spread}·(i−1))) has the \
+                     same rank as Q; got {rank}"
+                );
+            }
+        }
+    }
+
+    /// The companion property, on the other side of the same threshold: a
+    /// direction that *is* spanned must still be dropped, however the columns
+    /// are scaled. Rank invariance alone would be satisfied by never cutting
+    /// anything, which would hand every row a full-dimensional cone and cost
+    /// the `qssp180`-class models their whole reason for taking the conic
+    /// route.
+    #[test]
+    fn a_spanned_direction_is_dropped_at_every_column_scaling() {
+        // Exactly rank 1: `Q = v vᵀ`, so three of four directions are spanned.
+        let v = [1.0, 2.0, -3.0, 0.5];
+        let n = 4;
+        let mut q = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                q[i * n + j] = v[i] * v[j];
+            }
+        }
+        for e in [-8i32, -4, 0, 4, 8] {
+            let c: Vec<f64> = (0..n).map(|i| 10f64.powi(e * (i as i32 - 1))).collect();
+            let mut scaled = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    scaled[i * n + j] = c[i] * q[i * n + j] * c[j];
+                }
+            }
+            assert_eq!(
+                psd_outer_factor(scaled, n).len(),
+                1,
+                "rank-1 Q stays rank 1 under diag(10^({e}·(i−1)))"
+            );
+        }
+    }
+
+    /// A pivot the downdate has *not* spent must survive even when a spent one
+    /// sorts above it. This is the case that made the fix more than a change of
+    /// threshold: `√2 · √2 ≠ 2` in binary, so a factored-out column of size 2
+    /// carries `4.4e-16` of roundoff on its diagonal afterwards, which is
+    /// larger than a genuine `1e-20` eigenvalue sitting untouched on another
+    /// column. Complete pivoting picks the roundoff first. With an absolute
+    /// threshold that did not matter — both failed the same cut. With a
+    /// relative one they disagree, so the loop has to *settle* the failing
+    /// pivot and keep looking rather than stop at the first failure.
+    #[test]
+    fn a_live_pivot_below_a_spent_ones_roundoff_is_still_found() {
+        let n = 2;
+        // diag(2, 1e-20), the smaller entry twenty orders down.
+        let rows = psd_outer_factor(vec![2.0, 0.0, 0.0, 1e-20], n);
+        assert_eq!(
+            rows.len(),
+            2,
+            "both diagonal entries are eigenvalues; got {rows:?}"
+        );
+        assert!(
+            (rows[1][1] - 1e-10).abs() < 1e-22,
+            "the surviving row is √1e-20, got {}",
+            rows[1][1]
+        );
     }
 
     /// min (x0)^2 + (x1)^2 s.t. x0 + x1 = 2, no var bounds → (1,1), f*=2.

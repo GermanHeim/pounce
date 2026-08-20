@@ -123,16 +123,44 @@ spanning nine orders of magnitude:
 | 1e6 | 154 it, `2.4779690388034e4` | 16 it, `2.4779690299303e4` |
 | 1e9 | `Maximum_Iterations_Exceeded` | 16 it, `2.4779690299303e4` |
 
-Two caveats, both measured:
+Three caveats, all measured over POUNCE's own CLI fixture corpus (66
+models, of which this method accepts 47 and refuses 19):
 
-* **It is off by default**, and on a model whose rows the default *can*
-  see it is usually a wash — 37 of the 41 models in POUNCE's own fixture
-  corpus that it accepts are unchanged in status, iterations and objective.
+* **It is off by default, and asking for it is not free.** Of the 47 it
+  accepts, **33 change status, iteration count or objective** and 14 do not.
+  This is not a knob to turn on speculatively: it is the answer to a
+  specific pathology (a `Q` the default's gradient sample cannot see), and
+  on a model that does not have that pathology it is simply a different
+  scaling with different behaviour.
+* **Asking for it can change which engine runs.** The factors reach the
+  solver through the `get_scaling_parameters` callback, which the convex
+  drivers never call, so on a convex-classified model `solver_selection=auto`
+  declines the fast path and uses the general NLP interior-point solver — the
+  same bargain `user-scaling` has made since
+  [#483](https://github.com/jkitchin/pounce/issues/483). It says so on
+  stderr. That reroute is what the option costs on `convex_qp_share1b`:
+  28 iterations on the convex driver, 218 on the general one, same objective.
+  It also means the general path's verdicts apply: a handful of corpus models
+  that the convex presolve rejects as `Infeasible_Problem_Detected` are
+  reported by the NLP path as `Invalid_Problem_Definition` or
+  `Not_Enough_Degrees_Of_Freedom` instead. Every one of those is reachable
+  today by passing `solver_selection=nlp`; none is new.
+  **Exception:** a model with no quadratic coefficient at all — an LP is
+  degree ≤ 2 with every `Q` empty — has no curvature to read, so the scheme
+  degenerates to Ruiz equilibration of `[A b]`, which the convex driver
+  already does internally. Those keep the fast path unchanged, with a note
+  saying so. Without that exception `lp_israel` went from 29 iterations to
+  296 for asking.
 * **On a nonconvex model, changing the scaling changes which local minimum
-  you reach.** `pooling_rt2stp` goes from `-3273.955` in 181 iterations to
-  `-4391.826` in 1083 — a better point (it is the published global optimum
-  of that instance) for six times the work. Neither direction is
-  guaranteed; treat a nonconvex re-scale as a different search.
+  you reach — and which one is a coin flip, not a property of the method.**
+  On one draw `pooling_rt2stp` goes from `-3273.955` in 128 iterations to
+  `-4391.826` (the published global optimum of that instance) in 1083. Do
+  not read that as "curvature-based finds better optima, slowly": this model
+  is bistable between those two values, and across 11 round-off-scale
+  perturbations of `mu_init` the default lands on the better optimum 3 times
+  out of 11 and `curvature-based` 4 out of 11, with median iteration counts
+  of 204 and 108 respectively. Treat a nonconvex re-scale as a different
+  search whose outcome is not carried over from the old one.
 
 ### `user-scaling`
 

@@ -474,6 +474,12 @@ pub fn main() -> ExitCode {
     // (re-parsing doubled parse time / peak memory on large models — code
     // review L24). `None` for builtins (treated as general NLP).
     let mut nl_class: Option<pounce_cli::dispatch::ProblemClass> = None;
+    // gh #703: set alongside `nl_class` when curvature-based scaling is
+    // switched on below, and only then. Records whether the model handed the
+    // scheme any second-order coefficient to work with — see
+    // `decline_convex_for_curvature_scaling` for why the answer decides
+    // whether the request is worth the convex fast path.
+    let mut nl_curvature_read_curvature = false;
     // `nl_expr_provider` shadows `inner_tnlp` for the `.nl`-file path:
     // both point at the same `NlTnlp`, but the second handle is typed
     // as `dyn ExpressionProvider` so the presolve wrapper can use it
@@ -570,6 +576,7 @@ pub fn main() -> ExitCode {
                         );
                         return ExitCode::from(2);
                     }
+                    nl_curvature_read_curvature = nl_rc.borrow().curvature_scaling_read_curvature();
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
                     let t: Rc<RefCell<dyn TNLP>> = nl_rc;
@@ -627,6 +634,20 @@ pub fn main() -> ExitCode {
                 || s.con_real.contains_key("scaling_factor")
                 || s.var_real.contains_key("scaling_factor")
         });
+    // gh #703, gh#483 again: `nlp_scaling_method=curvature-based` reaches the
+    // engine through exactly the same channel as `user-scaling` — the TNLP's
+    // `get_scaling_parameters` callback — and the convex solvers do not call
+    // it. They equilibrate internally, so routing a curvature-scaling request
+    // there accepts the option and means "not this scaling".
+    //
+    // That is not a corner case for *this* option: the models it is defined
+    // for are the models with quadratic rows, which is precisely the
+    // population `classify_problem` sends to the convex path. Both fixtures
+    // gh #703 added are convex QCQPs, and of the 47 corpus models the option
+    // accepts, 38 classify convex. Without this gate the headline feature is
+    // inert by default on the majority of the models it exists for, which is
+    // the gh#483 failure verbatim.
+    let wants_curvature_scaling = curvature_scaling_requested(&app);
     // gh#483 follow-up: `obj_scaling_factor` is an NLP-path knob — the convex
     // solvers run their own equilibration and never read it. A *negative*
     // factor is upstream's documented spelling for "maximize", so dropping it
@@ -753,6 +774,29 @@ pub fn main() -> ExitCode {
         let decline_convex_for_user_scaling =
             wants_user_scaling && matches!(selection, SolverSelection::Auto);
 
+        // gh #703: and again for curvature-based scaling, for the same reason
+        // and through the same callback — but only when the model handed the
+        // scheme some curvature to read.
+        //
+        // The `user-scaling` gate above already has this shape: it requires
+        // the option *and* a `scaling_factor` suffix in the `.nl` for the
+        // solver to read, because rerouting a model that carries no suffixes
+        // buys a different engine and nothing else. The same test applies
+        // here, and it is not cosmetic. Leaving it out was measured on the
+        // corpus: `nlp_scaling_method=curvature-based` on `lp_israel`, a pure
+        // LP, went from 29 iterations on the convex path to 296 on the
+        // general one — 29 → 135 for the engine and 135 → 296 for a scaling
+        // scheme whose defining input, `Qᵢ`, is empty in every row. On an LP
+        // §8 degenerates to Ruiz equilibration of `[A b]`, which is what
+        // `pounce-convex` already does internally, so the fast path is not
+        // "quietly meaning none" here — it is doing the same kind of work by
+        // its own route. That is a claim worth making out loud rather than
+        // silently, so the no-curvature case still prints (below); what it
+        // does not do is pay for an engine switch that cannot help.
+        let decline_convex_for_curvature_scaling = wants_curvature_scaling
+            && nl_curvature_read_curvature
+            && matches!(selection, SolverSelection::Auto);
+
         // gh#483 follow-up: a negative `obj_scaling_factor` means maximize,
         // which the convex path cannot express. Unlike the two requests above
         // — where the fast path merely skips *extra* work — taking it here
@@ -763,6 +807,7 @@ pub fn main() -> ExitCode {
         // Any of these declines the fast path; the messages below say which.
         let decline_convex = decline_convex_for_postopt
             || decline_convex_for_user_scaling
+            || decline_convex_for_curvature_scaling
             || decline_convex_for_obj_scaling;
 
         // Same bargain for a conic solve that finishes without a verified KKT
@@ -906,6 +951,43 @@ pub fn main() -> ExitCode {
                          (pounce-convex), which equilibrates internally and does \
                          not read them; the requested scaling will be skipped. \
                          Use solver_selection=nlp or auto to apply it."
+                    );
+                }
+            }
+            // gh #703: same treatment for `nlp_scaling_method=curvature-based`,
+            // with a third case the other requests do not have — a model that
+            // is degree <= 2 (so the option was accepted) but carries no
+            // second-order coefficient at all.
+            if wants_curvature_scaling {
+                if decline_convex_for_curvature_scaling {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but \
+                         nlp_scaling_method=curvature-based asks for factors \
+                         derived from the model's quadratic coefficients, which \
+                         the convex solver (pounce-convex) does not read; \
+                         routing to the general NLP interior-point path so the \
+                         scaling is honored.",
+                        class.name()
+                    );
+                } else if !nl_curvature_read_curvature {
+                    eprintln!(
+                        "pounce: note: nlp_scaling_method=curvature-based was \
+                         accepted, but every quadratic coefficient in this \
+                         model is zero, so the scheme reduces to Ruiz \
+                         equilibration of the linear rows; the convex solver \
+                         (pounce-convex) equilibrates internally and keeps the \
+                         fast path. Use solver_selection=nlp to run the scheme \
+                         on the general path anyway."
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: nlp_scaling_method=curvature-based \
+                         asks for factors derived from the model's quadratic \
+                         coefficients, but solver_selection={sel_str} forces \
+                         the convex solver (pounce-convex), which equilibrates \
+                         internally and does not read them; the requested \
+                         scaling will be skipped. Use solver_selection=nlp or \
+                         auto to apply it."
                     );
                 }
             }

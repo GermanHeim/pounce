@@ -34,13 +34,39 @@ changes.
   `qcqp*` family it is 75 → 15 and 50 → 33 iterations at an identical
   objective.
 
-  **Off by default.** It requires every row and the objective to be degree
-  ≤ 2 and refuses with a message otherwise, rather than accepting the option
-  and solving unscaled. On a nonconvex model a change of scaling changes
-  which local minimum you reach: `pooling_rt2stp` goes from `-3273.955` in
-  181 iterations to `-4391.826` (the published global optimum) in 1083. The
-  fixture sweep against the pre-change baseline moves no existing line on
-  either the exact-Hessian or the limited-memory leg.
+  **Off by default, and not free when asked for.** It requires every row and
+  the objective to be degree ≤ 2 and refuses with a message otherwise, rather
+  than accepting the option and solving unscaled. Of the 47 CLI fixtures it
+  accepts, 33 change status, iteration count or objective and 14 do not — it
+  answers a specific pathology, and is a different scaling everywhere else.
+  On a nonconvex model a change of scaling changes which local minimum you
+  reach, and which one is not a property of the method: on one draw
+  `pooling_rt2stp` goes from `-3273.955` in 128 iterations to `-4391.826`
+  (the published global optimum) in 1083, but across 11 round-off-scale
+  perturbations of `mu_init` the default reaches the better optimum 3 times
+  in 11 and `curvature-based` 4 in 11, at median 204 and 108 iterations. The
+  model is bistable — see #713, closed as not-a-regression on this same
+  mistake — so treat a nonconvex re-scale as a different search. Because the
+  option is off by default, the fixture sweep is unaffected by all of this.
+
+  **Asking for it declines the convex fast path** (`solver_selection=auto`),
+  the same bargain #483 established for `user-scaling`. The factors reach the
+  engine through `TNLP::get_scaling_parameters`, which the convex solvers
+  never call — and the models this method is defined for are exactly the
+  models with quadratic rows, which is the population `auto` routes to those
+  solvers: 38 of the 47 fixtures it accepts classify convex, including both
+  fixtures added for it. Left ungated the headline feature would have been
+  silently inert on most of them. Under an explicit convex `solver_selection`
+  the forced choice is respected and the skipped option is reported instead.
+
+  The reroute is paid only where there is curvature to read. A model with no
+  quadratic coefficient anywhere — an LP is degree ≤ 2 with every `Q` empty —
+  makes the scheme degenerate to Ruiz equilibration of `[A b]`, which
+  `pounce-convex` already does internally, so those 7 fixtures keep the fast
+  path bit-for-bit and get a note rather than a reroute. Without that
+  exception, asking for this scaling took `lp_israel` from 29 iterations to
+  296 (29 → 135 for the engine switch, 135 → 296 for a scaling scheme with
+  nothing to read).
 
 - **`pounce check-x0` now reports what automatic scaling will do — and, for a
   quadratic row, what it cannot see** (#703).
@@ -71,6 +97,32 @@ changes.
   `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
   report. Background and measurements:
   `dev-notes/quadratic-structure-exploitation.md` §8.
+- **A badly column-scaled convex QCQP could be reduced to the wrong cone and
+  the wrong answer reported as a success** (found by #703's fixtures).
+
+  Reducing `½xᵀQx ≤ b` to a second-order cone factors `Σ_k f_k f_kᵀ = Q` by
+  pivoted Cholesky, and the number of factor rows is the dimension of the
+  cone. The rank test cut at `1e-12 · max_diag` — one absolute threshold for
+  the whole matrix — so it asked how a pivot compared to the model's units
+  rather than how far its own downdate had moved it. On a model whose columns
+  span eight orders of magnitude that discarded **7 of 24** genuine
+  directions, making the cone larger than the constraint it stood for.
+
+  The solve then reached a better objective than the true optimum
+  (`-400.652` against `-364.210`, 10% out) and certified it: status
+  `SolveSucceeded`, self-reported constraint violation `2.66e-15`. Evaluating
+  the returned point against the actual model violates the quadratic row by
+  `4.948e+01` — 38% of its right-hand side. A relative residual check would
+  not have caught it either (`5.4e-13` against `‖Q‖ = 4.3e9`).
+
+  The test is now relative to each pivot's own starting diagonal, which is
+  invariant under the diagonal congruence `Q → CQC` that a change of units
+  is, and the loop settles a failed pivot and keeps looking rather than
+  stopping — with a relative threshold, pivot order and rank order are no
+  longer the same order. Affects the conic route only (`solver_selection`
+  `auto` or `socp` on a convex QCQP); the NLP path was always correct. The
+  fixture sweep moves two lines, both of them the fixture that exposed it.
+
 - **An LP whose convex solve ended in numerical failure was reported as the
   final answer, on models the NLP path solves** (#724).
 
