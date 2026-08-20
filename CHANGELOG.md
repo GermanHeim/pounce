@@ -51,6 +51,35 @@ changes.
   tells the next person to copy the badge markdown off the Zenodo record page,
   which is how it came back the last time.
 
+- **A least-squares model could report `Solve_Succeeded` on a point it never
+  reached, and the iteration budget decided which** (#712).
+
+  `crates/pounce-cli/tests/fixtures/scaled_feasible_a.nl` — `min Σ(xᵢ − aᵢ)²`
+  with `a` feasible, so the optimum is exactly `0` — returned
+  `Solve_Succeeded` at the default 200-iteration budget on a point whose
+  absolute KKT error is `2.3e3`. Raising `max_iter` past the point where the
+  solve converges on its own changed the answer by twelve orders while the
+  status stayed the same, which is the part a user could not have caught: a
+  budget cap must not change the accuracy of a solve that reports success.
+
+  Two things had to be true at once. The convex QP driver models
+  `½xᵀPx + cᵀx` only, so on a least-squares objective the constant `Σaᵢ²`
+  (`5e11` here) is a displacement the solver is not carrying, and #696 taught
+  the in-loop stopping test about it — but not the *second* place that
+  magnitude normalizes a duality gap, the check that decides whether an
+  `Optimal` is genuine. And the Ruiz-equilibrated retry that produces this
+  verdict returned its `Optimal` without consulting that check at all. Both
+  are fixed, and a complementarity product whose slack is smaller than the
+  rounding quantum of the subtraction that produced it no longer counts as a
+  violation — without which the correction rejects converged points on
+  models whose data is large enough that a slack of `7e-9` is 46 ulps.
+
+  The model now reports `Maximum_Iterations_Exceeded` at the default budget,
+  which is the honest verdict: it needs ~3596 iterations to reach a genuine
+  optimum, and reaches it with `max_iter` raised. No other model in the
+  fixture corpus changes status, objective or iteration count on either the
+  exact-Hessian or the limited-memory leg.
+
 - **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
   (#710).
 
