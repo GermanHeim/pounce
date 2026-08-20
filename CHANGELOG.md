@@ -9,20 +9,6 @@ changes.
 
 ## [Unreleased]
 
-- **`linear_system_scaling`'s regression test was failing on macOS for a
-  reason that had nothing to do with the option.**
-
-  `slack_based_scaling_changes_the_solve` (#677) asserts that `slack-based`
-  is a real method and not an alias for `ruiz`, and it made that argument
-  from iteration counts alone. On aarch64-apple-darwin both take exactly 103
-  iterations on `cresc4` while landing on demonstrably different points —
-  objective `0.8718975394` against `0.8718975393` — so the test failed
-  against a correctly wired option. It compares the whole
-  `(iterations, objective)` fingerprint now, which still catches what it was
-  written to catch (the #677 defect made the two byte-identical) without
-  depending on a coincidence of counts holding on every host. Present on
-  `main` before the FERAL bump; unrelated to it.
-
 - **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
   (#710).
 
