@@ -944,7 +944,13 @@ pub fn convex_hint_warnings(options: &OptionsList, reg: &RegisteredOptions) -> V
         .filter(|name| set_to_a_non_default(options, reg, name))
         .map(|name| {
             format!(
-                "pounce: warning: `{name}` asserts a derivative is constant                  across iterates, which the NLP path reconciles against the                  model and exploits — but this problem routed to                  pounce-convex, whose LP/QP/SOCP engines are handed constant                  matrices to begin with and do not read the option at all. Your                  answer is unaffected. Use `solver_selection=nlp` if you                  wanted the path that acts on it. (gh#483, gh#588)"
+                "pounce: warning: `{name}` asserts a derivative is constant \
+                 across iterates, which the NLP path reconciles against the \
+                 model and exploits — but this problem routed to \
+                 pounce-convex, whose LP/QP/SOCP engines are handed constant \
+                 matrices to begin with and do not read the option at all. \
+                 Your answer is unaffected. Use `solver_selection=nlp` if you \
+                 wanted the path that acts on it. (gh#483, gh#588)"
             )
         })
         .collect()
@@ -1119,7 +1125,8 @@ mod tests {
         );
         assert!(
             !backend_warnings(&opts, &reg).is_empty(),
-            "the per-family warning still describes the knob; the refusal is              what stops the run",
+            "the per-family warning still describes the knob; the refusal is \
+             what stops the run",
         );
 
         opts.set_numeric_value("tol", 1e-8, true, false).unwrap();

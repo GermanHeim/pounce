@@ -827,6 +827,13 @@ changes.
   and still falls back, now with a test pinning that so the fallback
   stays deliberate.
 
+- **Two warnings print as paragraphs again, not with 18-space gaps mid-sentence.**
+
+  The convex caching-hint warning (gh#588) had its line continuations
+  eaten when it was written, so `hessian_constant` on a convex model
+  printed one 500-character line with ragged holes in it. Text only; the
+  warning says what it always said.
+
 - **The 111 per-backend linear-solver knobs warn instead of going
   silent, and are refused when they are all a run sets** (#551, #677).
 
