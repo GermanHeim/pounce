@@ -572,8 +572,12 @@ impl PySolver {
     ///
     /// `step` is a full compound step, the shape
     /// [`Self::parametric_step_full`] returns, so any mode's result
-    /// can be corrected. Returns `(step, iterations, residual,
-    /// initial_residual, converged)`.
+    /// can be corrected. Returns the refined step and a dict holding
+    /// the iterations spent, the residual before and after, whether
+    /// the loop stopped early, how many bounds changed status, and the
+    /// residual split into stationarity, feasibility and
+    /// complementarity, which carry different units and different
+    /// consequences for whether an estimate can be acted on.
     ///
     /// The corrector aims at the barrier solution at the μ the solve
     /// finished on, so the accuracy it reaches is bounded by that
@@ -592,14 +596,7 @@ impl PySolver {
         deltas: Vec<Number>,
         step: Vec<Number>,
         max_iter: usize,
-    ) -> PyResult<(
-        Bound<'py, PyArray1<Number>>,
-        usize,
-        Number,
-        Number,
-        bool,
-        usize,
-    )> {
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("correct_step: no converged factor (call solve() first)")
         })?;
@@ -615,14 +612,16 @@ impl PySolver {
             .inner
             .correct_step(&pins, &deltas, &step, max_iter)
             .map_err(solver_error_to_py)?;
-        Ok((
-            out.into_pyarray_bound(py),
-            rep.iterations,
-            rep.residual,
-            rep.initial_residual,
-            rep.converged,
-            rep.released,
-        ))
+        let info = PyDict::new_bound(py);
+        info.set_item("iterations", rep.iterations)?;
+        info.set_item("residual", rep.residual)?;
+        info.set_item("initial_residual", rep.initial_residual)?;
+        info.set_item("converged", rep.converged)?;
+        info.set_item("active_set_changes", rep.released)?;
+        info.set_item("stationarity", rep.stationarity)?;
+        info.set_item("feasibility", rep.feasibility)?;
+        info.set_item("complementarity", rep.complementarity)?;
+        Ok((out.into_pyarray_bound(py), info))
     }
 
     /// Rows of the compound KKT vector holding the equality

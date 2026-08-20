@@ -63,6 +63,21 @@ pub struct CorrectorReport {
     /// Bounds the step took out of the active set, which the corrector
     /// removed from the operator once before iterating.
     pub released: usize,
+    /// The returned point's residual split the way the compound system
+    /// is: how far the Lagrangian's gradient is from zero, how far the
+    /// model's own equations are from being satisfied, and how far the
+    /// bound multipliers are from complementarity at the held `mu`.
+    ///
+    /// The three carry different units and the reported `residual` is
+    /// the largest of them, so a caller deciding whether an estimate is
+    /// usable wants them apart. A correction can leave the equations
+    /// nearly satisfied while the multipliers are far off, and only the
+    /// first of those affects whether the values can be acted on.
+    pub stationarity: Number,
+    /// Largest violation of the model's equality and inequality rows.
+    pub feasibility: Number,
+    /// Largest departure from `z · s = mu` over the bound multipliers.
+    pub complementarity: Number,
 }
 
 impl CorrectorReport {
@@ -411,6 +426,12 @@ pub(crate) fn run(
         }
     }
 
+    // the returned point's residual, split by what each block means
+    residual_at(bs, &best, pins, deltas, mu, &mut resid)?;
+    clear(&mut resid);
+    let part = |a: usize, b: usize| norm(&resid[off[a]..off[b]]);
+    let (stationarity, feasibility, complementarity) = (part(0, 2), part(2, 4), part(4, 8));
+
     let step: Vec<Number> = best.iter().zip(base).map(|(&v, &b)| v - b).collect();
     Ok((
         step,
@@ -420,6 +441,9 @@ pub(crate) fn run(
             initial_residual,
             converged,
             released: released.len() + pinned.len(),
+            stationarity,
+            feasibility,
+            complementarity,
         },
     ))
 }

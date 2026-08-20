@@ -1142,16 +1142,9 @@ def _correct(session, pin_idx, deltas, step, mode, degeneracy,
     full = np.asarray(session.solver.parametric_step_full(pin_idx, deltas))
     n_x = len(step)
     full[:n_x] = np.asarray(step)
-    out, iters, residual, initial, converged, released = (
-        session.solver.correct_step(
-            pin_idx, deltas, list(full), corrector_iter))
-    return np.asarray(out)[:n_x], {
-        "iterations": iters,
-        "residual": residual,
-        "initial_residual": initial,
-        "converged": converged,
-        "released": released,
-    }
+    out, info = session.solver.correct_step(
+        pin_idx, deltas, list(full), corrector_iter)
+    return np.asarray(out)[:n_x], dict(info)
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
