@@ -87,6 +87,18 @@ fn presolve_verdict(
     }
 }
 
+/// Whether the resolved options select `nlp_scaling_method=curvature-based`
+/// (gh #703). Read off the `OptionsList` rather than the raw argv so the
+/// option file, the `pounce_options` environment variable and the
+/// command line are all honoured in the order they are applied.
+fn curvature_scaling_requested(app: &pounce_algorithm::application::IpoptApplication) -> bool {
+    app.options()
+        .get_string_value("nlp_scaling_method", "")
+        .ok()
+        .and_then(|(v, f)| f.then_some(v))
+        .is_some_and(|v| v == "curvature-based")
+}
+
 pub fn main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
@@ -535,6 +547,29 @@ pub fn main() -> ExitCode {
                     // LP/QP dispatch block below.
                     nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    // gh #703: `nlp_scaling_method=curvature-based` derives
+                    // its factors from the model's coefficients, so it has
+                    // to be switched on here — while the handle is still
+                    // the concrete `NlTnlp` that owns them, and before any
+                    // wrapper (presolve, penalty, the variable-scaling
+                    // substitution itself) sits in front of it. The
+                    // wrappers forward `get_scaling_parameters` and project
+                    // the indices, so the factors reach the engine through
+                    // the channel user factors already use.
+                    if curvature_scaling_requested(&app)
+                        && !nl_rc.borrow_mut().enable_curvature_scaling()
+                    {
+                        eprintln!(
+                            "pounce: nlp_scaling_method=curvature-based needs \
+                             every row and the objective to be degree <= 2 (it \
+                             scales a model by its quadratic coefficients, and \
+                             a genuine nonlinearity has none). This model has \
+                             at least one row it cannot read that way. Use \
+                             gradient-based, or user-scaling with your own \
+                             scaling_factor suffixes."
+                        );
+                        return ExitCode::from(2);
+                    }
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
                     let t: Rc<RefCell<dyn TNLP>> = nl_rc;

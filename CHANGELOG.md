@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+- **`nlp_scaling_method=curvature-based`: scale a QCQP by its coefficients
+  instead of by one derivative sample** (#703).
+
+  The default `gradient-based` scaling reads `∇f` and the Jacobian once, at
+  x₀. A row `½xᵀQx ≤ b` written about the origin has `∇g(0) = 0`, so started
+  from `x₀ = 0` it is assigned factor **1.0** however far `Q` and `b` disagree
+  — at every value of `nlp_scaling_max_gradient`, since `100/0` and `1e-6/0`
+  both clamp to 1. There is also no column stage at all. Across POUNCE's own
+  fixture corpus that is 196 of 196 quadratic rows left unscaled.
+
+  The new method derives both from the model's quadratic coefficients: one
+  **joint** variable scaling `D`, Ruiz-equilibrated across the whole pencil
+  `Q₀ + Σλᵢ Qᵢ` through its λ-independent magnitude envelope, then a per-row
+  `eᵢ = 1/max(‖D Qᵢ D‖_∞, ‖D aᵢ‖_∞, |bᵢ|)`. The objective is deliberately
+  left unscaled.
+
+  The claim it is validated on is invariance rather than speed. Given a QCQP
+  and the same QCQP under an exact change of variables spanning nine orders
+  of magnitude, `curvature-based` returns the same answer to fourteen digits
+  in the same 16 iterations at every span, while `gradient-based` degrades
+  from 75 to 154 iterations and then fails outright with
+  `Maximum_Iterations_Exceeded`. On two QCQPs shaped like the Mittelmann
+  `qcqp*` family it is 75 → 15 and 50 → 33 iterations at an identical
+  objective.
+
+  **Off by default.** It requires every row and the objective to be degree
+  ≤ 2 and refuses with a message otherwise, rather than accepting the option
+  and solving unscaled. On a nonconvex model a change of scaling changes
+  which local minimum you reach: `pooling_rt2stp` goes from `-3273.955` in
+  181 iterations to `-4391.826` (the published global optimum) in 1083. The
+  fixture sweep against the pre-change baseline moves no existing line on
+  either the exact-Hessian or the limited-memory leg.
+
 - **`pounce check-x0` now reports what automatic scaling will do — and, for a
   quadratic row, what it cannot see** (#703).
 
@@ -34,8 +67,7 @@ changes.
   objective, while `gradient-based` and `nlp_scaling_method=none` are
   bit-identical on both.
 
-  Diagnostic only — no solver behaviour changes, and the fixture sweep is
-  empty on both the exact-Hessian and limited-memory legs. New:
+  Diagnostic only — no solver behaviour changes. New:
   `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
   report. Background and measurements:
   `dev-notes/quadratic-structure-exploitation.md` §8.

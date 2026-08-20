@@ -37,7 +37,6 @@
 //! User-facing background: `docs/src/initialization.md`.
 
 use crate::nl_reader;
-use crate::nl_reader::NlProblem;
 use crate::verify::{RowReport, box_violation, name_at, sha256};
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::orig_ipopt_nlp::{gradient_obj_scale, gradient_row_scale, gradient_scaling_fires};
@@ -343,84 +342,11 @@ pub struct QuadRowScale {
     pub mismatch: Number,
 }
 
-/// Point-free coefficient magnitudes of one quadratic row, as read from
-/// an [`NlProblem`]. Merged with the Jacobian sample in
-/// [`check_tnlp_with_quadratics`] to make a [`QuadRowScale`].
-#[derive(Debug, Clone)]
-pub struct QuadRowCoef {
-    pub index: usize,
-    pub curvature: Number,
-    pub linear: Number,
-    pub rhs: Number,
-}
-
-/// Read every constraint row's quadratic coefficients out of an
-/// [`NlProblem`].
-///
-/// Uses [`crate::nl_reader::NlBody::analyze_quadratic_full`] — the same
-/// read-out the LP/QP dispatch classifies with — so a row counted here is
-/// a row the recognizer agrees is quadratic. Rows it refuses (a genuine
-/// nonlinearity, or a quadratic whose recognition lost a term) are simply
-/// absent, which is why the caller reports `n_quad_rows` alongside `m`
-/// rather than implying the census covers the model.
-///
-/// `O(nnz)` in the stored Hessian entries and no evaluation: this is a
-/// property of the file, not of a point.
-pub fn quad_row_coefs(prob: &NlProblem) -> Vec<QuadRowCoef> {
-    let mut out = Vec::new();
-    for i in 0..prob.m {
-        let Some((hess, nl_lin, nl_const)) = prob.con_nonlinear[i].analyze_quadratic_full() else {
-            continue;
-        };
-        if hess.is_empty() {
-            continue; // degree ≤ 1: a linear row, not this census's business
-        }
-        // `hess` is the upper triangle (i ≤ j) of a symmetric matrix, so an
-        // off-diagonal entry contributes its magnitude to two row sums.
-        let mut row_sum: std::collections::BTreeMap<usize, Number> =
-            std::collections::BTreeMap::new();
-        for (&(r, c), v) in &hess {
-            let a = v.abs();
-            *row_sum.entry(r).or_insert(0.0) += a;
-            if r != c {
-                *row_sum.entry(c).or_insert(0.0) += a;
-            }
-        }
-        let curvature = row_sum.values().fold(0.0_f64, |m, &v| m.max(v));
-
-        // The row's full linear part: `.nl` linear section + the degree-1
-        // terms AMPL folded into the tree. They can land on the same
-        // variable, so accumulate before taking the ∞-norm.
-        let mut lin: std::collections::BTreeMap<usize, Number> = std::collections::BTreeMap::new();
-        for (var, coef) in &prob.con_linear[i] {
-            *lin.entry(*var).or_insert(0.0) += *coef;
-        }
-        for (var, coef) in &nl_lin {
-            *lin.entry(*var).or_insert(0.0) += *coef;
-        }
-        let linear = lin.values().fold(0.0_f64, |m, &v| m.max(v.abs()));
-
-        // The folded constant moves to the right-hand side: the row is
-        // `½xᵀQx + aᵀx ≤ g_u − c`. A range row is reported by its larger
-        // side, since the scale has to serve both.
-        let (lo, hi) = (prob.g_l[i], prob.g_u[i]);
-        let mut rhs = 0.0_f64;
-        if lower_bound_present(lo) {
-            rhs = rhs.max((lo - nl_const).abs());
-        }
-        if upper_bound_present(hi) {
-            rhs = rhs.max((hi - nl_const).abs());
-        }
-
-        out.push(QuadRowCoef {
-            index: i,
-            curvature,
-            linear,
-            rhs,
-        });
-    }
-    out
-}
+// `QuadRowCoef` / `quad_row_coefs` live in `pounce_nl::nl_scaling`, where
+// `nlp_scaling_method=curvature-based` also reads them (gh #703). One
+// implementation: a preflight that reported different magnitudes from the
+// ones the scaler acts on would be worse than no preflight.
+pub use pounce_nl::nl_scaling::{QuadRowCoef, quad_row_coefs};
 
 /// Reproduce gradient-based scaling's decision at x0.
 ///

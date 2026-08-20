@@ -20,7 +20,7 @@ You can configure them independently. Defaults match upstream Ipopt:
 
 | Option | Default | Effect |
 |---|---|---|
-| `nlp_scaling_method` | `gradient-based` | `none` / `gradient-based` / `user-scaling`. |
+| `nlp_scaling_method` | `gradient-based` | `none` / `gradient-based` / `user-scaling` / `curvature-based`. |
 | `nlp_scaling_max_gradient` | `100.0` | Cutoff above which gradient-based scaling applies. Per-row scale = `min(1, max_gradient / ‖∇c_i‖_∞)`. |
 | `nlp_scaling_min_value` | `1e-8` | Floor on computed scale factors — prevents inverting near-zero gradients. |
 | `nlp_scaling_obj_target_gradient` | `0.0` | When `> 0`, *pins* the scaled objective gradient ∞-norm to this value. Overrides the `max_gradient` cutoff. |
@@ -81,10 +81,58 @@ is a *lower* estimate of the real one. `--scaling-max-gradient` previews
 a different cutoff; `--json` puts the same numbers under a `scaling`
 key.
 
-The fix is `user-scaling` below, with `e_i = 1/max(‖Q_i‖_∞, ‖a_i‖_∞,
-|b_i|)` on each quadratic row. See
+`curvature-based` below computes exactly that correction for you;
+`user-scaling` lets you supply it by hand. See
 `dev-notes/quadratic-structure-exploitation.md` §8 for the derivation
 and the measurements.
+
+### `curvature-based`
+
+Derives the scaling from the model's **quadratic coefficients** instead of
+from a derivative sample, so a row's factor does not depend on where the
+modeller happened to start. Two stages, both from
+`dev-notes/quadratic-structure-exploitation.md` §8:
+
+1. one **joint** variable scaling `D`, Ruiz-equilibrated across the whole
+   pencil `Q_0 + Σ λ_i Q_i` — via the λ-independent magnitude envelope of
+   that family, so it balances every constraint at once rather than each
+   `Q_i` against its own column scaling;
+2. a per-row `e_i = 1 / max(‖D Q_i D‖_∞, ‖D a_i‖_∞, |b_i|)`.
+
+The objective is deliberately left unscaled: the Ruiz pass already anchors
+the Hessian block against the constraint blocks, and shrinking it below the
+constraint scale costs strong convexity.
+
+```sh
+pounce model.nl model.sol nlp_scaling_method=curvature-based
+```
+
+**It requires every row and the objective to be degree ≤ 2** — the envelope
+above exists only because each `Q_i` is a constant matrix — and it refuses
+with a message rather than silently solving unscaled. A model with a
+genuine nonlinearity is not one this method is defined for.
+
+What it buys is best stated as invariance rather than speed. Given a QCQP
+and the same QCQP with an exact change of variables `x_j → x_j / c_j`
+spanning nine orders of magnitude:
+
+| column span | `gradient-based` | `curvature-based` |
+|---|---|---|
+| 1 | 75 it, `2.4779690299303e4` | 16 it, `2.4779690299303e4` |
+| 1e3 | 92 it, `2.4779690302194e4` | 16 it, `2.4779690299303e4` |
+| 1e6 | 154 it, `2.4779690388034e4` | 16 it, `2.4779690299303e4` |
+| 1e9 | `Maximum_Iterations_Exceeded` | 16 it, `2.4779690299303e4` |
+
+Two caveats, both measured:
+
+* **It is off by default**, and on a model whose rows the default *can*
+  see it is usually a wash — 37 of the 41 models in POUNCE's own fixture
+  corpus that it accepts are unchanged in status, iterations and objective.
+* **On a nonconvex model, changing the scaling changes which local minimum
+  you reach.** `pooling_rt2stp` goes from `-3273.955` in 181 iterations to
+  `-4391.826` in 1083 — a better point (it is the published global optimum
+  of that instance) for six times the work. Neither direction is
+  guaranteed; treat a nonconvex re-scale as a different search.
 
 ### `user-scaling`
 
@@ -280,7 +328,10 @@ Reach for non-default scaling when:
   started from zero. `gradient-based` cannot scale those rows at all —
   see [Quadratic rows the sampler cannot
   see](#quadratic-rows-the-sampler-cannot-see) — and `pounce check-x0`
-  will say so.
+  will say so. Try `curvature-based`.
+* The model is a QCQP whose variables are in wildly different units.
+  `curvature-based` equilibrates the columns jointly across every
+  quadratic form; `gradient-based` has no column stage at all.
 
 Otherwise the upstream-Ipopt-style defaults (`gradient-based` at the
 NLP level, `none` at the linear-system level with MA57's internal
