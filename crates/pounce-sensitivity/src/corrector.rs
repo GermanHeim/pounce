@@ -286,6 +286,41 @@ fn pinned_rows(
     out
 }
 
+/// Hold every bound multiplier within a band of what its slack
+/// implies, the way the algorithm does after each accepted step.
+///
+/// `kappa_sigma_clamp` in the solver puts each multiplier into
+/// `[mu / (kappa · s), kappa · mu / s]`, so one can never drift
+/// arbitrarily far from `mu / s`. The corrector needs it in two
+/// places the solver does not: the multipliers arrive from the
+/// predictor, extrapolated across the whole perturbation and never
+/// passed through this, and each iteration produces new ones.
+fn clamp_multipliers(
+    rows: &[crate::backsolver::BoundRow],
+    iterate: &mut [Number],
+    lo: &[Number],
+    hi: &[Number],
+    mu: Number,
+) {
+    const KAPPA_SIGMA: Number = 1e10;
+    for b in rows {
+        let i = b.var_row;
+        let s = if b.lower {
+            iterate[i] - lo[i]
+        } else {
+            hi[i] - iterate[i]
+        };
+        if s <= 0.0 || !s.is_finite() {
+            continue;
+        }
+        let z = &mut iterate[b.row];
+        if *z <= 0.0 {
+            continue; // released, and held there deliberately
+        }
+        *z = z.clamp(mu / (KAPPA_SIGMA * s), KAPPA_SIGMA * mu / s);
+    }
+}
+
 /// Run the corrector.
 ///
 /// `start` is the caller's compound step, `base` the converged
@@ -336,6 +371,8 @@ pub(crate) fn run(
     for z in iterate[off[4]..off[8]].iter_mut() {
         *z = z.max(1e-12);
     }
+
+    clamp_multipliers(&rows, &mut iterate, lo, hi, mu);
 
     // The bounds the step takes out of the active set, decided once
     // here and held for every iteration. Their barrier terms come out
@@ -410,6 +447,7 @@ pub(crate) fn run(
         for &r in &released {
             iterate[r] = 0.0;
         }
+        clamp_multipliers(&rows, &mut iterate, lo, hi, mu);
 
         residual_at(bs, &iterate, pins, deltas, mu, &mut resid)?;
         clear(&mut resid);
