@@ -1,0 +1,42 @@
+# Codecov configuration for pounce.
+#
+# The report uploaded here comes from `scripts/coverage-combined.sh`, not from
+# `cargo llvm-cov` — see CONTRIBUTING.md, "Measuring coverage". It merges the
+# Rust test binaries, the CLI, and the `pounce._pounce` extension module into
+# one profile, so paths reachable only through Python or the CLI are attributed
+# to the crates that implement them.
+
+coverage:
+  status:
+    # Informational. The combined run reaches three suites, and a suite that
+    # skips (a missing optional dep, a timing-sensitive test that loses its
+    # margin under instrumentation) moves the number without anyone touching
+    # the code. Gating on that before we know the run-to-run spread would
+    # teach people to ignore the check, which is worse than not having it.
+    #
+    # These now evaluate on `main` commits rather than on PRs: coverage.yml
+    # has no `pull_request` trigger, so no report is ever uploaded for a PR
+    # head and Codecov has nothing to compare there. Reinstating that trigger
+    # is what would bring the per-PR statuses back — this file is not what
+    # turned them off.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Paths that exist to be read by a human, not executed by a solve. Low coverage
+# in them is real and uninteresting, and letting it into the headline number
+# crowds out the gaps in the numerical core that can hide a wrong answer — the
+# same reasoning behind core.txt's exclusions in coverage-combined.sh.
+ignore:
+  - "**/benches/**"
+  - "**/examples/**"
+  - "tools/iter-diff/**"
+  - "crates/pounce-wasm/tests/**"
+
+comment:
+  layout: "reach, diff, flags, files"
+  # Nothing changed the coverage, nothing to say.
+  require_changes: true

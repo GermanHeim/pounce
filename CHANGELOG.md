@@ -71,6 +71,92 @@ changes.
   `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
   report. Background and measurements:
   `dev-notes/quadratic-structure-exploitation.md` §8.
+- **Coverage no longer runs on pull requests; it is measured on `main`.**
+
+  The combined coverage job takes 33–40 minutes (three measured runs: 33.2,
+  40.4, 33.3, the spread coming from cargo-cache warmth). `ci.yml` — everything
+  that can actually reject a change — finishes in about 10. Running both on a
+  PR meant the PR sat visibly un-green for another half hour after the checks
+  that matter had passed, and a reviewer looking at a spinner cannot tell "the
+  tests are still running" from "the measurement is still running". Nothing
+  blocked on the number: `codecov.yml` marks both statuses `informational`.
+
+  `coverage.yml` now triggers on pushes to `main` plus `workflow_dispatch`.
+  Every merge still produces exactly one run, on the commit the badge and the
+  Codecov trend actually refer to. A branch that needs a number before it
+  merges can get one on demand (Actions → Coverage → Run workflow → pick the
+  branch).
+
+  Two costs, both stated rather than discovered later. Codecov's per-PR
+  patch-coverage status is gone, because no report is uploaded for a PR head —
+  it was informational, so it could not have blocked anything. And a PR that
+  edits `coverage.yml` no longer exercises the workflow before merging, since
+  `pull_request` was what used to do that; dispatch such a branch by hand
+  first.
+
+  `timeout-minutes` also drops from 120 to 90. The 120 was a guess made before
+  any run existed; 90 keeps better than 2x headroom over the slowest run seen.
+
+- **The coverage upload was shipping two GAMS listing fixtures to Codecov
+  alongside the real report.**
+
+  The first live run of `.github/workflows/coverage.yml` logged `Found 3
+  coverage files to report`, and the two it found on its own were
+  `studio/mcp/fixtures/ex8_3_10.lst` and `spawn_failed.lst` — solver listing
+  fixtures, not coverage data. Naming a report in the action's `files:` input
+  does not turn its directory search off, and `.lst` is one of the extensions
+  that search looks for.
+
+  Nothing went red, which is the part worth remembering: Codecov processes an
+  uploaded report asynchronously, well after the step exits, so a junk report
+  cannot fail the job that sent it. It would have surfaced as an unexplained
+  number on the badge. And since the step sets `fail_ci_if_error`, a later
+  rejection of an unparseable fixture would have failed the coverage job for a
+  reason nothing in the diff explained. Fixed with `disable_search: true`: the
+  report is assembled deliberately by `scripts/coverage-combined.sh`, so there
+  is nothing for a search to contribute.
+
+- **Coverage is measured in CI, and the DOI badge no longer depends on
+  Zenodo's badge service.**
+
+  `.github/workflows/coverage.yml` runs `scripts/coverage-combined.sh` (i.e.
+  `make coverage`) on every PR and every push to `main` and uploads the result
+  to Codecov. It deliberately does *not* run `cargo llvm-cov --workspace`:
+  large parts of POUNCE are reachable only through the `pounce._pounce`
+  extension module or through the CLI, and a Rust-only report shows those at
+  0% — inventing gaps in code that is well covered, which is the one failure
+  mode that makes a coverage number worse than no number. Running the same
+  script CI and contributors run also means the badge and a local `make
+  coverage` cannot disagree.
+
+  The job asserts its own trustworthiness before uploading. `crates/pounce-py`
+  is reachable *only* through the `.so`, so if the extension module fails to
+  get attributed to the profile it reads ~0% — and llvm-cov reports that as a
+  complete, plausible, badly wrong number rather than as an error. The check
+  fails the job with the cause named instead of moving the badge by tens of
+  points. Requires the `CODECOV_TOKEN` repository secret; the job carries the
+  same `github.repository ==` gate the publishing workflows do, so a fork sync
+  does not produce a red run for a token it cannot have.
+
+  Two fixes to the script fell out of wiring it up. It now excludes
+  `pounce-hsl` from its cargo invocations, as ci.yml does — that crate cannot
+  link without licensed HSL, and the failure was invisible because the same
+  `2>/dev/null` that hid it also dropped every *other* crate's test binary from
+  `objects.txt`. And it stages the instrumented CLI at
+  `python/pounce/bin/pounce` before `maturin develop`, so the pyomo-pounce
+  suite has a bundled binary it will trust (its `conftest.py` refuses an
+  unvetted `pounce` on `PATH`, gh #403) rather than skipping — previously the
+  CLI was passed to llvm-cov as an `-object` that nothing ever executed, and
+  every CLI and `.nl` path reported 0%.
+
+  Separately, the README DOI badge now comes from shields.io rather than
+  `zenodo.org/badge/DOI/....svg`. Zenodo's badge endpoint has broken the badge
+  more than once, and GitHub's Camo image proxy *caches* the error, so one bad
+  fetch outlives the outage that caused it. The concept DOI is stable by
+  definition, so a static shields badge cannot go stale, and the README's PyPI
+  badges already come from the same host. `dev-notes/zenodo-setup.md` no longer
+  tells the next person to copy the badge markdown off the Zenodo record page,
+  which is how it came back the last time.
 
 - **A least-squares model could report `Solve_Succeeded` on a point it never
   reached, and the iteration budget decided which** (#712).
@@ -454,6 +540,20 @@ changes.
   dependent. It is round-off-dependent on a single platform — 6 draws in 17
   at a `1e-12` perturbation — which is a simpler and worse explanation. It is
   deterministic now.
+
+  **#706 is closed on a stronger measurement than the ulp screen above.**
+  `mu_init` is what that screen perturbs, and on `eigena2` it no longer
+  perturbs anything: moved from `0.1` to `100` — three decades, not an ulp —
+  every iterate of the `=yes` run is bit-identical (objective, `inf_pr`,
+  `‖d‖`, both step sizes, 17 iterations), and only the printed `lg(mu)` column
+  differs. On #693's parent the same model swings between 61 and 127
+  iterations and both statuses under a `1e-12` change to the same option. A
+  trajectory that ignores a thousandfold change in the barrier parameter is
+  not sitting on a tolerance band, so the `eigena2` pin in
+  `issue_616_ls_init_downgrades.rs` — two-valued while #706 was open, because
+  CI had caught the platforms disagreeing — is single-valued again, and the
+  barrier-independence itself is now asserted alongside it rather than
+  described.
 
 - **A test and a doc page asserted opposite things about `pooling_rt2stp`,
   and both were written from one draw** (#616).
