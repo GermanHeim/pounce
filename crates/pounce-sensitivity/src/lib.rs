@@ -71,6 +71,7 @@ pub mod algorithm_backsolver;
 pub mod backsolver;
 pub mod boundcheck;
 pub mod convenience;
+pub mod corrector;
 pub mod diff_handoff;
 pub mod options;
 pub mod p_calculator;

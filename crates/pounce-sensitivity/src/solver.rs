@@ -787,6 +787,82 @@ impl Solver {
         Ok((dx[..ctx.n_x].to_vec(), segments))
     }
 
+    /// Newton iterations on the barrier system, refining a step that
+    /// some mode already produced.
+    ///
+    /// `step` is a full compound step, the shape
+    /// [`Self::parametric_step_full`] returns, so any mode's result
+    /// can be handed in. Each iteration costs one back-solve against
+    /// the held factor and no factorization. Returns the refined step
+    /// and a [`CorrectorReport`] saying what the iterations bought.
+    ///
+    /// The corrector aims at the barrier solution at the μ the solve
+    /// finished on, not at a re-solve, so the accuracy it can reach is
+    /// bounded by that offset. Where the perturbation needs a bound
+    /// the base point held tightly to leave the active set, the held
+    /// barrier diagonal cannot represent the change and the iterations
+    /// make no progress. `CorrectorReport::improved` reports that
+    /// case: the step handed back is then the caller's own.
+    ///
+    /// The returned point always satisfies the variable bounds, since
+    /// the barrier residual is undefined outside them and the
+    /// fraction-to-boundary rule keeps every iterate inside. A step
+    /// that arrives pointing out of the box is therefore put back in
+    /// before the first iteration, which means `max_iter = 0` is not a
+    /// no-op: it costs one evaluation, no back-solve, and reports the
+    /// residual the caller's step leaves.
+    pub fn correct_step(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        step: &[Number],
+        max_iter: usize,
+    ) -> Result<(Vec<Number>, crate::corrector::CorrectorReport), SolverError> {
+        let ctx = self.bound_context()?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let bs = &state.backsolver;
+        let dim = bs.dim();
+        if step.len() != dim {
+            return Err(SolverError::BadShape {
+                what: "step",
+                got: step.len(),
+                expected: dim,
+            });
+        }
+        let mu = {
+            let (data, _, _) = bs.activity_handles();
+            let m = data.borrow().curr_mu;
+            if m > 0.0 {
+                m
+            } else {
+                return Err(SolverError::SensComputationFailed(
+                    "corrector: the solve reported no barrier parameter".into(),
+                ));
+            }
+        };
+        let base = {
+            let mut flat = vec![0.0; dim];
+            bs.curr_flat(&mut flat).map_err(|_| {
+                SolverError::SensComputationFailed(
+                    "corrector: converged iterate unavailable".into(),
+                )
+            })?;
+            flat
+        };
+        crate::corrector::run(
+            bs,
+            &base,
+            step,
+            pin_constraint_indices,
+            deltas,
+            &ctx.lo,
+            &ctx.hi,
+            mu,
+            max_iter,
+        )
+    }
+
     /// [`Self::parametric_step_bounded`] with the weak-row
     /// decision supplied by the caller instead of searched for. The
     /// direction is computed for the given working set (all weak rows

@@ -1005,6 +1005,46 @@ impl PdSensBacksolver {
         self.nlp.borrow().n_full_x()
     }
 
+    /// [`Self::offsets`], for the corrector's residual assembly, which
+    /// writes one calculated-quantity block at a time.
+    pub(crate) fn offsets_public(&self) -> [usize; 9] {
+        self.offsets()
+    }
+
+    /// [`Self::pack`], for the corrector, which builds a trial iterate
+    /// from the flat point it is stepping.
+    pub(crate) fn pack_public(&self, flat: &[Number]) -> Result<IteratesVectorMut, ()> {
+        self.pack(flat)
+    }
+
+    /// The converged iterate, flattened into the compound layout.
+    ///
+    /// The corrector steps a point rather than a step, so it needs the
+    /// iterate the step is measured from, in the same layout the step
+    /// arrives in.
+    pub(crate) fn curr_flat(&self, out: &mut [Number]) -> Result<(), ()> {
+        if out.len() != self.dim() {
+            return Err(());
+        }
+        let curr = {
+            let d = self.data.borrow();
+            d.curr.clone().ok_or(())?
+        };
+        let off = self.offsets();
+        let blocks: [&Rc<dyn pounce_linalg::vector::Vector>; 8] = [
+            &curr.x, &curr.s, &curr.y_c, &curr.y_d, &curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u,
+        ];
+        for (i, b) in blocks.iter().enumerate() {
+            let vals = crate::vec_util::dense_to_vec(&***b);
+            let (a, e) = (off[i], off[i + 1]);
+            if vals.len() != e - a {
+                return Err(());
+            }
+            out[a..e].copy_from_slice(&vals);
+        }
+        Ok(())
+    }
+
     /// Cumulative block offsets: `offset(i)` is the start index of
     /// block `i` in the flat slice.
     fn offsets(&self) -> [usize; 9] {
