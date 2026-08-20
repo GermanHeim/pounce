@@ -9,6 +9,60 @@ changes.
 
 ## [Unreleased]
 
+- **`corrector_iter` refines a step by Newton iterations on the barrier
+  system, against the factorization the solve left behind.**
+
+  A parametric step leaves a residual in the barrier KKT system at the
+  perturbed parameter values. Iterating on it costs one back-solve each
+  and no factorization, which is what makes the correction worth taking
+  over a re-solve. Available on `estimate()` and `estimate_report()`
+  under every mode, default 0, stopping early when an iteration fails
+  to improve the residual, so the number is a budget rather than a
+  count.
+
+  The residual comes from the algorithm's own calculated quantities by
+  way of the trial iterate, so scaling, fixed variables and the bound
+  expansions are handled exactly as the solve handles them. Setting a
+  trial point leaves `curr` alone, and `curr` is what the held
+  factorization was built from, so nothing here disturbs the factor or
+  any other consumer of the session.
+
+  A correction cannot change an active set on its own: the held
+  operator carries every bound's barrier diagonal from the base point,
+  `z / s`, which at a tightly held bound is `z² / mu`. So the predictor's
+  decision is applied once before iterating. A released bound comes out
+  of the operator with its multiplier held at zero and its
+  complementarity row gone, a bound the step brings in has its diagonal
+  raised to what the barrier assigns at that slack, and every other row
+  keeps the base point's term. Both are the same change to one
+  diagonal, so one factorization serves the whole correction. That is
+  also why `mode="linear"` gains nothing past the first crossing: it
+  holds the active set fixed by construction and hands over no
+  decision.
+
+  Measured on the CSTR of notebook 36, whose first crossing is at 1.3%
+  of the change to its steady state: with `fix_relax` and eight
+  iterations the largest relative error goes from 2.4e-3 to 1e-6 at a 2%
+  change, 1.4e-2 to 2e-6 at 5%, and 6.0e-2 to 6.0e-5 at 10%, which is
+  four crossings. At seven crossings it improves the estimate by about
+  5% and stops. The reach is set by the crossings handed over, not the
+  size of the change.
+
+  What it does not do is set the multipliers, which arrive extrapolated
+  over the whole perturbation and are the dominant error once that is
+  large. `estimate()` warns when a correction ends without at least
+  halving the residual, so an uncorrected step is never returned as a
+  corrected one, and the report splits the residual into stationarity,
+  feasibility and complementarity, which carry different units and
+  different consequences for whether an estimate can be acted on.
+
+- **`max_iter` on `estimate()`, `estimate_report()` and
+  `active_set_changes()` is now `predictor_iter`.** It bounds the
+  `fix_relax` refinement passes and the active-set changes `path`
+  applies, so it now says which work it limits, alongside
+  `corrector_iter` and `degeneracy_iter`. None of the three functions
+  is in a release, so nothing downstream carries the old name.
+
 - **`degeneracy="directional"` decides through the active-set QP engine,
   budgeted by its own `degeneracy_iter`.**
 

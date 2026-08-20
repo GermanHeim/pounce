@@ -124,3 +124,22 @@ def test_a_correction_that_achieves_nothing_says_so():
     assert corrected == pytest.approx(plain, abs=1e-12), (
         "a correction that achieves nothing should leave the estimate "
         f"where it was: {plain} -> {corrected}")
+
+
+def test_estimate_report_carries_what_the_corrector_did():
+    m = solved()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        plain = pyomo_pounce.estimate_report(m, [(m.p, 1.6)])
+        rep = pyomo_pounce.estimate_report(m, [(m.p, 1.6)], corrector_iter=8)
+    assert plain.corrector is None
+    c = rep.corrector
+    assert c is not None
+    assert c["iterations"] >= 1
+    assert c["residual"] <= c["initial_residual"]
+    for key in ("stationarity", "feasibility", "complementarity",
+                "active_set_changes", "converged"):
+        assert key in c, f"{key} missing from {sorted(c)}"
+    # the rest of the report describes the step handed over, unchanged
+    assert rep.alpha == pytest.approx(plain.alpha)
+    assert rep.violation == pytest.approx(plain.violation)

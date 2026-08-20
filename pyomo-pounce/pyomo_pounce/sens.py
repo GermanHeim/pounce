@@ -1148,7 +1148,7 @@ def _correct(session, pin_idx, deltas, step, mode, degeneracy,
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
-             max_iter=16, degeneracy="directional", degeneracy_iter=16,
+             predictor_iter=16, degeneracy="directional", degeneracy_iter=16,
              corrector_iter=0):
     """First-order estimate of the solution at perturbed parameter values.
 
@@ -1177,7 +1177,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     change at the fraction where it happens. `active_set_changes()`
     returns the record of those changes.
 
-    max_iter bounds that work. Under "fix_relax" each pass costs a
+    predictor_iter bounds that work. Under "fix_relax" each pass costs a
     dense solve whose size grows with the number of pins, and the
     refinement is only worth running while it stays cheaper than a
     re-solve. Under "path" it caps the number of active-set changes
@@ -1269,11 +1269,11 @@ def estimate(model, perturb, clamp=True, mode="linear",
             if mode == "fix_relax":
                 step, pinned = (
                     session.solver.parametric_step_bounded_decided(
-                        pin_idx, deltas, held_rows, max_iter))
+                        pin_idx, deltas, held_rows, predictor_iter))
             elif mode == "path":
                 step, segments = (
                     session.solver.parametric_step_path_decided(
-                        pin_idx, deltas, held_rows, max_iter))
+                        pin_idx, deltas, held_rows, predictor_iter))
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
@@ -1284,10 +1284,10 @@ def estimate(model, perturb, clamp=True, mode="linear",
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
             step, pinned = session.solver.parametric_step_bounded(
-                pin_idx, deltas, max_iter)
+                pin_idx, deltas, predictor_iter)
         elif mode == "path":
             step, segments = session.solver.parametric_step_path(
-                pin_idx, deltas, max_iter)
+                pin_idx, deltas, predictor_iter)
         else:
             step = session.solver.parametric_step(pin_idx, deltas)
     corrector = None
@@ -1343,8 +1343,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 n_changes = len(segments)
                 did = f"applied {n_changes} active-set change(s)"
             why = ("the limit of %d was reached, so raising "
-                   "max_iter may finish it" % max_iter
-                   if n_changes >= max_iter else
+                   "predictor_iter may finish it" % predictor_iter
+                   if n_changes >= predictor_iter else
                    "holding them all would need more pins than the "
                    "problem has degrees of freedom, so no step does")
             warnings.warn(
@@ -1438,6 +1438,13 @@ class EstimateReport:
         non-zero entry means the factor is regularized, so the step is
         taken against a modified matrix and differs from the exact
         active-set answer by that much.
+    corrector : dict or None
+        What `corrector_iter` iterations did, None when none were run.
+        Holds the back-solves spent, the residual before and after, the
+        bounds whose status the step changed, and the residual split
+        into stationarity, feasibility and complementarity. This is the
+        dual half `violation` refers to: it needs the multipliers at
+        the perturbed point, which the corrector holds.
     bounds_relaxed : bool
         True when the solve ran with a non-zero `bound_relax_factor`,
         which lets a variable settle outside the bound the model
@@ -1453,7 +1460,7 @@ class EstimateReport:
 
     def __init__(self, alpha, first, first_kind, crossed, crossed_rows,
                  violation, mu, activity, row_activity, perturbations,
-                 bounds_relaxed):
+                 bounds_relaxed, corrector=None):
         self.alpha = alpha
         self.first = first
         self.first_kind = first_kind
@@ -1465,6 +1472,7 @@ class EstimateReport:
         self.row_activity = row_activity
         self.perturbations = perturbations
         self.bounds_relaxed = bounds_relaxed
+        self.corrector = corrector
 
     def __repr__(self):
         n = len(self.crossed) + len(self.crossed_rows)
@@ -1603,16 +1611,23 @@ def _user_row_names(session):
     return [back.get(nm, nm) for nm in session.con_names]
 
 
-def estimate_report(model, perturb, max_iter=16,
-                    degeneracy="directional", degeneracy_iter=16):
+def estimate_report(model, perturb, predictor_iter=16,
+                    degeneracy="directional", degeneracy_iter=16,
+                    corrector_iter=0):
     """Report what `estimate()`'s linear step does about the bounds.
 
     degeneracy and degeneracy_iter match `estimate()`'s arguments of
     the same names, so the step measured here is the step `estimate()`
     takes for the same arguments, including the directional-derivative
     correction at a degenerate base point. degeneracy_iter budgets that
-    correction's back-solves. max_iter is accepted for signature
+    correction's back-solves. predictor_iter is accepted for signature
     parity with `estimate()` and is unused here.
+
+    corrector_iter runs the same Newton iterations `estimate()` runs
+    and reports what they did on the `corrector` attribute, without
+    changing anything the rest of the report measures: those describe
+    the step handed to the corrector, which is what a caller comparing
+    the two wants.
 
     Takes the same perturbation argument `estimate()` takes and returns
     an EstimateReport. Nothing about the estimate changes: this runs
@@ -1721,12 +1736,18 @@ def estimate_report(model, perturb, max_iter=16,
     violation = float(np.max(np.maximum.reduce(
         [gl_p - g_at, g_at - gu_p, np.zeros_like(g_at)])))
 
+    corrector = None
+    if corrector_iter:
+        _, corrector = _correct(
+            session, pin_idx, deltas, np.asarray(step), "linear",
+            degeneracy, corrector_iter, False)
+
     return EstimateReport(
         alpha=alpha, first=first, first_kind=first_kind,
         crossed=crossed, crossed_rows=crossed_rows, violation=violation,
         mu=mu, activity=activity, row_activity=row_status,
         perturbations=np.asarray(session.solver.kkt_perturbations).tolist(),
-        bounds_relaxed=bounds_relaxed,
+        bounds_relaxed=bounds_relaxed, corrector=corrector,
     )
 
 
@@ -1740,7 +1761,7 @@ ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 
 
-def active_set_changes(model, perturb, max_iter=16,
+def active_set_changes(model, perturb, predictor_iter=16,
                        degeneracy="directional", degeneracy_iter=16):
     """The active-set changes `estimate(mode="path")` applies, in order.
 
@@ -1755,7 +1776,7 @@ def active_set_changes(model, perturb, max_iter=16,
     list as a whole says which bounds the re-optimized solution enters
     and leaves between the predicted state and the measured one.
 
-    A list of length `max_iter` means the cap stopped the path before
+    A list of length `predictor_iter` means the cap stopped the path before
     the target, the same condition `estimate()` warns about.
 
     degeneracy matches `estimate()`'s argument of the same name. Under
@@ -1785,7 +1806,7 @@ def active_set_changes(model, perturb, max_iter=16,
                 session.solver.parametric_step_directional(
                     pin_idx, deltas, degeneracy_iter))
             _, segments = session.solver.parametric_step_path_decided(
-                pin_idx, deltas, held_rows, max_iter)
+                pin_idx, deltas, held_rows, predictor_iter)
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
@@ -1793,10 +1814,10 @@ def active_set_changes(model, perturb, max_iter=16,
                 f"active_set_changes: {e}. Falling back to the "
                 "one-sided record, the degeneracy='one_sided' behavior.")
             _, segments = session.solver.parametric_step_path(
-                pin_idx, deltas, max_iter)
+                pin_idx, deltas, predictor_iter)
     else:
         _, segments = session.solver.parametric_step_path(
-            pin_idx, deltas, max_iter)
+            pin_idx, deltas, predictor_iter)
 
     # segments carry var-x rows (the factor's x block); var_names is
     # full-x, so invert the same map scatter_x applies
