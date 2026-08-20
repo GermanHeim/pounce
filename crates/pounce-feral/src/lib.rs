@@ -26,7 +26,7 @@ pub mod schur;
 pub use schur::FeralSchurSolver;
 
 use feral::symbolic::SupernodeParams;
-use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
+use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, Solver};
 
 /// Re-export so option-aware callers can construct a
 /// [`FeralConfig`] without taking a direct dependency on `feral`.
@@ -47,6 +47,22 @@ pub struct FeralSolverInterface {
     pivtol_changed: bool,
     refactorize: bool,
     refine: bool,
+    /// See [`FeralConfig::refine_max_steps`].
+    refine_max_steps: usize,
+
+    /// Destination buffer for the in-place solve entry points, grown once
+    /// and reused. feral's allocating entry points return an owned `Vec`
+    /// per call — `dim * nrhs` doubles, ~946 KB per back-solve on the
+    /// 118 276-dimension KKT of gh#698 — and the `_into` forms
+    /// (feral#178) exist to take that back. Held here rather than
+    /// allocated per call because `solve` is the hot path: an IPM does two
+    /// of these per iteration for hundreds of iterations.
+    ///
+    /// It is a separate buffer rather than `rhs_vals` itself because
+    /// feral makes aliasing `rhs` with `x_out` unrepresentable in safe
+    /// Rust; the copy back into the caller's slice stays, the allocation
+    /// does not.
+    x_scratch: Vec<Number>,
 
     dim: Index,
     nonzeros: Index,
@@ -169,9 +185,10 @@ pub struct FeralConfig {
     /// Under pounce's IPM it is a **nested** loop, and that is worth
     /// knowing before tuning it. `PdFullSpaceSolver` runs Ipopt's own
     /// refinement (`min/max_refinement_steps`, `residual_ratio_max`) over
-    /// the augmented system, and feral's inner loop runs up to 10
-    /// correction steps plus the initial solve inside *each* of those —
-    /// up to 10x11 substitution passes for one aug-system solve, each
+    /// the augmented system, and feral's inner loop runs up to
+    /// [`Self::refine_max_steps`] correction steps plus the initial solve
+    /// inside *each* of those — at feral's own default of 10 that is up
+    /// to 10x11 substitution passes for one aug-system solve, each
     /// preceded by a matvec against the original matrix. The outer loop
     /// is the one that measures the residual ratio and decides; the
     /// inner one drives a residual nobody consults to a tolerance nobody
@@ -180,21 +197,20 @@ pub struct FeralConfig {
     ///
     /// Measured on a 118 276-dimension KKT (gh#698): `feral_refine = no`
     /// cut back-solve time 60% and wall time 20% and still converged.
-    /// The default stays `true` because the case that motivated it
-    /// (pinene_3200, whose IPM tail stalls when the cascade-break
-    /// residual floor is left uncorrected) is not in the fixture corpus
-    /// and has not been re-measured against the outer loop alone.
+    /// The default stays `true`, but no longer on the grounds it used to
+    /// stand on. That was pinene_3200, said to stall in the IPM tail when
+    /// the cascade-break residual floor is left uncorrected, and never
+    /// re-measured against the outer loop alone. It has now been measured
+    /// (gh#710) and it does not stall: at 64 000 variables it converges to
+    /// the same objective in 12 iterations with `feral_refine = no`, and
+    /// in 13 at every budget from 0 to 10, in about two seconds either
+    /// way. What does object is the fixture corpus — see
+    /// [`Self::refine_max_steps`].
     ///
-    /// The inner cap is hard-coded in feral 0.15.1
-    /// (`solve_sparse_refined_core`, `max_steps = 10`), so pounce cannot
-    /// narrow it without an upstream change; the knob here is
-    /// all-or-nothing. Asked for as feral#178 and implemented in
-    /// feral#179 (`RefineOptions { max_steps }`) — one correction step
-    /// would plausibly serve the pinene_3200 case at a tenth of the
-    /// cost, which is what would let this default change. Consuming it
-    /// needs a feral *release*: `Cargo.toml` pins the published
-    /// crates.io version and `check-release-consistency.sh` rejects a
-    /// git rev.
+    /// This knob is no longer all-or-nothing. feral 0.17.0 shipped
+    /// `RefineOptions { max_steps }` (feral#178), so the inner budget is
+    /// now [`Self::refine_max_steps`] and the interesting setting is a
+    /// small cap rather than `false` — see that field.
     ///
     /// Worth knowing before retuning this: feral#179 measured that
     /// nothing merely ill-conditioned reaches the 10-step budget at all
@@ -206,6 +222,37 @@ pub struct FeralConfig {
     ///
     /// Tracked as gh#710, which carries the acceptance criteria.
     pub refine: bool,
+    /// How many correction steps feral's inner refinement may take per
+    /// back-solve, when [`Self::refine`] is on. Passed straight through
+    /// as `feral::RefineOptions::with_max_steps`.
+    ///
+    /// This is the knob [`Self::refine`]'s documentation asks for, and it
+    /// is the reason feral 0.17.0 exists (feral#178, from pounce gh#698
+    /// observation 5, tracked as gh#710). Before it, the budget was
+    /// hard-coded at 10 and pounce's only choice was 10 or nothing —
+    /// and it can use neither. Ten is the wrong number for a caller that
+    /// runs its own refinement over the same system, which
+    /// `PdFullSpaceSolver` does.
+    ///
+    /// The cap is an upper bound only. feral's `eps*sqrt(n)` residual
+    /// target, its 100x divergence guard and its 2-strike plateau exit
+    /// all keep priority, and the best-iterate contract holds at every
+    /// value, so no cap returns an answer worse than the unrefined
+    /// solve.
+    ///
+    /// **Defaults to feral's own 10, and gh#710's proposed 1 is not safe
+    /// as a default.** gh#710 nominated pinene_3200 as the case that
+    /// decides it; pinene_3200 does not object (identical objective at
+    /// 10, 1, 0 and `refine = false`). The fixture corpus does. Swept at
+    /// a cap of 1, 15 of 118 legs move and two are lost outright: `deb7`
+    /// on the exact-Hessian leg goes from `SolveSucceeded` in 143
+    /// iterations to `ErrorInStepComputation` in 183, and `cresc4` under
+    /// limited-memory goes from `SolveSucceeded` in 99 iterations to
+    /// `InfeasibleProblemDetected` in 32 — a wrong verdict, not a slower
+    /// route to the right one. Some legs improve (`pooling_rt2stp`, 298
+    /// -> 199). So this is a per-problem lever whose answer has to be
+    /// re-checked, not a global default waiting for permission.
+    pub refine_max_steps: usize,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
     /// floor, `factor()` returns [`ESymSolverStatus::Singular`] even
@@ -331,6 +378,7 @@ impl Default for FeralConfig {
             cascade_break: None,
             fma: false,
             refine: true,
+            refine_max_steps: feral::DEFAULT_REFINE_MAX_STEPS,
             // MA57 `CNTL(2)` default — an absolute small-pivot
             // magnitude on the scaled matrix. Only pivots essentially
             // at the working-precision floor are flagged singular.
@@ -396,13 +444,22 @@ impl FeralConfig {
             fma: parse_bool_env(std::env::var("POUNCE_FERAL_FMA").ok().as_deref()).unwrap_or(false),
             refine: parse_bool_env(std::env::var("POUNCE_FERAL_REFINE").ok().as_deref())
                 .unwrap_or(true),
-            singular_pivot_floor: std::env::var("POUNCE_FERAL_SINGULAR_PIVOT_FLOOR")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(1e-20),
-            inertia_pivot_floor: std::env::var("POUNCE_FERAL_INERTIA_PIVOT_FLOOR")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok()),
+            // `feral::env` rather than a local parse: see the
+            // `min_par_flops` note below for why every numeric knob here
+            // goes through it now.
+            refine_max_steps: feral::env::usize_var("POUNCE_FERAL_REFINE_STEPS")
+                .unwrap_or(feral::DEFAULT_REFINE_MAX_STEPS),
+            singular_pivot_floor: feral::env::f64_var_where(
+                "POUNCE_FERAL_SINGULAR_PIVOT_FLOOR",
+                ">= 0 and finite",
+                |v| v >= 0.0,
+            )
+            .unwrap_or(1e-20),
+            inertia_pivot_floor: feral::env::f64_var_where(
+                "POUNCE_FERAL_INERTIA_PIVOT_FLOOR",
+                ">= 0 and finite",
+                |v| v >= 0.0,
+            ),
             pivtol: resolve_pivtol_env(
                 std::env::var("POUNCE_FERAL_PIVTOL").ok().as_deref(),
                 std::env::var("FERAL_PIVTOL").ok().as_deref(),
@@ -426,9 +483,23 @@ impl FeralConfig {
             // default; an unset or unparseable env value falls through
             // to it. A `u64` so the `u64::MAX` reject-all sentinel and
             // large flop counts stay representable.
-            min_par_flops: std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok()),
+            //
+            // Read through `feral::env::u64_var`, not `parse::<u64>()`.
+            // `"1e8".parse::<u64>()` fails — scientific notation is not an
+            // integer literal — so the documented default for this very
+            // knob, which `docs/src/options.md` and the option help both
+            // print as `1e8`, was silently discarded here and replaced by
+            // feral's built-in. The option spelling
+            // (`feral_min_par_flops`) is registered as a *number* option
+            // and accepted `1e8` all along, so the same knob accepted a
+            // value one way and dropped it the other, without a word.
+            // This is feral#176's defect, in pounce; `feral::env` is the
+            // policy that release made public precisely so a caller
+            // reading its own knobs gets the same rules — scientific
+            // notation accepted, an over-range magnitude clamped rather
+            // than dropped (it means "switch this off"), and anything
+            // refused warned about once instead of vanishing.
+            min_par_flops: feral::env::u64_var("POUNCE_FERAL_MIN_PAR_FLOPS"),
             // Tri-state, mirroring `cascade_break`: an unset or
             // unrecognized value leaves `None` (inherit feral's
             // delayed-pivot default); only an explicit on/off token forces
@@ -615,6 +686,8 @@ impl FeralSolverInterface {
             pivtol_changed: false,
             refactorize: false,
             refine: cfg.refine,
+            refine_max_steps: cfg.refine_max_steps,
+            x_scratch: Vec::new(),
             dim: 0,
             nonzeros: 0,
             rows_0: Vec::new(),
@@ -907,28 +980,37 @@ impl FeralSolverInterface {
         }
     }
 
-    fn backsolve(&self, nrhs: Index, rhs_vals: &mut [Number]) -> ESymSolverStatus {
+    fn backsolve(&mut self, nrhs: Index, rhs_vals: &mut [Number]) -> ESymSolverStatus {
         let n = self.dim as usize;
         let nrhs = nrhs as usize;
         debug_assert_eq!(rhs_vals.len(), n * nrhs);
 
-        // See `FeralConfig::refine`: under the IPM this inner refinement
-        // is nested inside `PdFullSpaceSolver`'s own loop (gh#698).
+        // feral#178 shipped the `_into` forms in 0.17.0, so the owned
+        // `Vec` every entry point used to return — and the allocation
+        // behind it — is gone. `x_scratch` is grown once and reused;
+        // `resize` is a no-op after the first call at a given shape.
+        self.x_scratch.resize(n * nrhs, 0.0);
+        let x_out = &mut self.x_scratch[..n * nrhs];
+
+        // See `FeralConfig::refine` and `refine_max_steps`: under the IPM
+        // this inner refinement is nested inside `PdFullSpaceSolver`'s own
+        // loop (gh#698, gh#710), so the budget is ours to set rather than
+        // feral's to assume.
+        let opts = RefineOptions::with_max_steps(self.refine_max_steps);
         let solved = match (self.refine, self.matrix.as_ref(), nrhs == 1) {
-            (true, Some(m), true) => self.solver.solve_refined(m, rhs_vals),
-            (true, Some(m), false) => self.solver.solve_many_refined(m, rhs_vals, nrhs),
-            (_, _, true) => self.solver.solve(rhs_vals),
-            (_, _, false) => self.solver.solve_many(rhs_vals, nrhs),
+            (true, Some(m), true) => self.solver.solve_refined_into(m, rhs_vals, x_out, opts),
+            (true, Some(m), false) => self
+                .solver
+                .solve_many_refined_into(m, rhs_vals, nrhs, x_out, opts),
+            (_, _, true) => self.solver.solve_into(rhs_vals, x_out),
+            (_, _, false) => self.solver.solve_many_into(rhs_vals, nrhs, x_out),
         };
         match solved {
-            Ok(x) => {
-                // The copy back is forced by feral's API: every solve
-                // entry point returns an owned `Vec` and none writes in
-                // place, so this allocates and copies `dim * nrhs`
-                // doubles per back-solve (~946 KB at n = 118 276).
-                // Removing it needs an in-place variant upstream
-                // (feral#178, part 2).
-                rhs_vals.copy_from_slice(&x);
+            Ok(()) => {
+                // The copy back stays: feral makes aliasing `rhs` with
+                // `x_out` unrepresentable in safe Rust, so the solve
+                // cannot write through the caller's slice directly.
+                rhs_vals.copy_from_slice(x_out);
                 ESymSolverStatus::Success
             }
             Err(_) => ESymSolverStatus::FatalError,
@@ -1093,7 +1175,8 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
         use feral::{
-            LuParams, LuScaling, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic,
+            LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu,
+            SparseLuSymbolic,
         };
 
         c_deps.clear();
@@ -1137,6 +1220,13 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         // systems (gen: d≈6000). The dependent-row mapping below is unaffected:
         // it reads the *row pivot* permutation `perm()`, and the s-scaling pins
         // each x-column to its own x-row diagonal regardless of column order.
+        //
+        // This symbolic is only honoured because `params` below pins
+        // `LuPivoting::GilbertPeierls`. feral 0.16 (feral#171) made
+        // `Markowitz` the default, and Markowitz chooses its column order
+        // during the factorization and ignores the symbolic argument outright
+        // — the AMD claim in the paragraph above would quietly stop being
+        // true about the factor this function actually reads.
         let symbolic = match SparseLuSymbolic::analyze(&m) {
             Ok(sym) => sym,
             Err(_) => return ESymSolverStatus::FatalError,
@@ -1152,6 +1242,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
             on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
             scaling: LuScaling::None,
             zero_pivot_tol,
+            // See the `SparseLuSymbolic::analyze` comment above: the
+            // dependent-row scan is written against the AMD order, so the
+            // symbolic has to be the thing that decides it.
+            pivoting: LuPivoting::GilbertPeierls,
             ..LuParams::default()
         };
         let lu = match SparseLu::factor(&m, &symbolic, params) {
@@ -2326,6 +2420,112 @@ mod tests {
                 "values drifted on factorization {i}"
             );
             check_residual(&dense_from_triplets(&vals), &rhs, &b);
+        }
+    }
+
+    /// gh#710 acceptance (b): the `feral_refine_steps` cap has to reach the
+    /// **multi-RHS** back-solve, not only the single-RHS one.
+    ///
+    /// This matters because of where the IPM actually spends its solves.
+    /// `PdFullSpaceSolver`'s predictor-corrector step hands the augmented
+    /// system two right-hand sides at once, and feral routes wide and narrow
+    /// `nrhs` through different entry points — `solve_many_refined_into` vs
+    /// `solve_refined_into` — with a further BLAS3 dispatch inside the wide
+    /// one (feral#179 found the narrow arm had duplicated that dispatch). A
+    /// cap plumbed into only one arm would leave the path that carries the
+    /// IPM's step uncapped, and the back-solve time gh#698 measured would not
+    /// move where it was measured.
+    ///
+    /// The check is behavioural rather than a spy on the call count: on a
+    /// system whose corrections are large enough to see, the residual must
+    /// fall as the budget rises, and must fall on both columns of an
+    /// `nrhs = 2` solve, not just the first.
+    #[test]
+    fn refine_steps_cap_reaches_the_two_rhs_path() {
+        // Hilbert n=8: symmetric, dense, condition ~1e10 — one back-solve
+        // lands around 1e-7 and refinement still has several digits to
+        // recover. Deliberately not larger: past n≈16 Hilbert is numerically
+        // singular in double precision, refinement stops improving on the
+        // first step, and the test would pass vacuously.
+        const N: usize = 8;
+        let a = |i: usize, j: usize| 1.0 / ((i + j + 1) as f64);
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..N {
+            for j in 0..=i {
+                irn.push((i + 1) as Index);
+                jcn.push((j + 1) as Index);
+                vals.push(a(i, j));
+            }
+        }
+        // Two distinct right-hand sides, column-major, exactly as
+        // `multi_solve` takes them on the predictor-corrector path.
+        let rhs0: Vec<Number> = (0..2 * N).map(|k| ((k % 7) as f64) - 3.0).collect();
+
+        // Residual against the *original* matrix, per column, infinity norm.
+        let resid = |x: &[Number], nrhs: usize| -> Vec<f64> {
+            (0..nrhs)
+                .map(|c| {
+                    let (xc, bc) = (&x[c * N..(c + 1) * N], &rhs0[c * N..(c + 1) * N]);
+                    (0..N)
+                        .map(|i| ((0..N).map(|j| a(i, j) * xc[j]).sum::<f64>() - bc[i]).abs())
+                        .fold(0.0, f64::max)
+                })
+                .collect()
+        };
+
+        let solve_with_cap = |k: usize, nrhs: Index| -> Vec<Number> {
+            let mut s = FeralSolverInterface::with_config(FeralConfig {
+                refine: true,
+                refine_max_steps: k,
+                ..FeralConfig::default()
+            });
+            assert_eq!(
+                s.initialize_structure(N as Index, vals.len() as Index, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&vals);
+            let mut rhs = rhs0[..N * nrhs as usize].to_vec();
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, nrhs, &mut rhs, false, 0),
+                ESymSolverStatus::Success
+            );
+            rhs
+        };
+
+        // Both arms: nrhs=1 is the single-RHS entry point, nrhs=2 is the one
+        // the predictor-corrector step actually uses.
+        for nrhs in [1usize, 2] {
+            let budgets = [0usize, 1, 2, 3, feral::DEFAULT_REFINE_MAX_STEPS];
+            let curves: Vec<Vec<f64>> = budgets
+                .iter()
+                .map(|&k| resid(&solve_with_cap(k, nrhs as Index), nrhs))
+                .collect();
+            for col in 0..nrhs {
+                // Monotone in the budget — feral's best-iterate contract says
+                // a larger cap can never return a worse answer.
+                for w in curves.windows(2) {
+                    assert!(
+                        w[1][col] <= w[0][col],
+                        "nrhs={nrhs} column {col}: raising the refinement \
+                         budget made the residual worse ({:e} -> {:e}); the \
+                         best-iterate contract is not holding",
+                        w[0][col],
+                        w[1][col],
+                    );
+                }
+                // ...and the cap is not being ignored: the full budget must
+                // actually beat the zero budget on *every* column, or the
+                // knob is not reaching this arm at all.
+                let (first, last) = (curves[0][col], curves[curves.len() - 1][col]);
+                assert!(
+                    last < first,
+                    "nrhs={nrhs} column {col}: a {}-step budget left the same \
+                     residual as a 0-step one ({first:e} vs {last:e}) — \
+                     `refine_max_steps` is not reaching this back-solve arm \
+                     (gh#710)",
+                    feral::DEFAULT_REFINE_MAX_STEPS,
+                );
+            }
         }
     }
 }

@@ -164,7 +164,7 @@ the safeguard against without it (gh#616, measured on `a44f4e8b`):
 |---|---|---|---|
 | `csfi2` | `SolveSucceeded`, 53 it | `SolvedToAcceptableLevel`, 35 it | objective bit-identical at 55.0176045 |
 | `eigenb2` | `SolveSucceeded`, 55 it | `SolvedToAcceptableLevel`, 57 it | 1.6 → 1.599999991 |
-| `pooling_rt2stp` | −4391.826, 134 it | −3273.955, 81 it | different local optimum |
+| `pooling_rt2stp` | −4391.826, 134 it | −3273.955, 81 it | **not a stable fact — see below** |
 | `deb7` | 249.746, 479 it | 97.560, 202 it | different local optimum, much better |
 | `eigena2` | `SolveSucceeded`, 78 it | `SolveSucceeded`, 65 it | |
 | `unbounded_cubic` | `DivergingIterates`, 91 it | `DivergingIterates`, 290 it | unbounded either way |
@@ -280,6 +280,52 @@ under `POUNCE_DBG_NO_QUAD=1`, which still reproduces gh#616's
 downgrade exactly. That is what makes a future move attributable to one
 of them instead of being absorbed as noise.
 
+#### And gh#693 removed the other one, by moving both models off the band
+
+The section above argues that `eigenb2`'s downgrade "was never a
+property of that test: it was decided downstream, by where the iteration
+*after* the safeguard landed relative to the acceptable band". gh#693 —
+which removed the Tikhonov `δ` from the least-square multiplier
+initializer — is a clean test of that claim, and confirms it.
+
+The safeguard's decision is bit-identical across gh#693 on every model
+here: `csfi2` and `pooling_rt2stp` still decline with four rejected
+trials, `eigenb2` still accepts at `alpha = 0.5` on a step of norm
+3.2596011939729705 after one rejected trial. Nothing the accept test
+reads moved. The outcomes did:
+
+| fixture | 0.10.0 | with gh#693 |
+|---|---|---|
+| `eigenb2`, `=yes` | `SolvedToAcceptableLevel`, 48 it | `SolveSucceeded`, 17 it |
+| `eigenb2`, `=no` | `SolveSucceeded`, 67 it | `SolveSucceeded`, 21 it |
+| `eigena2`, `=yes` | `SolvedToAcceptableLevel`, 127 it | `SolveSucceeded`, 17 it |
+| `csfi2`, `=yes` | `SolvedToAcceptableLevel`, 35 it | `SolvedToAcceptableLevel`, 35 it |
+
+So the safeguard's measured cost is now `csfi2` alone.
+
+The reason to trust that as a real improvement rather than another lucky
+landing — which is what gh#588's Q4 turned out to be — is that it
+survives a round-off screen. Re-running each model at 17 values of
+`mu_init` at `0.1·(1 ± k·1e-12)`:
+
+| fixture, `=yes` | 0.10.0 | with gh#693 |
+|---|---|---|
+| `eigenb2` | 14 `SolveSucceeded` / 3 `SolvedToAcceptableLevel` | 17 `SolveSucceeded` |
+| `eigena2` | 11 `SolveSucceeded` / 6 `SolvedToAcceptableLevel` | 17 `SolveSucceeded` |
+| `csfi2` | 17 `SolvedToAcceptableLevel` | 17 `SolvedToAcceptableLevel` |
+
+On 0.10.0 neither status was a stable fact — `eigenb2`'s pinned
+`SolvedToAcceptableLevel` was a three-point island around the default
+draw, and the majority outcome at neighbouring draws was already the
+other one. gh#693 does not carry these models across the band; it moves
+them off it. `csfi2`, which is genuinely clear of the band, does not
+move at all in either build, which is the control.
+
+This also amends gh#706. That issue recorded `eigena2`'s status as
+*platform*-dependent; it is round-off-dependent on a single platform,
+6 draws in 17 at a `1e-12` perturbation, which is a simpler and worse
+explanation. It is deterministic after gh#693.
+
 ### A declined step is not the same as never asking
 
 Worth knowing before you read `least_square_init_primal=yes` results:
@@ -295,9 +341,25 @@ bit-identical to the real safeguard. So the carrier is that one solve,
 not the staging or the trial evaluations — those are free.
 
 It shows on two of the eight declining fixtures: `pooling_rt2stp` takes
-298 iterations with the option off and 81 with it on and declined
-(same objective, same status), and `deb7` takes 154 against 202.
-Everywhere else declining and `=no` agree exactly. Making the decline a
+298 iterations with the option off and 81 with it on and declined, and
+`deb7` takes 154 against 202. Everywhere else declining and `=no` agree
+exactly.
+
+**Which local optimum each route reaches on `pooling_rt2stp` is not a
+stable fact, and this page previously reported it as one.** The table
+above records the two routes reaching *different* optima (−4391.826
+against −3273.955); the test that pins this behaviour,
+`issue_616_ls_init_downgrades.rs`, simultaneously asserted they reach
+the *same* one. Both were written from a single draw, and neither
+noticed the other. Re-measured across 17 values of `mu_init` at
+`0.1·(1 ± k·1e-12)` — a perturbation at round-off scale — the two routes
+agree on the optimum at **10 of 17 points** on 0.10.0 and 8 of 17 after
+gh#693. This model is bistable between −3273.955 and −4391.826 and a
+single run picks a side essentially at random.
+
+What *is* stable, at 17 of 17 points on both builds, is that the two
+routes take different numbers of iterations — which is the carry-over
+this section is about. The test now asserts that and nothing more. Making the decline a
 true no-op would need a separate augmented-system solver for the
 initializer; it was not done, because it is a trajectory change that
 costs `pooling_rt2stp` 81 → 298 iterations to buy a tidier contract on

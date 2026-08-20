@@ -54,7 +54,9 @@
 
 use crate::ipm::QpOptions;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution};
-use feral::{LuParams, LuScaling, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{
+    LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic,
+};
 
 /// Feasibility tolerance for bound satisfaction / degenerate-step detection.
 const FEAS_TOL: f64 = 1e-9;
@@ -1222,6 +1224,16 @@ fn lu_params() -> LuParams {
     LuParams {
         on_singular: LuSingularAction::PerturbToEps { abs_floor: 1e-12 },
         scaling: LuScaling::None,
+        // feral 0.16 (feral#171) changed `LuParams::default().pivoting` to
+        // `Markowitz`, which picks its column order *during* the
+        // factorization and so ignores the `SparseLuSymbolic` that
+        // `factor_basis` computes and hands to `SparseLu::factor`. Pinning
+        // `GilbertPeierls` keeps that symbolic load-bearing, which is what
+        // every basis here was measured under. Markowitz is a large reported
+        // fill win on exactly this workload (LP bases, geomean 2.77x -> 1.06x)
+        // bought with growth (max|U|/max|B| up to 81.8), so switching is a
+        // measured change with its own crossover evidence, not a bump.
+        pivoting: LuPivoting::GilbertPeierls,
         ..LuParams::default()
     }
 }

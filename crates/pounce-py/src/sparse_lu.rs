@@ -14,7 +14,7 @@
 //! `A x = b` (FERAL's `ftran`); `solve_transpose` does `Aᵀ x = b`
 //! (`btran`), which the implicit-differentiation backward needs.
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -95,7 +95,17 @@ impl PySparseLu {
             self.symbolic = Some(s);
         }
         let symbolic = self.symbolic.as_ref().unwrap();
-        let lu = SparseLu::factor(&m, symbolic, LuParams::default()).map_err(|e| {
+        // `GilbertPeierls`, not feral 0.16's new `Markowitz` default
+        // (feral#171): Markowitz picks its column order inside the
+        // factorization and ignores `symbolic`, which would make the cached
+        // symbolic this method advertises buy nothing and quietly falsify the
+        // docstring above ("repeated Newton factorizations pay only the
+        // numeric cost").
+        let params = LuParams {
+            pivoting: LuPivoting::GilbertPeierls,
+            ..LuParams::default()
+        };
+        let lu = SparseLu::factor(&m, symbolic, params).map_err(|e| {
             PyRuntimeError::new_err(format!("SparseLU: factorization failed (singular?): {e:?}"))
         })?;
         self.lu = Some(lu);

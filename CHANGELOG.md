@@ -38,6 +38,409 @@ changes.
   fixture corpus changes status, objective or iteration count on either the
   exact-Hessian or the limited-memory leg.
 
+- **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
+  (#710).
+
+  The pin moves three minor versions at once, and each one carries something
+  pounce has to answer for.
+
+  **0.16.0 changed a default out from under three call sites** (feral#171).
+  `LuParams::default().pivoting` became `LuPivoting::Markowitz`, which picks
+  its column order *during* the factorization and therefore ignores the
+  `SparseLuSymbolic` handed to `SparseLu::factor`. Every pounce caller of that
+  API passes a symbolic it computed on purpose — the simplex basis factor in
+  `pounce-convex`, the rank-detection LU in `pounce-feral`, and the Python
+  `SparseLu` binding, whose docstring promises that "repeated Newton
+  factorizations pay only the numeric cost". Under Markowitz that promise is
+  false and the symbolic is dead weight. All three now pass
+  `pivoting: LuPivoting::GilbertPeierls` explicitly, which is the pre-0.16
+  behaviour; none of them is opting out of a better default so much as
+  declining one that discards the work they already did.
+
+  **0.17.0 makes FERAL's inner refinement budget a caller's decision**
+  (feral#178, asked for by gh#698 observation 5). On the IPM path FERAL's
+  refinement loop is nested inside `PdFullSpaceSolver`'s own — Ipopt's, capped
+  at `max_refinement_steps` — and only the outer loop computes a residual
+  ratio and decides whether the answer is good enough. The inner one drove a
+  residual nobody consulted to a tolerance nobody set, ten corrections at a
+  time, and it was hard-coded upstream so `feral_refine=no` was the only lever.
+  The new `feral_refine_steps` option (env `POUNCE_FERAL_REFINE_STEPS`) caps it
+  without leaving the refined entry point.
+
+  **The default stays at ten.** gh#710 named `pinene_3200` as the case that
+  decides whether it could move, on the grounds that the accuracy argument for
+  the inner loop rests on it. It does not object: at 64,000 variables it
+  converges to `19.8721669342` in 13 iterations at a budget of ten, of one,
+  and of zero, and in 12 iterations with refinement off entirely — about two
+  seconds each way, no tail stall at any setting. The blocker turned out to be
+  somewhere gh#710 was not looking. Sweeping the fixture corpus at
+  `feral_refine_steps=1` moves 15 of 118 legs, and two of them are outright
+  losses: `deb7` on the exact-Hessian leg goes from `SolveSucceeded` in 143
+  iterations to `ErrorInStepComputation` in 183, and `cresc4` under
+  limited-memory goes from `SolveSucceeded` in 99 iterations to
+  `InfeasibleProblemDetected` in 32 — a converged solve and a *wrong verdict*,
+  not a slower path to the same answer. (Some legs improve: `pooling_rt2stp`
+  takes 199 iterations where it took 298.) So the knob ships opt-in, the
+  default is unchanged, and the case for changing it now needs a corpus
+  answer, not just a `pinene_3200` answer.
+
+  **The back-solve no longer allocates.** 0.17.0's `solve_into` /
+  `solve_refined_into` / `solve_many_into` / `solve_many_refined_into` write
+  into a caller-owned buffer, so `FeralSolverInterface` keeps one scratch
+  vector instead of letting FERAL allocate a fresh solution on every
+  back-solve — about 946 KB per right-hand side on the 118,276-dimension KKT
+  that motivated gh#698, so roughly 1.9 MB per predictor-corrector step.
+
+  **`POUNCE_FERAL_MIN_PAR_FLOPS=1e8` was silently doing nothing** — feral#176's
+  defect, in pounce. The documented default for that knob is `1e8`, the option
+  spelling `feral_min_par_flops` is registered as a *number* option and
+  accepted it all along, and the environment spelling parsed with
+  `str::parse::<u64>()`, which rejects scientific notation. So the same knob
+  took a value one way and dropped it the other without a word. 0.17.0 made
+  `feral::env` public for exactly this: the numeric `POUNCE_FERAL_*` reads now
+  go through it, which accepts what the option parser accepts, clamps an
+  over-range magnitude instead of discarding it, and warns once on stderr for
+  anything it refuses rather than letting a refused value quietly change the
+  numerics.
+
+  **Nothing in the corpus moves.** The fixture sweep against a 0.15.1 baseline
+  is bit-identical on all 118 legs, both exact-Hessian and limited-memory —
+  including 0.17.0's rework of how a refined solve picks its core, which
+  upstream flags as able to change a caller's numbers (feral#177), and the
+  scaling router's new symmetric-degree gate (feral#134 item B).
+
+- **The equality-multiplier initializer was damping `y0`, and `cresc4`'s
+  false-infeasibility verdict was the bill** (#693).
+
+  `LeastSquareMults::calculate_y_eq` solves a W=0 augmented system for the
+  initial equality multipliers. Eliminating `w` gives `y = −(J Jᵀ + δI)⁻¹J·r`,
+  so `δ = 0` returns the least-squares multiplier the calculator is named for
+  and `δ > 0` returns a Tikhonov-regularized one, damped by
+  `O(δ / σ_min(J)²)`. Review item M3 introduced `δ = 1e-8` as a workaround for
+  feral mis-reporting the inertia of a structurally-zero block, and argued it
+  was numerically inert because the suite stayed green — true only while
+  `σ_min(J)² ≫ δ`, which is a statement about the covered problems, not a
+  scale-free property. #688 retired it for `recalc_y`, where the bias is a
+  fixed point of the estimator rather than a transient. The other three call
+  sites kept it behind an `unregularized: bool`. They no longer do, and with no
+  caller left asking for the damped estimate the flag is gone: every path now
+  solves at `δ = 0` and falls back to `δ = 1e-8` only if that solve fails.
+
+  **#524's `cresc4` no longer needs the second-opinion ladder.** With the whole
+  ladder disabled — both `feral_infeasibility_scaling_retry` and
+  `infeasibility_mu_strategy_retry` off — the monotone-µ trajectory walks to
+  `0.8718975393`, the Ipopt-MA57 reference figure to all ten published digits,
+  in 69 iterations. On 0.10.0 the same invocation reports
+  `Infeasible_Problem_Detected` at 75 iterations on a feasible six-variable
+  problem, and the shipped answer comes from the barrier rung promoting a retry
+  to `0.871897548`. The damped `y0` was putting iteration 0 in the basin of the
+  degenerate zero-area crescent. So the false verdict is gone at its cause
+  rather than second-guessed after the fact, and the unaided answer is closer
+  to the reference than the ladder-promoted one was.
+
+  **Fixture sweep, both legs, every moving line.** 118 legs, 15 move, three of
+  them statuses:
+
+  | leg | fixture | before this change | after |
+  |---|---|---|---|
+  | exact | `cresc4` | 75 it | 69 it |
+  | exact | `deb7` | 143 it | 171 it |
+  | exact | `eigena2` | 26 it, dual 2.212e-09 | 27 it, dual 3.432e-10 |
+  | exact | `eigenb2` | 67 it | **21 it** |
+  | exact | `pooling_rt2stp` | 298 it | **128 it** |
+  | exact | `hs13_bigstart` | obj …7152 | obj …7153 |
+  | exact | `unbounded_cubic`, `unbounded_exp` | diverging | diverging |
+  | lbfgs | `convex_qp_sens` | obj 1.77e-30 | obj 4.44e-31 |
+  | lbfgs | `cresc4` | 99 it | 143 it |
+  | lbfgs | `eigenb2` | 56 it | 59 it |
+  | lbfgs | `hs13_bigstart` | obj …4399 | obj …43991 |
+  | lbfgs | `eigena2` | `ErrorInStepComputation` 265 | `SolvedToAcceptableLevel` 242 |
+  | lbfgs | `deb7` | `MaximumIterationsExceeded` 3000 | `RestorationFailed` 2941 |
+  | lbfgs | `pooling_rt2stp` | `SolveSucceeded` 233, obj −4391.826001 | **`RestorationFailed` 27, obj 9.323117531** |
+
+  The exact leg has no status changes and goes 2284 → 2087 iterations (−8.6%).
+  **The L-BFGS leg's headline −4.4% is not real** and should not be quoted:
+  5437 → 5196 counts `pooling_rt2stp` failing at 27 instead of succeeding at
+  233, and `deb7` failing at 2941 instead of capping at 3000, as savings.
+  Excluding the three models whose status changed, the L-BFGS leg is 1939 →
+  1986, **+2.4%** — slightly worse.
+
+  **The three L-BFGS status changes are all chaos, and the evidence for that
+  is quantitative.** `pooling_rt2stp` on this leg is not a regression, even
+  though the sweep line looks exactly like one. Perturbing at a scale where
+  the only thing that changes is the order of the last bits — 41 values of
+  `limited_memory_init_val` at `1.0 ± k·1e-12` — 0.10.0 returns
+  `Solve_Succeeded` on 36 of 41 and this release on 38 of 41, at median 209
+  and 203 iterations. An independent knob, `mu_init` at the same relative
+  scale over 31 points, gives 22/31 and 21/31. Across both, 58/72 against
+  59/72: a dead heat, with roughly a quarter of round-off-scale draws failing
+  on *both* builds. Even 0.10.0's successes split between two local minima
+  (33 × −4391.826, 3 × −3273.955). The sweep takes one draw, at
+  `limited_memory_init_val = 1.0` exactly, and that draw happens to be the one
+  point in 41 where 0.10.0 lands well and this release lands worst. `deb7` and
+  `unbounded_exp` on this leg are the same story — `deb7` flips its objective
+  between 97.56 and 119.62 under a ±1% nudge on 0.10.0, and `unbounded_*`
+  diverge either way. `convex_qp_sens` is two readings of zero and
+  `hs13_bigstart` moves in its last digit.
+
+  This corrects a claim made earlier in this entry's own drafting and in
+  gh#713, which was opened on the strength of the sweep line and has since
+  been closed as not-a-regression. The rebuttal it rested on — that 0.10.0
+  returned −4391.826001 at five settings of `limited_memory_init_val` (1.0,
+  ±1%, ±0.1%) and was therefore objective-stable — sampled five points far
+  above round-off that all happened to land in the same basin. gh#693's own
+  text called this model chaotic and it was right.
+
+  The exact leg is where this change can be read, and there the divergence is
+  cleanly attributable: forcing `constr_mult_init_max=0` makes the two builds
+  bit-identical on `pooling_rt2stp` (`ErrorInStepComputation` at 373, objective
+  −3273.954615, every printed digit the same), so the whole difference flows
+  through `y0`. A cap sweep puts both `‖y0‖∞` in `(10, 100]`, so this is not
+  the cap admitting an estimate 0.10.0 rejected — it is a different `y0` of
+  the same magnitude.
+
+  **`eigenb2` and the `feral_singular_pivot_floor` recipe.** `eigenb2`'s
+  default drops from 67 iterations to **21**, faster than any recipe in
+  `docs/src/troubleshooting.md`, while the `feral_singular_pivot_floor=1e-8`
+  recipe that section recommends goes from 39 iterations `Optimal` to 72
+  iterations `Solved To Acceptable Level` — the right point, without the
+  certificate. Unlike the L-BFGS lines above this is not chaos: 25 values of
+  `mu_init` at `0.1 ± k·1e-12` give 21 iterations at every point on this
+  release and 67 at every point on 0.10.0, and the recipe gives
+  acceptable-level at all 25.
+
+  That raised a question one fixture cannot answer — whether the recipe is
+  still correct advice for the *symptom* it is written for — so it was
+  measured against the benchmark corpus instead of being left open. On the 110
+  hardest corpus problems (those exiting non-`Optimal` with `dual_inf > tol`,
+  or taking 100+ iterations to certify) the knob is unchanged on 89, better on
+  10 (5 rescues, 5 speedups ≥20%) and worse on 11 (7 lost certificates or
+  solves, 4 slowdowns ≥25%). A coin flip in aggregate with large effects both
+  ways — `britgas` goes `Restoration Failed`@2748 → `Optimal`@54, `twirism1`
+  goes `Optimal`@178 → `Optimal`@1679 — and, importantly, five of the seven
+  regressions are `Optimal → Solved To Acceptable Level`, the same shape as
+  `eigenb2`'s. `docs/src/troubleshooting.md` now carries that table and the
+  advice that follows from it: the knob only pays when the solve is already
+  losing, and `dual_inf` must be checked against `tol` afterwards, because its
+  characteristic failure is quietly forfeiting the certificate rather than the
+  answer. The #541 dev-note records the same finding.
+
+  **Three tests were re-derived, and all three are weaker than what they
+  replace.**
+  `cresc4_needs_the_barrier_rung_not_the_scaling_rung` asserted that rung 1
+  alone still failed; its own message asked whoever made it pass to re-derive
+  whether the barrier rung was still carrying the case. It is now
+  `cresc4_no_longer_needs_either_rung_of_the_ladder`, which pins the stronger
+  outcome — but the ladder's rung-2 diversity property no longer has any
+  in-tree witness, since `discs.nl` is not a fixture here either.
+  `disabling_the_trigger_reproduces_the_reported_failure` is retired for the
+  same reason: under `POUNCE_DBG_NO_QUAD=1` with the trigger off, `eigena2`
+  went `SolvedToAcceptableLevel` at dual 1.841e-07 on 0.10.0 and now converges,
+  so **no fixture in this repo reproduces the gh#540 failure any more**. Its
+  replacement asserts only that the trigger improves the certificate on the
+  default path, which is a quality margin rather than a reproduction — and one
+  that was *not* true on 0.10.0, where the trigger left `eigena2`'s dual
+  residual slightly worse (2.212e-09 with, 5.947e-10 without). The property
+  #540 actually established is still pinned by a `pounce-feral` unit test.
+
+  The third, `disabling_the_walkback_restores_the_long_run`, is the guard
+  gh#592 wrote against exactly this situation: with the `δ_c` walk-back off,
+  the build had to still reproduce the 812-iteration run, so that a change
+  shortening `pooling_rt2stp` by *some other route* would fail loudly rather
+  than let the headline test pass for a reason it did not describe. It fired,
+  correctly. On 0.10.0 the model is 298 iterations with the walk-back and 812
+  without; here it is 128 and 116 — the `δ_c` path is not taken at all, so
+  withdrawing it costs nothing. Re-arming the other half of #592 does not
+  bring the witness back: pinning the pre-#592 `feral_inertia_pivot_floor=1e-12`
+  reproduces 0.10.0's 298/812 exactly and leaves this release's 128/116 exactly
+  as they are, so the two faults are independent on this model.
+
+  The search for a replacement witness came back not empty but *pointing the
+  other way*, and that is the more useful result. Searched: all 58 CLI
+  fixtures at `perturb_delta_c_max_rungs=0`; all 58 again with the other #592
+  fault re-armed maximally (`feral_inertia_pivot_floor=1e30`, which does move
+  8 fixtures, e.g. pooling 128 → 601); `feral_singular_pivot_floor` scans
+  across 12 decades on 4 models; and 117 problems from the external benchmark
+  corpus. Every apparent hit was then re-measured at 17 values of `mu_init` at
+  `0.1·(1 ± k·1e-12)` — round-off scale, the same screen that disproved the
+  L-BFGS "regressions" above. It disqualified both candidates: `deb7` has a
+  non-monotone rungs ladder and flips on a ±1% nudge, and `vanderbei/twirism1`
+  — which on a single draw looked like a textbook witness at 178 iterations
+  with the walk-back against 441 without, the same 2.5× shape as #544's
+  298/812 — converges on **both** arms at all 17 points, with medians of 154
+  on and 146 off. The single draw was noise.
+
+  What the corpus did produce is three robust *anti*-witnesses, where the
+  walk-back costs the solve:
+
+  | model | walk-back on (default) | walk-back off (`rungs=0`) |
+  | --- | --- | --- |
+  | `vanderbei/steenbrd` | 16/17 `ErrorInStepComputation` | 17/17 `Optimal`, ~118 it |
+  | `vanderbei/steenbrf` | 17/17 `SolvedToAcceptableLevel` | 17/17 `Optimal`, ~452 it |
+  | `vanderbei/steenbrg` | 14/17 `ErrorInStepComputation` | 17/17 `Optimal`, ~79 it |
+
+  Those are deterministic under the round-off screen in both directions, and
+  reproduce identically on 0.10.0 — so this is a pre-existing property of the
+  #592 mechanism, not something this release introduced. A fourth candidate,
+  `CVXQP1_L`, was inert under the screen (17/17 identical, both arms, both
+  builds) and is named here so the count is not overstated.
+
+  So the honest state of the `δ_c` walk-back is: no measured problem is
+  robustly helped by it, and three are robustly hurt. That is an argument for
+  revisiting the `perturb_delta_c_max_rungs` default — a trajectory change in
+  its own right, deliberately **not** made here, because it needs its own
+  fixture sweep and folding it in would make this release's sweep undiffable.
+  The measurement is recorded in the test's header so the next reader starts
+  from it. The guard itself is *inverted* rather than deleted: it now pins that
+  the walk-back is inert on `pooling_rt2stp`, and fails if that changes in
+  either direction. The mechanism remains pinned by
+  `pounce_common::pd_perturbation` and `pounce_feral` unit tests; what is gone
+  is the end-to-end demonstration that it matters to a real solve.
+
+  **The acceptable-point stash was carrying an iteration budget it had no use
+  for, and this change is what made it bite.** Removing the damping lengthens
+  the `feral_scaling=mc64` trajectory on a row-scaled infeasible model from 12
+  iterations to 288, and that is enough to blow a 60-iteration budget that had
+  never been reached before.
+
+  `OptErrorConvCheck::current_is_acceptable_with_state` gates the
+  acceptable-point stash on the scale-relative feasibility measure: a row
+  violated by more than `relative_viol_threshold` of its own magnitude is not
+  an acceptable point in any honest sense, so it must not become a rollback
+  target. That gate also carried `VETO_MAX_EXTRA_ITERS` — the *certificate*
+  veto's budget. The budget exists to bound how many extra iterations a veto
+  can keep a run alive for; declining to stash extends the run by nothing, so
+  on this gate it bounded no cost and could only ever expire. Once it did, the
+  offending iterate went into the stash, and
+  `ConvergenceStatus::LocallyInfeasible` — which consults the stash (#505) —
+  handed it back as `Solved_To_Acceptable_Level`. The stash gate is now
+  unbudgeted; the certificate veto's budget is untouched.
+
+  Caught by `pyomo-pounce/tests/test_scale_invariance.py`, which is exactly
+  what that harness is for: `x >= 2` over `x ∈ [0, 1]` with every row scaled by
+  `1e-8` went `INFEAS` → `SOLVED`. The point handed back has its single row
+  violated by 99.998% of the row's own magnitude, at `x ≈ 4e-5` — the *most*
+  infeasible end of the box.
+
+  Three things worth recording:
+
+  * The `ipopt_alg.rs` comment asserting the stash is "inert on genuinely
+    infeasible models" because the scale-relative veto blocks it was true only
+    for solves that convict inside 60 iterations. That qualifier is now in the
+    comment.
+  * `feral_scaling=identity` reported `Solved_To_Acceptable_Level` on this
+    model on 0.10.0 as well, before any of #693 — the recorded baseline of zero
+    wrong cells was a property of the default scaling, not of the algorithm.
+    The fix repairs that too, so the model is now right on all four
+    `feral_scaling` settings on both builds.
+  * The fixture sweep is **bit-identical** with and without this fix, both
+    legs, all 118 lines. Nothing in the corpus spends 60 blocked iterations, so
+    the table above stands unchanged. `infeasible_row_scaled_1em8.nl` joins the
+    corpus as a 60th fixture and adds two lines
+    (`InfeasibleProblemDetected it=0` on both legs) — under the sweep's default
+    options the convex-QP presolve certifies it outright, which is the right
+    answer and is what a default run gets. The NLP path this defect lives on is
+    reached only under `solver_selection=nlp`, which is what the dedicated test
+    passes.
+
+  Guarded by `issue_693_relative_infeasibility_stash.rs`, which pins the
+  infeasible band on the default path and on all three explicit
+  `feral_scaling` settings — all four report a code under 200 without the fix.
+
+- **`least_square_init_primal`'s measured cost is now `csfi2` alone, and two
+  of its models stop being coin flips** (#616, #681, #706).
+
+  The safeguard's own decision is bit-identical across this change on every
+  model that pins it: `csfi2` and `pooling_rt2stp` still decline with four
+  rejected trials, `eigenb2` still accepts at `alpha = 0.5` on a step of norm
+  3.2596011939729705 after one rejected trial. Nothing the accept test reads
+  moved. What moved is the state the initializer's augmented-system solve
+  leaves behind, and it moved the two models that were sitting on the
+  acceptable band:
+
+  | fixture | 0.10.0 | now |
+  | --- | --- | --- |
+  | `eigenb2`, `=yes` | `SolvedToAcceptableLevel`, 48 it | `SolveSucceeded`, 17 it |
+  | `eigenb2`, `=no` | `SolveSucceeded`, 67 it | `SolveSucceeded`, 21 it |
+  | `eigena2`, `=yes` | `SolvedToAcceptableLevel`, 127 it | `SolveSucceeded`, 17 it |
+  | `csfi2`, `=yes` | `SolvedToAcceptableLevel`, 35 it | `SolvedToAcceptableLevel`, 35 it |
+
+  #616's test file warned in as many words that a `SolveSucceeded` on
+  `eigenb2` "means something reassociated `eval_g` again and landed on the
+  lucky side of the accept band ... and it is not a fix" — which is exactly
+  what #588's Q4 had done. That warning was right, and the reason it does not
+  apply here is measured rather than asserted. Re-running each model at 17
+  values of `mu_init` at `0.1·(1 ± k·1e-12)`:
+
+  | fixture, `=yes` | 0.10.0 | now |
+  | --- | --- | --- |
+  | `eigenb2` | 14 `SolveSucceeded` / 3 `SolvedToAcceptableLevel` | 17 `SolveSucceeded` |
+  | `eigena2` | 11 `SolveSucceeded` / 6 `SolvedToAcceptableLevel` | 17 `SolveSucceeded` |
+  | `csfi2` | 17 `SolvedToAcceptableLevel` | 17 `SolvedToAcceptableLevel` |
+
+  On 0.10.0 neither status was a stable fact: the pinned
+  `SolvedToAcceptableLevel` was a three-point island around the default draw,
+  and the majority outcome at neighbouring draws was already the other one.
+  This change does not carry those models across the band, it moves them off
+  it — and `csfi2`, genuinely clear of the band, does not move at all in
+  either build, which is the control. The tape leg agrees with the fast path
+  throughout (`eigenb2` 57 it `SolvedToAcceptableLevel` → 17 it
+  `SolveSucceeded`).
+
+  This amends **#706**, which recorded `eigena2`'s status as *platform*-
+  dependent. It is round-off-dependent on a single platform — 6 draws in 17
+  at a `1e-12` perturbation — which is a simpler and worse explanation. It is
+  deterministic now.
+
+- **A test and a doc page asserted opposite things about `pooling_rt2stp`,
+  and both were written from one draw** (#616).
+
+  `docs/src/initialization.md` recorded that `least_square_init_primal=yes`
+  and `=no` reach *different* local optima on `pooling_rt2stp` (−4391.826
+  against −3273.955). `issue_616_ls_init_downgrades.rs` asserted, in the same
+  release, that they reach the *same* one. Neither noticed the other, because
+  each passed at the draw it was written from.
+
+  Under the round-off screen the two routes agree on the optimum at **10 of 17
+  points** on 0.10.0 and 8 of 17 here: the model is bistable and a single run
+  picks a side essentially at random. The assertion is removed rather than
+  inverted, and the doc says so. What survives the screen — 17 of 17 on both
+  builds — is that the two routes take *different numbers of iterations*,
+  which is the carry-over the test was written to demonstrate, so that is now
+  all it asserts. The `=no` arm's status is deliberately left unpinned: it
+  scatters 10/3/4 across the same 17 draws, and pinning a 59% outcome is the
+  mistake that produced the objective assertion in the first place.
+
+- **`linear_system_scaling`'s guard was comparing iteration counts, and it
+  was already red on macOS** (#677, #693).
+
+  `linear_system_scaling.rs` pinned #677's fix — `slack-based` must not be
+  indistinguishable from `none` — by asserting the two take a *different
+  number of iterations* on `cresc4`. Iteration counts are the most
+  platform-sensitive number a solver reports, and at 0.10.0 that file already
+  failed on macOS: `slack-based` and `ruiz` both took 103 iterations there
+  while CI's Linux runners saw them differ. A guard that is red on a
+  developer's machine and green in CI gets read as noise, which is how it
+  stops being a guard.
+
+  The proxy then went quiet from the other end. This release leaves `cresc4`
+  better conditioned, and all four scaling choices now reach the optimum in 69
+  iterations — with nothing wrong: `slack-based` still changes the arithmetic
+  (`cresc4`'s objective is 0.8718975393087962 under `none` and
+  0.8718975392737567 under `slack-based`). The option works; an assertion on
+  the count would have gone quiet with the count while still claiming to guard
+  #677.
+
+  The comparison is now on the solve's numerical output, which is what #677's
+  defect actually was — an option routed to a catch-all cannot perturb a
+  single bit, on any platform. Three relations across three fixtures
+  (`cresc4`, `airport`, `csfi2`), holding identically on 0.10.0 and here:
+  `slack-based` differs from `none`, `slack-based` differs from `ruiz`, and
+  `mc19` — still unimplemented, still falling back — is *identical* to `none`.
+  That last one is the positive control and the more valuable half: a file
+  that only ever asserts "these differ" would pass just as happily if the
+  comparison itself broke open. Reintroducing #677's catch-all turns the first
+  assertion red on the first fixture.
 - **Least-squares models now get the constant-structure fast path too**
   (#673).
 

@@ -4443,6 +4443,12 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }
+    // Only consulted when `refine` is on; see `FeralConfig::refine_max_steps`
+    // (gh#710). Registered as an integer option with lower bound 0, so the
+    // cast cannot go negative.
+    if let Ok((v, true)) = options.get_integer_value("feral_refine_steps", "") {
+        cfg.refine_max_steps = v.max(0) as usize;
+    }
     // Explicit static-pivoting opt-in (feral#8 cascade breaker, pounce#254).
     // Same tri-state discipline: unset leaves `cfg.static_pivoting` at
     // whatever `from_env` resolved (`None` → inherit feral's delayed-pivot
@@ -5056,6 +5062,30 @@ mod tests {
             feral_config_from_options(app.options()).min_par_flops,
             Some(500_000_000)
         );
+    }
+
+    #[test]
+    fn feral_refine_steps_option_reaches_config() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        // Unset: falls through to FeralConfig::from_env, which resolves to
+        // feral's own DEFAULT_REFINE_MAX_STEPS. The bump to feral 0.17.0 is
+        // deliberately behaviour-preserving here — the cap that gh#710 wants
+        // to measure (1) is not yet the default.
+        assert_eq!(
+            feral_config_from_options(app.options()).refine_max_steps,
+            pounce_feral::FeralConfig::default().refine_max_steps,
+            "unset feral_refine_steps must keep feral's own default"
+        );
+        // The setting gh#710 exists to evaluate.
+        app.initialize_with_options_str("feral_refine_steps 1\n")
+            .unwrap();
+        assert_eq!(feral_config_from_options(app.options()).refine_max_steps, 1);
+        // `0` is a legal cap (zero corrections, refined entry point still
+        // taken) and must not be read as "unset".
+        app.initialize_with_options_str("feral_refine_steps 0\n")
+            .unwrap();
+        assert_eq!(feral_config_from_options(app.options()).refine_max_steps, 0);
     }
 
     #[test]
