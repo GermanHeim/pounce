@@ -464,11 +464,27 @@ where
             return mark_timed_out(sol);
         }
         let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, &mut make_backend);
+        // An `Optimal` from this retry has to earn the same way the one in
+        // [`verify_or_repair_optimum`] does (gh #712). This retry runs *inside*
+        // the equilibrated metric, so its own absolute convergence test is
+        // applied to the Ruiz-scaled problem and says nothing about the point's
+        // accuracy in the caller's coordinates — exactly the gap gh #414 opened
+        // this check for. Until gh #712 this was the one `Optimal` in this
+        // function that reached a caller unchecked, and on `scaled_feasible_a`
+        // it returned a point whose absolute KKT error is `2.3e3` as
+        // `SolveSucceeded`. A retry that cannot certify leaves the original
+        // status standing, which is the honest answer: the loop really did run
+        // out of iterations.
+        let retry_optimal_genuine = retry.status == QpStatus::Optimal
+            && optimum_is_genuine(prob, &retry, opts.tol, opts.obj_constant);
         let accept = match sol.status {
-            QpStatus::NumericalFailure => retry.status != QpStatus::NumericalFailure,
-            QpStatus::IterationLimit | QpStatus::OptimalInaccurate => {
-                retry.status == QpStatus::Optimal
+            // Any non-failing status is an improvement on a breakdown — except
+            // a false `Optimal`, which is worse than an honest failure.
+            QpStatus::NumericalFailure => {
+                retry.status != QpStatus::NumericalFailure
+                    && (retry.status != QpStatus::Optimal || retry_optimal_genuine)
             }
+            QpStatus::IterationLimit | QpStatus::OptimalInaccurate => retry_optimal_genuine,
             _ => false,
         };
         if accept {
@@ -678,8 +694,8 @@ const FALSE_OPTIMUM_REL_TOL: f64 = 1e-3;
 /// Orthant/box only: Ruiz is a per-row scaling, which is unsound for a
 /// non-orthant cone (see [`crate::equilibrate`]), so callers must gate on the
 /// cones being nonnegative.
-fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution) -> f64 {
-    equilibrated_kkt_rel_parts(prob, sol).kkt_error()
+fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution, obj_constant: f64) -> f64 {
+    equilibrated_kkt_rel_parts(prob, sol, obj_constant).kkt_error()
 }
 
 /// The three components [`equilibrated_kkt_rel`] takes the max of, each already
@@ -692,7 +708,11 @@ fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution) -> f64 {
 /// user's own coordinates. See `crate::active_set::adjudicated_kkt_error` for
 /// why that split is the whole safety property. That path is orthant/box by
 /// construction, satisfying the cone restriction above.
-pub(crate) fn equilibrated_kkt_rel_parts(prob: &QpProblem, sol: &QpSolution) -> QpResiduals {
+pub(crate) fn equilibrated_kkt_rel_parts(
+    prob: &QpProblem,
+    sol: &QpSolution,
+    obj_constant: f64,
+) -> QpResiduals {
     let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
     let ssol = scaling.scale_solution(sol);
     let res = ssol.kkt_residuals(&scaled);
@@ -727,20 +747,101 @@ pub(crate) fn equilibrated_kkt_rel_parts(prob: &QpProblem, sol: &QpSolution) -> 
     // a false *reject* on a tiny-cost one. Recomputing here keeps numerator
     // and denominator in one metric, and `σ` cancels exactly. (A QP keeps
     // σ = 1, so this is a no-op there.)
-    let cscale = ssol
+    // ...plus the caller's degree-0 objective term (`QpOptions::obj_constant`,
+    // gh #689), in that same metric — the equilibration multiplies the
+    // objective by `σ`, so the constant does too. `QpProblem` models
+    // `½xᵀPx + cᵀx` only, so on a model whose objective carries a constant the
+    // sum above is the caller's objective *displaced* by it, and normalizing by
+    // the displaced value is what gh #712 was: `scaled_feasible_a` minimizes
+    // `Σ(xᵢ−aᵢ)²` with `Σaᵢ² ≈ 5e11`, so a point whose absolute KKT error is
+    // `2.3e3` read `4.6e-9` here and was certified. Told the constant, the
+    // normalizer measures the objective the caller actually reads (`~0` at that
+    // point, so the `max(1.0)` floor governs) and the same point reads `2.3e3`.
+    // `0.0` — the default, and every library caller that does not set it — is
+    // the tightest choice and leaves this bit-for-bit unchanged, which is what
+    // keeps the gh #286 huge-magnitude optima (genuine large objectives, no
+    // constant) certified by the only arm that can certify them.
+    //
+    // Note what the correction does on a least-squares model *at* its optimum:
+    // the quadratic form and the constant are equal and opposite, their sum is
+    // `~0`, the `max(1.0)` floor governs, and this arm silently becomes an
+    // absolute test. That is right — the caller's objective really is `O(1)`
+    // there — but it means the numerator can no longer be a product that only
+    // large data made large, which is why the complementarity it divides is
+    // [`resolvable_complementarity`] and not the raw residual.
+    let cscale = (ssol
         .x
         .iter()
         .zip(&px)
         .zip(&scaled.c)
         .map(|((&xi, &pxi), &ci)| 0.5 * xi * pxi + ci * xi)
         .sum::<f64>()
-        .abs()
-        .max(1.0);
+        + obj_constant * scaling.sigma())
+    .abs()
+    .max(1.0);
     QpResiduals {
         primal_infeasibility: res.primal_infeasibility / pscale,
         dual_infeasibility: res.dual_infeasibility / gscale,
-        complementarity: res.complementarity / cscale,
+        complementarity: resolvable_complementarity(&scaled, &ssol) / cscale,
     }
+}
+
+/// The slack `a − b` is a difference of two computed quantities, so it is
+/// quantised in units of `ε · max(|a|, |b|)`: no iterate can place it strictly
+/// between `0` and that quantum, and which side of the quantum it lands on is
+/// arithmetic luck rather than a statement about the point. `κ` covers the
+/// accumulation over a row's nonzeros and the linear solve's conditioning on
+/// top of the single subtraction — the same reading of "numerically zero", and
+/// the same constant, the NLP-side primal residual uses
+/// (`pounce_algorithm`'s `ROW_NOISE_KAPPA` / `primal_noise_floor_kappa`,
+/// gh #446, gh #528).
+const SLACK_NOISE_KAPPA: f64 = 64.0;
+
+/// Whether a slack of `slack` between two quantities of size `magnitude` is
+/// distinguishable from zero at all. See [`SLACK_NOISE_KAPPA`].
+fn slack_is_resolvable(slack: f64, magnitude: f64) -> bool {
+    slack.abs() > SLACK_NOISE_KAPPA * f64::EPSILON * magnitude
+}
+
+/// `max_i |sᵢ zᵢ|` over the complementarity pairs whose **slack is resolvable**
+/// — the pairs where a nonzero product is evidence of anything (gh #712).
+///
+/// A pair whose slack sits under its own rounding quantum is complementary as
+/// far as double precision can tell: the iterate is *at* that bound, and the
+/// product it forms with a large multiplier measures the quantum, not a
+/// violation. Counting it turns the scale-relative test into a floor on the
+/// **data** scale — on `feasible_x0_wide_scale` the bound presolve derives for
+/// `x₁` is `1.4e-8` wide next to `|x₁| ≈ 7.1e5` (`46` ulps), the converged
+/// iterate sits `7e-9` inside it, and against a multiplier of `1.8e7` that is
+/// a product of `0.13` on a point that matches the NLP oracle to 13 digits.
+///
+/// It does not soften a real violation: on `scaled_feasible_a`, the model this
+/// measure exists to reject, the offending slack is `5e-6` against a quantum of
+/// `8.5e-12` — six orders resolvable, and counted.
+///
+/// Only the *relative* measure abstains. The absolute residual
+/// ([`QpSolution::kkt_residuals`]) is untouched, and it is what
+/// [`optimum_is_genuine`] consults first.
+fn resolvable_complementarity(prob: &QpProblem, sol: &QpSolution) -> f64 {
+    let mut gx = vec![0.0; prob.m_ineq()];
+    prob.g_mul(&sol.x, &mut gx);
+    let mut comp = 0.0_f64;
+    for ((&hi, &gxi), &zi) in prob.h.iter().zip(&gx).zip(&sol.z) {
+        let s = hi - gxi;
+        if slack_is_resolvable(s, hi.abs().max(gxi.abs())) {
+            comp = comp.max((s * zi).abs());
+        }
+    }
+    for i in 0..prob.n {
+        let (lb, ub, xi) = (prob.lb_of(i), prob.ub_of(i), sol.x[i]);
+        if lb > -1e19 && slack_is_resolvable(xi - lb, xi.abs().max(lb.abs())) {
+            comp = comp.max(((xi - lb) * sol.z_lb[i]).abs());
+        }
+        if ub < 1e19 && slack_is_resolvable(ub - xi, xi.abs().max(ub.abs())) {
+            comp = comp.max(((ub - xi) * sol.z_ub[i]).abs());
+        }
+    }
+    comp
 }
 
 /// Whether an `Optimal` verdict is backed by a point that really is one.
@@ -752,9 +853,9 @@ pub(crate) fn equilibrated_kkt_rel_parts(prob: &QpProblem, sol: &QpSolution) -> 
 /// scale-*relative* convergence arm (`crate::hsde::relative_stop_permitted`,
 /// the arm that opens once absolute `tol` accuracy is below the
 /// finite-precision floor) is measured in the equilibrated metric.
-fn optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64) -> bool {
+fn optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64, obj_constant: f64) -> bool {
     sol.kkt_residuals(prob).kkt_error() <= tol
-        || equilibrated_kkt_rel(prob, sol) <= FALSE_OPTIMUM_REL_TOL
+        || equilibrated_kkt_rel(prob, sol, obj_constant) <= FALSE_OPTIMUM_REL_TOL
 }
 
 /// Re-check an HSDE `Optimal` and, when it is a scaling artifact, repair or
@@ -800,12 +901,14 @@ where
 {
     if !(opts.use_hsde && opts.equilibrate)
         || sol.status != QpStatus::Optimal
-        || optimum_is_genuine(prob, &sol, opts.tol)
+        || optimum_is_genuine(prob, &sol, opts.tol, opts.obj_constant)
     {
         return sol;
     }
     let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend);
-    if retry.status == QpStatus::Optimal && optimum_is_genuine(prob, &retry, opts.tol) {
+    if retry.status == QpStatus::Optimal
+        && optimum_is_genuine(prob, &retry, opts.tol, opts.obj_constant)
+    {
         return retry;
     }
     QpSolution {
@@ -4440,18 +4543,18 @@ mod false_optimum_metric_tests {
 
         // Measured in the equilibrated metric the same point is plainly not a
         // KKT point, by orders of magnitude either side of the cut.
-        let rel = equilibrated_kkt_rel(&prob, &bad);
+        let rel = equilibrated_kkt_rel(&prob, &bad, 0.0);
         assert!(
             rel > 1.0,
             "equilibrated relative KKT should be O(1) or worse, got {rel:.3e}"
         );
-        assert!(!optimum_is_genuine(&prob, &bad, opts.tol));
+        assert!(!optimum_is_genuine(&prob, &bad, opts.tol, 0.0));
 
         // And the repaired solve — the same problem, the real optimum — sits far
         // below the cut, so the two are separated with room to spare.
         let good = super::solve_qp_ipm(&prob, &opts, backend);
         assert_eq!(good.status, QpStatus::Optimal);
-        let good_rel = equilibrated_kkt_rel(&prob, &good);
+        let good_rel = equilibrated_kkt_rel(&prob, &good, 0.0);
         assert!(
             good_rel < 1e-6,
             "the true optimum must be far inside the cut, got {good_rel:.3e}"
@@ -4514,13 +4617,195 @@ mod false_optimum_metric_tests {
             sol.kkt_residuals(&prob).kkt_error() <= opts.tol,
             "premise: this solve is absolutely tol-accurate"
         );
-        assert!(optimum_is_genuine(&prob, &sol, opts.tol));
+        assert!(optimum_is_genuine(&prob, &sol, opts.tol, 0.0));
 
         let x = sol.x.clone();
         let mut mb = backend;
         let out = verify_or_repair_optimum(&prob, &opts, sol, &mut mb);
         assert_eq!(out.status, QpStatus::Optimal);
         assert_eq!(out.x, x, "a genuine optimum must be returned unchanged");
+    }
+}
+
+#[cfg(test)]
+mod objective_constant_metric_tests {
+    //! gh #712: the second place the objective magnitude normalizes a duality
+    //! gap, and the noise floor that keeps the correction from over-rejecting.
+
+    use super::{
+        FALSE_OPTIMUM_REL_TOL, QpOptions, optimum_is_genuine, resolvable_complementarity,
+        slack_is_resolvable,
+    };
+    use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
+
+    /// `min (x − a)²` — a one-variable least squares, `a = 5e5`, over the box
+    /// `0 ≤ x ≤ 1e6`. As a [`QpProblem`] that is `½·2x² − 2a·x`, and the `a² =
+    /// 2.5e11` the caller's objective also carries lives nowhere in the data:
+    /// it is exactly what [`QpOptions::obj_constant`] is for. The shape of
+    /// `scaled_feasible_a`, in one variable.
+    fn least_squares_with_constant(a: f64) -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 2.0)],
+            c: vec![-2.0 * a],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![2.0 * a],
+        }
+    }
+
+    fn point(x: f64, z_lb: f64) -> QpSolution {
+        QpSolution {
+            status: QpStatus::Optimal,
+            x: vec![x],
+            y: vec![],
+            z: vec![],
+            z_lb: vec![z_lb],
+            z_ub: vec![0.0],
+            obj: 0.0,
+            iters: 0,
+            iterates: Vec::new(),
+        }
+    }
+
+    /// The defect, in the small: a point carrying a multiplier on a bound it is
+    /// `5e5` away from is not a KKT point, and the only reason the equilibrated
+    /// test certified it is that it divided that `2.3e3` of complementarity by
+    /// an objective magnitude which is the *constant* `QpProblem` never models.
+    ///
+    /// Told the constant — the same correction gh #696 made to HSDE's `scale_g`
+    /// — the normalizer measures the objective the caller actually reads and the
+    /// point is refused. `0.0`, the default, reproduces the old reading exactly,
+    /// which is what keeps every caller that has no constant bit-for-bit
+    /// unchanged.
+    #[test]
+    fn the_objective_constant_reaches_the_equilibrated_gap_normalizer() {
+        let a = 5.0e5;
+        let prob = least_squares_with_constant(a);
+        // `z_lb` is the whole defect: at `x = a` stationarity would want it at
+        // `0`, and the bound is `5e5` away, so the product is a violation.
+        let bad = point(a, 4.566e-3);
+        let tol = QpOptions::default().tol;
+        assert!(
+            bad.kkt_residuals(&prob).kkt_error() > 1e3,
+            "premise: the point's own absolute KKT error is huge ({:.3e})",
+            bad.kkt_residuals(&prob).kkt_error()
+        );
+
+        assert!(
+            optimum_is_genuine(&prob, &bad, tol, 0.0),
+            "premise (the gh #712 defect): normalized by the displaced objective \
+             magnitude `a² = {:.1e}`, this point reads genuine",
+            a * a
+        );
+        assert!(
+            !optimum_is_genuine(&prob, &bad, tol, a * a),
+            "told the objective constant, the same point must be refused"
+        );
+    }
+
+    /// And the correction must not reject a point that *is* one: the same
+    /// problem, the same constant, with the spurious multiplier gone.
+    #[test]
+    fn the_correction_still_certifies_a_genuine_optimum() {
+        let a = 5.0e5;
+        let prob = least_squares_with_constant(a);
+        let good = point(a, 0.0);
+        let tol = QpOptions::default().tol;
+        assert!(optimum_is_genuine(&prob, &good, tol, a * a));
+    }
+
+    /// The floor that makes the correction survivable, measured on the two
+    /// geometries that forced it (both are a variable pinned inside a box far
+    /// tighter than the variable's own magnitude, with large multipliers on
+    /// both sides — the difference is entirely whether the slack is a number
+    /// double precision can hold).
+    ///
+    /// `feasible_x0_wide_scale`: presolve derives a box `1.4e-8` wide around
+    /// `|x| ≈ 7.1e5`, the converged iterate sits `7e-9` inside it — `46` ulps —
+    /// and against a multiplier of `1.8e7` that is a `0.13` product on a point
+    /// matching the NLP oracle to 13 digits. Nothing about it is a violation:
+    /// the slack is not distinguishable from zero.
+    #[test]
+    fn a_slack_under_its_own_rounding_quantum_is_not_a_violation() {
+        let x = 7.071044e5;
+        let (lo, hi) = (7.0e-9, 7.2e-9);
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![x - lo],
+            ub: vec![x + hi],
+        };
+        let sol = point(x, 1.847e7);
+        let sol = QpSolution {
+            z_ub: vec![1.847e7],
+            ..sol
+        };
+        assert!(
+            sol.kkt_residuals(&prob).complementarity > 0.1,
+            "premise: measured absolutely these products are O(0.1)"
+        );
+        assert_eq!(
+            resolvable_complementarity(&prob, &sol),
+            0.0,
+            "a slack of {lo:.1e}/{hi:.1e} at |x| = {x:.3e} is under the quantum \
+             of the subtraction that produced it"
+        );
+    }
+
+    /// The other side of the same measurement, and the reason the floor cannot
+    /// simply be "a tight box abstains": on `scaled_feasible_a` — the model
+    /// gh #712 exists to reject — the box is `1e-9` wide at `|x| ≈ 3.8`, the
+    /// iterate sits `5e-10` inside it, and *that* slack is six orders above its
+    /// own quantum. It is counted, and the point is refused.
+    #[test]
+    fn a_resolvable_slack_in_an_equally_tight_box_is_counted() {
+        let x = -3.8075263197246607;
+        let half = 5.0e-10;
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![x - half],
+            ub: vec![x + half],
+        };
+        let sol = point(x, 4.566e12);
+        let comp = resolvable_complementarity(&prob, &sol);
+        assert!(
+            comp > 1e3,
+            "a slack of {half:.1e} at |x| = {:.3e} is {:.0e} quanta wide and must \
+             be counted, got {comp:.3e}",
+            x.abs(),
+            half / (f64::EPSILON * x.abs())
+        );
+        assert!(
+            comp / 1.0 > FALSE_OPTIMUM_REL_TOL,
+            "and it must clear the cut once the objective normalizer is honest"
+        );
+    }
+
+    /// The rule itself, stated once: the quantum scales with the *magnitude of
+    /// the quantities subtracted*, not with the slack.
+    #[test]
+    fn the_quantum_scales_with_the_operands_not_the_slack() {
+        // The same absolute slack is noise next to `1e12` and plain data next
+        // to `1.0`.
+        assert!(!slack_is_resolvable(1e-3, 1e12));
+        assert!(slack_is_resolvable(1e-3, 1.0));
+        // An exact zero never counts, at any magnitude.
+        assert!(!slack_is_resolvable(0.0, 0.0));
     }
 }
 

@@ -283,3 +283,86 @@ two fixtures the issue is about (`scaled_feasible_a` reports `6.1e-5` and `_b`
 `2.4e-4` instead of `0`), and every `N` large enough to matter is a constant
 fitted to one fixture's `τ`-collapse noise. The gate correction alone is
 exact everywhere and needs no such constant.
+
+## 6. The second normalizer (gh #712)
+
+§3 corrected `scale_g`, HSDE's in-loop gap normalizer. It did not correct the
+*other* place the objective magnitude normalizes a duality gap:
+`equilibrated_kkt_rel_parts`' `cscale`, which is what `optimum_is_genuine` — the
+gh #414 guard — divides the complementarity residual by. §4's own text named it
+("its `cscale` is the objective magnitude, so it reads `4.9e-10` on a point
+whose absolute KKT error is `2.5e2`") and read it as "the guard fails to catch a
+bad point". After §3 it is stronger than that, because the guard became what
+**certifies** an answer rather than merely failing to refuse one.
+
+The hole: on `scaled_feasible_a` at the default budget the cold HSDE solve
+exhausts `max_iter` and returns `IterationLimit`, the gh #293 Ruiz-equilibrated
+retry fires and returns `Optimal` at 123 iterations, and `solve_qp_ipm_core`
+returned it **on status alone** — the one `Optimal` in that function that
+reached a caller without a genuineness check, and an early return that also
+bypasses the gh #414 guard entirely. The point it certified has an absolute KKT
+error of `2.283e3`, all of it complementarity, divided by a `cscale` of
+`5.0e11` — the `Σaᵢ²` the constant carries — to read `4.6e-9`.
+
+The symptom was that `max_iter` changed the answer: below the budget at which
+the cold solve happens to converge, `SolveSucceeded` at 123 iterations on that
+point; above it, `SolveSucceeded` at a genuine `5e-11`. Same model, same
+options, same verdict, twelve orders of accuracy apart.
+
+**Both halves are required and neither is sufficient.** The normalizer
+correction alone changes nothing on this model, because the gh #293 early return
+never consults it; the gate alone leaves the retry certified, because the
+displaced normalizer still reads `4.6e-9`.
+
+### Why the correction needed a third piece
+
+Correcting `cscale` by the constant does not merely re-centre the objective on a
+least-squares model **at its optimum** — it cancels it. `½xᵀPx + cᵀx` and the
+constant are equal and opposite there, their sum is `~0`, the `max(1.0)` floor
+governs, and the relative arm silently becomes an absolute one. Right for
+`scaled_feasible_a`; wrong for `feasible_x0_wide_scale`, which the correction
+alone rejected, spending 119 extra iterations to land at 199 against a 200 cap —
+handing back exactly the margin §5's gate correction had won.
+
+The two points are structurally identical: a variable pinned inside a box far
+tighter than its own magnitude, with large multipliers on both sides. What
+separates them is only whether the slack is a number double precision can hold:
+
+| model | box width | \|x\| | slack | quanta | multiplier | product |
+|---|---|---|---|---|---|---|
+| `feasible_x0_wide_scale` | `1.4e-8` | `7.1e5` | `7e-9` | **46** | `1.8e7` | `0.13` |
+| `scaled_feasible_a` | `1e-5` | `3.8e4` | `5e-6` | **5.9e5** | `4.6e8` | `2.3e3` |
+
+(equilibrated metric; "quanta" is the slack in units of `ε·max(|x|,|bound|)`,
+the quantum of the subtraction that produced it.)
+
+So `equilibrated_kkt_rel_parts` counts a complementarity product only where its
+slack is *resolvable* — `|s| > κ·ε·max(|a|,|b|)` over the two quantities `s` is
+the difference of, with `κ = 64`. That is the same reading of "numerically
+zero", and the same constant, the NLP-side primal residual has used since
+gh #446 / gh #528 (`ROW_NOISE_KAPPA`, `primal_noise_floor_kappa`): a pair whose
+slack sits under its own quantum is complementary as far as the arithmetic can
+tell, and the product it forms with a large multiplier measures the quantum, not
+a violation. Only the *relative* measure abstains — the absolute residual, which
+`optimum_is_genuine` consults first, is untouched.
+
+`FALSE_OPTIMUM_REL_TOL` did not move. It could not have: the two points are
+`0.13` and `2.3e3` once the normalizer is honest, and no cut between them
+survives the #414 and #286 families the constant is calibrated against.
+
+### Sweep and consequence
+
+`scripts/sweep-fixtures.sh`, both legs, 59 fixtures: **one line moves, on both
+legs** — `scaled_feasible_a`, `SolveSucceeded it=123` → `MaximumIterationsExceeded
+it=199`. That is the fix, not a regression: the model provably needs ~3596
+iterations to reach a genuine optimum (`final_kkt_error 1.9e-10` there), so no
+honest verdict inside a 200-iteration budget is a success. It still reports
+objective `0`, and `max_iter=4000` reaches the optimum with a success code.
+
+What is now invariant is the property the issue opened on: **every budget that
+reports success on this model hands back a point that is one** (`≤ 1.5e-10`,
+asserted over the historical flip points in
+`issue_689_direct_driver_scaled_feasible.rs`). Which budgets converge is still
+not monotone — the HSDE trajectory oscillates on this model, converging at 2610
+and 2999 and 3596 and not at 2699 or 3594 — but that is the trajectory's own
+business and no longer changes what a verdict means.
