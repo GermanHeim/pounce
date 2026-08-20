@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+- **The coverage upload was shipping two GAMS listing fixtures to Codecov
+  alongside the real report.**
+
+  The first live run of `.github/workflows/coverage.yml` logged `Found 3
+  coverage files to report`, and the two it found on its own were
+  `studio/mcp/fixtures/ex8_3_10.lst` and `spawn_failed.lst` — solver listing
+  fixtures, not coverage data. Naming a report in the action's `files:` input
+  does not turn its directory search off, and `.lst` is one of the extensions
+  that search looks for.
+
+  Nothing went red, which is the part worth remembering: Codecov processes an
+  uploaded report asynchronously, well after the step exits, so a junk report
+  cannot fail the job that sent it. It would have surfaced as an unexplained
+  number on the badge. And since the step sets `fail_ci_if_error`, a later
+  rejection of an unparseable fixture would have failed the coverage job for a
+  reason nothing in the diff explained. Fixed with `disable_search: true`: the
+  report is assembled deliberately by `scripts/coverage-combined.sh`, so there
+  is nothing for a search to contribute.
+
 - **Coverage is measured in CI, and the DOI badge no longer depends on
   Zenodo's badge service.**
 

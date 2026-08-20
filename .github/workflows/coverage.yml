@@ -192,6 +192,20 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage-combined/lcov.info
+          # `files:` names a report to upload; it does NOT stop the uploader
+          # from also globbing the tree for anything that looks like one. On
+          # the first real run that glob found two GAMS listing fixtures --
+          # studio/mcp/fixtures/ex8_3_10.lst and spawn_failed.lst -- and
+          # shipped them as coverage reports ("Found 3 coverage files to
+          # report"). `.lst` is a coverage extension to Codecov and a solver
+          # log to us. Nothing failed, because report *processing* is async
+          # and happens after the step exits, so the damage would have shown
+          # up as an unexplained number on the badge rather than as a red
+          # check -- and with fail_ci_if_error set, a future rejection of an
+          # unparseable fixture would fail this job for a reason nothing in
+          # the diff would explain. This report is assembled deliberately by
+          # coverage-combined.sh; there is nothing for a search to find.
+          disable_search: true
           flags: combined
           # Fail loudly on a broken upload. A silently-missing upload leaves
           # Codecov comparing against a stale baseline, which is worse than a
