@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+- **Coverage is measured in CI, and the DOI badge no longer depends on
+  Zenodo's badge service.**
+
+  `.github/workflows/coverage.yml` runs `scripts/coverage-combined.sh` (i.e.
+  `make coverage`) on every PR and every push to `main` and uploads the result
+  to Codecov. It deliberately does *not* run `cargo llvm-cov --workspace`:
+  large parts of POUNCE are reachable only through the `pounce._pounce`
+  extension module or through the CLI, and a Rust-only report shows those at
+  0% — inventing gaps in code that is well covered, which is the one failure
+  mode that makes a coverage number worse than no number. Running the same
+  script CI and contributors run also means the badge and a local `make
+  coverage` cannot disagree.
+
+  The job asserts its own trustworthiness before uploading. `crates/pounce-py`
+  is reachable *only* through the `.so`, so if the extension module fails to
+  get attributed to the profile it reads ~0% — and llvm-cov reports that as a
+  complete, plausible, badly wrong number rather than as an error. The check
+  fails the job with the cause named instead of moving the badge by tens of
+  points. Requires the `CODECOV_TOKEN` repository secret; the job carries the
+  same `github.repository ==` gate the publishing workflows do, so a fork sync
+  does not produce a red run for a token it cannot have.
+
+  Two fixes to the script fell out of wiring it up. It now excludes
+  `pounce-hsl` from its cargo invocations, as ci.yml does — that crate cannot
+  link without licensed HSL, and the failure was invisible because the same
+  `2>/dev/null` that hid it also dropped every *other* crate's test binary from
+  `objects.txt`. And it stages the instrumented CLI at
+  `python/pounce/bin/pounce` before `maturin develop`, so the pyomo-pounce
+  suite has a bundled binary it will trust (its `conftest.py` refuses an
+  unvetted `pounce` on `PATH`, gh #403) rather than skipping — previously the
+  CLI was passed to llvm-cov as an `-object` that nothing ever executed, and
+  every CLI and `.nl` path reported 0%.
+
+  Separately, the README DOI badge now comes from shields.io rather than
+  `zenodo.org/badge/DOI/....svg`. Zenodo's badge endpoint has broken the badge
+  more than once, and GitHub's Camo image proxy *caches* the error, so one bad
+  fetch outlives the outage that caused it. The concept DOI is stable by
+  definition, so a static shields badge cannot go stale, and the README's PyPI
+  badges already come from the same host. `dev-notes/zenodo-setup.md` no longer
+  tells the next person to copy the badge markdown off the Zenodo record page,
+  which is how it came back the last time.
+
 - **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**
   (#710).
 
