@@ -128,6 +128,12 @@ pub struct OptErrorConvCheck {
     /// disengages and the run terminates as it would have without it, so the
     /// worst case is a bounded number of extra iterations, never a lost
     /// verdict. See [`Self::relative_viol_threshold`].
+    ///
+    /// Read by the *certificate* arm only. The acceptable-point stash's gate
+    /// in [`ConvCheck::current_is_acceptable_with_state`] is deliberately
+    /// unbudgeted (gh #693) — declining to stash spends no iterations, so a
+    /// budget there bounds nothing and only ever expired, at which point the
+    /// point the veto exists to reject became the rollback target.
     pub rel_infeas_extra_iters: Index,
     /// Relative primal infeasibility at the previous
     /// [`Self::note_infeasible_stationary`] call — the progress signal for the
@@ -1329,11 +1335,29 @@ impl ConvCheck for OptErrorConvCheck {
         // stall later in the run must not roll back to it and surface
         // `Solved_To_Acceptable_Level` on an infeasible model (measured: an
         // infeasible row at scale `1e-10`, 100% violated, exited exactly that
-        // way through this stash). Budget-aware like the certificate veto, so
-        // a spent budget restores the old behaviour entirely.
-        if rel_viol > self.relative_viol_threshold()
-            && self.rel_infeas_extra_iters < VETO_MAX_EXTRA_ITERS
-        {
+        // way through this stash).
+        //
+        // gh #693: unlike the certificate veto above, this gate is **not**
+        // budget-aware, and deliberately so. `VETO_MAX_EXTRA_ITERS` exists to
+        // bound the *iterations* a veto can spend refusing to stop — the
+        // certificate veto keeps the run going, so it can cost wall clock, and
+        // the budget caps that. Declining to stash costs nothing: the stash is
+        // a side effect of an iteration the run was taking anyway, so a budget
+        // here bounds no cost. What it did do was expire, and once expired the
+        // very point the veto exists to reject was written into the rollback
+        // target — and `ConvergenceStatus::LocallyInfeasible` consults that
+        // stash (gh #505, `ipopt_alg.rs`), so the honest infeasibility verdict
+        // came back out as `Solved_To_Acceptable_Level`.
+        //
+        // Measured on `x >= 2` over `x in [0, 1]` with every row scaled by
+        // `1e-8` (`test_scale_invariance.py::_inf_clear`, and `_inf_two`
+        // likewise): the `feral_scaling=mc64` leg spends 288 iterations, blows
+        // the 60-iteration budget around iteration 60, stashes an iterate whose
+        // single row is violated by 99.998% of its own magnitude, then rolls
+        // back to it on the infeasibility exit. The comment in `ipopt_alg.rs`
+        // asserting this gate makes the stash "inert on genuinely infeasible
+        // models" was true only for runs that convict inside 60 iterations.
+        if rel_viol > self.relative_viol_threshold() {
             return false;
         }
         self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)

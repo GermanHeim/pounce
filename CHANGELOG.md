@@ -197,6 +197,56 @@ changes.
   `pounce_common::pd_perturbation` and `pounce_feral` unit tests; what is gone
   is the end-to-end demonstration that it matters to a real solve.
 
+  **The acceptable-point stash was carrying an iteration budget it had no use
+  for, and this change is what made it bite.** Removing the damping lengthens
+  the `feral_scaling=mc64` trajectory on a row-scaled infeasible model from 12
+  iterations to 288, and that is enough to blow a 60-iteration budget that had
+  never been reached before.
+
+  `OptErrorConvCheck::current_is_acceptable_with_state` gates the
+  acceptable-point stash on the scale-relative feasibility measure: a row
+  violated by more than `relative_viol_threshold` of its own magnitude is not
+  an acceptable point in any honest sense, so it must not become a rollback
+  target. That gate also carried `VETO_MAX_EXTRA_ITERS` — the *certificate*
+  veto's budget. The budget exists to bound how many extra iterations a veto
+  can keep a run alive for; declining to stash extends the run by nothing, so
+  on this gate it bounded no cost and could only ever expire. Once it did, the
+  offending iterate went into the stash, and
+  `ConvergenceStatus::LocallyInfeasible` — which consults the stash (#505) —
+  handed it back as `Solved_To_Acceptable_Level`. The stash gate is now
+  unbudgeted; the certificate veto's budget is untouched.
+
+  Caught by `pyomo-pounce/tests/test_scale_invariance.py`, which is exactly
+  what that harness is for: `x >= 2` over `x ∈ [0, 1]` with every row scaled by
+  `1e-8` went `INFEAS` → `SOLVED`. The point handed back has its single row
+  violated by 99.998% of the row's own magnitude, at `x ≈ 4e-5` — the *most*
+  infeasible end of the box.
+
+  Three things worth recording:
+
+  * The `ipopt_alg.rs` comment asserting the stash is "inert on genuinely
+    infeasible models" because the scale-relative veto blocks it was true only
+    for solves that convict inside 60 iterations. That qualifier is now in the
+    comment.
+  * `feral_scaling=identity` reported `Solved_To_Acceptable_Level` on this
+    model on 0.10.0 as well, before any of #693 — the recorded baseline of zero
+    wrong cells was a property of the default scaling, not of the algorithm.
+    The fix repairs that too, so the model is now right on all four
+    `feral_scaling` settings on both builds.
+  * The fixture sweep is **bit-identical** with and without this fix, both
+    legs, all 118 lines. Nothing in the corpus spends 60 blocked iterations, so
+    the table above stands unchanged. `infeasible_row_scaled_1em8.nl` joins the
+    corpus as a 60th fixture and adds two lines
+    (`InfeasibleProblemDetected it=0` on both legs) — under the sweep's default
+    options the convex-QP presolve certifies it outright, which is the right
+    answer and is what a default run gets. The NLP path this defect lives on is
+    reached only under `solver_selection=nlp`, which is what the dedicated test
+    passes.
+
+  Guarded by `issue_693_relative_infeasibility_stash.rs`, which pins the
+  infeasible band on the default path and on all three explicit
+  `feral_scaling` settings — all four report a code under 200 without the fix.
+
 - **`least_square_init_primal`'s measured cost is now `csfi2` alone, and two
   of its models stop being coin flips** (#616, #681, #706).
 

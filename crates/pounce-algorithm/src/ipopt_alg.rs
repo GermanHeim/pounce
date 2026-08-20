@@ -2183,6 +2183,14 @@ impl IpoptAlgorithm {
                 // `terminate_acceptable_or` falls through to the verdict
                 // unchanged. `infeasible_models_are_never_reported_solved`
                 // (`infeasible_status_tol_invariance.rs`) is the standing guard.
+                //
+                // That inertness rests entirely on the stash gate having no
+                // iteration budget (gh #693). While it carried the certificate
+                // veto's `VETO_MAX_EXTRA_ITERS`, a solve that took more than 60
+                // blocked iterations to convict stashed the very point the veto
+                // exists to reject and rolled back to it here — an infeasible
+                // model reported `Solved_To_Acceptable_Level`. See
+                // `issue_693_relative_infeasibility_stash.rs`.
                 return self.terminate_local_infeasibility();
             }
             ConvergenceStatus::Failed => {
