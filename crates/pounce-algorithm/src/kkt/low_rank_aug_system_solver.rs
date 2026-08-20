@@ -547,7 +547,20 @@ impl LowRankAugSystemSolver {
             let n_d = space_d.dim() as usize;
             let dim = n_x + n_s + n_c + n_d;
             let nrhs = n_cols_us - k0;
-            if nrhs > 1 && dim > 0 && dim == self.inner.system_dim() as usize {
+            // The batch is a pure time optimization: these columns feed
+            // the SMW correction of an iterate whose trajectory must not
+            // move. A backend whose blocked substitution reassociates
+            // returns a tolerance-equal but different answer, and on a
+            // nonconvex problem that is enough to select a different local
+            // optimum — MA57 takes `pooling_rt2stp` to an objective 25%
+            // worse while still reporting `Optimal Solution Found` (gh#729).
+            // So the backend has to affirm bit-identity at this width, and
+            // the default answer is no.
+            if nrhs > 1
+                && dim > 0
+                && dim == self.inner.system_dim() as usize
+                && self.inner.multi_solve_matches_single_solve(nrhs)
+            {
                 let mut packed = vec![0.0; dim * nrhs];
                 let mut packed_ok = true;
                 for (j, k) in (k0..n_cols_us).enumerate() {
@@ -1223,6 +1236,10 @@ mod tests {
         /// Like the real one it ignores the coefficients it is handed and
         /// uses the cached ones, so back-solving against a stale factor
         /// shows up as a wrong answer rather than a wrong count.
+        fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+            self.packed
+        }
+
         fn try_resolve_many_flat(
             &mut self,
             _coeffs: &AugSysCoeffs<'_>,

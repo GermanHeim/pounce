@@ -38,6 +38,28 @@ use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
 };
 
+/// Largest `nrhs` at which feral's blocked back-substitution is still
+/// **bit-identical** to looping one column at a time — the ceiling
+/// [`FeralSolverInterface::multi_solve_matches_single_solve`] reports.
+///
+/// feral routes a multi-RHS solve two ways (feral#57): below its
+/// private `BLAS3_NRHS_THRESHOLD` each column runs the same rank-1
+/// cascade a single-RHS solve would, in the same order, so no sum is
+/// reassociated; at or above it a register-blocked TRSM/GEMM panel
+/// kernel runs, which reassociates and is therefore only
+/// tolerance-equal. That threshold is `32` in feral 0.17.0 and is not
+/// exported, so this is our own conservative floor under it rather than
+/// a mirror of it.
+///
+/// `multi_solve_bitwise_matches_single_solve_at_the_documented_ceiling`
+/// is the guard: it exercises a real factor at exactly this width and
+/// fails if feral ever lowers its threshold to or below it. Without
+/// that test this constant is an assumption about another crate's
+/// private internals, which is the shape of defect
+/// `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`
+/// is about.
+const FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS: usize = 16;
+
 /// FERAL solver implementing the IPM-side sparse symmetric backend
 /// contract.
 pub struct FeralSolverInterface {
@@ -1036,6 +1058,10 @@ impl std::fmt::Debug for FeralSolverInterface {
 }
 
 impl SparseSymLinearSolverInterface for FeralSolverInterface {
+    fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
+        nrhs <= FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS
+    }
+
     fn initialize_structure(
         &mut self,
         dim: Index,
@@ -2527,5 +2553,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Guard for [`FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS`].
+    ///
+    /// `LowRankAugSystemSolver` batches its SMW correction columns into one
+    /// `multi_solve` purely to save time (gh#729). That is only sound while
+    /// the batched answer is *bit-identical* to the per-column one: the
+    /// batch sits inside an iteration whose trajectory must not move, and a
+    /// tolerance-legal perturbation there can select a different local
+    /// optimum on a nonconvex problem. MA57 reassociates and does move
+    /// `pooling_rt2stp` to an objective 25% worse while still reporting
+    /// `Optimal Solution Found`, which is why the batching is gated on this
+    /// predicate rather than applied unconditionally.
+    ///
+    /// feral is bit-identical only below its private
+    /// `BLAS3_NRHS_THRESHOLD` (32 in 0.17.0); above it a blocked TRSM/GEMM
+    /// panel kernel runs. Our ceiling is a conservative 16, and this test is
+    /// what keeps that an argument rather than a hope — it fails if feral
+    /// ever lowers the threshold to or below our ceiling, or changes the
+    /// narrow arm to reassociate. Run at the **default** config, refinement
+    /// included, because that is the configuration the gate actually admits.
+    #[test]
+    fn multi_solve_bitwise_matches_single_solve_at_the_documented_ceiling() {
+        // A 2-D 5-point Laplacian, NOT a tridiagonal band. Bandwidth is
+        // what decides whether this test can see anything: a tridiagonal
+        // matrix eliminates one row per supernode, so feral's blocked
+        // TRSM/GEMM panel degenerates to the same scalar operations as the
+        // rank-1 cascade and the two paths agree bit-for-bit at *every*
+        // `nrhs` — the guard would pass with the ceiling set anywhere.
+        // Nested dissection on a 2-D grid produces genuinely wide
+        // separators, so the panel kernel runs as itself.
+        const K: usize = 24;
+        const N: usize = K * K;
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let mut push = |i: usize, j: usize, v: Number| {
+            irn.push((i + 1) as Index);
+            jcn.push((j + 1) as Index);
+            vals.push(v);
+        };
+        for r in 0..K {
+            for c in 0..K {
+                let i = r * K + c;
+                push(i, i, 4.0 + ((r + c) % 5) as Number * 0.25);
+                if c + 1 < K {
+                    push(i + 1, i, -1.0 - (r % 3) as Number * 0.125);
+                }
+                if r + 1 < K {
+                    push(i + K, i, -1.0 - (c % 3) as Number * 0.125);
+                }
+            }
+        }
+        let nrhs_max = FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS;
+        // Irrational-ish, non-repeating entries: a right-hand side of small
+        // integers can be reassociation-insensitive by luck and pass a
+        // bit-identity check that a real RHS would fail.
+        let rhs_all: Vec<Number> = (0..N * nrhs_max)
+            .map(|k| ((k as Number) * 0.7390851332151607).sin() * 3.0 + 0.5)
+            .collect();
+
+        let solve = |nrhs: usize, rhs: &[Number], refine: bool| -> Vec<Number> {
+            let mut s = FeralSolverInterface::with_config(FeralConfig {
+                refine,
+                ..FeralConfig::default()
+            });
+            assert_eq!(
+                s.initialize_structure(N as Index, vals.len() as Index, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&vals);
+            let mut buf = rhs.to_vec();
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, nrhs as Index, &mut buf, false, 0),
+                ESymSolverStatus::Success
+            );
+            buf
+        };
+
+        // `refine = false` isolates the substitution kernel, which is what
+        // the ceiling is a statement about; the default arm is the
+        // configuration the gate actually admits in production. Refinement
+        // could in principle drive two differing solves back onto the same
+        // answer, so checking only the default arm would be a weaker claim
+        // than the constant makes.
+        for refine in [false, true] {
+            for nrhs in 2..=nrhs_max {
+                let rhs = &rhs_all[..N * nrhs];
+                let batched = solve(nrhs, rhs, refine);
+                let looped: Vec<Number> = (0..nrhs)
+                    .flat_map(|c| solve(1, &rhs[c * N..(c + 1) * N], refine))
+                    .collect();
+                assert_eq!(
+                    batched, looped,
+                    "feral's nrhs={nrhs} solve (refine={refine}) is no longer \
+                     bit-identical to looping single-RHS; \
+                     FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS \
+                     ({FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS}) is too high and the \
+                     gh#729 SMW batching is silently perturbing trajectories"
+                );
+            }
+        }
+
+        // The predicate must actually say `false` past the ceiling, or the
+        // constant is documentation and the gate admits everything.
+        let s = FeralSolverInterface::default();
+        assert!(s.multi_solve_matches_single_solve(nrhs_max));
+        assert!(!s.multi_solve_matches_single_solve(nrhs_max + 1));
     }
 }

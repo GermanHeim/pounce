@@ -401,6 +401,14 @@ impl TSymLinearSolver {
     pub fn factor_pattern(&self, want_values: bool) -> Option<FactorPattern> {
         self.backend.factor_pattern(want_values)
     }
+
+    /// Pass-through to
+    /// [`SparseSymLinearSolverInterface::multi_solve_matches_single_solve`],
+    /// which see. Scaling does not affect the answer: it is applied per
+    /// column, identically on both paths.
+    pub fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
+        self.backend.multi_solve_matches_single_solve(nrhs)
+    }
 }
 
 impl SymLinearSolver for TSymLinearSolver {
