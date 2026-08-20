@@ -421,7 +421,17 @@ impl PySolver {
                 pins.len(),
             )));
         }
-        let held: Vec<Index> = held_var_rows.iter().map(|&r| r as Index).collect();
+        // The rows index the primal block directly, and an
+        // out-of-range one reaches a raw `d[i]` inside the direction,
+        // so it is a panic out of the extension rather than a raised
+        // error. `Index` is signed, so a negative row becomes a very
+        // large `usize` there. Checked here, the way the sibling
+        // argument on this same call already is.
+        let n_x = s
+            .inner
+            .block_dims()
+            .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?[0];
+        let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
         let (dx, pinned) = s
             .inner
             .parametric_step_bounded_decided(&pins, &deltas, max_iter, &held)
@@ -458,7 +468,17 @@ impl PySolver {
                 pins.len(),
             )));
         }
-        let held: Vec<Index> = held_var_rows.iter().map(|&r| r as Index).collect();
+        // The rows index the primal block directly, and an
+        // out-of-range one reaches a raw `d[i]` inside the direction,
+        // so it is a panic out of the extension rather than a raised
+        // error. `Index` is signed, so a negative row becomes a very
+        // large `usize` there. Checked here, the way the sibling
+        // argument on this same call already is.
+        let n_x = s
+            .inner
+            .block_dims()
+            .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?[0];
+        let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
         let (dx, segments) = s
             .inner
             .parametric_step_path_decided(&pins, &deltas, max_iter, &held)
@@ -475,9 +495,13 @@ impl PySolver {
     /// The eq. 14 directional derivative, decided by the pounce-qp
     /// active-set engine on the reduced weak-row problem. `max_iter`
     /// is the total
-    /// back-solve budget: the all-released solve plus one basis column
-    /// per engaged weak row count against it, and a budget the weak
-    /// set cannot fit fails before any factorization happens. Returns
+    /// back-solve budget: the all-released solve, one basis column per
+    /// engaged weak row, and the combined solve that recovers the
+    /// direction all count against it. Only a budget of zero fails
+    /// before any work, since which rows engage is not known until the
+    /// all-released solve has run, so a budget too small to finish
+    /// still pays that factorization. The error names the engaged
+    /// count and the number to raise `degeneracy_iter` to. Returns
     /// `(dx, held_var_rows, backsolves_spent)`.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_directional<'py>(
@@ -858,6 +882,21 @@ impl PySolver {
         let g = s.inner.row_normal(j as usize).map_err(solver_error_to_py)?;
         Ok(g.into_pyarray_bound(py))
     }
+}
+
+fn validate_var_rows(held_var_rows: &[i64], n_x: usize) -> PyResult<Vec<Index>> {
+    held_var_rows
+        .iter()
+        .map(|&r| {
+            if r < 0 || (r as usize) >= n_x {
+                Err(PyValueError::new_err(format!(
+                    "held_var_rows[..] = {r} out of range [0, n_x={n_x})",
+                )))
+            } else {
+                Ok(r as Index)
+            }
+        })
+        .collect()
 }
 
 fn validate_pins(pin_constraint_indices: &[i64], m: usize) -> PyResult<Vec<Index>> {

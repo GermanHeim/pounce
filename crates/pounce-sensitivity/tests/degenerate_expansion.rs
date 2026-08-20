@@ -15,10 +15,11 @@
 //! the held filter and the direction is exactly zero.
 //!
 //! The back-solve counts are the complexity regression: the decision
-//! spends one solve for the all-released direction plus one basis
-//! column per engaged row, so the hold side costs `ke + 1` where
-//! enumeration over the same weak sets spent 6 (`ke = 2`) and 11
-//! (`ke = 3`) trials.
+//! spends one solve for the all-released direction, one basis column
+//! per engaged row, and one more to recover the direction from the pin
+//! forces, so the hold side costs `ke + 2` where enumeration over the
+//! same weak sets spent 6 (`ke = 2`) and 11 (`ke = 3`) trials. The
+//! release side engages nothing and costs one.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -330,8 +331,8 @@ fn the_two_weak_directional_step_matches_hand_algebra_on_both_sides() {
     pinned.sort_unstable();
     assert_eq!(pinned, vec![0, 1], "both variables pinned on the hold side");
     assert_eq!(
-        trials, 3,
-        "one all-released solve plus ke = 2 basis columns"
+        trials, 4,
+        "the all-released solve, ke = 2 basis columns, and the combined          solve that recovers the direction"
     );
 }
 
@@ -402,16 +403,18 @@ fn the_three_weak_directional_step_matches_hand_algebra_on_both_sides() {
         "all three variables pinned on the hold side"
     );
     assert_eq!(
-        trials, 4,
-        "one all-released solve plus ke = 3 basis columns"
+        trials, 5,
+        "the all-released solve, ke = 3 basis columns, and the combined          solve that recovers the direction"
     );
 }
 
 #[test]
-fn a_tight_budget_fails_before_the_work() {
-    // the ke = 3 hold side needs 4 back-solves, so a budget of 3 must
-    // error without spending the fourth, and the message names the
-    // shortfall
+fn a_tight_budget_reports_what_to_raise_it_to() {
+    // The ke = 3 hold side needs five back-solves: the all-released
+    // solve, three basis columns, and the combined solve that recovers
+    // the direction. A budget of three cannot finish, and what the
+    // caller needs back is the number to raise degeneracy_iter to,
+    // since raising it one at a time is a retry per engaged row.
     let solver = solved(Rc::new(RefCell::new(Ke3Qp)));
     let err = solver
         .parametric_step_directional(&[0], &[-1.0], 3)
@@ -421,4 +424,28 @@ fn a_tight_budget_fails_before_the_work() {
         msg.contains("directional derivative"),
         "recoverable prefix missing: {msg}"
     );
+}
+
+#[test]
+fn the_budget_message_names_the_knob_and_the_number() {
+    // What a caller reads when the budget runs out has to be actionable:
+    // the engaged count, which is the retry price, and the number to
+    // raise degeneracy_iter to. Naming the weak-set size instead sends
+    // a caller on one retry per engaged row.
+    let solver = solved(Rc::new(RefCell::new(Ke3Qp)));
+    for budget in [0usize, 1, 3] {
+        let err = solver
+            .parametric_step_directional(&[0], &[-1.0], budget)
+            .expect_err("a budget below five cannot finish the ke = 3 hold side");
+        let msg = match err {
+            pounce_sensitivity::SolverError::SensComputationFailed(m) => m,
+            other => panic!("wrong error at budget {budget}: {other:?}"),
+        };
+        assert!(!msg.is_empty(), "empty message at budget {budget}");
+        assert!(
+            msg.contains("degeneracy_iter"),
+            "budget {budget} does not name the knob: {msg}",
+        );
+        println!("budget {budget}: {msg}");
+    }
 }

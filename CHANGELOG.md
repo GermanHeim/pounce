@@ -54,8 +54,19 @@ changes.
   fewer solves), the notebook's held-breakpoint example bit-identical
   including its record, the column's default-budget call falling back
   diagnosed in 5 s against 32 s, and the exact decision at a raised
-  budget, which enumeration cannot produce at all, terminating in 20 s
-  (230 back-solves, 76 of 792 held). The engine's `use_schur_updates`
+  budget, which enumeration cannot produce at all, terminating in 21.5 s
+  (232 back-solves, 76 of 792 held).
+
+  The basis columns are projected onto the weak rows' own entries and
+  the full-length vectors dropped, since that projection is all `S`
+  reads. What the columns were otherwise held for, the direction
+  `d0 + Σ λ_k X_k`, is recovered in one further solve on the combined
+  right-hand side `Σ λ_k a_k`, which is the same vector by linearity.
+  That trades one back-solve per expansion round for bounding the
+  memory by the weak-set size rather than by `dim` times the budget:
+  about 114 MB at that 62k configuration, and growing with
+  `degeneracy_iter` toward 390 MB for a caller raising it to reach the
+  exact decision. The engine's `use_schur_updates`
   path hits `MaxIter` on dense reduced problems of hundreds of rows and
   stays off here; that is engine-side follow-up work.
 - **FERAL 0.15.1 → 0.17.0, and the refinement budget it was released for**

@@ -860,10 +860,14 @@ impl Solver {
     /// never enter and never make anything singular.
     ///
     /// `max_iter` is the total back-solve budget: the all-released
-    /// solve and every basis column count against it, so a budget the
-    /// engagement cannot fit errs before the work happens and the
-    /// caller falls back to the one-sided step. Returns the direction,
-    /// the var-x rows held, and the back-solves spent.
+    /// solve, every basis column, and the combined solve that recovers
+    /// the direction all count against it. A budget of zero errs
+    /// before any work. Any budget above that pays the all-released
+    /// factorization first, because which rows engage is only known
+    /// once that solve has run, and the shortfall is reported when the
+    /// basis columns cannot fit. Either way the caller falls back to
+    /// the one-sided step. Returns the direction, the var-x rows held,
+    /// and the back-solves spent.
     pub fn parametric_step_directional(
         &self,
         pin_constraint_indices: &[Index],
@@ -912,11 +916,20 @@ impl Solver {
             return Ok((d[..n_x].to_vec(), Vec::new(), 0));
         }
 
-        let budget = |need: usize, spent: usize| {
+        // What the caller needs is the number to raise
+        // `degeneracy_iter` to, so the message reports the engaged
+        // count rather than the weak-set size: engagement is the retry
+        // price, and on a model with hundreds of weak bounds the two
+        // differ by enough that raising one at a time is dozens of
+        // retries. The engaged set can still grow on a later pass, so
+        // the figure is a floor and says so.
+        let budget = |engaged_now: usize, spent: usize| {
+            let need = engaged_now + 2;
             SolverError::SensComputationFailed(format!(
-                "directional derivative: {need} more back-solve(s) needed \
-                 with {spent} of {max_iter} spent over {nw} weakly active \
-                 bound(s)"
+                "directional derivative: {spent} of {max_iter} back-solve(s) \
+                 spent, and {engaged_now} of {nw} weakly active bound(s) are \
+                 engaged so far. Raise degeneracy_iter to at least {need}; \
+                 the engaged set can still grow, so that is a floor."
             ))
         };
         let fail = |what: &str| {
@@ -928,7 +941,14 @@ impl Solver {
             .released_sigma_x(&released)
             .ok_or_else(|| fail("released sigma unavailable"))?;
         if work + 1 > max_iter {
-            return Err(budget(1, work));
+            // Nothing is engaged before the all-released solve, so
+            // this fires only at a budget of zero, and the floor is
+            // the one solve the decision cannot start without.
+            return Err(SolverError::SensComputationFailed(format!(
+                "directional derivative: degeneracy_iter is {max_iter}, and the \
+                 decision cannot start without one back-solve over the {nw} \
+                 weakly active bound(s). Raise degeneracy_iter to at least 2."
+            )));
         }
         let mut d0 = vec![0.0; dim];
         // shift = false, matching `path_direction`'s all-released
@@ -957,16 +977,24 @@ impl Solver {
             return Ok((d0[..n_x].to_vec(), Vec::new(), work));
         }
 
-        let mut cols: Vec<Option<Vec<Number>>> = vec![None; nw];
+        // Each basis column is only ever read at the weak rows' own
+        // variables, once to build `S` and never again: the direction
+        // it contributes is recovered below in a single solve. So the
+        // column is projected onto those `nw` entries and the
+        // full-length vector dropped, which bounds this by the weak
+        // set rather than by `dim` times the budget. Holding the full
+        // columns costs about 114 MB on a 62k model at 230 engaged
+        // rows, and grows with `degeneracy_iter`.
+        let mut proj: Vec<Option<Vec<Number>>> = vec![None; nw];
         let mut d = d0.clone();
         let held: Vec<usize>;
         loop {
             for &k in &engaged {
-                if cols[k].is_some() {
+                if proj[k].is_some() {
                     continue;
                 }
                 if work + 1 > max_iter {
-                    return Err(budget(1, work));
+                    return Err(budget(engaged.len(), work));
                 }
                 let mut unit = vec![0.0; dim];
                 unit[weak[k].var_row] = sign(k);
@@ -976,7 +1004,7 @@ impl Solver {
                     return Err(SolverError::BacksolveFailed);
                 }
                 work += 1;
-                cols[k] = Some(xk);
+                proj[k] = Some(weak.iter().map(|w| xk[w.var_row]).collect());
             }
 
             // dense reduced data over the engaged rows, upper triangle
@@ -986,13 +1014,15 @@ impl Solver {
             let mut vals = Vec::new();
             for i in 0..ke {
                 for j in i..ke {
-                    let col_j = cols[engaged[j]].as_ref().expect("column built");
-                    let col_i = cols[engaged[i]].as_ref().expect("column built");
+                    let col_j = proj[engaged[j]].as_ref().expect("column built");
+                    let col_i = proj[engaged[i]].as_ref().expect("column built");
                     // S_ij = a_i^T X_j; symmetrize, since S is
-                    // symmetric in exact arithmetic
+                    // symmetric in exact arithmetic. The projection
+                    // holds one entry per weak row, so a weak row's
+                    // own index is where its `a` picks the column out.
                     let s_ij = 0.5
-                        * (sign(engaged[i]) * col_j[weak[engaged[i]].var_row]
-                            + sign(engaged[j]) * col_i[weak[engaged[j]].var_row]);
+                        * (sign(engaged[i]) * col_j[engaged[i]]
+                            + sign(engaged[j]) * col_i[engaged[j]]);
                     // pounce-linalg triplets are one-based
                     irows.push((i + 1) as Index);
                     jcols.push((j + 1) as Index);
@@ -1061,17 +1091,38 @@ impl Solver {
             }
             let lambda: Vec<Number> = sol.x.iter().map(|&v| v * (g_scale / s_scale)).collect();
 
-            d.copy_from_slice(&d0);
             // plus, not minus: the QP's optimality gradient is
             // S lambda + m, so the direction's movement must be
-            // m + lambda S, which is d0 + lambda X applied here
-            for (i, &k) in engaged.iter().enumerate() {
-                let lk = lambda[i];
-                if lk != 0.0 {
-                    let xk = cols[k].as_ref().expect("column built");
-                    for (dv, &xv) in d.iter_mut().zip(xk.iter()) {
-                        *dv += lk * xv;
-                    }
+            // m + lambda S, which is d0 + Σ λ_k X_k here.
+            //
+            // Each `X_k` is `K_rel⁻¹ a_k`, so that sum is
+            // `K_rel⁻¹ (Σ λ_k a_k)` and one solve on the combined
+            // right-hand side gives it. That is why the columns above
+            // need not be kept: the only thing they were held for is
+            // recovered here, in a single back-solve, at the price of
+            // one more against the budget per expansion round.
+            d.copy_from_slice(&d0);
+            if lambda.iter().any(|&l| l != 0.0) {
+                if work + 1 > max_iter {
+                    return Err(budget(engaged.len(), work));
+                }
+                let mut comb = vec![0.0; dim];
+                for (i, &k) in engaged.iter().enumerate() {
+                    comb[weak[k].var_row] += lambda[i] * sign(k);
+                }
+                let mut corr = vec![0.0; dim];
+                if !bs.solve_released_prebuilt(
+                    &released,
+                    Rc::clone(&sigma),
+                    &comb,
+                    &mut corr,
+                    false,
+                ) {
+                    return Err(SolverError::BacksolveFailed);
+                }
+                work += 1;
+                for (dv, &cv) in d.iter_mut().zip(corr.iter()) {
+                    *dv += cv;
                 }
             }
 
