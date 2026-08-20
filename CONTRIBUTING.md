@@ -78,13 +78,22 @@ These run on every PR; run them locally before pushing to get fast feedback:
 Use `make coverage` (or `make coverage-quick` to skip the slow pytest suite),
 **not** `cargo llvm-cov --workspace`.
 
-`.github/workflows/coverage.yml` runs the same script on every PR and every
-push to `main` and uploads the result to
-[Codecov](https://codecov.io/gh/jkitchin/pounce) — so the badge, the Codecov
-diff, and what you get locally are all produced by one code path. That job is
-a *measurement*, not a test gate: it deliberately does not fail on a failing
-test (`ci.yml` does that). It does fail if the report is untrustworthy — see
-the `pounce-py` sanity check below, which it asserts.
+`.github/workflows/coverage.yml` runs the same script on every push to `main`
+and uploads the result to [Codecov](https://codecov.io/gh/jkitchin/pounce) —
+so the badge, the Codecov trend, and what you get locally are all produced by
+one code path. That job is a *measurement*, not a test gate: it deliberately
+does not fail on a failing test (`ci.yml` does that). It does fail if the
+report is untrustworthy — see the `pounce-py` sanity check below, which it
+asserts.
+
+**It does not run on pull requests.** The job takes 33–40 minutes against
+ci.yml's ~10, so running it on PRs left every PR visibly un-green for half an
+hour after the checks that can actually reject it had passed. Nothing blocked
+on the number, so the wait bought nothing. If a particular branch does need a
+number before it merges, run it on demand: Actions → Coverage → Run workflow →
+pick the branch. Do that too for any PR that edits `coverage.yml` itself —
+without a `pull_request` trigger, nothing else proves the workflow still runs
+before you merge it.
 
 `cargo llvm-cov` instruments and runs only the Rust test suite. Large parts of
 POUNCE are exercised solely through the Python extension (`pounce._pounce`) or

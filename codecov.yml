@@ -8,12 +8,17 @@
 
 coverage:
   status:
-    # Informational to start with. The combined run reaches three suites, and
-    # a suite that skips (a missing optional dep, a timing-sensitive test that
-    # loses its margin under instrumentation) moves the number without anyone
-    # touching the code. Blocking PRs on that before we know the run-to-run
-    # spread would teach people to ignore the check, which is worse than not
-    # having it. Flip `informational` off once the baseline holds steady.
+    # Informational. The combined run reaches three suites, and a suite that
+    # skips (a missing optional dep, a timing-sensitive test that loses its
+    # margin under instrumentation) moves the number without anyone touching
+    # the code. Gating on that before we know the run-to-run spread would
+    # teach people to ignore the check, which is worse than not having it.
+    #
+    # These now evaluate on `main` commits rather than on PRs: coverage.yml
+    # has no `pull_request` trigger, so no report is ever uploaded for a PR
+    # head and Codecov has nothing to compare there. Reinstating that trigger
+    # is what would bring the per-PR statuses back — this file is not what
+    # turned them off.
     project:
       default:
         informational: true
