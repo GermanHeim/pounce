@@ -1098,7 +1098,6 @@ fn reconstruct_eq_duals(
         aug_solver,
         &mut new_y_c,
         &mut new_y_d,
-        false,
     );
     if !ok {
         diag.eq_duals = BlockVerdict::Discarded;

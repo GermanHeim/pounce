@@ -54,6 +54,66 @@
 //! `least_square_init_primal=yes` against `=no` on the parent commit
 //! `a44f4e8b`: `csfi2` 35/35, `eigena2` 65/26, `eigenb2` 57/67, `deb7`
 //! 202/154, `pooling_rt2stp` 81/298, `unbounded_cubic` 290/290.
+//!
+//! ## gh#693: the safeguard is unchanged; two of these models stop being
+//! ## coin flips
+//!
+//! gh#693 removed the Tikhonov `δ` from the least-square multiplier
+//! initializer. It does **not** change what this safeguard decides. The
+//! attribution line is bit-identical across the change on all three
+//! models this file drives:
+//!
+//! ```text
+//!   csfi2           violation 1508.554… → 1508.554…  alpha=0   trials=4  declined
+//!   eigenb2         violation 1.0 → 0.25000000624999996  alpha=0.5  trials=1  accepted
+//!   pooling_rt2stp  violation 4.93000007 → 4.93000007  alpha=0   trials=4  declined
+//! ```
+//!
+//! Same numbers, same arm, same verdict. What moves is the state the
+//! initializer's augmented-system solve leaves behind, and it moves the
+//! two models that were sitting on the accept band:
+//!
+//! ```text
+//!                  main (0.10.0)              with gh#693
+//!   eigenb2 =yes   SolvedToAcceptableLevel 48  SolveSucceeded 17
+//!   eigenb2 =no    SolveSucceeded          67  SolveSucceeded 21
+//!   eigena2 =yes   SolvedToAcceptableLevel 127 SolveSucceeded 17
+//!   csfi2   =yes   SolvedToAcceptableLevel 35  SolvedToAcceptableLevel 35
+//! ```
+//!
+//! The header above warned that a `SolveSucceeded` on `eigenb2` "means
+//! something reassociated `eval_g` again and landed on the lucky side of
+//! the accept band ... and it is not a fix". That was the right warning
+//! and it is worth being precise about why it does not apply here.
+//!
+//! Each model was re-run at 17 values of `mu_init` at `0.1·(1 ± k·1e-12)`
+//! — round-off scale, where a model sitting on a tolerance band scatters
+//! and one that is clear of it does not:
+//!
+//! ```text
+//!                          main                       gh#693
+//!   eigenb2 =yes   14 Succeeded / 3 Acceptable   17 Succeeded
+//!   eigena2 =yes   11 Succeeded / 6 Acceptable   17 Succeeded
+//!   csfi2   =yes   17 Acceptable                 17 Acceptable
+//! ```
+//!
+//! So on `main` these two statuses were never stable facts: the values
+//! this file pinned were a 3-point island around the default draw, and
+//! the majority outcome on `main` itself was already the other one.
+//! gh#693 does not carry them across the band, it moves them off it —
+//! and `csfi2`, which is genuinely clear of the band, does not move at
+//! all, to the bit, in either build. The pins below are updated to the
+//! measured outcome, and the round-off screen is the reason they are now
+//! stronger than what they replace rather than weaker.
+//!
+//! This also amends gh#706, which recorded `eigena2`'s status as
+//! *platform*-dependent. On `main` it is round-off-dependent on a single
+//! platform — 11/6 across a `1e-12` perturbation — which is a simpler
+//! and worse explanation. It is deterministic here.
+//!
+//! `pooling_rt2stp` is the one model in this file that gh#693 does not
+//! settle, and the assertion it used to carry was never true in the way
+//! the file believed. See the test itself.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -314,11 +374,18 @@ fn safeguard_decision(model: &str) -> BTreeMap<String, String> {
 /// back — check which association produced it.
 ///
 /// The `POUNCE_DBG_NO_QUAD=1` leg no longer discriminates, since both
-/// evaluator routes now downgrade. It stays as a cross-check: the two
-/// routes agreeing on this model is the normal state, and Q4's window
-/// was the exception.
+/// evaluator routes agree. It stays as a cross-check: the two routes
+/// agreeing on this model is the normal state, and Q4's window was the
+/// exception.
+///
+/// gh#693 adds a fourth row to that table, and it is the one that
+/// settles it — `SolveSucceeded` in 17 iterations on both evaluator
+/// routes, and 17/17 under the round-off screen in the header. The three
+/// rows above disagree because all three sat on the accept band; this
+/// one is off it. The test name changed with it: the safeguard's
+/// measured cost is now `csfi2` alone.
 #[test]
-fn the_safeguards_measured_cost_is_csfi2_and_eigenb2() {
+fn the_safeguards_measured_cost_is_now_csfi2_alone() {
     let csfi2 = solve("csfi2", true);
     assert_eq!(
         status_of(&csfi2),
@@ -335,11 +402,14 @@ fn the_safeguards_measured_cost_is_csfi2_and_eigenb2() {
     let eigenb2 = solve("eigenb2", true);
     assert_eq!(
         status_of(&eigenb2),
-        "SolvedToAcceptableLevel",
-        "gh#616 measured this downgrade and gh#702 restored it. \
-         `SolveSucceeded` here means something reassociated `eval_g` \
-         again and landed on the lucky side of the accept band — that \
-         is what gh#588's Q4 did, and it is not a fix",
+        "SolveSucceeded",
+        "gh#616 measured a downgrade here and gh#693 removed it. Before \
+         reading a return to `SolvedToAcceptableLevel` as a regression, \
+         re-run the round-off screen in the header: on `main` this model \
+         gave 14 `SolveSucceeded` to 3 `SolvedToAcceptableLevel` across \
+         17 draws of `mu_init` at 1e-12 scale, so the old pin was an \
+         island. If the 14/3 scatter is back, the accept band is being \
+         straddled again and that is the finding — not this status",
     );
     assert!(
         (eigenb2.solution.objective - 1.6).abs() < 1e-6,
@@ -350,11 +420,13 @@ fn the_safeguards_measured_cost_is_csfi2_and_eigenb2() {
     let tape = solve_with_env("eigenb2", true, &[("POUNCE_DBG_NO_QUAD", "1")]);
     assert_eq!(
         status_of(&tape),
-        "SolvedToAcceptableLevel",
-        "with the fast path off, eigenb2 must still reproduce gh#616's \
-         measurement. Since gh#702 the fast path reproduces it too, so \
-         the two routes agree here; a disagreement means one of them \
-         moved and the diff says which",
+        "SolveSucceeded",
+        "with the fast path off, eigenb2 must agree with the fast path. \
+         That is the property this leg is for, and it survives gh#693: \
+         the tape route went 57 iterations at `SolvedToAcceptableLevel` \
+         to 17 at `SolveSucceeded` alongside the fast path, so the two \
+         still agree. A disagreement means one of them moved and the \
+         diff says which",
     );
     assert!(
         (tape.solution.objective - 1.6).abs() < 1e-6,
@@ -476,9 +548,10 @@ fn eigena2_and_eigenb2_hand_the_safeguard_identical_numbers() {
     );
     assert_eq!(
         status_of(&solve("eigenb2", true)),
-        "SolvedToAcceptableLevel",
-        "see the test above — this is gh#616's originally measured \
-         downgrade, restored by gh#702",
+        "SolveSucceeded",
+        "see the test above — gh#616's originally measured downgrade, \
+         removed by gh#693, with the round-off screen that says the old \
+         pin was a 3-point island rather than a fact",
     );
     assert!(
         (solve("eigena2", true).solution.objective - 82.5).abs() < 1e-6,
@@ -527,24 +600,48 @@ fn csfi2_declines_the_step_so_the_option_changes_nothing_there() {
 /// `least_square_init_primal=no` everywhere, declining *after* it is
 /// bit-identical to the real safeguard.
 ///
-/// `pooling_rt2stp` is where it shows: same objective, same status, and
-/// a large iteration difference in the *declined* route's favour. This
-/// test pins that the two routes differ, not by how much — the
-/// direction is the mechanism claim, the magnitude is a platform
-/// detail.
+/// `pooling_rt2stp` is where it shows, as a large iteration difference
+/// in the *declined* route's favour. This test pins that the two routes
+/// differ, not by how much — the direction is the mechanism claim, the
+/// magnitude is a platform detail.
+///
+/// **This test used to also assert the two routes reach the same local
+/// optimum, and that was never a property of this model.** gh#693 made
+/// it fail — on the default draw the declined route reaches −4391.826
+/// and the `=no` route −3273.955 — which prompted measuring it properly
+/// rather than re-pinning it. Across 17 values of `mu_init` at
+/// `0.1·(1 ± k·1e-12)` the two routes agree on the optimum at **10 of 17
+/// points on `main`** and 8 of 17 here. It was a coin flip that happened
+/// to land heads at one draw.
+///
+/// The repository had in fact already recorded both sides of that flip
+/// as fact in different places: `docs/src/initialization.md` still
+/// carried gh#616's original measurement, where the two routes reached
+/// *different* optima (−4391.826 against −3273.955), while this test
+/// asserted they reached the same one. Both were written from a single
+/// draw of a bistable nonconvex model, and neither noticed the other.
+/// The doc now says so too.
+///
+/// So the same-optimum assertion is gone rather than inverted, and what
+/// is left is the part that survives the screen: the iteration counts
+/// differ at **17 of 17 points on both builds**. That is the mechanism
+/// claim, and it is the one this test was written to make.
 #[test]
 fn a_declined_step_is_not_the_same_as_never_asking() {
     let on = solve("pooling_rt2stp", true);
     let off = solve("pooling_rt2stp", false);
 
-    assert_eq!(status_of(&on), "SolveSucceeded");
-    assert_eq!(status_of(&off), "SolveSucceeded");
-    assert!(
-        (on.solution.objective - off.solution.objective).abs() < 1e-3,
-        "pooling_rt2stp declines the step, so both routes should land on \
-         the same local optimum: {} on, {} off",
-        on.solution.objective,
-        off.solution.objective,
+    // Only the declined route's status is pinned. The `=no` route is
+    // *not*: under the same round-off screen it gives 10 `SolveSucceeded`,
+    // 3 `SolvedToAcceptableLevel` and 4 `ErrorInStepComputation` across 17
+    // draws, so asserting one of them here would pin a 59% outcome — the
+    // same mistake the objective assertion made.
+    assert_eq!(
+        status_of(&on),
+        "SolveSucceeded",
+        "the declined route is the stable one on this model (17/17 under \
+         the header's round-off screen); if it has started scattering, \
+         re-run that screen before treating this as a regression",
     );
     assert_ne!(
         on.statistics.iteration_count, off.statistics.iteration_count,

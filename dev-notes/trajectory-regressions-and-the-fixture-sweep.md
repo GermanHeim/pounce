@@ -170,3 +170,80 @@ structural guard is to fail the build for any registered option with no read
 site, which turns this class from a user-reported trajectory mystery into a
 compile error. #551 is the standing list of the rest of them; the audit for
 #677 found 26 core options still in that state.
+
+## Round three: the witness that went away, and what replaced it (#693)
+
+#693 removed the Tikhonov `δ=1e-8` from the least-squares multiplier
+initializer. That is a different fault from either of #592's two, but it lands
+on the same model: `pooling_rt2stp` goes from 298 iterations to 128, and — the
+part that matters here — from 812 to 116 with the `δ_c` walk-back *off*.
+
+So #592's guard test fired. That guard existed precisely because a headline
+test asserting "298 iterations" can pass for a reason it does not describe; it
+required the build to still reproduce 812 with the walk-back disabled. It was
+right to fire, and the correct response was not to relax it.
+
+**Re-arming the other fault does not bring the witness back.** Pinning the
+pre-#592 `feral_inertia_pivot_floor=1e-12` reproduces 0.10.0's 298/812 exactly
+and leaves #693's 128/116 exactly as they are. The two faults are independent
+on this model.
+
+**The search for a replacement.** All 58 CLI fixtures at
+`perturb_delta_c_max_rungs=0`; all 58 again under maximal fault-1 injection
+(`feral_inertia_pivot_floor=1e30`, verified live — it moves 8 fixtures);
+`feral_singular_pivot_floor` scans over 12 decades on 4 models; 117 problems
+from the external benchmark corpus.
+
+**The screen that every candidate has to pass.** Re-run the model at 17 values
+of an innocuous option perturbed at round-off scale — `0.1·(1 ± k·1e-12)` on
+`mu_init` works — and compare the *distributions*, not the single draws. A real
+effect survives; a chaotic model scatters. This is the generalization of the
+`deb7` lesson, and it is now the standard for admitting any trajectory witness
+to this repository. Perturbing at ±1% or ±0.1% is **too coarse** to
+distinguish the two and has produced at least two wrong conclusions in this
+codebase's history — including one of mine, in this same PR, where five
+samples of `limited_memory_init_val` at ±1% all landed in the same basin and I
+read that as a regression.
+
+Both candidates failed the screen:
+
+- `deb7` — fails at `rungs=0`, converges at the default, but its ladder is
+  non-monotone (1..4 converge, 5 fails, 8 fails) and ±1% on `mu_init` flips it.
+- `vanderbei/twirism1` — a single draw gave 178 iterations with the walk-back
+  and 441 without, the same 2.5× shape as #544's 298/812. Under the screen both
+  arms converge at all 17 points; medians 154 on, **146 off**. Noise.
+
+**What the corpus produced instead: three robust anti-witnesses.**
+
+```text
+               walkback on (default)          walkback off (rungs=0)
+  steenbrd     16/17 ErrorInStepComputation   17/17 Optimal, ~118 it
+  steenbrf     17/17 SolvedToAcceptableLevel  17/17 Optimal, ~452 it
+  steenbrg     14/17 ErrorInStepComputation   17/17 Optimal, ~79 it
+```
+
+Deterministic in both directions under the screen, and identical on 0.10.0 —
+a pre-existing property of the #592 mechanism, not something #693 introduced.
+(`CVXQP1_L` looked like a fourth on a single draw and was inert under the
+screen: 17/17 identical on both arms and both builds. Recorded so the count is
+not overstated.)
+
+**Where that leaves the walk-back.** No measured problem is robustly helped by
+it; three are robustly hurt. That is a real argument for revisiting the
+`perturb_delta_c_max_rungs` default of 3, and it was deliberately not acted on
+in #693: changing a default is a trajectory change in its own right, needs its
+own two-leg sweep, and folding it into #693 would have made #693's sweep
+undiffable. Whoever picks it up should start from the table above rather than
+from scratch.
+
+**What was done instead.** The guard was *inverted*, not deleted. It now pins
+that the walk-back is inert on `pooling_rt2stp` and fails if that changes in
+either direction — including if a witness comes back, which is stated in the
+failure message as a wanted outcome. The general rule this round adds to the
+list in "What to do instead":
+
+> A guard that fires because the thing it guards stopped happening has done
+> its job. Do not relax it and do not delete it — measure what replaced the
+> old behavior, and pin *that*, so the next change still has something to
+> break. An inverted guard is weaker than the original; say so where a reader
+> will see it, and say what would make it strong again.

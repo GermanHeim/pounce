@@ -49,7 +49,6 @@ impl EqMultCalculator for LeastSquareMults {
         aug_solver: &mut dyn AugSystemSolver,
         y_c: &mut dyn Vector,
         y_d: &mut dyn Vector,
-        unregularized: bool,
     ) -> bool {
         let curr = match data.borrow().curr.clone() {
             Some(c) => c,
@@ -157,9 +156,15 @@ impl EqMultCalculator for LeastSquareMults {
         // the retry cannot be regression-tested here — the same reason
         // M3 shipped without a fail-first test, and why the guard is kept
         // rather than dropped outright.
+        //
+        // #688 could only reach `recalc_y`, so for one release the three
+        // *initializer* sites still took δ=1e-8 unconditionally, behind
+        // an `unregularized: bool`. gh#693 retired that flag: the same
+        // argument applies to a starting guess that a capped `y0` then
+        // carries into iteration 0, and no caller was left asking for the
+        // damped estimate. The retry below is now the only behaviour.
         let mut status = ESymSolverStatus::Success;
-        let deltas: &[pounce_common::types::Number] =
-            if unregularized { &[0.0, 1e-8] } else { &[1e-8] };
+        let deltas: &[pounce_common::types::Number] = &[0.0, 1e-8];
         for &delta in deltas {
             let coeffs = AugSysCoeffs {
                 w: Some(&*zero_w),
