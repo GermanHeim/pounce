@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+- **Coverage no longer runs on pull requests; it is measured on `main`.**
+
+  The combined coverage job takes 33–40 minutes (three measured runs: 33.2,
+  40.4, 33.3, the spread coming from cargo-cache warmth). `ci.yml` — everything
+  that can actually reject a change — finishes in about 10. Running both on a
+  PR meant the PR sat visibly un-green for another half hour after the checks
+  that matter had passed, and a reviewer looking at a spinner cannot tell "the
+  tests are still running" from "the measurement is still running". Nothing
+  blocked on the number: `codecov.yml` marks both statuses `informational`.
+
+  `coverage.yml` now triggers on pushes to `main` plus `workflow_dispatch`.
+  Every merge still produces exactly one run, on the commit the badge and the
+  Codecov trend actually refer to. A branch that needs a number before it
+  merges can get one on demand (Actions → Coverage → Run workflow → pick the
+  branch).
+
+  Two costs, both stated rather than discovered later. Codecov's per-PR
+  patch-coverage status is gone, because no report is uploaded for a PR head —
+  it was informational, so it could not have blocked anything. And a PR that
+  edits `coverage.yml` no longer exercises the workflow before merging, since
+  `pull_request` was what used to do that; dispatch such a branch by hand
+  first.
+
+  `timeout-minutes` also drops from 120 to 90. The 120 was a guess made before
+  any run existed; 90 keeps better than 2x headroom over the slowest run seen.
+
 - **The coverage upload was shipping two GAMS listing fixtures to Codecov
   alongside the real report.**
 

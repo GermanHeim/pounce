@@ -1,21 +1,37 @@
 name: Coverage
 
-# Scoped to `main` on both triggers so a PR from a branch in this repo produces
-# ONE coverage run, not the two that `on: [push, pull_request]` gives. This job
-# is the most expensive thing in the repo — it builds the whole workspace
-# unoptimized and instrumented, then runs the Rust, Python and pyomo suites on
-# top — so a duplicate is not a rounding error. Codecov keys its comparison off
-# a single head commit and merges duplicate uploads for the same SHA anyway, so
-# the second run buys nothing.
+# Coverage does NOT run on pull requests, deliberately.
+#
+# This job is the most expensive thing in the repo: it builds the whole
+# workspace unoptimized and instrumented, then runs the Rust, Python and pyomo
+# suites on top of that. Three measured runs: 33, 40 and 33 minutes. ci.yml —
+# the checks that can actually reject a change — finishes in about 10. Running
+# coverage on PRs meant a PR sat visibly un-green for another half hour after
+# everything that could reject it had already passed, and a reviewer looking at
+# a spinner does not distinguish "the tests are still running" from "the
+# measurement is still running". The wait bought nothing: nobody blocks a merge
+# on this number, and codecov.yml marks both statuses `informational`.
+#
+# So the number is tracked on `main`. Every merge produces exactly one run, on
+# the commit the badge and the Codecov trend line actually refer to. What that
+# gives up is Codecov's per-PR patch-coverage status — which, being
+# informational, could not have blocked anything either.
+#
+# `workflow_dispatch` covers a branch that genuinely needs a number before it
+# merges: Actions -> Coverage -> Run workflow -> pick the branch. It is also
+# the only way left to exercise a change to THIS FILE before it lands. Without
+# a `pull_request` trigger, a PR editing this workflow no longer proves the
+# workflow still runs — so dispatch it from the branch before merging one.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
-# A superseded coverage run is ~an hour of runner time nobody will read.
+# A superseded coverage run is ~40 minutes of runner time nobody will read.
 # Never cancel on `main`, where each commit's number is the record of that
-# commit and the baseline every PR is compared against.
+# commit and the baseline every later commit is compared against. That leaves
+# `workflow_dispatch` runs on a branch, where re-dispatching after a push
+# should supersede the run you have just invalidated.
 concurrency:
   group: coverage-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -34,14 +50,16 @@ jobs:
     # (see CLAUDE.md): `push: branches: [main]` fires in a fork when the owner
     # syncs, CODECOV_TOKEN does not exist there, and `fail_ci_if_error: true`
     # below turns that into a red run and an email for a contributor who did
-    # nothing. `pull_request` runs in the base repo's context, so PR checks
-    # from forks are unaffected.
+    # nothing. Now that `push` is the only automatic trigger, this gate is the
+    # only thing standing between a fork sync and that email.
     if: github.repository == 'jkitchin/pounce'
     runs-on: ubuntu-latest
-    # The instrumented build is unoptimized and carries per-region counters,
-    # and this runs three suites on it. Generous, but far below the 6 h
-    # default: a job that hangs should fail in an hour, not burn six.
-    timeout-minutes: 120
+    # 120 was a guess made before any run existed. Measured since: 33.2, 40.4
+    # and 33.3 minutes, the spread coming from how warm the cargo cache is. 90
+    # keeps better than 2x headroom over the slowest of those (and well over
+    # the cold-cache case, which none of the three was) while making a hung job
+    # fail in an hour and a half rather than burning the 6 h default.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
