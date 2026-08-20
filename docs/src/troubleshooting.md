@@ -551,14 +551,76 @@ measurable — FERAL reports anywhere from 43 to 64 against an expected
 55.
 
 Since #544 the default solve certifies `Optimal` (before it, this
-exited `Solved To Acceptable Level` in 67 iterations). The knob is now
-a speedup rather than a rescue:
+exited `Solved To Acceptable Level` in 67 iterations). **Since #693 the
+default is also the fastest route on this model, and the knob is no
+longer worth reaching for here:**
 
 | options | iterations | dual inf | exit |
 |---|---|---|---|
-| *(defaults)* | 68 | 4.70e-09 | Optimal Solution Found |
-| `feral_singular_pivot_floor=1e-8` | 39 | 1.25e-09 | Optimal Solution Found |
-| `feral_singular_pivot_floor=1e-8 mu_strategy=adaptive` | 30 | 4.98e-09 | Optimal Solution Found |
+| *(defaults)* | 21 | 2.71e-09 | Optimal Solution Found |
+| `feral_singular_pivot_floor=1e-8` | 72 | 2.39e-08 | Solved To Acceptable Level |
+| `feral_singular_pivot_floor=1e-8 mu_strategy=adaptive` | 86 | 1.77e-08 | Solved To Acceptable Level |
+| `mu_strategy=adaptive` | 21 | 2.71e-09 | Optimal Solution Found |
+
+For the record, on 0.10.0 the same four rows read 67 / 39 / 30 / 63
+iterations, all `Optimal Solution Found`. #693 removed a Tikhonov
+perturbation from the equality-multiplier initializer; `eigenb2`'s
+default trajectory got three times shorter and the knob's inverted from
+a speedup into a cost that also loses the certificate.
+
+**So do not read this section as "try `feral_singular_pivot_floor=1e-8`
+on a model like `eigenb2`".** More generally, do not read it as a
+recommendation at all. It is a *gamble worth taking when you are already
+stuck*, and the odds have now been measured rather than guessed.
+
+#### What the knob is actually worth, across the corpus
+
+The 110 hardest problems in the benchmark corpus — every one that either
+exits non-`Optimal` with `dual_inf` above `tol`, or takes 100+ iterations
+to certify — run with and without `feral_singular_pivot_floor=1e-8`:
+
+| outcome | count |
+|---|---|
+| unchanged | 89 |
+| rescues a failed or acceptable-level solve | 5 |
+| ≥20% faster, both `Optimal` | 5 |
+| **costs the certificate or the solve** | **7** |
+| ≥25% slower, both `Optimal` | 4 |
+
+Ten better, eleven worse. In aggregate the knob is a coin flip — but the
+individual effects are large in *both* directions, which is what makes it
+worth trying and worth measuring:
+
+| the best cases | | the worst cases | |
+|---|---|---|---|
+| `britgas` | `Restoration Failed` @2748 → `Optimal` @54 | `twirism1` | `Optimal` @178 → `Optimal` @1679 |
+| `ex9_1_1` | `Error In Step Computation` @99 → `Optimal` @27 | `palmer7e` | `Optimal` @1677 → hits the 3000 cap |
+| `ssebnln` | `Error In Step Computation` @215 → `Optimal` @101 | `ncvxqp6` | `Optimal` @301 → `Error In Step Computation` @505 |
+| `deconvu` | `Optimal` @321 → `Optimal` @95 | `scosine` | `Optimal` @129 → `Acceptable` @326 |
+
+(38 further problems hit a wall-clock cap in one arm or the other and are
+excluded rather than counted — they were measured 8-way parallel and the
+cap says more about the machine than about the solver.)
+
+Two things follow, and they are the practical advice:
+
+1. **The characteristic failure mode is losing the certificate, not
+   losing the answer.** Five of the seven regressions above are
+   `Optimal → Solved To Acceptable Level`: the point is still right, the
+   dual residual just parks an order of magnitude above `tol`. That is
+   the same thing `eigenb2` now does. So after setting this knob,
+   **check `dual_inf` against `tol` in the exit block** — a run that
+   still looks fine may have quietly stopped certifying.
+2. **It only pays when you are already losing.** All five rescues start
+   from a failed or acceptable-level solve. Nothing in the corpus shows
+   it turning a healthy `Optimal` run into a better one often enough to
+   justify reaching for it speculatively — it made four healthy runs
+   substantially slower over the same sample.
+
+So: reach for it when the symptom at the top of this section is what you
+are looking at, back it off from `1e-8` toward `1e-10`/`1e-12` if it does
+not pay immediately, and check the certificate before you trust the
+result. Do not carry it into a options file as a default.
 
 The fixture is committed, so this reproduces without a benchmark corpus:
 
