@@ -368,8 +368,41 @@ OMP_NUM_THREADS=1 RAYON_NUM_THREADS=1 \
 
 `crates/pounce-cli/tests/issue_541_eigenb2_degenerate_hessian.rs` pins the
 post-#544 behaviour: the default solve certifies `Optimal`, and
-`feral_singular_pivot_floor=1e-8` still reaches it in materially fewer
-iterations (39 against 68).
+`feral_singular_pivot_floor=1e-8` still reaches the optimum point.
+
+> **Addendum, gh#693.** Every measurement above was taken before #693
+> removed the Tikhonov `δ = 1e-8` from the least-squares
+> equality-multiplier initializer, and they are left as recorded — this
+> section is the #541 investigation, not a current-state reference. The
+> current numbers on the same committed fixture are:
+>
+> | options | 0.10.0 | with #693 |
+> |---|---|---|
+> | *(defaults)* | 67 it, 3.504e-09, Optimal | **21 it, 2.712e-09, Optimal** |
+> | `feral_singular_pivot_floor=1e-8` | 39 it, 7.806e-10, Optimal | 72 it, 2.394e-08, Acceptable |
+> | `… + mu_strategy=adaptive` | 30 it, 3.11e-09, Optimal | 86 it, 1.768e-08, Acceptable |
+> | `mu_strategy=adaptive` | 63 it, 7.763e-10, Optimal | 21 it, 2.712e-09, Optimal |
+>
+> The §6 conclusion that the knob rescues this model is therefore no
+> longer the operative advice: the default now reaches the optimum in
+> fewer iterations than the knob ever did, and the knob costs the
+> certificate. §6's separate conclusion — that the *default* floor must
+> not be raised globally, because healthy corpus solves live below any
+> floor that fires on `eigenb2` — is untouched by #693 and still holds.
+> The question this raised — whether the recipe is still correct advice
+> for the *symptom* it is written for, which one fixture cannot answer —
+> was settled against the benchmark corpus rather than left open. On the
+> 110 hardest corpus problems (non-`Optimal` with `dual_inf > tol`, or
+> 100+ iterations to certify), `feral_singular_pivot_floor=1e-8` is
+> unchanged on 89, better on 10 (5 rescues, 5 speedups ≥20%) and worse on
+> 11 (7 lost certificates or solves, 4 slowdowns ≥25%). A coin flip in
+> aggregate, with large effects both ways: `britgas` goes
+> `Restoration Failed`@2748 → `Optimal`@54, `twirism1` goes
+> `Optimal`@178 → `Optimal`@1679. Five of the seven regressions are
+> `Optimal → Solved To Acceptable Level` — the same shape as `eigenb2`'s,
+> the right point without the certificate. `docs/src/troubleshooting.md`
+> carries the table and the resulting advice: reach for it only when
+> already losing, and check `dual_inf` against `tol` afterwards.
 
 The first of those is the regression test for the `eigenb2` half of #544 —
 that PR pins `eigena2` and found this model only through a corpus sweep, so

@@ -127,40 +127,66 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
     );
 }
 
-/// The guard against a vacuous pass: with the trigger disabled this build
-/// must still reproduce the reported failure. If a later change fixes
-/// `eigena2` by some other route, this test fails and says so rather than
-/// letting the two tests above pass for a reason they do not describe.
+/// The guard against a vacuous pass: the `#540` trigger must still be doing
+/// measurable work on `eigena2`, or the two tests above are passing for a
+/// reason they do not describe.
 ///
-/// **`POUNCE_DBG_NO_QUAD=1` is part of the reproduction, as of gh #588's Q4.**
-/// The pre-#540 route is a knife edge — it turns on an inertia count read off
-/// a factor whose smallest pivot is ~1e-16 — and Q4 moved `∇²L[8, 8]` by
-/// **one ulp** on this model. `eigena2` has 55 quadratic rows and a
-/// non-quadratic objective, so that entry is now assembled as a constant
-/// scatter plus a decoded tape share rather than as one sum, and the two
-/// associate differently. With the fast path on, `feral_inertia_pivot_floor=0`
-/// converges (27 iterations, dual 6.0e-10) instead of stalling, and this
-/// guard would pass vacuously in the other direction — by having nothing left
-/// to reproduce.
+/// **This guard was re-derived for gh#693 and is weaker than the one it
+/// replaces. Read this before trusting it.**
 ///
-/// The env var restores the pre-Q4 arithmetic exactly: 29 iterations, dual
-/// 1.841e-7, `SolvedToAcceptableLevel`, the same numbers as before that
-/// commit. **The shipped route is untouched** — with the trigger on,
-/// `eigena2` takes 26 iterations to `SolveSucceeded` at dual 2.211e-9 before
-/// Q4 and 2.208e-9 after, on the same objective. So what changed is the
-/// reproducibility of a failure, not the fix and not the answer.
+/// It used to assert that disabling the trigger *reproduced the reported
+/// failure* — `SolvedToAcceptableLevel` with a stuck ~3.3e-7 dual — under
+/// `POUNCE_DBG_NO_QUAD=1`. That is no longer true, and the reason is
+/// gh#693: with the least-squares multiplier perturbation removed from the
+/// initializer, `y0` changes, the trajectory changes, and the pre-#540
+/// route converges on this model instead of stalling. `eigena2` is fixed by
+/// two independent routes now, so it can no longer isolate either one.
+///
+/// The old guard existed precisely to fail in this situation rather than go
+/// quiet, and it did — it is being replaced deliberately, not silenced.
+/// What is lost is real: **no fixture in this repo now reproduces the gh#540
+/// failure**, so the trigger's necessity is pinned by nothing. See gh#693.
+///
+/// What is still true, and is what this asserts: on the default path the
+/// trigger measurably improves the certificate. With it on, `eigena2`
+/// converges in 27 iterations at dual 3.43e-10; with
+/// `feral_inertia_pivot_floor=0` it takes 29 and lands at 5.45e-09 — 16x
+/// worse, deterministic across runs.
+///
+/// **Two caveats a reader has to have, or this test reads stronger than it
+/// is.** First, the margin is narrow to the default path: under
+/// `POUNCE_DBG_NO_QUAD=1` the two configurations land at 5.21e-09 and
+/// 5.27e-09, indistinguishable. Second, the *ordering* is newly true. On
+/// 0.10.0 the trigger made this model's dual residual slightly **worse** —
+/// 2.21e-09 with it on against 5.95e-10 with it off, both clearing `tol`:
+///
+/// ```text
+///                          trigger ON        trigger OFF
+///   main (0.10.0)          2.212e-09         5.947e-10     <- trigger hurts
+///   with gh#693            3.432e-10         5.447e-09     <- trigger helps
+/// ```
+///
+/// So the trigger had already stopped being load-bearing on `eigena2` at the
+/// default before gh#693 touched anything; what gh#693 removed was the last
+/// configuration (`POUNCE_DBG_NO_QUAD=1`, trigger off) under which the
+/// original failure still appeared. This assertion pins a real, reproducible
+/// effect of the current build — not a stable invariant of the fix. The
+/// property gh#540 actually established, that a count read off a
+/// working-precision pivot routes to `delta_c` instead of the `delta_w`
+/// ladder, is pinned where it belongs: the `pounce-feral` unit test named in
+/// the module header.
 #[test]
-fn disabling_the_trigger_reproduces_the_reported_failure() {
-    let r = solve_with_env(&NO_TRIGGER, &[("POUNCE_DBG_NO_QUAD", "1")]);
-    assert_eq!(
-        r.solution.status,
-        ApplicationReturnStatus::SolvedToAcceptableLevel,
-        "the pre-#540 route no longer reproduces the issue, so the tests \
-         above are no longer pinning the fix they describe",
-    );
-    let dual = r.statistics.final_dual_inf;
+fn the_trigger_still_improves_the_certificate() {
+    let with_trigger = solve(&[]).statistics.final_dual_inf;
+    let without = solve(&NO_TRIGGER).statistics.final_dual_inf;
     assert!(
-        dual > 1e-7,
-        "expected the stuck ~3.3e-7 dual residual from the issue, got {dual:e}",
+        without > with_trigger * 5.0,
+        "the inertia trigger no longer improves eigena2's dual residual \
+         (with {with_trigger:e}, without {without:e}), so the tests above \
+         are no longer pinning the fix they describe",
+    );
+    assert!(
+        with_trigger < 1e-9,
+        "expected the trigger to reach ~3.4e-10, got {with_trigger:e}",
     );
 }

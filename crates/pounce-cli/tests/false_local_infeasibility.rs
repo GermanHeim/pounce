@@ -318,26 +318,74 @@ fn cresc4_is_not_reported_infeasible() {
     );
 }
 
-/// The mechanism, pinned separately from the outcome: the ladder recovers
-/// `cresc4` *because* of the barrier-strategy rung, not the scaling rung.
+/// gh #693: no rung carries `cresc4` any more — the base trajectory reaches the
+/// optimum on its own.
 ///
-/// Rung 1 alone still fails here — that is the whole point of the issue — so if
-/// a future change collapses the ladder back to a single MC64 re-solve this
-/// test says so directly, rather than leaving the headline test above to fail
-/// with no explanation.
+/// This test used to assert the opposite. It pinned the *mechanism* behind the
+/// test above: that rung 1 alone still failed, so the barrier rung was what
+/// recovered `cresc4`, and a future change collapsing the ladder back to a
+/// single MC64 re-solve would be caught here rather than surfacing as an
+/// unexplained failure upstairs. Its message asked whoever made it pass to
+/// re-derive whether the barrier rung was still carrying the case. gh #693 made
+/// it pass, and the re-derivation is this:
+///
+/// ```text
+///                                    main (0.10.0)                this change
+///   both rungs off      Infeasible_Problem_Detected, 75    SolveSucceeded, 69
+///   rung 2 off          Infeasible_Problem_Detected, 75    SolveSucceeded, 69
+///   defaults            SolveSucceeded, 75 (promoted)      SolveSucceeded, 69
+/// ```
+///
+/// With the *whole* ladder disabled the monotone-mu trajectory now walks to
+/// `0.8718975393` — the Ipopt-MA57 reference figure to all ten published
+/// digits, and closer to it than the ladder-promoted `0.871897548` main
+/// returned. The false-infeasibility verdict is gone at its cause rather than
+/// second-guessed after the fact, so the assertion is inverted: what is pinned
+/// now is that neither rung is needed.
+///
+/// The cause was the damped equality-multiplier initializer. `y0` came out of a
+/// Tikhonov-perturbed least-squares solve (`delta = 1e-8`), which biases `y`
+/// by `O(delta / sigma_min(J)^2)`; on `cresc4` that bias was enough to send
+/// iteration 0 down the basin containing the degenerate zero-area crescent.
+/// See `LeastSquareMults::calculate_y_eq`.
+///
+/// **What this costs in coverage, stated plainly.** The ladder's rung-2
+/// diversity property — that varying the linear algebra is not a second opinion
+/// and varying the trajectory is — no longer has a witness in this repo.
+/// `discs.nl`, rung 1's own canonical case, is not a fixture here either. Both
+/// rungs remain on by default and are still exercised end-to-end by the unit
+/// tests in `main.rs`'s `scaling_retry_tests`, but nothing in-tree now
+/// demonstrates that the ladder changes an outcome on a real model. That is a
+/// real gap and it is tracked, not shrugged off.
 #[test]
-fn cresc4_needs_the_barrier_rung_not_the_scaling_rung() {
-    let scaling_only = solve("cresc4.nl", &["infeasibility_mu_strategy_retry=no"]);
+fn cresc4_no_longer_needs_either_rung_of_the_ladder() {
+    let unaided = solve(
+        "cresc4.nl",
+        &[
+            "infeasibility_mu_strategy_retry=no",
+            "feral_infeasibility_scaling_retry=no",
+        ],
+    );
     assert!(
-        (200..300).contains(&scaling_only.solution.solve_result_num),
-        "cresc4 with only the MC64 rung is expected to still report infeasible \
-         (that is gh #524); it returned status={:?}. If this now passes, the \
-         underlying monotone-mu failure may have been fixed properly — good, but \
-         re-derive whether the barrier rung is still carrying this case",
-        scaling_only.solution.status,
+        !(200..300).contains(&unaided.solution.solve_result_num),
+        "cresc4 with the whole second-opinion ladder disabled reported \
+         INFEASIBLE (status={:?}) — gh #693 removed the damped `y0` that put \
+         the base trajectory in the wrong basin, so the monotone-mu path is \
+         expected to reach the optimum unaided. If this fails, the initializer \
+         change has been undone or diluted and gh #524 is being carried by the \
+         ladder again",
+        unaided.solution.status,
+    );
+    let obj = unaided.solution.objective;
+    let rel = (obj - CRESC4_STAR).abs() / CRESC4_STAR;
+    assert!(
+        rel < 1e-6,
+        "cresc4 unaided: got objective {obj}, expected the known optimum \
+         {CRESC4_STAR} (rel err {rel:.3e})",
     );
 
-    // …and the knob the rung applies is the one that actually works, by hand.
+    // …and the two knobs the rungs apply still work by hand, which is what
+    // keeps them worth having for the models this repo does not carry.
     for opts in [
         vec!["mu_strategy=adaptive"],
         vec!["nlp_scaling_method=none"],
