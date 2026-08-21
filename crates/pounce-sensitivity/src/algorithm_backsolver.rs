@@ -457,6 +457,10 @@ impl PdSensBacksolver {
     /// `z / s` taken off the variable it constrains, and a bound that
     /// becomes active has one put on, so a single vector describes
     /// both and a single factorization serves the whole correction.
+    /// The two arguments are in different index spaces and both are
+    /// `usize`: `released` holds compound KKT rows of bound
+    /// multipliers, `pinned` holds var-x rows. Passing one where the
+    /// other belongs is not a type error and will not be caught here.
     pub(crate) fn active_set_sigma_x(
         &self,
         released: &[usize],

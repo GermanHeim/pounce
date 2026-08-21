@@ -21,8 +21,12 @@ changes.
   count.
 
   The residual comes from the algorithm's own calculated quantities by
-  way of the trial iterate, so scaling, fixed variables and the bound
-  expansions are handled exactly as the solve handles them. Setting a
+  way of the trial iterate, so fixed variables and the bound expansions
+  are handled exactly as the solve handles them. The iterations run in
+  the model's own units, which is the frame the step and the bounds
+  arrive in, and the converged iterate is converted once on the way in
+  and back on the way to those quantities, so a variable-scaled solve
+  answers in the model's units the way every other query does. Setting a
   trial point leaves `curr` alone, and `curr` is what the held
   factorization was built from, so nothing here disturbs the factor or
   any other consumer of the session.

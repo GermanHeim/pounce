@@ -34,7 +34,8 @@ use pounce_common::types::{Index, Number};
 use pounce_nlp::TNLP;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
+    StartingPoint,
 };
 use pounce_sensitivity::Solver;
 
@@ -44,9 +45,28 @@ const A1: Number = 1.10;
 const B0: Number = -0.29;
 const B1: Number = 0.11;
 
-struct ParamQp;
+/// `x_scaling` reports per-variable factors through
+/// `get_scaling_parameters`, so the same QP can be solved in the
+/// model's own units or in scaled ones. The corrector reads the
+/// algorithm's iterate, which is scaled, and is handed a step and
+/// bounds in the model's units, so the two frames have to be
+/// reconciled and only a non-unit factor shows whether they are.
+struct ParamQp {
+    x_scaling: Option<[Number; 3]>,
+}
 
 impl TNLP for ParamQp {
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(d) = self.x_scaling else {
+            return false;
+        };
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = true;
+        req.x_scaling.copy_from_slice(&d);
+        *req.use_g_scaling = false;
+        true
+    }
+
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: 3,
@@ -138,6 +158,10 @@ impl TNLP for ParamQp {
 }
 
 fn solved() -> Solver {
+    solved_scaled(None)
+}
+
+fn solved_scaled(x_scaling: Option<[Number; 3]>) -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -151,8 +175,13 @@ fn solved() -> Solver {
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
+    if x_scaling.is_some() {
+        app.options_mut()
+            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp { x_scaling }));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
     assert!(
@@ -390,4 +419,36 @@ fn the_corrector_rejects_a_step_of_the_wrong_length() {
         .expect_err("a short step should be refused");
     let msg = format!("{err:?}");
     assert!(msg.contains("step"), "unhelpful error: {msg}");
+}
+
+#[test]
+fn the_correction_is_the_same_under_variable_scaling() {
+    // The corrector adds the algorithm's iterate, which the solve
+    // keeps scaled, to a step and bounds that arrive in the model's own
+    // units. With unit factors the two frames coincide and any mix-up
+    // is invisible, so this runs the release case at three factors and
+    // asks for the same answer from each (gh#733 review).
+    let (x1, x2) = exact_at(RELEASE_DP);
+    for d in [1.0, 2.0, 10.0] {
+        let scaling = (d != 1.0).then_some([d, d, d]);
+        let solver = solved_scaled(scaling);
+        let base = solver.converged().expect("converged").x.clone();
+        let step = fix_relax_step(&solver, RELEASE_DP);
+        let (out, report) = solver
+            .correct_step(&[0], &[RELEASE_DP], &step, 12)
+            .expect("corrector");
+        let (e1, e2) = (base[0] + out[0] - x1, base[1] + out[1] - x2);
+        assert!(
+            e1.abs() < 1e-7 && e2.abs() < 1e-7,
+            "d = {d}: corrected to ({}, {}), exact is ({x1}, {x2}); {report:?}",
+            base[0] + out[0],
+            base[1] + out[1],
+        );
+        // and it still has to land inside the declared bounds
+        assert!(
+            base[0] + out[0] >= -1e-9 && base[0] + out[0] <= 1.0 + 1e-9,
+            "d = {d}: x1 left its bounds at {}",
+            base[0] + out[0],
+        );
+    }
 }

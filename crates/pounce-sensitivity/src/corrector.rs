@@ -54,7 +54,11 @@ pub struct CorrectorReport {
     pub iterations: usize,
     /// Residual at the returned point.
     pub residual: Number,
-    /// Residual at the step handed in.
+    /// Residual at the point the iterations start from, which is the
+    /// step handed in after the active-set decision has been applied
+    /// and any coordinate outside a bound has been put back inside. It
+    /// is not the residual of the caller's own step, and the two differ
+    /// by exactly what that decision and that clamp changed.
     pub initial_residual: Number,
     /// True when the loop stopped because an iteration failed to
     /// improve on the best residual seen, rather than because it ran
@@ -103,13 +107,24 @@ impl CorrectorReport {
 pub(crate) fn residual_at(
     bs: &crate::algorithm_backsolver::PdSensBacksolver,
     flat: &[Number],
-    pins: &[Index],
+    pin_rows: &[usize],
     deltas: &[Number],
     mu: Number,
     out: &mut [Number],
 ) -> Result<(), SolverError> {
+    // `flat` is in natural units, the frame the step and the bounds are
+    // in. The algorithm's own iterate is scaled, so undo `F` before
+    // handing it back. `solve` post-multiplies by the same vector.
+    let scaled: Vec<Number> = match bs.natural_units_factor() {
+        None => flat.to_vec(),
+        Some(f) => flat
+            .iter()
+            .zip(f)
+            .map(|(&v, &s)| if s == 0.0 { v } else { v / s })
+            .collect(),
+    };
     let iv = bs
-        .pack_public(flat)
+        .pack_public(&scaled)
         .map_err(|_| SolverError::SensComputationFailed("corrector: pack failed".into()))?;
     let (data, cq, _) = bs.activity_handles();
     data.borrow_mut().set_trial(iv.freeze());
@@ -143,14 +158,19 @@ pub(crate) fn residual_at(
     drop(cqb);
 
     // The perturbation moves the pinned equalities' right-hand sides,
-    // so the residual there is measured against the moved value. The
-    // rows are indices into `g`, which is the `y_c` block.
+    // so the residual there is measured against the moved value.
+    //
+    // `pin_rows` are flat KKT rows, already through
+    // `pin_rows_and_c_scales`. A user `g` index is NOT that row: the
+    // two differ whenever an inequality precedes the pin in `g(x)`
+    // (pounce#128). `deltas` arrive multiplied by the same call's row
+    // scales, since the residual above is in the algorithm's scaled
+    // equality block.
     let (yc_a, yc_b) = (off[2], off[3]);
-    for (&row, &d) in pins.iter().zip(deltas) {
-        let r = yc_a + row as usize;
-        if r >= yc_b {
+    for (&r, &d) in pin_rows.iter().zip(deltas) {
+        if r < yc_a || r >= yc_b {
             return Err(SolverError::SensComputationFailed(format!(
-                "corrector: pin row {row} is outside the equality block"
+                "corrector: pin row {r} is outside the equality block"
             )));
         }
         out[r] -= d;
@@ -160,10 +180,15 @@ pub(crate) fn residual_at(
 
 /// The largest step from `val` along `dir` that keeps every entry of a
 /// positive quantity at or above `1 - TAU` of where it started.
-fn fraction_to_boundary(val: &[Number], dir: &[Number]) -> Number {
+/// `skip` names entries to leave out, by position in `val`. A released
+/// multiplier is held at zero for the whole correction, and zero is not
+/// a positive quantity: `-TAU * 0 / d` is exactly zero, so leaving one
+/// in with a negative direction sets the step length to zero and
+/// freezes every other entry with it.
+fn fraction_to_boundary(val: &[Number], dir: &[Number], skip: &[usize]) -> Number {
     let mut a = 1.0;
-    for (&v, &d) in val.iter().zip(dir) {
-        if d < 0.0 {
+    for (k, (&v, &d)) in val.iter().zip(dir).enumerate() {
+        if d < 0.0 && !skip.contains(&k) {
             let lim = -TAU * v / d;
             if lim < a {
                 a = lim;
@@ -339,9 +364,9 @@ fn clamp_multipliers(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     bs: &crate::algorithm_backsolver::PdSensBacksolver,
-    base: &[Number],
+    base_scaled: &[Number],
     start: &[Number],
-    pins: &[Index],
+    pin_rows: &[usize],
     deltas: &[Number],
     lo: &[Number],
     hi: &[Number],
@@ -361,6 +386,16 @@ pub(crate) fn run(
     // carries one past is put back just inside, since the residual is
     // undefined outside and the fraction rule cannot recover from a
     // point that is already out.
+    // Everything below works in natural units: the step, the bounds
+    // from `bound_context`, and what `solve` returns are all in that
+    // frame, while the algorithm's own iterate is scaled. Converting
+    // the base once here is what keeps them addable. `residual_at`
+    // converts back before reading the calculated quantities.
+    let base: Vec<Number> = match bs.natural_units_factor() {
+        None => base_scaled.to_vec(),
+        Some(f) => base_scaled.iter().zip(f).map(|(&v, &s)| v * s).collect(),
+    };
+    let base = &base[..];
     let mut iterate: Vec<Number> = base.iter().zip(start).map(|(&b, &s)| b + s).collect();
     for b in &rows {
         let i = b.var_row;
@@ -412,7 +447,7 @@ pub(crate) fn run(
     };
 
     let mut resid = vec![0.0; dim];
-    residual_at(bs, &iterate, pins, deltas, mu, &mut resid)?;
+    residual_at(bs, &iterate, pin_rows, deltas, mu, &mut resid)?;
     clear(&mut resid);
     let norm = |v: &[Number]| v.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
     let initial_residual = norm(&resid);
@@ -421,6 +456,10 @@ pub(crate) fn run(
     let mut best_residual = initial_residual;
     let mut iterations = 0usize;
     let mut converged = false;
+
+    // The released rows as positions inside the dual slice the fraction
+    // rule reads, since they are held at zero and must not bound it.
+    let released_dual: Vec<usize> = released.iter().map(|&r| r - off[4]).collect();
 
     let mut rhs = vec![0.0; dim];
     let mut dir = vec![0.0; dim];
@@ -435,8 +474,13 @@ pub(crate) fn run(
 
         let (sl, dsl) = slacks_and_directions(&rows, &iterate[..n_x], &dir[..n_x], lo, hi, true);
         let (su, dsu) = slacks_and_directions(&rows, &iterate[..n_x], &dir[..n_x], lo, hi, false);
-        let alpha_p = fraction_to_boundary(&sl, &dsl).min(fraction_to_boundary(&su, &dsu));
-        let alpha_d = fraction_to_boundary(&iterate[off[4]..off[8]], &dir[off[4]..off[8]]);
+        let alpha_p =
+            fraction_to_boundary(&sl, &dsl, &[]).min(fraction_to_boundary(&su, &dsu, &[]));
+        let alpha_d = fraction_to_boundary(
+            &iterate[off[4]..off[8]],
+            &dir[off[4]..off[8]],
+            &released_dual,
+        );
 
         for i in 0..off[4] {
             iterate[i] += alpha_p * dir[i];
@@ -452,7 +496,7 @@ pub(crate) fn run(
         }
         clamp_multipliers(&rows, &mut iterate, lo, hi, mu);
 
-        residual_at(bs, &iterate, pins, deltas, mu, &mut resid)?;
+        residual_at(bs, &iterate, pin_rows, deltas, mu, &mut resid)?;
         clear(&mut resid);
         let now = norm(&resid);
         if now < best_residual {
@@ -468,7 +512,7 @@ pub(crate) fn run(
     }
 
     // the returned point's residual, split by what each block means
-    residual_at(bs, &best, pins, deltas, mu, &mut resid)?;
+    residual_at(bs, &best, pin_rows, deltas, mu, &mut resid)?;
     clear(&mut resid);
     let part = |a: usize, b: usize| norm(&resid[off[a]..off[b]]);
     let (stationarity, feasibility, complementarity) = (part(0, 2), part(2, 4), part(4, 8));
@@ -591,10 +635,15 @@ mod tests {
     fn the_fraction_rule_stops_short_of_zero() {
         // A direction that would drive an entry to zero is cut to TAU
         // of the way, and one that only increases is taken whole.
-        assert_eq!(fraction_to_boundary(&[1.0], &[-1.0]), TAU);
-        assert_eq!(fraction_to_boundary(&[1.0], &[1.0]), 1.0);
-        assert_eq!(fraction_to_boundary(&[2.0, 1.0], &[-1.0, -1.0]), TAU);
+        assert_eq!(fraction_to_boundary(&[1.0], &[-1.0], &[]), TAU);
+        assert_eq!(fraction_to_boundary(&[1.0], &[1.0], &[]), 1.0);
+        assert_eq!(fraction_to_boundary(&[2.0, 1.0], &[-1.0, -1.0], &[]), TAU);
         // the tightest entry decides
-        assert_eq!(fraction_to_boundary(&[1.0], &[-4.0]), TAU / 4.0);
+        assert_eq!(fraction_to_boundary(&[1.0], &[-4.0], &[]), TAU / 4.0);
+        // a zero entry would set the step to zero, and a skipped one
+        // must not: this is what freezes every multiplier once a bound
+        // is released (gh#733 review)
+        assert_eq!(fraction_to_boundary(&[0.0, 1.0], &[-1.0, -1.0], &[]), 0.0);
+        assert_eq!(fraction_to_boundary(&[0.0, 1.0], &[-1.0, -1.0], &[0]), TAU);
     }
 }

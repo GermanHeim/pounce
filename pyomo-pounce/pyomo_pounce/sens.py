@@ -1137,6 +1137,13 @@ def _correct(session, pin_idx, deltas, step, corrector_iter):
     the mode's own primal block carrying the plain step's multipliers.
     The iterations correct the multipliers from there, which is what
     they are for.
+
+    Two consequences worth naming. This spends a second solve even under
+    mode="linear" with degeneracy="one_sided", where the primal block it
+    then overwrites is the one it just computed. And under
+    degeneracy="directional" the multipliers come from the one-sided
+    step rather than the directional one that produced `step`, since
+    there is no directional full step to ask.
     """
     full = np.asarray(session.solver.parametric_step_full(pin_idx, deltas))
     n_x = len(step)
@@ -1306,7 +1313,9 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 "estimate: the corrector spent "
                 f"{corrector['iterations']} back-solve(s) and moved the "
                 f"residual from {corrector['initial_residual']:.2e} to "
-                f"{corrector['residual']:.2e}, so the estimate is close to "
+                f"{corrector['residual']:.2e}, measured from the point the "
+                "iterations start at rather than from the step handed in, "
+                "so the estimate is close to "
                 "the uncorrected step. That happens when the perturbation "
                 "needs a bound the base point held tightly to leave the "
                 "active set, which the held factorization cannot represent.")
@@ -1453,7 +1462,10 @@ class EstimateReport:
     corrector : dict or None
         What `corrector_iter` iterations did, None when none were run.
         Holds the back-solves spent under `iterations`, the residual
-        before and after under `initial_residual` and `residual`, and
+        before and after under `initial_residual` and `residual`
+        (`initial_residual` is measured at the point the iterations
+        start from, after the active-set decision and the clamp, not at
+        the step handed in), and
         that residual split into `stationarity`, `feasibility` and
         `complementarity`. `released` counts the bounds the step took
         out of the active set and `pinned` the ones it brought in, with

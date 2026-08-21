@@ -852,12 +852,27 @@ impl Solver {
             })?;
             flat
         };
+        // The pinned equalities' KKT rows and the row scales the
+        // algorithm applied to them. A user `g` index is not the KKT
+        // row: the two differ once an inequality precedes the pin in
+        // `g(x)` (pounce#128), and the residual the corrector measures
+        // sits in the algorithm's scaled equality block, so the deltas
+        // have to carry the same factors.
+        let (pin_rows, pin_scales) = bs
+            .pin_rows_and_c_scales(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
+        let pin_rows: Vec<usize> = pin_rows.iter().map(|&r| r as usize).collect();
+        let scaled_deltas: Vec<Number> = deltas
+            .iter()
+            .zip(&pin_scales)
+            .map(|(&d, &c)| d * c)
+            .collect();
         crate::corrector::run(
             bs,
             &base,
             step,
-            pin_constraint_indices,
-            deltas,
+            &pin_rows,
+            &scaled_deltas,
             &ctx.lo,
             &ctx.hi,
             mu,
