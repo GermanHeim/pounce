@@ -1155,12 +1155,13 @@ def estimate(model, perturb, clamp=True, mode="linear",
     change at the fraction where it happens. `active_set_changes()`
     returns the record of those changes.
 
-    max_iter bounds that work. Under "fix_relax" each pass costs a
-    dense solve whose size grows with the number of pins, and the
-    refinement is only worth running while it stays cheaper than a
-    re-solve. Under "path" it caps the number of active-set changes
-    applied, and past the cap the rest of the perturbation is taken
-    in one step under the active set reached.
+    max_iter bounds that work. Under "fix_relax" it caps the passes,
+    each of which pins every crossing it can see and costs a dense
+    solve whose size grows with the number of pins. It is a safety
+    limit there rather than a budget: the loop ends when nothing is
+    left outside a bound. Under "path" it caps the number of
+    active-set changes applied, and past the cap the rest of the
+    perturbation is taken in one step under the active set reached.
 
     degeneracy selects what happens when the base point itself sits at
     an active-set kink: a bound the classifier can call neither active
@@ -1179,7 +1180,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
     leave nothing to clamp, and when they do not, the warning says
-    whether the pass budget or the degrees of freedom stopped it.
+    which of the refinement's stopping conditions was reached.
 
     The perturbation is measured from the SOLVE point (the pin
     constraint's stored right-hand side, which is the value the Param
@@ -1229,7 +1230,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 session.solver.parametric_step_directional(
                     pin_idx, deltas, degeneracy_iter))
             if mode == "fix_relax":
-                step, pinned = (
+                step, pinned, stop = (
                     session.solver.parametric_step_bounded_decided(
                         pin_idx, deltas, held_rows, max_iter))
             elif mode == "path":
@@ -1245,7 +1246,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
             fell_back = True
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
-            step, pinned = session.solver.parametric_step_bounded(
+            step, pinned, stop = session.solver.parametric_step_bounded(
                 pin_idx, deltas, max_iter)
         elif mode == "path":
             step, segments = session.solver.parametric_step_path(
@@ -1277,16 +1278,29 @@ def estimate(model, perturb, clamp=True, mode="linear",
         if out.size:
             names = [session.var_names[i] for i in out]
             if mode == "fix_relax":
-                n_changes = len(pinned)
-                did = f"pinned {n_changes} variable(s)"
+                did = f"pinned {len(pinned)} variable(s)"
+                # The refinement says why it stopped rather than the
+                # count being read as a proxy for it: a pass pins every
+                # crossing it sees, so the number of pins says nothing
+                # about whether max_iter bound the work (gh#732).
+                why = {
+                    "iteration_limit":
+                        "the safety limit of %d pass(es) was reached, so "
+                        "raising max_iter may finish it" % max_iter,
+                    "degrees_of_freedom":
+                        "holding them all would need more pins than the "
+                        "problem has degrees of freedom, so no step does",
+                    "worse_than_plain":
+                        "the refinement ended further outside the bounds "
+                        "than the plain step, which was returned instead",
+                }.get(stop, "the refinement settled here")
             else:
                 n_changes = len(segments)
                 did = f"applied {n_changes} active-set change(s)"
-            why = ("the limit of %d was reached, so raising "
-                   "max_iter may finish it" % max_iter
-                   if n_changes >= max_iter else
-                   "holding them all would need more pins than the "
-                   "problem has degrees of freedom, so no step does")
+                why = ("the limit of %d was reached, so raising "
+                       "max_iter may finish it" % max_iter
+                       if n_changes >= max_iter else
+                       "the path settled the active set here")
             warnings.warn(
                 f"estimate: {mode} {did} and "
                 f"still leaves the bounds for {names}, because {why}."

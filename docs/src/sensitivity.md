@@ -222,13 +222,24 @@ uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
 `tol = 1e-8`. There is no option for it, since there is no reason to
 want the barrier problem's answer.
 
-Each pass rebuilds the Schur complement over the pins so far, so pass
-`k` costs one dense `k × k` solve and `k + 1` back-solves and the total
-grows quadratically. The default `max_iter` of 16 is 136 back-solves.
-A pin never rebuilds the factorization, which is what keeps it cheaper
-than re-solving. `max_iter` bounds that work and is a budget rather
-than a safeguard: the refinement is only worth running while it stays
-cheaper than the re-solve it replaces.
+A pass takes every crossing it can see, pins them together and
+re-solves, which is upstream's own loop: one violation list per pass,
+and `while (bounds_violated)` as the termination condition. Each pass
+rebuilds the Schur complement over the pins so far, so a pass carrying
+`k` of them costs one dense `k × k` solve and `k + 1` back-solves. A
+pin never rebuilds the factorization, which is what keeps it cheaper
+than re-solving.
+
+`max_iter` caps the passes, and is a safety limit rather than a budget.
+It was a budget while a pass took only the worst crossing, which needed
+as many passes as there were crossings — and on a model with more
+crossings than passes the limit, not the violations, decided where the
+loop stopped. On the CSTR of notebook 36 that put the pin count at
+exactly the budget for every budget tried, and at 100 pins (half that
+problem's degrees of freedom) the refined step came back 8.6 times
+worse than the unrefined one (gh#732). `estimate()`'s warning now names
+which stopping condition was reached rather than inferring it from the
+pin count.
 
 A **release** does re-factor, once per released set. It has to. An
 active bound contributes `sigma = z / s` to the KKT's `x` diagonal, and
@@ -240,15 +251,30 @@ was off by 2e-4 while at a looser `1e-6` it was off by 7e-9. Dropping
 the bound's `sigma` and re-factoring removes the dependence entirely.
 One factorization still sits an order of magnitude under the twenty to
 a hundred a re-solve runs, and a step that releases nothing pays
-nothing.
+nothing. This is the one place the loop departs from upstream, which
+puts the multiplier's row in the same violation list as the primal
+crossings and takes a Schur row over it: that is the computation the
+`eps · sigma` cancellation above is measuring. The pins survive a
+release either way — their right-hand sides are re-measured against the
+re-solved base rather than the pin set being cleared.
 
-Two things stop it short of holding every bound. The pass budget, which
-a caller can raise. And the problem's degrees of freedom, which no
-budget helps: pinning uses one degree of freedom each, and past that no
+Three things stop it short of holding every bound. The pass limit,
+which a caller can raise. The problem's degrees of freedom, which no
+limit helps: pinning uses one degree of freedom each, and past that no
 step holds every bound at once, so the pin is refused rather than
-returned from a singular system. In either case `estimate()` warns,
-names the variables still outside, and says which limit was reached.
-`clamp` then decides what happens to them, exactly as under `linear`.
+returned from a singular system. And the refinement ending further
+outside the bounds than the step it started from, which returns the
+unrefined step instead — repairing an active set has to beat not
+repairing it. In each case `estimate()` warns, names the variables
+still outside, and says which of the three it was. `clamp` then decides
+what happens to them, exactly as under `linear`.
+
+A pass is also refused when its correction is out of scale with the
+step it corrects, not only when a pinned row misses its target.
+Checking the pinned rows alone is what let gh#732's hundred pins each
+land within `1e-3` of where they were asked to go while the step as a
+whole came back unusable: hitting the pinned coordinates says nothing
+about what the correction did to the other thirteen hundred.
 
 What counts as outside a bound is not a tolerance you pass. It comes
 from the solve, which was willing to leave a converged point
