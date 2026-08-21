@@ -389,7 +389,9 @@ The cost is gated by the condition, and budgeted by
 `degeneracy_iter` (default 16): the released solve, one further
 back-solve per engaged row, and one more to recover the direction all
 count against it, so the decision costs a handful of back-solves at a
-kink that engages a handful of bounds.
+kink that engages a handful of bounds. A decision whose engaged set
+grows pays that recovering solve once per pass, so a set reached in
+two passes costs one more than the same set reached in one.
 
 A direction that engages more rows than the budget covers falls back to
 the one-sided step with a warning. Only a budget of zero fails before
@@ -397,8 +399,10 @@ any work: which rows engage is not known until the released solve has
 run, so a budget too small to finish still pays that one factorization
 before reporting the shortfall. The warning names the engaged count and
 the number to raise `degeneracy_iter` to, which is the retry price and
-is a floor, since a later pass can engage more rows. `predictor_iter` keeps its meaning as the mode's own
-work and plays no part in the decision. Detection also returns
+is a floor, since a later pass can engage more rows. It is always
+strictly above what the failed call spent, so each retry buys progress.
+`predictor_iter` keeps its meaning as the mode's own work and plays no
+part in the decision. Detection also returns
 nothing on a solve with relaxed bounds, where the classifier cannot
 read the slacks.
 

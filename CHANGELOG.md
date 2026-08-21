@@ -123,6 +123,17 @@ changes.
   exact decision. The engine's `use_schur_updates`
   path hits `MaxIter` on dense reduced problems of hundreds of rows and
   stays off here; that is engine-side follow-up work.
+
+  One caller-visible consequence of the split: `estimate_report()`'s
+  `max_iter` no longer does anything, since the decision was the only
+  work it budgeted there and that is `degeneracy_iter` now. It is still
+  accepted, for positional compatibility, but passing it raises a
+  `DeprecationWarning` rather than being ignored quietly —
+  `estimate_report(..., max_iter=0)` used to force the one-sided
+  fallback and would otherwise have started returning the directional
+  step without saying so. `estimate()` and `active_set_changes()` keep
+  `max_iter` as the mode's own work, where it still bites.
+
 - **`nlp_scaling_method=curvature-based`: scale a QCQP by its coefficients
   instead of by one derivative sample** (#703).
 
