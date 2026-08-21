@@ -1422,46 +1422,12 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         // `false` and succeeds with it wired; on the 126028-dimension
         // `laptime` KKT (L-BFGS leg) the pair is 68.9s -> 18.8s against
         // MA57's 10.7s.
-        // One last rung, *after* feral's ladder is exhausted: turn
-        // the backend's inner refinement on if it is off. `refine`
-        // defaults off for speed, and the argument for that default is
-        // that the IPM refines the unreduced system itself and
-        // self-corrects. That argument holds right up until this
-        // method is called -- being called *is* `PdFullSpaceSolver`
-        // reporting that its own refinement loop stagnated, i.e. that
-        // the substitutions it is iterating on are not accurate enough
-        // to converge. deb7 under `least_square_init_primal=yes` is
-        // the case that showed it: restoration converges to a feasible
-        // point (inf_pr 2.9e-12), the outer then computes a step of
-        // norm ~1e7 whose line search collapses at alpha ~1e-12, and
-        // the two cycle until `ErrorInStepComputation`. It is not a
-        // factorization-quality failure -- the inertia is right and no
-        // regularization is applied -- so the pivot and scaling rungs
-        // have nothing to fix.
-        //
-        // It goes last, not first. Ahead of the ladder it displaces
-        // the escalation path rather than extending it, and on
-        // `issue_508_infeasible_gap_1em2` at `tol=1e-3` that was
-        // enough to keep the step computation limping along instead of
-        // dropping into restoration: 3000 iterations sitting on the
-        // 1e-2 violation and a `MaximumIterationsExceeded` (AMPL 400)
-        // where the ladder as it stands reports
-        // `InfeasibleProblemDetected` (200) in 271. As a last rung it
-        // only ever fires where the alternative was to give up, so no
-        // trajectory that reaches a verdict today can lose it.
-        //
-        // Monotone: once on it stays on for the rest of the solve, so
-        // a problem that needs the accuracy pays for it and one that
-        // does not never sees it.
         if self.solver.increase_quality() {
             self.pivtol_changed = true;
-            return true;
+            true
+        } else {
+            false
         }
-        if !self.refine {
-            self.refine = true;
-            return true;
-        }
-        false
     }
 
     fn provides_inertia(&self) -> bool {
