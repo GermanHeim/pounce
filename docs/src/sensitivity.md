@@ -435,11 +435,14 @@ raised to the stiffness the barrier assigns there. Every other row
 keeps the base point's term. Both directions are the same change to one
 diagonal, so a single factorization serves the whole correction.
 
-That decision is what separates the modes here. `fix_relax` and `path`
-compute an active set and hand it over. `mode="linear"` holds the
-active set fixed by construction and hands over nothing, so its
-correction is confined to perturbations small enough that no bound
-moves.
+That decision is where the modes start from different places.
+`fix_relax` and `path` compute an active set and hand it over.
+`mode="linear"` holds the active set fixed as it builds the step, so
+all the correction has to work with is whatever the clamp left sitting
+on a bound. On the CSTR at a quarter of the change to its steady state
+that is one bound against the seven the other two pass over, which is
+why the linear estimate stays furthest from a re-solve. Below the first
+crossing all three are the same step.
 
 How far the correction reaches is set by how many crossings the
 predictor hands over rather than by the size of the perturbation
