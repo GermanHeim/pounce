@@ -379,6 +379,26 @@ impl PdSensBacksolver {
         let Some(sigma) = self.released_sigma_x(released) else {
             return false;
         };
+        self.solve_released_prebuilt(released, sigma, rhs, lhs, shift)
+    }
+
+    /// [`Self::solve_released_inner`] with the released `Σ` supplied by
+    /// the caller. Repeated solves against ONE released operator must
+    /// pass the same `Rc` every time: the factorization cache keys on
+    /// the sigma object's tag, so a sigma rebuilt per call forces a
+    /// re-factorization per call, while a held one factorizes once and
+    /// back-solves thereafter.
+    pub(crate) fn solve_released_prebuilt(
+        &self,
+        released: &[usize],
+        sigma: Rc<dyn pounce_linalg::Vector>,
+        rhs: &[Number],
+        lhs: &mut [Number],
+        shift: bool,
+    ) -> bool {
+        if rhs.len() != self.dim() || lhs.len() != self.dim() {
+            return false;
+        }
         let mut scaled: Vec<Number> = match self.conj.as_ref() {
             Some(c) => rhs.iter().zip(c.e.iter()).map(|(&r, &e)| r * e).collect(),
             None => rhs.to_vec(),
@@ -422,7 +442,10 @@ impl PdSensBacksolver {
     /// (gh#654): mixing a declared-frame `Σ` with relaxed-frame slacks
     /// would leave the released variable pinned in one frame and its
     /// neighbours in the other.
-    fn released_sigma_x(&self, released: &[usize]) -> Option<Rc<dyn pounce_linalg::Vector>> {
+    pub(crate) fn released_sigma_x(
+        &self,
+        released: &[usize],
+    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let rows = self.bound_vars.as_deref()?;
         let base_row = rows.first()?.row;

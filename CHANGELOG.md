@@ -9,6 +9,66 @@ changes.
 
 ## [Unreleased]
 
+- **`degeneracy="directional"` decides through the active-set QP engine,
+  budgeted by its own `degeneracy_iter`.**
+
+  The shipped decision enumerated candidate working sets over the weakly
+  active bounds, one released re-factorization per trial. On a dynamic
+  column model with 792 weakly active bounds that spent 32 s exhausting
+  its budget on every call before falling back, no budget could reach a
+  meaningful candidate, and any candidate holding a bound whose variable
+  an initial-condition equality already pins was singular, one such trial
+  ending the whole search. Both defects are structural to enumeration,
+  not tuning.
+
+  The decision is now solved as the QP it is: one released factorization
+  serves the whole call (the released `Sigma` is built once and every
+  solve reuses it, where rebuilding it per call was most of the old
+  per-trial cost), the released direction's violations name the engaged
+  rows, and their pin forces solve a small bound-constrained QP through
+  `pounce-qp` whose complementarity conditions are eq. 14's. Equality-
+  pinned rows never violate, so they never enter and nothing is singular.
+  Engagement uses a band of sqrt(mu) relative to the direction's norm: a
+  weak bound's slack and multiplier carry uncertainty equal to their own
+  size, and a movement below that band cannot be resolved against the
+  bound, so it keeps the released treatment rather than an asserted-exact
+  decision.
+
+  `degeneracy_iter` (default 16, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`) budgets the decision's back-solves, replacing
+  the borrowed `max_iter`, which keeps its meaning as the mode's own
+  work; the split matters because the two are different resources spent
+  on different questions. Exhaustion falls back to the one-sided step as
+  before, with the warning now naming the true engagement count.
+
+  The enumeration is removed, not kept alongside: `directional_step`
+  and its combination generator are gone, and the
+  `parametric_step_bounded_directional` /
+  `parametric_step_path_directional` entries and bindings with them
+  (their job, decide then consume, is now the decision plus the
+  `_decided` entries). `parametric_step_directional` remains the name
+  of the decision and is the QP implementation.
+
+  Measured on the fixtures and the 62k-variable column: kink decisions
+  identical to the enumeration's (direction difference 0 and 2e-19, in
+  fewer solves), the notebook's held-breakpoint example bit-identical
+  including its record, the column's default-budget call falling back
+  diagnosed in 5 s against 32 s, and the exact decision at a raised
+  budget, which enumeration cannot produce at all, terminating in 21.5 s
+  (232 back-solves, 76 of 792 held).
+
+  The basis columns are projected onto the weak rows' own entries and
+  the full-length vectors dropped, since that projection is all `S`
+  reads. What the columns were otherwise held for, the direction
+  `d0 + Σ λ_k X_k`, is recovered in one further solve on the combined
+  right-hand side `Σ λ_k a_k`, which is the same vector by linearity.
+  That trades one back-solve per expansion round for bounding the
+  memory by the weak-set size rather than by `dim` times the budget:
+  about 114 MB at that 62k configuration, and growing with
+  `degeneracy_iter` toward 390 MB for a caller raising it to reach the
+  exact decision. The engine's `use_schur_updates`
+  path hits `MaxIter` on dense reduced problems of hundreds of rows and
+  stays off here; that is engine-side follow-up work.
 - **`nlp_scaling_method=curvature-based`: scale a QCQP by its coefficients
   instead of by one derivative sample** (#703).
 
