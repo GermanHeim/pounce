@@ -78,6 +78,14 @@ changes.
   come after `corrector_iter`, since `estimate_report()` shipped in
   0.10.0 and its positional order is fixed.
 
+  A `refine_stop` attribute carries why the `"fix_relax"` refinement
+  stopped, one of `"settled"`, `"iteration_limit"`,
+  `"degrees_of_freedom"` or `"worse_than_plain"`, and None under the
+  other two modes. A pass pins every crossing it sees, so the pin count
+  says nothing about which limit was reached and this is the only thing
+  that does. `"worse_than_plain"` means the step the report describes
+  is the unrefined one.
+
 - **`max_iter` on `estimate()` and `active_set_changes()` is now
   `predictor_iter`.** It bounds the `fix_relax` refinement passes and
   the active-set changes `path` applies, so it now says which work it

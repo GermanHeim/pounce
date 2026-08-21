@@ -533,6 +533,12 @@ r.activity       # per coordinate: inactive / weakly_active /
 r.row_activity   # strongly_active / ambiguous / unidentified / ...
 ```
 
+`refine_stop` says why the `"fix_relax"` refinement stopped, one of
+`"settled"`, `"iteration_limit"`, `"degrees_of_freedom"` or
+`"worse_than_plain"`, and is None under the other two modes. A pass
+pins every crossing it sees, so the pin count says nothing about which
+limit was reached and this is the only thing that does.
+
 `mode` and `predictor_iter` select which step is measured and match
 `estimate()`'s arguments of the same names. `violation` and `corrector`
 are properties of the step, so a `fix_relax` estimate needs
