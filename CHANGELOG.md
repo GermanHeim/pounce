@@ -35,10 +35,13 @@ changes.
   complementarity row gone, a bound the step brings in has its diagonal
   raised to what the barrier assigns at that slack, and every other row
   keeps the base point's term. Both are the same change to one
-  diagonal, so one factorization serves the whole correction. That is
-  also why `mode="linear"` gains nothing past the first crossing: it
-  holds the active set fixed by construction and hands over no
-  decision.
+  diagonal, so one factorization serves the whole correction.
+
+  The changes come from the step's own endpoint, so every mode hands
+  over something. `fix_relax` and `path` decide an active set and pass
+  it on. `mode="linear"` holds the active set fixed as it builds the
+  step, so what reaches the correction is whatever the clamp left
+  sitting on a bound, one change where the other two pass seven.
 
   Measured on the CSTR of notebook 36, whose first crossing is at 1.3%
   of the change to its steady state: with `fix_relax` and eight
@@ -54,14 +57,17 @@ changes.
   halving the residual, so an uncorrected step is never returned as a
   corrected one, and the report splits the residual into stationarity,
   feasibility and complementarity, which carry different units and
-  different consequences for whether an estimate can be acted on.
+  different consequences for whether an estimate can be acted on. It
+  also reports `released` and `pinned`, the bounds that left the active
+  set and the ones that joined, with `active_set_changes` their total.
 
-- **`max_iter` on `estimate()`, `estimate_report()` and
-  `active_set_changes()` is now `predictor_iter`.** It bounds the
-  `fix_relax` refinement passes and the active-set changes `path`
-  applies, so it now says which work it limits, alongside
-  `corrector_iter` and `degeneracy_iter`. None of the three functions
-  is in a release, so nothing downstream carries the old name.
+- **`max_iter` on `estimate()` and `active_set_changes()` is now
+  `predictor_iter`.** It bounds the `fix_relax` refinement passes and
+  the active-set changes `path` applies, so it now says which work it
+  limits, alongside `corrector_iter` and `degeneracy_iter`. Neither
+  function is in a release, so nothing downstream carries the old name.
+  `estimate_report()` is unaffected and keeps the deprecated `max_iter`
+  it gained earlier in this cycle.
 
 - **`degeneracy="directional"` decides through the active-set QP engine,
   budgeted by its own `degeneracy_iter`.**
