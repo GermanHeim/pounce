@@ -13,10 +13,18 @@
 //! correct: the residual it reports must be at the barrier's own
 //! floor, and the step must come back unchanged.
 //!
-//! Moving `p` far enough to change the active set gives the opposite
-//! case. At `p = 1` the true solution has `x1` on its upper bound,
-//! which the base point's factor holds nothing against, so the step
-//! needs correcting and the corrector has room to work.
+//! Moving `p` changes the active set in either direction, and the
+//! fixture reaches both. The base solve holds `x2` on its lower bound,
+//! since `b(0)` is negative. Past `p = 0.573` the true `x2` is
+//! positive, so that bound leaves the active set, and below `p = 0.728`
+//! the true `x1` is still inside its upper bound, so a `p` between the
+//! two releases one bound and touches nothing else. At `p = 1` the
+//! opposite happens: `x1` reaches its upper bound, which the base
+//! point's factor holds nothing against.
+//!
+//! Both cases have a closed form, since the solution solves a 2x2
+//! linear system while the active set holds, so `exact_at` gives the
+//! answer the corrector is aiming at without solving again.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -154,6 +162,109 @@ fn solved() -> Solver {
     solver
 }
 
+/// The solution with both bounds inactive, from the 2x2 system the
+/// first-order conditions reduce to.
+fn exact_at(p: Number) -> (Number, Number) {
+    let (a, b) = (A0 + A1 * p, B0 + B1 * p);
+    let det = 1.0 - G * G;
+    ((a - G * b) / det, (b - G * a) / det)
+}
+
+/// The step `pyomo-pounce` hands the corrector under `mode="fix_relax"`:
+/// that mode's primal block carrying the plain step's multipliers.
+///
+/// It matters which one the corrector gets. A bound the solve held
+/// contributes a barrier diagonal the plain step cannot move against,
+/// so the plain step leaves the variable on the bound and the endpoint
+/// shows no release. `fix_relax` decides the release itself, and its
+/// endpoint is where the corrector reads it from.
+fn fix_relax_step(solver: &Solver, dp: Number) -> Vec<Number> {
+    let mut full = solver
+        .parametric_step_full(&[0], &[dp])
+        .expect("parametric step");
+    let (primal, _) = solver
+        .parametric_step_bounded(&[0], &[dp], 16)
+        .expect("fix_relax step");
+    full[..primal.len()].copy_from_slice(&primal);
+    full
+}
+
+/// `p` between the two thresholds in the module header, where the only
+/// active-set change is `x2` leaving its lower bound.
+const RELEASE_DP: Number = 0.65;
+
+#[test]
+fn the_corrector_releases_a_bound_the_solve_held() {
+    // The base solve holds x2 down, and at this p the true x2 is off
+    // the bound. The corrector takes that bound out of the operator
+    // once, and the iterations then reach the exact answer.
+    let solver = solved();
+    let base = solver.converged().expect("converged").x.clone();
+    let step = fix_relax_step(&solver, RELEASE_DP);
+    let (out, report) = solver
+        .correct_step(&[0], &[RELEASE_DP], &step, 12)
+        .expect("corrector");
+    assert_eq!(
+        (report.released, report.pinned),
+        (1, 0),
+        "this p should release one bound and pin none, got {report:?}",
+    );
+    assert!(
+        report.residual < report.initial_residual * 1e-6,
+        "releasing the bound should let the iterations converge: {:.3e} -> {:.3e}",
+        report.initial_residual,
+        report.residual,
+    );
+    assert!(
+        report.converged,
+        "the loop should stop on its own: {report:?}"
+    );
+    let (x1, x2) = exact_at(RELEASE_DP);
+    assert!(
+        (base[0] + out[0] - x1).abs() < 1e-7 && (base[1] + out[1] - x2).abs() < 1e-7,
+        "corrected to ({}, {}), exact is ({x1}, {x2})",
+        base[0] + out[0],
+        base[1] + out[1],
+    );
+}
+
+#[test]
+fn a_plain_step_leaves_a_held_bound_where_it_was() {
+    // The same p through the plain step. Its endpoint keeps x2 on the
+    // bound, so there is no release to read and the corrector iterates
+    // against the base point's own barrier term, which holds x2 down.
+    // Nothing moves, and that is what the residual reports.
+    let solver = solved();
+    let base = solver.converged().expect("converged").x.clone();
+    let step = solver
+        .parametric_step_full(&[0], &[RELEASE_DP])
+        .expect("parametric step");
+    let (_, report) = solver
+        .correct_step(&[0], &[RELEASE_DP], &step, 12)
+        .expect("corrector");
+    assert_eq!(
+        (report.released, report.pinned),
+        (0, 0),
+        "the plain step's endpoint shows no active-set change: {report:?}",
+    );
+    let (_, x2) = exact_at(RELEASE_DP);
+    assert!(
+        x2 > 1e-3,
+        "this p should want x2 off its bound, exact x2 = {x2}"
+    );
+    assert!(
+        base[1] + step[1] < 1e-6,
+        "the plain step should leave x2 on the bound, at {}",
+        base[1] + step[1],
+    );
+    assert!(
+        report.residual > report.initial_residual * 0.99,
+        "with the bound still in the operator there is nothing to gain:          {:.3e} -> {:.3e}",
+        report.initial_residual,
+        report.residual,
+    );
+}
+
 #[test]
 fn the_corrector_leaves_an_exact_step_alone() {
     // A small move keeps the active set, where the quadratic model
@@ -168,6 +279,11 @@ fn the_corrector_leaves_an_exact_step_alone() {
         .correct_step(&[0], &[0.05], &step, 8)
         .expect("corrector");
     assert_eq!(out.len(), step.len());
+    assert_eq!(
+        (report.released, report.pinned),
+        (0, 0),
+        "a step this small changes no bound's status: {report:?}",
+    );
     assert!(
         report.initial_residual < 1e-6,
         "an exact step should start at the barrier floor, got {}",
@@ -205,9 +321,17 @@ fn the_corrector_reduces_the_residual_where_the_step_is_wrong() {
         "this step should leave a residual to work on, got {}",
         report.initial_residual,
     );
+    assert_eq!(
+        (report.released, report.pinned),
+        (0, 1),
+        "this p should pin one bound and release none: {report:?}",
+    );
+    // A magnitude, not just `improved()`. Without the pin applied the
+    // iterations move the residual by about 1e-10 of itself, which a
+    // strict inequality accepts and this does not.
     assert!(
-        report.improved(),
-        "the corrector should reduce the residual: {} -> {} in {} iteration(s)",
+        report.residual < report.initial_residual * 0.95,
+        "the corrector should reduce the residual by more than roundoff:          {:.17e} -> {:.17e} in {} iteration(s)",
         report.initial_residual,
         report.residual,
         report.iterations,
@@ -240,6 +364,11 @@ fn a_zero_budget_measures_the_step_without_iterating() {
         .correct_step(&[0], &[1.0], &step, 0)
         .expect("corrector");
     assert_eq!(report.iterations, 0);
+    assert_eq!(
+        (report.released, report.pinned),
+        (0, 1),
+        "the active set is decided before the first iteration: {report:?}",
+    );
     assert_eq!(report.residual, report.initial_residual);
     assert!(!report.improved());
     assert!(

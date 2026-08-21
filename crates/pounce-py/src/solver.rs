@@ -617,7 +617,9 @@ impl PySolver {
         info.set_item("residual", rep.residual)?;
         info.set_item("initial_residual", rep.initial_residual)?;
         info.set_item("converged", rep.converged)?;
-        info.set_item("active_set_changes", rep.released)?;
+        info.set_item("active_set_changes", rep.released + rep.pinned)?;
+        info.set_item("released", rep.released)?;
+        info.set_item("pinned", rep.pinned)?;
         info.set_item("stationarity", rep.stationarity)?;
         info.set_item("feasibility", rep.feasibility)?;
         info.set_item("complementarity", rep.complementarity)?;

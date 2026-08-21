@@ -63,6 +63,9 @@ pub struct CorrectorReport {
     /// Bounds the step took out of the active set, which the corrector
     /// removed from the operator once before iterating.
     pub released: usize,
+    /// Bounds the step brought into the active set, whose barrier
+    /// diagonal the corrector raised once before iterating.
+    pub pinned: usize,
     /// The returned point's residual split the way the compound system
     /// is: how far the Lagrangian's gradient is from zero, how far the
     /// model's own equations are from being satisfied, and how far the
@@ -478,10 +481,120 @@ pub(crate) fn run(
             residual: best_residual,
             initial_residual,
             converged,
-            released: released.len() + pinned.len(),
+            released: released.len(),
+            pinned: pinned.len(),
             stationarity,
             feasibility,
             complementarity,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backsolver::BoundRow;
+
+    const MU: Number = 1e-8;
+
+    /// Two variables, one bound row each: a lower bound on `x0` and an
+    /// upper bound on `x1`. The compound layout puts the multipliers
+    /// after the primal block, which is all `clamp_multipliers` needs.
+    fn rows() -> Vec<BoundRow> {
+        vec![
+            BoundRow {
+                row: 2,
+                var_row: 0,
+                lower: true,
+            },
+            BoundRow {
+                row: 3,
+                var_row: 1,
+                lower: false,
+            },
+        ]
+    }
+
+    /// `[x0, x1, z0, z1]` with both variables a unit inside their
+    /// bounds, so each band is `[mu / kappa, kappa * mu]`.
+    fn iterate(z0: Number, z1: Number) -> Vec<Number> {
+        vec![1.0, 9.0, z0, z1]
+    }
+
+    const LO: [Number; 2] = [0.0, 0.0];
+    const HI: [Number; 2] = [10.0, 10.0];
+
+    #[test]
+    fn a_multiplier_inside_the_band_is_left_alone() {
+        let mut it = iterate(1.0, 2.0);
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        assert_eq!((it[2], it[3]), (1.0, 2.0));
+    }
+
+    #[test]
+    fn a_multiplier_above_the_band_comes_down_to_it() {
+        // the slack is 1.0 on both, so the ceiling is kappa * mu
+        let ceiling = 1e10 * MU;
+        let mut it = iterate(1e6, 1e6);
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        assert_eq!(
+            (it[2], it[3]),
+            (ceiling, ceiling),
+            "both should land on the ceiling {ceiling}",
+        );
+    }
+
+    #[test]
+    fn a_multiplier_below_the_band_comes_up_to_it() {
+        let floor = MU / 1e10;
+        let mut it = iterate(1e-30, 1e-30);
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        assert_eq!((it[2], it[3]), (floor, floor));
+    }
+
+    #[test]
+    fn the_band_moves_with_the_slack() {
+        // x0 a hundredth off its lower bound, x1 a hundredth off its
+        // upper. Both bands are a hundred times higher than at a slack
+        // of one, and the upper bound reads its slack from the other
+        // side.
+        let mut it = vec![0.01, 9.99, 1e6, 1e6];
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        let ceiling = 1e10 * MU / 0.01;
+        assert!(
+            (it[2] - ceiling).abs() < 1e-9 * ceiling && (it[3] - ceiling).abs() < 1e-9 * ceiling,
+            "want {ceiling} on both, got {} and {}",
+            it[2],
+            it[3],
+        );
+    }
+
+    #[test]
+    fn a_released_multiplier_stays_at_zero() {
+        // A released bound is held at zero for the whole correction,
+        // so the clamp must not lift it back into the band.
+        let mut it = iterate(0.0, -1.0);
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        assert_eq!((it[2], it[3]), (0.0, -1.0));
+    }
+
+    #[test]
+    fn a_coordinate_outside_its_bound_is_skipped() {
+        // No positive slack means no band to clamp into, and dividing
+        // by it would produce a sign the barrier cannot use.
+        let mut it = vec![-1.0, 11.0, 1e6, 1e6];
+        clamp_multipliers(&rows(), &mut it, &LO, &HI, MU);
+        assert_eq!((it[2], it[3]), (1e6, 1e6));
+    }
+
+    #[test]
+    fn the_fraction_rule_stops_short_of_zero() {
+        // A direction that would drive an entry to zero is cut to TAU
+        // of the way, and one that only increases is taken whole.
+        assert_eq!(fraction_to_boundary(&[1.0], &[-1.0]), TAU);
+        assert_eq!(fraction_to_boundary(&[1.0], &[1.0]), 1.0);
+        assert_eq!(fraction_to_boundary(&[2.0, 1.0], &[-1.0, -1.0]), TAU);
+        // the tightest entry decides
+        assert_eq!(fraction_to_boundary(&[1.0], &[-4.0]), TAU / 4.0);
+    }
 }

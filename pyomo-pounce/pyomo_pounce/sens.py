@@ -1440,11 +1440,16 @@ class EstimateReport:
         active-set answer by that much.
     corrector : dict or None
         What `corrector_iter` iterations did, None when none were run.
-        Holds the back-solves spent, the residual before and after, the
-        bounds whose status the step changed, and the residual split
-        into stationarity, feasibility and complementarity. This is the
-        dual half `violation` refers to: it needs the multipliers at
-        the perturbed point, which the corrector holds.
+        Holds the back-solves spent under `iterations`, the residual
+        before and after under `initial_residual` and `residual`, and
+        that residual split into `stationarity`, `feasibility` and
+        `complementarity`. `released` counts the bounds the step took
+        out of the active set and `pinned` the ones it brought in, with
+        `active_set_changes` their total. `converged` says the loop
+        stopped because an iteration failed to improve rather than
+        because it ran out of budget. This is the dual half `violation`
+        refers to: it needs the multipliers at the perturbed point,
+        which the corrector holds.
     bounds_relaxed : bool
         True when the solve ran with a non-zero `bound_relax_factor`,
         which lets a variable settle outside the bound the model
