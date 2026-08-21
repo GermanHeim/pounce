@@ -788,3 +788,29 @@ def test_an_unknown_mode_is_refused():
     m = bounded()
     with pytest.raises(ValueError, match="mode must be"):
         estimate_report(m, [(m.p, 2.0)], mode="relax_fix")
+
+
+def test_refine_stop_says_why_the_refinement_stopped():
+    """A pass pins every crossing it sees, so the pin count says
+    nothing about which limit was reached. Only the stop reason does."""
+    m = coupled()
+    r = estimate_report(m, [(m.p, -1.2)], mode="fix_relax")
+    assert r.refine_stop in ("settled", "iteration_limit",
+                            "degrees_of_freedom", "worse_than_plain"), (
+        f"unrecognised stop reason {r.refine_stop!r}")
+    for mode in ("linear", "path"):
+        assert estimate_report(m, [(m.p, -1.2)], mode=mode).refine_stop is None
+
+
+@pytest.mark.parametrize("mk,target", [
+    (coupled, -1.2), (bounded, 4.0), (with_row, 3.0),
+])
+def test_settled_means_nothing_is_left_outside_a_bound(mk, target):
+    """The label has to match the state it names. A pass now pins every
+    crossing it sees, so these all settle in one, which is what makes
+    the pin count useless as a proxy and the label worth having."""
+    m = mk()
+    r = estimate_report(m, [(m.p, target)], mode="fix_relax")
+    assert r.refine_stop == "settled"
+    assert list(r.crossed) == [], (
+        f"settled but {[v.name for v in r.crossed]} is outside its bound")

@@ -85,6 +85,77 @@ changes.
   function is in a release, so nothing downstream carries the old name.
   `estimate_report()` is unaffected and keeps the deprecated `max_iter`
   it gained earlier in this cycle.
+- **`mode="fix_relax"` pins every crossing in a pass, so `max_iter` no
+  longer picks the answer (gh#732).**
+
+  The refinement took the single worst violation per pass, so repairing
+  `k` crossings needed `k` passes and `max_iter` — documented as a cost
+  budget — was the loop's only termination condition on any model with
+  more crossings than passes. On the CSTR of notebook 36 the pin count
+  equalled the budget at 16, 30, 60 and 100; at 100 pins, half that
+  problem's degrees of freedom, the refined step came back with a
+  largest relative error of 7.16 against `mode="linear"`'s 0.83 — 8.6
+  times worse than not refining at all — and the error was not even
+  monotonic in the budget.
+
+  A pass now collects the whole violation list, both halves of
+  fix-relax together, constrains all of it and re-solves, which is
+  upstream's own structure: one `x_bound_violations_idx` per pass and
+  `while (bounds_violated)` as the termination condition. The loop ends
+  when the list empties.
+
+  A release keeps its re-factorization rather than becoming a Schur row
+  as upstream has it — that is the computation the `eps · sigma`
+  cancellation measured at 2e-4 off at `tol = 1e-10` is about — but it
+  no longer clears the pins: their right-hand sides are re-measured
+  against the re-solved base. Clearing them is where the budget table's
+  discontinuity came from (a budget of 200 reached a release, wiped
+  100+ pins and ended with 3).
+
+  The release batch backs off the way the pin batch does, and the
+  asymmetry is the point: a pin ADDS a condition, so an over-large batch
+  shows up as an augmented system that cannot be solved, while a release
+  REMOVES one — each bound taken out is stiffness no longer holding its
+  variable, and taking too many at once carries variables off bounds
+  they were sitting on with nothing left to pin them back, and no failed
+  solve anywhere to say so. On notebook 36's CSTR that was 56 releases
+  where 41 were right, and two of its four perturbations came back worse
+  than the unrefined step. A batch of more than one is now kept only
+  when the step it produces is no further outside the bounds than the
+  step in hand; otherwise the most negative multiplier goes alone and
+  the next pass re-measures the rest under it. A release also survives a
+  pin batch that cannot be solved, rather than being rolled back with
+  it: a release repairs the active set on its own terms. That is two
+  separable things — the released set itself, and the step it produced
+  — and a pass that rolls back only the first recovers the released
+  bounds while still answering with the unrefined step.
+
+  A bound whose release the factorization refuses is barred rather than
+  retried — the same factorization was being asked for again on every
+  later pass — and the stop for it is `degrees_of_freedom`, which no
+  budget reaches, rather than the pass limit.
+
+  `max_iter` is a safety limit now, and the refinement reports which of
+  its stopping conditions fired. `Solver::parametric_step_bounded`,
+  `parametric_step_bounded_decided` and their Python bindings return
+  `(dx, pinned, stop)`, where `stop` is `"settled"`,
+  `"iteration_limit"`, `"degrees_of_freedom"` or `"worse_than_plain"`.
+  `estimate()` names it in the warning instead of inferring the reason
+  from the pin count, which a batched pass makes meaningless.
+
+  Two guards independent of the loop shape, both suggested on the
+  issue. A pass is refused when its correction is out of scale with the
+  step it corrects, not only when a pinned row misses its target: the
+  hundred pins above each landed within `1e-3` of where they were asked
+  to go, because achieving the pinned coordinates says nothing about
+  what the correction did to the other 1300. And the unrefined step is
+  returned when the refinement ends further outside the bounds than it
+  started, which is free — `dx_plain` is already in scope.
+
+  Also fixed on the way: the refinement's augmented solves routed an
+  empty released set through `solve_released`, which a backsolver
+  without release support answers `false` to, so such a backsolver
+  could not pin at all.
 
 - **`degeneracy="directional"` decides through the active-set QP engine,
   budgeted by its own `degeneracy_iter`.**

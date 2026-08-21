@@ -253,7 +253,7 @@ impl PySolver {
     }
 
     /// Parametric step with the bounds respected by pinning rather than
-    /// clamping, as `(dx, pinned)`.
+    /// clamping, as `(dx, pinned, stop)`.
     ///
     /// `parametric_step` points where the linear predictor points,
     /// which can be outside the box. Clamping a coordinate back to its
@@ -280,18 +280,34 @@ impl PySolver {
     /// already respects every bound, and the step is then the plain
     /// one.
     ///
-    /// `max_iter` is a budget rather than a safeguard: the
-    /// refinement is only worth running while it stays cheaper than a
-    /// re-solve. The factorization is never rebuilt, but the Schur
-    /// complement is rebuilt each pass, so pass `k` costs one dense
-    /// `k × k` solve and `k + 1` back-solves and the total grows
-    /// quadratically. The default of 16 is 136 back-solves. What counts
-    /// as outside a bound comes from the solve's own
-    /// `bound_relax_factor` rather than from an argument. Passes stop
-    /// when nothing is outside by that much, at `max_iter`, or when
-    /// the conditions exhaust the problem's degrees of freedom, which
-    /// makes the augmented system singular. None is an error, and
-    /// `pinned` says how far the refinement got.
+    /// A pass takes every crossing it can see, pins them together and
+    /// re-solves, so the number of passes tracks how far the active set
+    /// has to move rather than how many bounds it moves. The
+    /// factorization is never rebuilt for a pin, but the Schur
+    /// complement is, so a pass carrying `k` pins costs one dense
+    /// `k × k` solve and `k + 1` back-solves. What counts as outside a
+    /// bound comes from the solve's own `bound_relax_factor` rather
+    /// than from an argument.
+    ///
+    /// `max_iter` is a safety limit rather than a budget. It was a
+    /// budget while a pass took one pin, which needed as many passes as
+    /// there were crossings, and on a model with more crossings than
+    /// passes the limit picked the answer (gh#732).
+    ///
+    /// `stop` says why the refinement stopped, and is one of:
+    ///
+    /// * `"settled"` — nothing is outside a bound and no multiplier is
+    ///   negative. Only this one says it finished.
+    /// * `"iteration_limit"` — `max_iter` passes were spent with
+    ///   violations left. Raising it may finish the job.
+    /// * `"degrees_of_freedom"` — the conditions exhausted the
+    ///   problem's degrees of freedom, so no step holds every bound at
+    ///   once. No budget helps.
+    /// * `"worse_than_plain"` — the refinement ended further outside
+    ///   the bounds than the unrefined step, which was returned instead
+    ///   with an empty `pinned`.
+    ///
+    /// None is an error, and `pinned` says how far the refinement got.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_bounded<'py>(
         &self,
@@ -299,7 +315,7 @@ impl PySolver {
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
         max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "parametric_step_bounded: no converged factor (call solve() first)",
@@ -313,13 +329,14 @@ impl PySolver {
                 pins.len(),
             )));
         }
-        let (dx, pinned) = s
+        let (dx, pinned, stop) = s
             .inner
             .parametric_step_bounded(&pins, &deltas, max_iter)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
             pinned.into_iter().map(|p| p as i64).collect(),
+            stop.as_str(),
         ))
     }
 
@@ -397,8 +414,8 @@ impl PySolver {
 
     /// `parametric_step_bounded` with the weak-row decision
     /// supplied by the caller (var-x rows the direction holds) instead
-    /// of searched for. Study surface for an externally solved eq. 14
-    /// QP.
+    /// of searched for, as `(dx, pinned, stop)`. Study surface for an
+    /// externally solved eq. 14 QP.
     #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16))]
     fn parametric_step_bounded_decided<'py>(
         &self,
@@ -407,7 +424,7 @@ impl PySolver {
         deltas: Vec<Number>,
         held_var_rows: Vec<i64>,
         max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "parametric_step_bounded_decided: no converged factor (call solve() first)",
@@ -432,13 +449,14 @@ impl PySolver {
             .block_dims()
             .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?[0];
         let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
-        let (dx, pinned) = s
+        let (dx, pinned, stop) = s
             .inner
             .parametric_step_bounded_decided(&pins, &deltas, max_iter, &held)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
             pinned.into_iter().map(|p| p as i64).collect(),
+            stop.as_str(),
         ))
     }
 
