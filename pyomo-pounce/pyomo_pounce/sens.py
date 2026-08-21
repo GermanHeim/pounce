@@ -1543,7 +1543,7 @@ def _user_row_names(session):
     return [back.get(nm, nm) for nm in session.con_names]
 
 
-def estimate_report(model, perturb, max_iter=16,
+def estimate_report(model, perturb, max_iter=None,
                     degeneracy="directional", degeneracy_iter=16):
     """Report what `estimate()`'s linear step does about the bounds.
 
@@ -1551,8 +1551,14 @@ def estimate_report(model, perturb, max_iter=16,
     the same names, so the step measured here is the step `estimate()`
     takes for the same arguments, including the directional-derivative
     correction at a degenerate base point. degeneracy_iter budgets that
-    correction's back-solves. max_iter is accepted for signature
-    parity with `estimate()` and is unused here.
+    correction's back-solves.
+
+    max_iter is accepted for positional compatibility and does nothing.
+    It used to budget the directional decision here, so passing it -- in
+    particular `max_iter=0` to force the one-sided fallback -- changed
+    the reported step; `degeneracy_iter` is that knob now. Passing it
+    raises a DeprecationWarning rather than being ignored in silence,
+    since the two readings differ and nothing else would say so.
 
     Takes the same perturbation argument `estimate()` takes and returns
     an EstimateReport. Nothing about the estimate changes: this runs
@@ -1579,6 +1585,12 @@ def estimate_report(model, perturb, max_iter=16,
         raise ValueError(
             "estimate_report: degeneracy must be 'directional' or "
             f"'one_sided', got {degeneracy!r}")
+    if max_iter is not None:
+        warnings.warn(
+            "estimate_report: max_iter no longer does anything here and is "
+            "ignored; it used to budget the directional decision, which "
+            "degeneracy_iter budgets now. Pass degeneracy_iter instead.",
+            DeprecationWarning, stacklevel=2)
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:
@@ -1698,13 +1710,15 @@ def active_set_changes(model, perturb, max_iter=16,
     A list of length `max_iter` means the cap stopped the path before
     the target, the same condition `estimate()` warns about.
 
-    degeneracy matches `estimate()`'s argument of the same name. Under
-    "directional" (the default), a weakly active bound the perturbation
-    releases appears in the record as a departure at the fraction
-    where its multiplier reaches zero: essentially zero at an exact
-    kink, and partway along the step when the held solve sits inside
-    the ambiguous band, where the bound is genuinely active for the
-    first stretch.
+    degeneracy and degeneracy_iter match `estimate()`'s arguments of the
+    same names. Under "directional" (the default), a weakly active bound
+    the perturbation releases appears in the record as a departure at
+    the fraction where its multiplier reaches zero: essentially zero at
+    an exact kink, and partway along the step when the held solve sits
+    inside the ambiguous band, where the bound is genuinely active for
+    the first stretch. degeneracy_iter budgets that decision's
+    back-solves, and a budget it cannot fit falls back to the one-sided
+    record with a warning; max_iter, above, still caps the path itself.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None

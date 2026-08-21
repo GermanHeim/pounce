@@ -6,7 +6,8 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import declare_sens_param, estimate, estimate_report
+from pyomo_pounce import (active_set_changes, declare_sens_param, estimate,
+                          estimate_report)
 from pyomo_pounce.sens import _NO_BOUND, _ratio_test
 
 
@@ -666,3 +667,31 @@ def test_no_session_is_a_clean_error():
     m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
     with pytest.raises(RuntimeError, match="no sensitivity session"):
         estimate_report(m, [(m.p, 2.0)])
+
+
+def test_max_iter_here_warns_instead_of_being_ignored():
+    """`max_iter` used to budget the directional decision here, so
+    `max_iter=0` forced the one-sided fallback. `degeneracy_iter` is
+    that knob now and `max_iter` does nothing, which would silently
+    change what this returns for a caller who passed it."""
+    m = bounded()
+    with pytest.warns(DeprecationWarning, match="max_iter no longer"):
+        got = estimate_report(m, [(m.p, 4.0)], max_iter=0)
+    # and it really is ignored: the report is the one the same call
+    # without it produces, not the one-sided fallback max_iter=0 used
+    # to force
+    assert got.alpha == pytest.approx(estimate_report(m, [(m.p, 4.0)]).alpha)
+
+
+def test_the_other_two_surfaces_keep_max_iter_silent():
+    """`estimate` and `active_set_changes` still spend `max_iter` on
+    the mode's own work, so passing it there is not deprecated. Matched
+    on this deprecation's own text rather than on DeprecationWarning as
+    a class, so an unrelated one from pyomo or numpy cannot fail it."""
+    import warnings as _w
+    m = bounded()
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        estimate(m, [(m.p, 1.2)], max_iter=8)
+        active_set_changes(m, [(m.p, 1.2)], max_iter=8)
+    assert not [w for w in caught if "max_iter no longer" in str(w.message)]
