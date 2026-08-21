@@ -36,6 +36,26 @@ changes.
   discontinuity came from (a budget of 200 reached a release, wiped
   100+ pins and ended with 3).
 
+  The release batch backs off the way the pin batch does, and the
+  asymmetry is the point: a pin ADDS a condition, so an over-large batch
+  shows up as an augmented system that cannot be solved, while a release
+  REMOVES one — each bound taken out is stiffness no longer holding its
+  variable, and taking too many at once carries variables off bounds
+  they were sitting on with nothing left to pin them back, and no failed
+  solve anywhere to say so. On notebook 36's CSTR that was 56 releases
+  where 41 were right, and two of its four perturbations came back worse
+  than the unrefined step. A batch of more than one is now kept only
+  when the step it produces is no further outside the bounds than the
+  step in hand; otherwise the most negative multiplier goes alone and
+  the next pass re-measures the rest under it. A release also survives a
+  pin batch that cannot be solved, rather than being rolled back with
+  it: a release repairs the active set on its own terms.
+
+  A bound whose release the factorization refuses is barred rather than
+  retried — the same factorization was being asked for again on every
+  later pass — and the stop for it is `degrees_of_freedom`, which no
+  budget reaches, rather than the pass limit.
+
   `max_iter` is a safety limit now, and the refinement reports which of
   its stopping conditions fired. `Solver::parametric_step_bounded`,
   `parametric_step_bounded_decided` and their Python bindings return

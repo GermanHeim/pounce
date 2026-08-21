@@ -258,6 +258,18 @@ crossings and takes a Schur row over it: that is the computation the
 release either way — their right-hand sides are re-measured against the
 re-solved base rather than the pin set being cleared.
 
+Releasing is the half that has to be careful about how much it does at
+once, and the asymmetry is worth stating. A pin ADDS a condition, so
+asking for too many shows up honestly as an augmented system that
+cannot be solved. A release REMOVES one: each bound taken out of the
+active set is stiffness that is no longer holding its variable there.
+Take too many at once and variables that were sitting on their bounds
+are carried off them, with no degrees of freedom left to pin them back
+— and no failed solve anywhere to say so. So a release batch is kept
+only when the step it produces is no further outside the bounds than
+the step in hand; otherwise the most negative multiplier goes alone and
+the next pass re-measures the rest under it.
+
 Three things stop it short of holding every bound. The pass limit,
 which a caller can raise. The problem's degrees of freedom, which no
 limit helps: pinning uses one degree of freedom each, and past that no
