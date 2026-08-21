@@ -4449,6 +4449,11 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_integer_value("feral_refine_steps", "") {
         cfg.refine_max_steps = v.max(0) as usize;
     }
+    // Also only consulted when `refine` is on. Registered with lower bound
+    // 0, and 0 disables the pre-check; see `FeralConfig::refine_target`.
+    if let Ok((v, true)) = options.get_numeric_value("feral_refine_target", "") {
+        cfg.refine_target = v.max(0.0);
+    }
     // Explicit static-pivoting opt-in (feral#8 cascade breaker, pounce#254).
     // Same tri-state discipline: unset leaves `cfg.static_pivoting` at
     // whatever `from_env` resolved (`None` → inherit feral's delayed-pivot

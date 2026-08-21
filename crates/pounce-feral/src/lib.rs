@@ -49,6 +49,8 @@ pub struct FeralSolverInterface {
     refine: bool,
     /// See [`FeralConfig::refine_max_steps`].
     refine_max_steps: usize,
+    /// See [`FeralConfig::refine_target`]. `0.0` disables the pre-check.
+    refine_target: f64,
 
     /// Destination buffer for the in-place solve entry points, grown once
     /// and reused. feral's allocating entry points return an owned `Vec`
@@ -63,6 +65,11 @@ pub struct FeralSolverInterface {
     /// Rust; the copy back into the caller's slice stays, the allocation
     /// does not.
     x_scratch: Vec<Number>,
+
+    /// Residual buffer for the [`FeralConfig::refine_target`] pre-check,
+    /// grown once and reused on the same terms as `x_scratch`. Unused
+    /// (and never grown) when the target is disabled.
+    resid_scratch: Vec<Number>,
 
     dim: Index,
     nonzeros: Index,
@@ -304,10 +311,13 @@ pub struct FeralConfig {
     /// `residual_ratio_max` of 1e-10 on the unreduced system — rather than
     /// chasing machine precision on the condensed one. feral cannot
     /// express that: `RefineOptions` carries `max_steps` and nothing else,
-    /// and the tolerance is hard-wired. A residual-target option is the
-    /// upstream request, in the same shape as feral#178 which produced
-    /// this knob. Until then the cap is the only lever, and 10 is the only
-    /// value the corpus does not reject.
+    /// and the tolerance is hard-wired. That is filed as feral#190, in the
+    /// same shape as feral#178 which produced this knob. Until it lands,
+    /// [`Self::refine_target`] is pounce's own approximation of it — a
+    /// pre-check that decides *whether* to refine rather than for how
+    /// long, which is the discrimination this cap cannot make at any
+    /// value. Of the caps, 10 remains the only one the corpus does not
+    /// reject.
     ///
     /// Cost of leaving it at 10, on the 58014-variable `laptime`
     /// benchmark under limited-memory: `LinearSystemBackSolve` 48.962 s of
@@ -316,6 +326,48 @@ pub struct FeralConfig {
     /// it per problem when back-solve dominates the timing report, and
     /// re-check the answer; it is not safe to lower globally.
     pub refine_max_steps: usize,
+    /// Residual level at which the inner refinement is skipped entirely,
+    /// as a relative 2-norm `‖b − A·x‖₂ / ‖b‖₂` measured on the
+    /// *unrefined* solve. `0.0` (the default) disables the check and
+    /// every back-solve takes the refined entry point, which is the
+    /// behaviour every release through 0.10.0 shipped.
+    ///
+    /// This exists because feral's refinement has a step cap but no
+    /// target: `RefineOptions` carries only `max_steps`, and the
+    /// convergence test is hard-wired to `‖r‖₂/‖b‖₂ < ε·√n`
+    /// (`feral-0.17.0/src/numeric/solve.rs:2574`). That is the tightest
+    /// residual the arithmetic admits — and roughly 300× tighter than
+    /// anything the caller reads. `PdFullSpaceSolver` accepts a solve at
+    /// `residual_ratio_max = 1e-10`, on the *unreduced* system at that,
+    /// so the digits feral works for are discarded on arrival.
+    ///
+    /// Traced on the 126028-dimension KKT of the `laptime` benchmark
+    /// (target `ε·√n` = 7.88e-14), the unrefined solve already lands at
+    /// 1.5e-11 and 2.3e-11 — two orders inside what the outer loop asks
+    /// for — and the loop then spends four to five steps chasing the last
+    /// two digits, at 48.962 s of a 61.741 s solve. One of the two traced
+    /// calls never reaches the hard-wired target at all: it plateaus at
+    /// 8.19e-14 against 7.88e-14 and exits on the stagnation rule, having
+    /// paid two full steps to notice a bit-identical residual.
+    ///
+    /// So the pre-check: solve once without refinement, measure, and take
+    /// the refined path only if the answer is not already good enough.
+    /// The cheap path costs one sparse matvec against the four-to-five
+    /// matvec-plus-substitution passes it replaces; the expensive path
+    /// pays one extra substitution, since the refined entry point redoes
+    /// the initial solve internally.
+    ///
+    /// The upstream fix is feral#190 — a residual target on
+    /// `RefineOptions`, so the loop stops when the caller's tolerance is
+    /// met rather than when the arithmetic runs out. This field is the
+    /// pounce-side prototype that establishes what that number should be;
+    /// it goes away when feral#190 lands.
+    ///
+    /// Not a substitute for [`Self::refine_max_steps`] `= 0`: the check
+    /// still runs refinement on the back-solves that need it, which is
+    /// what keeps the gh#590 noise-floor LP (data scale 1e11) solving.
+    /// Consulted only when [`Self::refine`] is on.
+    pub refine_target: f64,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
     /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
     /// floor, `factor()` returns [`ESymSolverStatus::Singular`] even
@@ -442,6 +494,8 @@ impl Default for FeralConfig {
             fma: false,
             refine: true,
             refine_max_steps: feral::DEFAULT_REFINE_MAX_STEPS,
+            // Disabled: every back-solve refines, as it always has.
+            refine_target: 0.0,
             // MA57 `CNTL(2)` default — an absolute small-pivot
             // magnitude on the scaled matrix. Only pivots essentially
             // at the working-precision floor are flagged singular.
@@ -512,6 +566,12 @@ impl FeralConfig {
             // goes through it now.
             refine_max_steps: feral::env::usize_var("POUNCE_FERAL_REFINE_STEPS")
                 .unwrap_or(feral::DEFAULT_REFINE_MAX_STEPS),
+            refine_target: feral::env::f64_var_where(
+                "POUNCE_FERAL_REFINE_TARGET",
+                ">= 0 and finite",
+                |v| v >= 0.0,
+            )
+            .unwrap_or(0.0),
             singular_pivot_floor: feral::env::f64_var_where(
                 "POUNCE_FERAL_SINGULAR_PIVOT_FLOOR",
                 ">= 0 and finite",
@@ -750,7 +810,9 @@ impl FeralSolverInterface {
             refactorize: false,
             refine: cfg.refine,
             refine_max_steps: cfg.refine_max_steps,
+            refine_target: cfg.refine_target,
             x_scratch: Vec::new(),
+            resid_scratch: Vec::new(),
             dim: 0,
             nonzeros: 0,
             rows_0: Vec::new(),
@@ -1060,6 +1122,49 @@ impl FeralSolverInterface {
         // loop (gh#698, gh#710), so the budget is ours to set rather than
         // feral's to assume.
         let opts = RefineOptions::with_max_steps(self.refine_max_steps);
+        // `FeralConfig::refine_target`: solve once without refinement and
+        // measure, so the refined entry point is only reached on the
+        // back-solves that are not already inside the caller's tolerance.
+        // feral's own convergence test cannot do this — `RefineOptions`
+        // has no target, only a step cap (feral#190).
+        if self.refine
+            && self.refine_target > 0.0
+            && let Some(m) = self.matrix.as_ref()
+        {
+            let first = if nrhs == 1 {
+                self.solver.solve_into(rhs_vals, x_out)
+            } else {
+                self.solver.solve_many_into(rhs_vals, nrhs, x_out)
+            };
+            match first {
+                Err(_) => return ESymSolverStatus::FatalError,
+                Ok(()) => {
+                    self.resid_scratch.resize(n, 0.0);
+                    // Every column has to clear the target: a back-solve
+                    // is one solve as far as the caller is concerned, and
+                    // refinement is all-or-nothing per call.
+                    let good = (0..nrhs).all(|col| {
+                        let lo = col * n;
+                        relative_residual(
+                            m,
+                            &rhs_vals[lo..lo + n],
+                            &x_out[lo..lo + n],
+                            &mut self.resid_scratch,
+                        )
+                        .is_some_and(|r| r <= self.refine_target)
+                    });
+                    if good {
+                        rhs_vals.copy_from_slice(x_out);
+                        return ESymSolverStatus::Success;
+                    }
+                }
+            }
+            // Fall through: the unrefined answer is not good enough, so
+            // pay for the refined path. It redoes the initial solve
+            // internally — one wasted substitution on this branch, against
+            // the four-to-five passes the branch above skips entirely.
+        }
+
         let solved = match (self.refine, self.matrix.as_ref(), nrhs == 1) {
             (true, Some(m), true) => self.solver.solve_refined_into(m, rhs_vals, x_out, opts),
             (true, Some(m), false) => self
@@ -1079,6 +1184,48 @@ impl FeralSolverInterface {
             Err(_) => ESymSolverStatus::FatalError,
         }
     }
+}
+
+/// Relative residual `‖b − A·x‖₂ / ‖b‖₂` of a single solve, for the
+/// [`FeralConfig::refine_target`] pre-check.
+///
+/// `a` holds the **lower** triangle of a symmetric matrix — that is what
+/// `factor()` builds and what feral's refinement is handed — so each
+/// stored entry off the diagonal contributes to two rows of the product.
+///
+/// `scratch` is the residual accumulator, sized `a.n` by the caller;
+/// taken as a parameter so the hot path allocates nothing.
+///
+/// Returns `None` when `‖b‖₂` is zero (the ratio is undefined and there
+/// is nothing to refine) or when any norm is not finite, which reads as
+/// "cannot certify this solve" and sends the caller down the refined
+/// path.
+fn relative_residual(
+    a: &CscMatrix,
+    b: &[Number],
+    x: &[Number],
+    scratch: &mut [Number],
+) -> Option<f64> {
+    let n = a.n;
+    debug_assert_eq!(b.len(), n);
+    debug_assert_eq!(x.len(), n);
+    scratch[..n].copy_from_slice(&b[..n]);
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let v = a.values[k];
+            scratch[i] -= v * x[j];
+            if i != j {
+                scratch[j] -= v * x[i];
+            }
+        }
+    }
+    let r_norm = scratch[..n].iter().map(|v| v * v).sum::<f64>().sqrt();
+    let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if !r_norm.is_finite() || !b_norm.is_finite() || b_norm == 0.0 {
+        return None;
+    }
+    Some(r_norm / b_norm)
 }
 
 impl Default for FeralSolverInterface {
@@ -2589,6 +2736,155 @@ mod tests {
                     feral::DEFAULT_REFINE_MAX_STEPS,
                 );
             }
+        }
+    }
+
+    /// `relative_residual` reads the **lower** triangle of a symmetric
+    /// matrix, so every stored off-diagonal has to land in two rows of the
+    /// product. Checked against a dense reference rather than a
+    /// hand-computed number, so the mirroring is what is being tested and
+    /// not an arithmetic transcription.
+    #[test]
+    fn the_residual_probe_mirrors_the_stored_lower_triangle() {
+        // [[4, 1, 1], [1, 5, 1], [1, 1, 3]], lower triangle only.
+        let dense = [[4.0, 1.0, 1.0], [1.0, 5.0, 1.0], [1.0, 1.0, 3.0]];
+        let rows = [0usize, 1, 1, 2, 2, 2];
+        let cols = [0usize, 0, 1, 0, 1, 2];
+        let vals = [4.0, 1.0, 5.0, 1.0, 1.0, 3.0];
+        let a = CscMatrix::from_triplets(3, &rows, &cols, &vals).unwrap();
+
+        let b = [1.0, -2.0, 3.0];
+        // A deliberately wrong `x`, so the residual is large and a probe
+        // that dropped the mirrored half would land somewhere else.
+        let x = [0.5, 0.25, -1.0];
+        let mut scratch = vec![0.0; 3];
+        let got = relative_residual(&a, &b, &x, &mut scratch).expect("finite, b nonzero");
+
+        let r: Vec<f64> = (0..3)
+            .map(|i| b[i] - (0..3).map(|j| dense[i][j] * x[j]).sum::<f64>())
+            .collect();
+        let want = r.iter().map(|v| v * v).sum::<f64>().sqrt()
+            / b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(
+            (got - want).abs() <= 1e-15 * want,
+            "probe {got:e} vs dense reference {want:e}",
+        );
+
+        // An exact solve reads as ~0, which is what makes the comparison
+        // against a target meaningful in the first place.
+        let x_exact = [0.12000000000000005, -0.6599999999999999, 1.1799999999999997];
+        let got = relative_residual(&a, &b, &x_exact, &mut scratch).expect("finite");
+        assert!(got < 1e-15, "exact solve read as {got:e}");
+
+        // `b = 0` makes the ratio undefined; the caller reads `None` as
+        // "cannot certify" and refines.
+        assert!(relative_residual(&a, &[0.0; 3], &x, &mut scratch).is_none());
+    }
+
+    /// gh#710 follow-on: `FeralConfig::refine_target` decides *whether* the
+    /// refinement runs, where `refine_max_steps` only decides how long it
+    /// runs once started. Both back-solve arms have to honour it — the
+    /// predictor-corrector step is the `nrhs = 2` one, and a target plumbed
+    /// into only the narrow arm would leave the IPM's hot path refining
+    /// unconditionally.
+    ///
+    /// Behavioural, and bit-exact on purpose: the check is not "the answer
+    /// got worse" (which is a tolerance argument) but "this is *the same
+    /// answer* the unrefined path returns", which can only be true if the
+    /// refinement was skipped outright.
+    #[test]
+    fn the_refine_target_decides_whether_refinement_runs_on_both_arms() {
+        // Hilbert n=8 again: conditioned so one back-solve lands around
+        // 1e-7 and refinement has digits left to recover, so "refined" and
+        // "unrefined" are distinguishable answers rather than the same one.
+        const N: usize = 8;
+        let a = |i: usize, j: usize| 1.0 / ((i + j + 1) as f64);
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..N {
+            for j in 0..=i {
+                irn.push((i + 1) as Index);
+                jcn.push((j + 1) as Index);
+                vals.push(a(i, j));
+            }
+        }
+        let rhs0: Vec<Number> = (0..2 * N).map(|k| ((k % 7) as f64) - 3.0).collect();
+
+        let solve_with = |cfg: FeralConfig, nrhs: Index| -> Vec<Number> {
+            let mut s = FeralSolverInterface::with_config(cfg);
+            assert_eq!(
+                s.initialize_structure(N as Index, vals.len() as Index, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&vals);
+            let mut rhs = rhs0[..N * nrhs as usize].to_vec();
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, nrhs, &mut rhs, false, 0),
+                ESymSolverStatus::Success
+            );
+            rhs
+        };
+
+        for nrhs in [1 as Index, 2] {
+            let refined = solve_with(FeralConfig::default(), nrhs);
+            let unrefined = solve_with(
+                FeralConfig {
+                    refine: false,
+                    ..FeralConfig::default()
+                },
+                nrhs,
+            );
+            assert_ne!(
+                refined, unrefined,
+                "nrhs={nrhs}: refinement changed nothing on this matrix, so \
+                 the test cannot tell the two paths apart",
+            );
+
+            // A target of 0 is the shipped default and must be inert: the
+            // pre-check is skipped entirely and every back-solve refines.
+            assert_eq!(
+                solve_with(
+                    FeralConfig {
+                        refine_target: 0.0,
+                        ..FeralConfig::default()
+                    },
+                    nrhs
+                ),
+                refined,
+                "nrhs={nrhs}: a target of 0 changed the answer — the default \
+                 is not inert",
+            );
+
+            // A target no solve can miss accepts the first answer, so the
+            // result is the unrefined one, bit for bit.
+            assert_eq!(
+                solve_with(
+                    FeralConfig {
+                        refine_target: 1.0,
+                        ..FeralConfig::default()
+                    },
+                    nrhs
+                ),
+                unrefined,
+                "nrhs={nrhs}: an unmissable target still refined — \
+                 `refine_target` is not reaching this back-solve arm",
+            );
+
+            // ...and a target no solve can meet must still refine, which is
+            // what keeps the check from being a disguised `refine = no`
+            // (pounce gh#590: the noise-floor LP needs the refinement it
+            // asks for, and gets it, because its residuals sit above any
+            // target worth setting).
+            assert_eq!(
+                solve_with(
+                    FeralConfig {
+                        refine_target: f64::MIN_POSITIVE,
+                        ..FeralConfig::default()
+                    },
+                    nrhs
+                ),
+                refined,
+                "nrhs={nrhs}: an unreachable target skipped the refinement",
+            );
         }
     }
 }
