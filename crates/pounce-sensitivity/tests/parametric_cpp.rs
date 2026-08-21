@@ -27,6 +27,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// `bound_relax_factor`'s default, i.e. how far below its declared
+/// lower bound of 0 the solver actually holds `x[2]`.
+const BOUND_RELAX: f64 = 1e-8;
+
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -523,8 +527,12 @@ fn fix_relax_pins_the_crossing_variable_at_its_bound() {
 
     // and the pinned re-solve puts it back on the bound
     let fixed_x2 = base[2] + fixed[2];
+    // "On its bound" means the bound the solver actually holds, which
+    // `bound_relax_factor` (1e-8) has moved from 0 to -1e-8. A pinned
+    // re-solve that is accurate enough lands on -1e-8 exactly, so the
+    // window has to include it rather than stop one ulp short of it.
     assert!(
-        fixed_x2.abs() < 1e-8,
+        fixed_x2.abs() <= BOUND_RELAX + 1e-12,
         "fix-relax should land x[2] on its bound, got {fixed_x2}",
     );
 }
@@ -866,7 +874,12 @@ fn path_stops_where_the_variable_reaches_its_bound() {
     );
     // Having pinned there, the walk must leave it on the bound.
     let x2 = base[2] + walked[2];
-    assert!(x2.abs() < 1e-8, "x[2] should finish on its bound, got {x2}",);
+    // See `fix_relax_pins_the_crossing_variable_at_its_bound`: the held
+    // bound is the relaxed one, at -`BOUND_RELAX`.
+    assert!(
+        x2.abs() <= BOUND_RELAX + 1e-12,
+        "x[2] should finish on its bound, got {x2}",
+    );
 }
 
 #[test]
