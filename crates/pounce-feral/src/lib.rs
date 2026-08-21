@@ -204,8 +204,40 @@ pub struct FeralConfig {
     ///
     /// Measured on a 118 276-dimension KKT (gh#698): `feral_refine = no`
     /// cut back-solve time 60% and wall time 20% and still converged.
-    /// The default stays `true`, but no longer on the grounds it used to
-    /// stand on. That was pinene_3200, said to stall in the IPM tail when
+    ///
+    /// **This default is `true`, and the NLP solver's is `false`
+    /// (gh#710, reported as gh#698 observation 5). The split is
+    /// deliberate.** Turning the loop off is
+    /// only safe for a caller that does two things Ipopt's architecture
+    /// assumes of one: refine the *unreduced* system itself, and ask the
+    /// backend for a better factorization when that stalls. Refinement
+    /// is needed at all because feral's
+    /// `ZeroPivotAction::ForceAccept` can leave real residual against
+    /// the system it factorized — something Ipopt assumes a backend does
+    /// not do — and with nothing to catch it, gh#590's data-scale-1e11
+    /// LP exits `RestorationFailed`. Ipopt's own answer to a
+    /// factorization that cannot deliver is not backend refinement; it
+    /// is `IncreaseQuality` (`IpPDFullSpaceSolver.cpp:296`), which
+    /// [`FeralSolverInterface::increase_quality`] now implements. So
+    /// `pounce_algorithm::application::feral_config_from_options` turns
+    /// this off for the IPM — `PdFullSpaceSolver` does both halves —
+    /// and on the 126 028-dimension `laptime` KKT under limited-memory
+    /// the pair is 68.9 s -> 18.8 s, against MA57's 10.7 s.
+    ///
+    /// It stays `true` here because every other caller of
+    /// [`FeralSolverInterface::new`] — `pounce-convex`'s HSDE / SOS /
+    /// active-set solvers, `pounce-rs`, `pounce-py`'s QP and SOS
+    /// entry points — has the first half (`hsde::IR_MAX_PASSES`) but
+    /// not the second: none of them calls `increase_quality`. Flipping
+    /// the library default instead of the IPM's took backend
+    /// refinement away from them with nothing in its place, and the
+    /// Motzkin SOS relaxation at its minimal order went from `Optimal`
+    /// to `IterationLimit` — a rank-deficient, non-strictly-feasible
+    /// SDP is exactly the case that needs it. Wire `increase_quality`
+    /// into a caller before turning this off for it.
+    ///
+    /// The grounds it used to stand on were already gone before that.
+    /// That was pinene_3200, said to stall in the IPM tail when
     /// the cascade-break residual floor is left uncorrected, and never
     /// re-measured against the outer loop alone. It has now been measured
     /// (gh#710) and it does not stall: at 64 000 variables it converges to
@@ -492,6 +524,11 @@ impl Default for FeralConfig {
         Self {
             cascade_break: None,
             fma: false,
+            // On -- see the field doc. The NLP solver turns it off in
+            // `feral_config_from_options` because it refines the
+            // unreduced system itself *and* escalates through
+            // `increase_quality`; a caller doing only the first still
+            // needs this.
             refine: true,
             refine_max_steps: feral::DEFAULT_REFINE_MAX_STEPS,
             // Disabled: every back-solve refines, as it always has.
@@ -1336,11 +1373,35 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
     }
 
     fn increase_quality(&mut self) -> bool {
-        // Mirror ipopt-feral (IpFeralSolverInterface.cpp:134): no pivtol
-        // escalation here. Returning false hands recovery to
-        // PDPerturbationHandler so matrix-side regularization (`lg(rg)`)
-        // is the single escalator, matching ipopt-feral's trajectory.
-        false
+        // Ipopt's `IncreaseQuality` contract: when `PdFullSpaceSolver`'s
+        // refinement loop stagnates it asks the backend for a better
+        // factorization before falling back on `pretend_singular` and the
+        // perturbation handler (`IpPDFullSpaceSolver.cpp:296`). Every
+        // upstream backend that can escalate does — MA57 raises `pivtol`
+        // to `min(pivtolmax, pivtol^0.75)` (`IpMa57TSolverInterface.cpp:832`),
+        // and `Ma57SolverInterface::increase_quality` mirrors it.
+        //
+        // feral has the same ladder (scaling Identity → InfNorm, then
+        // `pivot_threshold^0.75`); this hands it the rung. The earlier
+        // `false` here cited the ipopt-feral shim, but that shim's own
+        // comment reads "POC: no escalation" — a proof-of-concept
+        // shortcut, not a design.
+        //
+        // Wiring it is what lets `refine` default off (as it is for every
+        // other backend, upstream and here): with the escalation missing,
+        // feral's unconditional inner refinement was the only thing
+        // standing between a hard KKT and `RestorationFailed`, at ~4x the
+        // back-solve cost. Measured on gh#590's data-scale-1e11 LP,
+        // `refine = no` fails `RestorationFailed` with this returning
+        // `false` and succeeds with it wired; on the 126028-dimension
+        // `laptime` KKT (L-BFGS leg) the pair is 68.9s -> 18.8s against
+        // MA57's 10.7s.
+        if self.solver.increase_quality() {
+            self.pivtol_changed = true;
+            true
+        } else {
+            false
+        }
     }
 
     fn provides_inertia(&self) -> bool {

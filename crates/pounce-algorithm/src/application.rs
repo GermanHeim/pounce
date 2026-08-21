@@ -4440,6 +4440,17 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_bool_value("feral_fma", "") {
         cfg.fma = v;
     }
+    // Not tri-state, and deliberately not: the IPM's default is the
+    // opposite of the library's (gh#710, gh#698 obs 5). `FeralConfig`
+    // ships `refine = true` because a caller that only refines its own
+    // system needs the backend loop; the IPM also escalates through
+    // `increase_quality` when that stalls, which is the rung Ipopt uses
+    // in place of backend refinement, so here the loop is off. Ordered
+    // env-then-option so `POUNCE_FERAL_REFINE` still reaches this path
+    // and an explicit `feral_refine` still beats both.
+    if std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
+        cfg.refine = false;
+    }
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }
