@@ -61,6 +61,23 @@ changes.
   also reports `released` and `pinned`, the bounds that left the active
   set and the ones that joined, with `active_set_changes` their total.
 
+- **`estimate_report()` takes `mode` and `predictor_iter`, and measures
+  the step that mode builds.** `violation` is evaluated at the
+  predicted point and the `corrector` block starts from that point's
+  residual, so both are properties of the step. Reporting the linear
+  step's numbers for a `fix_relax` or `path` estimate described a step
+  the caller did not take. On one nonlinear model whose linear step
+  leaves a variable outside its bound, the violation is 3.64 under
+  `"linear"` and 0.427 under the other two.
+
+  Under `"fix_relax"` and `"path"` the step stops at the bound, so
+  `alpha` is 1.0 and `crossed` is empty for every model, which is the
+  correct answer for such a step. `activity`, `row_activity`, `mu`,
+  `perturbations` and `bounds_relaxed` come from the base point and the
+  solve, so none of them moves with the mode. The two new arguments
+  come after `corrector_iter`, since `estimate_report()` shipped in
+  0.10.0 and its positional order is fixed.
+
 - **`max_iter` on `estimate()` and `active_set_changes()` is now
   `predictor_iter`.** It bounds the `fix_relax` refinement passes and
   the active-set changes `path` applies, so it now says which work it

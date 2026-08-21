@@ -1126,8 +1126,7 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
-def _correct(session, pin_idx, deltas, step, mode, degeneracy,
-             corrector_iter, fell_back):
+def _correct(session, pin_idx, deltas, step, corrector_iter):
     """Refine a step by Newton iterations on the barrier system.
 
     Returns the refined primal step and what the iterations did.
@@ -1293,8 +1292,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     corrector = None
     if corrector_iter:
         step, corrector = _correct(
-            session, pin_idx, deltas, step, mode, degeneracy,
-            corrector_iter, fell_back)
+            session, pin_idx, deltas, step, corrector_iter)
         # A correction that works drives the residual down by orders;
         # one that cannot represent the active-set change the
         # perturbation needs shaves a few percent off and leaves the
@@ -1618,8 +1616,8 @@ def _user_row_names(session):
 
 def estimate_report(model, perturb, max_iter=None,
                     degeneracy="directional", degeneracy_iter=16,
-                    corrector_iter=0):
-    """Report what `estimate()`'s linear step does about the bounds.
+                    corrector_iter=0, mode="linear", predictor_iter=16):
+    """Report what `estimate()`'s step does about the bounds.
 
     degeneracy and degeneracy_iter match `estimate()`'s arguments of
     the same names, so the step measured here is the step `estimate()`
@@ -1633,6 +1631,24 @@ def estimate_report(model, perturb, max_iter=None,
     reported step. `degeneracy_iter` is that knob now. Passing it raises
     a DeprecationWarning rather than being ignored in silence, since the
     two readings differ and nothing else would say so.
+
+    mode and predictor_iter match `estimate()`'s arguments of the same
+    names, so the step measured here is the step `estimate()` takes for
+    the same arguments. `violation` and `corrector` are properties of
+    that step and move with the mode. Reporting the linear step's
+    violation for a `fix_relax` estimate would describe a step the
+    caller did not take.
+
+    `alpha`, `first`, `crossed` and `crossed_rows` measure where the
+    step leaves a bound. Under "fix_relax" and "path" it does not,
+    since both stop at the bound by construction, so `alpha` is 1.0 and
+    `crossed` is empty for every model. That is the correct answer for
+    such a step rather than a missing one. The reason to run those
+    modes is what "linear" reports at the same perturbation.
+
+    `activity`, `row_activity` and `mu` come from the converged base
+    point and `perturbations` and `bounds_relaxed` from the solve, so
+    none of the five depends on the mode.
 
     corrector_iter runs the same Newton iterations `estimate()` runs and
     reports what they did on the `corrector` attribute, without changing
@@ -1661,6 +1677,10 @@ def estimate_report(model, perturb, max_iter=None,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    if mode not in ("linear", "fix_relax", "path"):
+        raise ValueError(
+            "estimate_report: mode must be 'linear', 'fix_relax' or "
+            f"'path', got {mode!r}")
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
             "estimate_report: degeneracy must be 'directional' or "
@@ -1672,19 +1692,35 @@ def estimate_report(model, perturb, max_iter=None,
             "degeneracy_iter budgets now. Pass degeneracy_iter instead.",
             DeprecationWarning, stacklevel=2)
     pin_idx, deltas = _perturbation_deltas(session, perturb)
+    # the same dispatch `estimate()` runs, so the step measured here is
+    # the step it takes for these arguments
+    fell_back = False
     if degeneracy == "directional":
         try:
-            step, _, _ = session.solver.parametric_step_directional(
+            step, held_rows, _ = session.solver.parametric_step_directional(
                 pin_idx, deltas, degeneracy_iter)
+            if mode == "fix_relax":
+                step, _ = session.solver.parametric_step_bounded_decided(
+                    pin_idx, deltas, held_rows, predictor_iter)
+            elif mode == "path":
+                step, _ = session.solver.parametric_step_path_decided(
+                    pin_idx, deltas, held_rows, predictor_iter)
         except RuntimeError as e:
             if "directional derivative" not in str(e):
                 raise
             warnings.warn(
                 f"estimate_report: {e}. Falling back to the one-sided "
                 "step, the degeneracy='one_sided' behavior.")
+            fell_back = True
+    if degeneracy == "one_sided" or fell_back:
+        if mode == "fix_relax":
+            step, _ = session.solver.parametric_step_bounded(
+                pin_idx, deltas, predictor_iter)
+        elif mode == "path":
+            step, _ = session.solver.parametric_step_path(
+                pin_idx, deltas, predictor_iter)
+        else:
             step = session.solver.parametric_step(pin_idx, deltas)
-    else:
-        step = session.solver.parametric_step(pin_idx, deltas)
     dx = session.scatter_x(np.asarray(step))
     base = np.asarray(session.base_x)
     x_new = base + dx
@@ -1756,8 +1792,7 @@ def estimate_report(model, perturb, max_iter=None,
     corrector = None
     if corrector_iter:
         _, corrector = _correct(
-            session, pin_idx, deltas, np.asarray(step), "linear",
-            degeneracy, corrector_iter, False)
+            session, pin_idx, deltas, np.asarray(step), corrector_iter)
 
     return EstimateReport(
         alpha=alpha, first=first, first_kind=first_kind,

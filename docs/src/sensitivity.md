@@ -495,6 +495,18 @@ r.activity       # per coordinate: inactive / weakly_active /
 r.row_activity   # strongly_active / ambiguous / unidentified / ...
 ```
 
+`mode` and `predictor_iter` select which step is measured and match
+`estimate()`'s arguments of the same names. `violation` and `corrector`
+are properties of the step, so a `fix_relax` estimate needs
+`estimate_report(mode="fix_relax")` to be described by its own numbers
+rather than the linear step's.
+
+Under `"fix_relax"` and `"path"` the step stops at the bound, so
+`alpha` is 1.0 and `crossed` is empty for every model. What those two
+did about the bounds is what `"linear"` reports at the same
+perturbation. `activity`, `row_activity` and `mu` come from the
+converged base point and do not depend on the mode.
+
 `alpha` comes from a ratio test along the step. Coordinates already on
 a bound take no part in it, on that side: the gap left at an active
 bound is the slack the barrier leaves rather than room to move, so

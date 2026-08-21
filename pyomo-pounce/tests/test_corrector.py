@@ -3,14 +3,11 @@ barrier system after the step, against the factorization the solve left
 behind."""
 import warnings
 
-import numpy as np
 import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import declare_sens_param, estimate
-from pyomo_pounce.sens import (_correct, _perturbation_deltas,
-                               _session_for)
 
 
 def curved(p=1.0):
@@ -62,38 +59,18 @@ def pinning():
     return m
 
 
-def corrector_of(m, perturb, corrector_iter=8):
+def corrector_of(m, perturb, corrector_iter=8, mode="linear"):
     """What the corrector did, from the report `estimate_report` builds."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         rep = pyomo_pounce.estimate_report(
-            m, perturb, corrector_iter=corrector_iter)
+            m, perturb, corrector_iter=corrector_iter, mode=mode)
     return rep.corrector
 
 
 def mode_corrector(m, newval, mode, corrector_iter=8):
-    """The same, under a chosen mode.
-
-    `estimate_report` reports the linear step, so a correction under
-    another mode is reached through the same private path `estimate`
-    itself uses.
-    """
-    session = _session_for(m)
-    pin, deltas = _perturbation_deltas(session, [(m.p, newval)])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        if mode == "linear":
-            step = session.solver.parametric_step(list(pin), list(deltas))
-        elif mode == "fix_relax":
-            step, _ = session.solver.parametric_step_bounded(
-                list(pin), list(deltas), 16)
-        else:
-            step, _ = session.solver.parametric_step_path(
-                list(pin), list(deltas), 16)
-        _, info = _correct(session, list(pin), list(deltas),
-                           np.asarray(step), mode, "one_sided",
-                           corrector_iter, False)
-    return info
+    """What the corrector did under a chosen mode."""
+    return corrector_of(m, [(m.p, newval)], corrector_iter, mode=mode)
 
 
 def solve_it(m):
