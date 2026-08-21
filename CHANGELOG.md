@@ -49,7 +49,10 @@ changes.
   step in hand; otherwise the most negative multiplier goes alone and
   the next pass re-measures the rest under it. A release also survives a
   pin batch that cannot be solved, rather than being rolled back with
-  it: a release repairs the active set on its own terms.
+  it: a release repairs the active set on its own terms. That is two
+  separable things — the released set itself, and the step it produced
+  — and a pass that rolls back only the first recovers the released
+  bounds while still answering with the unrefined step.
 
   A bound whose release the factorization refuses is barred rather than
   retried — the same factorization was being asked for again on every

@@ -913,11 +913,16 @@ where
             }
         }
 
-        // What the pin batch can undo. The releases above are not among
-        // them: a release repairs the active set on its own terms, and
-        // rolling one back because the pins that came with it did not
-        // fit discards a repair the step needed and returns the plain
-        // one instead.
+        // What the pin batch can undo, snapshotted BELOW the release
+        // phase so a release is not among it. Both halves of that
+        // matter and they are separable (gh#734 review bisected them):
+        // keeping `released` is what leaves the bounds out of the
+        // active set at all, and snapshotting `dx` here rather than
+        // above is what leaves the STEP the release produced. Roll back
+        // only the first and the rows come back while the answer stays
+        // the plain step's; roll back both and a sound release is
+        // discarded because the pins that came with it did not fit. A
+        // release repairs the active set on its own terms.
         let keep_pins = pins.clone();
         let keep_dx = dx.clone();
         pins.extend(fresh_pins.iter().map(|&(i, bound, _)| (i, bound)));
