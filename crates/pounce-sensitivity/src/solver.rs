@@ -636,49 +636,50 @@ impl Solver {
     }
 
     /// Parametric step with the bounds respected by pinning, not by
-    /// clamping. Returns the `n_x`-long primal step and the variables
-    /// pinned to reach it.
+    /// clamping. Returns the `n_x`-long primal step, the rows it
+    /// constrained to reach it, and why the refinement stopped.
     ///
     /// [`Self::parametric_step`] answers where the linear predictor
     /// points, which can be outside the box. Clamping a coordinate
     /// back to its bound leaves every other coordinate at its
     /// predictor value, so the answer is feasible but no longer
     /// consistent with the KKT relations. This instead adds a row
-    /// pinning the offending coordinate at the bound and re-solves, so
-    /// the others move to stay consistent under the pin, which is the
+    /// pinning each offending coordinate at its bound and re-solves, so
+    /// the others move to stay consistent under the pins, which is the
     /// refinement upstream runs under `sens_boundcheck`.
     ///
-    /// Each pass augments the held factorization with the pin rows and
-    /// takes the Schur complement over them. The factorization itself
-    /// is never rebuilt, but the Schur complement is rebuilt each pass,
-    /// so pass `k` costs one dense `k × k` solve and `k + 1`
-    /// back-solves and the total grows quadratically in the number of
-    /// pins. The default `max_iter` of 16 is 136 back-solves.
+    /// A pass takes every crossing it can see, pins them together, and
+    /// re-solves, so the loop ends when nothing is left outside rather
+    /// than when the passes run out. Each pass rebuilds the Schur
+    /// complement over the pins so far, so a pass carrying `k` of them
+    /// costs one dense `k × k` solve and `k + 1` back-solves; the
+    /// factorization itself is never rebuilt for a pin.
     ///
     /// What counts as outside a bound is taken from the solve rather
     /// than from the caller: it was willing to leave a converged point
     /// `bound_relax_factor` outside its bound, so anything within that
     /// is on the bound. An unrelaxed solve gets a roundoff floor.
     ///
-    /// Passes stop when nothing is outside its bound by that much, at
-    /// `max_iter`, or when a pin cannot be achieved because the pins
-    /// have exhausted the problem's degrees of freedom. None of those
-    /// is an error: the step returned is the last one computed, and the
-    /// returned pin list says how far the refinement got. `max_iter`
-    /// is a budget, since each pass costs a dense `k × k` solve and the
-    /// point of the refinement is to stay cheaper than a re-solve.
+    /// Passes stop when nothing is outside its bound by that much, when
+    /// a pin cannot be achieved because the pins have exhausted the
+    /// problem's degrees of freedom, or at `max_iter`, which is a
+    /// safety limit rather than a budget: it took one pin per pass
+    /// until gh#732, where a model with more crossings than passes had
+    /// its answer picked by the limit. None of those is an error, and
+    /// the returned [`crate::boundcheck::RefineStop`] says which
+    /// happened.
     pub fn parametric_step_bounded(
         &self,
         pin_constraint_indices: &[Index],
         deltas: &[Number],
         max_iter: usize,
-    ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
+    ) -> Result<(Vec<Number>, Vec<Index>, crate::boundcheck::RefineStop), SolverError> {
         let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
         let ctx = self.bound_context()?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+        let (dx, pinned, stop) = crate::boundcheck::refine_step_onto_bounds(
             &state.backsolver,
             &dx_full,
             &ctx.x_curr,
@@ -693,6 +694,7 @@ impl Solver {
         Ok((
             dx[..ctx.n_x].to_vec(),
             pinned.into_iter().map(|p| p as Index).collect(),
+            stop,
         ))
     }
 
@@ -799,7 +801,7 @@ impl Solver {
         deltas: &[Number],
         max_iter: usize,
         held_var_rows: &[Index],
-    ) -> Result<(Vec<Number>, Vec<Index>), SolverError> {
+    ) -> Result<(Vec<Number>, Vec<Index>, crate::boundcheck::RefineStop), SolverError> {
         let weak = self.weakly_active_bounds()?;
         if weak.is_empty() {
             return self.parametric_step_bounded(pin_constraint_indices, deltas, max_iter);
@@ -817,7 +819,7 @@ impl Solver {
             &pinned_rows,
         )
         .map_err(SolverError::SensComputationFailed)?;
-        let (dx, pinned) = crate::boundcheck::refine_step_onto_bounds(
+        let (dx, pinned, stop) = crate::boundcheck::refine_step_onto_bounds(
             &state.backsolver,
             &d,
             &ctx.x_curr,
@@ -832,6 +834,7 @@ impl Solver {
         Ok((
             dx[..ctx.n_x].to_vec(),
             pinned.into_iter().map(|p| p as Index).collect(),
+            stop,
         ))
     }
 

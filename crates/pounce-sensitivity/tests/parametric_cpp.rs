@@ -34,6 +34,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
+use pounce_sensitivity::boundcheck::RefineStop;
 use pounce_sensitivity::{
     IndexSchurData, PdSensBacksolver, SensApplication, SensBacksolver, SensOptions,
 };
@@ -477,6 +478,15 @@ fn parametric_cpp_first_order_sensitivity_matches_finite_difference() {
 
 /// Solve at the nominal parameters and run `parametric_step_bounded`.
 fn run_bounded_step(delta_p: [Number; 2]) -> ([Number; 5], Vec<Index>) {
+    let (dx, pinned, _) = run_bounded_step_with_stop(delta_p, 8);
+    (dx, pinned)
+}
+
+/// `run_bounded_step` with the pass limit and the stop reason exposed.
+fn run_bounded_step_with_stop(
+    delta_p: [Number; 2],
+    max_iter: usize,
+) -> ([Number; 5], Vec<Index>, RefineStop) {
     use pounce_sensitivity::Solver;
 
     let mut app = IpoptApplication::new();
@@ -499,10 +509,10 @@ fn run_bounded_step(delta_p: [Number; 2]) -> ([Number; 5], Vec<Index>) {
         "nominal solve failed: {status:?}",
     );
 
-    let (dx, pinned) = solver
-        .parametric_step_bounded(&[2, 3], &delta_p, 8)
+    let (dx, pinned, stop) = solver
+        .parametric_step_bounded(&[2, 3], &delta_p, max_iter)
         .expect("parametric_step_bounded");
-    (std::array::from_fn(|i| dx[i]), pinned)
+    (std::array::from_fn(|i| dx[i]), pinned, stop)
 }
 
 #[test]
@@ -583,8 +593,13 @@ fn a_pin_beyond_the_degrees_of_freedom_is_refused() {
     // is singular and the second pin is refused. The refinement keeps
     // what it could achieve rather than returning the singular solve.
     let base = solve_at(5.0, 1.0);
-    let (fixed, pinned) = run_bounded_step([-2.0, -0.5]);
+    let (fixed, pinned, stop) = run_bounded_step_with_stop([-2.0, -0.5], 8);
     assert_eq!(pinned, vec![2], "only the first pin fits in one DOF");
+    assert_eq!(
+        stop,
+        RefineStop::DegreesOfFreedom,
+        "and the caller is told which limit that was, not that a budget          ran out",
+    );
 
     let x2 = base[2] + fixed[2];
     assert!(x2.abs() < 1e-7, "the pin that was accepted holds: {x2}");
@@ -740,8 +755,8 @@ fn three_free_solve_at(p: Number) -> [Number; 4] {
     captured.borrow().expect("on_converged fired")
 }
 
-#[test]
-fn fix_relax_pins_three_crossings_at_once() {
+/// The three-free model, solved at its nominal parameter.
+fn three_free_solver() -> pounce_sensitivity::Solver {
     use pounce_sensitivity::Solver;
 
     let mut app = IpoptApplication::new();
@@ -758,13 +773,24 @@ fn fix_relax_pins_three_crossings_at_once() {
         solver.solve(),
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
+    solver
+}
+
+#[test]
+fn fix_relax_pins_three_crossings_at_once() {
+    let solver = three_free_solver();
 
     let base = three_free_solve_at(1.0);
     let exact = three_free_solve_at(-1.0);
     let plain = solver.parametric_step(&[0], &[-2.0]).expect("plain step");
-    let (fixed, pinned) = solver
+    let (fixed, pinned, stop) = solver
         .parametric_step_bounded(&[0], &[-2.0], 8)
         .expect("bounded step");
+    assert_eq!(
+        stop,
+        RefineStop::Settled,
+        "the loop ends on an empty violation list, not on the pass limit",
+    );
 
     // dx/dp is (1, 2, 3), so the step drives all three below zero and
     // the worst violator is taken first
@@ -793,6 +819,36 @@ fn fix_relax_pins_three_crossings_at_once() {
         err(&fixed_x)
     );
     assert!(err(&fixed_x) <= err(&clamped));
+}
+
+#[test]
+fn the_pass_limit_no_longer_picks_the_answer() {
+    // gh#732. A pass used to take the single worst crossing, so the
+    // number of crossings repaired was whatever `max_iter` allowed and
+    // the answer moved with the budget. This model's step crosses three
+    // bounds at once: one pass now takes all three, and every budget
+    // from one pass up agrees to the last digit.
+    let solver = three_free_solver();
+    let at = |k| {
+        solver
+            .parametric_step_bounded(&[0], &[-2.0], k)
+            .expect("bounded step")
+    };
+    let (one, pins_one, stop_one) = at(1);
+    let (eight, pins_eight, stop_eight) = at(8);
+
+    assert_eq!(stop_one, RefineStop::Settled, "one pass settles it");
+    assert_eq!(stop_eight, RefineStop::Settled);
+    assert_eq!(pins_one, vec![2, 1, 0], "all three, worst first");
+    assert_eq!(pins_one, pins_eight, "and the budget does not change them");
+    for k in 0..4 {
+        assert!(
+            (one[k] - eight[k]).abs() < 1e-14,
+            "x[{k}] moved with the budget: {} vs {}",
+            one[k],
+            eight[k],
+        );
+    }
 }
 
 /// Walk the same perturbation the fix-relax tests use. Returns the

@@ -191,7 +191,7 @@ fn both_steps(p0: Number, dp: Number) -> ([Number; 2], [Number; 2], usize) {
         "base solve failed: {status:?}",
     );
     let base = solver.converged().expect("converged state").x.clone();
-    let (fixed, _) = solver
+    let (fixed, _, _) = solver
         .parametric_step_bounded(&[0], &[dp], 8)
         .expect("parametric_step_bounded");
     let (walked, segs) = solver
