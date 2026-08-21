@@ -923,8 +923,18 @@ impl Solver {
         // differ by enough that raising one at a time is dozens of
         // retries. The engaged set can still grow on a later pass, so
         // the figure is a floor and says so.
+        //
+        // `engaged_now + 2` prices a decision that finishes on one
+        // pass. Each expansion round pays another combined solve, so
+        // on a multi-pass decision that total is short, and once the
+        // engaged set stops growing it stops moving at all: the
+        // combined solve of the last round would otherwise be told to
+        // raise the budget to the number already spent, which is a
+        // retry that buys nothing and reads as self-contradictory.
+        // Flooring at `spent + 1` keeps the advice strictly larger
+        // than what is gone, so every retry makes progress.
         let budget = |engaged_now: usize, spent: usize| {
-            let need = engaged_now + 2;
+            let need = (engaged_now + 2).max(spent + 1);
             SolverError::SensComputationFailed(format!(
                 "directional derivative: {spent} of {max_iter} back-solve(s) \
                  spent, and {engaged_now} of {nw} weakly active bound(s) are \
