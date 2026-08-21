@@ -787,6 +787,7 @@ pub fn run_inner_resto(
             last_output,
             locally_infeasible: false,
             user_requested_stop: true,
+            feasible_point_found: false,
         });
     }
 
@@ -822,6 +823,31 @@ pub fn run_inner_resto(
     } else {
         1.0
     };
+    // Square-problem feasible point, `IpRestoMinC_1Nrm.cpp:269`:
+    //
+    //     else if( square_problem && resto_status == STOP_AT_ACCEPTABLE_POINT
+    //              && IpCq().unscaled_curr_nlp_constraint_violation(NORM_MAX)
+    //                 < constr_viol_tol_ )
+    //        THROW_EXCEPTION(FEASIBILITY_PROBLEM_SOLVED, ...)
+    //
+    // Upstream evaluates that violation on `IpData().curr()` — but it has
+    // just copied the restoration point onto `trial` and accepted it
+    // (`:243-246`, the `resto_status != SUCCESS` block), so `curr` *is*
+    // the recovered point and `orig_inf_pr_at_final`, the unscaled
+    // orig-NLP violation at the inner's final iterate, is the same
+    // quantity. Strict `<`, as upstream has it.
+    //
+    // The upstream chain that leads here: `IpRestoConvCheck.cpp:222`
+    // returns `CONVERGED_TO_ACCEPTABLE_POINT` for a square problem that is
+    // feasible w.r.t. `constr_viol_tol` but not w.r.t. `tol`, precisely so
+    // that this branch can see it and render the feasible-point verdict.
+    // pounce ported that arm (`conv_check.rs:222`) but not this one, so
+    // the signal it exists to raise had nowhere to land.
+    let feasible_point_found = is_square_problem
+        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && orig_inf_pr_at_final.is_finite()
+        && orig_inf_pr_at_final < outer_constr_viol_tol;
+
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
     // Square problems: upstream `IpRestoMinC_1Nrm.cpp:357-371` returns
@@ -1117,6 +1143,7 @@ pub fn run_inner_resto(
     Some(RestoSolveResult {
         trial_x,
         trial_s,
+        feasible_point_found,
         iter_count: inner_iter_count,
         // Inner-IPM info_iters_since_header / info_last_output are
         // tracked on the inner data; surface them on best-effort
