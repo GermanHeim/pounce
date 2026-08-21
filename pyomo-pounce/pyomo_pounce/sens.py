@@ -1640,12 +1640,6 @@ def estimate_report(model, perturb, max_iter=None,
     handed to the corrector, which is what a caller comparing the two
     wants.
 
-    corrector_iter runs the same Newton iterations `estimate()` runs
-    and reports what they did on the `corrector` attribute, without
-    changing anything the rest of the report measures: those describe
-    the step handed to the corrector, which is what a caller comparing
-    the two wants.
-
     Takes the same perturbation argument `estimate()` takes and returns
     an EstimateReport. Nothing about the estimate changes: this runs
     the same step and measures it.

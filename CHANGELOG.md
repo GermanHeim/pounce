@@ -27,7 +27,7 @@ changes.
   factorization was built from, so nothing here disturbs the factor or
   any other consumer of the session.
 
-  A correction cannot change an active set on its own: the held
+  A correction cannot change an active set on its own. The held
   operator carries every bound's barrier diagonal from the base point,
   `z / s`, which at a tightly held bound is `z² / mu`. So the predictor's
   decision is applied once before iterating. A released bound comes out
@@ -44,7 +44,7 @@ changes.
   sitting on a bound, one change where the other two pass seven.
 
   Measured on the CSTR of notebook 36, whose first crossing is at 1.3%
-  of the change to its steady state: with `fix_relax` and eight
+  of the change to its steady state. With `fix_relax` and eight
   iterations the largest relative error goes from 2.4e-3 to 1e-6 at a 2%
   change, 1.4e-2 to 2e-6 at 5%, and 6.0e-2 to 6.0e-5 at 10%, which is
   four crossings. At seven crossings it improves the estimate by about

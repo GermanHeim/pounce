@@ -208,8 +208,8 @@ fn slacks_and_directions(
 /// diagonal, which at a small `mu` is a very large number, and the
 /// held factorization carries it. If the perturbation moves that
 /// variable off its bound, iterating against that operator cannot
-/// follow: the stiffness the base point had is still there. The way
-/// out is to take the bound out of the operator once, before
+/// follow, because the stiffness the base point had is still there.
+/// The way out is to take the bound out of the operator once, before
 /// iterating, which is what `solve_released` does.
 ///
 /// Which bounds those are is the predictor's answer, read off the step
