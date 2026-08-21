@@ -643,6 +643,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.timing = Some(timing);
     }
 
+    fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
+        self.linsol.multi_solve_matches_single_solve(nrhs)
+    }
+
     fn try_resolve_many_flat(
         &mut self,
         _coeffs: &AugSysCoeffs<'_>,

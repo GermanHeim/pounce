@@ -230,4 +230,21 @@ pub trait AugSystemSolver {
     ) -> Option<ESymSolverStatus> {
         None
     }
+
+    /// Whether [`Self::try_resolve_many_flat`] with `nrhs` columns returns
+    /// **bit-identical** results to `nrhs` separate [`Self::resolve`] calls.
+    ///
+    /// Consulted only by callers that batch as a pure optimization inside an
+    /// iteration whose trajectory must not move — today that is
+    /// `LowRankAugSystemSolver`'s SMW correction block (gh#729). A caller
+    /// batching independent questions (`pounce-sensitivity`'s `jacrev`
+    /// backward) has no such constraint and does not ask.
+    ///
+    /// Defaults to `false`, the conservative answer. `StdAugSystemSolver`
+    /// forwards it to the linear-solver backend; see
+    /// `SparseSymLinearSolverInterface::multi_solve_matches_single_solve`
+    /// for why the answer depends on `nrhs`.
+    fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+        false
+    }
 }
