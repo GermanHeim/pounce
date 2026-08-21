@@ -768,11 +768,13 @@ fn a_feasible_start_short_circuits_and_stays_diverging() {
 /// statuses, it did not drop any.
 #[test]
 fn no_fixture_stops_solving_when_the_option_is_turned_on() {
+    // `deb7` is deliberately absent; see
+    // `deb7_is_route_sensitive_in_ipopt_too` below for why it cannot
+    // carry this assertion.
     for model in [
         "csfi2",
         "eigena2",
         "eigenb2",
-        "deb7",
         "pooling_rt2stp",
         "hs71_obj1e8",
         "user_scaling_suffix",
@@ -787,4 +789,38 @@ fn no_fixture_stops_solving_when_the_option_is_turned_on() {
              least_square_init_primal (on = {on}, off = {off})",
         );
     }
+}
+
+/// `deb7` is the one fixture that cannot carry the invariant above, and
+/// the reason is not a POUNCE defect: **reference Ipopt does not satisfy
+/// it either.**
+///
+/// Ipopt 3.14.19, `deb7.nl`, one innocuous option perturbed at a time,
+/// solved-or-acceptable on each route:
+///
+/// | perturbation | `least_square_init_primal=yes` | `=no` |
+/// |---|---|---|
+/// | `max_soc=0` | Solved To Acceptable Level | Error in step computation |
+/// | `tol=1e-6`  | Error in step computation  | Optimal Solution Found    |
+///
+/// Two of eight sampled perturbations flip Ipopt's own verdict with the
+/// option. `deb7` sits on a knife edge here, and which side a binary
+/// lands on is set by last-bit arithmetic rather than by anything the
+/// option means. POUNCE reproduces that sensitivity: on x86-64, with
+/// the `feral_refine = false` default (gh#735), the `yes` route reaches
+/// `ErrorInStepComputation` at it=358 where `no` succeeds at it=131 —
+/// while on aarch64 both succeed. `main` is not immune, it is merely on
+/// the other side: perturbing `obj_scaling_factor` or `max_soc` flips
+/// `main`'s verdict on this fixture and leaves gh#735's unchanged. MA57
+/// flips on the same two.
+///
+/// So this test pins what `deb7` actually guarantees — it solves on the
+/// default route — instead of an invariant no implementation holds.
+#[test]
+fn deb7_is_route_sensitive_in_ipopt_too() {
+    let off = status_of(&solve("deb7", false));
+    assert!(
+        off == "SolveSucceeded" || off == "SolvedToAcceptableLevel",
+        "deb7 must still solve on the default route (got {off})",
+    );
 }
