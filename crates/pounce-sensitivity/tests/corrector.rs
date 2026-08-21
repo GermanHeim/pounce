@@ -53,17 +53,33 @@ const B1: Number = 0.11;
 /// reconciled and only a non-unit factor shows whether they are.
 struct ParamQp {
     x_scaling: Option<[Number; 3]>,
+    /// Row factor for the single constraint, the pinned equality. The
+    /// residual the corrector measures sits in the algorithm's scaled
+    /// equality block, so the perturbation has to carry the same
+    /// factor, and only a non-unit one shows whether it does.
+    g_scaling: Option<[Number; 1]>,
 }
 
 impl TNLP for ParamQp {
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
-        let Some(d) = self.x_scaling else {
+        if self.x_scaling.is_none() && self.g_scaling.is_none() {
             return false;
-        };
+        }
         *req.obj_scaling = 1.0;
-        *req.use_x_scaling = true;
-        req.x_scaling.copy_from_slice(&d);
-        *req.use_g_scaling = false;
+        match self.x_scaling {
+            Some(d) => {
+                *req.use_x_scaling = true;
+                req.x_scaling.copy_from_slice(&d);
+            }
+            None => *req.use_x_scaling = false,
+        }
+        match self.g_scaling {
+            Some(c) => {
+                *req.use_g_scaling = true;
+                req.g_scaling.copy_from_slice(&c);
+            }
+            None => *req.use_g_scaling = false,
+        }
         true
     }
 
@@ -162,6 +178,10 @@ fn solved() -> Solver {
 }
 
 fn solved_scaled(x_scaling: Option<[Number; 3]>) -> Solver {
+    solved_with(x_scaling, None)
+}
+
+fn solved_with(x_scaling: Option<[Number; 3]>, g_scaling: Option<[Number; 1]>) -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -175,13 +195,16 @@ fn solved_scaled(x_scaling: Option<[Number; 3]>) -> Solver {
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
-    if x_scaling.is_some() {
+    if x_scaling.is_some() || g_scaling.is_some() {
         app.options_mut()
             .set_string_value("nlp_scaling_method", "user-scaling", true, false)
             .unwrap();
     }
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp { x_scaling }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp {
+        x_scaling,
+        g_scaling,
+    }));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
     assert!(
@@ -449,6 +472,32 @@ fn the_correction_is_the_same_under_variable_scaling() {
             base[0] + out[0] >= -1e-9 && base[0] + out[0] <= 1.0 + 1e-9,
             "d = {d}: x1 left its bounds at {}",
             base[0] + out[0],
+        );
+    }
+}
+
+#[test]
+fn the_correction_is_the_same_under_constraint_scaling() {
+    // The other half of the frame. The perturbation is a move in the
+    // pinned equality's right-hand side, and the residual it is
+    // measured against lives in the algorithm's scaled equality block,
+    // so the delta has to carry that row's factor. A unit factor hides
+    // whether it does (gh#733 review, reproducer B).
+    let (x1, x2) = exact_at(RELEASE_DP);
+    for c in [1.0, 1.0e3, 1.0e4] {
+        let scaling = (c != 1.0).then_some([c]);
+        let solver = solved_with(None, scaling);
+        let base = solver.converged().expect("converged").x.clone();
+        let step = fix_relax_step(&solver, RELEASE_DP);
+        let (out, report) = solver
+            .correct_step(&[0], &[RELEASE_DP], &step, 12)
+            .expect("corrector");
+        let (e1, e2) = (base[0] + out[0] - x1, base[1] + out[1] - x2);
+        assert!(
+            e1.abs() < 1e-7 && e2.abs() < 1e-7,
+            "row scale {c}: corrected to ({}, {}), exact is ({x1}, {x2}); {report:?}",
+            base[0] + out[0],
+            base[1] + out[1],
         );
     }
 }
