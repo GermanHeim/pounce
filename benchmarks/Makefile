@@ -53,6 +53,7 @@ export IPOPT_LINEAR_SOLVER
 	qp-run qp-rerun qp-generate \
 	lp-run lp-rerun lp-generate \
 	lp-convex-run lp-convex-rerun qp-convex-run qp-convex-rerun \
+	lbfgs-run lbfgs-rerun \
 	lpopt-run lpopt-rerun lpopt-generate \
 	ipopt-reference ipopt-reference-provenance \
 	$(addprefix ipopt-ref-,$(REF_SUITES)) \
@@ -91,6 +92,7 @@ help:
 	@echo "  lp-generate                (Re)generate the lp .nl files only (needs highspy/pyomo; downloads MPS)"
 	@echo "  lp-convex-run   / -rerun   LP head-to-head: pounce-convex (lp-ipm) vs pounce-nlp (reuses lp .nl)"
 	@echo "  qp-convex-run   / -rerun   QP head-to-head: pounce-convex (qp-ipm) vs pounce-nlp (reuses qp .nl)"
+	@echo "  lbfgs-run       / -rerun   Hessian head-to-head: exact vs limited-memory (reuses mittelmann .nl)"
 	@echo "  warmstart-run              Warm-start suite: parametric NLP sequences, cold vs warm (needs the built Python ext)"
 	@echo "  warmstart-quick            Warm-start suite, short sweep (3 families, one scale)"
 	@echo "  warmstart-selftest         Finite-difference check of the warm-start families (no solver needed)"
@@ -139,6 +141,7 @@ LP_DIR          := $(REPO_ROOT)/benchmarks/lp
 LPOPT_DIR       := $(REPO_ROOT)/benchmarks/lpopt
 LP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/lp_convex
 QP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/qp_convex
+LBFGS_DIR       := $(REPO_ROOT)/benchmarks/lbfgs
 
 # Ensure POUNCE_BIN exists; helps when a target is run before any cargo
 # build. Cheap when already built.
@@ -320,7 +323,31 @@ qp-convex-run: $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
 
 qp-convex-rerun:
 	rm -f $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
+	rm -f $(LBFGS_DIR)/exact.json $(LBFGS_DIR)/limited.json
 	$(MAKE) qp-convex-run
+
+# ---- Hessian head-to-head: exact vs limited-memory -----------------------
+# L-BFGS is not a rare opt-in: the Python frontend and the CasADi plugin
+# both select `hessian_approximation=limited-memory` automatically when no
+# exact Lagrangian Hessian is available, so a corpus measured only with an
+# exact Hessian leaves that path unbenchmarked. That gap shipped gh#677.
+# Two pounce arms (same binary) over the SAME mittelmann .nl problems, two
+# result files: exact.json and limited.json. No ipopt reference — this is
+# pounce-vs-pounce, and the interesting number is the cost of giving up the
+# exact Hessian, not a cross-solver comparison.
+$(LBFGS_DIR)/exact.json: $(POUNCE_BIN) $(wildcard $(nldir_mittelmann)/*.nl)
+	$(NL_DRIVER) lbfgs $(nldir_mittelmann) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce hessian_approximation=exact exact
+
+$(LBFGS_DIR)/limited.json: $(POUNCE_BIN) $(wildcard $(nldir_mittelmann)/*.nl)
+	$(NL_DRIVER) lbfgs $(nldir_mittelmann) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce hessian_approximation=limited-memory lbfgs
+
+lbfgs-run: $(LBFGS_DIR)/exact.json $(LBFGS_DIR)/limited.json
+
+lbfgs-rerun:
+	rm -f $(LBFGS_DIR)/exact.json $(LBFGS_DIR)/limited.json
+	$(MAKE) lbfgs-run
 
 # ---- warm-start suite ----------------------------------------------------
 # The only suite that is not .nl-driven: warm starting is a property of a
@@ -496,6 +523,7 @@ benchmark:
 	-$(MAKE) lp-run
 	-$(MAKE) lp-convex-run
 	-$(MAKE) qp-convex-run
+	-$(MAKE) lbfgs-run
 	-$(MAKE) lpopt-run
 	-$(MAKE) gams-bench
 	-$(MAKE) benchmark-report
@@ -554,6 +582,7 @@ clean-bench-nl:
 	      $(REPO_ROOT)/benchmarks/lpopt/pounce.json
 	rm -f $(LP_CONVEX_DIR)/convex.json $(LP_CONVEX_DIR)/nlp.json
 	rm -f $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
+	rm -f $(LBFGS_DIR)/exact.json $(LBFGS_DIR)/limited.json
 	rm -rf $(REPO_ROOT)/benchmarks/logs
 
 clean-bench-report:
