@@ -53,6 +53,30 @@ pub enum PsdCertificateError {
 /// each off-diagonal is supplied once and the factorization layer mirrors it
 /// according to its symmetric-matrix contract.
 ///
+/// More explicitly, the factorization is an `L D L^T` factorization of the
+/// shifted symmetric matrix, up to the backend's permutation. The factor is a
+/// congruence, so Sylvester's law of inertia makes the reported negative-pivot
+/// count equal to the shifted matrix's number of negative eigenvalues. Since
+/// every eigenvalue is shifted by the same `tolerance`, `negative == 0` is
+/// equivalent to `lambda_min(A) + tolerance >= 0`. A singular PSD matrix has
+/// `lambda_min(A) = 0`, so the shift moves its zero eigenvalue to the strictly
+/// positive value `tolerance` and it is certified just like an SPD matrix
+/// (subject to the backend's finite-precision singularity policy).
+///
+/// The diagonal branch is intentionally separate: once duplicate entries have
+/// been summed, a diagonal matrix's eigenvalues are its diagonal entries, so a
+/// single sign scan settles it in `O(nnz)` without constructing or factoring a
+/// backend. That cost matters for the large separable and least-squares QP
+/// shapes, whose Hessians can contain tens of thousands of diagonal entries
+/// even though their convexity is trivial.
+///
+/// Coupled Hessians use the sparse factorization instead of a dense Jacobi or
+/// eigensolve. The latter allocates a dense `k × k` matrix and costs
+/// `O(k^3)` for the `k` active variables; sparse inertia follows the nonzero
+/// pattern and its fill. This is what makes the coupled, sparse Hessians in
+/// the CVXQP family (typically around `k = 1000`) practical to classify
+/// without paying a dense cubic eigenvalue computation before the solve.
+///
 /// Empty and diagonal matrices are settled without constructing `make_backend`.
 /// A coupled matrix is compressed to the variables present in its nonzero
 /// pattern before it is factored, so structurally zero rows do not inflate the
