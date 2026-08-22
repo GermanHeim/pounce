@@ -147,9 +147,15 @@ changes.
   ends in `Maximum_Iterations_Exceeded` or `Solved_To_Acceptable_Level`, and
   on `dirichlet120` that retry solves in 176 iterations to the pre-#746
   objective. Whether that fallback should be on by default is the open
-  question in #748. (`nql180` also appears to regress in the raw
-  table; re-run without competing load both arms hit the CPU limit, so that
-  line is a timing artifact, not a schedule effect.)
+  question in #748.
+
+  `nql180` regresses the same way and is **not** recoverable by that fallback.
+  Given a 4000 s budget, monotone solves it in 105 iterations / 259 s while
+  adaptive runs 453 iterations / 2176 s and still exits on the time limit. The
+  fallback's trigger set is `Solved_To_Acceptable_Level` and
+  `Maximum_Iterations_Exceeded`; a `Maximum_CpuTime_Exceeded` exit returns
+  early, and widening it to cover that case would be wrong anyway, since the
+  time budget the retry would need is precisely the budget already spent.
 
   `recalc_y`'s upstream limited-memory default (`IpIpoptAlg.cpp:238`) is
   deliberately still **not** followed; that decision and its measurements are
