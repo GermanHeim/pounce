@@ -37,6 +37,7 @@
 
 use crate::nl_reader::NlProblem;
 use pounce_common::types::{lower_bound_present, upper_bound_present};
+use pounce_convex::{Triplet, certify_psd_lower_triangle};
 
 /// Tolerance for the smallest-eigenvalue sign test in the convexity
 /// check. A Hessian eigenvalue below `-PSD_TOL` is treated as a genuine
@@ -727,100 +728,16 @@ fn socp_reform_flops(h: &QuadHessian) -> u128 {
 
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
 ///
-/// A purely diagonal Hessian is settled in `O(nnz)` by sign — its
-/// eigenvalues *are* its diagonal entries — with no factorization at all;
-/// this keeps large separable / least-squares QPs cheap. A *coupled*
-/// Hessian is certified by a sparse symmetric factorization (see
-/// [`coupled_hessian_is_psd`]): feral's LDLᵀ reports the matrix inertia in
-/// roughly `O(nnz · fill)`, so even the large but sparse coupled Hessians of
-/// the CVXQP family (n ≈ 1000) are classified in well under the solve cost —
-/// no dense `k×k` allocation and no `O(k³)` eigensolve. Returns `true` only
-/// when the smallest eigenvalue is `≥ -PSD_TOL`; an indefinite or
-/// inconclusive result returns `false`, routing to the safe (more general)
-/// class.
-fn hessian_is_psd(h: &QuadHessian, _n: usize) -> bool {
-    if h.is_empty() {
-        return true; // zero matrix is PSD (the linear case)
-    }
-    // Fast path: a diagonal Hessian is PSD iff every diagonal entry is
-    // `≥ -PSD_TOL`. No factorization — essential for large but separable
-    // objectives, where the answer is trivial.
-    if h.keys().all(|(i, j)| i == j) {
-        return h.values().all(|v| *v >= -PSD_TOL);
-    }
-    coupled_hessian_is_psd(h)
-}
-
-/// PSD certificate for a *coupled* Hessian via a sparse symmetric
-/// factorization.
-///
-/// The test is positive-definiteness of the `ε`-shifted matrix `H + ε·I`
-/// with `ε = PSD_TOL`. A genuinely-PSD `H` (smallest eigenvalue `λ_min ≥ 0`,
-/// even a singular one) becomes strictly positive definite after the shift,
-/// so feral factors it with no negative pivots (`inertia.negative == 0`); a
-/// truly indefinite `H` with `λ_min < -PSD_TOL` keeps a strictly-negative
-/// shifted eigenvalue and yields `negative > 0`. The `negative == 0` test on
-/// the shifted matrix is therefore exactly `λ_min ≥ -PSD_TOL` — the same
-/// tolerance the dense path used — and it scales to large sparse Hessians
-/// because the factorization cost tracks the nonzero/fill count, not a dense
-/// `k³`.
-///
-/// The Hessian is compressed to its active variable set so the factored
-/// dimension is `k` (the number of distinct variables in the form). The
-/// [`QuadHessian`] is upper-triangular (`i ≤ j`); feral wants the lower
-/// triangle (`row ≥ col`), so each entry `(i, j)` is emitted at
-/// `(row = j, col = i)`. Every active diagonal is seeded with `ε` (the shift;
-/// `from_triplets` sums it with any diagonal entry already in `H`), which
-/// also guarantees no structurally empty column. A non-`Success`
-/// factorization (singular/fatal — should not occur given the strictly-PD
-/// shift, but possible on a pathological form) is treated conservatively as
-/// not-provably-PSD.
-fn coupled_hessian_is_psd(h: &QuadHessian) -> bool {
-    use feral::{CscMatrix, FactorStatus, Solver};
-
-    // Compress to the active variable set so the factored dimension is `k`.
-    let mut active: Vec<usize> = Vec::with_capacity(2 * h.len());
-    for (i, j) in h.keys() {
-        active.push(*i);
-        active.push(*j);
-    }
-    active.sort_unstable();
-    active.dedup();
-    let k = active.len();
-    let idx = |v: usize| active.binary_search(&v).unwrap();
-
-    // Lower-triangle triplets: H's entry (i ≤ j) maps to (row = j, col = i).
-    // Capacity covers H's nonzeros plus one ε-shift per active diagonal.
-    let mut rows: Vec<usize> = Vec::with_capacity(h.len() + k);
-    let mut cols: Vec<usize> = Vec::with_capacity(h.len() + k);
-    let mut vals: Vec<f64> = Vec::with_capacity(h.len() + k);
-    for ((i, j), v) in h {
-        let (ri, rj) = (idx(*i), idx(*j));
-        // i ≤ j by the upper-tri convention, so rj ≥ ri ⇒ lower triangle.
-        rows.push(rj);
-        cols.push(ri);
-        vals.push(*v);
-    }
-    // εI shift: seed every active diagonal (summed with H's own diagonal).
-    for d in 0..k {
-        rows.push(d);
-        cols.push(d);
-        vals.push(PSD_TOL);
-    }
-
-    let mat = match CscMatrix::from_triplets(k, &rows, &cols, &vals) {
-        Ok(m) => m,
-        Err(_) => return false, // malformed ⇒ be conservative
-    };
-    let mut solver = Solver::new();
-    match solver.factor(&mat, None) {
-        FactorStatus::Success => {
-            // PD ⟺ no negative pivots in the LDLᵀ of the ε-shifted matrix.
-            solver.inertia().map(|i| i.negative == 0).unwrap_or(false)
-        }
-        // Singular / wrong-inertia / fatal: cannot certify ⇒ safe fallback.
-        _ => false,
-    }
+/// A diagonal Hessian is settled in `O(nnz)` by sign. A coupled Hessian is
+/// certified from the inertia of `H + PSD_TOL·I`.
+fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
+    let lower: Vec<_> = h
+        .iter()
+        .map(|(&(row, col), &val)| Triplet::new(col, row, val))
+        .collect();
+    certify_psd_lower_triangle(n, &lower, PSD_TOL, || {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    })
 }
 
 #[cfg(test)]

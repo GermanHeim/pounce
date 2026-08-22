@@ -20,6 +20,8 @@
 //! Entry points:
 //! - [`solve_qp_ipm`] — solve a [`qp::QpProblem`] (covers LP via an empty
 //!   `P`).
+//! - [`certify_psd_lower_triangle`] — conservatively certify a sparse
+//!   symmetric matrix from a caller-supplied inertia-reporting backend.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -36,6 +38,7 @@ pub mod hsde;
 pub mod hsde_nonsym;
 pub mod ipm;
 pub mod presolve;
+mod psd_certificate;
 pub mod qp;
 pub mod sensitivity;
 pub(crate) mod simplex;
@@ -51,6 +54,7 @@ pub use ipm::{
     QpFactorization, QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
     solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
+pub use psd_certificate::certify_psd_lower_triangle;
 pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};
 pub use sos::{
