@@ -466,8 +466,18 @@ impl PdSensBacksolver {
     /// the held factor does not decompose, the loop cannot converge,
     /// and it escalates instead of improving anything. Same reason the
     /// release path (`solve_released_inner`) never refines.
+    ///
+    /// So the test is on the override itself and not on where it came
+    /// from. It read `declared.is_none()` while crossover was the only
+    /// thing that could produce one; gh#737's ceiling is a second, and
+    /// it fires on an ordinary solve with `declared` empty. On the
+    /// gh#737 fixture that combination returned `7.97e22` for a step of
+    /// `-0.21` -- refinement escalating against the uncapped matrix,
+    /// exactly the failure this predicate exists to prevent. Declared
+    /// still implies an override, so this stays equivalent wherever it
+    /// was already right.
     fn may_refine(&self) -> bool {
-        self.declared.is_none()
+        self.sigma.x.is_none() && self.sigma.s.is_none()
     }
 
     /// The `x`-block barrier diagonal in the frame the held iterate

@@ -76,12 +76,22 @@ const PIN: Number = 1.0;
 const DELTA: Number = -0.21;
 
 /// ```text
-/// min  ½(x − T)² + ½(w − 1)²
+/// min  ½(x − T)² + ½(w − 1)² + ½(u − 1)²
 /// s.t. g₀:  x − p = 0
 ///      g₁:      p = PIN     ← the parameter row, perturbed
 ///      g₂:  w − x = 0
-///      0 ≤ x ≤ PIN,  p and w free
+///      0 ≤ x ≤ PIN,  p, w and u free
 /// ```
+///
+/// `u` is in no constraint and nothing else reads it. It is here to
+/// keep the model **non-square**: at `n == m` the solve takes Ipopt's
+/// square-problem path (gh#508, ported in gh#735), which zeroes the
+/// bound multipliers because the equalities already determine every
+/// variable. That is the right answer for such a model and it makes
+/// `Σ = z/s` exactly zero -- so the three-variable version of this
+/// fixture stopped reproducing gh#737 the moment that path landed,
+/// while still passing every assertion below. One free variable puts
+/// the barrier back in play.
 ///
 /// `T > PIN` pulls `x` against the upper bound the equality already
 /// holds it on, so bound and equality bind together and the multiplier
@@ -102,10 +112,10 @@ struct PinnedToBound {
 impl TNLP for PinnedToBound {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
-            n: 3,
+            n: 4,
             m: 3,
             nnz_jac_g: 5,
-            nnz_h_lag: 2,
+            nnz_h_lag: 3,
             index_style: IndexStyle::C,
         })
     }
@@ -117,6 +127,8 @@ impl TNLP for PinnedToBound {
         b.x_u[1] = 1.0e19;
         b.x_l[2] = -1.0e19;
         b.x_u[2] = 1.0e19;
+        b.x_l[3] = -1.0e19;
+        b.x_u[3] = 1.0e19;
         b.g_l[0] = 0.0;
         b.g_u[0] = 0.0;
         b.g_l[1] = PIN;
@@ -130,6 +142,7 @@ impl TNLP for PinnedToBound {
         sp.x[0] = 0.5;
         sp.x[1] = 0.5;
         sp.x[2] = 0.5;
+        sp.x[3] = 0.5;
         true
     }
 
@@ -139,13 +152,16 @@ impl TNLP for PinnedToBound {
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
-        Some(0.5 * (x[0] - self.t).powi(2) + 0.5 * (x[2] - 1.0).powi(2))
+        Some(
+            0.5 * (x[0] - self.t).powi(2) + 0.5 * (x[2] - 1.0).powi(2) + 0.5 * (x[3] - 1.0).powi(2),
+        )
     }
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         g[0] = x[0] - self.t;
         g[1] = 0.0;
         g[2] = x[2] - 1.0;
+        g[3] = x[3] - 1.0;
         true
     }
 
@@ -187,14 +203,14 @@ impl TNLP for PinnedToBound {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0;
-                jcol[0] = 0;
-                irow[1] = 2;
-                jcol[1] = 2;
+                let rs: [Index; 3] = [0, 2, 3];
+                for (k, &r) in rs.iter().enumerate() {
+                    irow[k] = r;
+                    jcol[k] = r;
+                }
             }
             SparsityRequest::Values { values } => {
-                values[0] = obj_factor;
-                values[1] = obj_factor;
+                values.fill(obj_factor);
             }
         }
         true
