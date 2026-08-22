@@ -16,8 +16,9 @@ changes.
   CLI: it sums duplicate lower-triangle triplets, keeps an expected-`O(nnz)`
   diagonal fast path, and certifies coupled matrices from the inertia of a
   tolerance-shifted sparse factorization supplied by the caller. Malformed
-  input, factorization failure, or a backend without inertia conservatively
-  returns `false`. `pounce_rs::linsol` now also re-exports
+  input is reported as `PsdCertificateError`; factorization failure or a
+  backend without inertia conservatively returns `Ok(false)`.
+  `pounce_rs::linsol` now also re-exports
   `ESymSolverStatus` and `EMatrixFormat`, so facade-only backend integrations
   no longer need debug-string status comparisons or a direct
   `pounce-linsol` dependency.

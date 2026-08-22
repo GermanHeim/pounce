@@ -728,16 +728,25 @@ fn socp_reform_flops(h: &QuadHessian) -> u128 {
 
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
 ///
-/// A diagonal Hessian is settled in `O(nnz)` by sign. A coupled Hessian is
-/// certified from the inertia of `H + PSD_TOL·I`.
+/// A diagonal Hessian is settled in `O(nnz)` by sign before converting to the
+/// reusable triplet API. A coupled Hessian is certified from the inertia of
+/// `H + PSD_TOL·I`. An inconclusive certificate conservatively routes to NLP.
 fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
+    if h.is_empty() {
+        return true;
+    }
+    if h.keys().all(|(i, j)| i == j) {
+        return h.values().all(|value| *value >= -PSD_TOL);
+    }
+
     let lower: Vec<_> = h
         .iter()
-        .map(|(&(row, col), &val)| Triplet::new(col, row, val))
+        .map(|(&(i, j), &val)| Triplet::new(j, i, val))
         .collect();
     certify_psd_lower_triangle(n, &lower, PSD_TOL, || {
         Box::new(pounce_feral::FeralSolverInterface::new())
     })
+    .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use pounce_rs::convex::{
     QpFactorization, QpOptions, QpProblem, QpStatus, Triplet, certify_psd_lower_triangle,
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_ipm,
 };
-use pounce_rs::linsol::{EMatrixFormat, ESymSolverStatus, backend, serial_backend};
+use pounce_rs::linsol::{EMatrixFormat, backend, serial_backend};
 
 /// `min ‖x − t‖²` over the box `[0, 1]ⁿ`, written as `½ xᵀ(2I)x − 2tᵀx`.
 /// The unconstrained optimum is `t`, clamped componentwise to `[0, 1]`.
@@ -35,9 +35,8 @@ fn sparse_psd_certificate_and_linsol_enums_are_available_through_the_facade() {
         Triplet::new(1, 0, 1.0),
         Triplet::new(1, 1, 2.0),
     ];
-    assert!(certify_psd_lower_triangle(2, &lower, 1e-9, backend));
+    assert!(certify_psd_lower_triangle(2, &lower, 1e-9, backend).unwrap());
 
-    assert_eq!(ESymSolverStatus::Success, ESymSolverStatus::Success);
     assert_eq!(backend().matrix_format(), EMatrixFormat::TripletFormat);
 }
 

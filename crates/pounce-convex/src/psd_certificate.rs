@@ -7,6 +7,31 @@ use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 
 use crate::Triplet;
 
+/// An input error reported by [`certify_psd_lower_triangle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PsdCertificateError {
+    /// `tolerance` was negative, NaN, or infinite.
+    InvalidTolerance,
+    /// A triplet coordinate is outside the declared `n × n` matrix.
+    OutOfBounds {
+        /// Zero-based row coordinate.
+        row: usize,
+        /// Zero-based column coordinate.
+        col: usize,
+        /// Declared matrix dimension.
+        dimension: usize,
+    },
+    /// The caller supplied an upper-triangle triplet to a lower-triangle API.
+    UpperTriangle { row: usize, col: usize },
+    /// A triplet value is not finite.
+    NonFiniteValue { row: usize, col: usize },
+    /// Summing duplicate triplets overflowed to a non-finite value.
+    NonFiniteSum { row: usize, col: usize },
+    /// The matrix pattern cannot be represented by the linear-solver index
+    /// type on this target.
+    DimensionTooLarge,
+}
+
 /// Certify that a sparse symmetric matrix is positive semidefinite within an
 /// absolute tolerance.
 ///
@@ -14,45 +39,74 @@ use crate::Triplet;
 /// coordinates (`row >= col`). Duplicate coordinates are summed. The
 /// diagonal fast path accepts an eigenvalue down to `-tolerance`, while coupled
 /// matrices are tested by factoring `A + tolerance * I` and inspecting its
-/// inertia. A coupled matrix exactly on that shifted singular boundary may be
-/// rejected conservatively when the backend cannot produce an inertia.
+/// inertia. At the exact boundary `lambda_min(A) = -tolerance`, the shifted
+/// matrix is singular, so a backend that rejects singular factors may return
+/// `Ok(false)` even though the eigenvalue is within the requested tolerance.
+/// A backend that reports no inertia, or a factorization that fails, likewise
+/// produces `Ok(false)` rather than a certificate.
+///
+/// For a symmetric matrix, shifting every eigenvalue by `tolerance` gives
+/// `lambda_min(A + tolerance I) = lambda_min(A) + tolerance`. Therefore a
+/// successful factorization with zero negative eigenvalues certifies exactly
+/// `lambda_min(A) >= -tolerance`; it does not require the original matrix to
+/// be nonsingular. The strict lower-triangle convention is important here:
+/// each off-diagonal is supplied once and the factorization layer mirrors it
+/// according to its symmetric-matrix contract.
 ///
 /// Empty and diagonal matrices are settled without constructing `make_backend`.
 /// A coupled matrix is compressed to the variables present in its nonzero
 /// pattern before it is factored, so structurally zero rows do not inflate the
 /// factorization.
+///
+/// The shift is deliberately absolute: it preserves the classifier's
+/// `lambda_min(A) >= -tolerance` contract. At very large matrix scales an
+/// absolute shift can be below floating-point resolution, and an exact
+/// rank-deficient PSD matrix may consequently be rejected as singular by a
+/// backend. That is a conservative dispatch fallback, not evidence of a
+/// negative eigenvalue; changing to a norm-relative tolerance would be a
+/// separate numerical-policy change.
 pub fn certify_psd_lower_triangle<F>(
     n: usize,
     triplets: &[Triplet],
     tolerance: f64,
     make_backend: F,
-) -> bool
+) -> Result<bool, PsdCertificateError>
 where
     F: FnOnce() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     if !tolerance.is_finite() || tolerance < 0.0 {
-        return false;
+        return Err(PsdCertificateError::InvalidTolerance);
     }
 
     let mut entries = HashMap::<(usize, usize), f64>::with_capacity(triplets.len());
     for &Triplet { row, col, val } in triplets {
-        if row >= n || col >= n || row < col || !val.is_finite() {
-            return false;
+        if row >= n || col >= n {
+            return Err(PsdCertificateError::OutOfBounds {
+                row,
+                col,
+                dimension: n,
+            });
+        }
+        if row < col {
+            return Err(PsdCertificateError::UpperTriangle { row, col });
+        }
+        if !val.is_finite() {
+            return Err(PsdCertificateError::NonFiniteValue { row, col });
         }
         let sum = entries.entry((row, col)).or_default();
         *sum += val;
         if !sum.is_finite() {
-            return false;
+            return Err(PsdCertificateError::NonFiniteSum { row, col });
         }
     }
     entries.retain(|_, value| *value != 0.0);
 
     if entries.is_empty() {
-        return true;
+        return Ok(true);
     }
 
     if entries.keys().all(|(row, col)| row == col) {
-        return entries.values().all(|value| *value >= -tolerance);
+        return Ok(entries.values().all(|value| *value >= -tolerance));
     }
 
     let mut active = Vec::with_capacity(2 * entries.len());
@@ -64,53 +118,54 @@ where
     active.dedup();
 
     let Ok(dim) = Index::try_from(active.len()) else {
-        return false;
+        return Err(PsdCertificateError::DimensionTooLarge);
     };
+    let active_index: HashMap<usize, usize> = active
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(compressed, original)| (original, compressed))
+        .collect();
     let mut shifted = BTreeMap::<(usize, usize), f64>::new();
     for ((row, col), value) in entries {
-        let Ok(compressed_row) = active.binary_search(&row) else {
-            return false;
-        };
-        let Ok(compressed_col) = active.binary_search(&col) else {
-            return false;
-        };
+        // Both coordinates were used to construct `active`, so these lookups
+        // are total for every entry in the validated map.
+        let compressed_row = active_index[&row];
+        let compressed_col = active_index[&col];
         shifted.insert((compressed_row, compressed_col), value);
     }
 
-    for diagonal in 0..active.len() {
+    for (diagonal, &original) in active.iter().enumerate() {
         let value = shifted.entry((diagonal, diagonal)).or_default();
         *value += tolerance;
         if !value.is_finite() {
-            return false;
+            return Err(PsdCertificateError::NonFiniteSum {
+                row: original,
+                col: original,
+            });
         }
     }
     if Index::try_from(shifted.len()).is_err() {
-        return false;
+        return Err(PsdCertificateError::DimensionTooLarge);
     }
 
     let mut rows = Vec::with_capacity(shifted.len());
     let mut cols = Vec::with_capacity(shifted.len());
     let mut values = Vec::with_capacity(shifted.len());
     for ((row, col), value) in shifted {
-        let Ok(row_1) = Index::try_from(row + 1) else {
-            return false;
-        };
-        let Ok(col_1) = Index::try_from(col + 1) else {
-            return false;
-        };
-        rows.push(row_1);
-        cols.push(col_1);
+        rows.push(row as Index + 1);
+        cols.push(col as Index + 1);
         values.push(value);
     }
 
     let backend = make_backend();
     if !backend.provides_inertia() {
-        return false;
+        return Ok(false);
     }
     let Ok(factor) = Factorization::new(dim, rows, cols, values, backend) else {
-        return false;
+        return Ok(false);
     };
-    factor.number_of_neg_evals() == Some(0)
+    Ok(factor.number_of_neg_evals() == Some(0))
 }
 
 #[cfg(test)]
@@ -129,19 +184,25 @@ mod tests {
         let no_backend = || -> Box<dyn SparseSymLinearSolverInterface> {
             panic!("the diagonal fast path must not construct a backend")
         };
-        assert!(certify_psd_lower_triangle(4, &[], 1e-9, no_backend));
+        assert!(certify_psd_lower_triangle(4, &[], 1e-9, no_backend).unwrap());
 
         let diagonal = [
             Triplet::new(0, 0, 3.0),
             Triplet::new(1, 1, -2.0),
             Triplet::new(1, 1, 2.0 - 5e-10),
         ];
-        assert!(certify_psd_lower_triangle(2, &diagonal, 1e-9, || {
-            panic!("the diagonal fast path must not construct a backend")
-        }));
-        assert!(!certify_psd_lower_triangle(2, &diagonal, 1e-11, || {
-            panic!("the diagonal fast path must not construct a backend")
-        }));
+        assert!(
+            certify_psd_lower_triangle(2, &diagonal, 1e-9, || {
+                panic!("the diagonal fast path must not construct a backend")
+            })
+            .unwrap()
+        );
+        assert!(
+            !certify_psd_lower_triangle(2, &diagonal, 1e-11, || {
+                panic!("the diagonal fast path must not construct a backend")
+            })
+            .unwrap()
+        );
     }
 
     #[test]
@@ -151,24 +212,14 @@ mod tests {
             Triplet::new(1, 0, 1.0),
             Triplet::new(1, 1, 1.0),
         ];
-        assert!(certify_psd_lower_triangle(
-            2,
-            &singular_psd,
-            1e-9,
-            feral_backend
-        ));
+        assert!(certify_psd_lower_triangle(2, &singular_psd, 1e-9, feral_backend).unwrap());
 
         let indefinite = [
             Triplet::new(0, 0, 2.0),
             Triplet::new(1, 0, 0.25),
             Triplet::new(1, 1, -1e-4),
         ];
-        assert!(!certify_psd_lower_triangle(
-            2,
-            &indefinite,
-            1e-9,
-            feral_backend
-        ));
+        assert!(!certify_psd_lower_triangle(2, &indefinite, 1e-9, feral_backend).unwrap());
     }
 
     #[test]
@@ -184,18 +235,14 @@ mod tests {
                 Triplet::new(1, 1, 1.0),
             ]
         };
-        assert!(certify_psd_lower_triangle(
-            2,
-            &matrix(0.5 * TOLERANCE),
-            TOLERANCE,
-            feral_backend
-        ));
-        assert!(!certify_psd_lower_triangle(
-            2,
-            &matrix(2.0 * TOLERANCE),
-            TOLERANCE,
-            feral_backend
-        ));
+        assert!(
+            certify_psd_lower_triangle(2, &matrix(0.5 * TOLERANCE), TOLERANCE, feral_backend)
+                .unwrap()
+        );
+        assert!(
+            !certify_psd_lower_triangle(2, &matrix(2.0 * TOLERANCE), TOLERANCE, feral_backend)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -207,9 +254,12 @@ mod tests {
             Triplet::new(1, 0, -4.0),
             Triplet::new(1, 1, 1.0),
         ];
-        assert!(certify_psd_lower_triangle(2, &matrix, 0.0, || {
-            panic!("cancelled coupling should use the diagonal fast path")
-        }));
+        assert!(
+            certify_psd_lower_triangle(2, &matrix, 0.0, || {
+                panic!("cancelled coupling should use the diagonal fast path")
+            })
+            .unwrap()
+        );
     }
 
     #[test]
@@ -222,10 +272,19 @@ mod tests {
             (vec![Triplet::new(0, 0, 1.0)], f64::INFINITY),
         ];
         for (matrix, tolerance) in cases {
-            assert!(!certify_psd_lower_triangle(2, &matrix, tolerance, || {
-                panic!("invalid input must not construct a backend")
-            }));
+            assert!(
+                certify_psd_lower_triangle(2, &matrix, tolerance, || {
+                    panic!("invalid input must not construct a backend")
+                })
+                .is_err()
+            );
         }
+        assert!(matches!(
+            certify_psd_lower_triangle(2, &[Triplet::new(0, 1, 1.0)], 1e-9, || {
+                panic!("upper-triangle input must not construct a backend")
+            }),
+            Err(PsdCertificateError::UpperTriangle { row: 0, col: 1 })
+        ));
     }
 
     struct MockBackend {
@@ -361,12 +420,15 @@ mod tests {
         let record = Rc::new(RefCell::new(BackendRecord::default()));
         let backend_record = Rc::clone(&record);
 
-        assert!(certify_psd_lower_triangle(8, &matrix, 0.5, move || {
-            Box::new(RecordingBackend {
-                values: Vec::new(),
-                record: backend_record,
+        assert!(
+            certify_psd_lower_triangle(8, &matrix, 0.5, move || {
+                Box::new(RecordingBackend {
+                    values: Vec::new(),
+                    record: backend_record,
+                })
             })
-        }));
+            .unwrap()
+        );
 
         let record = record.borrow();
         assert_eq!(record.dim, Some(3));
@@ -395,17 +457,23 @@ mod tests {
                 })
             }
         };
-        assert!(!certify_psd_lower_triangle(
-            2,
-            &coupled_matrix(),
-            1e-9,
-            make_mock(ESymSolverStatus::Success, None),
-        ));
-        assert!(!certify_psd_lower_triangle(
-            2,
-            &coupled_matrix(),
-            1e-9,
-            make_mock(ESymSolverStatus::Singular, Some(0)),
-        ));
+        assert!(
+            !certify_psd_lower_triangle(
+                2,
+                &coupled_matrix(),
+                1e-9,
+                make_mock(ESymSolverStatus::Success, None),
+            )
+            .unwrap()
+        );
+        assert!(
+            !certify_psd_lower_triangle(
+                2,
+                &coupled_matrix(),
+                1e-9,
+                make_mock(ESymSolverStatus::Singular, Some(0)),
+            )
+            .unwrap()
+        );
     }
 }
