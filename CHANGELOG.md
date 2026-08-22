@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+- **`pounce.jax.solve` composes with `jax.jit` when the bounds are built
+  inside the traced function** (#740).
+
+  `lb=jnp.full(n, -10.0)` written in the body of a jitted loss — which is
+  how the book's own examples write it — is a tracer, not an array. The
+  four bound arrays were closed over and then dereferenced inside the
+  `pure_callback` host body, which let the tracer escape its trace; JAX
+  reported the leak as a side effect *in the user's function*, naming a
+  line that had done nothing wrong. Under plain `jax.grad` the same
+  expression evaluates eagerly, because it does not depend on `p`, so
+  only the `jit` paths were affected and the eager examples looked fine.
+
+  The bounds are now split at the call: anything already concrete
+  (`None`, numpy, Python scalars, materialized `jax.Array`s) is closed
+  over exactly as before, and anything traced is threaded through
+  explicitly — as a `pure_callback` operand on the way to the host, and
+  as a `custom_vjp` argument so no rule closes over it either. The
+  second half matters on its own: `cl`/`cu` are read again in the
+  backward to tell equality rows from slack ones, and a closed-over
+  tracer there fails during lowering rather than in the callback.
+  `solve`, `solve_with_warm`, `vmap_solve` and `vmap_solve_parallel` all
+  route through the same split.
+
+  Bounds remain *constants* of the problem, so `jax.grad` still does not
+  produce `dx*/d(bound)`. Answering that with a plain zero would have
+  been a silent lie in one case — a bound derived from `p` that is
+  *active* at `x*` really does move `x*`, so dropping its term yields a
+  confidently wrong gradient where the old code at least crashed. The
+  bound cotangent is therefore `NaN` on exactly the active coordinates.
+  A constant bound is unaffected (its cotangent transposes into nothing
+  and is discarded, so the `jnp.full(n, -10.0)` idiom above is exempt
+  whether or not it binds), and a p-derived bound that stays slack keeps
+  its correct gradient. Fold a bound into a row of `g` if you need to
+  differentiate through it.
+
 - **The sensitivity back-solve no longer refines against a matrix its
   factor does not decompose (gh#737 / gh#735 interaction).**
 
@@ -101,7 +136,6 @@ changes.
   where it returned the baseline `1.000000` in all three before; the
   re-solve is `0.790000`. The rows away from a bound are unchanged to
   every digit printed.
-
 - **`corrector_iter` refines a step by Newton iterations on the barrier
   system, against the factorization the solve left behind.**
 

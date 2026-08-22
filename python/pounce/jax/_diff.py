@@ -66,6 +66,118 @@ from .._pounce import Problem
 from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
+_BOUND_NAMES = ("lb", "ub", "cl", "cu")
+
+
+def _split_bounds(lb, ub, cl, cu):
+    """Split the four bound arrays into a static half and a traced half.
+
+    A bound built with ``jnp.*`` *inside* a traced function is a tracer,
+    not a concrete array — and that is exactly how the docs' examples
+    write them (``lb=jnp.full(n, -10.0)`` in the body of a jitted loss).
+    Closing such a value over and then dereferencing it inside a
+    ``pure_callback`` host body, or inside a ``custom_vjp`` rule, leaks
+    it out of the trace; JAX reports the leak as a side effect *in the
+    user's function*, which is near-undiagnosable from the message
+    (gh#740). Traced bounds are therefore threaded through explicitly —
+    as ``pure_callback`` operands on the way to the host, and as a
+    ``custom_vjp`` argument so nothing is closed over.
+
+    Everything else — ``None``, Python scalars, lists, numpy arrays,
+    already-concrete ``jax.Array`` values — stays static and is closed
+    over verbatim, so the common case keeps its old behaviour exactly.
+
+    Returns ``(static, dynamic)``: ``static`` is the 4-tuple with
+    ``None`` punched into every traced slot, and ``dynamic`` maps those
+    slot names to the arrays to thread through.
+    """
+    static = []
+    dynamic = {}
+    for name, b in zip(_BOUND_NAMES, (lb, ub, cl, cu)):
+        if isinstance(b, jax.core.Tracer):
+            static.append(None)
+            dynamic[name] = jnp.asarray(b, dtype=jnp.float64)
+        else:
+            static.append(b)
+    return tuple(static), dynamic
+
+
+def _merge_bounds(static, dynamic):
+    """Re-join :func:`_split_bounds`'s halves into ``(lb, ub, cl, cu)``.
+
+    Used both inside ``pure_callback`` host bodies (where ``dynamic``
+    holds the concrete numpy arrays JAX materialized) and inside the
+    backward rules (where it holds the residual's traced copies).
+    """
+    merged = dict(zip(_BOUND_NAMES, static))
+    merged.update(dynamic)
+    return tuple(merged[name] for name in _BOUND_NAMES)
+
+
+def _trip(b, mask):
+    """NaN where ``mask`` holds, zero elsewhere, shaped like the bound ``b``."""
+    zeros = jnp.zeros(jnp.shape(b), dtype=jnp.float64)
+    if jnp.shape(mask) != jnp.shape(b):
+        # A scalar (or otherwise broadcast) bound: the transpose of the
+        # broadcast sums the coordinates, so one tripped coordinate is
+        # enough to poison it.
+        mask = jnp.any(mask)
+    return jnp.where(mask, jnp.nan, zeros)
+
+
+def _active_bound_masks(need, g, m, cl, cu, p, x_star, lam, mult_xL, mult_xU):
+    """Per-bound mask: "the term we are dropping is nonzero here".
+
+    A variable bound's side is read straight off its multiplier — the
+    same ``_ACTIVE_TOL`` rule :func:`_kkt_implicit_backward` uses,
+    except split by side, since ``dx*/dlb`` is nonzero only where the
+    *lower* bound binds.
+
+    A constraint row needs its side too, and the multiplier's magnitude
+    does not carry it, so we evaluate ``g(x*, p)`` and ask which bound
+    it is sitting on. An equality row (``cl == cu``) reads as both,
+    which is right: it pins ``x*`` from either side. ``need`` holds the
+    bounds actually being asked about, so that extra ``g`` evaluation
+    only happens when a *constraint* bound was traced.
+    """
+    masks = {
+        "lb": mult_xL > _ACTIVE_TOL,
+        "ub": mult_xU > _ACTIVE_TOL,
+    }
+    if g is not None and m > 0 and ("cl" in need or "cu" in need):
+        gx = g(x_star, p)
+        cl_v = jnp.asarray(cl, dtype=jnp.float64)
+        cu_v = jnp.asarray(cu, dtype=jnp.float64)
+        active = (cl_v == cu_v) | (jnp.abs(lam) > _ACTIVE_TOL)
+        masks["cl"] = active & ((gx - cl_v) <= (cu_v - gx))
+        masks["cu"] = active & ((cu_v - gx) <= (gx - cl_v))
+    else:
+        masks["cl"] = jnp.zeros((m,), dtype=bool)
+        masks["cu"] = jnp.zeros((m,), dtype=bool)
+    return masks
+
+
+def _bound_cotangents(dyn_bounds, masks):
+    """Cotangent for the traced bounds: NaN exactly where the drop bites.
+
+    Bounds are constants of the problem, so ``solve`` has no gradient to
+    give back for them. Handing back a plain zero would be a silent lie
+    in one case: a bound *derived from* ``p`` that is active at ``x*``
+    genuinely moves ``x*``, so dropping its term yields a confidently
+    wrong ``jax.grad`` — the failure mode pounce#73 was filed for.
+
+    We cannot tell a p-derived bound from a constant one at trace time;
+    under ``jit`` both are tracers. We do not have to. A cotangent
+    handed back to a bound that *is* a constant transposes into nothing
+    and is discarded, so NaN on the coordinates where the dropped term
+    is nonzero is inert for the ordinary ``lb=jnp.full(n, -10.0)`` case
+    (gh#740) and unmissable for the case that would otherwise be wrong.
+    Slack coordinates keep an honest zero — there the dropped term
+    really is zero, so a p-derived slack bound still differentiates.
+    """
+    return {k: _trip(v, masks[k]) for k, v in dyn_bounds.items()}
+
+
 def _kkt_implicit_backward(f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v):
     """Shared implicit-function-theorem backward for the NLP custom_vjp.
 
@@ -183,41 +295,51 @@ def _make_solve_custom_vjp(
     g: Callable | None,
     n: int,
     m: int,
-    lb,
-    ub,
-    cl,
-    cu,
+    static_bounds,
     options: dict | None,
 ):
     @jax.custom_vjp
-    def solve_fn(p, x0):
+    def solve_fn(p, x0, dyn_bounds):
         # Pure-callback to Python. The forward returns only x*; the
         # backward needs (x*, λ*, mult_x_L, mult_x_U) so we re-pack
         # them via the residual.
-        x_star, _info = _pure_callback_solve(f, g, p, x0, n, m, lb, ub, cl, cu, options)
+        x_star, _info = _pure_callback_solve(
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options
+        )
         return x_star
 
-    def fwd(p, x0):
-        x_star, info = _pure_callback_solve(f, g, p, x0, n, m, lb, ub, cl, cu, options)
+    def fwd(p, x0, dyn_bounds):
+        x_star, info = _pure_callback_solve(
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options
+        )
         lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
         mult_xL = jnp.asarray(info["mult_x_L"])
         mult_xU = jnp.asarray(info["mult_x_U"])
-        return x_star, (p, x_star, lam, mult_xL, mult_xU)
+        return x_star, (p, x_star, lam, mult_xL, mult_xU, dyn_bounds)
 
     def bwd(residuals, cotangent_x):
-        p, x_star, lam, mult_xL, mult_xU = residuals
+        p, x_star, lam, mult_xL, mult_xU, dyn_bounds = residuals
+        _lb, _ub, cl, cu = _merge_bounds(static_bounds, dyn_bounds)
         dL_dp = _kkt_implicit_backward(
             f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, cotangent_x
         )
-        # The x0 input has no sensitivity through x* (the solver is
-        # deterministic at optimum); return zeros.
-        return dL_dp, jnp.zeros((n,), dtype=jnp.float64)
+        # x0 has no sensitivity through x* (the solver is deterministic
+        # at the optimum), so its cotangent is an exact zero. The bounds
+        # are held constant — see :func:`_bound_cotangents`.
+        masks = _active_bound_masks(
+            dyn_bounds, g, m, cl, cu, p, x_star, lam, mult_xL, mult_xU
+        )
+        return (
+            dL_dp,
+            jnp.zeros((n,), dtype=jnp.float64),
+            _bound_cotangents(dyn_bounds, masks),
+        )
 
     solve_fn.defvjp(fwd, bwd)
     return solve_fn
 
 
-def _pure_callback_solve(f, g, p, x0, n, m, lb, ub, cl, cu, options):
+def _pure_callback_solve(f, g, p, x0, n, m, static_bounds, dyn_bounds, options):
     """JAX pure_callback wrapper around :func:`_solve_once`.
 
     Returns ``(x_star, info)`` where ``info`` is a dict of arrays.
@@ -236,7 +358,8 @@ def _pure_callback_solve(f, g, p, x0, n, m, lb, ub, cl, cu, options):
         },
     )
 
-    def host_call(p_h, x0_h):
+    def host_call(p_h, x0_h, bounds_h):
+        lb, ub, cl, cu = _merge_bounds(static_bounds, bounds_h)
         x_np, info = _solve_once(
             f=f, g=g,
             p=jnp.asarray(p_h),
@@ -255,7 +378,7 @@ def _pure_callback_solve(f, g, p, x0, n, m, lb, ub, cl, cu, options):
         }
         return np.asarray(x_np, dtype=np.float64), info_out
 
-    return jax.pure_callback(host_call, result_shapes, p, x0)
+    return jax.pure_callback(host_call, result_shapes, p, x0, dyn_bounds)
 
 
 def solve(
@@ -275,12 +398,27 @@ def solve(
     """Parametric solve. ``x* = solve(p, f=..., g=..., x0=..., ...)``.
 
     Differentiable w.r.t. ``p`` via the implicit-function rule on the
-    KKT system at ``x*(p)``. Not differentiable w.r.t. ``x0``.
+    KKT system at ``x*(p)``. Not differentiable w.r.t. ``x0`` or the
+    bounds. ``x0``'s cotangent is an exact zero — the solver is
+    deterministic at the optimum. The bounds are treated as constants
+    of the problem, so building one out of ``p`` will *not* produce the
+    bound-sensitivity term; where such a bound is *active* at ``x*``
+    that term is a real part of ``dL/dp``, and rather than silently
+    drop it ``solve`` returns NaN for those coordinates. The gradient
+    goes visibly bad instead of quietly wrong. Fold the bound into a
+    row of ``g`` if you need to differentiate through it.
+
+    The bounds may be built with ``jnp.*`` inside a traced function —
+    they are threaded through the callback and the ``custom_vjp``
+    rather than closed over, so ``jax.jit`` works either way (gh#740).
+    A constant bound is unaffected by the NaN above: its cotangent
+    transposes into nothing and is discarded.
 
     ``f`` and ``g`` must take ``(x, p)`` and be JAX-traceable.
     """
-    fn = _make_solve_custom_vjp(f, g, n, m, lb, ub, cl, cu, options)
-    return fn(p, x0)
+    static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
+    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options)
+    return fn(p, x0, dyn_bounds)
 
 
 def _solve_once_warm(
@@ -348,7 +486,7 @@ def _solve_once_warm(
 
 
 def _pure_callback_warm_solve(
-    f, g, p, x0, n, m, lb, ub, cl, cu, options,
+    f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
     lam_warm, zL_warm, zU_warm, mu_warm,
 ):
     """Pure-callback wrapper around :func:`_solve_once_warm`.
@@ -366,7 +504,8 @@ def _pure_callback_warm_solve(
         jax.ShapeDtypeStruct((), jnp.float64),
     )
 
-    def host_call(p_h, x0_h, lam_h, zL_h, zU_h, mu_h):
+    def host_call(p_h, x0_h, lam_h, zL_h, zU_h, mu_h, bounds_h):
+        lb, ub, cl, cu = _merge_bounds(static_bounds, bounds_h)
         x_np, lam_out, zL_out, zU_out, mu_out, _info = _solve_once_warm(
             f=f, g=g,
             p=jnp.asarray(p_h),
@@ -380,6 +519,7 @@ def _pure_callback_warm_solve(
 
     return jax.pure_callback(
         host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm, mu_warm,
+        dyn_bounds,
     )
 
 
@@ -388,32 +528,30 @@ def _make_solve_with_warm_custom_vjp(
     g: Callable | None,
     n: int,
     m: int,
-    lb,
-    ub,
-    cl,
-    cu,
+    static_bounds,
     options: dict | None,
 ):
     @jax.custom_vjp
-    def solve_fn(p, x0, lam_warm, zL_warm, zU_warm, mu_warm):
+    def solve_fn(p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds):
         x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
-            f, g, p, x0, n, m, lb, ub, cl, cu, options,
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
             lam_warm, zL_warm, zU_warm, mu_warm,
         )
         return x_star, lam_out, zL_out, zU_out, mu_out
 
-    def fwd(p, x0, lam_warm, zL_warm, zU_warm, mu_warm):
+    def fwd(p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds):
         x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
-            f, g, p, x0, n, m, lb, ub, cl, cu, options,
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
             lam_warm, zL_warm, zU_warm, mu_warm,
         )
         return (
             (x_star, lam_out, zL_out, zU_out, mu_out),
-            (p, x_star, lam_out, zL_out, zU_out),
+            (p, x_star, lam_out, zL_out, zU_out, dyn_bounds),
         )
 
     def bwd(residuals, cotangents):
-        p, x_star, lam, mult_xL, mult_xU = residuals
+        p, x_star, lam, mult_xL, mult_xU, dyn_bounds = residuals
+        _lb, _ub, cl, cu = _merge_bounds(static_bounds, dyn_bounds)
         # Only the x* cotangent contributes a gradient w.r.t. p.
         # Cotangents on (lam_out, zL_out, zU_out, mu_out) are dropped —
         # same pattern existing `solve` uses for x0: warm dual / barrier
@@ -433,6 +571,12 @@ def _make_solve_with_warm_custom_vjp(
             jnp.zeros((n,), dtype=jnp.float64),
             jnp.zeros((n,), dtype=jnp.float64),
             jnp.zeros((), dtype=jnp.float64),
+            _bound_cotangents(
+                dyn_bounds,
+                _active_bound_masks(
+                    dyn_bounds, g, m, cl, cu, p, x_star, lam, mult_xL, mult_xU
+                ),
+            ),
         )
 
     solve_fn.defvjp(fwd, bwd)
@@ -513,9 +657,10 @@ def solve_with_warm(
             jnp.nan if mu_seed is None else mu_seed, dtype=jnp.float64
         )
 
-    fn = _make_solve_with_warm_custom_vjp(f, g, n, m, lb, ub, cl, cu, options)
+    static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
+    fn = _make_solve_with_warm_custom_vjp(f, g, n, m, static_bounds, options)
     x_star, lam_out, zL_out, zU_out, mu_out = fn(
-        p, x0, lam_warm, zL_warm, zU_warm, mu_warm,
+        p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds,
     )
     if want_mu:
         return x_star, (lam_out, zL_out, zU_out, mu_out)
@@ -606,46 +751,62 @@ def _make_vmap_solve_parallel_custom_vjp(
     g: Callable | None,
     n: int,
     m: int,
-    lb,
-    ub,
-    cl,
-    cu,
+    static_bounds,
     options: dict | None,
     workers: int | None,
 ):
     @jax.custom_vjp
-    def solve_fn(p_batch, x0_batch):
+    def solve_fn(p_batch, x0_batch, dyn_bounds):
         x_star, *_ = _pure_callback_parallel_solve(
-            f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+            f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds,
+            options, workers,
         )
         return x_star
 
-    def fwd(p_batch, x0_batch):
+    def fwd(p_batch, x0_batch, dyn_bounds):
         x_star, lam, mult_xL, mult_xU = _pure_callback_parallel_solve(
-            f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+            f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds,
+            options, workers,
         )
-        return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
-
-    def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
-        return _kkt_implicit_backward(
-            f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v
-        )
+        return x_star, (p_batch, x_star, lam, mult_xL, mult_xU, dyn_bounds)
 
     def bwd(residuals, cotangent_x_batch):
-        p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch = residuals
+        (p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch,
+         dyn_bounds) = residuals
+        # The bounds are per-problem, not per-batch-element, so they stay
+        # in ``bwd_single``'s closure rather than joining the vmap.
+        _lb, _ub, cl, cu = _merge_bounds(static_bounds, dyn_bounds)
+
+        def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
+            return _kkt_implicit_backward(
+                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v
+            )
+
         dL_dp_batch = jax.vmap(bwd_single)(
             p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch,
             cotangent_x_batch,
         )
-        # x0_batch carries no gradient (matches `solve`).
-        return dL_dp_batch, jnp.zeros_like(x_star_batch)
+        # x0_batch carries no gradient (matches `solve`). The bounds are
+        # shared across the batch, so a coordinate trips if it is active
+        # in *any* element — that element's dropped term is nonzero.
+        masks_batch = jax.vmap(
+            lambda p_i, x_i, lam_i, zL_i, zU_i: _active_bound_masks(
+                dyn_bounds, g, m, cl, cu, p_i, x_i, lam_i, zL_i, zU_i
+            )
+        )(p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch)
+        masks = {k: jnp.any(v, axis=0) for k, v in masks_batch.items()}
+        return (
+            dL_dp_batch,
+            jnp.zeros_like(x_star_batch),
+            _bound_cotangents(dyn_bounds, masks),
+        )
 
     solve_fn.defvjp(fwd, bwd)
     return solve_fn
 
 
 def _pure_callback_parallel_solve(
-    f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+    f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds, options, workers,
 ):
     B = p_batch.shape[0]
     result_shapes = (
@@ -655,13 +816,16 @@ def _pure_callback_parallel_solve(
         jax.ShapeDtypeStruct((B, n), jnp.float64),
     )
 
-    def host_call(p_h, x0_h):
+    def host_call(p_h, x0_h, bounds_h):
+        lb, ub, cl, cu = _merge_bounds(static_bounds, bounds_h)
         return _solve_batch_threadpool(
             f, g, np.asarray(p_h), np.asarray(x0_h),
             n, m, lb, ub, cl, cu, options, workers,
         )
 
-    return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
+    return jax.pure_callback(
+        host_call, result_shapes, p_batch, x0_batch, dyn_bounds,
+    )
 
 
 def vmap_solve_parallel(
@@ -704,7 +868,8 @@ def vmap_solve_parallel(
     x0_arr = jnp.asarray(x0)
     if x0_arr.ndim == 1:
         x0_arr = jnp.broadcast_to(x0_arr, (B, n))
+    static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
     fn = _make_vmap_solve_parallel_custom_vjp(
-        f, g, n, m, lb, ub, cl, cu, options, workers,
+        f, g, n, m, static_bounds, options, workers,
     )
-    return fn(p_batch, x0_arr)
+    return fn(p_batch, x0_arr, dyn_bounds)
