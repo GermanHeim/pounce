@@ -99,14 +99,14 @@
 //! without adding a dependency.
 
 pub use pounce_convex::{
-    ActiveSetOverrides, ConeSpec, NEG_INF, POS_INF, PolyProblem, Polynomial, QpFactorization,
-    QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution, QpStatus, QpWarmStart,
-    ReducedHessian, SensError, SosBound, SosSolution, Triplet, solve_qp_active_set, solve_qp_batch,
-    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug,
-    solve_qp_ipm_warm, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm,
-    solve_socp_ipm_debug, solve_socp_ipm_warm, sos_constrained_lower_bound,
-    sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,
-    sos_minimize_opts, sos_opts,
+    ActiveSetOverrides, ConeSpec, NEG_INF, POS_INF, PolyProblem, Polynomial, PsdCertificateError,
+    QpFactorization, QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution,
+    QpStatus, QpWarmStart, ReducedHessian, SensError, SosBound, SosSolution, Triplet,
+    certify_psd_lower_triangle, solve_qp_active_set, solve_qp_batch, solve_qp_batch_parallel,
+    solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
+    solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug,
+    solve_socp_ipm_warm, sos_constrained_lower_bound, sos_constrained_lower_bound_opts,
+    sos_lower_bound, sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
 };
 
 /// The underlying crate, for anything not surfaced above.

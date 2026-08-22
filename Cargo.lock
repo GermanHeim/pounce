@@ -910,7 +910,6 @@ version = "0.10.0"
 dependencies = [
  "anstream",
  "anstyle",
- "feral",
  "nix",
  "pounce-algorithm",
  "pounce-common",
