@@ -125,6 +125,27 @@ changes.
     iterations. Same verdict, later. Ipopt also takes longer under `adaptive`
     on this model (43 → 79).
 
+  On the wider 47-problem mittelmann corpus, run under `limited-memory` both
+  ways, `Solve_Succeeded` goes 28 → 31: all three `Error_In_Step_Computation`
+  exits disappear, `qcqp1000-1nc`'s false `Infeasible_Problem_Detected`
+  becomes `Restoration_Failed`, and `robot_1600` (3000 → 33),
+  `steering_12800` (3000 → 59), `robot_c` (3000 → 2331) and `qcqp1500-1nc`
+  (timeout → 106) start solving.
+
+  One model moves from solved to unsolved and survives an uncontended re-run:
+  `dirichlet120`, `Solve_Succeeded`/176 → `Maximum_Iterations_Exceeded`/3000.
+  Ipopt does exactly the same thing — its default limited-memory arm and its
+  explicit `mu_strategy=adaptive` arm are identical to every printed digit
+  (3000 iterations, objective `3.7377878739899603e-02`), while its `monotone`
+  arm solves in 178. POUNCE now agrees with Ipopt on both arms and matches the
+  stalled objective to eight significant digits, so this is upstream's default
+  being the worse choice on this model rather than a POUNCE defect. Both codes
+  reach the optimum and then fail to close the convergence test. It is an
+  accepted cost of matching upstream, tracked with an owner in #748 rather
+  than left in a commit message. (`nql180` also appears to regress in the raw
+  table; re-run without competing load both arms hit the CPU limit, so that
+  line is a timing artifact, not a schedule effect.)
+
   `recalc_y`'s upstream limited-memory default (`IpIpoptAlg.cpp:238`) is
   deliberately still **not** followed; that decision and its measurements are
   documented where it is read, in `application.rs`.
