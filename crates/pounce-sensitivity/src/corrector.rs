@@ -31,7 +31,7 @@
 
 use std::rc::Rc;
 
-use pounce_common::types::{Index, Number};
+use pounce_common::types::Number;
 
 use crate::backsolver::SensBacksolver;
 use crate::solver::SolverError;
@@ -464,8 +464,24 @@ pub(crate) fn run(
     let mut rhs = vec![0.0; dim];
     let mut dir = vec![0.0; dim];
     while iterations < max_iter {
-        for (r, s) in rhs.iter_mut().zip(&resid) {
-            *r = -s;
+        // `resid` came off the calculated quantities, so it is in the
+        // algorithm's scaled frame, and `solve` pre-multiplies its
+        // right-hand side by `E` because it expects natural units.
+        // `r_scaled = E r_nat`, so undo it here; passing the scaled
+        // residual straight in applies `E` twice and leaves a
+        // diagonally mis-scaled direction that under-corrects
+        // stationarity wherever a variable factor is not one.
+        match bs.scaled_rhs_factor() {
+            None => {
+                for (r, s) in rhs.iter_mut().zip(&resid) {
+                    *r = -s;
+                }
+            }
+            Some(e) => {
+                for ((r, s), &ev) in rhs.iter_mut().zip(&resid).zip(e) {
+                    *r = if ev == 0.0 { -s } else { -s / ev };
+                }
+            }
         }
         if !solve(&rhs, &mut dir) {
             return Err(SolverError::BacksolveFailed);

@@ -473,6 +473,21 @@ fn the_correction_is_the_same_under_variable_scaling() {
             "d = {d}: x1 left its bounds at {}",
             base[0] + out[0],
         );
+        // The answer alone does not say the frames agree. The step this
+        // fixture hands over is already exact, so a direction that is
+        // merely damped still lands on it, and only the residual says
+        // whether the iterations did their work. `E` applied twice --
+        // the scaled residual passed to a `solve` that wants natural
+        // units -- left this at 4.1e-4 for d = 10 against 3.7e-11 for
+        // d = 1, all of it in stationarity (gh#733 review).
+        assert!(
+            report.residual < report.initial_residual * 1e-6,
+            "d = {d}: the iterations should drive the residual down as far \
+             as they do unscaled, got {:.3e} -> {:.3e} (stationarity {:.3e})",
+            report.initial_residual,
+            report.residual,
+            report.stationarity,
+        );
     }
 }
 

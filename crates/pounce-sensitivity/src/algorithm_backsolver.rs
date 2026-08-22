@@ -1028,6 +1028,21 @@ impl PdSensBacksolver {
         self.nlp.borrow().n_full_x()
     }
 
+    /// `E` itself, the vector [`Self::solve`] pre-multiplies its
+    /// right-hand side by.
+    ///
+    /// The counterpart of [`SensBacksolver::natural_units_factor`],
+    /// which reports `F`. A caller holding a residual it assembled from
+    /// the algorithm's own calculated quantities holds it in the scaled
+    /// frame, and `solve` wants its right-hand side in natural units:
+    /// `K̃ = E K F` with `v_scaled = F⁻¹ v_nat` gives
+    /// `r_scaled = E r_nat`, so that caller divides by this before
+    /// handing the residual over. Passing `r_scaled` straight in applies
+    /// `E` twice and leaves a diagonally mis-scaled Newton direction.
+    pub(crate) fn scaled_rhs_factor(&self) -> Option<&[Number]> {
+        self.conj.as_ref().map(|c| c.e.as_slice())
+    }
+
     /// [`Self::offsets`], for the corrector's residual assembly, which
     /// writes one calculated-quantity block at a time.
     pub(crate) fn offsets_public(&self) -> [usize; 9] {
