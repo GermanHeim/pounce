@@ -84,6 +84,24 @@ pub struct RestoSolveResult {
     /// point the user interrupted us at would be a verdict we have not
     /// earned.
     pub user_requested_stop: bool,
+    /// `true` when the original NLP is square, the inner sub-IPM stopped
+    /// at its acceptable level, and the recovered point is feasible for
+    /// the original NLP to `constr_viol_tol`. Port of the square-problem
+    /// branch at `IpRestoMinC_1Nrm.cpp:269`, which throws
+    /// `FEASIBILITY_PROBLEM_SOLVED` there; `IpIpoptAlg.cpp:542` catches it
+    /// and returns `FEASIBLE_POINT_FOUND`.
+    ///
+    /// A square NLP is a system of equations with nothing to optimise. A
+    /// point satisfying it to the tolerance the user declared *is* the
+    /// answer, so this branch outranks every locally-infeasible gate
+    /// below it — and is checked before them for exactly that reason.
+    /// Without it the gh#508 probe model cycles: restoration converges to
+    /// the feasible-to-`constr_viol_tol` point over and over (measured:
+    /// 210+ outer iterations, restoration re-entered every few) and the
+    /// run ends on whichever pounce-specific detector fires first rather
+    /// than on the verdict Ipopt gives, `Feasible point for square
+    /// problem found`.
+    pub feasible_point_found: bool,
 }
 
 /// Inner-loop driver hook. Constructs and runs the nested IPM around
@@ -291,6 +309,34 @@ impl RestorationPhase for MinC1NormRestoration {
         // in place and terminates on it.
         if result.user_requested_stop {
             return RestorationOutcome::UserRequestedStop;
+        }
+
+        // 1a''. Square-problem feasible point (`IpRestoMinC_1Nrm.cpp:269`).
+        // Ahead of the locally-infeasible branch, as upstream's `else if`
+        // chain has it: on a square problem a point feasible to
+        // `constr_viol_tol` is the answer, not evidence of infeasibility.
+        // Upstream installs the recovered point on `trial` and accepts it
+        // before throwing (`:243-246`), so the iterate handed back is the
+        // restoration phase's, not the pre-restoration one; do the same
+        // here, keeping `curr`'s multipliers because
+        // `compute_feasibility_multipliers_postprocess` in the outer loop
+        // overwrites them anyway.
+        if result.feasible_point_found {
+            let curr_snapshot = data.borrow().curr.clone();
+            if let Some(curr) = curr_snapshot {
+                let recovered = IteratesVector::new(
+                    result.trial_x.clone(),
+                    result.trial_s.clone(),
+                    curr.y_c.clone(),
+                    curr.y_d.clone(),
+                    curr.z_l.clone(),
+                    curr.z_u.clone(),
+                    curr.v_l.clone(),
+                    curr.v_u.clone(),
+                );
+                data.borrow_mut().set_curr(recovered);
+            }
+            return RestorationOutcome::FeasiblePointFound;
         }
 
         // 1b. Locally-infeasible short-circuit. The inner sub-IPM
@@ -967,6 +1013,7 @@ mod tests {
                 last_output: 0.0,
                 locally_infeasible: false,
                 user_requested_stop: false,
+                feasible_point_found: false,
             })
         });
 

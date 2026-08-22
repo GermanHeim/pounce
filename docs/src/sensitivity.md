@@ -630,6 +630,50 @@ still reports zero for the same model. Four things follow from it:
   many Param-dependent bounds trades roughly one row per bound. Only
   models that write a bound in terms of a declared Param pay this.
 
+### A Param pinned to exactly a bound
+
+A related case, and one that used to be silent. A declared Param can pin
+a variable through an ordinary equality:
+
+```python
+m.zc0 = pyo.Param(initialize=1.0, mutable=True)
+declare_sens_param(m.zc0)
+m.zc = pyo.Var(m.t, bounds=(0, 1))
+m.zc_init = pyo.Constraint(expr=m.zc[0] == m.zc0)
+```
+
+`d zc[0]/d zc0` is `1` by construction: the equality is linear and says
+so. When `zc0` sits strictly inside `zc`'s box that is what comes back.
+When it sits *on* a bound — `zc0 = 1.0` here, or `0.0` — the variable is
+held by the bound and the equality at once, the force that holds it has
+no unique split between them, and the solve lands with a bound
+multiplier far larger than the geometry needs over a slack near
+roundoff. The barrier diagonal `Σ = z/s` is the product of both, and it
+can reach `1e27` against Jacobian entries of `1`.
+
+At that point the constraint rows through the variable stop being
+representable against its own diagonal, and before
+[#737](https://github.com/jkitchin/pounce/issues/737) the whole
+derivative column read `0.00000` — `estimate()` returned the baseline
+value, and nothing warned. `Σ` is now capped at the stiffness those rows
+can still be seen against, so the equality is enforced again and the
+column reads what the model says. The cap is a ceiling and not a
+release: a bound that genuinely holds a variable still holds it, to
+within roundoff of the variable's own scale, and a bound-pinned variable
+that appears in no constraint row is not capped at all — there is no row
+for its diagonal to swamp, and there the stiffness is exactly what
+[Crossover and the barrier
+diagonal](crossover.md#what-it-does-to-a-downstream-sensitivity-result)
+wants every digit of.
+
+The ceiling holds on every diagonal the sensitivity system builds, the
+one [`corrector_iter`](#refining-the-step-corrector_iter) assembles when
+a step brings a variable onto a bound included — a bound the corrector
+newly pins arrives as `mu / s²` off the step's own endpoint, which is
+the same quantity by another name.
+
+Nothing about the solve changes; this is the sensitivity system only.
+
 ### Solver options and warm starts
 
 Solver options reach the in-process path the same two ways they reach an

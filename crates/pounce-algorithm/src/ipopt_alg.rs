@@ -2841,6 +2841,18 @@ impl IpoptAlgorithm {
         //     ends with.
         self.maybe_recalc_y();
 
+        // 8c. Square-problem multipliers. `IpIpoptAlg.cpp:409` runs this
+        //     between `AcceptTrialPoint` and the next `CheckConvergence`,
+        //     on every iteration, for square problems only. pounce's
+        //     `iterate()` boundary falls between those two — the outer
+        //     loop bumps `iter_count` and the next `iterate()` opens with
+        //     the convergence check — so this is the same slot, and the
+        //     `+ 1` inside is that pending bump (upstream increments
+        //     before the call, at `IpIpoptAlg.cpp:407`).
+        if self.is_square_problem() {
+            self.compute_feasibility_multipliers();
+        }
+
         // Sub-iteration checkpoint: the trial point was accepted; α and
         // the new iterate are in place (before the loop's iter bookkeeping
         // and the next `IterStart`).
@@ -3417,6 +3429,26 @@ impl IpoptAlgorithm {
                 // subproblem's iterate is not a point it should apply.
                 IterateOutcome::Terminate(SolverReturn::UserRequestedStop)
             }
+            RestorationOutcome::FeasiblePointFound => {
+                // Port of `IpIpoptAlg.cpp:542` — the catch of
+                // `FEASIBILITY_PROBLEM_SOLVED`, thrown by
+                // `IpRestoMinC_1Nrm.cpp:269` when restoration reaches a
+                // point feasible for a *square* original NLP. Upstream
+                // recomputes the multipliers before returning
+                // `FEASIBLE_POINT_FOUND`; without that step the reported
+                // dual infeasibility is `∇f` at a point whose status says
+                // the constraints are satisfied. On the gh#508 probe that
+                // is the difference between Ipopt's `1.78e-15` and a bare
+                // `10.0`.
+                //
+                // The driver has already promoted the recovered point to
+                // `data.curr`, so the multipliers are computed at the
+                // point that will be reported.
+                if self.is_square_problem() {
+                    self.compute_feasibility_multipliers_postprocess();
+                }
+                IterateOutcome::Terminate(SolverReturn::FeasiblePointFound)
+            }
             RestorationOutcome::LocallyInfeasible => {
                 // Mirrors upstream's catch of `LOCALLY_INFEASIBLE` thrown
                 // from `IpRestoConvCheck.cpp:240` — the resto sub-IPM
@@ -3606,6 +3638,222 @@ impl IpoptAlgorithm {
             curr.v_u.clone(),
         );
         self.data.borrow_mut().set_curr(new_iv);
+    }
+
+    /// Port of `IpoptCalculatedQuantities::IsSquareProblem`
+    /// (`IpIpoptCalculatedQuantities.cpp:3732`): as many equality
+    /// constraints as variables, so the NLP has zero degrees of freedom.
+    /// There is nothing to optimise — only a system to solve — and the
+    /// objective is decorative.
+    ///
+    /// The consequence that matters is algebraic. `J_c` is square, so the
+    /// least-square multiplier system `J_cᵀ y = −∇f (+ bound terms)` is
+    /// exactly solvable and the dual residual can always be driven to
+    /// zero, however large `y` has to be. On a non-square problem it
+    /// generally cannot, which is why this is the right gate and not a
+    /// heuristic.
+    fn is_square_problem(&self) -> bool {
+        match self.data.borrow().curr.as_ref() {
+            Some(c) => c.x.dim() == c.y_c.dim(),
+            None => false,
+        }
+    }
+
+    /// Zero the four bound multipliers and replace `y_c`/`y_d` with the
+    /// least-square multipliers of the resulting feasibility problem —
+    /// the shared body of `ComputeFeasibilityMultipliers`
+    /// (`IpIpoptAlg.cpp:893-922`) and
+    /// `ComputeFeasibilityMultipliersPostprocess` (`cpp:964-984`), which
+    /// upstream writes out twice.
+    ///
+    /// Returns the iterate that was in place beforehand, so a caller that
+    /// must be able to undo the swap can. `None` means nothing was
+    /// installed — no iterate, no multipliers, or the least-square solve
+    /// failed — in which case the original iterate is left untouched.
+    fn install_feasibility_multipliers(
+        &mut self,
+    ) -> Option<crate::iterates_vector::IteratesVector> {
+        let nlp = self.nlp.as_ref().map(Rc::clone)?;
+        let curr_backup = self.data.borrow().curr.clone()?;
+        let (n_yc, n_yd) = (curr_backup.y_c.dim(), curr_backup.y_d.dim());
+        if n_yc + n_yd == 0 {
+            return None;
+        }
+
+        // Zero the bound multipliers and install that iterate *before* the
+        // solve, so the least-square RHS is the feasibility problem's
+        // (`cpp:893-910`): the calculator reads `curr`, so the zeroing has
+        // to be visible to it, not applied to the result afterwards.
+        let zeroed = |v: &Rc<dyn Vector>| -> Rc<dyn Vector> {
+            let mut t = v.make_new();
+            t.set(0.0);
+            Rc::from(t)
+        };
+        let z_l = zeroed(&curr_backup.z_l);
+        let z_u = zeroed(&curr_backup.z_u);
+        let v_l = zeroed(&curr_backup.v_l);
+        let v_u = zeroed(&curr_backup.v_u);
+        self.data
+            .borrow_mut()
+            .set_curr(crate::iterates_vector::IteratesVector::new(
+                curr_backup.x.clone(),
+                curr_backup.s.clone(),
+                curr_backup.y_c.clone(),
+                curr_backup.y_d.clone(),
+                z_l.clone(),
+                z_u.clone(),
+                v_l.clone(),
+                v_u.clone(),
+            ));
+
+        let mut new_y_c = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yc).make_new_dense();
+        let mut new_y_d = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yd).make_new_dense();
+        let ok = match self.search_dir.as_mut() {
+            None => false,
+            Some(sd) => {
+                let mut pd_guard = sd.pd_solver_mut();
+                let ok = self.bundle.eq_mult.calculate_y_eq(
+                    &self.data,
+                    &self.cq,
+                    &nlp,
+                    pd_guard.aug_solver_mut(),
+                    &mut new_y_c,
+                    &mut new_y_d,
+                );
+                drop(pd_guard);
+                ok
+            }
+        };
+        if !ok {
+            // `cpp:986` logs a warning and keeps whatever `y` was there.
+            tracing::debug!(
+                target: "pounce::algorithm",
+                "square problem: least-square multiplier solve failed, keeping Newton multipliers",
+            );
+            self.data.borrow_mut().set_curr(curr_backup);
+            return None;
+        }
+
+        self.data
+            .borrow_mut()
+            .set_curr(crate::iterates_vector::IteratesVector::new(
+                curr_backup.x.clone(),
+                curr_backup.s.clone(),
+                Rc::new(new_y_c),
+                Rc::new(new_y_d),
+                z_l,
+                z_u,
+                v_l,
+                v_u,
+            ));
+        Some(curr_backup)
+    }
+
+    /// Port of `IpoptAlgorithm::ComputeFeasibilityMultipliersPostprocess`
+    /// (`IpIpoptAlg.cpp:949`). Same swap as
+    /// [`Self::compute_feasibility_multipliers`], but unconditional: the
+    /// run is over and the point has already been judged, so there is no
+    /// convergence check to gate on and nothing to restore. Called on the
+    /// two square-problem exits that report a feasible point
+    /// (`cpp:484`, `cpp:542`), whose whole claim is that the constraints
+    /// are satisfied — reporting `∇f` as the dual residual of such a point
+    /// would contradict the status printed next to it.
+    fn compute_feasibility_multipliers_postprocess(&mut self) {
+        debug_assert!(self.is_square_problem());
+        let _ = self.install_feasibility_multipliers();
+    }
+
+    /// Port of `IpoptAlgorithm::ComputeFeasibilityMultipliers`
+    /// (`IpIpoptAlg.cpp:857`). On a square problem, once the iterate is
+    /// primal-feasible to `constr_viol_tol`, re-estimate `y_c`/`y_d` as
+    /// the multipliers of the *feasibility* problem: zero the four bound
+    /// multipliers and take the least-square `y` against that iterate. If
+    /// the convergence check then accepts, keep them; otherwise restore
+    /// the iterate untouched.
+    ///
+    /// Why it exists (gh#508). A square problem is a system of equations.
+    /// If the solver has found a point satisfying them to the tolerance
+    /// the user declared, that point *is* the answer, and the leftover
+    /// objective gradient is not evidence of anything. Without this,
+    /// `inf_du` carries `∇f` — on the gh#508 probe `|2(x−5)| = 10` at a
+    /// point whose violation is `1e-4` inside a `constr_viol_tol` of
+    /// `1e-3` — the convergence check refuses, and the rapid-infeasibility
+    /// detector convicts a point Ipopt calls feasible.
+    ///
+    /// Note the double convergence check, which is upstream's too: one to
+    /// decide whether to bother (`cpp:880`), one to decide whether to keep
+    /// the result (`cpp:924`). Both go through
+    /// [`ConvergenceCheck::probe_convergence`], not the real check —
+    /// upstream can afford `CheckConvergence` here because the only state
+    /// it carries is `acceptable_counter_`, whereas pounce's also carries
+    /// the gh#505 rapid-infeasibility streak, the gh#200 veto budget and
+    /// the gh#533 progress window. Advancing those three times per
+    /// iteration instead of once is not a faithful port of anything: on
+    /// the gh#508 probe it moved the infeasibility conviction from
+    /// iteration 86 to 33.
+    fn compute_feasibility_multipliers(&mut self) {
+        debug_assert!(self.is_square_problem());
+
+        // Not primal feasible yet → no multipliers to compute (cpp:864).
+        // Upstream measures this on the *unscaled* violation in the max
+        // norm, against `constr_viol_tol`.
+        let constr_viol_tol = self.bundle.conv_check.constr_viol_tol_or_default();
+        if self.cq.borrow().curr_unscaled_primal_infeasibility_max() > constr_viol_tol {
+            return;
+        }
+
+        // No calculator → upstream logs and leaves `y` alone (cpp:872).
+        if self.nlp.is_none() {
+            return;
+        }
+
+        // `iter_count + 1`: see the call site. Upstream has already
+        // incremented when it reaches here.
+        let iter_count = self.data.borrow().iter_count + 1;
+        let nlp_err = self.cq.borrow().curr_nlp_error();
+        if !nlp_err.is_finite() {
+            return;
+        }
+
+        // Already converged, or out of iterations/time → do not touch the
+        // multipliers (cpp:884). `Continue` is the case worth acting on:
+        // it usually means dual feasibility is what is still missing.
+        if self
+            .bundle
+            .conv_check
+            .probe_convergence(nlp_err, iter_count, &self.data, &self.cq)
+            != ConvergenceStatus::Continue
+        {
+            return;
+        }
+
+        let Some(curr_backup) = self.install_feasibility_multipliers() else {
+            return;
+        };
+
+        // Keep them only if they actually buy a verdict (cpp:924).
+        let nlp_err = self.cq.borrow().curr_nlp_error();
+        if nlp_err.is_finite()
+            && matches!(
+                self.bundle
+                    .conv_check
+                    .probe_convergence(nlp_err, iter_count, &self.data, &self.cq,),
+                ConvergenceStatus::Converged | ConvergenceStatus::ConvergedToAcceptable
+            )
+        {
+            // Upstream marks nothing here; `"y "` is `recalc_y`'s. Use a
+            // distinct tag so the iteration log says which mechanism
+            // moved the multipliers.
+            self.data.borrow_mut().append_info_string("f ");
+            return;
+        }
+
+        tracing::debug!(
+            target: "pounce::algorithm",
+            "square problem: feasibility multipliers at iter {} did not converge the check, restoring",
+            iter_count,
+        );
+        self.data.borrow_mut().set_curr(curr_backup);
     }
 
     /// Port of `IpIpoptAlg::correct_bound_multiplier`

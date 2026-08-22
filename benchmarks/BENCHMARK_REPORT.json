@@ -4,7 +4,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.7201185696467292,
+    "pounce_obj": 1.7201185696480374,
     "ipopt_obj": 1.720118569648039,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -34,7 +34,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 47952.70164705679,
+    "pounce_obj": 47952.7016470568,
     "ipopt_obj": 47952.70140972709,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -64,7 +64,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 30.491718843718054,
+    "pounce_obj": 30.49171884371494,
     "ipopt_obj": 30.491718843714125,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -84,7 +84,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.08208499991347046,
+    "pounce_obj": 0.08208499991347043,
     "ipopt_obj": 0.08208499991347046,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -264,7 +264,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 94680127.0155049,
+    "pounce_obj": 94680127.0155229,
     "ipopt_obj": 94680127.01550286,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -314,7 +314,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.798357125282131e-15,
+    "pounce_obj": 5.777226148842026e-15,
     "ipopt_obj": 5.77343737009855e-15,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -344,7 +344,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3024988585029372e-26,
+    "pounce_obj": 1.297850992508848e-26,
     "ipopt_obj": 1.298554111012945e-26,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -384,7 +384,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -24.500000484782632,
+    "pounce_obj": -24.500000484782635,
     "ipopt_obj": -24.500000484782632,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -394,7 +394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -996.5000174414027,
+    "pounce_obj": -996.5000174413863,
     "ipopt_obj": -996.5000174414018,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -404,7 +404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -996.1012159839888,
+    "pounce_obj": -996.1012159839987,
     "ipopt_obj": -996.1012159839888,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -414,7 +414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -497.5000074262458,
+    "pounce_obj": -497.500007426246,
     "ipopt_obj": -497.50000742624593,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -424,7 +424,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -498.0982095515714,
+    "pounce_obj": -498.09820955157153,
     "ipopt_obj": -498.0982095515714,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -434,7 +434,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -497.500007426353,
+    "pounce_obj": -497.50000742635297,
     "ipopt_obj": -497.5000074263529,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -444,7 +444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.04553071810111675,
+    "pounce_obj": -0.04553071810111579,
     "ipopt_obj": -0.04553071810111107,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -454,7 +454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.030452651735840285,
+    "pounce_obj": -0.03045265173584397,
     "ipopt_obj": -0.03045265173584222,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -464,7 +464,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.030363813358248982,
+    "pounce_obj": -0.030363813358248937,
     "ipopt_obj": -0.030363813358248212,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -532,9 +532,9 @@
   {
     "name": "brainpc0",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Restoration_Failed",
-    "pounce_obj": 0.3835288481185249,
+    "pounce_obj": 0.38998045806831333,
     "ipopt_obj": 1700213.3452634949,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -542,19 +542,19 @@
   {
     "name": "brainpc1",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Restoration_Failed",
-    "pounce_obj": 0.0004074423584427042,
+    "pounce_obj": 0.00043826547089489634,
     "ipopt_obj": 0.05375290882672689,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
     "name": "brainpc2",
     "suite": "Vanderbei",
-    "pounce_status": "Restoration_Failed",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 7.056546348797835,
+    "pounce_obj": 0.00043895158706897935,
     "ipopt_obj": 0.0005293886984829627,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -564,7 +564,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0004094674992979975,
+    "pounce_obj": 0.0004094849804654304,
     "ipopt_obj": 0.0004094849012040243,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -574,7 +574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.00040972375193537873,
+    "pounce_obj": 0.0004098708266221393,
     "ipopt_obj": 0.0004079162968431434,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -584,7 +584,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 0.00035842245852414504,
+    "pounce_obj": 0.0003750403946183381,
     "ipopt_obj": 0.00037504028977766046,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -594,7 +594,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0003880681961437552,
+    "pounce_obj": 0.00038792671966195847,
     "ipopt_obj": 0.00038792666721809883,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -604,7 +604,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 0.00039268345303351213,
+    "pounce_obj": 0.0003927066256546562,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -614,7 +614,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0003941096176267527,
+    "pounce_obj": 0.00039390461758473323,
     "ipopt_obj": 0.00039313843393831417,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -624,7 +624,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.000423580229099245,
+    "pounce_obj": 0.000415203679783356,
     "ipopt_obj": 0.00041043060354924616,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -672,11 +672,11 @@
   {
     "name": "britgas",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": -1.5940807232382074e-07,
+    "pounce_obj": 2.4993217605356937,
     "ipopt_obj": 2.434433235736598,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -774,7 +774,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0,
+    "pounce_obj": -1.000000002785312,
     "ipopt_obj": -1.000000002785312,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -794,7 +794,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.18811881188119,
+    "pounce_obj": 6.188118811881188,
     "ipopt_obj": 6.188118811881188,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -804,7 +804,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9.090909090909074e-09,
+    "pounce_obj": -7.49409644032e-09,
     "ipopt_obj": -7.494096440320001e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -834,7 +834,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3.7047681836394486,
+    "pounce_obj": -3.704768183639449,
     "ipopt_obj": -3.704768183639449,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -854,7 +854,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.2770447887645596,
+    "pounce_obj": 0.2770447887645595,
     "ipopt_obj": 0.2770447887645597,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -874,7 +874,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 1.0000000037252903,
+    "pounce_obj": 1.0,
     "ipopt_obj": 1.0,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -894,7 +894,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.683300132670378,
+    "pounce_obj": -4.683300132670382,
     "ipopt_obj": -4.683300132670379,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -904,7 +904,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.2154638243837168,
+    "pounce_obj": -0.21546382438372058,
     "ipopt_obj": -0.2154638243837188,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -944,7 +944,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.9522244886358406,
+    "pounce_obj": 1.9522244886358409,
     "ipopt_obj": 1.9522244886358409,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1034,7 +1034,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 216.41357165949765,
+    "pounce_obj": 217.83337116009682,
     "ipopt_obj": 2.6647102474879127,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1044,7 +1044,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 0.16200710691483108,
+    "pounce_obj": 0.16200377114968503,
     "ipopt_obj": 0.16200167707878013,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1084,7 +1084,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 344.87621644228517,
+    "pounce_obj": 344.8762164421699,
     "ipopt_obj": 344.8762164421722,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1144,7 +1144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 27.99999919626401,
+    "pounce_obj": 27.999999196264014,
     "ipopt_obj": 27.999999196264017,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1174,7 +1174,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 72.89999928470526,
+    "pounce_obj": 72.89999928617065,
     "ipopt_obj": 72.89999928115354,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1184,7 +1184,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 90.68781743418927,
+    "pounce_obj": 90.68781743418458,
     "ipopt_obj": 90.68781743419142,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1194,7 +1194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Diverging_Iterates",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": -66023499381.68673,
+    "pounce_obj": -64975737815.315605,
     "ipopt_obj": -116947361609.7959,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1224,7 +1224,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 28.05848188870732,
+    "pounce_obj": 5.673602641822072,
     "ipopt_obj": -5.284832597191212e-08,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1232,11 +1232,11 @@
   {
     "name": "cresc132",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 5.348534466806879e-10,
+    "pounce_obj": 0.8577054096340895,
     "ipopt_obj": -4.447533416283649e-15,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -1244,7 +1244,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.8718975289998773,
+    "pounce_obj": 0.8718975394994039,
     "ipopt_obj": 0.8718975393016776,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1252,11 +1252,11 @@
   {
     "name": "cresc50",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 0.7862466522884753,
+    "pounce_obj": 49.582317430108105,
     "ipopt_obj": -4.6030278911203385e-12,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -1264,7 +1264,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -49.075200984344725,
+    "pounce_obj": -49.07520098434472,
     "ipopt_obj": -49.07520098434472,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1354,7 +1354,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 115711100.44086716,
+    "pounce_obj": 115711100.44086763,
     "ipopt_obj": 115711110.78519969,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1362,9 +1362,9 @@
   {
     "name": "dallasl",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Error_In_Step_Computation",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -202604.1327123546,
+    "pounce_obj": 233838.33994819297,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1372,11 +1372,11 @@
   {
     "name": "dallasm",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Error_In_Step_Computation",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -48198.18883818532,
+    "pounce_obj": -48198.14213788709,
     "ipopt_obj": null,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -1384,7 +1384,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -32393.225736201388,
+    "pounce_obj": -32393.225737433484,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1394,7 +1394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 7.973180195069245e-06,
+    "pounce_obj": 5.058641259229897e-06,
     "ipopt_obj": 6.911085877353293e-10,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1404,7 +1404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0025694827250118063,
+    "pounce_obj": 0.0025694827511638777,
     "ipopt_obj": 0.0025694961904041123,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1524,7 +1524,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.5625000022869973,
+    "pounce_obj": 1.562500002286997,
     "ipopt_obj": 1.562500002286997,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1532,11 +1532,11 @@
   {
     "name": "discs",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14.449516541671395,
+    "pounce_obj": 43.031695706568904,
     "ipopt_obj": 14.449516531152279,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -1544,7 +1544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.9975967407224124,
+    "pounce_obj": -1.9975967407224136,
     "ipopt_obj": -1.9975967407224122,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1714,7 +1714,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18744.0099571595,
+    "pounce_obj": 18744.00995715951,
     "ipopt_obj": 18744.00995715951,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1804,7 +1804,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 125.33812973582887,
+    "pounce_obj": 125.33812973582884,
     "ipopt_obj": 125.33812973582884,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1824,7 +1824,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 15.937777653848736,
+    "pounce_obj": 15.937777653848734,
     "ipopt_obj": 15.937777653848734,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1834,7 +1834,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.969812770004882,
+    "pounce_obj": 24.969812770004893,
     "ipopt_obj": 24.969812770004882,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1874,7 +1874,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.8685382232818877,
+    "pounce_obj": 2.8685382232818823,
     "ipopt_obj": 2.8685382232818855,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1894,7 +1894,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 134850.61625893367,
+    "pounce_obj": 134850.6162589337,
     "ipopt_obj": 134850.6162589336,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2014,7 +2014,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0671799837163845,
+    "pounce_obj": 0.06717998371638455,
     "ipopt_obj": 0.06717998295376071,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2074,7 +2074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.6000000000000008,
+    "pounce_obj": 1.6000000000112784,
     "ipopt_obj": 1.60000000000722,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2084,7 +2084,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.0249007544713503e-16,
+    "pounce_obj": 4.732884828623391e-19,
     "ipopt_obj": 6.779068774186479e-30,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2102,11 +2102,11 @@
   {
     "name": "eigenc2",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Search_Direction_Becomes_Too_Small",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 771.8095238095252,
+    "pounce_obj": 771.8095244527607,
     "ipopt_obj": 771.8095238128142,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -2114,7 +2114,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.7419666150981896e-21,
+    "pounce_obj": 3.977588019504365e-22,
     "ipopt_obj": 3.977671661444464e-22,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2134,7 +2134,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.0009674354160238705,
+    "pounce_obj": -0.0009674354160255581,
     "ipopt_obj": -0.0009674354160255639,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2144,7 +2144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.00000000000062,
+    "pounce_obj": -1.0000000000006197,
     "ipopt_obj": -1.0000000000006197,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2164,7 +2164,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0009674354160238706,
+    "pounce_obj": 0.0009674354160255584,
     "ipopt_obj": 0.0009674354160255544,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2224,7 +2224,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0011366404730515102,
+    "pounce_obj": 0.001136640473051518,
     "ipopt_obj": 0.0011366404730515035,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2234,7 +2234,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.005019508700854384,
+    "pounce_obj": 0.00501950870085438,
     "ipopt_obj": 0.005019508700854488,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2244,7 +2244,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.023303311466139155,
+    "pounce_obj": 0.02330331146615937,
     "ipopt_obj": 0.023303311466134544,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2354,7 +2354,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 11.656854117935882,
+    "pounce_obj": 11.656854117935868,
     "ipopt_obj": 11.656854117935879,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2384,7 +2384,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 38.87125618765783,
+    "pounce_obj": 38.87125618765782,
     "ipopt_obj": 38.87125618765786,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2394,7 +2394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 10.000000000003777,
+    "pounce_obj": 10.000000000087336,
     "ipopt_obj": 10.000000013062666,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -2414,7 +2414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 10.000000008515777,
+    "pounce_obj": 10.000000000110761,
     "ipopt_obj": 10.0000000085157,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2454,7 +2454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -17.685171641791435,
+    "pounce_obj": -16.992239786424967,
     "ipopt_obj": -17.862886560246064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2494,7 +2494,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3.000000002482289,
+    "pounce_obj": -3.0000000024822886,
     "ipopt_obj": -3.0000000024822886,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2504,7 +2504,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 482.02729949295895,
+    "pounce_obj": 482.0272994929593,
     "ipopt_obj": 482.02729949295895,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2554,7 +2554,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14400.927097126045,
+    "pounce_obj": 14400.927097126043,
     "ipopt_obj": 14400.927097126043,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2594,7 +2594,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 566.4443691882849,
+    "pounce_obj": 566.4443691881796,
     "ipopt_obj": 566.4443691882936,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2604,7 +2604,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 206.55469240602147,
+    "pounce_obj": 206.55469240601758,
     "ipopt_obj": 206.55469240601667,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2614,7 +2614,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 242.1089711821127,
+    "pounce_obj": 242.1089711829209,
     "ipopt_obj": 242.10897118292002,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2624,7 +2624,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 73.31702572865079,
+    "pounce_obj": 73.31702572956412,
     "ipopt_obj": 73.31702572985212,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2634,7 +2634,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 39.626268623147965,
+    "pounce_obj": 39.62626862314782,
     "ipopt_obj": 39.626268623147986,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2644,7 +2644,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 40.24746472863521,
+    "pounce_obj": 40.24746472863553,
     "ipopt_obj": 40.24746472863555,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2754,7 +2754,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -45.00036038989027,
+    "pounce_obj": -45.00036038989023,
     "ipopt_obj": -45.000360385975256,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2764,7 +2764,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.4500000029374792,
+    "pounce_obj": -0.45000000293747894,
     "ipopt_obj": -0.450000002937479,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2784,7 +2784,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.033283194386317494,
+    "pounce_obj": 0.03303040529096762,
     "ipopt_obj": 0.033283191745894,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2894,7 +2894,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -24.500000485119628,
+    "pounce_obj": -24.500000485119624,
     "ipopt_obj": -24.500000485119628,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3094,7 +3094,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -8.198031800645936,
+    "pounce_obj": -8.198031800645822,
     "ipopt_obj": -8.198031800645973,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3124,7 +3124,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -59.01312422228273,
+    "pounce_obj": -59.01312422228216,
     "ipopt_obj": -59.01312422228272,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3194,7 +3194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.9132229549810362,
+    "pounce_obj": -1.913222954981037,
     "ipopt_obj": -1.9132229549810367,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3204,7 +3204,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.437342591868191e-31,
+    "pounce_obj": 4.930380657631324e-32,
     "ipopt_obj": 0.0,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3214,7 +3214,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.732050807568948,
+    "pounce_obj": -1.7320508075689496,
     "ipopt_obj": -1.7320508075689496,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3314,7 +3314,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.000000148094966,
+    "pounce_obj": 1.0000001480949698,
     "ipopt_obj": 1.000000148094982,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3384,7 +3384,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0000000336540058,
+    "pounce_obj": -1.000000033654005,
     "ipopt_obj": -1.000000033654005,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3394,7 +3394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8.527590050515965e-16,
+    "pounce_obj": 8.527590042418357e-16,
     "ipopt_obj": 8.527590243874079e-16,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3404,7 +3404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.2913838052907805e-16,
+    "pounce_obj": 1.2913838053499576e-16,
     "ipopt_obj": 1.2913838048281224e-16,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3414,7 +3414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.03999999999999904,
+    "pounce_obj": 0.03999999998468283,
     "ipopt_obj": 0.03999999999895657,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3434,7 +3434,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -22.627417334874945,
+    "pounce_obj": -22.627417334874952,
     "ipopt_obj": -22.627417334874952,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3444,7 +3444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.9999999998681706,
+    "pounce_obj": 0.9999999998598019,
     "ipopt_obj": 0.9999999800415539,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3454,7 +3454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.999999942505261,
+    "pounce_obj": 5.99999994250526,
     "ipopt_obj": 5.99999994250526,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3544,7 +3544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.2500000000822895,
+    "pounce_obj": -0.25000000008228956,
     "ipopt_obj": -0.25000000008228956,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3564,7 +3564,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13.85786437626902,
+    "pounce_obj": 13.857864376269019,
     "ipopt_obj": 13.857864376269017,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3584,7 +3584,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -13.00000032747863,
+    "pounce_obj": -13.000000327478634,
     "ipopt_obj": -13.00000032747863,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3604,7 +3604,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8.553348883204236e-16,
+    "pounce_obj": 8.553352418258253e-16,
     "ipopt_obj": 8.553352493110184e-16,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3614,7 +3614,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.575160374640998e-14,
+    "pounce_obj": 6.57516035836253e-14,
     "ipopt_obj": 6.57516035836253e-14,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3644,7 +3644,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0,
+    "pounce_obj": 2.0954117794933126e-31,
     "ipopt_obj": 0.0,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3704,7 +3704,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3.4560000000000333,
+    "pounce_obj": -3.456000000000002,
     "ipopt_obj": -3.4560000000000017,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3724,7 +3724,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -7.802789549019167,
+    "pounce_obj": -7.80278954901911,
     "ipopt_obj": -7.802789549019134,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3744,7 +3744,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -143.6461421979285,
+    "pounce_obj": -143.64614219783556,
     "ipopt_obj": -143.6461421978006,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3764,7 +3764,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 961.715172130052,
+    "pounce_obj": 961.7151721300521,
     "ipopt_obj": 961.715172130052,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3784,7 +3784,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.9535288568869333,
+    "pounce_obj": 0.9535288568047804,
     "ipopt_obj": 0.9535288198704925,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3804,7 +3804,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1162.0269895931706,
+    "pounce_obj": -1162.0269895931742,
     "ipopt_obj": -1162.0269895931758,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3834,7 +3834,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.009401973254465658,
+    "pounce_obj": 0.009401973254465705,
     "ipopt_obj": 0.009401973254465679,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3844,7 +3844,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 17.014017145179157,
+    "pounce_obj": 17.01401714517916,
     "ipopt_obj": 17.014017145179164,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3854,7 +3854,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 727.679350506436,
+    "pounce_obj": 727.6793505064359,
     "ipopt_obj": 727.6788661765524,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3864,7 +3864,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 29.894378048973927,
+    "pounce_obj": 29.89437804897393,
     "ipopt_obj": 29.894378048973927,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3904,7 +3904,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.24150512877022667,
+    "pounce_obj": 0.24150512877022653,
     "ipopt_obj": 0.24150512877022667,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3914,7 +3914,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2.9197004089696583,
+    "pounce_obj": -2.9197004089696605,
     "ipopt_obj": -2.9197004089696605,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3924,7 +3924,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.07877682096342144,
+    "pounce_obj": 0.0787768209634214,
     "ipopt_obj": 0.0787768209634214,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3944,7 +3944,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.05394984776596946,
+    "pounce_obj": 0.05394984776596948,
     "ipopt_obj": 0.05394984776596941,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3964,7 +3964,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -5280335.298241995,
+    "pounce_obj": -5280335.298241988,
     "ipopt_obj": -5280335.246923825,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3994,7 +3994,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8827.597729486331,
+    "pounce_obj": 8827.59772948633,
     "ipopt_obj": 8827.597729486331,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4004,7 +4004,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.362655405455775,
+    "pounce_obj": 1.3626554054557614,
     "ipopt_obj": 1.3626462201733145,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4014,7 +4014,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.362655405455528,
+    "pounce_obj": 1.3626554054554987,
     "ipopt_obj": 1.3626462201729197,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4024,7 +4024,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3626554054511668,
+    "pounce_obj": 1.3626554054511455,
     "ipopt_obj": 1.3626462201685168,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4034,7 +4034,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3626554054544404,
+    "pounce_obj": 1.3626554054544384,
     "ipopt_obj": 1.3626462201717913,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4044,7 +4044,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3626554053003028,
+    "pounce_obj": 1.3626554053002484,
     "ipopt_obj": 1.362646220017802,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4074,7 +4074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.015617733119928028,
+    "pounce_obj": 0.015617733119928026,
     "ipopt_obj": 0.015617733119928022,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4084,7 +4084,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.1358057554506376,
+    "pounce_obj": 3.135805755450638,
     "ipopt_obj": 3.135805755450638,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4094,7 +4094,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.1358057554506353,
+    "pounce_obj": 3.1358057554506344,
     "ipopt_obj": 3.1358057554506362,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4144,7 +4144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1809.7646822896095,
+    "pounce_obj": 1809.764682289609,
     "ipopt_obj": 1809.764682289609,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4154,7 +4154,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 911.8805325829239,
+    "pounce_obj": 911.8805325829238,
     "ipopt_obj": 911.8805325829233,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4164,7 +4164,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 543.6679360710865,
+    "pounce_obj": 543.6679360710867,
     "ipopt_obj": 543.6679360710866,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4174,7 +4174,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.9511633467577187,
+    "pounce_obj": 3.9511633467577205,
     "ipopt_obj": 3.9511633467577183,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4184,7 +4184,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1136.3609836441728,
+    "pounce_obj": 1136.3609836441726,
     "ipopt_obj": 1136.3609836374765,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4194,7 +4194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7049.247760205951,
+    "pounce_obj": 7049.2477602059525,
     "ipopt_obj": 7049.247890421568,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4204,7 +4204,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5055.011794522214,
+    "pounce_obj": 5055.011794522243,
     "ipopt_obj": 5055.011794522221,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4214,7 +4214,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.6749814350592085,
+    "pounce_obj": -0.6749814350592093,
     "ipopt_obj": -0.6749814350592094,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4224,7 +4224,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5326.851310161076,
+    "pounce_obj": 5326.851310161077,
     "ipopt_obj": 5326.851310161078,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4244,7 +4244,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -47.76109085995744,
+    "pounce_obj": -47.76109085995763,
     "ipopt_obj": -47.76109085995764,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4254,7 +4254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -47.76109086431422,
+    "pounce_obj": -47.761090864314326,
     "ipopt_obj": -47.76109086431432,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4274,7 +4274,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.30620696053002,
+    "pounce_obj": 24.306206960530005,
     "ipopt_obj": 24.306206960530012,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4284,7 +4284,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1768.807482660006,
+    "pounce_obj": -1768.8074826600023,
     "ipopt_obj": -1768.8074826600068,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4294,7 +4294,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 97.58747527003538,
+    "pounce_obj": 97.58747527003531,
     "ipopt_obj": 97.58747316316169,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4324,7 +4324,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 244.89969626160178,
+    "pounce_obj": 244.89969626160183,
     "ipopt_obj": 244.8996962616018,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4404,7 +4404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 34824488.47198758,
+    "pounce_obj": 34824488.4696747,
     "ipopt_obj": 34824488.46221486,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4414,7 +4414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 348244886091.30054,
+    "pounce_obj": 348244885973.2555,
     "ipopt_obj": 348244884622.12634,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4434,7 +4434,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.16168999999999994,
+    "pounce_obj": -0.15294999999999995,
     "ipopt_obj": -0.1442099999999999,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4454,7 +4454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Diverging_Iterates",
     "ipopt_status": "Search_Direction_Becomes_Too_Small",
-    "pounce_obj": -751814403395754.8,
+    "pounce_obj": -740550600823659.5,
     "ipopt_obj": -3.092737303891266e+17,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -4484,7 +4484,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.8461039436164931,
+    "pounce_obj": 0.8454425912276674,
     "ipopt_obj": 0.845442591227744,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4494,7 +4494,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.987339167800485e-09,
+    "pounce_obj": -4.987339392459034e-09,
     "ipopt_obj": -4.987339323661747e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4534,7 +4534,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 5.339381754664938e-05,
+    "pounce_obj": 8.444185394930289e-05,
     "ipopt_obj": 4.025057815122093e-06,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -4544,7 +4544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.318288805876205,
+    "pounce_obj": -4.318288792945679,
     "ipopt_obj": -4.3182888009530025,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4714,7 +4714,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.4528510640527856,
+    "pounce_obj": 0.45285106405278547,
     "ipopt_obj": 0.45285106405278536,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4784,7 +4784,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.6164324304735898,
+    "pounce_obj": 0.6164324304735899,
     "ipopt_obj": 0.6164324304735898,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4794,7 +4794,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -797.2837027025383,
+    "pounce_obj": -797.283702702534,
     "ipopt_obj": -797.2837027025373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4854,7 +4854,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -0.9741034034245195,
+    "pounce_obj": -0.9741512458116854,
     "ipopt_obj": -0.974003696308087,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -4884,7 +4884,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.105425174680372e-09,
+    "pounce_obj": 5.10542517468037e-09,
     "ipopt_obj": 5.105425174680368e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4994,7 +4994,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0025730289832990656,
+    "pounce_obj": 0.0025730289832990643,
     "ipopt_obj": 0.0025730289832990656,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5014,7 +5014,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.3614392423909267e-11,
+    "pounce_obj": 2.3614420163391256e-11,
     "ipopt_obj": 2.3614806746687284e-11,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5024,7 +5024,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0003628799983131309,
+    "pounce_obj": 0.00036287999831313087,
     "ipopt_obj": 0.00036287999999999994,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5044,7 +5044,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0000000028069533,
+    "pounce_obj": -1.000000002806951,
     "ipopt_obj": -1.0000000028069518,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5064,7 +5064,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.808846030588611e-15,
+    "pounce_obj": 5.817153252838059e-15,
     "ipopt_obj": 5.798989298419966e-15,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5154,7 +5154,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -19855438853.82677,
+    "pounce_obj": -19855438853.826775,
     "ipopt_obj": -19855438853.826767,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5164,7 +5164,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -13315104959.66028,
+    "pounce_obj": -13315104959.660278,
     "ipopt_obj": -13315104959.660282,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5174,7 +5174,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6437652454.634439,
+    "pounce_obj": -6437652454.634438,
     "ipopt_obj": -6437652454.63444,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5184,7 +5184,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -71513094.11839849,
+    "pounce_obj": -71513094.11839847,
     "ipopt_obj": -71513094.11839767,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5194,7 +5194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -57788248.67241674,
+    "pounce_obj": -57788248.6724167,
     "ipopt_obj": -57788248.672416866,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5204,7 +5204,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -30536886.779037364,
+    "pounce_obj": -30536886.77903735,
     "ipopt_obj": -30536886.77903737,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5214,7 +5214,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -93973770.1062934,
+    "pounce_obj": -93973770.10629337,
     "ipopt_obj": -93973770.1062934,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5224,7 +5224,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -66252868.804420315,
+    "pounce_obj": -66252868.8044203,
     "ipopt_obj": -66252868.8044203,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5244,7 +5244,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -43419828.383624285,
+    "pounce_obj": -43419828.38362429,
     "ipopt_obj": -43419828.383624285,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5254,7 +5254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -30376198.015992224,
+    "pounce_obj": -30376198.01599224,
     "ipopt_obj": -30376198.015992235,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5264,7 +5264,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -21519249.743052796,
+    "pounce_obj": -21519249.743052803,
     "ipopt_obj": -21519249.74305279,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5274,7 +5274,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.6332838536449589,
+    "pounce_obj": -0.6332838536449588,
     "ipopt_obj": -0.6332838522530307,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5324,7 +5324,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 0.7518003729483076,
+    "pounce_obj": 0.7518003733981933,
     "ipopt_obj": 0.7516816754020541,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -5394,7 +5394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.08715962993690975,
+    "pounce_obj": 0.08715962993690961,
     "ipopt_obj": 0.08715962891120173,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5414,7 +5414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.4506150337495264e-05,
+    "pounce_obj": 4.446239008763607e-05,
     "ipopt_obj": 4.45050019224728e-05,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5424,7 +5424,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 229.57341526432276,
+    "pounce_obj": 229.57341526432293,
     "ipopt_obj": 229.57341526432276,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5434,7 +5434,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 46.14566933278828,
+    "pounce_obj": 46.14566933278831,
     "ipopt_obj": 46.145669332788295,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5444,7 +5444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 549.9999988524032,
+    "pounce_obj": 549.999998838116,
     "ipopt_obj": 549.9999988381192,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5454,7 +5454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2048.016541713491,
+    "pounce_obj": 2048.0165417134913,
     "ipopt_obj": 2048.016541713491,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5464,7 +5464,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2048.016541713491,
+    "pounce_obj": 2048.0165417134913,
     "ipopt_obj": 2048.016541713491,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5474,7 +5474,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.18954247428971085,
+    "pounce_obj": -0.18954247428971088,
     "ipopt_obj": -0.18954247311286143,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5494,7 +5494,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 155.5328153566159,
+    "pounce_obj": 155.53281535661642,
     "ipopt_obj": 155.53281535661594,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5502,11 +5502,11 @@
   {
     "name": "orthrds2",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1562.822976652208,
+    "pounce_obj": 1461.0405016425398,
     "ipopt_obj": 1544.296623334707,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -5534,7 +5534,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 189.59767424193325,
+    "pounce_obj": 189.59767424193373,
     "ipopt_obj": 189.59767424193325,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5544,7 +5544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1523.8997328865148,
+    "pounce_obj": 1523.8997328865155,
     "ipopt_obj": 1523.8997328865144,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5554,7 +5554,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.9343366754307296,
+    "pounce_obj": 3.9343366592921134,
     "ipopt_obj": 3.8681878437716266,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5564,7 +5564,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1513.8023234527088,
+    "pounce_obj": 1513.802323452711,
     "ipopt_obj": 1513.8023234527086,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5574,7 +5574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1523.8997328865169,
+    "pounce_obj": 1523.8997328865184,
     "ipopt_obj": 1523.899732886517,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5824,7 +5824,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 0.03871960539797411,
+    "pounce_obj": 0.038774125640598976,
     "ipopt_obj": 0.03875608767904218,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -5984,7 +5984,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0001365322114620905,
+    "pounce_obj": 0.00013653221146209065,
     "ipopt_obj": 0.0001365322114620906,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6094,7 +6094,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 54.59815002815607,
+    "pounce_obj": 54.59815002815602,
     "ipopt_obj": 54.59815002815607,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6104,7 +6104,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Restoration_Failed",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 1186.7806738919462,
+    "pounce_obj": 333.32427740334134,
     "ipopt_obj": 116235.9744191567,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -6134,7 +6134,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": -44.00000017951024,
+    "pounce_obj": -44.0000001795093,
     "ipopt_obj": -2.42457322872232e+25,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -6144,7 +6144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.035303219217914e-17,
+    "pounce_obj": 7.035269295429899e-17,
     "ipopt_obj": 1.4277841516153786e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6154,7 +6154,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.0276188044292235e-20,
+    "pounce_obj": 2.3461132671020394e-20,
     "ipopt_obj": 2.407027116254734e-20,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6264,7 +6264,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 60.9192349510829,
+    "pounce_obj": 60.91923495108289,
     "ipopt_obj": 60.91923495108289,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6334,7 +6334,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8459253.461586343,
+    "pounce_obj": 8459253.46158634,
     "ipopt_obj": 8459253.461586343,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6344,7 +6344,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1271825.015669682,
+    "pounce_obj": 1271825.0156696804,
     "ipopt_obj": 1271825.0154734696,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6354,7 +6354,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5146033.064277457,
+    "pounce_obj": 5146033.064277458,
     "ipopt_obj": 5146033.063905478,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6424,7 +6424,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.16045784810225416,
+    "pounce_obj": -0.1604578481022542,
     "ipopt_obj": -0.16045784810225486,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6444,7 +6444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9.858377806377845e-09,
+    "pounce_obj": -9.858377805703074e-09,
     "ipopt_obj": -9.848631273240814e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6474,7 +6474,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.08333328583729671,
+    "pounce_obj": 0.08333328583729686,
     "ipopt_obj": 0.08333328583729674,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6524,7 +6524,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 52.13990311106723,
+    "pounce_obj": 52.13990311106722,
     "ipopt_obj": 52.139903111067206,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6544,7 +6544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 181.57299127538116,
+    "pounce_obj": 181.5729912753813,
     "ipopt_obj": 181.57299127538118,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6694,7 +6694,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.1374938270943571e-12,
+    "pounce_obj": 8.046041998309508e-13,
     "ipopt_obj": 1.3636386730327006e-12,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6804,7 +6804,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.0001999981818180743,
+    "pounce_obj": -0.0001999981818182989,
     "ipopt_obj": -0.00019999818181805175,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6814,7 +6814,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.7178417836427087e-10,
+    "pounce_obj": 1.7178417836425053e-10,
     "ipopt_obj": -8.333991002096062e-10,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6824,7 +6824,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4998.699683368688,
+    "pounce_obj": -4998.699683368673,
     "ipopt_obj": -4998.699683368706,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6834,7 +6834,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 239.73800065816613,
+    "pounce_obj": 239.73800065828254,
     "ipopt_obj": 239.73800065823025,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6844,7 +6844,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.988435405786838e-09,
+    "pounce_obj": -4.988610135348593e-09,
     "ipopt_obj": -4.9886101973577575e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6854,7 +6854,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6.446756082974916e-05,
+    "pounce_obj": -6.446756082973898e-05,
     "ipopt_obj": -6.446756082959594e-05,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6882,11 +6882,11 @@
   {
     "name": "ssebnln",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Error_In_Step_Computation",
     "ipopt_status": "Optimal",
-    "pounce_obj": 16170599.81200177,
+    "pounce_obj": 16189700.376061153,
     "ipopt_obj": 16170599.811996737,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -6894,7 +6894,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 337.77246576885744,
+    "pounce_obj": 337.7724657688575,
     "ipopt_obj": 337.7724657688571,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6914,7 +6914,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Diverging_Iterates",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": -5.402076991889588e+26,
+    "pounce_obj": -5.4020769918895695e+26,
     "ipopt_obj": -3.390754267835726e+44,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -6942,9 +6942,9 @@
   {
     "name": "steenbrc",
     "suite": "Vanderbei",
-    "pounce_status": "Error_In_Step_Computation",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 18498.36768302577,
+    "pounce_obj": 139172.15792650648,
     "ipopt_obj": 25976.2448442355,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -6952,11 +6952,11 @@
   {
     "name": "steenbrd",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Error_In_Step_Computation",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9030.081777847261,
+    "pounce_obj": 11368.992524601344,
     "ipopt_obj": 9030.08177829628,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -6964,7 +6964,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 28514.95090307726,
+    "pounce_obj": 28514.950903077257,
     "ipopt_obj": 29560.02158231581,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -6972,21 +6972,21 @@
   {
     "name": "steenbrf",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 282.6780556484919,
+    "pounce_obj": 720.5566091431241,
     "ipopt_obj": 1321.6523214730862,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
     "name": "steenbrg",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Search_Direction_Becomes_Too_Small",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 27471.28192895999,
+    "pounce_obj": 28299.77349462432,
     "ipopt_obj": 28317.57959330006,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -7014,7 +7014,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.06786019055090686,
+    "pounce_obj": 0.0678601905509062,
     "ipopt_obj": 0.06786019055090597,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7024,7 +7024,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.7592841963656465,
+    "pounce_obj": 0.7592841963656474,
     "ipopt_obj": 0.7592841963656498,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7054,7 +7054,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1175.4722221461695,
+    "pounce_obj": 1175.4722221461689,
     "ipopt_obj": 1175.4722221461693,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7064,7 +7064,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.103409272179045,
+    "pounce_obj": 3.103409272179043,
     "ipopt_obj": 3.103409272179053,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7074,7 +7074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 12.311996511515657,
+    "pounce_obj": 12.311996511514678,
     "ipopt_obj": 12.31199651151446,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7114,7 +7114,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.00360189915452,
+    "pounce_obj": -1.0076626668346569,
     "ipopt_obj": -1.0011410801324998,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7144,7 +7144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.1160008156947845,
+    "pounce_obj": 1.1160008156947858,
     "ipopt_obj": 1.116000815694786,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7154,7 +7154,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.983044182999342e-08,
+    "pounce_obj": 7.983044183013475e-08,
     "ipopt_obj": 7.983044182989482e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7164,7 +7164,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.983044183002024e-08,
+    "pounce_obj": 7.983044183007301e-08,
     "ipopt_obj": 7.983044182964223e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7174,7 +7174,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8.048403259375186e-07,
+    "pounce_obj": 8.04840325937854e-07,
     "ipopt_obj": 8.048403259362828e-07,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7334,7 +7334,7 @@
     "suite": "Electrolyte",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.825840587094014e-10,
+    "pounce_obj": 7.825840587101685e-10,
     "ipopt_obj": 7.825840587101685e-10,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7344,7 +7344,7 @@
     "suite": "Electrolyte",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.7723713582599269,
+    "pounce_obj": -0.7723713582598383,
     "ipopt_obj": -0.7723713582598373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7354,7 +7354,7 @@
     "suite": "Electrolyte",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.006933335952005659,
+    "pounce_obj": -0.006933374994510822,
     "ipopt_obj": -0.006933374994510116,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7414,7 +7414,7 @@
     "suite": "Electrolyte",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.05531314542407987,
+    "pounce_obj": -0.0553131454240308,
     "ipopt_obj": -0.0553131454240308,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7444,7 +7444,7 @@
     "suite": "Electrolyte",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.3482746782838695,
+    "pounce_obj": -1.3482746804150145,
     "ipopt_obj": -1.3482746804150167,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7464,7 +7464,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2178.0804108196703,
+    "pounce_obj": 2178.080410819669,
     "ipopt_obj": 2178.08041081967,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7474,7 +7474,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8208.515428322775,
+    "pounce_obj": 8208.515428322793,
     "ipopt_obj": 8208.515428322795,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7494,7 +7494,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 17551.89083859282,
+    "pounce_obj": 17551.890838592815,
     "ipopt_obj": 17551.89083859282,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7502,11 +7502,11 @@
   {
     "name": "cho_parmest",
     "suite": "CHO",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 67672.86755753511,
+    "pounce_obj": 67672.86755752882,
     "ipopt_obj": 67672.86755753602,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -7514,7 +7514,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1008.403538324238,
+    "pounce_obj": 1003.2466162651306,
     "ipopt_obj": 1001.1632592686777,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7524,7 +7524,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 249.04182241047482,
+    "pounce_obj": 249.04182241238047,
     "ipopt_obj": 249.04182241162775,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7534,7 +7534,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 303.016842772068,
+    "pounce_obj": 303.01684277224604,
     "ipopt_obj": 303.0168427722458,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7544,7 +7544,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 213.51320958630703,
+    "pounce_obj": 207.25631681039124,
     "ipopt_obj": 207.25631681040468,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7554,7 +7554,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 963.9148473320661,
+    "pounce_obj": 991.9834644892483,
     "ipopt_obj": 944.5512192864275,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7564,7 +7564,7 @@
     "suite": "Water",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 207.25631477979638,
+    "pounce_obj": 207.51463968176944,
     "ipopt_obj": 207.5146396817694,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7574,7 +7574,7 @@
     "suite": "Gas",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.6986405294099942,
+    "pounce_obj": 1.698640529409994,
     "ipopt_obj": 1.6986405294102997,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7584,7 +7584,7 @@
     "suite": "Gas",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.03285559713775812,
+    "pounce_obj": 0.032855597137758055,
     "ipopt_obj": 0.03285559713297465,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7594,7 +7594,7 @@
     "suite": "Gas",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 118.51859709584375,
+    "pounce_obj": 432.75493137203296,
     "ipopt_obj": 57.02748996410721,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -7604,7 +7604,7 @@
     "suite": "Gas",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.2899875309882556,
+    "pounce_obj": 1.289987530988255,
     "ipopt_obj": 1.2899875309882551,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7618,6 +7618,16 @@
     "ipopt_obj": 0.0,
     "pounce_solved": true,
     "ipopt_solved": true
+  },
+  {
+    "name": "laptime",
+    "suite": "LargeScale",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 65.2946393859211,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
   },
   {
     "name": "optcontrol",
@@ -7664,7 +7674,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.008644519467756137,
+    "pounce_obj": 0.008735782306919623,
     "ipopt_obj": 0.008675495668633269,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7694,7 +7704,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -207096.607560608,
+    "pounce_obj": -207096.60756039422,
     "ipopt_obj": -207096.6075400124,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7714,7 +7724,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.448367512092724,
+    "pounce_obj": -4.448367512186283,
     "ipopt_obj": -4.4483776974762925,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7724,7 +7734,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 344.8761314083454,
+    "pounce_obj": 344.8761314124327,
     "ipopt_obj": 344.87613141578004,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7734,7 +7744,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.7209747977699337,
+    "pounce_obj": 2.7209747977699714,
     "ipopt_obj": 2.7209747976434064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7754,7 +7764,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0005199974520846034,
+    "pounce_obj": 0.0005199974520846613,
     "ipopt_obj": 0.0005199974520846647,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7764,7 +7774,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0005207820832705911,
+    "pounce_obj": 0.0005207820832716664,
     "ipopt_obj": 0.0005207820832729023,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7774,7 +7784,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.06637130830389394,
+    "pounce_obj": 0.06637130830389405,
     "ipopt_obj": 0.06637130830389411,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7784,7 +7794,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 98.09596925638442,
+    "pounce_obj": 98.09596925636929,
     "ipopt_obj": 98.09596925639626,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7794,7 +7804,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.035036085697751004,
+    "pounce_obj": 0.035036085697751,
     "ipopt_obj": 0.035036085631595236,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7804,7 +7814,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 136.45580216202498,
+    "pounce_obj": 136.45580216202495,
     "ipopt_obj": 136.45580216202492,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7824,7 +7834,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 75583.06085245013,
+    "pounce_obj": 75583.06085244328,
     "ipopt_obj": 75583.06085244352,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7834,7 +7844,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.06389670128604523,
+    "pounce_obj": 0.0638967012860335,
     "ipopt_obj": 0.06389670128604544,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7844,7 +7854,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.06543514582287373,
+    "pounce_obj": 0.06543514582283572,
     "ipopt_obj": 0.06543514582308746,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7854,7 +7864,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.6461170616785052,
+    "pounce_obj": 3.6461170616756124,
     "ipopt_obj": 3.6461170616757244,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7864,7 +7874,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.6391679522371656,
+    "pounce_obj": 3.6391679703020494,
     "ipopt_obj": 3.6391673276079475,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7874,7 +7884,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -552.6662879283585,
+    "pounce_obj": -552.6662879283581,
     "ipopt_obj": -552.6662879283568,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7894,7 +7904,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.005236595833903659,
+    "pounce_obj": 0.005236595833903641,
     "ipopt_obj": 0.005236595833903134,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7904,7 +7914,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 133.29473763540847,
+    "pounce_obj": 133.2947376354084,
     "ipopt_obj": 133.29473763147269,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7914,7 +7924,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9.340250718459648,
+    "pounce_obj": 9.340250718459652,
     "ipopt_obj": 9.340250718411813,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7924,7 +7934,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 19746529.71315141,
+    "pounce_obj": 19746529.713151384,
     "ipopt_obj": 19746529.71315141,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7934,7 +7944,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Solver_Error",
-    "pounce_obj": -0.9277211161278336,
+    "pounce_obj": -0.9277211161513587,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -7944,7 +7954,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.12040448050599158,
+    "pounce_obj": -0.12040448050599156,
     "ipopt_obj": -0.12040448118681227,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7954,7 +7964,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 19.872166934244767,
+    "pounce_obj": 19.872166934244774,
     "ipopt_obj": 19.87216693424477,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7964,7 +7974,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -26628866.24358867,
+    "pounce_obj": -26628866.243588667,
     "ipopt_obj": -26628866.243700426,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7974,7 +7984,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 738127.4263171845,
+    "pounce_obj": 738127.4263175657,
     "ipopt_obj": 738127.4255995068,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7984,7 +7994,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 93279.08929311589,
+    "pounce_obj": 93279.08929311552,
     "ipopt_obj": 93279.08901274561,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7994,7 +8004,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 3882979.4908800474,
+    "pounce_obj": 3882979.490877333,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8004,7 +8014,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 4778479.686167628,
+    "pounce_obj": 4778479.686167611,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8014,7 +8024,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -11733616.701781355,
+    "pounce_obj": -11733616.70164277,
     "ipopt_obj": -11733616.632486288,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8024,7 +8034,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -21235333.87837542,
+    "pounce_obj": -21235333.878375515,
     "ipopt_obj": -21235333.878750674,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8034,7 +8044,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -15933325.671358086,
+    "pounce_obj": -15933325.671237608,
     "ipopt_obj": -15933325.588911088,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8044,7 +8054,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -21618986.131695233,
+    "pounce_obj": -21618986.13169518,
     "ipopt_obj": -21618986.132069953,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8054,7 +8064,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6.639447222846842,
+    "pounce_obj": -6.639447222846808,
     "ipopt_obj": -6.639447264497423,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8064,7 +8074,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9.140923622569705,
+    "pounce_obj": 9.140923622569707,
     "ipopt_obj": 9.140923622569716,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8074,7 +8084,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 1.0431952061258085,
+    "pounce_obj": 1.0431952061264949,
     "ipopt_obj": 8.173304350449197,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8084,7 +8094,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 2.333099018760325,
+    "pounce_obj": 2.333099018756607,
     "ipopt_obj": 15.48468449656994,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8094,7 +8104,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 1.4059755770797007,
+    "pounce_obj": 1.4059755770800477,
     "ipopt_obj": 29.039905764280274,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8124,7 +8134,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 83623.82012417658,
+    "pounce_obj": 83623.82012417655,
     "ipopt_obj": 83623.82012417658,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8214,7 +8224,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -61735219.63443368,
+    "pounce_obj": -61735219.634433694,
     "ipopt_obj": -61735221.428562656,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8354,7 +8364,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 115711100.44086716,
+    "pounce_obj": 115711100.44086763,
     "ipopt_obj": 115711104.1563345,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8614,7 +8624,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 34824463.91000962,
+    "pounce_obj": 34824463.89499475,
     "ipopt_obj": 34824463.87334354,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8624,7 +8634,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 348244639954.3976,
+    "pounce_obj": 348244639276.52374,
     "ipopt_obj": 348244638733.4167,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9484,7 +9494,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.3966211114987845,
+    "pounce_obj": -1.3966211114987825,
     "ipopt_obj": -1.3966211114987819,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9912,11 +9922,11 @@
   {
     "name": "de063155",
     "suite": "LP",
-    "pounce_status": "Infeasible_Problem_Detected",
+    "pounce_status": "Optimal",
     "ipopt_status": "Restoration_Failed",
-    "pounce_obj": 9883094342.464708,
+    "pounce_obj": 9883094342.464716,
     "ipopt_obj": 9891854759.786541,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -10354,7 +10364,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -305.1981391904203,
+    "pounce_obj": -305.19816970903105,
     "ipopt_obj": -305.1982026818099,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10504,7 +10514,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0975644150419833e-05,
+    "pounce_obj": -1.0975644106751861e-05,
     "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10514,7 +10524,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0975644150419833e-05,
+    "pounce_obj": -1.0975644106751861e-05,
     "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11104,7 +11114,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -58063.743699026556,
+    "pounce_obj": -58063.743699791165,
     "ipopt_obj": -58063.744058754826,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11284,7 +11294,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -8203511.999998168,
+    "pounce_obj": -8203511.999999678,
     "ipopt_obj": -8203512.029245055,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11594,7 +11604,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2720107.5328449635,
+    "pounce_obj": -2720107.5328449593,
     "ipopt_obj": -2720107.5538034895,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11604,7 +11614,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2581.139253183749,
+    "pounce_obj": -2581.139253183389,
     "ipopt_obj": -2581.139538918964,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11614,7 +11624,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 301.71067491076394,
+    "pounce_obj": 301.71067491002924,
     "ipopt_obj": 301.71035063475375,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13244,7 +13254,7 @@
     "suite": "LPopt",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 1040.9940407790864,
+    "pounce_obj": 1040.9940407790912,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false

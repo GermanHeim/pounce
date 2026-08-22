@@ -327,11 +327,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     // scoped borrows: the Cq getters below re-borrow the NLP (mutably,
     // for lazy evaluation) and the data, so nothing here may hold
     // either across a Cq call
-    let (mu, mult_z_l, mult_z_u, mult_v_l, mult_v_u, n, m_d) = {
+    let mu = bs.barrier_mu();
+    let (mult_z_l, mult_z_u, mult_v_l, mult_v_u, n, m_d) = {
         let d = data.borrow();
         let curr = d.curr.as_ref().expect("converged state has an iterate");
         (
-            d.curr_mu,
             Rc::clone(&curr.z_l),
             Rc::clone(&curr.z_u),
             Rc::clone(&curr.v_l),

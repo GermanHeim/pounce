@@ -187,10 +187,24 @@ fn solve(problem: ProductAndSum) -> ApplicationReturnStatus {
     app.optimize_tnlp(tnlp)
 }
 
+/// `FeasiblePointFound` counts, in **both** directions. It is a success-band
+/// answer — `Ipopt 3.14.19: Found feasible point for square problem`, AMPL
+/// `objno` code 2, which every band table reads as SOLVED — and this model is
+/// square (two variables, two equality rows), so it is a verdict the driver
+/// can actually reach here. Leaving it out is what let the square-problem
+/// path (gh#508) reintroduce this issue's exact defect at `1e-4` without any
+/// test in this file noticing: the run reported a feasible point for a system
+/// with no solution, and `is_success` said that was not a success.
+///
+/// Real Ipopt does return it on this model at that scale, having compared an
+/// unscaled violation against an absolute `constr_viol_tol`. That is the
+/// comparison this issue exists to refuse.
 fn is_success(status: ApplicationReturnStatus) -> bool {
     matches!(
         status,
-        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ApplicationReturnStatus::SolveSucceeded
+            | ApplicationReturnStatus::SolvedToAcceptableLevel
+            | ApplicationReturnStatus::FeasiblePointFound
     )
 }
 

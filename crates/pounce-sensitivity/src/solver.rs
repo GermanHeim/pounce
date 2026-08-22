@@ -581,11 +581,7 @@ impl Solver {
                 "SensApplication::parametric_rhs failed".into(),
             ));
         }
-        let mu = {
-            let (data, _, _) = state.backsolver.activity_handles();
-            let d = data.borrow();
-            d.curr_mu
-        };
+        let mu = state.backsolver.barrier_mu();
         let start = dims[0] + dims[1] + dims[2] + dims[3];
         let end = start + dims[4] + dims[5] + dims[6] + dims[7];
         for r in rhs.iter_mut().take(end).skip(start) {
@@ -615,11 +611,7 @@ impl Solver {
     fn barrier_correction(&self, state: &ConvergedState) -> Result<Vec<Number>, SolverError> {
         let dims = state.backsolver.block_dims();
         let n_full = state.backsolver.dim();
-        let mu = {
-            let (data, _, _) = state.backsolver.activity_handles();
-            let d = data.borrow();
-            d.curr_mu
-        };
+        let mu = state.backsolver.barrier_mu();
         // z_l, z_u, v_l, v_u: the rows carrying the complementarity
         // conditions, which are the ones the barrier perturbs
         let start = dims[0] + dims[1] + dims[2] + dims[3];
@@ -834,10 +826,14 @@ impl Solver {
                 expected: dim,
             });
         }
+        // `>= 0`, not `> 0`: `barrier_mu` reports exactly zero for a
+        // point whose bound multipliers were zeroed on the way out (see
+        // its doc comment), and that is a barrier level, not a missing
+        // one. The complementarity rows are then already satisfied
+        // where they stand, which is what the corrector should measure.
         let mu = {
-            let (data, _, _) = bs.activity_handles();
-            let m = data.borrow().curr_mu;
-            if m > 0.0 {
+            let m = bs.barrier_mu();
+            if m >= 0.0 && m.is_finite() {
                 m
             } else {
                 return Err(SolverError::SensComputationFailed(
@@ -1002,11 +998,7 @@ impl Solver {
         // complementarity decision. The engagement and expansion
         // tests use this band; acceptance-level roundoff tests keep
         // EPS_REL.
-        let band = {
-            let (data, _, _) = bs.activity_handles();
-            let mu = data.borrow().curr_mu;
-            mu.max(0.0).sqrt().max(EPS_REL)
-        };
+        let band = bs.barrier_mu().max(0.0).sqrt().max(EPS_REL);
 
         if weak.is_empty() {
             // a clean base point takes the plain step and no decision

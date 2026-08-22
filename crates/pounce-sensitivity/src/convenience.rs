@@ -491,7 +491,7 @@ impl SensSolve {
                     let dims = backsolver_for_refine.block_dims();
                     let start = dims[0] + dims[1] + dims[2] + dims[3];
                     let end = start + dims[4] + dims[5] + dims[6] + dims[7];
-                    let mu = data.borrow().curr_mu;
+                    let mu = backsolver_for_refine.barrier_mu();
                     let mut rhs = vec![0.0; n_full];
                     for r in rhs.iter_mut().take(end).skip(start) {
                         *r = mu;

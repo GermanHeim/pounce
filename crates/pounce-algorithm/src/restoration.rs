@@ -66,6 +66,14 @@ pub enum RestorationOutcome {
     /// restoration subproblem — the same discipline the pounce#244
     /// deadline exit already follows.
     UserRequestedStop,
+    /// The original NLP is square and the restoration phase reached a
+    /// point feasible for it to `constr_viol_tol`. Port of the
+    /// `FEASIBILITY_PROBLEM_SOLVED` throw at `IpRestoMinC_1Nrm.cpp:269`;
+    /// the outer loop maps this to `SolverReturn::FeasiblePointFound`
+    /// (`IpIpoptAlg.cpp:542`) after recomputing the multipliers of the
+    /// feasibility problem. The impl has already promoted the recovered
+    /// point to `data.curr`.
+    FeasiblePointFound,
 }
 
 pub trait RestorationPhase {

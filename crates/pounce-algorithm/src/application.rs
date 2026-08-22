@@ -4448,6 +4448,49 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_bool_value("feral_fma", "") {
         cfg.fma = v;
     }
+    // Not tri-state, and deliberately not: on the limited-memory path
+    // the IPM's default is the opposite of the library's (gh#710,
+    // gh#698 obs 5). `FeralConfig` ships `refine = true` because a
+    // caller that only refines its own system needs the backend loop.
+    //
+    // Scoped to limited-memory, because that is where the win was
+    // measured and where it comes from. Under L-BFGS the Hessian-free
+    // bypass batches the low-rank SMW correction into one multi-RHS
+    // back-solve, and the backend loop refines per right-hand side, so
+    // its cost scales with the memory depth — while what it polishes is
+    // the *condensed* system, which is not where Waechter-Biegler 3.10
+    // puts refinement. Turning it off takes `laptime` under
+    // limited-memory from 1397 s to 394 s.
+    //
+    // The same switch is a net loss on the exact path, so it is not
+    // applied there. It costs `NARX_CFy` 230 iterations (400 -> 630,
+    // 173 s -> 250 s) to buy back 34 on `laptime` (380 -> 346). And the
+    // exact path has no rung left to stand in for it: the
+    // `increase_quality` escalation that once argued for dropping the
+    // backend loop here proved inert and was itself removed, so with
+    // `refine` off the host loop in `PdFullSpaceSolver` is the only
+    // refinement in the stack — and it stops the moment it crosses
+    // `residual_ratio_max` (1e-10), three orders looser than the ~1e-16
+    // the backend-refined solves reach.
+    //
+    // Tightening that threshold instead is not the fix, and was measured
+    // rather than assumed: it is chaotic on this corpus, flipping `deb7`
+    // to `Error_In_Step_Computation` at 1e-12 and swinging
+    // `pooling_rt2stp` between 107 and 199 iterations across 1e-11 to
+    // 1e-13. Forcing extra passes via `min_refinement_steps` behaves the
+    // same way (both fixtures break at 2). Restoring the backend loop is
+    // trajectory-neutral next to either (`deb7` 146 -> 147,
+    // `pooling_rt2stp` 107 -> 109).
+    //
+    // Ordered env-then-option so `POUNCE_FERAL_REFINE` still reaches
+    // this path and an explicit `feral_refine` still beats both.
+    let limited_memory = matches!(
+        options.get_string_value("hessian_approximation", ""),
+        Ok((ref s, true)) if s == "limited-memory"
+    );
+    if limited_memory && std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
+        cfg.refine = false;
+    }
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }
@@ -4456,6 +4499,11 @@ pub fn feral_config_from_options(
     // cast cannot go negative.
     if let Ok((v, true)) = options.get_integer_value("feral_refine_steps", "") {
         cfg.refine_max_steps = v.max(0) as usize;
+    }
+    // Also only consulted when `refine` is on. Registered with lower bound
+    // 0, and 0 disables the pre-check; see `FeralConfig::refine_target`.
+    if let Ok((v, true)) = options.get_numeric_value("feral_refine_target", "") {
+        cfg.refine_target = v.max(0.0);
     }
     // Explicit static-pivoting opt-in (feral#8 cascade breaker, pounce#254).
     // Same tri-state discipline: unset leaves `cfg.static_pivoting` at

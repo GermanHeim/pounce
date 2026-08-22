@@ -16,6 +16,7 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::{Index, Number};
 
+#[derive(Clone)]
 pub struct OptErrorConvCheck {
     pub tol: Number,
     pub dual_inf_tol: Number,
@@ -862,6 +863,27 @@ impl OptErrorConvCheck {
 }
 
 impl ConvCheck for OptErrorConvCheck {
+    /// Snapshot every counter, run the real check, put them back. The
+    /// struct is `Clone` for this and only this — the alternative is a
+    /// hand-maintained list of the mutable fields, and this type has
+    /// grown a new one for roughly every issue it has been through
+    /// (`infeas_streak`, `veto_extra_iters`, `acceptable_window`,
+    /// `acceptable_progress_refusals`, `rel_infeas_extra_iters`,
+    /// `prev_rel_viol`, ...). A list like that is wrong the first time
+    /// someone adds a field and does not think of this method.
+    fn probe_convergence(
+        &mut self,
+        nlp_err: Number,
+        iter_count: Index,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> ConvergenceStatus {
+        let saved = self.clone();
+        let status = self.check_convergence_with_state(nlp_err, iter_count, data, cq);
+        *self = saved;
+        status
+    }
+
     fn certificate_vetoed(&self) -> bool {
         self.veto_fired
     }

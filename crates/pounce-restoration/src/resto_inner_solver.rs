@@ -787,6 +787,7 @@ pub fn run_inner_resto(
             last_output,
             locally_infeasible: false,
             user_requested_stop: true,
+            feasible_point_found: false,
         });
     }
 
@@ -822,6 +823,95 @@ pub fn run_inner_resto(
     } else {
         1.0
     };
+    // Square-problem feasible point, `IpRestoMinC_1Nrm.cpp:269`:
+    //
+    //     else if( square_problem && resto_status == STOP_AT_ACCEPTABLE_POINT
+    //              && IpCq().unscaled_curr_nlp_constraint_violation(NORM_MAX)
+    //                 < constr_viol_tol_ )
+    //        THROW_EXCEPTION(FEASIBILITY_PROBLEM_SOLVED, ...)
+    //
+    // Upstream evaluates that violation on `IpData().curr()` — but it has
+    // just copied the restoration point onto `trial` and accepted it
+    // (`:243-246`, the `resto_status != SUCCESS` block), so `curr` *is*
+    // the recovered point and `orig_inf_pr_at_final`, the unscaled
+    // orig-NLP violation at the inner's final iterate, is the same
+    // quantity. Strict `<`, as upstream has it.
+    //
+    // The upstream chain that leads here: `IpRestoConvCheck.cpp:222`
+    // returns `CONVERGED_TO_ACCEPTABLE_POINT` for a square problem that is
+    // feasible w.r.t. `constr_viol_tol` but not w.r.t. `tol`, precisely so
+    // that this branch can see it and render the feasible-point verdict.
+    // pounce ported that arm (`conv_check.rs:222`) but not this one, so
+    // the signal it exists to raise had nowhere to land.
+    // One departure from upstream, and a required one: `<
+    // constr_viol_tol_` is an *absolute* test on a scale-dependent
+    // quantity, which is the defect class gh#387 / gh#390 exist to close.
+    // `s*(x*y) == s*1.0` with `s*(x+y) == s*0.5` over `x,y in [-10,10]`
+    // has no solution at any `s` — its least-infeasible point misses by
+    // ~0.94 of the row — but the residual carries `s`, so at `s = 1e-4`
+    // the absolute test alone reads that point as feasible and renders
+    // `Feasible point for square problem found` for a model with no
+    // answer. Real Ipopt 3.14.19 does exactly that (verified directly);
+    // `pyomo-pounce/tests/test_scale_invariance.py::inf_eq_nl` is the
+    // harness that refuses to inherit it, and gh#390 had already taken
+    // that model to right-at-every-scale before this path existed.
+    //
+    // The companion arm this one consumes — `resto_orig_verdict`'s port
+    // of `IpRestoConvCheck.cpp:222`, the square-problem branch that
+    // produces the `StopAtAcceptablePoint` being matched on — already
+    // pairs its absolute test with a relative one for this reason. This
+    // is the same pairing, measured the same way and against the same
+    // `1e-2` band. That arm cannot stand in for this one: the status
+    // matched below is the inner sub-IPM's *generic* acceptable-level
+    // stop, which several routes reach, so the square-problem verdict
+    // has to carry its own guard rather than assume one upstream of it.
+    //
+    // The measure has to be the declared-RHS one, not the
+    // `violation_scale` computed a few lines up. That scale comes from
+    // the solver's own row scaling `dc`, and gradient-based NLP scaling
+    // only ever scales a row *down*: on this model `dc = 1`, the scaled
+    // and unscaled violations are equal, and the ratio is a flat `1.0`
+    // at every `s`. A row the *user* wrote small is precisely the case
+    // it cannot see.
+    //
+    // This can only ever *withhold* the feasible-point verdict, and it
+    // abstains — contributing `0.0` — on any model whose rows carry no
+    // declared magnitude, so nothing upstream and pounce already agreed
+    // on moves.
+    //
+    // It also stands down once `constr_viol_tol` is set *wider* than the
+    // registered default. What makes the bare absolute test unsafe is not
+    // that it is absolute — it is that the number on the right-hand side
+    // of it was chosen by the solver, out of the box, with no knowledge of
+    // the model's units. A tolerance wider than that default cannot have
+    // come from the solver: it is the author saying how much violation
+    // this particular model tolerates, chosen with the model in hand and
+    // therefore carrying its scale by construction. Honouring it is both
+    // what the author asked for and what upstream does at every setting.
+    // `constr_viol_tol=1e-3` on `min (x-5)² s.t. x² = -1e-4` is the worked
+    // case: the recovered point misses that row by 100% of its own
+    // magnitude and is still the point the author declared feasible, so
+    // pounce must not turn round and certify the model infeasible (gh#508,
+    // `issue_508_infeasibility_gap_status.rs::a_gap_inside_constr_viol_tol_is_not_claimed_infeasible`).
+    //
+    // Comparing the value rather than asking whether the key was set is
+    // deliberate. A frontend that echoes the defaults back — several do —
+    // would otherwise disable the guard for every model it touches, and
+    // `constr_viol_tol=1e-4` typed by hand would answer differently from
+    // the identical default. Only a *widened* band changes the verdict.
+    let default_constr_viol_tol =
+        pounce_algorithm::alg_builder::ConvCheckOptions::default().constr_viol_tol;
+    let orig_rel_inf_pr_at_final = if outer_constr_viol_tol > default_constr_viol_tol {
+        0.0
+    } else {
+        eval_orig_rel_c_inf_pr_at_inner_curr(&*final_iv.x, outer_nlp)
+    };
+    let feasible_point_found = is_square_problem
+        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && orig_inf_pr_at_final.is_finite()
+        && orig_inf_pr_at_final < outer_constr_viol_tol
+        && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD;
+
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
     // Square problems: upstream `IpRestoMinC_1Nrm.cpp:357-371` returns
@@ -1117,6 +1207,7 @@ pub fn run_inner_resto(
     Some(RestoSolveResult {
         trial_x,
         trial_s,
+        feasible_point_found,
         iter_count: inner_iter_count,
         // Inner-IPM info_iters_since_header / info_last_output are
         // tracked on the inner data; surface them on best-effort
@@ -1180,6 +1271,104 @@ fn eval_orig_inf_pr_at_inner_curr(
         c_amax.0.max(d_minus_s_amax.0),
         c_amax.1.max(d_minus_s_amax.1),
     ))
+}
+
+/// Fraction of a row's own declared magnitude the orig-NLP violation must
+/// fall under before the square-problem branch will call the recovered point
+/// feasible. Deliberately the same `1e-2` band that
+/// `RestoConvCheck::rel_viol_threshold` uses for the sibling square-problem
+/// arm, which in turn matches `OptErrorConvCheck::relative_viol_threshold` on
+/// the outer side: one band, so a model cannot be judged feasible by one of
+/// the three and infeasible by another.
+const SQUARE_FEASIBLE_REL_VIOL_THRESHOLD: f64 = 1e-2;
+
+/// The orig NLP's equality-block violation at the inner IPM's converged
+/// iterate, as a fraction of each row's **declared** right-hand side:
+/// `max_i |c_i(x_orig)| / |b_i|`. The scale-free companion to
+/// [`eval_orig_inf_pr_at_inner_curr`], and a direct mirror of
+/// `IpoptCq::relative_c_infeasibility_max` — the gh#390 measure — evaluated
+/// against the *original* NLP rather than the restoration one.
+///
+/// The restoration sub-NLP cannot answer this: its `c` block is not the
+/// user's rows, so its `declared_c_rhs` is `None` and the inner CQ's own
+/// relative measure abstains. Hence the re-derivation here.
+///
+/// Both numerator and denominator are in the internally-scaled space
+/// (`eval_c`'s output and `declared_c_rhs`'s contract), so the solver's row
+/// scaling `dc_i` cancels and the ratio is a pure number.
+///
+/// Returns `0.0` — "no relative violation established" — whenever the
+/// measure cannot be formed: no equality rows, an NLP that does not track
+/// the RHS, or a downcast/dim mismatch. That is the direction that leaves
+/// the caller's absolute test governing alone, i.e. upstream's behaviour.
+///
+/// Rows whose declared magnitude sits under their own noise floor abstain,
+/// for the reason `IpoptCq::row_noise_floor` documents at length: a
+/// converter that emits `2^-53` where the model says `0` declares a
+/// magnitude no iterate could be positioned finely enough to hit, and
+/// dividing by it turns rounding residue into a 100% "violation".
+fn eval_orig_rel_c_inf_pr_at_inner_curr(
+    inner_x: &dyn Vector,
+    orig_rc: &Rc<RefCell<dyn IpoptNlp>>,
+) -> f64 {
+    use pounce_algorithm::ipopt_cq::ROW_NOISE_KAPPA;
+
+    let Some(xc) = inner_x.as_any().downcast_ref::<CompoundVector>() else {
+        return 0.0;
+    };
+    let x_orig = xc.comp(BLOCK_X);
+    let mut orig = orig_rc.borrow_mut();
+    let m_eq = orig.m_eq();
+    if m_eq == 0 {
+        return 0.0;
+    }
+    let Some(rhs) = orig.declared_c_rhs() else {
+        return 0.0;
+    };
+
+    let mut c_buf = DenseVectorSpace::new(m_eq).make_new_dense();
+    orig.eval_c(x_orig, &mut c_buf);
+    let cv = c_buf.expanded_values().to_vec();
+    if cv.len() != rhs.len() {
+        return 0.0;
+    }
+
+    // Per-row noise floor, `max_j |dc_i/dx_j| * eps * ||x||_inf * kappa`.
+    // `None` leaves every floor at `0.0`, which reproduces the plain
+    // `mag > 0.0` gate exactly.
+    let x_amax = x_orig.amax();
+    let floors: Option<Vec<f64>> = if x_amax > 0.0 && x_amax.is_finite() {
+        let jac = orig.eval_jac_c(x_orig);
+        let mut rows = c_buf.make_new();
+        jac.compute_row_amax(&mut *rows, true);
+        rows.as_any()
+            .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            .filter(|r| r.is_initialized())
+            .map(|r| {
+                r.expanded_values()
+                    .iter()
+                    .map(|&a| {
+                        if a > 0.0 {
+                            ROW_NOISE_KAPPA * f64::EPSILON * a * x_amax
+                        } else {
+                            f64::INFINITY
+                        }
+                    })
+                    .collect()
+            })
+    } else {
+        None
+    };
+
+    let mut worst = 0.0_f64;
+    for (i, (&ci, &bi)) in cv.iter().zip(rhs.iter()).enumerate() {
+        let mag = bi.abs();
+        let floor = floors.as_ref().map_or(0.0, |f| f[i]);
+        if mag > floor && mag.is_finite() && ci.is_finite() {
+            worst = worst.max(ci.abs() / mag);
+        }
+    }
+    worst
 }
 
 /// Capture the pieces of the outer iterate the resto initializer needs.
