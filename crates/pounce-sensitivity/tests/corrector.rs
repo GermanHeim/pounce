@@ -514,5 +514,11 @@ fn the_correction_is_the_same_under_constraint_scaling() {
             base[0] + out[0],
             base[1] + out[1],
         );
+        assert!(
+            report.residual < report.initial_residual * 1e-6,
+            "row scale {c}: the residual has to fall by orders, {:.4e} -> {:.4e};              {report:?}",
+            report.initial_residual,
+            report.residual,
+        );
     }
 }

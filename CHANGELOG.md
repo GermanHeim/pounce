@@ -26,7 +26,12 @@ changes.
   the model's own units, which is the frame the step and the bounds
   arrive in, and the converged iterate is converted once on the way in
   and back on the way to those quantities, so a variable-scaled solve
-  answers in the model's units the way every other query does. Setting a
+  answers in the model's units the way every other query does. The
+  residual comes back through `E` before the back-solve, since `solve`
+  takes its right-hand side in natural units and applies `E` itself, so
+  handing it one the algorithm already scaled applies the factor twice.
+  That leaves the fixed point alone and puts every Newton direction on
+  the way there out by it. Setting a
   trial point leaves `curr` alone, and `curr` is what the held
   factorization was built from, so nothing here disturbs the factor or
   any other consumer of the session.
