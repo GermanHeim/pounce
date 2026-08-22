@@ -230,7 +230,7 @@ rebuilds the Schur complement over the pins so far, so a pass carrying
 pin never rebuilds the factorization, which is what keeps it cheaper
 than re-solving.
 
-`max_iter` caps the passes, and is a safety limit rather than a budget.
+`predictor_iter` caps the passes, and is a safety limit rather than a budget.
 It was a budget while a pass took only the worst crossing, which needed
 as many passes as there were crossings — and on a model with more
 crossings than passes the limit, not the violations, decided where the
@@ -346,7 +346,7 @@ large every first-order prediction degrades: the CSTR trajectories
 read high near the start of the horizon in every mode, which is the
 base-point linearization and not something more segments repair.
 
-`max_iter` is the same knob it is under `fix_relax`: it caps the
+`predictor_iter` is the same knob it is under `fix_relax`: it caps the
 active-set changes applied, and past the cap the rest of the
 perturbation is taken in one step under the active set reached, with
 the warning naming the cap. On the cost side a reach adds a Schur row
@@ -355,7 +355,7 @@ grows about linearly with the changes applied, well under a re-solve.
 
 See
 [`python/notebooks/36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
-for the worked CSTR example behind those numbers, including `max_iter`
+for the worked CSTR example behind those numbers, including `predictor_iter`
 sweeps of both modes against re-solve wall time.
 
 ### A held solve at a kink: `degeneracy`
@@ -439,8 +439,8 @@ before reporting the shortfall. The warning names the engaged count and
 the number to raise `degeneracy_iter` to, which is the retry price and
 is a floor, since a later pass can engage more rows. It is always
 strictly above what the failed call spent, so each retry buys progress.
-`max_iter` keeps its meaning as the mode's own work and plays no part
-in the decision. Detection also returns
+`predictor_iter` keeps its meaning as the mode's own work and plays no
+part in the decision. Detection also returns
 nothing on a solve with relaxed bounds, where the classifier cannot
 read the slacks.
 
@@ -448,6 +448,69 @@ read the slacks.
 without a direction, so at a degenerate base point it warns, names
 the variables and bounds, and returns the one-sided value. The
 direction-aware answer is `estimate()`'s.
+
+### Refining the step: `corrector_iter`
+
+Every mode returns a step, and that step leaves a residual in the
+barrier KKT system at the perturbed parameter values. Newton iterations
+against the held factorization drive that residual down, one back-solve
+each and no factorization. `corrector_iter` is how many to run, on
+`estimate()` and `estimate_report()`, and it stops early when an
+iteration fails to improve the residual, so it is a budget rather than
+a count. It defaults to zero.
+
+The correction aims at the barrier solution at the `mu` the solve
+finished on, not at a re-solve, so the accuracy it can reach is bounded
+by that offset. It does not converge to the exact answer and does not
+claim to.
+
+What lets it work past a bound crossing is that the predictor already
+decided which bounds moved, and the corrector applies that decision
+once before iterating. A bound the step takes off its minimum comes out
+of the operator, its multiplier held at zero and its complementarity
+row gone. A bound the step brings onto its minimum has its diagonal
+raised to the stiffness the barrier assigns there. Every other row
+keeps the base point's term. Both directions are the same change to one
+diagonal, so a single factorization serves the whole correction.
+
+That decision is where the modes start from different places.
+`fix_relax` and `path` compute an active set and hand it over.
+`mode="linear"` holds the active set fixed as it builds the step, so
+all the correction has to work with is whatever the clamp left sitting
+on a bound. On the CSTR at a quarter of the change to its steady state
+that is one bound against the seven the other two pass over, which is
+why the linear estimate stays furthest from a re-solve. Below the first
+crossing all three are the same step.
+
+How far the correction reaches is set by how many crossings the
+predictor hands over rather than by the size of the perturbation
+directly. On the CSTR the notebook uses, whose first crossing is at
+1.3% of the change to its steady state, `fix_relax` with eight
+iterations takes the largest relative error from 2.4e-3 to 1e-6 at a 2%
+change, from 1.4e-2 to 2e-6 at 5%, and from 6.0e-2 to 6.0e-5 at 10%,
+which is four crossings. At seven crossings the same call improves the
+estimate by about 5% and stops.
+
+The reason it stops is the multipliers rather than the operator. They
+arrive extrapolated over the whole perturbation, nothing sets them at
+handoff, and once the perturbation is large that is the dominant error.
+Fitting them to minimize the stationarity residual at the predictor's
+variables does not help: it absorbs the error into the multipliers and
+removes the signal the iterations need, which is why the algorithm uses
+that estimate only to initialize multipliers before its first
+iteration.
+
+So a budget past the crossing count the correction carries buys little,
+and at large perturbations it can return an estimate no better than the
+step it was handed. `estimate()` warns when a correction ends without
+at least halving the residual, so an uncorrected step is never passed
+off as a corrected one, and `estimate_report(corrector_iter=...)`
+carries the iterations spent, the residual before and after, and that
+residual split into stationarity, feasibility and complementarity. The
+three carry different units and different consequences: a correction
+can leave the model's equations nearly satisfied and the multipliers
+complementary while the Lagrangian's gradient is far from zero, and
+only the first two say whether the values can be acted on.
 
 ### What the step did about the bounds: `estimate_report()`
 
@@ -469,6 +532,24 @@ r.violation      # constraint violation at the predicted point
 r.activity       # per coordinate: inactive / weakly_active /
 r.row_activity   # strongly_active / ambiguous / unidentified / ...
 ```
+
+`refine_stop` says why the `"fix_relax"` refinement stopped, one of
+`"settled"`, `"iteration_limit"`, `"degrees_of_freedom"` or
+`"worse_than_plain"`, and is None under the other two modes. A pass
+pins every crossing it sees, so the pin count says nothing about which
+limit was reached and this is the only thing that does.
+
+`mode` and `predictor_iter` select which step is measured and match
+`estimate()`'s arguments of the same names. `violation` and `corrector`
+are properties of the step, so a `fix_relax` estimate needs
+`estimate_report(mode="fix_relax")` to be described by its own numbers
+rather than the linear step's.
+
+Under `"fix_relax"` and `"path"` the step stops at the bound, so
+`alpha` is 1.0 and `crossed` is empty for every model. What those two
+did about the bounds is what `"linear"` reports at the same
+perturbation. `activity`, `row_activity` and `mu` come from the
+converged base point and do not depend on the mode.
 
 `alpha` comes from a ratio test along the step. Coordinates already on
 a bound take no part in it, on that side: the gap left at an active

@@ -683,15 +683,134 @@ def test_max_iter_here_warns_instead_of_being_ignored():
     assert got.alpha == pytest.approx(estimate_report(m, [(m.p, 4.0)]).alpha)
 
 
-def test_the_other_two_surfaces_keep_max_iter_silent():
-    """`estimate` and `active_set_changes` still spend `max_iter` on
-    the mode's own work, so passing it there is not deprecated. Matched
-    on this deprecation's own text rather than on DeprecationWarning as
-    a class, so an unrelated one from pyomo or numpy cannot fail it."""
+def test_the_other_two_surfaces_keep_their_budget_silent():
+    """`estimate` and `active_set_changes` still spend a budget on the
+    mode's own work, so passing it there is not deprecated. It is named
+    `predictor_iter` on those two, since what it bounds is the
+    prediction rather than the correction or the degeneracy decision.
+    Matched on this deprecation's own text rather than on
+    DeprecationWarning as a class, so an unrelated one from pyomo or
+    numpy cannot fail it."""
     import warnings as _w
     m = bounded()
     with _w.catch_warnings(record=True) as caught:
         _w.simplefilter("always")
-        estimate(m, [(m.p, 1.2)], max_iter=8)
-        active_set_changes(m, [(m.p, 1.2)], max_iter=8)
-    assert not [w for w in caught if "max_iter no longer" in str(w.message)]
+        estimate(m, [(m.p, 1.2)], predictor_iter=8)
+        active_set_changes(m, [(m.p, 1.2)], predictor_iter=8)
+    assert not [w for w in caught if "no longer does anything" in str(w.message)]
+
+
+# ── the mode the report measures ─────────────────────────────────────────────
+#
+# `violation` and `corrector` are properties of the step, so they move
+# with the mode. The rest either measures where the step leaves a bound,
+# which only "linear" does, or comes from the base point.
+
+def coupled():
+    """A nonlinear model whose linear step leaves `x` outside its lower
+    bound, so the three modes take genuinely different steps and the
+    constraint is violated by a different amount at each."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.1, 5.0), initialize=1.0)
+    m.y = pyo.Var(bounds=(0.1, 5.0), initialize=1.0)
+    m.c = pyo.Constraint(expr=m.x * m.y == 1.0 + 0.4 * m.p)
+    m.obj = pyo.Objective(expr=(m.x - 2 * m.p) ** 2 + (m.y - m.p) ** 4)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+@pytest.mark.parametrize("mode", ["linear", "fix_relax", "path"])
+def test_the_violation_is_the_one_at_the_mode_s_own_point(mode):
+    """The report has to describe the step `estimate()` takes for the
+    same arguments. Evaluating the constraint at that mode's estimate
+    is what says whether it does."""
+    m = coupled()
+    r = estimate_report(m, [(m.p, -1.2)], mode=mode)
+    for v, val in estimate(m, [(m.p, -1.2)], clamp=False, mode=mode).items():
+        v.set_value(val)
+    body = pyo.value(m.x) * pyo.value(m.y)
+    rhs = 1.0 + 0.4 * (-1.2)
+    assert r.violation == pytest.approx(abs(body - rhs), rel=1e-9)
+
+
+def test_the_violation_moves_with_the_mode():
+    m = coupled()
+    lin = estimate_report(m, [(m.p, -1.2)], mode="linear").violation
+    fix = estimate_report(m, [(m.p, -1.2)], mode="fix_relax").violation
+    pat = estimate_report(m, [(m.p, -1.2)], mode="path").violation
+    assert lin > 5 * fix, (
+        f"the linear step should be visibly less feasible here: "
+        f"{lin:.6e} against {fix:.6e}")
+    assert fix == pytest.approx(pat, rel=1e-9)
+
+
+def test_the_other_modes_report_a_step_that_stops_at_the_bound():
+    """Both stop the step at the bound, so there is no crossing left to
+    report. That is the correct answer for such a step."""
+    m = coupled()
+    assert estimate_report(m, [(m.p, -1.2)]).crossed, (
+        "this perturbation should cross a bound under the linear step")
+    for mode in ("fix_relax", "path"):
+        r = estimate_report(m, [(m.p, -1.2)], mode=mode)
+        assert r.alpha == pytest.approx(1.0), f"mode={mode}: {r.alpha}"
+        assert list(r.crossed) == [], f"mode={mode}: {list(r.crossed)}"
+        assert list(r.crossed_rows) == []
+
+
+def test_the_base_point_fields_do_not_move_with_the_mode():
+    m = coupled()
+    reports = [estimate_report(m, [(m.p, -1.2)], mode=mode)
+               for mode in ("linear", "fix_relax", "path")]
+    first = reports[0]
+    for r in reports[1:]:
+        assert r.mu == pytest.approx(first.mu, rel=1e-12)
+        assert r.activity == first.activity
+        assert r.row_activity == first.row_activity
+        assert r.bounds_relaxed == first.bounds_relaxed
+
+
+def test_the_corrector_measures_the_mode_s_own_step():
+    """The residual the corrector starts from is the mode's step in the
+    barrier system, so a mode that takes a different step reports a
+    different starting residual."""
+    m = coupled()
+    lin = estimate_report(m, [(m.p, -1.2)], mode="linear", corrector_iter=6)
+    fix = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", corrector_iter=6)
+    assert lin.corrector["initial_residual"] > (
+        2 * fix.corrector["initial_residual"]), (
+        f"{lin.corrector['initial_residual']:.4e} against "
+        f"{fix.corrector['initial_residual']:.4e}")
+
+
+def test_an_unknown_mode_is_refused():
+    m = bounded()
+    with pytest.raises(ValueError, match="mode must be"):
+        estimate_report(m, [(m.p, 2.0)], mode="relax_fix")
+
+
+def test_refine_stop_says_why_the_refinement_stopped():
+    """A pass pins every crossing it sees, so the pin count says
+    nothing about which limit was reached. Only the stop reason does."""
+    m = coupled()
+    r = estimate_report(m, [(m.p, -1.2)], mode="fix_relax")
+    assert r.refine_stop in ("settled", "iteration_limit",
+                            "degrees_of_freedom", "worse_than_plain"), (
+        f"unrecognised stop reason {r.refine_stop!r}")
+    for mode in ("linear", "path"):
+        assert estimate_report(m, [(m.p, -1.2)], mode=mode).refine_stop is None
+
+
+@pytest.mark.parametrize("mk,target", [
+    (coupled, -1.2), (bounded, 4.0), (with_row, 3.0),
+])
+def test_settled_means_nothing_is_left_outside_a_bound(mk, target):
+    """The label has to match the state it names. A pass now pins every
+    crossing it sees, so these all settle in one, which is what makes
+    the pin count useless as a proxy and the label worth having."""
+    m = mk()
+    r = estimate_report(m, [(m.p, target)], mode="fix_relax")
+    assert r.refine_stop == "settled"
+    assert list(r.crossed) == [], (
+        f"settled but {[v.name for v in r.crossed]} is outside its bound")
