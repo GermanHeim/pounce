@@ -1050,6 +1050,37 @@ impl IpoptApplication {
             .unwrap_or(false)
     }
 
+    /// Did the caller set `mu_strategy` explicitly?
+    ///
+    /// The answer decides whether the limited-memory default applies
+    /// (see `algorithm_builder_from_options`): upstream only substitutes
+    /// `adaptive` for the registered `monotone` when the option is
+    /// absent from the list.
+    fn mu_strategy_was_set(&self) -> bool {
+        matches!(
+            self.options.get_string_value("mu_strategy", ""),
+            Ok((_, true))
+        )
+    }
+
+    /// The μ strategy this option table actually resolves to, as
+    /// `algorithm_builder_from_options` will build it: the explicit
+    /// value when there is one, otherwise `adaptive` for a
+    /// limited-memory Hessian and `monotone` for anything else.
+    ///
+    /// The fallback below flips *this*, not the registered default —
+    /// flipping the registered default under limited-memory would
+    /// "retry" with the strategy that just failed.
+    fn effective_mu_strategy_is_adaptive(&self) -> bool {
+        if let Ok((v, true)) = self.options.get_string_value("mu_strategy", "") {
+            return v == "adaptive";
+        }
+        matches!(
+            self.options.get_string_value("hessian_approximation", ""),
+            Ok((ref v, true)) if v == "limited-memory"
+        )
+    }
+
     /// Read the μ-strategy auto-fallback switch (pounce#138).
     /// Default `false` when the option is not set.
     fn is_mu_strategy_fallback_enabled(&self) -> bool {
@@ -2228,10 +2259,14 @@ impl IpoptApplication {
     /// stalls at `max_iter` — hence both triggers. flosp2tm is μ-independent
     /// and correctly does not promote.)
     ///
-    /// The flip direction is taken from the option's current value:
-    /// `adaptive` → `monotone`, anything else (including absent, which
-    /// the builder treats as monotone) → `adaptive`. The option table is
-    /// restored to the user's original view afterward.
+    /// The flip direction is taken from the strategy the option table
+    /// actually resolves to (`effective_mu_strategy_is_adaptive`):
+    /// `adaptive` → `monotone`, otherwise → `adaptive`. Absence is not
+    /// the same as `monotone` — under a limited-memory Hessian an unset
+    /// `mu_strategy` resolves to `adaptive` (gh#746), and flipping the
+    /// *registered* default there would re-run the strategy that just
+    /// stalled. The option table is restored to the resolved view
+    /// afterward.
     ///
     /// Caveat (shared with the ℓ₁ fallback): the user TNLP's
     /// `finalize_solution` runs once per attempt, so when the retry
@@ -2253,10 +2288,7 @@ impl IpoptApplication {
         // opposite of an explicit "adaptive" is "monotone" and the
         // opposite of anything else is "adaptive".
         let prev = self.options.get_string_value("mu_strategy", "").ok();
-        let was_adaptive = prev
-            .as_ref()
-            .map(|(v, found)| *found && v == "adaptive")
-            .unwrap_or(false);
+        let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
         let _ = self
             .options
@@ -2268,7 +2300,7 @@ impl IpoptApplication {
             prev.as_ref()
                 .filter(|(_, found)| *found)
                 .map(|(v, _)| v.as_str())
-                .unwrap_or("monotone"),
+                .unwrap_or(if was_adaptive { "adaptive" } else { "monotone" }),
             true,
             false,
         );
@@ -3443,6 +3475,36 @@ impl IpoptApplication {
                     _ => HessianApproxChoice::Exact,
                 };
             }
+        }
+        // **Upstream changes the `mu_strategy` default for a
+        // limited-memory Hessian.** `IpAlgBuilder.cpp:1059`:
+        //
+        //     if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
+        //     {
+        //        // Change default for quasi-Newton option (then we use adaptive)
+        //        ... if( hessian_approximation == LIMITED_MEMORY )
+        //               smuupdate = "adaptive";
+        //     }
+        //
+        // and again at `:920` for the restoration-phase algorithm.
+        // Registered default is `monotone`; the quasi-Newton path takes
+        // `adaptive` unless the caller says otherwise. pounce read the
+        // registered default unconditionally, so every L-BFGS solve ran
+        // a barrier schedule Ipopt does not use on that path — a
+        // trajectory divergence on the arm the Python frontend and the
+        // CasADi plugin select automatically (gh#746).
+        //
+        // The restoration sub-IPM inherits this: `run_inner_resto`
+        // clones the configured `inner_alg_builder`, so the flag set
+        // here is what the resto algorithm gets, matching `:920`.
+        //
+        // Only when unset — an explicit `mu_strategy` still wins, and
+        // `mehrotra_algorithm` (parsed above) has already forced
+        // adaptive on its own terms.
+        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory
+            && !self.mu_strategy_was_set()
+        {
+            builder.mu_strategy = MuStrategyChoice::Adaptive;
         }
         // Limited-memory quasi-Newton update formula. Registered upstream
         // (`limited_memory_update_type`, IpLimMemQuasiNewtonUpdater.cpp) but
@@ -5553,6 +5615,84 @@ mod tests {
         assert_eq!(
             app.algorithm_builder_from_options().linear_solver,
             LinearSolverChoice::Feral
+        );
+    }
+
+    /// gh#746. `IpAlgBuilder.cpp:1059` substitutes `adaptive` for the
+    /// registered `monotone` when `hessian_approximation` is
+    /// limited-memory and the caller left `mu_strategy` alone. pounce
+    /// read the registered default unconditionally, which is a
+    /// different barrier schedule on the whole quasi-Newton arm.
+    #[test]
+    fn limited_memory_defaults_mu_strategy_to_adaptive() {
+        // Exact Hessian, nothing set: monotone, as registered.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Monotone,
+            "the exact arm must keep the registered default"
+        );
+
+        // Limited memory, nothing set: adaptive.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("hessian_approximation limited-memory\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Adaptive,
+            "limited-memory must take upstream's quasi-Newton default"
+        );
+
+        // An explicit `monotone` still wins — the substitution is only
+        // for an absent option.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             mu_strategy monotone\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Monotone,
+            "an explicit mu_strategy must not be overridden"
+        );
+    }
+
+    /// The μ-strategy auto-fallback retries with the *other* strategy.
+    /// Under limited-memory the first attempt is adaptive, so the flip
+    /// has to be monotone — reading the registered default there would
+    /// re-run the strategy that just stalled (gh#746).
+    #[test]
+    fn fallback_flip_follows_the_resolved_mu_strategy() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert!(
+            !app.effective_mu_strategy_is_adaptive(),
+            "unset + exact resolves to monotone"
+        );
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("hessian_approximation limited-memory\n")
+            .unwrap();
+        assert!(
+            app.effective_mu_strategy_is_adaptive(),
+            "unset + limited-memory resolves to adaptive"
+        );
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             mu_strategy monotone\n",
+        )
+        .unwrap();
+        assert!(
+            !app.effective_mu_strategy_is_adaptive(),
+            "an explicit monotone under limited-memory resolves to monotone"
         );
     }
 

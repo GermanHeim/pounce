@@ -219,6 +219,70 @@ fn hs071_solves_with_lbfgs_and_adaptive_mu() {
     );
 }
 
+/// The limited-memory default for `mu_strategy` must reach the *solve*,
+/// not just the builder snapshot (gh#746).
+///
+/// `IpAlgBuilder.cpp:1059` substitutes `adaptive` for the registered
+/// `monotone` whenever the Hessian is limited-memory and the caller left
+/// `mu_strategy` alone; pounce read the registered default
+/// unconditionally, so the whole quasi-Newton arm ran a barrier schedule
+/// Ipopt does not use there. A unit test on
+/// `algorithm_builder_from_options` proves the field is set; it cannot
+/// prove the field is consumed. This runs three solves and pins the
+/// default's trajectory onto explicit `adaptive` and off explicit
+/// `monotone`.
+#[test]
+fn limited_memory_default_mu_strategy_reaches_the_solve() {
+    fn run(mu_strategy: Option<&str>) -> (usize, Number) {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, true)
+            .unwrap();
+        if let Some(v) = mu_strategy {
+            app.options_mut()
+                .set_string_value("mu_strategy", v, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default())) as _;
+        let status = app.optimize_tnlp(tnlp);
+        let stats = app.statistics();
+        eprintln!(
+            "HS71+LBFGS mu_strategy={mu_strategy:?}: status={status:?} iter={} obj={}",
+            stats.iteration_count, stats.final_objective,
+        );
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "mu_strategy={mu_strategy:?} did not solve: {status:?}",
+        );
+        assert!(
+            (stats.final_objective - 17.014017).abs() < 1e-4,
+            "mu_strategy={mu_strategy:?}: objective {} drifted",
+            stats.final_objective,
+        );
+        (stats.iteration_count as usize, stats.final_objective)
+    }
+
+    let (it_default, _) = run(None);
+    let (it_adaptive, _) = run(Some("adaptive"));
+    let (it_monotone, _) = run(Some("monotone"));
+
+    assert_eq!(
+        it_default, it_adaptive,
+        "the limited-memory default must be adaptive ({it_default} vs {it_adaptive} iterations)",
+    );
+    assert_ne!(
+        it_adaptive, it_monotone,
+        "adaptive and monotone agree on HS071 ({it_adaptive} iterations either way) \
+         — this fixture can no longer tell the two schedules apart, so the \
+         assertion above proves nothing; pick another model",
+    );
+}
+
 /// `recalc_y` must *change the solve*, not merely parse (#677).
 ///
 /// The caution this guards against is spelled out in #551: "A read site
@@ -242,6 +306,16 @@ fn recalc_y_changes_the_lbfgs_trajectory() {
             .unwrap();
         app.options_mut()
             .set_string_value("recalc_y", if recalc { "yes" } else { "no" }, true, false)
+            .unwrap();
+        // Pinned, not inherited. A limited-memory solve now resolves an
+        // unset `mu_strategy` to `adaptive` (gh#746, matching
+        // `IpAlgBuilder.cpp:1059`), and on that schedule HS071 reaches the
+        // optimum in 8 iterations with recalc_y on or off — so the
+        // iteration count stops being able to see the option at all. The
+        // claim under test is that `recalc_y` reaches the algorithm, and
+        // the monotone schedule is where this problem shows it.
+        app.options_mut()
+            .set_string_value("mu_strategy", "monotone", true, false)
             .unwrap();
         // Default 1e-6 leaves the gate shut on a short HS071 run; open
         // it so the feature actually fires within the solve.

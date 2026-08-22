@@ -9,6 +9,81 @@ changes.
 
 ## [Unreleased]
 
+- **A limited-memory Hessian now defaults `mu_strategy` to `adaptive`, as
+  upstream does** (#746).
+
+  Four nonconvex QCQPs — `qcqp1000-1nc`, `qcqp500-3nc`, `qcqp750-2c`,
+  `qcqp750-2nc` — that the exact-Hessian arm solves came apart under
+  `hessian_approximation=limited-memory`: three exited
+  `Error_In_Step_Computation`, and `qcqp1000-1nc` returned
+  `Infeasible_Problem_Detected` on a problem that is not infeasible, which is
+  a wrong answer rather than a failure to answer.
+
+  The cause is not in the quasi-Newton update. `IpAlgBuilder.cpp:1059`:
+
+      if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
+      {
+         // Change default for quasi-Newton option (then we use adaptive)
+         ... if( hessian_approximation == LIMITED_MEMORY )
+                smuupdate = "adaptive";
+      }
+
+  and again at `:920` for the restoration-phase algorithm. `monotone` is the
+  *registered* default; upstream substitutes `adaptive` whenever the option is
+  absent and the Hessian is limited-memory. POUNCE read the registered default
+  unconditionally, so every L-BFGS solve ran a barrier schedule Ipopt does not
+  use on that path. Running the two arms of a stock Ipopt 3.14.19 side by side
+  confirms it from the other direction: its default limited-memory run on
+  `qcqp1000-1nc` starts at `lg(mu) = 0.0` with a non-monotone μ and never
+  enters restoration, while `mu_strategy=monotone` reproduces POUNCE's
+  `1r`-and-stuck trajectory step for step. With the default corrected, POUNCE's
+  limited-memory arm matches Ipopt's digit for digit over the first four
+  iterations.
+
+  This is not an exotic corner: both the Python frontend and the CasADi plugin
+  select `limited-memory` on their own whenever no exact Lagrangian Hessian is
+  available, so it is what an embedder gets without typing an option.
+
+  On the four filed models the three `Error_In_Step_Computation` breakdowns
+  become honest budget/failure statuses (`qcqp750-2c` reaches
+  `Solved_To_Acceptable_Level`), and `qcqp1000-1nc`'s wrong
+  `Infeasible_Problem_Detected` is gone. It should be said plainly that this
+  does not make L-BFGS solve them: Ipopt's own limited-memory arm also fails
+  `qcqp1000-1nc`, at 3000 iterations with a constraint violation of `1.7e14`.
+  What was defective was the divergence from upstream's default, not L-BFGS's
+  reach on nonconvex QCQPs.
+
+  The fixture sweep (`scripts/sweep-fixtures.sh`, both legs) leaves the
+  exact-Hessian leg **byte-identical** and moves 27 of 71 lines on the L-BFGS
+  leg. No fixture goes from solved to unsolved. Three improve status —
+  `autocorr_bern55-06` `SolvedToAcceptableLevel`/945 → `SolveSucceeded`/58,
+  `eigmaxa` `RestorationFailed`/3 → `SolveSucceeded`/19, `pooling_rt2stp`
+  `ErrorInStepComputation`/105 → `SolvedToAcceptableLevel`/362 — and most of
+  the rest simply shorten (`jit1` 32 → 21, `csfi2` 31 → 19, `airport` 57 → 49,
+  and all four infeasibility detections reach their verdict sooner).
+
+  Three lines move the wrong way, and each was checked against Ipopt under the
+  same option change rather than accepted on faith:
+
+  * `deb7` `RestorationFailed`/2993 → `ErrorInStepComputation`/709. Both are
+    failures carrying `solve_result_num = 500`; neither claims a solution, and
+    the objectives they print (97.56, 101.09) are not answers. Ipopt's
+    limited-memory arm does not solve `deb7` either — 3000 iterations under
+    both `adaptive` and `monotone`. L-BFGS does not solve this model in any
+    code; the exact arm still does, in 147 iterations.
+  * `hs13_bigstart` `SolveSucceeded` both ways, objective 0.985014 → 0.979650.
+    HS13 violates MFCQ at its solution, so where a solver stops is soft; the
+    true optimum is 1.0. Ipopt moves the same direction under the same switch
+    (0.950376 → 0.919662) and lands further from 1.0 than POUNCE does at
+    either setting.
+  * `infeasible_equalities` `InfeasibleProblemDetected` at 33 → 127
+    iterations. Same verdict, later. Ipopt also takes longer under `adaptive`
+    on this model (43 → 79).
+
+  `recalc_y`'s upstream limited-memory default (`IpIpoptAlg.cpp:238`) is
+  deliberately still **not** followed; that decision and its measurements are
+  documented where it is read, in `application.rs`.
+
 - **Convex postsolve no longer manufactures a KKT residual on the way back to
   the original problem space** (#745).
 
