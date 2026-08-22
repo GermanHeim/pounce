@@ -39,6 +39,13 @@ changes.
   `information()`. The last two warned about the same perturbations
   already and go on warning when no cap is set.
 
+  The comparison behind it is `pounce_sensitivity::pdpert_verdict`,
+  which `sens_max_pdpert` reads too and which the `Solver.pdpert_verdict`
+  binding exposes, so the two surfaces cannot drift apart on what counts
+  as too perturbed. Each words its own message, since the option's names
+  an option and says the sensitivity was skipped, and neither is true of
+  a call that raises.
+
   *Breaking (Rust API):* `Solver::parametric_step_bounded` and
   `Solver::parametric_step_bounded_decided` take the margin as a
   trailing `Option<Number>`, so an out-of-tree caller passing the old

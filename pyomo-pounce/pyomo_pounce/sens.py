@@ -1184,19 +1184,18 @@ def _refuse_on_pdpert(session, max_pdpert, who):
     reports them either way, and this is the caller choosing to stop
     rather than to read them.
 
-    `SensOptionOverrides::pdpert_refusal` in
-    `crates/pounce-sensitivity/src/options.rs` applies the same
-    threshold to the same numbers for `sens_max_pdpert`. The message
-    differs on purpose, since that one names a CLI option and says the
-    sensitivity was skipped, and neither is true here. The comparison
-    is the part that has to agree: a change to `worst` or to the test
-    belongs in both.
+    The comparison comes from `pounce_sensitivity::pdpert_verdict`,
+    which `sens_max_pdpert` reads too, so the two surfaces cannot drift
+    apart on what counts as too perturbed. The message is written here
+    rather than taken from there, since that one names a CLI option and
+    says the sensitivity was skipped, and neither is true of a call
+    that raises.
     """
     if max_pdpert is None:
         return
-    pert = [abs(float(v)) for v in session.solver.kkt_perturbations]
-    worst = max(pert) if pert else 0.0
-    if worst > max_pdpert:
+    refuse, worst = session.solver.pdpert_verdict(float(max_pdpert))
+    if refuse:
+        pert = [abs(float(v)) for v in session.solver.kkt_perturbations]
         raise ValueError(
             f"{who}: the converged KKT factor carries a perturbation of "
             f"{worst:.3e} (dx={pert[0]:.3e}, ds={pert[1]:.3e}, "

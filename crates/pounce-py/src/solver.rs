@@ -763,6 +763,26 @@ impl PySolver {
         Ok(p.to_vec().into_pyarray_bound(py))
     }
 
+    /// Whether a `max_pdpert` of `limit` turns this factor down, and
+    /// the worst correction it read, as `(refuse, worst)`.
+    ///
+    /// The comparison is `pounce_sensitivity::pdpert_verdict`, which
+    /// the CLI's `sens_max_pdpert` reads too, so the two surfaces
+    /// cannot drift apart on what counts as too perturbed. The caller
+    /// words its own message from `worst`, since the option's message
+    /// names an option and says the sensitivity was skipped, and
+    /// neither is true of a call that raises.
+    ///
+    /// `kkt_perturbations` reports the same four numbers for a caller
+    /// who would rather read them than stop on them.
+    fn pdpert_verdict(&self, limit: Number) -> PyResult<(bool, Number)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("pdpert_verdict: no converged factor (call solve() first)")
+        })?;
+        let p = s.inner.kkt_perturbations().map_err(solver_error_to_py)?;
+        Ok(pounce_sensitivity::pdpert_verdict(&p, limit))
+    }
+
     /// Dimension of the full compound KKT vector. `None` if no
     /// converged factor is held yet.
     #[getter]

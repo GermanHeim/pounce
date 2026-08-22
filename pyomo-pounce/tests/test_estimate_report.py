@@ -948,6 +948,21 @@ def test_max_pdpert_refuses_a_factor_the_correction_perturbed():
             call(worst / 10.0)
 
 
+def test_max_pdpert_reads_the_same_comparison_the_option_reads():
+    """`_refuse_on_pdpert` asks the solver rather than recomputing the
+    threshold, so the pyomo argument and the CLI's sens_max_pdpert
+    cannot drift apart on what counts as too perturbed. The boundary is
+    where that shows: the comparison is strictly above, so a cap at the
+    correction accepts it and a cap a hair below refuses."""
+    m = regularized()
+    refuse, worst = _session_for(m).solver.pdpert_verdict(0.0)
+    assert refuse and worst > 0.0, "this fixture is meant to be regularized"
+
+    estimate(m, [(m.p, 0.5)], max_pdpert=worst)
+    with pytest.raises(ValueError, match="max_pdpert"):
+        estimate(m, [(m.p, 0.5)], max_pdpert=worst * (1.0 - 1e-12))
+
+
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
 def test_max_pdpert_takes_the_option_surfaces_bounds(bad):
     """`sens_max_pdpert` is registered strictly above zero. A negative
