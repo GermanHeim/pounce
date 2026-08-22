@@ -9,6 +9,80 @@ changes.
 
 ## [Unreleased]
 
+- **A barrier diagonal too stiff for the constraint rows it sits in no
+  longer erases them (gh#737).**
+
+  A declared parameter pinned to a value that equals a bound of the
+  variable it pins made the whole derivative column through that
+  variable read zero — including a derivative that is `1` by
+  construction. On the CSTR of notebook 36, `zc_init: zc[0] == zc0` with
+  `zc` bounded `(0, 1)` reported `d zc[0]/d zc0 = 1.00000` at every
+  baseline except `zc0 = 0.00` and `zc0 = 1.00`, where it read
+  `0.00000`; `estimate()` followed the column and returned the baseline
+  value; sIPOPT solved the same model and perturbation correctly. At
+  `zc0 = 1.00` nothing warned.
+
+  Such a point is held by a bound and an equality at once, so the force
+  that holds it has no unique split between them and the solve lands
+  with a bound multiplier far larger than the geometry needs over a
+  slack near roundoff. `Σ = z/s` is the product of both and came out at
+  `1.9e27` against Jacobian entries of `1`. Eliminating the variable
+  through that diagonal leaves each of its constraint rows holding
+  `a²/Σ ≈ 1e-27`, which is the whole of what the row still knows about
+  it and far under the roundoff of the row it lands in: the
+  factorization has a row it cannot pivot on, and the step came back as
+  the even split of two rows that are no longer distinguishable — the
+  parameter's own Var moving half the requested delta and a linear
+  equality carrying the other half as residual.
+
+  `Σ` is now capped, on every sensitivity path, at the stiffness the
+  variable's own constraint rows can still be seen against:
+  `Σ_i ≤ a_i²/eps` with `a_i` the largest of its Jacobian coefficients,
+  backed off by 64 so the surviving contribution sits inside the edge
+  rather than on it. The quadratic form is the scale-invariant one — a
+  change of variables sends `Σ → Σ/c²` and `a → a/c` — and both
+  quantities are read in the space the factor lives in.
+
+  It is a ceiling, not a release. A capped bound still holds its
+  variable to within roundoff of the variable's own scale, so a bound
+  that genuinely holds a variable keeps holding it, and a variable in no
+  constraint row is left alone entirely — that is gh#653 / gh#654's
+  case, where the stiffness is the accuracy. The rule is only the one
+  #655's slack floor already makes one step further down: a pin the
+  matrix cannot represent is not a stiffer pin.
+
+  Applied at `barrier_sigma_x` / `barrier_sigma_s`, the diagonal every
+  sensitivity path shares, so it covers `gradient()`'s solve-time
+  callback, `estimate()`'s directional and fix-relax modes, the plain
+  and released parametric steps, `compute_reduced_hessian`,
+  `classify_activity()` and `covariance()` alike — and the diagonal
+  `corrector_iter` assembles, where a bound the step brings onto a
+  variable arrives as `mu / s²` off the endpoint's own slack. On that
+  last path the ceiling is prophylaxis rather than a repair: the
+  corrector clamps its iterate `1e-10` inside each bound before
+  measuring, which already holds the addend three orders under a unit
+  coefficient's ceiling, so the ceiling binds there only on a variable
+  whose largest Jacobian coefficient is under about `2e-2`. Nothing in
+  the interior-point iteration reads it, so no trajectory moves.
+
+  On the reported model — notebook 36's CSTR, `zt0` held at `0.70`,
+  measured on this commit against its parent:
+
+  ```text
+    zc0     d zc[0]/d zc0            d v1[0]/d zc0
+   0.00    0.00000 → 1.00000     -0.00000 →  1.04145
+   0.01    1.00000   1.00000      1.05472    1.05472
+   0.62    1.00000   1.00000     -0.03578   -0.03578
+   0.99    1.00000   1.00000     -0.08145   -0.08145
+   1.00    0.00000 → 1.00000     -0.00000 → -0.06934
+  ```
+
+  and `estimate()` from `(zc0, zt0) = (1.00, 0.70)` to `(0.79, 0.57)`
+  returns `zc[0] = 0.790000` in `linear`, `fix_relax` and `path` alike,
+  where it returned the baseline `1.000000` in all three before; the
+  re-solve is `0.790000`. The rows away from a bound are unchanged to
+  every digit printed.
+
 - **`corrector_iter` refines a step by Newton iterations on the barrier
   system, against the factorization the solve left behind.**
 

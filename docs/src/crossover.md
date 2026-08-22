@@ -283,6 +283,17 @@ in [#653](https://github.com/jkitchin/pounce/issues/653) bottomed out at
 neither. The representability half matters for solves at pathological
 tolerances, not for these.
 
+There is a bound at the other end too, and it is not symmetric with
+these. A floor keeps `Σ` from leaving the double range; the ceiling
+[#737](https://github.com/jkitchin/pounce/issues/737) added keeps it
+from swamping the constraint rows the same variable sits in, which
+happens at a `Σ` that is perfectly representable. It applies to the
+sensitivity system in either frame, and only to a variable that appears
+in a constraint row — never to the bound-pinned, otherwise-unconstrained
+variable of the table above, whose stiffness is the accuracy being
+measured. See [A Param pinned to exactly a
+bound](sensitivity.md#a-param-pinned-to-exactly-a-bound).
+
 ## Reading the result
 
 The returned solution — `x`, the objective, `g`, and every multiplier — is
