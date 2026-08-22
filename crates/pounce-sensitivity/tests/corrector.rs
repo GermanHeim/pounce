@@ -235,7 +235,7 @@ fn fix_relax_step(solver: &Solver, dp: Number) -> Vec<Number> {
         .parametric_step_full(&[0], &[dp])
         .expect("parametric step");
     let (primal, _, _) = solver
-        .parametric_step_bounded(&[0], &[dp], 16)
+        .parametric_step_bounded(&[0], &[dp], 16, None)
         .expect("fix_relax step");
     full[..primal.len()].copy_from_slice(&primal);
     full

@@ -230,6 +230,17 @@ rebuilds the Schur complement over the pins so far, so a pass carrying
 pin never rebuilds the factorization, which is what keeps it cheaper
 than re-solving.
 
+`bound_eps` sets how far outside a bound a step has to end to count as
+having left it, and so decides what a pass pins. Unset, it is how far
+outside the solve itself was willing to settle, so nothing moves for a
+caller who does not set it. `mode="path"` reads no such margin.
+
+`max_pdpert` refuses rather than answering when the converged factor
+carries an inertia correction above the value given, since every
+sensitivity output inverts that factor and a perturbed one answers for
+a nearby problem. `estimate_report().perturbations` reports the same
+numbers for a caller who would rather read them.
+
 `predictor_iter` caps the passes, and is a safety limit rather than a budget.
 It was a budget while a pass took only the worst crossing, which needed
 as many passes as there were crossings — and on a model with more

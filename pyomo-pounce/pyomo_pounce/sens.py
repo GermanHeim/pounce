@@ -1070,7 +1070,7 @@ def _weakly_active(session):
     return cached
 
 
-def gradient(target=None, *, wrt):
+def gradient(target=None, *, wrt, max_pdpert=None):
     """d(target*)/d(wrt).
 
     target: a Var (primal sensitivity) or an equality Constraint (its
@@ -1084,8 +1084,14 @@ def gradient(target=None, *, wrt):
     derivatives and this call has no direction to choose between them,
     so it returns the one-sided value the held factorization leans
     toward and warns. `estimate()` computes the directional derivative
-    for the perturbation it is given."""
+    for the perturbation it is given.
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given,
+    since every derivative here inverts that factor and a perturbed one
+    answers for a nearby problem."""
     session = _session_for(wrt)
+    _refuse_on_pdpert(session, max_pdpert, "gradient")
     weak = _weakly_active(session)
     if weak:
         warnings.warn(
@@ -1126,6 +1132,30 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
+def _refuse_on_pdpert(session, max_pdpert, who):
+    """Refuse when the converged factor carries more inertia correction
+    than the caller will accept.
+
+    A non-zero entry means the factorization every sensitivity output
+    inverts is not this problem's KKT matrix but a nearby one's, and how
+    nearby is what the entries measure. `EstimateReport.perturbations`
+    reports them either way; this is the caller choosing to stop rather
+    than to read them.
+    """
+    if max_pdpert is None:
+        return
+    pert = [abs(float(v)) for v in session.solver.kkt_perturbations]
+    worst = max(pert) if pert else 0.0
+    if worst > max_pdpert:
+        raise ValueError(
+            f"{who}: the converged KKT factor carries a perturbation of "
+            f"{worst:.3e} (dx={pert[0]:.3e}, ds={pert[1]:.3e}, "
+            f"dc={pert[2]:.3e}, dd={pert[3]:.3e}), above the requested "
+            f"max_pdpert={max_pdpert:.3e}. The factor the step would "
+            f"invert is not this problem's KKT matrix. Raise max_pdpert "
+            f"to accept it anyway.")
+
+
 def _correct(session, pin_idx, deltas, step, corrector_iter):
     """Refine a step by Newton iterations on the barrier system.
 
@@ -1155,7 +1185,7 @@ def _correct(session, pin_idx, deltas, step, corrector_iter):
 
 def estimate(model, perturb, clamp=True, mode="linear",
              predictor_iter=16, degeneracy="directional", degeneracy_iter=16,
-             corrector_iter=0):
+             corrector_iter=0, bound_eps=None, max_pdpert=None):
     """First-order estimate of the solution at perturbed parameter values.
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
@@ -1221,6 +1251,20 @@ def estimate(model, perturb, clamp=True, mode="linear",
     gained. It applies under every mode, refining whatever step that
     mode produced.
 
+
+    bound_eps sets how far outside a bound a step has to end to count as
+    having left it, which decides what mode="fix_relax" pins. Unset, it
+    is how far outside the solve itself was willing to settle, floored
+    so an unrelaxed solve does not pin on roundoff. mode="path" reads no
+    such margin, so this does nothing there.
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given.
+    Every sensitivity output inverts that factor, so a perturbed one
+    answers for a nearby problem rather than this one.
+    `estimate_report().perturbations` reports the same numbers for a
+    caller who would rather read them than stop.
+
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
     leave nothing to clamp, and when they do not, the warning says
@@ -1247,6 +1291,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    _refuse_on_pdpert(_session_for(model), max_pdpert, "estimate")
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
             "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
@@ -1276,7 +1321,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
             if mode == "fix_relax":
                 step, pinned, stop = (
                     session.solver.parametric_step_bounded_decided(
-                        pin_idx, deltas, held_rows, predictor_iter))
+                        pin_idx, deltas, held_rows, predictor_iter,
+                        bound_eps))
             elif mode == "path":
                 step, segments = (
                     session.solver.parametric_step_path_decided(
@@ -1291,7 +1337,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
             step, pinned, stop = session.solver.parametric_step_bounded(
-                pin_idx, deltas, predictor_iter)
+                pin_idx, deltas, predictor_iter, bound_eps)
         elif mode == "path":
             step, segments = session.solver.parametric_step_path(
                 pin_idx, deltas, predictor_iter)
@@ -1651,7 +1697,8 @@ def _user_row_names(session):
 
 def estimate_report(model, perturb, max_iter=None,
                     degeneracy="directional", degeneracy_iter=16,
-                    corrector_iter=0, mode="linear", predictor_iter=16):
+                    corrector_iter=0, mode="linear", predictor_iter=16,
+                    bound_eps=None, max_pdpert=None):
     """Report what `estimate()`'s step does about the bounds.
 
     degeneracy and degeneracy_iter match `estimate()`'s arguments of
@@ -1685,6 +1732,19 @@ def estimate_report(model, perturb, max_iter=None,
     point and `perturbations` and `bounds_relaxed` from the solve, so
     none of the five depends on the mode.
 
+    bound_eps sets how far outside a bound a step has to end to count as
+    having left it, which decides what mode="fix_relax" pins. Unset, it
+    is how far outside the solve itself was willing to settle, floored
+    so an unrelaxed solve does not pin on roundoff. mode="path" reads no
+    such margin, so this does nothing there.
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given.
+    Every sensitivity output inverts that factor, so a perturbed one
+    answers for a nearby problem rather than this one.
+    `estimate_report().perturbations` reports the same numbers for a
+    caller who would rather read them than stop.
+
     corrector_iter runs the same Newton iterations `estimate()` runs and
     reports what they did on the `corrector` attribute, without changing
     anything the rest of the report measures. Those describe the step
@@ -1712,6 +1772,7 @@ def estimate_report(model, perturb, max_iter=None,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    _refuse_on_pdpert(session, max_pdpert, "estimate_report")
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
             "estimate_report: mode must be 'linear', 'fix_relax' or "
@@ -1738,7 +1799,8 @@ def estimate_report(model, perturb, max_iter=None,
             if mode == "fix_relax":
                 step, _, refine_stop = (
                     session.solver.parametric_step_bounded_decided(
-                        pin_idx, deltas, held_rows, predictor_iter))
+                        pin_idx, deltas, held_rows, predictor_iter,
+                        bound_eps))
             elif mode == "path":
                 step, _ = session.solver.parametric_step_path_decided(
                     pin_idx, deltas, held_rows, predictor_iter)
@@ -1752,7 +1814,7 @@ def estimate_report(model, perturb, max_iter=None,
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
             step, _, refine_stop = session.solver.parametric_step_bounded(
-                pin_idx, deltas, predictor_iter)
+                pin_idx, deltas, predictor_iter, bound_eps)
         elif mode == "path":
             step, _ = session.solver.parametric_step_path(
                 pin_idx, deltas, predictor_iter)

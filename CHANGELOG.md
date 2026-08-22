@@ -9,6 +9,29 @@ changes.
 
 ## [Unreleased]
 
+- **`estimate()`, `estimate_report()` and `gradient()` take `bound_eps`
+  and `max_pdpert`.** Both are settable through the CLI and the
+  `SensSolve` builder and were unreachable from pyomo (gh#736).
+
+  `bound_eps` sets how far outside a bound a step has to end to count as
+  having left it, which decides what `mode="fix_relax"` pins. Unset, it
+  is how far outside the solve itself was willing to settle, floored so
+  an unrelaxed solve does not pin on roundoff, so nothing moves for a
+  caller who does not set it. `mode="path"` reads no such margin, so the
+  argument does nothing there and `active_set_changes()` does not take
+  it.
+
+  `max_pdpert` refuses rather than answering when the converged KKT
+  factor carries an inertia correction larger than the value given.
+  Every sensitivity output inverts that factor, so a perturbed one
+  answers for a nearby problem rather than this one.
+  `EstimateReport.perturbations` already reported the same numbers,
+  which let a caller read them but not stop on them.
+
+  `Solver::parametric_step_bounded` and
+  `parametric_step_bounded_decided` take the margin as a trailing
+  `Option<Number>`, and their Python bindings take `bound_eps=None`.
+
 - **`corrector_iter` refines a step by Newton iterations on the barrier
   system, against the factorization the solve left behind.**
 

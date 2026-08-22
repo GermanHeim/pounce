@@ -8,7 +8,7 @@ import pyomo.environ as pyo
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (active_set_changes, declare_sens_param, estimate,
                           estimate_report)
-from pyomo_pounce.sens import _NO_BOUND, _ratio_test
+from pyomo_pounce.sens import _NO_BOUND, _ratio_test, _session_for
 
 
 # ── the ratio test on its own ────────────────────────────────────────────────
@@ -814,3 +814,61 @@ def test_settled_means_nothing_is_left_outside_a_bound(mk, target):
     assert r.refine_stop == "settled"
     assert list(r.crossed) == [], (
         f"settled but {[v.name for v in r.crossed]} is outside its bound")
+
+
+# ── the two sIPOPT margins, on the pyomo surface ─────────────────────────────
+#
+# Both are settable through the CLI and the SensSolve builder and were
+# unreachable from here (gh#736).
+
+def test_bound_eps_sets_what_counts_as_leaving_a_bound():
+    """The refinement pins a coordinate only once it is outside by more
+    than the margin, so a margin wider than the crossing leaves the step
+    alone and the crossing survives into the estimate."""
+    m = coupled()
+    tight = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    slack = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
+    assert list(tight.crossed) == [], (
+        f"a tight margin should repair the crossing, left {list(tight.crossed)}")
+    assert list(slack.crossed) != [], (
+        "a margin wider than the crossing should leave it unrepaired")
+
+
+def test_bound_eps_unset_matches_the_previous_behaviour():
+    m = coupled()
+    unset = estimate(m, [(m.p, -1.2)], mode="fix_relax")
+    same = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    for v in unset:
+        assert unset[v] == pytest.approx(same[v], abs=1e-12)
+
+
+def regularized():
+    """Two constraints stating the same row, so the factor carries an
+    inertia correction and there is something for the cap to refuse."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.25, mutable=True)
+    m.x = pyo.Var(range(3), bounds=(-10.0, 10.0), initialize=0.3)
+    m.c1 = pyo.Constraint(expr=sum(m.x[i] for i in range(3)) == 1.0 - m.p)
+    m.c2 = pyo.Constraint(expr=1.0 * sum(m.x[i] for i in range(3)) == 1.0 - m.p)
+    m.obj = pyo.Objective(expr=sum(m.x[i] ** 2 for i in range(3)))
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_max_pdpert_refuses_a_factor_the_correction_perturbed():
+    """Every sensitivity output inverts the converged factor, so a
+    factor the inertia correction had to perturb answers for a nearby
+    problem. The cap is the caller declining to accept that."""
+    m = regularized()
+    worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
+    assert worst > 0.0, "this fixture is meant to be regularized"
+
+    from pyomo_pounce import gradient
+    for call in (lambda cap: gradient(m.x[0], wrt=m.p, max_pdpert=cap),
+                 lambda cap: estimate(m, [(m.p, 0.5)], max_pdpert=cap),
+                 lambda cap: estimate_report(m, [(m.p, 0.5)], max_pdpert=cap)):
+        call(None)
+        call(worst * 10.0)
+        with pytest.raises(ValueError, match="max_pdpert"):
+            call(worst / 10.0)
