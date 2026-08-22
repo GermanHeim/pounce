@@ -147,18 +147,34 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// What is lost is real: **no fixture in this repo now reproduces the gh#540
 /// failure**, so the trigger's necessity is pinned by nothing. See gh#693.
 ///
-/// What is still true, and is what this asserts: on the default path the
-/// trigger measurably improves the certificate. With it on, `eigena2`
-/// converges in 27 iterations at dual 3.43e-10; with
-/// `feral_inertia_pivot_floor=0` it takes 29 and lands at 5.45e-09 — 16x
-/// worse, deterministic across runs.
+/// What is still true, and is what this asserts, in two parts.
+///
+/// **Iteration count, at the default.** With the trigger on `eigena2`
+/// converges in 27 iterations; with `feral_inertia_pivot_floor=0` it takes
+/// 29. Deterministic across runs and independent of `feral_refine`.
+///
+/// **Dual residual, under `feral_refine=yes`.** 3.43e-10 with the trigger
+/// against 5.45e-09 without — 16x, deterministic. That margin used to be
+/// the default-path measurement, and is not any more: turning `feral_refine`
+/// off by default (gh#710) moved the trigger-on dual from 3.43e-10 to
+/// 5.20e-09 while leaving trigger-off at 5.41e-09, so at the default the two
+/// configurations are now indistinguishable. The residual assertion is
+/// therefore made where the effect still exists rather than dropped, and
+/// `feral_refine=yes` is not an artificial setting here — it is what every
+/// release through 0.10.0 shipped.
+///
+/// Both halves of that shift are worth reading. The certificate `eigena2`
+/// earns at the default is still strict and still clears `tol = 1e-8`, but
+/// by 2x rather than 30x; and the trigger's contribution to it is now the
+/// two iterations, not the last order of magnitude.
 ///
 /// **Two caveats a reader has to have, or this test reads stronger than it
-/// is.** First, the margin is narrow to the default path: under
-/// `POUNCE_DBG_NO_QUAD=1` the two configurations land at 5.21e-09 and
-/// 5.27e-09, indistinguishable. Second, the *ordering* is newly true. On
-/// 0.10.0 the trigger made this model's dual residual slightly **worse** —
-/// 2.21e-09 with it on against 5.95e-10 with it off, both clearing `tol`:
+/// is.** First, the margin was always narrow to one configuration: it was
+/// already gone under `POUNCE_DBG_NO_QUAD=1` before `feral_refine` moved,
+/// where the two land at 5.21e-09 and 5.27e-09. Second, the *ordering* is
+/// newly true. On 0.10.0 the trigger made this model's dual residual
+/// slightly **worse** — 2.21e-09 with it on against 5.95e-10 with it off,
+/// both clearing `tol`:
 ///
 /// ```text
 ///                          trigger ON        trigger OFF
@@ -177,13 +193,30 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// the module header.
 #[test]
 fn the_trigger_still_improves_the_certificate() {
-    let with_trigger = solve(&[]).statistics.final_dual_inf;
-    let without = solve(&NO_TRIGGER).statistics.final_dual_inf;
+    // At the default (`feral_refine=no` since gh#710): the trigger is worth
+    // two iterations, and the dual residuals are indistinguishable.
+    let on = solve(&[]).statistics;
+    let off = solve(&NO_TRIGGER).statistics;
+    assert!(
+        off.iteration_count > on.iteration_count,
+        "the inertia trigger no longer shortens eigena2 at the default \
+         (with {} iters, without {} iters), so the tests above are no longer \
+         pinning the fix they describe",
+        on.iteration_count,
+        off.iteration_count,
+    );
+
+    // Under `feral_refine=yes` — every release through 0.10.0 — the
+    // certificate margin is still there and still 16x.
+    let with_trigger = solve(&["feral_refine=yes"]).statistics.final_dual_inf;
+    let without = solve(&["feral_refine=yes", NO_TRIGGER[0]])
+        .statistics
+        .final_dual_inf;
     assert!(
         without > with_trigger * 5.0,
-        "the inertia trigger no longer improves eigena2's dual residual \
-         (with {with_trigger:e}, without {without:e}), so the tests above \
-         are no longer pinning the fix they describe",
+        "the inertia trigger no longer improves eigena2's dual residual under \
+         feral_refine=yes (with {with_trigger:e}, without {without:e}), so the \
+         tests above are no longer pinning the fix they describe",
     );
     assert!(
         with_trigger < 1e-9,

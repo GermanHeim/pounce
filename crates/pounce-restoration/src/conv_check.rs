@@ -104,26 +104,27 @@ pub fn resto_orig_verdict(
     //
     // Upstream states the arm's premise in its own comment: it tightens
     // "in case the problem is only very slightly infeasible". *In*feasible
-    // is the operative word — the arm spends the tolerance budget chasing
-    // a residual violation down to zero. Once the recovered point is
-    // feasible to the original NLP's own `tol` there is no residual left
-    // to chase, and tightening only drives the sub-solve past the point
-    // the outer asked for: eigmaxa/eigmina reach `inf_pr = 7.5e-15`, get
-    // tightened anyway, and run on into a tiny-step restoration failure
-    // where handing the point straight back solves the problem. dallasm
-    // is the same story at `1.5e-10`.
+    // is the operative word. The arm buys progress on a residual
+    // violation by spending tolerance budget; at a point already feasible
+    // to the original NLP's own `tol` there is no residual left to buy,
+    // and tightening only drives the sub-solve past the accuracy the
+    // outer phase asked for — typically into a tiny-step restoration
+    // failure, discarding a point that was the answer.
     //
-    // Upstream never has to make this distinction, because it cannot
-    // arrive here at a feasible point: `IpBacktrackingLineSearch.cpp:578`
-    // refuses to enter restoration once the violation is under
-    // `1e-2 · tol`, and layer 1's reduction target is floored at
-    // `min(tol, constr_viol_tol)` so a feasible trial is released before
-    // layer 2 is consulted. Pounce reaches it by both routes, so the
-    // premise has to be checked rather than assumed. A point at or under
-    // `orig_tol` falls through to the feasible-point arm below, which is
-    // the verdict that describes it.
-    let slightly_infeasible = orig_trial_inf_pr > orig_tol;
-    if nearly_feasible && slightly_infeasible && tol > 1e-1 * orig_tol {
+    // Upstream may assume the premise rather than test it, because it
+    // cannot arrive here at a feasible point. Two layer-1 arms release
+    // such a trial before layer 2 is consulted: the `IsSquareProblem()`
+    // arm (line 174), and the `min(tol, constr_viol_tol)` floor on the
+    // reduction target (line 161). Pounce implements the first; it
+    // deliberately does not implement the second (see the note in
+    // `RestoConvCheckAdapter::check_convergence_with_state`), and
+    // `IpBacktrackingLineSearch`'s refusal to enter restoration below
+    // `1e-2 · tol` is likewise not reproduced. So on a non-square NLP
+    // pounce can reach this arm at a feasible point, and the premise has
+    // to be checked. A point at or under `orig_tol` falls through to the
+    // feasible-point arm below, which is the verdict that describes it.
+    let already_feasible_for_orig = orig_trial_inf_pr <= orig_tol;
+    if nearly_feasible && !already_feasible_for_orig && tol > 1e-1 * orig_tol {
         return RestoOrigVerdict::TightenAndContinue;
     }
     // `IpRestoConvCheck.cpp:222` — a square problem has nothing to
@@ -729,7 +730,14 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
             }
         }
 
-        // 2. Kappa-reduction early-exit on orig-NLP `inf_pr`. Mirrors
+        // 2. Layer 1 of `IpRestoConvCheck::CheckConvergence`, evaluated
+        //    on the original NLP at the inner iterate: the
+        //    square-problem arm (2a) and the kappa-reduction early-exit
+        //    (2b). Both are skipped on the first inner iteration —
+        //    upstream's `first_resto_iter` freebie at line 152 — via
+        //    `iter_count > 0`.
+        //
+        // 2b. Kappa-reduction early-exit on orig-NLP `inf_pr`. Mirrors
         //    upstream `IpRestoConvCheck.cpp:175` — when the inner
         //    iterate's orig `(theta_trial)` is below
         //    `kappa_resto · orig_curr_inf_pr`, restoration has done
@@ -737,41 +745,79 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
         //    `RestoConvCheck::check_convergence`; pounce deliberately
         //    does not.) Upstream then runs `TestOrigProgress` (filter +
         //    iterate acceptance) before declaring `Converged`; we mirror
-        //    that gate via [`Self::orig_progress_callback`]. The first
-        //    inner iter is skipped (no prior reduction reference yet)
-        //    by checking `iter_count > 0`; that matches upstream's
-        //    `first_resto_iter` freebie at line 152.
-        if iter_count > 0 && self.kappa_resto > 0.0 {
+        //    that gate via [`Self::orig_progress_callback`].
+        if iter_count > 0 {
             if let Some(orig_rc) = self.orig_nlp.clone() {
                 if let Some(OrigTrialMeasures {
                     inf_pr_scaled: orig_trial_inf_pr,
+                    inf_pr_unscaled: orig_trial_inf_pr_unscaled,
+                    inf_pr_relative: orig_trial_rel_inf_pr,
                     f: orig_trial_f,
-                    ..
                 }) = eval_orig_trial_measures(data, &orig_rc)
                 {
-                    if std::env::var_os("POUNCE_DBG_RESTO_KAPPA").is_some() {
-                        tracing::debug!(target: "pounce::restoration",
-                            "[PN_RESTO_KAPPA] iter={} orig_trial_inf_pr={:.6e} orig_curr_inf_pr={:.6e} kappa_resto={:.3e} threshold={:.6e} guard_passes={}",
-                            iter_count,
-                            orig_trial_inf_pr,
-                            self.orig_curr_inf_pr,
-                            self.kappa_resto,
-                            self.kappa_resto * self.orig_curr_inf_pr,
-                            orig_trial_inf_pr <= self.kappa_resto * self.orig_curr_inf_pr
-                        );
-                    }
-                    if orig_trial_inf_pr <= self.kappa_resto * self.orig_curr_inf_pr {
-                        // Kappa reduction satisfied. Now consult the
-                        // outer-filter / iterate-acceptance callback if
-                        // wired (mirrors `TestOrigProgress`). When the
-                        // callback is absent, kappa alone gates the
-                        // exit (matches `RestoConvCheck`-base).
-                        let outer_accept = match &self.orig_progress_callback {
-                            Some(cb) => cb(orig_trial_f, orig_trial_inf_pr),
-                            None => true,
-                        };
-                        if outer_accept {
+                    // 2a. Layer 1's square-problem arm
+                    //     (`IpRestoConvCheck.cpp:174`). A square NLP has
+                    //     nothing to optimise, so an iterate feasible to
+                    //     `min(tol, constr_viol_tol)` is already the
+                    //     answer: restoration has succeeded outright and
+                    //     the outer phase resumes from the recovered
+                    //     point. Upstream returns plain `CONVERGED` here,
+                    //     not `CONVERGED_TO_ACCEPTABLE_POINT`, and — as
+                    //     the arm sits above the `status == CONTINUE`
+                    //     guard — layer 2 never sees such a point at all.
+                    //     Without this arm a square restoration that
+                    //     reaches feasibility falls through to layer 2,
+                    //     whose square branch reports
+                    //     `ConvergedToAcceptable` and terminates the
+                    //     whole solve with `Feasible Point Found` in
+                    //     place of the optimal status the outer phase
+                    //     would have gone on to reach.
+                    //
+                    //     Tested in both unit systems (plus the
+                    //     scale-invariant relative measure) rather than
+                    //     upstream's scaled-only comparison, for the
+                    //     reason documented on [`OrigTrialMeasures`]:
+                    //     `tol` and `constr_viol_tol` are absolute
+                    //     user-facing magnitudes, so a row-scaled model
+                    //     could otherwise clear the test while still
+                    //     violating the user's tolerance.
+                    if self.is_square_problem {
+                        let target = self.orig_tol.min(self.orig_constr_viol_tol);
+                        if orig_trial_inf_pr <= target
+                            && orig_trial_inf_pr_unscaled <= target
+                            && orig_trial_rel_inf_pr <= self.rel_viol_threshold
+                        {
                             return ConvergenceStatus::Converged;
+                        }
+                    }
+
+                    // `kappa_resto == 0` disables the reduction guard
+                    // outright (`IpRestoConvCheck.cpp:163`).
+                    if self.kappa_resto > 0.0 {
+                        if std::env::var_os("POUNCE_DBG_RESTO_KAPPA").is_some() {
+                            tracing::debug!(target: "pounce::restoration",
+                                "[PN_RESTO_KAPPA] iter={} orig_trial_inf_pr={:.6e} orig_curr_inf_pr={:.6e} kappa_resto={:.3e} threshold={:.6e} guard_passes={}",
+                                iter_count,
+                                orig_trial_inf_pr,
+                                self.orig_curr_inf_pr,
+                                self.kappa_resto,
+                                self.kappa_resto * self.orig_curr_inf_pr,
+                                orig_trial_inf_pr <= self.kappa_resto * self.orig_curr_inf_pr
+                            );
+                        }
+                        if orig_trial_inf_pr <= self.kappa_resto * self.orig_curr_inf_pr {
+                            // Kappa reduction satisfied. Now consult the
+                            // outer-filter / iterate-acceptance callback if
+                            // wired (mirrors `TestOrigProgress`). When the
+                            // callback is absent, kappa alone gates the
+                            // exit (matches `RestoConvCheck`-base).
+                            let outer_accept = match &self.orig_progress_callback {
+                                Some(cb) => cb(orig_trial_f, orig_trial_inf_pr),
+                                None => true,
+                            };
+                            if outer_accept {
+                                return ConvergenceStatus::Converged;
+                            }
                         }
                     }
                 }

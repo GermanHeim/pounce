@@ -1099,7 +1099,7 @@ impl AlgorithmBuilder {
     /// PdSearchDirCalc` chain via the supplied `factory`.
     pub fn build_with_backend(&self, mut factory: LinearBackendFactory) -> AlgorithmBundle {
         let backend = factory(self.linear_solver);
-        let scaling: Option<Box<dyn pounce_linsol::TSymScalingMethod>> =
+        let make_scaling = || -> Option<Box<dyn pounce_linsol::TSymScalingMethod>> {
             match self.linear_system_scaling {
                 LinearSystemScalingChoice::None => None,
                 LinearSystemScalingChoice::Ruiz => {
@@ -1114,8 +1114,9 @@ impl AlgorithmBuilder {
                 LinearSystemScalingChoice::SlackBased => {
                     Some(Box::new(pounce_linsol::SlackBasedTSymScalingMethod::new()))
                 }
-            };
-        let linsol = TSymLinearSolver::new(backend, scaling, self.linear_scaling_on_demand);
+            }
+        };
+        let linsol = TSymLinearSolver::new(backend, make_scaling(), self.linear_scaling_on_demand);
         let inner_aug = StdAugSystemSolver::new(linsol);
         // Limited-memory mode publishes the Hessian as a
         // `LowRankUpdateSymMatrix`; wrap the standard solver in the
@@ -1127,7 +1128,20 @@ impl AlgorithmBuilder {
             HessianApproxChoice::LimitedMemory
         );
         let aug_solver: Box<dyn AugSystemSolver> = if is_lbfgs {
-            Box::new(LowRankAugSystemSolver::new(Box::new(inner_aug)))
+            // A second, independent inner solver for the Hessian-free
+            // solves. Both see one W shape each for their whole life, so
+            // neither re-runs the backend's symbolic factorization when
+            // the other's shape comes round — see
+            // `LowRankAugSystemSolver::with_bypass_solver` (gh#730).
+            let bypass_linsol = TSymLinearSolver::new(
+                factory(self.linear_solver),
+                make_scaling(),
+                self.linear_scaling_on_demand,
+            );
+            Box::new(LowRankAugSystemSolver::with_bypass_solver(
+                Box::new(inner_aug),
+                Box::new(StdAugSystemSolver::new(bypass_linsol)),
+            ))
         } else if let Some((indices, cfg)) = self.kkt_schur.clone() {
             // Block-triangular / Schur KKT path (pounce#180 item 2). Only on the
             // exact-Hessian feral path — the Schur backend is feral-specific,

@@ -79,6 +79,35 @@ pub trait ConvCheck {
         self.check_convergence(nlp_err, iter_count)
     }
 
+    /// Ask [`Self::check_convergence_with_state`] what it *would* say,
+    /// without letting the answer count as an iteration.
+    ///
+    /// `IpoptAlgorithm::ComputeFeasibilityMultipliers` calls the
+    /// convergence check twice on the same iterate — once to decide
+    /// whether re-estimating the multipliers is worth attempting
+    /// (`IpIpoptAlg.cpp:880`), once to decide whether to keep the result
+    /// (`cpp:924`) — on top of the main loop's own call. Upstream wears
+    /// the double-count because the only state it advances is
+    /// `acceptable_counter_`. pounce's check carries considerably more:
+    /// the rapid-infeasibility streak, the gh#200 veto budget, the gh#533
+    /// acceptable-progress window. Advancing those three times per
+    /// iteration is not upstream behaviour under a different name — it
+    /// changes when detectors fire. Measured on the gh#508 probe: the
+    /// rapid detector convicted at iteration 33 instead of 86, purely
+    /// from the extra increments.
+    ///
+    /// Default delegates, since a policy with no cross-iteration state
+    /// has nothing to protect.
+    fn probe_convergence(
+        &mut self,
+        nlp_err: Number,
+        iter_count: Index,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> ConvergenceStatus {
+        self.check_convergence_with_state(nlp_err, iter_count, data, cq)
+    }
+
     /// Whether the current iterate passes the *strict* per-component convergence
     /// tolerances — the [`Self::check_convergence_with_state`] strict test with
     /// the masked-certificate veto (gh #200) removed. In other words: would this

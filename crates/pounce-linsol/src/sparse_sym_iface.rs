@@ -116,6 +116,34 @@ pub trait SparseSymLinearSolverInterface {
     /// eigenvalues post-factor.
     fn provides_inertia(&self) -> bool;
 
+    /// Whether a blocked `multi_solve` of `nrhs` columns returns
+    /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
+    /// against the same factor.
+    ///
+    /// Backends that block the triangular substitution across columns
+    /// reassociate the floating-point sums, so their batched answer is
+    /// tolerance-equal but not bit-equal to the per-column one. That is
+    /// fine for a caller that only wants *a* solution, and not fine for
+    /// a caller batching purely to save time inside an iteration whose
+    /// trajectory must not move: on a nonconvex problem the perturbation
+    /// can select a different local optimum. `pooling_rt2stp` under MA57
+    /// does exactly that (gh#729), landing on an objective 25% worse
+    /// while still reporting `Optimal Solution Found`.
+    ///
+    /// Defaults to `false` — the conservative answer, so a new backend
+    /// has to opt in deliberately rather than inherit a trajectory
+    /// change by omission. This gates only opportunistic batching;
+    /// callers that batch for their own reasons (`pounce-sensitivity`'s
+    /// `jacrev` backward, where each cotangent is an independent
+    /// question) do not consult it.
+    /// The answer is allowed to depend on `nrhs`: a backend may run a
+    /// bit-identical rank-1 cascade for narrow blocks and switch to a
+    /// reassociating BLAS-3 panel kernel once the block is wide enough
+    /// to pay for it. feral does exactly that.
+    fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+        false
+    }
+
     /// Required matrix layout. Caller marshals data into this format.
     fn matrix_format(&self) -> EMatrixFormat;
 

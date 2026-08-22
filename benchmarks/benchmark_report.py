@@ -1321,12 +1321,22 @@ def main():
     # so they stay out of the Ipopt-reference machinery (profiles, baseline,
     # regressions/wins, executive summary).
     head_to_head = []
-    for suite_name, dirname in (('LP — convex vs NLP', 'lp_convex'),
-                                ('QP — convex vs NLP', 'qp_convex')):
+    for suite_name, dirname, files, keys in (
+            ('LP — convex vs NLP', 'lp_convex',
+             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+            ('QP — convex vs NLP', 'qp_convex',
+             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+            # Exact vs limited-memory Hessian on the same problems. The
+            # Python frontend and the CasADi plugin pick L-BFGS on their
+            # own when no exact Lagrangian Hessian exists, so this arm is
+            # a default path for a large share of users, not an opt-in.
+            ('Mittelmann — exact vs L-BFGS', 'lbfgs',
+             ('exact.json', 'limited.json'), ('exact', 'lbfgs')),
+    ):
         comps, has_convex, has_nlp = load_suite(
             suite_name, dirname,
-            left_file='convex.json', right_file='nlp.json',
-            left_key='convex', right_key='nlp')
+            left_file=files[0], right_file=files[1],
+            left_key=keys[0], right_key=keys[1])
         if comps:
             head_to_head.append((suite_name, comps))
             print(f"{suite_name} suite: {len(comps)} records loaded — "

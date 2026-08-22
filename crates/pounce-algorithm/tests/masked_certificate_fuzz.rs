@@ -1751,7 +1751,7 @@ fn a_warm_start_chain_is_unaffected_by_the_veto() {
 struct ChronologyCase;
 
 const CHRONO_A: [Number; 3] = [-0.6562098709158892, -6.6421858042642175, -2.598669849860882];
-const CHRONO_W: [Number; 3] = [9682.539592993013, 5145.503368047705, 6220.696295926191];
+const CHRONO_W: [Number; 3] = [19365.079185986026, 10291.00673609541, 12441.392591852382];
 const CHRONO_B: Number = 12.825582160408128;
 
 impl TNLP for ChronologyCase {
@@ -1777,24 +1777,32 @@ impl TNLP for ChronologyCase {
         for v in b.g_u.iter_mut() {
             *v = 0.0;
         }
+        // `g[2] = (x0 - a0)^2` is a square, so `<= 0` and `== 0` cut out the
+        // same feasible set — but only the first leaves `dim(y_c) = 2 < 3 =
+        // dim(x)`. Written as an equality the problem is square, and Ipopt's
+        // square-problem path (`ComputeFeasibilityMultipliers`,
+        // `IpIpoptAlg.cpp:857`) then solves it outright to `Solve_Succeeded`
+        // long before either certificate is refused, so the fixture would
+        // exercise nothing. Squareness is orthogonal to the veto under test.
+        b.g_l[2] = -2.0e19;
         true
     }
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         for v in sp.x.iter_mut() {
-            *v = -50.0;
+            *v = -80.0;
         }
         true
     }
     fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
         Some(
             (0..3)
-                .map(|i| (x[i] - CHRONO_A[i]).powi(6) - CHRONO_W[i] * x[i] * x[i])
+                .map(|i| (x[i] - CHRONO_A[i]).powi(4) - CHRONO_W[i] * x[i] * x[i])
                 .sum::<Number>(),
         )
     }
     fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
         for i in 0..3 {
-            g[i] = 6.0 * (x[i] - CHRONO_A[i]).powi(5) - 2.0 * CHRONO_W[i] * x[i];
+            g[i] = 4.0 * (x[i] - CHRONO_A[i]).powi(3) - 2.0 * CHRONO_W[i] * x[i];
         }
         true
     }
@@ -1848,7 +1856,7 @@ impl TNLP for ChronologyCase {
                 let lam = l.expect("no lambda");
                 for i in 0..3 {
                     values[i] = obj_factor
-                        * (30.0 * (x[i] - CHRONO_A[i]).powi(4) - 2.0 * CHRONO_W[i])
+                        * (12.0 * (x[i] - CHRONO_A[i]).powi(2) - 2.0 * CHRONO_W[i])
                         + 2.0 * (lam[0] + lam[1]);
                 }
                 values[0] += 2.0 * lam[2];
@@ -1865,9 +1873,10 @@ impl TNLP for ChronologyCase {
 ///
 /// Both arms follow the same trajectory only up to the first refusal, so that
 /// iterate is where the baseline stopped and what it reported. Here the
-/// acceptable-level refusal fires at iteration 43, which is exactly where the
-/// baseline terminates with `Solved_To_Acceptable_Level`; the strict refusal
-/// fires later, on the continued trajectory the baseline never walked.
+/// acceptable-level refusal fires at iteration 101, which is exactly where the
+/// baseline terminates with `Solved_To_Acceptable_Level` — the veto arm
+/// restores that point and reports its objective to the last bit; the strict
+/// refusal fires later, on the continued trajectory the baseline never walked.
 /// Preferring the strict snapshot therefore compared against — and restored —
 /// a point that was never on offer, and the run came back with an objective
 /// worse than baseline's at the same reported status.
@@ -1920,7 +1929,7 @@ fn the_earliest_refusal_is_the_one_restored_not_the_strictest() {
 
     // The guarantee: never worse on status, and within equal status never worse
     // on objective. Restoring the later strict point instead of the earlier
-    // acceptable one lands here with an objective ~8.6e-3 above baseline.
+    // acceptable one lands here with an objective ~7.7e-2 above baseline.
     assert_eq!(
         veto_status, base_status,
         "status regressed: base {base_status:?} -> veto {veto_status:?}"

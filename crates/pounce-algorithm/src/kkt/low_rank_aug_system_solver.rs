@@ -67,6 +67,19 @@ pub struct LowRankAugSystemSolver {
     /// A fast path that skips re-factorizing must not also skip an
     /// inertia check the caller asked for against a different target.
     inner_factor_neg_evals: Option<Index>,
+    /// Separate inner solver dedicated to the Hessian-free solves that
+    /// take the bypass in [`LowRankAugSystemSolver::solve`], so that
+    /// neither solver ever sees more than one W sparsity (gh#730).
+    ///
+    /// `None` restores the single-solver arrangement, in which both
+    /// shapes share one inner solver and each alternation re-runs the
+    /// backend's symbolic factorization. Unit tests that drive a stub
+    /// inner solver directly use that arrangement; the builder always
+    /// supplies a bypass solver on the limited-memory path.
+    bypass: Option<Box<dyn AugSystemSolver>>,
+    /// Whether the most recent `solve` took the Hessian-free bypass, so
+    /// `last_solve_status` reports the solver that actually ran.
+    last_solve_took_bypass: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +149,53 @@ impl LowRankAugSystemSolver {
             factor: Factorization::default(),
             inner_has_factor: false,
             inner_factor_neg_evals: None,
+            bypass: None,
+            last_solve_took_bypass: false,
+        }
+    }
+
+    /// Same as [`Self::new`] but routes the Hessian-free solves through
+    /// their own inner solver.
+    ///
+    /// Under limited-memory this solver drives its inner solver with two
+    /// different (1,1) shapes: an empty W for the least-square multiplier
+    /// initialization and the equality-multiplier estimates, and an
+    /// `n`-diagonal `B0` for the main primal-dual solves.
+    /// `StdAugSystemSolver` keys its structure signature on W's nonzero
+    /// count, so the two alternate and every alternation re-runs the
+    /// backend's symbolic factorization — for MA57 with
+    /// `ma57_pivot_order = 5` a full MeTiS nested dissection of the whole
+    /// KKT system, ~0.4 s per call on a 118 276-row model (gh#730).
+    ///
+    /// Ipopt never pays this because its low-rank layer owns those
+    /// solves, so its inner solver sees one shape for its whole life —
+    /// `IpTSymLinearSolver.cpp:182` asserts exactly that. Giving the
+    /// bypass its own solver reproduces that invariant on both sides
+    /// instead of on neither.
+    ///
+    /// Deliberately **not** done by making the two shapes agree — e.g.
+    /// substituting a zeroed `n`-diagonal for the empty W, which is what
+    /// the shape proposed in gh#730 does. That is numerically exact, but
+    /// it changes the pattern the backend orders, and a different
+    /// ordering rounds differently: swept, it takes `pooling_rt2stp`
+    /// under MA57 from `obj = -4391.83` to `-3273.95` (both "Optimal",
+    /// 25% apart) and `cresc4` from 110 to 267 iterations. Two solvers
+    /// hand each path exactly the matrix and the ordering it already
+    /// had, so the win is free of trajectory movement rather than paid
+    /// for with it.
+    ///
+    /// The cost is one additional numeric factorization resident at
+    /// once. That is the deliberate trade: memory is measurable and
+    /// boundable, and a trajectory regression is what has repeatedly
+    /// shipped here undetected (`dev-notes/trajectory-regressions-and-\
+    /// the-fixture-sweep.md`).
+    pub fn with_bypass_solver(
+        inner: Box<dyn AugSystemSolver>,
+        bypass: Box<dyn AugSystemSolver>,
+    ) -> Self {
+        Self {
+            bypass: Some(bypass),
+            ..Self::new(inner)
         }
     }
 
@@ -470,6 +530,7 @@ impl LowRankAugSystemSolver {
         MultiVectorMatrix,
     ) {
         let n_cols = v_x.n_cols();
+        let n_cols_us = n_cols as usize;
 
         // Allocate four per-block result MVMs.
         let mut out_x =
@@ -494,69 +555,234 @@ impl LowRankAugSystemSolver {
         let mut rhs_d = space_d.make_new_dense();
         rhs_d.set(0.0);
 
-        for k in 0..n_cols {
-            let rhs_x_dyn: &dyn Vector = v_x.get_vector(k).as_ref();
-            let inner_rhs = AugSysRhs {
-                rhs_x: rhs_x_dyn,
-                rhs_s: rhs_s.as_dyn_vector(),
-                rhs_c: rhs_c.as_dyn_vector(),
-                rhs_d: rhs_d.as_dyn_vector(),
-            };
-            // Build solution slots (fresh each iteration).
-            let mut sol_x = space_x.make_new_dense();
-            let mut sol_s = space_s.make_new_dense();
-            let mut sol_c = space_c.make_new_dense();
-            let mut sol_d = space_d.make_new_dense();
-            sol_x.set(0.0);
-            sol_s.set(0.0);
-            sol_c.set(0.0);
-            sol_d.set(0.0);
-            let inner_coeffs = inner_coeffs(&self.factor, coeffs);
-            // Every column here shares one matrix, so only the first one
-            // needs a factorization; the rest are back-substitutions
-            // against it. Upstream gets the same effect by issuing a
-            // single `MultiSolve` for all `nrhs` columns
-            // (`IpLowRankAugSystemSolver.cpp:487`), which reaches
-            // `StdAugSystemSolver::MultiSolve` and factorizes once.
-            let reuse = self.inner_has_factor;
-            let status = {
-                let mut sol = AugSysSol {
-                    sol_x: &mut sol_x,
-                    sol_s: &mut sol_s,
-                    sol_c: &mut sol_c,
-                    sol_d: &mut sol_d,
-                };
-                if reuse {
-                    self.inner.resolve(&inner_coeffs, &inner_rhs, &mut sol)
-                } else {
-                    self.inner.solve(
-                        &inner_coeffs,
-                        &inner_rhs,
-                        &mut sol,
-                        check_neg_evals,
-                        num_neg_evals,
-                    )
+        // Every column here shares one matrix, so only the first one
+        // needs a factorization; the rest are back-substitutions
+        // against it. Upstream gets that from a single `MultiSolve`
+        // over all `nrhs` columns (`IpLowRankAugSystemSolver.cpp:487`),
+        // which reaches `StdAugSystemSolver::MultiSolve` and factorizes
+        // once. We reproduce it in two steps: pay the factorization on
+        // column 0 through the single-RHS path when the inner solver is
+        // cold, then hand every remaining column to the inner solver's
+        // packed multi-RHS back-substitution in one call. That is the
+        // only way `nrhs > 1` reaches the backend — both FERAL
+        // (`solve_many_into`) and MA57 (`ma57cd_` with `nrhs`) block the
+        // triangular solves, and neither can do so one column at a time
+        // (gh#729).
+        let mut k0 = 0usize;
+        if !self.inner_has_factor && n_cols_us > 0 {
+            let rhs_x_dyn: &dyn Vector = v_x.get_vector(0).as_ref();
+            match self.solve_one_column(
+                rhs_x_dyn,
+                &rhs_s,
+                &rhs_c,
+                &rhs_d,
+                coeffs,
+                space_x,
+                space_s,
+                space_c,
+                space_d,
+                check_neg_evals,
+                num_neg_evals,
+            ) {
+                Ok((sol_x, sol_s, sol_c, sol_d)) => {
+                    out_x.set_vector(0, Rc::new(sol_x) as Rc<dyn Vector>);
+                    out_s.set_vector(0, Rc::new(sol_s) as Rc<dyn Vector>);
+                    out_c.set_vector(0, Rc::new(sol_c) as Rc<dyn Vector>);
+                    out_d.set_vector(0, Rc::new(sol_d) as Rc<dyn Vector>);
                 }
-            };
-            if self.inner.provides_inertia() {
-                self.num_neg_evals = self.inner.number_of_neg_evals();
+                Err(status) => return (Err(status), out_s, out_c, out_d),
             }
-            if status != ESymSolverStatus::Success {
-                self.inner_has_factor = false;
-                self.inner_factor_neg_evals = None;
-                return (Err(status), out_s, out_c, out_d);
+            k0 = 1;
+        }
+
+        // Batched back-substitution for columns `k0..n_cols`. Declines
+        // (leaving `k0` untouched for the loop below) when the inner
+        // solver does not expose the packed path, does not report a
+        // dimension, or hands us a column we cannot read as a dense
+        // slice.
+        if k0 < n_cols_us {
+            let n_x = space_x.dim() as usize;
+            let n_s = space_s.dim() as usize;
+            let n_c = space_c.dim() as usize;
+            let n_d = space_d.dim() as usize;
+            let dim = n_x + n_s + n_c + n_d;
+            let nrhs = n_cols_us - k0;
+            // The batch is a pure time optimization: these columns feed
+            // the SMW correction of an iterate whose trajectory must not
+            // move. A backend whose blocked substitution reassociates
+            // returns a tolerance-equal but different answer, and on a
+            // nonconvex problem that is enough to select a different local
+            // optimum — MA57 takes `pooling_rt2stp` to an objective 25%
+            // worse while still reporting `Optimal Solution Found` (gh#729).
+            // So the backend has to affirm bit-identity at this width, and
+            // the default answer is no.
+            if nrhs > 1
+                && dim > 0
+                && dim == self.inner.system_dim() as usize
+                && self.inner.multi_solve_matches_single_solve(nrhs)
+            {
+                let mut packed = vec![0.0; dim * nrhs];
+                let mut packed_ok = true;
+                for (j, k) in (k0..n_cols_us).enumerate() {
+                    let col = &mut packed[j * dim..j * dim + n_x];
+                    if !copy_dense_into(v_x.get_vector(k as Index).as_ref(), col) {
+                        packed_ok = false;
+                        break;
+                    }
+                    // The s/c/d blocks of the RHS are zero by
+                    // construction, and `packed` starts zeroed.
+                }
+                if packed_ok {
+                    let ic = inner_coeffs(&self.factor, coeffs);
+                    if let Some(status) = self.inner.try_resolve_many_flat(&ic, &mut packed, nrhs) {
+                        if self.inner.provides_inertia() {
+                            self.num_neg_evals = self.inner.number_of_neg_evals();
+                        }
+                        if status != ESymSolverStatus::Success {
+                            self.inner_has_factor = false;
+                            self.inner_factor_neg_evals = None;
+                            return (Err(status), out_s, out_c, out_d);
+                        }
+                        for (j, k) in (k0..n_cols_us).enumerate() {
+                            let col = &packed[j * dim..(j + 1) * dim];
+                            let mut sol_x = space_x.make_new_dense();
+                            let mut sol_s = space_s.make_new_dense();
+                            let mut sol_c = space_c.make_new_dense();
+                            let mut sol_d = space_d.make_new_dense();
+                            sol_x.set_values(&col[..n_x]);
+                            sol_s.set_values(&col[n_x..n_x + n_s]);
+                            sol_c.set_values(&col[n_x + n_s..n_x + n_s + n_c]);
+                            sol_d.set_values(&col[n_x + n_s + n_c..]);
+                            out_x.set_vector(k as Index, Rc::new(sol_x) as Rc<dyn Vector>);
+                            out_s.set_vector(k as Index, Rc::new(sol_s) as Rc<dyn Vector>);
+                            out_c.set_vector(k as Index, Rc::new(sol_c) as Rc<dyn Vector>);
+                            out_d.set_vector(k as Index, Rc::new(sol_d) as Rc<dyn Vector>);
+                        }
+                        return (Ok(out_x), out_s, out_c, out_d);
+                    }
+                }
             }
-            if !reuse {
-                self.inner_has_factor = true;
-                self.inner_factor_neg_evals = check_neg_evals.then_some(num_neg_evals);
+        }
+
+        // Fallback: one single-RHS back-substitution per column.
+        for k in k0..n_cols_us {
+            let rhs_x_dyn: &dyn Vector = v_x.get_vector(k as Index).as_ref();
+            match self.solve_one_column(
+                rhs_x_dyn,
+                &rhs_s,
+                &rhs_c,
+                &rhs_d,
+                coeffs,
+                space_x,
+                space_s,
+                space_c,
+                space_d,
+                check_neg_evals,
+                num_neg_evals,
+            ) {
+                Ok((sol_x, sol_s, sol_c, sol_d)) => {
+                    out_x.set_vector(k as Index, Rc::new(sol_x) as Rc<dyn Vector>);
+                    out_s.set_vector(k as Index, Rc::new(sol_s) as Rc<dyn Vector>);
+                    out_c.set_vector(k as Index, Rc::new(sol_c) as Rc<dyn Vector>);
+                    out_d.set_vector(k as Index, Rc::new(sol_d) as Rc<dyn Vector>);
+                }
+                Err(status) => return (Err(status), out_s, out_c, out_d),
             }
-            out_x.set_vector(k, Rc::new(sol_x) as Rc<dyn Vector>);
-            out_s.set_vector(k, Rc::new(sol_s) as Rc<dyn Vector>);
-            out_c.set_vector(k, Rc::new(sol_c) as Rc<dyn Vector>);
-            out_d.set_vector(k, Rc::new(sol_d) as Rc<dyn Vector>);
         }
         (Ok(out_x), out_s, out_c, out_d)
     }
+
+    /// One column of [`Self::multi_solve_block`] through the inner
+    /// solver's single-RHS path: `solve` (factorize) when the inner
+    /// solver is cold, `resolve` (back-substitute) when it is not.
+    /// Carries the inertia and factor bookkeeping either way, so the
+    /// batched path and the fallback loop agree on solver state.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_one_column(
+        &mut self,
+        rhs_x: &dyn Vector,
+        rhs_s: &DenseVector,
+        rhs_c: &DenseVector,
+        rhs_d: &DenseVector,
+        coeffs: &AugSysCoeffs<'_>,
+        space_x: &Rc<DenseVectorSpace>,
+        space_s: &Rc<DenseVectorSpace>,
+        space_c: &Rc<DenseVectorSpace>,
+        space_d: &Rc<DenseVectorSpace>,
+        check_neg_evals: bool,
+        num_neg_evals: Index,
+    ) -> Result<(DenseVector, DenseVector, DenseVector, DenseVector), ESymSolverStatus> {
+        let inner_rhs = AugSysRhs {
+            rhs_x,
+            rhs_s: rhs_s.as_dyn_vector(),
+            rhs_c: rhs_c.as_dyn_vector(),
+            rhs_d: rhs_d.as_dyn_vector(),
+        };
+        // Build solution slots (fresh each iteration).
+        let mut sol_x = space_x.make_new_dense();
+        let mut sol_s = space_s.make_new_dense();
+        let mut sol_c = space_c.make_new_dense();
+        let mut sol_d = space_d.make_new_dense();
+        sol_x.set(0.0);
+        sol_s.set(0.0);
+        sol_c.set(0.0);
+        sol_d.set(0.0);
+        let ic = inner_coeffs(&self.factor, coeffs);
+        let reuse = self.inner_has_factor;
+        let status = {
+            let mut sol = AugSysSol {
+                sol_x: &mut sol_x,
+                sol_s: &mut sol_s,
+                sol_c: &mut sol_c,
+                sol_d: &mut sol_d,
+            };
+            if reuse {
+                self.inner.resolve(&ic, &inner_rhs, &mut sol)
+            } else {
+                self.inner
+                    .solve(&ic, &inner_rhs, &mut sol, check_neg_evals, num_neg_evals)
+            }
+        };
+        if self.inner.provides_inertia() {
+            self.num_neg_evals = self.inner.number_of_neg_evals();
+        }
+        if status != ESymSolverStatus::Success {
+            self.inner_has_factor = false;
+            self.inner_factor_neg_evals = None;
+            return Err(status);
+        }
+        if !reuse {
+            self.inner_has_factor = true;
+            self.inner_factor_neg_evals = check_neg_evals.then_some(num_neg_evals);
+        }
+        Ok((sol_x, sol_s, sol_c, sol_d))
+    }
+}
+
+/// Copy a `dyn Vector` block into `dst`, expanding the homogeneous
+/// (single-scalar) representation. Returns `false` — leaving `dst`
+/// untouched — when the block is not a [`DenseVector`] or its length
+/// disagrees, which the batched path in [`multi_solve_block`] treats as
+/// "decline and take the per-column loop" rather than panicking.
+///
+/// [`multi_solve_block`]: LowRankAugSystemSolver::multi_solve_block
+fn copy_dense_into(src: &dyn Vector, dst: &mut [Number]) -> bool {
+    if dst.is_empty() {
+        return true;
+    }
+    let Some(dv) = src.as_any().downcast_ref::<DenseVector>() else {
+        return false;
+    };
+    if dv.dim() as usize != dst.len() {
+        return false;
+    }
+    if dv.is_homogeneous() {
+        let v = dv.scalar();
+        dst.iter_mut().for_each(|x| *x = v);
+    } else {
+        dst.copy_from_slice(dv.values());
+    }
+    true
 }
 
 /// Build inner-solver coefficients that substitute `Wdiag` for `W`.
@@ -625,18 +851,43 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         // a tighter tolerance), so ours is stale too.
         self.inner_has_factor = false;
         self.inner_factor_neg_evals = None;
-        self.inner.increase_quality()
+        // Escalate both: a caller asking for tighter pivoting wants it on
+        // the next solve whichever path that takes, and the two solvers
+        // hold independent backend state.
+        let inner = self.inner.increase_quality();
+        let bypass = self
+            .bypass
+            .as_deref_mut()
+            .map(|b| b.increase_quality())
+            .unwrap_or(false);
+        inner || bypass
     }
 
     fn last_solve_status(&self) -> ESymSolverStatus {
-        self.inner.last_solve_status()
+        // Whichever solver actually ran last — otherwise a bypass solve
+        // reports the stale status of the previous main solve.
+        match (self.last_solve_took_bypass, self.bypass.as_deref()) {
+            (true, Some(bypass)) => bypass.last_solve_status(),
+            _ => self.inner.last_solve_status(),
+        }
     }
 
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
+        // Both, or the bypass solver's symbolic and factorization time
+        // lands in no phase at all — which is precisely the row gh#730
+        // is about.
+        if let Some(bypass) = self.bypass.as_deref_mut() {
+            bypass.set_timing_stats(Rc::clone(&timing));
+        }
         self.inner.set_timing_stats(timing);
     }
 
     fn set_slack_scaling(&mut self, nx: Index, s_scale: &[Number]) {
+        // Both: the bypass solver assembles the same (2,2) slack block
+        // and would otherwise scale it differently from the main path.
+        if let Some(bypass) = self.bypass.as_deref_mut() {
+            bypass.set_slack_scaling(nx, s_scale);
+        }
         self.inner.set_slack_scaling(nx, s_scale);
     }
 
@@ -674,16 +925,32 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             // The inner solver is about to factor a *different* matrix
             // (the caller's own W, not our `Wdiag` substitution), so any
             // cached SMW factor state no longer describes what it holds.
-            self.inner_has_factor = false;
-            self.inner_factor_neg_evals = None;
-            let status = self
-                .inner
-                .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
-            if self.inner.provides_inertia() {
-                self.num_neg_evals = self.inner.number_of_neg_evals();
+            // Only invalidate the shared-solver cache when the solve is
+            // actually about to land on `self.inner`. With a dedicated
+            // bypass solver `self.inner` keeps holding a valid factor of
+            // the `Wdiag`-substituted system, and dropping it here would
+            // force a needless refactorization on the next main solve.
+            self.last_solve_took_bypass = true;
+            let target = match self.bypass.as_deref_mut() {
+                Some(bypass) => bypass,
+                None => {
+                    // The inner solver is about to factor a *different*
+                    // matrix (the caller's own W, not our `Wdiag`
+                    // substitution), so any cached SMW factor state no
+                    // longer describes what it holds.
+                    self.inner_has_factor = false;
+                    self.inner_factor_neg_evals = None;
+                    self.inner.as_mut()
+                }
+            };
+            let status = target.solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
+            if target.provides_inertia() {
+                self.num_neg_evals = target.number_of_neg_evals();
             }
             return status;
         };
+
+        self.last_solve_took_bypass = false;
 
         let needs_rebuild = self.first_call || self.augmented_system_requires_change(coeffs);
         if needs_rebuild {
@@ -949,12 +1216,20 @@ mod tests {
     struct InnerStats {
         factorizations: Cell<usize>,
         backsolves: Cell<usize>,
+        batched_calls: Cell<usize>,
+        batched_cols: Cell<usize>,
         factored_diag: RefCell<Vec<Number>>,
         factored_delta_x: Cell<Number>,
     }
 
     struct CountingInner {
         stats: Rc<InnerStats>,
+        /// When set, the mock exposes `system_dim` / `try_resolve_many_flat`
+        /// the way `StdAugSystemSolver` does, so the batched arm of
+        /// `multi_solve_block` is reachable. Off by default: the trait
+        /// default `system_dim() == 0` is what a mock without the packed
+        /// path looks like, and that is the arm the other tests exercise.
+        packed: bool,
     }
 
     impl CountingInner {
@@ -965,6 +1240,19 @@ mod tests {
             (
                 Self {
                     stats: Rc::clone(&stats),
+                    packed: false,
+                },
+                stats,
+            )
+        }
+
+        /// Same mock, but advertising the packed multi-RHS back-solve.
+        fn with_packed_path() -> (Self, Rc<InnerStats>) {
+            let stats = Rc::new(InnerStats::default());
+            (
+                Self {
+                    stats: Rc::clone(&stats),
+                    packed: true,
                 },
                 stats,
             )
@@ -1036,6 +1324,53 @@ mod tests {
             self.stats.backsolves.set(self.stats.backsolves.get() + 1);
             self.apply_cached(rhs, sol);
             ESymSolverStatus::Success
+        }
+        fn system_dim(&self) -> Index {
+            if self.packed {
+                self.stats.factored_diag.borrow().len() as Index
+            } else {
+                0
+            }
+        }
+        /// Mirrors `StdAugSystemSolver`: declines when cold, otherwise
+        /// applies the cached factor to every packed column in place.
+        /// Like the real one it ignores the coefficients it is handed and
+        /// uses the cached ones, so back-solving against a stale factor
+        /// shows up as a wrong answer rather than a wrong count.
+        fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+            self.packed
+        }
+
+        fn try_resolve_many_flat(
+            &mut self,
+            _coeffs: &AugSysCoeffs<'_>,
+            packed_rhs: &mut [Number],
+            nrhs: usize,
+        ) -> Option<ESymSolverStatus> {
+            if !self.packed {
+                return None;
+            }
+            let diag = self.stats.factored_diag.borrow();
+            if diag.is_empty() {
+                return None;
+            }
+            let dim = diag.len();
+            if packed_rhs.len() != dim * nrhs {
+                return Some(ESymSolverStatus::FatalError);
+            }
+            self.stats
+                .batched_calls
+                .set(self.stats.batched_calls.get() + 1);
+            self.stats
+                .batched_cols
+                .set(self.stats.batched_cols.get() + nrhs);
+            let delta_x = self.stats.factored_delta_x.get();
+            for col in packed_rhs.chunks_mut(dim) {
+                for (i, x) in col.iter_mut().enumerate() {
+                    *x /= diag[i] + delta_x;
+                }
+            }
+            Some(ESymSolverStatus::Success)
         }
     }
 
@@ -1471,6 +1806,107 @@ mod tests {
             stats.backsolves.get(),
             3,
             "2 remaining V columns + diagonal solve"
+        );
+    }
+
+    #[test]
+    fn batched_smw_columns_match_the_per_column_path() {
+        // The batched arm of `multi_solve_block` is unreachable from a
+        // mock that leaves `system_dim()` at its 0 default, so every
+        // other test in this file exercises the per-column fallback and
+        // a green suite says nothing about the packed path (gh#729).
+        // Drive the identical problem down both arms and require the
+        // solutions to agree bit-for-bit: the batched call must be work
+        // removed, not work re-associated.
+        fn run(packed: bool) -> (Vec<Number>, Rc<InnerStats>) {
+            let space_x = DenseVectorSpace::new(3);
+            let space_zero = DenseVectorSpace::new(0);
+            let lr_space = LowRankUpdateSymMatrixSpace::new(3, None, false);
+            let mut lr = lr_space.make_new_low_rank();
+            lr.set_diag(dvec_rc(&space_x, &[2.0, 3.0, 4.0]));
+            let v_space = MultiVectorMatrixSpace::new(3, Rc::clone(&space_x));
+            let mut v = v_space.make_new_multi_vector();
+            v.set_vector(0, dvec_rc(&space_x, &[0.5, 0.25, 0.0]));
+            v.set_vector(1, dvec_rc(&space_x, &[0.0, 0.5, 0.125]));
+            v.set_vector(2, dvec_rc(&space_x, &[0.25, 0.0, 0.5]));
+            lr.set_v(Rc::new(v));
+            let lr_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr);
+            let (j_c, j_d) = empty_jacobians(3);
+
+            let (inner, stats) = if packed {
+                CountingInner::with_packed_path()
+            } else {
+                CountingInner::new()
+            };
+            let mut solver = LowRankAugSystemSolver::new(Box::new(inner));
+            let coeffs = AugSysCoeffs {
+                w: Some(lr_rc.as_ref() as &dyn SymMatrix),
+                w_factor: 1.0,
+                d_x: None,
+                delta_x: 0.0,
+                d_s: None,
+                delta_s: 0.0,
+                j_c: &j_c as &dyn Matrix,
+                d_c: None,
+                delta_c: 0.0,
+                j_d: &j_d as &dyn Matrix,
+                d_d: None,
+                delta_d: 0.0,
+            };
+            let rhs_x = dvec(&space_x, &[1.0, -2.0, 3.5]);
+            let rhs_zero = dvec(&space_zero, &[]);
+            let rhs = AugSysRhs {
+                rhs_x: &rhs_x,
+                rhs_s: &rhs_zero,
+                rhs_c: &rhs_zero,
+                rhs_d: &rhs_zero,
+            };
+            let (mut sx, mut z1, mut z2, mut z3) = (
+                dvec(&space_x, &[0.0, 0.0, 0.0]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+                dvec(&space_zero, &[]),
+            );
+            {
+                let mut sol = AugSysSol {
+                    sol_x: &mut sx,
+                    sol_s: &mut z1,
+                    sol_c: &mut z2,
+                    sol_d: &mut z3,
+                };
+                assert_eq!(
+                    solver.solve(&coeffs, &rhs, &mut sol, false, 0),
+                    ESymSolverStatus::Success
+                );
+            }
+            (sx.expanded_values(), stats)
+        }
+
+        let (sol_loop, stats_loop) = run(false);
+        let (sol_batch, stats_batch) = run(true);
+
+        assert_eq!(
+            stats_loop.batched_calls.get(),
+            0,
+            "a mock without the packed path must take the per-column arm"
+        );
+        assert!(
+            stats_batch.batched_calls.get() >= 1,
+            "the packed mock must actually reach the batched arm"
+        );
+        assert_eq!(
+            stats_batch.batched_cols.get(),
+            2,
+            "3 V columns: column 0 pays the factorization, 2 are batched"
+        );
+        assert_eq!(
+            stats_batch.factorizations.get(),
+            1,
+            "batching must not cost an extra factorization"
+        );
+        assert_eq!(
+            sol_loop, sol_batch,
+            "batched and per-column arms must agree bit-for-bit"
         );
     }
 

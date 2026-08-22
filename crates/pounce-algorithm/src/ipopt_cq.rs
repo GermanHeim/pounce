@@ -49,7 +49,7 @@ use std::rc::Rc;
 /// QSCSD1's rows are wide enough that the missing nonzero-count factor still
 /// leaves its `2^-53` RHS above the bound — so `64` sits an order of magnitude
 /// inside the band from either edge.
-const ROW_NOISE_KAPPA: Number = 64.0;
+pub const ROW_NOISE_KAPPA: Number = 64.0;
 
 /// Headroom on the representability floor `calculate_safe_slack` puts under a
 /// slack so that `Σ = z/s` stays inside the double range (gh#655).

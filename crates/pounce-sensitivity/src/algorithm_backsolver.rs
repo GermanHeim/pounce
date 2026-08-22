@@ -217,6 +217,66 @@ impl PdSensBacksolver {
         (&self.data, &self.cq, &self.nlp)
     }
 
+    /// The barrier level the **reported point** sits on.
+    ///
+    /// Normally that is `IpoptData::curr_mu`: the solve stops on the
+    /// `mu = 0` error with `mu` already driven to the floor, so the
+    /// driver's last barrier parameter still describes the iterate it
+    /// stopped at, and every complementarity product is within
+    /// tolerance of it.
+    ///
+    /// It stops describing the iterate when a terminating path
+    /// installs multipliers of its own. `ComputeFeasibilityMultipliers`
+    /// (`IpIpoptAlg.cpp:893`, ported in gh#508) is the one that bites:
+    /// on a square NLP -- `dim(x) == dim(y_c)`, so the objective is
+    /// decorative and the answer is just the feasible point -- it zeroes
+    /// all four bound-multiplier blocks, solves for the feasibility
+    /// multipliers, and converges the check outright. A square problem
+    /// can therefore be *reported solved at `mu = mu_init`* with every
+    /// complementarity product identically zero, on iteration 1, having
+    /// never reduced the barrier at all.
+    ///
+    /// Everything downstream that reads `curr_mu` then measures the
+    /// point against a barrier it is not on. It is not cosmetic: the
+    /// equation-11 barrier correction injects `mu` into the
+    /// complementarity rows, and on such a point that term is pure
+    /// error -- on the `cd_split_pin_mapping` fixture it flips the sign
+    /// of the returned bound-multiplier step (`-1.004e-4` against a
+    /// true `+1.004e-4`).
+    ///
+    /// Detected from the point, never from the problem's dimensions:
+    /// bound rows present with every bound multiplier exactly zero is a
+    /// state no barrier iterate can be in -- the algorithm holds
+    /// `z > 0` strictly -- and is exactly what that path leaves behind.
+    /// The barrier level there is `0`: the equation-11 correction has
+    /// nothing to carry the step off, and the complementarity rows are
+    /// already satisfied where they stand.
+    ///
+    /// The test is exact equality rather than a threshold on purpose.
+    /// `curr_avrg_compl` was measured as the alternative and rejected:
+    /// across the `pounce-sensitivity` suite it disagrees with
+    /// `curr_mu` by up to 4.7x on ordinary terminations, so reading the
+    /// barrier level off it would move every sensitivity result to fix
+    /// one. The zeroing, by contrast, is assignment, not arithmetic.
+    pub(crate) fn barrier_mu(&self) -> Number {
+        let d = self.data.borrow();
+        let mu = d.curr_mu;
+        let Some(curr) = d.curr.as_ref() else {
+            return mu;
+        };
+        let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
+        let n_bound: Index = blocks.iter().map(|v| v.dim()).sum();
+        if n_bound == 0 {
+            // No bounds at all: there is no barrier either way, and the
+            // complementarity blocks the caller would shift are empty.
+            return mu;
+        }
+        if blocks.iter().all(|v| v.amax() == 0.0) {
+            return 0.0;
+        }
+        mu
+    }
+
     /// Construct from the four handles handed in by the `on_converged`
     /// callback. Errors if `data` has no `curr` (i.e. the algorithm
     /// never reached an iterate — should not happen on
@@ -335,6 +395,21 @@ impl PdSensBacksolver {
                 s: Some(Rc::clone(&d.sigma_s)),
             },
         }
+    }
+
+    /// Whether the held-factor back-solve may run
+    /// `PdFullSpaceSolver`'s iterative refinement.
+    ///
+    /// Refinement iterates `x += K^-1 r` and measures `r` against the
+    /// system it thinks it is solving. That is only the system this
+    /// factor factors when no `SigmaOverride` is in play: after
+    /// crossover (gh#654) the barrier diagonal is replaced with the
+    /// declared-frame one, so the residual is taken against a matrix
+    /// the held factor does not decompose, the loop cannot converge,
+    /// and it escalates instead of improving anything. Same reason the
+    /// release path (`solve_released_inner`) never refines.
+    fn may_refine(&self) -> bool {
+        self.declared.is_none()
     }
 
     /// The `x`-block barrier diagonal in the frame the held iterate
@@ -604,7 +679,14 @@ impl PdSensBacksolver {
             0.0,
             &rhs_iv,
             &mut res_iv,
-            /* allow_inexact = */ true,
+            // NOT refined: the release path asks the held factor
+            // for the solution of a *different* system (one bound
+            // released), so the refinement loop would measure a
+            // residual against a matrix this factor does not factor,
+            // stagnate, and escalate. See `solve_scaled_space` for
+            // why the ordinary back-solves do refine.
+            /* allow_inexact = */
+            true,
             /* improve_solution = */ false,
             SigmaOverride {
                 x: Some(sigma),
@@ -1219,6 +1301,9 @@ impl PdSensBacksolver {
         // one factorization, then a back-substitution per RHS, against
         // the tag cache that the shared override vector keeps warm.
         let sigma = self.sigma_override();
+        // Refined, for the reason spelled out in `solve_scaled_space`:
+        // one shot, no outer loop.
+        let allow_inexact = !self.may_refine();
         let corrected = self.declared.is_some();
 
         // Tier 1: fully-inline flat-slice path. `PdFullSpaceSolver::
@@ -1315,7 +1400,7 @@ impl PdSensBacksolver {
                 0.0,
                 &rhs_iv,
                 &mut res_iv,
-                /* allow_inexact = */ true,
+                allow_inexact,
                 /* improve_solution = */ false,
                 sigma.clone(),
             );
@@ -1523,16 +1608,49 @@ impl PdSensBacksolver {
         // K · lhs = rhs   ⇒   solve(α=1, β=0, rhs, res) writes
         // res = K⁻¹ · rhs.
         //
-        // `allow_inexact=true` mirrors upstream sIPOPT's
-        // `SensSimpleBacksolver`: skip `PdFullSpaceSolver`'s iterative-
-        // refinement loop and accept the first back-solve against the
-        // held factor. The IPM-level refinement (`min_refinement_steps
-        // = 1`, residual_ratio_max = 1e-10`) is there to clean up
-        // numerical noise during forward IPM steps; for the held-factor
-        // back-solve used by sens / JaxProblem bwd, it ~doubles the
-        // per-call cost and produces gains that are below `tol`. Under
-        // `jax.jacrev` over a JaxProblem solve this dominates the wall
-        // time at moderate `n+m` (pounce#77 follow-up).
+        // `allow_inexact = false`: run `PdFullSpaceSolver`'s
+        // iterative-refinement loop (`min_refinement_steps = 1`,
+        // `residual_ratio_max = 1e-10`) on the held-factor back-solve
+        // too, rather than accepting the first substitution the way
+        // upstream sIPOPT's `SensSimpleBacksolver` does.
+        //
+        // It used to be `true`, on the argument that refinement is
+        // there to clean up noise during *forward* IPM steps and that
+        // the residual it removes here is below `tol` (pounce#77
+        // follow-up, where the per-call cost showed up under
+        // `jax.jacrev` over a batched `JaxProblem` solve). Two things
+        // are wrong with that argument.
+        //
+        // The first is that "below `tol`" is not the property the
+        // callers need. A sens back-solve has no outer loop to
+        // self-correct — it is one shot, and its answer is read as a
+        // *derivative*, not as a step. `pyomo-pounce`'s covariance /
+        // information machinery then asks rank questions about blocks
+        // of `K⁻¹`, and `np.linalg.matrix_rank` thresholds the
+        // correlation-scaled block at `n · eps` — around `1e-15` for a
+        // 2x2. Two coordinates that are exactly dependent (a
+        // duplicated design point) produce two rows that agree to
+        // whatever accuracy the back-solve has: at `1e-16` they read
+        // as dependent and the caller gets its refusal, at `1e-12`
+        // they read as independent and it silently gets a covariance
+        // for a block that has none. Refinement is what buys those
+        // digits.
+        //
+        // The second is that the premise had a hidden dependency. The
+        // unrefined substitution was accurate enough only because the
+        // *backend* was refining underneath (`feral_refine` defaulted
+        // on); with MA57 — whose `icntl[9] = 0` disables its own
+        // refinement — the hole was already open, and turning the
+        // feral default off opened it for everyone.
+        //
+        // The cost the original comment was avoiding is not there to
+        // avoid: measured on `kkt_solve_many` with 32 RHS against
+        // held factors of dimension 120k/150k/300k (poisson,
+        // optcontrol, sparseqp), refined vs unrefined is 0.136/0.120/
+        // 0.217 s against 0.138/0.123/0.215 s — inside the noise. The
+        // extra substitution runs against the cached matrix, so it
+        // never refactorizes, and the pack/unpack around it dominates.
+        let allow_inexact = !self.may_refine();
         let ok = {
             let mut pd_ref = self.pd.borrow_mut();
             pd_ref.solve_with_sigma(
@@ -1543,7 +1661,7 @@ impl PdSensBacksolver {
                 0.0,
                 &rhs_iv,
                 &mut res_iv,
-                /* allow_inexact = */ true,
+                allow_inexact,
                 /* improve_solution = */ false,
                 // Identity on every ordinary solve; the declared-frame
                 // diagonal when the held iterate came from crossover
