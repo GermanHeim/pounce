@@ -57,9 +57,13 @@ changes.
   and released parametric steps, `compute_reduced_hessian`,
   `classify_activity()` and `covariance()` alike — and the diagonal
   `corrector_iter` assembles, where a bound the step brings onto a
-  variable arrives as `mu / s²` off the endpoint's own slack and is
-  bounded from below by nothing but `> 0`. Nothing in the
-  interior-point iteration reads it, so no trajectory moves.
+  variable arrives as `mu / s²` off the endpoint's own slack. On that
+  last path the ceiling is prophylaxis rather than a repair: the
+  corrector clamps its iterate `1e-10` inside each bound before
+  measuring, which already holds the addend three orders under a unit
+  coefficient's ceiling, so the ceiling binds there only on a variable
+  whose largest Jacobian coefficient is under about `2e-2`. Nothing in
+  the interior-point iteration reads it, so no trajectory moves.
 
   On the reported model — notebook 36's CSTR, `zt0` held at `0.70`,
   measured on this commit against its parent:

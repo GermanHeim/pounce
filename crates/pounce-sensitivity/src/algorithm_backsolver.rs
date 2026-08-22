@@ -1578,19 +1578,37 @@ fn sigma_pin_cap(a: Number) -> Number {
 /// under that variable's ceiling.
 ///
 /// The corrector's pinned contribution (gh#733) is `mu / s²` off the
-/// slack the *endpoint* has, and nothing in `pinned_rows` bounds that
-/// slack from below beyond `> 0`. So the addend is unbounded above and
-/// lands on a variable the corrector has just decided sits on a bound
-/// -- gh#737's own case, reached through a second door. The ceiling is
-/// a property of the entry rather than of where the entry came from,
-/// so it applies to the sum and not to the addend: two contributions
-/// that are individually representable can still swamp the row
-/// together.
+/// slack the *endpoint* has, landing on a variable the corrector has
+/// just decided sits on a bound -- gh#737's own case, reached through
+/// a second door. The ceiling is a property of the entry rather than
+/// of where the entry came from, so it applies to the sum and not to
+/// the addend: two contributions that are individually representable
+/// can still swamp the row together.
 ///
-/// No end-to-end fixture in this repository reaches the uncapped
-/// version's failure. It is applied because the argument for the
-/// ceiling does not distinguish the two doors, not because a test
-/// caught it.
+/// # How far the addend can actually reach
+///
+/// `pinned_rows` itself bounds that slack from below by nothing beyond
+/// `> 0`, but the caller does: `correct_step` clamps the iterate to
+/// `margin = 1e-10 * (1 + |base_i|)` inside each bound *before*
+/// measuring it. So the addend is bounded after all, at
+/// `mu / margin²`, and at a converged `mu` of `1e-9` on a variable of
+/// order one that is `2.5e10` -- three orders under the `7.0e13` a
+/// unit Jacobian coefficient allows.
+///
+/// The ceiling therefore binds on this path only where the coefficient
+/// is small enough to bring it down to meet the addend, below
+/// `sqrt(mu · eps · SIGMA_PIN_HEADROOM) / margin`, about `2e-2` at
+/// that `mu`. That is measured, not deduced: on PR #738 the corrector
+/// was driven with pinned coefficients of `1e-3` and `1e-4` and two of
+/// twelve cases moved -- an iteration count of 1 against 12 at
+/// identical residuals, and a residual differing in the fifth digit.
+/// Live, and far too small to assert on.
+///
+/// So this clamp is prophylaxis rather than a fix for a reachable
+/// failure: what makes the corrector's door narrow is a `1e-10` margin
+/// in a different file, which no rule keeps in step with this ceiling.
+/// The ceiling costs nothing to hold here and does not depend on that
+/// margin staying where it is.
 fn pinned_entry(had: Number, add: Number, cap: Number) -> Number {
     (had + add).min(cap)
 }
@@ -1924,12 +1942,49 @@ mod tests {
     /// cache rather than an equal copy with a fresh tag.
     #[test]
     fn a_newly_pinned_bound_lands_under_the_ceiling_too() {
-        // The corrector's own addend, `mu / s²` off an endpoint slack
-        // it does not bound from below: over any real ceiling.
+        // An addend over the ceiling is held at it, wherever it came
+        // from.
         let cap = sigma_pin_cap(1.0);
         let add = 1e-9 / (1e-14 * 1e-14);
         assert!(add > cap, "the fixture needs an addend over the ceiling");
         assert_eq!(pinned_entry(1e6, add, cap), cap);
+    }
+
+    /// Where the corrector's addend stands against the ceiling once
+    /// `correct_step`'s own clamp is accounted for -- the reason this
+    /// path is narrow, in the two numbers that make it narrow. Both
+    /// live elsewhere (`corrector.rs` sets the margin, `pinned_rows`
+    /// the form of the addend), so this reads as documentation until
+    /// one of them moves, which is the point.
+    #[test]
+    fn the_correctors_clamp_is_what_keeps_its_addend_under_a_unit_ceiling() {
+        let mu = 1e-9;
+        // `correct_step`: margin = 1e-10 * (1 + |base|), base ~ 1.
+        let margin = 1e-10 * 2.0;
+        let most = mu / (margin * margin);
+
+        // At a unit coefficient the clamp already does it, three
+        // orders clear, and `pinned_entry` is a pass-through.
+        let unit = sigma_pin_cap(1.0);
+        assert!(most < unit, "{most:e} should sit under {unit:e}");
+        assert_eq!(pinned_entry(0.0, most, unit), most);
+
+        // The ceiling binds only once the coefficient brings it down
+        // to meet the addend. #738 measured the corrector moving at
+        // 1e-3 and 1e-4, and not at 1.
+        assert!(sigma_pin_cap(1e-3) < most);
+        assert_eq!(
+            pinned_entry(0.0, most, sigma_pin_cap(1e-3)),
+            sigma_pin_cap(1e-3)
+        );
+
+        // The crossover between the two, which is what would move if
+        // either the margin or the headroom were retuned.
+        let crossover = (mu * Number::EPSILON * SIGMA_PIN_HEADROOM).sqrt() / margin;
+        assert!(
+            (1e-2..1e-1).contains(&crossover),
+            "the corrector's door is this wide: {crossover:e}",
+        );
     }
 
     #[test]
