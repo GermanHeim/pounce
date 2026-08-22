@@ -286,8 +286,8 @@ impl PySolver {
     /// factorization is never rebuilt for a pin, but the Schur
     /// complement is, so a pass carrying `k` pins costs one dense
     /// `k × k` solve and `k + 1` back-solves. What counts as outside a
-    /// bound comes from the solve's own `bound_relax_factor` rather
-    /// than from an argument.
+    /// bound is `bound_eps` when one is given, and the solve's own
+    /// `bound_relax_factor`, floored, when it is `None`.
     ///
     /// `max_iter` is a safety limit rather than a budget. It was a
     /// budget while a pass took one pin, which needed as many passes as

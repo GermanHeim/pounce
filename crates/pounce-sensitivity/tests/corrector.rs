@@ -225,6 +225,13 @@ fn solved_inner(
         app.options_mut()
             .set_string_value("nlp_scaling_method", m, true, false)
             .unwrap();
+        // set rather than assumed: the derived row factor is
+        // `nlp_scaling_max_gradient / row_scale`, so a changed default
+        // would move the number this fixture reasons about without
+        // failing.
+        app.options_mut()
+            .set_numeric_value("nlp_scaling_max_gradient", 100.0, true, false)
+            .unwrap();
     }
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp {

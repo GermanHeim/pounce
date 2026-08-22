@@ -161,6 +161,12 @@ impl SensOptionOverrides {
     /// system solved is not the KKT system of the problem, so the step
     /// and the reduced Hessian describe a nearby, perturbed problem —
     /// which is what upstream's cap exists to catch.
+    ///
+    /// `pyomo_pounce.sens._refuse_on_pdpert` applies the same threshold
+    /// to the same numbers for the pyomo surface's `max_pdpert`
+    /// argument, wording the message for that surface rather than for
+    /// the option. The threshold is the part that has to agree: a
+    /// change to `worst` or to the comparison belongs in both.
     pub fn pdpert_refusal(&self, perturbations: &[Number; 4]) -> Option<String> {
         let limit = self.sens_max_pdpert?;
         let worst = perturbations

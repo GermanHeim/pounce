@@ -655,8 +655,9 @@ impl Solver {
     /// costs one dense `k × k` solve and `k + 1` back-solves; the
     /// factorization itself is never rebuilt for a pin.
     ///
-    /// What counts as outside a bound is taken from the solve rather
-    /// than from the caller: it was willing to leave a converged point
+    /// What counts as outside a bound is the `eps` argument when the
+    /// caller passes one, and the solve's own margin when it passes
+    /// `None`: the solve was willing to leave a converged point
     /// `bound_relax_factor` outside its bound, so anything within that
     /// is on the bound. An unrelaxed solve gets a roundoff floor.
     ///
