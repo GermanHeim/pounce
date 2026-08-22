@@ -912,3 +912,110 @@ def test_gams_continuation_rejects_a_view_factory_returning_none():
 
     with pytest.raises(TypeError, match="must return the GmoView"):
         gams_cont.trace(lambda th: None, [np.array([40.0])])
+
+
+# --- what the link writes back into GMO's head-and-tail record (gh#747) -----
+
+
+class _RecordingGmo:
+    """The handful of `gams.core.gmo` names `_write_solution` touches.
+
+    `_write_solution` takes the module as an argument, so the whole
+    write-back path -- normally `pragma: no cover - needs GAMS` -- can be
+    driven with no GAMS present by handing it this instead.
+    """
+
+    # Head-and-tail slots, spelled as gamsapi spells them. The values are
+    # opaque tags; only the identity matters here.
+    gmoHobjval = "objval"
+    gmoHiterused = "iterused"
+    gmoHresused = "resused"
+
+    def __init__(self):
+        self.head_n_tail: dict[str, float] = {}
+        self.model_stat = None
+        self.solve_stat = None
+        self.solution = None
+        self.var_marginals = None
+        self.unloaded = False
+
+    def doubleArray(self, n):  # noqa: N802 - gamsapi spelling
+        return [0.0] * n
+
+    def gmoModelStatSet(self, _h, v):  # noqa: N802
+        self.model_stat = v
+
+    def gmoSolveStatSet(self, _h, v):  # noqa: N802
+        self.solve_stat = v
+
+    def gmoSetHeadnTail(self, _h, slot, value):  # noqa: N802
+        self.head_n_tail[slot] = value
+
+    def gmoSetSolution2(self, _h, x, pi):  # noqa: N802
+        self.solution = (x, pi)
+
+    def gmoSetVarM(self, _h, marg):  # noqa: N802
+        self.var_marginals = marg
+
+    def gmoUnloadSolutionLegacy(self, _h):  # noqa: N802
+        self.unloaded = True
+
+
+class _TinyView:
+    """Just the two `GmoView` methods `_write_solution` asks about."""
+
+    def __init__(self, m=1, maximize=False):
+        self._m = m
+        self._max = maximize
+
+    def num_cons(self):
+        return self._m
+
+    def maximize(self):
+        return self._max
+
+
+def _solved_info(**over):
+    info = {
+        "status_msg": "Solve_Succeeded",
+        "obj_val": -0.519978061074211,
+        "iter_count": 14,
+        "wall_time": 0.0123,
+        "mult_g": np.array([0.25]),
+        "mult_x_L": np.zeros(2),
+        "mult_x_U": np.zeros(2),
+    }
+    info.update(over)
+    return info
+
+
+def test_solver_time_reaches_the_gams_trace():
+    """`resUsed` is the trace's `SolverTime` column.
+
+    The link reported `objval` and `iterused` and not this one, so every
+    pip-link trace row carried `NA` where the C link writes seconds --
+    which is what made a 10/10-solved smoke suite also report
+    `both solved: 0`, the head-to-head having dropped every instance for
+    want of a time (gh#747).
+    """
+    g = _RecordingGmo()
+    link._write_solution(object(), g, _TinyView(), np.zeros(2), _solved_info())
+
+    assert g.head_n_tail[g.gmoHresused] == pytest.approx(0.0123)
+    # The two it already reported must keep working.
+    assert g.head_n_tail[g.gmoHiterused] == 14.0
+    assert g.head_n_tail[g.gmoHobjval] == pytest.approx(-0.519978061074211)
+
+
+def test_solver_time_is_omitted_rather_than_faked_when_absent():
+    """No `wall_time` in `info` -> leave the slot alone.
+
+    Writing a 0.0 there would be worse than `NA`: a missing time reads as
+    missing, a zero reads as an instantaneous solve.
+    """
+    g = _RecordingGmo()
+    info = _solved_info()
+    del info["wall_time"]
+    link._write_solution(object(), g, _TinyView(), np.zeros(2), info)
+
+    assert g.gmoHresused not in g.head_n_tail

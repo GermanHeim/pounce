@@ -498,11 +498,43 @@ ipopt-reference-provenance:
 # For a fuller GAMS comparison run on demand:
 #   make -C gams/nlpbench bench-release   # globallib + powerflow, ~2h
 #   make -C gams/nlpbench bench-full      # all eight testsets, ~14h
+#
+# The target FORCES a re-run (`clean-bench-smoke` first) and then validates
+# the traces it produced. Both halves are load-bearing (gh#747):
+#
+#   * without the clean, the vendored `runsolver` Makefile keys `rungams`
+#     off the per-instance trace CSVs rather than off the pounce build, so
+#     a rebuilt solver leaves them satisfied -- `Nothing to be done for
+#     'rungams'` -- and the report is regenerated from months-old traces
+#     under the current commit's name;
+#
+#   * without the check, a link that runs but reports nothing usable still
+#     looks green. `nlpbench_report.py` drops an instance from the
+#     head-to-head when either side has no SolverTime, so a POUNCE link
+#     that never set `resUsed` produced a report claiming `10/10 solved`
+#     for both solvers and `both solved: 0` in the same breath.
+#
+# `nlpbench_report.py` and the `runsolver` Makefile are in `gams/nlpbench/`,
+# a private GAMS-licensed clone this repository does not track, so the
+# guarantee has to live on this side of the boundary.
+#
+# Only the pounce trace is required to be fresh: `clean-bench-smoke`
+# defaults to `CLEAN_SOLVERS=pounce`, deliberately leaving the ipopt
+# reference cached (its binary does not change between pounce iterations).
 gams-bench:
-	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench bench-smoke
+	@stamp=$$(mktemp); \
+	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench-smoke bench-smoke; \
+	rc=$$?; \
+	if [ $$rc -ne 0 ]; then rm -f $$stamp; exit $$rc; fi; \
+	python3 $(REPO_ROOT)/benchmarks/scripts/check_gams_smoke.py \
+	    --trace pounce=$(REPO_ROOT)/gams/nlpbench/runsolver/smoke.gms_pounce.csv \
+	    --trace ipopt=$(REPO_ROOT)/gams/nlpbench/runsolver/smoke.gms_ipopt.csv \
+	    --fresh pounce --newer-than $$stamp --min-common 10; \
+	rc=$$?; rm -f $$stamp; exit $$rc
 
-gams-rerun:
-	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench-smoke bench-smoke
+# Retained as the historical spelling of "force a re-run"; `gams-bench`
+# now always does that, so the two are the same thing.
+gams-rerun: gams-bench
 
 # ---- Aggregation ----
 # Incremental sweep — each *-run target is now a file-target wrapper

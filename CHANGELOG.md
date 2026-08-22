@@ -9,6 +9,51 @@ changes.
 
 ## [Unreleased]
 
+- **The GAMS solver-link smoke check reports a solver time, actually re-runs,
+  and refuses to pass on traces it did not produce** (#747).
+
+  `make -C benchmarks gams-bench` completed inside a full sweep without
+  solving anything and emitted a report whose own numbers disagreed: 10/10
+  solved for both solvers, and, three lines further down, `both solved: 0`
+  with every head-to-head bucket at zero and POUNCE's mean and median time
+  columns empty. It is the only thing in the sweep that exercises the GAMS
+  solver link, so "it passed" was carrying more weight than any other line in
+  the report — and it could not fail.
+
+  Three defects, in the order they compound:
+
+  * `python/pounce/gams/link.py` never reported `resUsed`. It wrote
+    `gmoHobjval` and `gmoHiterused` and stopped there, so every pip-link
+    solve left `NA` in the trace's `SolverTime` column where `gams_pounce.c`
+    and every other GAMS solver write seconds. This is the root cause of the
+    contradiction, and it is fixed here: `info["wall_time"]` is one of the
+    two keys POUNCE always populates regardless of `timing_statistics`, so
+    the report costs nothing and no option file can switch it off.
+
+  * `nlpbench_report.py` folded "and both have a usable time" into the test
+    that decides whether an instance was jointly solved, so an instance with
+    a missing time fell out of *every* bucket instead of one — which is how a
+    fully-solved suite printed `both solved: 0`. (That file lives in
+    `gams/nlpbench/`, a private GAMS-licensed clone this repository does not
+    track; the fix is applied there but cannot ship in this commit.)
+
+  * the vendored `runsolver` Makefile keys `rungams` off the per-instance
+    trace CSVs rather than off the pounce build, so a rebuilt solver leaves
+    them satisfied — `Nothing to be done for 'rungams'` — and the report is
+    regenerated from months-old traces, stamped with the current commit and
+    the current date.
+
+  Since the last two live outside this repository, the guarantee is put on
+  this side of the boundary. `gams-bench` now forces the re-run
+  (`clean-bench-smoke` first) and then validates what it produced with a new
+  `benchmarks/scripts/check_gams_smoke.py`, which fails the target when a
+  trace is older than the run that was supposed to write it, when a trace has
+  no rows, when any row is missing a `SolverTime`, or when no instance was
+  solved by every solver. Each of those four is the signature of a smoke
+  check that did not smoke anything, and each was exercised against a
+  doctored trace. `gams-rerun` is kept as an alias; the two are now the same
+  thing.
+
 - **A limited-memory Hessian now defaults `mu_strategy` to `adaptive`, as
   upstream does** (#746).
 
