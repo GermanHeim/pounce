@@ -731,6 +731,10 @@ fn socp_reform_flops(h: &QuadHessian) -> u128 {
 /// A diagonal Hessian is settled in `O(nnz)` by sign before converting to the
 /// reusable triplet API. A coupled Hessian is certified from the inertia of
 /// `H + PSD_TOL·I`. An inconclusive certificate conservatively routes to NLP.
+/// The absolute shift is intentional and preserves the classifier's
+/// `lambda_min(H) >= -PSD_TOL` contract. On badly scaled, rank-deficient PSD
+/// matrices it can fall below floating-point resolution, in which case FERAL
+/// reports a zero pivot and this dispatch takes the slower NLP path.
 fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
     if h.is_empty() {
         return true;
@@ -744,7 +748,9 @@ fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
         .map(|(&(i, j), &val)| Triplet::new(j, i, val))
         .collect();
     certify_psd_lower_triangle(n, &lower, PSD_TOL, || {
-        Box::new(pounce_feral::FeralSolverInterface::new())
+        Box::new(pounce_feral::FeralSolverInterface::with_config(
+            pounce_feral::FeralConfig::default(),
+        ))
     })
     .unwrap_or(false)
 }
