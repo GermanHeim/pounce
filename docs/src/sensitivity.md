@@ -655,6 +655,12 @@ for its diagonal to swamp, and there the stiffness is exactly what
 diagonal](crossover.md#what-it-does-to-a-downstream-sensitivity-result)
 wants every digit of.
 
+The ceiling holds on every diagonal the sensitivity system builds, the
+one [`corrector_iter`](#refining-the-step-corrector_iter) assembles when
+a step brings a variable onto a bound included — a bound the corrector
+newly pins arrives as `mu / s²` off the step's own endpoint, which is
+the same quantity by another name.
+
 Nothing about the solve changes; this is the sensitivity system only.
 
 ### Solver options and warm starts

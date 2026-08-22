@@ -587,7 +587,14 @@ impl PdSensBacksolver {
             *sigma.get_mut(br.var_row)? = fresh.min(cap);
         }
         for &(var_row, add) in pinned {
-            *sigma.get_mut(var_row)? += add;
+            let cap = self
+                .sigma
+                .cap_x
+                .get(var_row)
+                .copied()
+                .unwrap_or(Number::INFINITY);
+            let slot = sigma.get_mut(var_row)?;
+            *slot = pinned_entry(*slot, add, cap);
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);
@@ -1566,6 +1573,28 @@ fn sigma_pin_cap(a: Number) -> Number {
     if cap > 1.0 { cap } else { Number::INFINITY }
 }
 
+/// One diagonal entry after a step brings a bound onto its variable:
+/// the entry it had, plus the newly active bound's contribution, held
+/// under that variable's ceiling.
+///
+/// The corrector's pinned contribution (gh#733) is `mu / s²` off the
+/// slack the *endpoint* has, and nothing in `pinned_rows` bounds that
+/// slack from below beyond `> 0`. So the addend is unbounded above and
+/// lands on a variable the corrector has just decided sits on a bound
+/// -- gh#737's own case, reached through a second door. The ceiling is
+/// a property of the entry rather than of where the entry came from,
+/// so it applies to the sum and not to the addend: two contributions
+/// that are individually representable can still swamp the row
+/// together.
+///
+/// No end-to-end fixture in this repository reaches the uncapped
+/// version's failure. It is applied because the argument for the
+/// ceiling does not distinguish the two doors, not because a test
+/// caught it.
+fn pinned_entry(had: Number, add: Number, cap: Number) -> Number {
+    (had + add).min(cap)
+}
+
 /// `min(Σ, cap)` entrywise, or the input unchanged (and `None`) when no
 /// entry is over its ceiling.
 ///
@@ -1893,6 +1922,36 @@ mod tests {
     /// Nothing over its ceiling returns `None`, so an ordinary solve
     /// keeps factoring against the object the calculated quantities
     /// cache rather than an equal copy with a fresh tag.
+    #[test]
+    fn a_newly_pinned_bound_lands_under_the_ceiling_too() {
+        // The corrector's own addend, `mu / s²` off an endpoint slack
+        // it does not bound from below: over any real ceiling.
+        let cap = sigma_pin_cap(1.0);
+        let add = 1e-9 / (1e-14 * 1e-14);
+        assert!(add > cap, "the fixture needs an addend over the ceiling");
+        assert_eq!(pinned_entry(1e6, add, cap), cap);
+    }
+
+    #[test]
+    fn two_representable_contributions_can_swamp_a_row_together() {
+        // Neither half is over the ceiling; their sum is. Capping the
+        // addend alone would let this through, which is why the
+        // ceiling is applied to the entry.
+        let cap = sigma_pin_cap(1.0);
+        let (had, add) = (0.7 * cap, 0.7 * cap);
+        assert!(had < cap && add < cap && had + add > cap);
+        assert_eq!(pinned_entry(had, add, cap), cap);
+    }
+
+    #[test]
+    fn a_pinned_entry_under_the_ceiling_is_just_the_sum() {
+        let cap = sigma_pin_cap(1.0);
+        assert_eq!(pinned_entry(2.0, 3.0, cap), 5.0);
+        // A variable in no constraint row has no ceiling, so the
+        // corrector's pin reaches the diagonal whole.
+        assert_eq!(pinned_entry(2.0, 1e30, Number::INFINITY), 1e30 + 2.0);
+    }
+
     #[test]
     fn a_diagonal_under_its_ceiling_is_left_alone() {
         let sigma = dense(&[1.0, 1e6, 0.0, 1e12]);
