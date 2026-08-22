@@ -151,6 +151,33 @@ pub struct PdSensBacksolver {
     /// every solve that ended on an interior point. See
     /// [`DeclaredFrameBarrier`].
     declared: Option<Rc<DeclaredFrameBarrier>>,
+    /// The barrier diagonals every sensitivity solve actually factors
+    /// with: [`Self::declared`]'s pair when there is one, the
+    /// calculated quantities otherwise, with [`sigma_pin_caps`]
+    /// applied to both (gh#737). See [`EffectiveSigma`].
+    sigma: EffectiveSigma,
+}
+
+/// The barrier diagonals the sensitivity path factors with, after both
+/// corrections that stand between the calculated quantities and the
+/// matrix: gh#654's choice of *frame*, and gh#737's ceiling on how
+/// stiff a pin the frame is allowed to report.
+///
+/// `None` in a block means "the calculated quantity as it stands" —
+/// no crossover frame to substitute and nothing over the ceiling — so
+/// an ordinary solve still factors against the cached `Σ` object and
+/// keeps the tag-keyed factorization cache warm.
+#[derive(Clone)]
+struct EffectiveSigma {
+    /// `x`-block diagonal, or `None` for `cq.curr_sigma_x()`.
+    x: Option<Rc<dyn pounce_linalg::Vector>>,
+    /// `s`-block diagonal, or `None` for `cq.curr_sigma_s()`.
+    s: Option<Rc<dyn pounce_linalg::Vector>>,
+    /// The gh#737 ceiling per var-x row, `INFINITY` where none applies.
+    /// Kept because a *released* solve rebuilds one variable's `Σ`
+    /// entry from the bounds that stay active, and a rebuilt entry has
+    /// to land under the same ceiling the rest of the diagonal did.
+    cap_x: Rc<Vec<Number>>,
 }
 
 /// `Σ` and the active-bound slacks of a **crossed-over** iterate,
@@ -247,6 +274,7 @@ impl PdSensBacksolver {
         let conj = Self::natural_units_conj(nlp, &dims, d_var.as_ref().map(|v| v.as_slice()))?;
         let bound_vars = Self::bound_variable_rows(nlp, &dims);
         let declared = Self::declared_frame_barrier(data, nlp, &dims);
+        let sigma = Self::effective_sigma(cq, declared.as_ref(), &dims);
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -259,7 +287,38 @@ impl PdSensBacksolver {
             d_full,
             bound_vars,
             declared,
+            sigma,
         })
+    }
+
+    /// Pick the frame (gh#654) and apply the ceiling (gh#737), once,
+    /// at construction: both diagonals are functions of the converged
+    /// state alone, and every solve has to factor against the same
+    /// object for the factorization cache to hold.
+    fn effective_sigma(
+        cq: &IpoptCqHandle,
+        declared: Option<&Rc<DeclaredFrameBarrier>>,
+        dims: &[usize; 8],
+    ) -> EffectiveSigma {
+        let cap_x = Rc::new(sigma_pin_caps(cq, dims[0]));
+        let base_x = match declared {
+            Some(d) => Rc::clone(&d.sigma_x),
+            None => cq.borrow().curr_sigma_x(),
+        };
+        let base_s = match declared {
+            Some(d) => Rc::clone(&d.sigma_s),
+            None => cq.borrow().curr_sigma_s(),
+        };
+        // The `s` block's single model coefficient is the `−I` that ties
+        // each row's slack to its `d(x)` row, exactly `1` in the scaled
+        // space this is measured in, so its ceiling is one scalar.
+        let cap_s = sigma_pin_cap(1.0);
+        let x = cap_sigma(&base_x, &|i| {
+            cap_x.get(i).copied().unwrap_or(Number::INFINITY)
+        })
+        .or_else(|| declared.map(|d| Rc::clone(&d.sigma_x)));
+        let s = cap_sigma(&base_s, &|_| cap_s).or_else(|| declared.map(|d| Rc::clone(&d.sigma_s)));
+        EffectiveSigma { x, s, cap_x }
     }
 
     /// Re-measure `Σ` against the declared bounds when the held iterate
@@ -323,36 +382,36 @@ impl PdSensBacksolver {
         }))
     }
 
-    /// The barrier diagonals to factor with: the declared-frame pair
-    /// when the held iterate came from crossover, otherwise the
-    /// calculated quantities (which is what [`SigmaOverride::default`]
-    /// selects).
+    /// The barrier diagonals to factor with — [`Self::sigma`], which
+    /// is the declared-frame pair when the held iterate came from
+    /// crossover and the calculated quantities otherwise, either way
+    /// under gh#737's ceiling. A block that needed neither correction
+    /// stays `None`, which is what [`SigmaOverride::default`] carries
+    /// and what leaves the cached diagonal in place.
     fn sigma_override(&self) -> SigmaOverride {
-        match self.declared.as_ref() {
-            None => SigmaOverride::default(),
-            Some(d) => SigmaOverride {
-                x: Some(Rc::clone(&d.sigma_x)),
-                s: Some(Rc::clone(&d.sigma_s)),
-            },
+        SigmaOverride {
+            x: self.sigma.x.clone(),
+            s: self.sigma.s.clone(),
         }
     }
 
     /// The `x`-block barrier diagonal in the frame the held iterate
-    /// belongs to. Crate-internal because [`crate::activity`] reads `Σ`
-    /// straight off the iterate rather than through the factor, and the
-    /// two must not disagree about which bounds the point is measured
-    /// against.
+    /// belongs to, under the [`sigma_pin_caps`] ceiling. Crate-internal
+    /// because [`crate::activity`] reads `Σ` straight off the iterate
+    /// rather than through the factor, and the two must not disagree
+    /// about which bounds the point is measured against or about how
+    /// stiffly it is held there.
     pub(crate) fn barrier_sigma_x(&self) -> Rc<dyn pounce_linalg::Vector> {
-        match self.declared.as_ref() {
-            Some(d) => Rc::clone(&d.sigma_x),
+        match self.sigma.x.as_ref() {
+            Some(v) => Rc::clone(v),
             None => self.cq.borrow().curr_sigma_x(),
         }
     }
 
     /// [`Self::barrier_sigma_x`] for the `s` block.
     pub(crate) fn barrier_sigma_s(&self) -> Rc<dyn pounce_linalg::Vector> {
-        match self.declared.as_ref() {
-            Some(d) => Rc::clone(&d.sigma_s),
+        match self.sigma.s.as_ref() {
+            Some(v) => Rc::clone(v),
             None => self.cq.borrow().curr_sigma_s(),
         }
     }
@@ -495,7 +554,17 @@ impl PdSensBacksolver {
                 }
                 fresh += z / s;
             }
-            *sigma.get_mut(br.var_row)? = fresh;
+            // Under the same ceiling the rest of the diagonal is held
+            // to (gh#737): a rebuilt entry is `z/s` off the iterate
+            // like any other, and a released variable is the one most
+            // likely to be reached through a constraint row.
+            let cap = self
+                .sigma
+                .cap_x
+                .get(br.var_row)
+                .copied()
+                .unwrap_or(Number::INFINITY);
+            *sigma.get_mut(br.var_row)? = fresh.min(cap);
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);
@@ -1311,6 +1380,146 @@ fn declared_slack_floor(bound: Number, z_max: Number) -> Number {
     }
 }
 
+/// Headroom on [`sigma_pin_caps`]' representability bound: how far
+/// above one ulp the surviving Schur contribution `a²/Σ` is required to
+/// stay.
+///
+/// The bound itself is where that contribution reaches exactly one ulp
+/// of unity, which is the edge rather than a safe distance from it, and
+/// the edge is where measurement puts the failure: on the gh#737
+/// fixture `Σ = 3.6e22` still returns the exact step and `6.9e27`
+/// returns none of it, while the issue's own bracket runs from `7.1e14`
+/// correct to `3.4e23` zero. Backing off is nearly free — the ceiling
+/// only ever binds on an entry that would have been capped anyway, and
+/// dropping it from `1/eps` to `1/(64·eps)` moves the pin's residual
+/// leak from `2e-16` to `1.4e-14`, still an order under the roundoff a
+/// back-solve on any real model carries. The cost of the other
+/// direction is the defect surviving between the ceiling and the
+/// failure.
+const SIGMA_PIN_HEADROOM: Number = 64.0;
+
+/// The largest barrier diagonal each variable may carry and still be
+/// reachable through the constraint rows it appears in, one entry per
+/// var-x row; `INFINITY` for a variable in no constraint row, and an
+/// all-`INFINITY` vector when the Jacobians are not triplet matrices
+/// and the column magnitudes cannot be read.
+///
+/// # What the ceiling is
+///
+/// `Σ_i` sits on the diagonal of KKT row `i`, alongside that variable's
+/// Jacobian entries `a_ji` in the constraint columns. Eliminating the
+/// variable through its own diagonal leaves each constraint row `j`
+/// holding `a_ji²/Σ_i` — the whole of what row `j` still knows about
+/// variable `i`. Once that quantity falls below the roundoff of the
+/// row it lands in, the constraint is no longer represented: the
+/// factorization sees a row it cannot pivot on, and what comes back is
+/// whatever the singularity handling substitutes.
+///
+/// Requiring `a²/Σ` to stay at or above one ulp is therefore the
+/// ceiling `Σ_i ≤ a_i²/eps`, with `a_i` the largest of the variable's
+/// constraint coefficients, and [`SIGMA_PIN_HEADROOM`] backing off from
+/// the edge. The quadratic form is the scale-invariant one: a change of
+/// variables `x_i → c·x_i` sends `Σ_i → Σ_i/c²` and `a_ji → a_ji/c`, so
+/// the ceiling tracks the diagonal it bounds. Both quantities are read
+/// in the solver's own scaled space, which is the space the factor
+/// lives in.
+///
+/// # What it is not
+///
+/// It is not a release. A capped bound is still a bound, and still
+/// pinned about as hard as double precision expresses: at the ceiling
+/// the variable moves by `eps·SIGMA_PIN_HEADROOM/a²` per unit of force,
+/// which for a constraint coefficient of order one is roundoff.
+/// Zeroing the entry
+/// instead would let a genuinely held variable off its bound entirely
+/// and answer a different question. The rule is only that a pin the
+/// matrix cannot represent is not a stiffer pin — the same argument
+/// [`declared_slack_floor`] makes one step further down, where `z/0` is
+/// not an infinitely stiff pin but a `NaN`.
+///
+/// A variable in no constraint row is left alone: there is no row for
+/// its diagonal to swamp, and that is the gh#653 / gh#654 case, where a
+/// bound-pinned variable coupled to the rest of the model only through
+/// the Hessian wants every digit of stiffness it has.
+fn sigma_pin_caps(cq: &IpoptCqHandle, n_x: usize) -> Vec<Number> {
+    use pounce_linalg::triplet::GenTMatrix;
+
+    let mut a_max: Vec<Number> = vec![0.0; n_x];
+    let (jac_c, jac_d) = {
+        let c = cq.borrow();
+        (c.curr_jac_c(), c.curr_jac_d())
+    };
+    for jac in [jac_c, jac_d] {
+        let Some(t) = jac.as_any().downcast_ref::<GenTMatrix>() else {
+            return vec![Number::INFINITY; n_x];
+        };
+        for (&col, &v) in t.jcols().iter().zip(t.values().iter()) {
+            let j = (col - 1) as usize;
+            if let Some(slot) = a_max.get_mut(j) {
+                *slot = slot.max(v.abs());
+            }
+        }
+    }
+    a_max
+        .into_iter()
+        .map(|a| {
+            if a > 0.0 && a.is_finite() {
+                sigma_pin_cap(a)
+            } else {
+                Number::INFINITY
+            }
+        })
+        .collect()
+}
+
+/// [`sigma_pin_caps`]' ceiling for one coefficient magnitude, `a²/eps`
+/// backed off by [`SIGMA_PIN_HEADROOM`].
+///
+/// Grouped as two divides so a large `a` overflows to `INFINITY` — no
+/// ceiling, which is right, since no representable `Σ` reaches it — in
+/// place of a spurious finite product. The floor at the other end is
+/// the one that matters: for a coefficient small enough that the
+/// ceiling underflows, *no* positive `Σ` keeps that coefficient
+/// representable, and a ceiling at or below `1` would not be a looser
+/// pin but a released bound. There is nothing to buy there, so those
+/// report no ceiling too and leave the diagonal as it stands.
+fn sigma_pin_cap(a: Number) -> Number {
+    let cap = (a / Number::EPSILON) * (a / SIGMA_PIN_HEADROOM);
+    if cap > 1.0 { cap } else { Number::INFINITY }
+}
+
+/// `min(Σ, cap)` entrywise, or the input unchanged (and `None`) when no
+/// entry is over its ceiling.
+///
+/// Returning `None` rather than an equal copy is what keeps an ordinary
+/// solve factoring against the object the calculated quantities already
+/// cache: the factorization cache keys on the `Σ` object's tag, and a
+/// fresh vector per construction would cost a re-factorization for a
+/// diagonal that is bit-identical.
+fn cap_sigma(
+    sigma: &Rc<dyn pounce_linalg::Vector>,
+    cap: &dyn Fn(usize) -> Number,
+) -> Option<Rc<dyn pounce_linalg::Vector>> {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    let dv = sigma.as_any().downcast_ref::<DenseVector>()?;
+    let mut vals = dv.expanded_values();
+    let mut hit = false;
+    for (i, v) in vals.iter_mut().enumerate() {
+        let c = cap(i);
+        if *v > c {
+            *v = c;
+            hit = true;
+        }
+    }
+    if !hit {
+        return None;
+    }
+    let mut out = DenseVector::new(DenseVectorSpace::new(vals.len() as Index));
+    out.values_mut().copy_from_slice(&vals);
+    Some(Rc::new(out) as Rc<dyn pounce_linalg::Vector>)
+}
+
 /// `Σ = Σ_l z_l/s_l + Σ_u z_u/s_u` for one primal block, with the slacks
 /// taken against `b_l` / `b_u` instead of the NLP's live (relaxed)
 /// bounds. Returns the diagonal plus the two slack vectors it was built
@@ -1535,5 +1744,95 @@ impl SensBacksolver for PdSensBacksolver {
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    fn dense(vals: &[Number]) -> Rc<dyn pounce_linalg::Vector> {
+        let mut v = DenseVector::new(DenseVectorSpace::new(vals.len() as Index));
+        v.values_mut().copy_from_slice(vals);
+        Rc::new(v) as Rc<dyn pounce_linalg::Vector>
+    }
+
+    /// The ceiling is where the surviving Schur contribution `a²/Σ`
+    /// reaches [`SIGMA_PIN_HEADROOM`] ulps, which is what the whole
+    /// rule says it is.
+    #[test]
+    fn the_ceiling_leaves_the_schur_contribution_representable() {
+        for a in [1.0, 3.5, 1e-3, 1e6] {
+            let ratio = a * a / sigma_pin_cap(a);
+            assert!(
+                (ratio / (Number::EPSILON * SIGMA_PIN_HEADROOM) - 1.0).abs() < 1e-12,
+                "a={a:e}: a²/cap = {ratio:e}, want {:e}",
+                Number::EPSILON * SIGMA_PIN_HEADROOM,
+            );
+        }
+    }
+
+    /// A change of variables `x → c·x` sends `Σ → Σ/c²` and `a → a/c`,
+    /// so a diagonal that was over its ceiling has to still be over it
+    /// afterwards, and one under it has to stay under. Anything keyed
+    /// on `a` linearly instead of quadratically fails this.
+    ///
+    /// The range stops where the ceiling itself saturates — past
+    /// `c = 1e3` here the rescaled coefficient is small enough that
+    /// [`sigma_pin_cap`] reports no ceiling at all, which is the
+    /// deliberate refusal documented there rather than a break in the
+    /// invariance.
+    #[test]
+    fn the_ceiling_is_invariant_to_rescaling_the_variable() {
+        for c in [1e-3, 1e-1, 1.0, 1e1, 1e3] {
+            let over = 1e27 / (c * c) > sigma_pin_cap(1.0 / c);
+            assert!(over, "c={c:e}: rescaling moved the entry under its ceiling");
+            let under = 1e6 / (c * c) > sigma_pin_cap(1.0 / c);
+            assert!(
+                !under,
+                "c={c:e}: rescaling moved the entry over its ceiling"
+            );
+        }
+    }
+
+    /// Neither end of the coefficient range may produce a ceiling that
+    /// caps something it should not. Huge: no representable `Σ` reaches
+    /// the ceiling, so it is no ceiling. Tiny: the ceiling underflows,
+    /// and a `Σ` capped at or below `1` is a released bound rather than
+    /// a looser pin, so that is no ceiling either.
+    #[test]
+    fn a_ceiling_that_cannot_help_is_no_ceiling() {
+        for a in [Number::MAX, 1e200, 1e-9, 1e-200, Number::MIN_POSITIVE] {
+            let cap = sigma_pin_cap(a);
+            assert!(
+                cap.is_infinite() || cap > 1.0,
+                "a={a:e} produced a ceiling of {cap:e}, which would release the bound",
+            );
+        }
+    }
+
+    /// Nothing over its ceiling returns `None`, so an ordinary solve
+    /// keeps factoring against the object the calculated quantities
+    /// cache rather than an equal copy with a fresh tag.
+    #[test]
+    fn a_diagonal_under_its_ceiling_is_left_alone() {
+        let sigma = dense(&[1.0, 1e6, 0.0, 1e12]);
+        assert!(cap_sigma(&sigma, &|_| sigma_pin_cap(1.0)).is_none());
+    }
+
+    /// Over the ceiling, only the offending entries move.
+    #[test]
+    fn only_the_entries_over_their_ceiling_move() {
+        let cap = sigma_pin_cap(1.0);
+        let sigma = dense(&[1.0, 1e27, 1e6, Number::INFINITY]);
+        let capped = cap_sigma(&sigma, &|i| if i == 2 { Number::INFINITY } else { cap })
+            .expect("two entries are over their ceiling");
+        let got = capped
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .expect("dense")
+            .expanded_values();
+        assert_eq!(got, vec![1.0, cap, 1e6, cap]);
     }
 }
