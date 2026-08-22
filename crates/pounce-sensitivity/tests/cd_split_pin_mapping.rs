@@ -209,6 +209,55 @@ fn parametric_step_translates_pin_index_through_cd_split() {
 }
 
 #[test]
+fn correct_step_translates_pin_index_through_cd_split() {
+    // The corrector measures its residual against the perturbed
+    // right-hand side, so it has to shift the same row the step was
+    // taken for. `correct_step` used to be handed the user's `g` index
+    // and add it to the `y_c` offset directly, which is what the module
+    // header says is wrong (gh#733 review).
+    //
+    // This problem is linear in the pinned right-hand side, so the
+    // parametric step is already exact and a correct corrector has
+    // nothing to do. Shifting the wrong row instead makes it converge
+    // toward a different perturbed problem and drag the exact step off
+    // the answer.
+    let tnlp: Rc<RefCell<dyn TNLP>> =
+        Rc::new(RefCell::new(LeadingInequalityTNLP { p1: 1.0, p2: 1.0 }));
+    let mut solver = Solver::new(make_app(), tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}"
+    );
+
+    let delta = 0.1;
+    let step = solver
+        .parametric_step_full(&[2], &[delta])
+        .expect("parametric_step_full ok");
+    let (out, report) = solver
+        .correct_step(&[2], &[delta], &step, 8)
+        .expect("correct_step ok");
+
+    // Same [Δ, Δ, 0] the step already had.
+    assert!(
+        (out[0] - delta).abs() < 1e-7 && (out[1] - delta).abs() < 1e-7 && out[2].abs() < 1e-7,
+        "corrected to [{}, {}, {}], expected [{delta}, {delta}, 0]; {report:?}",
+        out[0],
+        out[1],
+        out[2],
+    );
+    // and an exact step leaves nothing to correct
+    assert!(
+        report.initial_residual < 1e-6,
+        "an exact step should start at the barrier floor: {report:?}",
+    );
+}
+
+#[test]
 fn parametric_step_errors_on_pinned_inequality() {
     let tnlp: Rc<RefCell<dyn TNLP>> =
         Rc::new(RefCell::new(LeadingInequalityTNLP { p1: 1.0, p2: 1.0 }));

@@ -76,6 +76,99 @@ changes.
   re-solve is `0.790000`. The rows away from a bound are unchanged to
   every digit printed.
 
+- **`corrector_iter` refines a step by Newton iterations on the barrier
+  system, against the factorization the solve left behind.**
+
+  A parametric step leaves a residual in the barrier KKT system at the
+  perturbed parameter values. Iterating on it costs one back-solve each
+  and no factorization, which is what makes the correction worth taking
+  over a re-solve. Available on `estimate()` and `estimate_report()`
+  under every mode, default 0, stopping early when an iteration fails
+  to improve the residual, so the number is a budget rather than a
+  count.
+
+  The residual comes from the algorithm's own calculated quantities by
+  way of the trial iterate, so fixed variables and the bound expansions
+  are handled exactly as the solve handles them. The iterations run in
+  the model's own units, which is the frame the step and the bounds
+  arrive in, and the converged iterate is converted once on the way in
+  and back on the way to those quantities, so a variable-scaled solve
+  answers in the model's units the way every other query does. The
+  residual comes back through `E` before the back-solve, since `solve`
+  takes its right-hand side in natural units and applies `E` itself, so
+  handing it one the algorithm already scaled applies the factor twice.
+  That leaves the fixed point alone and puts every Newton direction on
+  the way there out by it. Setting a
+  trial point leaves `curr` alone, and `curr` is what the held
+  factorization was built from, so nothing here disturbs the factor or
+  any other consumer of the session.
+
+  A correction cannot change an active set on its own. The held
+  operator carries every bound's barrier diagonal from the base point,
+  `z / s`, which at a tightly held bound is `z² / mu`. So the predictor's
+  decision is applied once before iterating. A released bound comes out
+  of the operator with its multiplier held at zero and its
+  complementarity row gone, a bound the step brings in has its diagonal
+  raised to what the barrier assigns at that slack, and every other row
+  keeps the base point's term. Both are the same change to one
+  diagonal, so one factorization serves the whole correction.
+
+  The changes come from the step's own endpoint, so every mode hands
+  over something. `fix_relax` and `path` decide an active set and pass
+  it on. `mode="linear"` holds the active set fixed as it builds the
+  step, so what reaches the correction is whatever the clamp left
+  sitting on a bound, one change where the other two pass seven.
+
+  Measured on the CSTR of notebook 36, whose first crossing is at 1.3%
+  of the change to its steady state. With `fix_relax` and eight
+  iterations the largest relative error goes from 2.4e-3 to 1e-6 at a 2%
+  change, 1.4e-2 to 2e-6 at 5%, and 6.0e-2 to 6.0e-5 at 10%, which is
+  four crossings. At seven crossings it improves the estimate by about
+  5% and stops. The reach is set by the crossings handed over, not the
+  size of the change.
+
+  What it does not do is set the multipliers, which arrive extrapolated
+  over the whole perturbation and are the dominant error once that is
+  large. `estimate()` warns when a correction ends without at least
+  halving the residual, so an uncorrected step is never returned as a
+  corrected one, and the report splits the residual into stationarity,
+  feasibility and complementarity, which carry different units and
+  different consequences for whether an estimate can be acted on. It
+  also reports `released` and `pinned`, the bounds that left the active
+  set and the ones that joined, with `active_set_changes` their total.
+
+- **`estimate_report()` takes `mode` and `predictor_iter`, and measures
+  the step that mode builds.** `violation` is evaluated at the
+  predicted point and the `corrector` block starts from that point's
+  residual, so both are properties of the step. Reporting the linear
+  step's numbers for a `fix_relax` or `path` estimate described a step
+  the caller did not take. On one nonlinear model whose linear step
+  leaves a variable outside its bound, the violation is 3.64 under
+  `"linear"` and 0.427 under the other two.
+
+  Under `"fix_relax"` and `"path"` the step stops at the bound, so
+  `alpha` is 1.0 and `crossed` is empty for every model, which is the
+  correct answer for such a step. `activity`, `row_activity`, `mu`,
+  `perturbations` and `bounds_relaxed` come from the base point and the
+  solve, so none of them moves with the mode. The two new arguments
+  come after `corrector_iter`, since `estimate_report()` shipped in
+  0.10.0 and its positional order is fixed.
+
+  A `refine_stop` attribute carries why the `"fix_relax"` refinement
+  stopped, one of `"settled"`, `"iteration_limit"`,
+  `"degrees_of_freedom"` or `"worse_than_plain"`, and None under the
+  other two modes. A pass pins every crossing it sees, so the pin count
+  says nothing about which limit was reached and this is the only thing
+  that does. `"worse_than_plain"` means the step the report describes
+  is the unrefined one.
+
+- **`max_iter` on `estimate()` and `active_set_changes()` is now
+  `predictor_iter`.** It bounds the `fix_relax` refinement passes and
+  the active-set changes `path` applies, so it now says which work it
+  limits, alongside `corrector_iter` and `degeneracy_iter`. Neither
+  function is in a release, so nothing downstream carries the old name.
+  `estimate_report()` is unaffected and keeps the deprecated `max_iter`
+  it gained earlier in this cycle.
 - **`mode="fix_relax"` pins every crossing in a pass, so `max_iter` no
   longer picks the answer (gh#732).**
 

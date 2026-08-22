@@ -584,6 +584,66 @@ impl PySolver {
         Ok(dx_full.into_pyarray_bound(py))
     }
 
+    /// Newton iterations on the barrier system, refining a compound
+    /// step against the held factor. One back-solve per iteration and
+    /// no factorization.
+    ///
+    /// `step` is a full compound step, the shape
+    /// [`Self::parametric_step_full`] returns, so any mode's result
+    /// can be corrected. Returns the refined step and a dict holding
+    /// the iterations spent, the residual before and after, whether
+    /// the loop stopped early, how many bounds changed status, and the
+    /// residual split into stationarity, feasibility and
+    /// complementarity, which carry different units and different
+    /// consequences for whether an estimate can be acted on.
+    ///
+    /// The corrector aims at the barrier solution at the μ the solve
+    /// finished on, so the accuracy it reaches is bounded by that
+    /// offset, and where the perturbation needs a bound the base point
+    /// held tightly to leave, the held barrier diagonal cannot
+    /// represent the change and the iterations make no progress. A
+    /// returned `residual` equal to `initial_residual` is that case.
+    /// The returned point always satisfies the variable bounds, so
+    /// `max_iter = 0` costs one evaluation and reports the step's
+    /// residual without iterating.
+    #[pyo3(signature = (pin_constraint_indices, deltas, step, max_iter=5))]
+    fn correct_step<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        step: Vec<Number>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("correct_step: no converged factor (call solve() first)")
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (out, rep) = s
+            .inner
+            .correct_step(&pins, &deltas, &step, max_iter)
+            .map_err(solver_error_to_py)?;
+        let info = PyDict::new_bound(py);
+        info.set_item("iterations", rep.iterations)?;
+        info.set_item("residual", rep.residual)?;
+        info.set_item("initial_residual", rep.initial_residual)?;
+        info.set_item("converged", rep.converged)?;
+        info.set_item("active_set_changes", rep.released + rep.pinned)?;
+        info.set_item("released", rep.released)?;
+        info.set_item("pinned", rep.pinned)?;
+        info.set_item("stationarity", rep.stationarity)?;
+        info.set_item("feasibility", rep.feasibility)?;
+        info.set_item("complementarity", rep.complementarity)?;
+        Ok((out.into_pyarray_bound(py), info))
+    }
+
     /// Rows of the compound KKT vector holding the equality
     /// multipliers for the given 0-based constraint (`g`) indices;
     /// `None` for inequality constraints.

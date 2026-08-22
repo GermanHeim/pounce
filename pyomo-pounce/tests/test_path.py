@@ -239,8 +239,8 @@ def test_a_released_bound_can_be_reached_again():
 
 def test_the_cap_falls_back_to_the_clamp_with_a_warning():
     m = solved()
-    with pytest.warns(UserWarning, match="max_iter may finish it"):
-        capped = estimate(m, [(m.p, -2.0)], mode="path", max_iter=0,
+    with pytest.warns(UserWarning, match="predictor_iter may finish it"):
+        capped = estimate(m, [(m.p, -2.0)], mode="path", predictor_iter=0,
                           clamp=False)
     # with no changes allowed the whole perturbation is one plain step
     lin = estimate(m, [(m.p, -2.0)], clamp=False)
