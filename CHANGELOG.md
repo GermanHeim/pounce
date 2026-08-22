@@ -9,28 +9,41 @@ changes.
 
 ## [Unreleased]
 
-- **`estimate()`, `estimate_report()` and `gradient()` take `bound_eps`
-  and `max_pdpert`.** Both are settable through the CLI and the
-  `SensSolve` builder and were unreachable from pyomo (gh#736).
+- **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
+  settable through the CLI and the `SensSolve` builder and were
+  unreachable from pyomo (gh#736). Both are rejected at or below zero,
+  and NaN with them, matching the strict lower bound the CLI registers
+  each option with.
 
   `bound_eps` sets how far outside a bound a step has to end to count as
-  having left it, which decides what `mode="fix_relax"` pins. Unset, it
-  is how far outside the solve itself was willing to settle, floored so
-  an unrelaxed solve does not pin on roundoff, so nothing moves for a
-  caller who does not set it. `mode="path"` reads no such margin, so the
-  argument does nothing there and `active_set_changes()` does not take
-  it.
+  having left it, which decides what `mode="fix_relax"` pins, what
+  `estimate()` clamps, and what `EstimateReport.crossed` reports. Unset,
+  it is how far outside the solve itself was willing to settle, floored
+  so an unrelaxed solve does not pin on roundoff, so nothing moves for a
+  caller who does not set it. Only the `fix_relax` refinement reads it,
+  and passing it under `mode="linear"` or `mode="path"` warns and
+  changes nothing. It is on `estimate()` and `estimate_report()`.
+
+  A margin wide enough to cover the crossing leaves the step where the
+  predictor put it, so `alpha` comes back below one there, where under
+  `fix_relax` it is otherwise 1.0.
 
   `max_pdpert` refuses rather than answering when the converged KKT
   factor carries an inertia correction larger than the value given.
   Every sensitivity output inverts that factor, so a perturbed one
   answers for a nearby problem rather than this one.
   `EstimateReport.perturbations` already reported the same numbers,
-  which let a caller read them but not stop on them.
+  which let a caller read them but not stop on them. It is on every
+  surface that inverts the factor: `gradient()`, `estimate()`,
+  `estimate_report()`, `active_set_changes()`, `covariance()` and
+  `information()`. The last two warned about the same perturbations
+  already and go on warning when no cap is set.
 
-  `Solver::parametric_step_bounded` and
-  `parametric_step_bounded_decided` take the margin as a trailing
-  `Option<Number>`, and their Python bindings take `bound_eps=None`.
+  *Breaking (Rust API):* `Solver::parametric_step_bounded` and
+  `Solver::parametric_step_bounded_decided` take the margin as a
+  trailing `Option<Number>`, so an out-of-tree caller passing the old
+  argument list stops compiling. Passing `None` reproduces the previous
+  behaviour exactly. Their Python bindings take `bound_eps=None`.
 
 - **`corrector_iter` refines a step by Newton iterations on the barrier
   system, against the factorization the solve left behind.**

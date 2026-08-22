@@ -824,22 +824,94 @@ def test_settled_means_nothing_is_left_outside_a_bound(mk, target):
 def test_bound_eps_sets_what_counts_as_leaving_a_bound():
     """The refinement pins a coordinate only once it is outside by more
     than the margin, so a margin wider than the crossing leaves the step
-    alone and the crossing survives into the estimate."""
+    where the plain predictor put it."""
     m = coupled()
-    tight = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
-    slack = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
-    assert list(tight.crossed) == [], (
-        f"a tight margin should repair the crossing, left {list(tight.crossed)}")
-    assert list(slack.crossed) != [], (
-        "a margin wider than the crossing should leave it unrepaired")
+    plain = estimate(m, [(m.p, -1.2)], mode="linear", clamp=False)
+    tight = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    slack = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
+
+    moved = max(abs(tight[v] - plain[v]) for v in plain)
+    assert moved > 1e-3, (
+        f"a tight margin should repair the crossing, moved {moved:g}")
+    for v in plain:
+        assert slack[v] == pytest.approx(plain[v], abs=1e-9), (
+            f"a margin wider than the crossing should leave {v.name} alone")
 
 
-def test_bound_eps_unset_matches_the_previous_behaviour():
+def test_bound_eps_decides_crossed_and_the_stop_reason_together():
+    """`refine_stop` and `crossed` have to keep agreeing under the new
+    argument. The refinement decides "outside a bound" against the
+    margin and `crossed` used to decide it against a fixed 1e-9, so a
+    margin wider than the crossing reported `settled` beside a
+    coordinate 2.0 outside its bound."""
     m = coupled()
+    for eps in (1e-9, 1e-2, 1.0, 10.0):
+        r = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=eps)
+        assert r.refine_stop == "settled"
+        assert list(r.crossed) == [], (
+            f"settled at bound_eps={eps:g} but "
+            f"{[v.name for v in r.crossed]} is reported outside its bound")
+
+
+def test_bound_eps_unset_is_the_solves_own_margin():
+    """Unset is `bound_relax_factor` floored at 1e-9. pyomo-pounce
+    solves with the relaxation off, so unset IS the floor here, and
+    naming both numbers is what keeps this from comparing a value
+    against itself."""
+    m = coupled()
+    assert _session_for(m).solver.bound_relax_factor == 0.0, (
+        "this test reads the floor, which only shows through an "
+        "unrelaxed solve")
+
     unset = estimate(m, [(m.p, -1.2)], mode="fix_relax")
-    same = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    floor = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    wide = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
+
     for v in unset:
-        assert unset[v] == pytest.approx(same[v], abs=1e-12)
+        assert unset[v] == pytest.approx(floor[v], abs=1e-12), (
+            f"unset should resolve to the 1e-9 floor, {v.name} differs")
+    moved = max(abs(wide[v] - unset[v]) for v in unset)
+    assert moved > 1e-3, (
+        f"a margin that covers the crossing should move the answer, "
+        f"moved {moved:g}")
+
+
+def test_bound_eps_warns_where_no_refinement_reads_it():
+    """Only the fix_relax refinement pins against the margin. Passing it
+    under another mode changes nothing, and a registered argument that
+    looks wired and is not is what gh#677 was."""
+    m = coupled()
+    for mode in ("linear", "path"):
+        with pytest.warns(UserWarning, match="bound_eps"):
+            estimate(m, [(m.p, -1.2)], mode=mode, bound_eps=1e-3)
+        with pytest.warns(UserWarning, match="bound_eps"):
+            estimate_report(m, [(m.p, -1.2)], mode=mode, bound_eps=1e-3)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_bound_eps_takes_the_option_surfaces_bounds(bad):
+    """`sens_bound_eps` is registered strictly above zero, so the CLI
+    turns these down. Zero reinstates the roundoff pinning the floor
+    prevents, and NaN makes every comparison against it false, so the
+    refinement pins nothing and still reports settled."""
+    m = coupled()
+    for call in (estimate, estimate_report):
+        with pytest.raises(ValueError,
+                           match="bound_eps must be a positive number"):
+            call(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=bad)
+
+
+def test_arguments_are_checked_before_the_factor_is():
+    """A typo'd mode plus a tight cap should name the typo. The cap
+    reads the factor, which is a fact about the solve rather than about
+    the call, so it cannot be what a malformed call reports."""
+    m = regularized()
+    worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
+    with pytest.raises(ValueError, match="mode"):
+        estimate(m, [(m.p, 0.5)], mode="relax_fix", max_pdpert=worst / 10.0)
+    with pytest.raises(ValueError, match="mode"):
+        estimate_report(m, [(m.p, 0.5)], mode="relax_fix",
+                        max_pdpert=worst / 10.0)
 
 
 def regularized():
@@ -867,8 +939,24 @@ def test_max_pdpert_refuses_a_factor_the_correction_perturbed():
     from pyomo_pounce import gradient
     for call in (lambda cap: gradient(m.x[0], wrt=m.p, max_pdpert=cap),
                  lambda cap: estimate(m, [(m.p, 0.5)], max_pdpert=cap),
-                 lambda cap: estimate_report(m, [(m.p, 0.5)], max_pdpert=cap)):
+                 lambda cap: estimate_report(m, [(m.p, 0.5)], max_pdpert=cap),
+                 lambda cap: active_set_changes(m, [(m.p, 0.5)],
+                                                max_pdpert=cap)):
         call(None)
         call(worst * 10.0)
         with pytest.raises(ValueError, match="max_pdpert"):
             call(worst / 10.0)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_max_pdpert_takes_the_option_surfaces_bounds(bad):
+    """`sens_max_pdpert` is registered strictly above zero. A negative
+    cap refuses on every model, with a message that reads as though the
+    factor were bad."""
+    m = regularized()
+    # matched on the validation wording, not on "max_pdpert": the
+    # refusal message carries that too, so a cap of 0.0 or -1.0 raises
+    # either way and only the message says which check fired
+    with pytest.raises(ValueError,
+                       match="max_pdpert must be a positive number"):
+        estimate(m, [(m.p, 0.5)], max_pdpert=bad)

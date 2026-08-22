@@ -1091,6 +1091,7 @@ def gradient(target=None, *, wrt, max_pdpert=None):
     since every derivative here inverts that factor and a perturbed one
     answers for a nearby problem."""
     session = _session_for(wrt)
+    _check_margins(None, max_pdpert, "gradient")
     _refuse_on_pdpert(session, max_pdpert, "gradient")
     weak = _weakly_active(session)
     if weak:
@@ -1132,6 +1133,47 @@ def _perturbation_deltas(session, perturb):
     return pin_idx, deltas
 
 
+def _check_margins(bound_eps, max_pdpert, who):
+    """Reject the values the CLI's option surface rejects.
+
+    `sens_bound_eps` and `sens_max_pdpert` are both registered with
+    `add_lower_bounded_number_option(..., 0.0, strict)`, so a value the
+    CLI turns down is turned down here too. A `bound_eps` of zero
+    reinstates the roundoff pinning the floor exists to prevent, a NaN
+    makes every "outside a bound" comparison false so the refinement
+    pins nothing and still reports settled, and a negative `max_pdpert`
+    always refuses with a message that reads as though the factor were
+    bad.
+    """
+    for name, value in (("bound_eps", bound_eps), ("max_pdpert", max_pdpert)):
+        if value is None:
+            continue
+        if not float(value) > 0.0:
+            raise ValueError(
+                f"{who}: {name} must be a positive number, got {value!r}")
+
+
+def _bound_margin(session, bound_eps):
+    """How far outside a bound a coordinate has to end to count as
+    having left it.
+
+The refinement pins against this margin and `estimate()` clamps
+    against it. `estimate_report()` measures `crossed` against the same
+    number whenever the caller sets one, since deciding it twice is
+    what let `refine_stop == "settled"` come back beside a coordinate
+    reported 2.0 outside its bound.
+
+    Unset it is how far outside the solve itself was willing to settle,
+    floored so an unrelaxed solve does not pin on roundoff. The report
+    keeps the floor there instead, because a coordinate the SOLVE left
+    outside its bound is one of the things `crossed` exists to name,
+    and the relaxation is exactly how far out it is.
+    """
+    if bound_eps is not None:
+        return float(bound_eps)
+    return max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+
+
 def _refuse_on_pdpert(session, max_pdpert, who):
     """Refuse when the converged factor carries more inertia correction
     than the caller will accept.
@@ -1139,8 +1181,16 @@ def _refuse_on_pdpert(session, max_pdpert, who):
     A non-zero entry means the factorization every sensitivity output
     inverts is not this problem's KKT matrix but a nearby one's, and how
     nearby is what the entries measure. `EstimateReport.perturbations`
-    reports them either way; this is the caller choosing to stop rather
-    than to read them.
+    reports them either way, and this is the caller choosing to stop
+    rather than to read them.
+
+    `SensOptionOverrides::pdpert_refusal` in
+    `crates/pounce-sensitivity/src/options.rs` applies the same
+    threshold to the same numbers for `sens_max_pdpert`. The message
+    differs on purpose, since that one names a CLI option and says the
+    sensitivity was skipped, and neither is true here. The comparison
+    is the part that has to agree: a change to `worst` or to the test
+    belongs in both.
     """
     if max_pdpert is None:
         return
@@ -1251,19 +1301,24 @@ def estimate(model, perturb, clamp=True, mode="linear",
     gained. It applies under every mode, refining whatever step that
     mode produced.
 
-
     bound_eps sets how far outside a bound a step has to end to count as
-    having left it, which decides what mode="fix_relax" pins. Unset, it
-    is how far outside the solve itself was willing to settle, floored
-    so an unrelaxed solve does not pin on roundoff. mode="path" reads no
-    such margin, so this does nothing there.
+    having left it, which decides what mode="fix_relax" pins, what
+    `estimate_report()` reports in `crossed`, and what the clamp below
+    acts on. Unset, it is how far outside the solve itself was willing
+    to settle, floored so an unrelaxed solve does not pin on roundoff.
+    Only mode="fix_relax" reads it, and passing it under another mode
+    warns and changes nothing. It must be positive, as the CLI's
+    sens_bound_eps is.
 
     max_pdpert refuses rather than answering when the converged KKT
     factor carries an inertia correction larger than the value given.
     Every sensitivity output inverts that factor, so a perturbed one
     answers for a nearby problem rather than this one.
     `estimate_report().perturbations` reports the same numbers for a
-    caller who would rather read them than stop.
+    caller who would rather read them than stop. It must be positive,
+    as the CLI's sens_max_pdpert is, and the same argument is on
+    gradient(), estimate(), estimate_report(), active_set_changes(),
+    covariance() and information().
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
@@ -1291,7 +1346,6 @@ def estimate(model, perturb, clamp=True, mode="linear",
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
-    _refuse_on_pdpert(_session_for(model), max_pdpert, "estimate")
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
             "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
@@ -1300,6 +1354,13 @@ def estimate(model, perturb, clamp=True, mode="linear",
         raise ValueError(
             "estimate: degeneracy must be 'directional' or 'one_sided', "
             f"got {degeneracy!r}")
+    _check_margins(bound_eps, max_pdpert, "estimate")
+    if bound_eps is not None and mode != "fix_relax":
+        warnings.warn(
+            "estimate: bound_eps is the margin the fix_relax refinement "
+            f"pins against and mode={mode!r} runs no refinement, so it "
+            "changes nothing here.")
+    _refuse_on_pdpert(session, max_pdpert, "estimate")
 
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
@@ -1382,7 +1443,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # rather than chosen here: it was willing to leave a converged
         # point `bound_relax_factor` outside, so anything within that is
         # on the bound. The refinement pins against the same number.
-        eps = max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+        eps = _bound_margin(
+            session, bound_eps if mode == "fix_relax" else None)
         # scaled by the coordinate's own magnitude, never by the
         # bound: an absent bound arrives as the reader's +-1e19
         # sentinel, which would put the tolerance at 1e10
@@ -1427,7 +1489,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # crossing shows up as a value outside its bound and clamping is
         # all this mode can do about it. The active set changed and the
         # step does not know, which is what `fix_relax` addresses.
-        eps = max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+        eps = _bound_margin(session, None)
         # scaled by the coordinate's own magnitude, never by the
         # bound: an absent bound arrives as the reader's +-1e19
         # sentinel, which would put the tolerance at 1e10
@@ -1588,7 +1650,7 @@ _NO_BOUND = 1e19
 
 
 def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
-                mu=float("nan")):
+                mu=float("nan"), eps=1e-9):
     """Smallest fraction of `step` that reaches a bound, and where.
 
     Only coordinates strictly inside their bounds take part, because a
@@ -1641,7 +1703,7 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
 
     # the same predicate, and the same tolerance, that fills `crossed`
     reached = base + step
-    tol = 1e-9 * np.maximum(1.0, np.abs(reached))
+    tol = eps * np.maximum(1.0, np.abs(reached))
     crosses = present & moving & np.where(
         toward_hi, reached > bound + tol, reached < bound - tol)
 
@@ -1725,7 +1787,10 @@ def estimate_report(model, perturb, max_iter=None,
     step leaves a bound. Under "fix_relax" and "path" it does not,
     since both stop at the bound by construction, so `alpha` is 1.0 and
     `crossed` is empty for every model. That is the correct answer for
-    such a step rather than a missing one. The reason to run those
+    such a step rather than a missing one. A `bound_eps` wide enough to
+    cover the crossing is the exception: the refinement then pins
+    nothing, so the step is the linear one and reaches a bound at a
+    fraction below one. The reason to run those
     modes is what "linear" reports at the same perturbation.
 
     `activity`, `row_activity` and `mu` come from the converged base
@@ -1743,7 +1808,10 @@ def estimate_report(model, perturb, max_iter=None,
     Every sensitivity output inverts that factor, so a perturbed one
     answers for a nearby problem rather than this one.
     `estimate_report().perturbations` reports the same numbers for a
-    caller who would rather read them than stop.
+    caller who would rather read them than stop. It must be positive,
+    as the CLI's sens_max_pdpert is, and the same argument is on
+    gradient(), estimate(), estimate_report(), active_set_changes(),
+    covariance() and information().
 
     corrector_iter runs the same Newton iterations `estimate()` runs and
     reports what they did on the `corrector` attribute, without changing
@@ -1772,7 +1840,6 @@ def estimate_report(model, perturb, max_iter=None,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
-    _refuse_on_pdpert(session, max_pdpert, "estimate_report")
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
             "estimate_report: mode must be 'linear', 'fix_relax' or "
@@ -1781,6 +1848,13 @@ def estimate_report(model, perturb, max_iter=None,
         raise ValueError(
             "estimate_report: degeneracy must be 'directional' or "
             f"'one_sided', got {degeneracy!r}")
+    _check_margins(bound_eps, max_pdpert, "estimate_report")
+    if bound_eps is not None and mode != "fix_relax":
+        warnings.warn(
+            "estimate_report: bound_eps is the margin the fix_relax "
+            f"refinement pins against and mode={mode!r} runs no "
+            "refinement, so it changes nothing here.")
+    _refuse_on_pdpert(session, max_pdpert, "estimate_report")
     if max_iter is not None:
         warnings.warn(
             "estimate_report: max_iter no longer does anything here and is "
@@ -1827,6 +1901,15 @@ def estimate_report(model, perturb, max_iter=None,
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
     g_l, g_u = np.asarray(session.nl.g_l), np.asarray(session.nl.g_u)
 
+    # the margin the refinement pinned against, so `alpha`, `crossed`
+    # and `crossed_rows` answer with the number that decided the step.
+    # Unset keeps the fixed floor rather than the solve's relaxation:
+    # `crossed` reports a coordinate the SOLVE left outside its bound,
+    # and the relaxation is exactly how far out that is, so taking it
+    # as the margin would hide the case this report exists to name.
+    eps = (1e-9 if bound_eps is None or mode != "fix_relax"
+           else float(bound_eps))
+
     row_names = _user_row_names(session)
 
     # The classifier raises for a solve that relaxed its bounds, since
@@ -1848,7 +1931,7 @@ def estimate_report(model, perturb, max_iter=None,
         var_on_bound = _on_bound(act["var_status"])
         row_on_bound = _on_bound(act["row_status"])
 
-    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names,
+    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names, eps=eps,
                                on_bound=var_on_bound, mu=mu)
     first_kind = None if first is None else "variable"
     dg = _row_step(session, dx)
@@ -1858,18 +1941,18 @@ def estimate_report(model, perturb, max_iter=None,
     live = g_l < g_u
     live[list(pin_idx)] = False
     a_row, f_row = _ratio_test(g_base, dg, g_l, g_u, row_names, live=live,
-                               on_bound=row_on_bound, mu=mu)
+                               on_bound=row_on_bound, mu=mu, eps=eps)
     if a_row < alpha:
         alpha, first, first_kind = a_row, f_row, "constraint"
 
-    tol = 1e-9 * np.maximum(1.0, np.abs(x_new))
+    tol = eps * np.maximum(1.0, np.abs(x_new))
     crossed = ComponentMap()
     for i in np.where((x_new < lo - tol) | (x_new > hi + tol))[0]:
         ov = model.find_component(session.var_names[i])
         if ov is not None:
             crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
     g_pred = g_base + dg
-    gtol = 1e-9 * np.maximum(1.0, np.abs(g_pred))
+    gtol = eps * np.maximum(1.0, np.abs(g_pred))
     crossed_rows = ComponentMap()
     out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
     for j in np.where(live & out_of_bounds)[0]:
@@ -1914,7 +1997,8 @@ ActiveSetChange = namedtuple(
 
 
 def active_set_changes(model, perturb, predictor_iter=16,
-                       degeneracy="directional", degeneracy_iter=16):
+                       degeneracy="directional", degeneracy_iter=16,
+                       max_pdpert=None):
     """The active-set changes `estimate(mode="path")` applies, in order.
 
     Takes the same perturbation argument `estimate()` takes and returns
@@ -1941,6 +2025,13 @@ def active_set_changes(model, perturb, predictor_iter=16,
     back-solves, and a budget it cannot fit falls back to the one-sided
     record with a warning, and predictor_iter above still caps the path
     itself.
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given.
+    This runs the same predictor `estimate(mode="path")` runs and
+    inverts the same factor, so it takes the same cap. There is no
+    bound_eps here, since the path decides its changes from where a
+    multiplier reaches zero and reads no margin.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
@@ -1950,6 +2041,8 @@ def active_set_changes(model, perturb, predictor_iter=16,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
+    _check_margins(None, max_pdpert, "active_set_changes")
+    _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
             "active_set_changes: degeneracy must be 'directional' or "
@@ -2788,7 +2881,7 @@ def _minv(M, who="covariance"):
 
 
 def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
-               wrt=None):
+               wrt=None, max_pdpert=None):
     """Asymptotic covariance of the fitted parameters of a
     least-squares problem, from ONE ordinary solve.
 
@@ -2889,6 +2982,12 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     still determines (for a + b <= cap binding, corr(a, b) = -1: only
     the difference is determined). The same limit written as a bound
     or as a row returns the same matrix (jkitchin/pounce#362).
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given.
+    This inverts that factor, so a perturbed one answers for a nearby
+    problem rather than this one. It warns either way, and the cap is
+    the caller choosing to stop instead of to read the warning.
     """
     if hessian not in ("lagrangian", "gauss-newton"):
         raise ValueError(
@@ -2915,6 +3014,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     n_fit = len(session.fit_rows)
 
     # ── guardrails ────────────────────────────────────────────────────────
+    _check_margins(None, max_pdpert, "covariance")
+    _refuse_on_pdpert(session, max_pdpert, "covariance")
     pert = np.asarray(session.solver.kkt_perturbations)
     if pert.any():
         warnings.warn(
@@ -3228,7 +3329,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         lambda: _conditioned_on(session, cb.act, rows, "covariance"))
 
 
-def information(model, hessian="lagrangian", wrt=None):
+def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     """The information matrix of the fitted parameters: the reduced
     Hessian over the declared block, the un-inverted sibling of
     covariance(), from the same single solve.
@@ -3273,6 +3374,12 @@ def information(model, hessian="lagrangian", wrt=None):
 
     Returns an Information object keyed by the declared variables'
     data objects: info[m.A, m.k], info.matrix, info.eigen().
+
+    max_pdpert refuses rather than answering when the converged KKT
+    factor carries an inertia correction larger than the value given.
+    This inverts that factor, so a perturbed one answers for a nearby
+    problem rather than this one. It warns either way, and the cap is
+    the caller choosing to stop instead of to read the warning.
     """
     if hessian not in ("lagrangian", "gauss-newton"):
         raise ValueError(
@@ -3291,6 +3398,8 @@ def information(model, hessian="lagrangian", wrt=None):
     n_params = len(params)
     wording = "fitted" if wrt is None else "block"
 
+    _check_margins(None, max_pdpert, "information")
+    _refuse_on_pdpert(session, max_pdpert, "information")
     pert = np.asarray(session.solver.kkt_perturbations)
     if pert.any():
         warnings.warn(
