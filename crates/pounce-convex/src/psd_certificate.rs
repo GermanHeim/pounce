@@ -39,11 +39,19 @@ pub enum PsdCertificateError {
 /// coordinates (`row >= col`). Duplicate coordinates are summed. The
 /// diagonal fast path accepts an eigenvalue down to `-tolerance`, while coupled
 /// matrices are tested by factoring `A + tolerance * I` and inspecting its
-/// inertia. At the exact boundary `lambda_min(A) = -tolerance`, the shifted
-/// matrix is singular, so a backend that rejects singular factors may return
-/// `Ok(false)` even though the eigenvalue is within the requested tolerance.
-/// A backend that reports no inertia, or a factorization that fails, likewise
-/// produces `Ok(false)` rather than a certificate.
+/// inertia. These branches differ at the exact boundary: the diagonal test is
+/// inclusive (`lambda_min(A) >= -tolerance`), but the coupled route must first
+/// accept the shifted matrix as a nonsingular factorization and is therefore
+/// effectively strict (`lambda_min(A) > -tolerance`) with the current FERAL
+/// backend.
+///
+/// At `lambda_min(A) = -tolerance`, the shifted matrix has a zero eigenvalue.
+/// FERAL reports that zero pivot as `Singular`; `Factorization::new` converts
+/// that status to an error, so the certificate returns `Ok(false)` before
+/// `number_of_neg_evals` is consulted. This is separate from the later
+/// `provides_inertia()` guard: a backend that reports no inertia, or any other
+/// factorization failure, likewise produces `Ok(false)` rather than a
+/// certificate.
 ///
 /// For a symmetric matrix, shifting every eigenvalue by `tolerance` gives
 /// `lambda_min(A + tolerance I) = lambda_min(A) + tolerance`. Therefore a
