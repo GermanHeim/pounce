@@ -1300,14 +1300,17 @@ def estimate(model, perturb, clamp=True, mode="linear",
     gained. It applies under every mode, refining whatever step that
     mode produced.
 
-    bound_eps sets how far outside a bound a step has to end to count as
-    having left it, which decides what mode="fix_relax" pins, what
-    `estimate_report()` reports in `crossed`, and what the clamp below
-    acts on. Unset, it is how far outside the solve itself was willing
-    to settle, floored so an unrelaxed solve does not pin on roundoff.
-    Only mode="fix_relax" reads it, and passing it under another mode
-    warns and changes nothing. It must be positive, as the CLI's
-    sens_bound_eps is.
+    bound_eps sets how far outside a variable bound a step has to end
+    to count as having left it, which decides what mode="fix_relax"
+    pins, what `estimate_report()` reports in `crossed`, and what the
+    clamp below acts on. It is absolute, as the refinement's own test
+    is. Unset, it is how far outside the solve itself was willing to
+    settle, floored so an unrelaxed solve does not pin on roundoff. A
+    constraint row keeps its own floor, and a bound is released when the
+    step drives its multiplier negative past the solve's own margin,
+    whatever bound_eps is. Only mode="fix_relax" reads it, and passing
+    it under another mode warns and changes nothing. It must be
+    positive, as the CLI's sens_bound_eps is.
 
     max_pdpert refuses rather than answering when the converged KKT
     factor carries an inertia correction larger than the value given.
@@ -1442,13 +1445,11 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # rather than chosen here: it was willing to leave a converged
         # point `bound_relax_factor` outside, so anything within that is
         # on the bound. The refinement pins against the same number.
+        # The comparison is absolute, as the refinement's own is, so the
+        # clamp and the pins agree on a coordinate of any magnitude.
         eps = _bound_margin(
             session, bound_eps if mode == "fix_relax" else None)
-        # scaled by the coordinate's own magnitude, never by the
-        # bound: an absent bound arrives as the reader's +-1e19
-        # sentinel, which would put the tolerance at 1e10
-        tol = eps * np.maximum(1.0, np.abs(x_new))
-        out = np.where((x_new < lo - tol) | (x_new > hi + tol))[0]
+        out = np.where((x_new < lo - eps) | (x_new > hi + eps))[0]
         if out.size:
             names = [session.var_names[i] for i in out]
             if mode == "fix_relax":
@@ -1488,12 +1489,9 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # crossing shows up as a value outside its bound and clamping is
         # all this mode can do about it. The active set changed and the
         # step does not know, which is what `fix_relax` addresses.
+        # The comparison is absolute, as the refinement's own is.
         eps = _bound_margin(session, None)
-        # scaled by the coordinate's own magnitude, never by the
-        # bound: an absent bound arrives as the reader's +-1e19
-        # sentinel, which would put the tolerance at 1e10
-        tol = eps * np.maximum(1.0, np.abs(x_new))
-        clamped = (x_new < lo - tol) | (x_new > hi + tol)
+        clamped = (x_new < lo - eps) | (x_new > hi + eps)
         if clamped.any():
             names = [session.var_names[i] for i in np.where(clamped)[0]]
             warnings.warn(
@@ -1649,7 +1647,7 @@ _NO_BOUND = 1e19
 
 
 def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
-                mu=float("nan"), eps=1e-9):
+                mu=float("nan"), tol=None):
     """Smallest fraction of `step` that reaches a bound, and where.
 
     Only coordinates strictly inside their bounds take part, because a
@@ -1700,9 +1698,12 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
     present = np.abs(bound) < _NO_BOUND
     moving = np.abs(step) > 1e-12 * scale
 
-    # the same predicate, and the same tolerance, that fills `crossed`
+    # The same predicate, and the same tolerance, that fills `crossed`
+    # or `crossed_rows`. The caller passes the tolerance it fills with,
+    # and the default is the rows' own.
     reached = base + step
-    tol = eps * np.maximum(1.0, np.abs(reached))
+    if tol is None:
+        tol = 1e-9 * np.maximum(1.0, np.abs(reached))
     crosses = present & moving & np.where(
         toward_hi, reached > bound + tol, reached < bound - tol)
 
@@ -1796,11 +1797,18 @@ def estimate_report(model, perturb, max_iter=None,
     point and `perturbations` and `bounds_relaxed` from the solve, so
     none of the five depends on the mode.
 
-    bound_eps sets how far outside a bound a step has to end to count as
-    having left it, which decides what mode="fix_relax" pins. Unset, it
-    is how far outside the solve itself was willing to settle, floored
-    so an unrelaxed solve does not pin on roundoff. mode="path" reads no
-    such margin, so this does nothing there.
+    bound_eps sets how far outside a variable bound a step has to end
+    to count as having left it, which decides what mode="fix_relax"
+    pins and what `crossed` and `alpha` measure against. It is absolute,
+    as the refinement's own test is. Unset, it is how far outside the
+    solve itself was willing to settle, floored so an unrelaxed solve
+    does not pin on roundoff, and `crossed` keeps that floor so a
+    coordinate the solve itself left outside a relaxed bound is still
+    named. A constraint row keeps its own floor, and a bound is released
+    when the step drives its multiplier negative past the solve's own
+    margin, whatever bound_eps is. Only mode="fix_relax" reads it, and
+    passing it under another mode warns. It must be positive, as the
+    CLI's sens_bound_eps is.
 
     max_pdpert refuses rather than answering when the converged KKT
     factor carries an inertia correction larger than the value given.
@@ -1900,14 +1908,20 @@ def estimate_report(model, perturb, max_iter=None,
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
     g_l, g_u = np.asarray(session.nl.g_l), np.asarray(session.nl.g_u)
 
-    # the margin the refinement pinned against, so `alpha`, `crossed`
-    # and `crossed_rows` answer with the number that decided the step.
-    # Unset keeps the fixed floor rather than the solve's relaxation:
-    # `crossed` reports a coordinate the SOLVE left outside its bound,
-    # and the relaxation is exactly how far out that is, so taking it
-    # as the margin would hide the case this report exists to name.
+    # The margin the refinement pinned against, so `alpha` and `crossed`
+    # answer with the number that decided the step. It is absolute, as
+    # the refinement's own test is, so a coordinate of order 1e4 does not
+    # get a tolerance the refinement never gave it. Unset keeps the
+    # fixed floor rather than the solve's relaxation: `crossed` reports
+    # a coordinate the SOLVE left outside its bound, and the relaxation
+    # is exactly how far out that is, so taking it as the margin would
+    # hide the case this report exists to name.
     eps = (1e-9 if bound_eps is None or mode != "fix_relax"
            else float(bound_eps))
+    # The refinement pins variable bounds only, so a constraint row
+    # keeps its floor whatever margin the caller set: a wide margin has
+    # no say over a row the step carries past its limit. Its tolerance
+    # is set beside the row ratio test below.
 
     row_names = _user_row_names(session)
 
@@ -1930,7 +1944,7 @@ def estimate_report(model, perturb, max_iter=None,
         var_on_bound = _on_bound(act["var_status"])
         row_on_bound = _on_bound(act["row_status"])
 
-    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names, eps=eps,
+    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names, tol=eps,
                                on_bound=var_on_bound, mu=mu)
     first_kind = None if first is None else "variable"
     dg = _row_step(session, dx)
@@ -1939,19 +1953,18 @@ def estimate_report(model, perturb, max_iter=None,
     # activity, and a pin constraint moves by construction
     live = g_l < g_u
     live[list(pin_idx)] = False
+    g_pred = g_base + dg
+    gtol = 1e-9 * np.maximum(1.0, np.abs(g_pred))
     a_row, f_row = _ratio_test(g_base, dg, g_l, g_u, row_names, live=live,
-                               on_bound=row_on_bound, mu=mu, eps=eps)
+                               on_bound=row_on_bound, mu=mu, tol=gtol)
     if a_row < alpha:
         alpha, first, first_kind = a_row, f_row, "constraint"
 
-    tol = eps * np.maximum(1.0, np.abs(x_new))
     crossed = ComponentMap()
-    for i in np.where((x_new < lo - tol) | (x_new > hi + tol))[0]:
+    for i in np.where((x_new < lo - eps) | (x_new > hi + eps))[0]:
         ov = model.find_component(session.var_names[i])
         if ov is not None:
             crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
-    g_pred = g_base + dg
-    gtol = eps * np.maximum(1.0, np.abs(g_pred))
     crossed_rows = ComponentMap()
     out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
     for j in np.where(live & out_of_bounds)[0]:
@@ -2040,12 +2053,12 @@ def active_set_changes(model, perturb, predictor_iter=16,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
-    _check_margins(None, max_pdpert, "active_set_changes")
-    _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
             "active_set_changes: degeneracy must be 'directional' or "
             f"'one_sided', got {degeneracy!r}")
+    _check_margins(None, max_pdpert, "active_set_changes")
+    _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:

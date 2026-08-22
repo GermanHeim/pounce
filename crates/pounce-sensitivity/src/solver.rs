@@ -79,6 +79,9 @@ struct BoundContext {
     x_curr: Vec<Number>,
     /// How far outside a bound still counts as on it.
     eps: Number,
+    /// How far negative a bound multiplier has to go before its bound
+    /// is released. Always the solve's own margin, whatever `eps` is.
+    release_eps: Number,
     /// Bound multipliers at the base point, in the solve's own
     /// coordinates, with the compound row each occupies.
     mults: Vec<crate::boundcheck::BoundMultiplier>,
@@ -682,6 +685,7 @@ impl Solver {
             &ctx.mults,
             &rhs_plain,
             ctx.eps,
+            ctx.release_eps,
             max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
@@ -923,6 +927,7 @@ impl Solver {
             &ctx.mults,
             &rhs_plain,
             ctx.eps,
+            ctx.release_eps,
             max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
@@ -1378,7 +1383,12 @@ impl Solver {
         // outside, so anything within that is on the bound, not past
         // it. A floor keeps an unrelaxed solve from pinning on
         // roundoff.
-        let eps = bound_eps.unwrap_or_else(|| state.bound_relax_factor.abs().max(1e-9));
+        let floor = state.bound_relax_factor.abs().max(1e-9);
+        let eps = bound_eps.unwrap_or(floor);
+        // A caller's `bound_eps` is a primal margin and says nothing
+        // about when a multiplier has changed sign, so the release test
+        // keeps the solve's own margin.
+        let release_eps = floor;
         // The bound multipliers at the base point, with the compound
         // row each one occupies, so a step that drives one negative can
         // release that bound.
@@ -1405,6 +1415,7 @@ impl Solver {
             hi,
             x_curr: state.x[..n_x].to_vec(),
             eps,
+            release_eps,
             mults,
         })
     }

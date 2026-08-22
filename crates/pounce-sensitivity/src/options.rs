@@ -277,20 +277,6 @@ mod tests {
     /// The cap compares against the largest perturbation of the four,
     /// and only fires when it is actually exceeded.
     #[test]
-    /// The comparison two surfaces share, on its own. Strictly above,
-    /// the largest of the four, and by absolute value: an inertia
-    /// correction is reported signed and a cap is a magnitude.
-    #[test]
-    fn the_verdict_reads_the_largest_correction_by_magnitude() {
-        assert_eq!(pdpert_verdict(&[0.0, 0.0, 0.0, 0.0], 1e-6), (false, 0.0));
-        assert_eq!(pdpert_verdict(&[1e-9, 1e-4, 0.0, 1e-7], 1e-6).1, 1e-4);
-        assert!(pdpert_verdict(&[0.0, 0.0, -1e-4, 0.0], 1e-6).0);
-        // strictly above, so a cap AT the correction accepts it
-        assert!(!pdpert_verdict(&[1e-6, 0.0, 0.0, 0.0], 1e-6).0);
-        assert!(pdpert_verdict(&[1.0000001e-6, 0.0, 0.0, 0.0], 1e-6).0);
-    }
-
-    #[test]
     fn the_perturbation_cap_fires_only_above_the_limit() {
         let mut l = list();
         l.set_numeric_value("sens_max_pdpert", 1e-6, true, false)
@@ -302,5 +288,18 @@ mod tests {
             .pdpert_refusal(&[0.0, 0.0, 1e-4, 0.0])
             .expect("1e-4 is above the 1e-6 cap");
         assert!(msg.contains("sens_max_pdpert"), "{msg}");
+    }
+
+    /// The comparison two surfaces share, on its own. Strictly above,
+    /// the largest of the four, and by absolute value: an inertia
+    /// correction is reported signed and a cap is a magnitude.
+    #[test]
+    fn the_verdict_reads_the_largest_correction_by_magnitude() {
+        assert_eq!(pdpert_verdict(&[0.0, 0.0, 0.0, 0.0], 1e-6), (false, 0.0));
+        assert_eq!(pdpert_verdict(&[1e-9, 1e-4, 0.0, 1e-7], 1e-6).1, 1e-4);
+        assert!(pdpert_verdict(&[0.0, 0.0, -1e-4, 0.0], 1e-6).0);
+        // strictly above, so a cap AT the correction accepts it
+        assert!(!pdpert_verdict(&[1e-6, 0.0, 0.0, 0.0], 1e-6).0);
+        assert!(pdpert_verdict(&[1.0000001e-6, 0.0, 0.0, 0.0], 1e-6).0);
     }
 }
