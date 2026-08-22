@@ -747,7 +747,10 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or_else(|| "gradient-based".to_string());
-        if method != "user-scaling" {
+        // `curvature-based` (gh #703) delivers its factors through the
+        // same `get_scaling_parameters` callback, so the per-variable half
+        // needs the same substitution wrapper user factors get.
+        if method != "user-scaling" && method != "curvature-based" {
             return Ok(tnlp);
         }
         match pounce_nlp::scaling_tnlp::wrap_with_scaling(
@@ -765,9 +768,9 @@ impl IpoptApplication {
                 // The trailing newline belongs to the message: the
                 // caller emits it with `eprint!` and hands the same
                 // string to the journalist, as the refusals below do.
-                "pounce: nlp_scaling_method=user-scaling supplied per-variable \
+                "pounce: nlp_scaling_method={method} supplied per-variable \
                  scaling factors that cannot be applied. {why}. Correct the \
-                 factors, or drop nlp_scaling_method=user-scaling.\n"
+                 factors, or drop nlp_scaling_method={method}.\n"
             )),
         }
     }
@@ -2741,7 +2744,12 @@ impl IpoptApplication {
         let scaling_method = match scaling_method.as_str() {
             "none" => ScalingMethod::None,
             "gradient-based" => ScalingMethod::GradientBased,
-            "user-scaling" => ScalingMethod::UserScaling,
+            // `curvature-based` computes the factors from the model's
+            // quadratic coefficients and hands them back through
+            // `TNLP::get_scaling_parameters` (gh #703), so from the
+            // engine's side it *is* user scaling — the only difference is
+            // who filled the vectors in.
+            "user-scaling" | "curvature-based" => ScalingMethod::UserScaling,
             // `equilibration-based` is registered upstream but not yet
             // implemented in pounce; fall back to gradient-based (the
             // upstream default) to keep behavior predictable.

@@ -222,13 +222,24 @@ uncorrected step differs by 9e-6 at `tol = 1e-3` and by 2e-9 at
 `tol = 1e-8`. There is no option for it, since there is no reason to
 want the barrier problem's answer.
 
-Each pass rebuilds the Schur complement over the pins so far, so pass
-`k` costs one dense `k × k` solve and `k + 1` back-solves and the total
-grows quadratically. The default `max_iter` of 16 is 136 back-solves.
-A pin never rebuilds the factorization, which is what keeps it cheaper
-than re-solving. `max_iter` bounds that work and is a budget rather
-than a safeguard: the refinement is only worth running while it stays
-cheaper than the re-solve it replaces.
+A pass takes every crossing it can see, pins them together and
+re-solves, which is upstream's own loop: one violation list per pass,
+and `while (bounds_violated)` as the termination condition. Each pass
+rebuilds the Schur complement over the pins so far, so a pass carrying
+`k` of them costs one dense `k × k` solve and `k + 1` back-solves. A
+pin never rebuilds the factorization, which is what keeps it cheaper
+than re-solving.
+
+`predictor_iter` caps the passes, and is a safety limit rather than a budget.
+It was a budget while a pass took only the worst crossing, which needed
+as many passes as there were crossings — and on a model with more
+crossings than passes the limit, not the violations, decided where the
+loop stopped. On the CSTR of notebook 36 that put the pin count at
+exactly the budget for every budget tried, and at 100 pins (half that
+problem's degrees of freedom) the refined step came back 8.6 times
+worse than the unrefined one (gh#732). `estimate()`'s warning now names
+which stopping condition was reached rather than inferring it from the
+pin count.
 
 A **release** does re-factor, once per released set. It has to. An
 active bound contributes `sigma = z / s` to the KKT's `x` diagonal, and
@@ -240,15 +251,42 @@ was off by 2e-4 while at a looser `1e-6` it was off by 7e-9. Dropping
 the bound's `sigma` and re-factoring removes the dependence entirely.
 One factorization still sits an order of magnitude under the twenty to
 a hundred a re-solve runs, and a step that releases nothing pays
-nothing.
+nothing. This is the one place the loop departs from upstream, which
+puts the multiplier's row in the same violation list as the primal
+crossings and takes a Schur row over it: that is the computation the
+`eps · sigma` cancellation above is measuring. The pins survive a
+release either way — their right-hand sides are re-measured against the
+re-solved base rather than the pin set being cleared.
 
-Two things stop it short of holding every bound. The pass budget, which
-a caller can raise. And the problem's degrees of freedom, which no
-budget helps: pinning uses one degree of freedom each, and past that no
+Releasing is the half that has to be careful about how much it does at
+once, and the asymmetry is worth stating. A pin ADDS a condition, so
+asking for too many shows up honestly as an augmented system that
+cannot be solved. A release REMOVES one: each bound taken out of the
+active set is stiffness that is no longer holding its variable there.
+Take too many at once and variables that were sitting on their bounds
+are carried off them, with no degrees of freedom left to pin them back
+— and no failed solve anywhere to say so. So a release batch is kept
+only when the step it produces is no further outside the bounds than
+the step in hand; otherwise the most negative multiplier goes alone and
+the next pass re-measures the rest under it.
+
+Three things stop it short of holding every bound. The pass limit,
+which a caller can raise. The problem's degrees of freedom, which no
+limit helps: pinning uses one degree of freedom each, and past that no
 step holds every bound at once, so the pin is refused rather than
-returned from a singular system. In either case `estimate()` warns,
-names the variables still outside, and says which limit was reached.
-`clamp` then decides what happens to them, exactly as under `linear`.
+returned from a singular system. And the refinement ending further
+outside the bounds than the step it started from, which returns the
+unrefined step instead — repairing an active set has to beat not
+repairing it. In each case `estimate()` warns, names the variables
+still outside, and says which of the three it was. `clamp` then decides
+what happens to them, exactly as under `linear`.
+
+A pass is also refused when its correction is out of scale with the
+step it corrects, not only when a pinned row misses its target.
+Checking the pinned rows alone is what let gh#732's hundred pins each
+land within `1e-3` of where they were asked to go while the step as a
+whole came back unusable: hitting the pinned coordinates says nothing
+about what the correction did to the other thirteen hundred.
 
 What counts as outside a bound is not a tolerance you pass. It comes
 from the solve, which was willing to leave a converged point
@@ -308,7 +346,7 @@ large every first-order prediction degrades: the CSTR trajectories
 read high near the start of the horizon in every mode, which is the
 base-point linearization and not something more segments repair.
 
-`max_iter` is the same knob it is under `fix_relax`: it caps the
+`predictor_iter` is the same knob it is under `fix_relax`: it caps the
 active-set changes applied, and past the cap the rest of the
 perturbation is taken in one step under the active set reached, with
 the warning naming the cap. On the cost side a reach adds a Schur row
@@ -317,7 +355,7 @@ grows about linearly with the changes applied, well under a re-solve.
 
 See
 [`python/notebooks/36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
-for the worked CSTR example behind those numbers, including `max_iter`
+for the worked CSTR example behind those numbers, including `predictor_iter`
 sweeps of both modes against re-solve wall time.
 
 ### A held solve at a kink: `degeneracy`
@@ -348,22 +386,33 @@ estimate(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
 
 `"directional"` decides each weakly active bound for the
 perturbation's own direction by the directional-derivative QP (the
-sIPOPT paper's eq. 14), solved as an active-set search over those
-bounds on the held factorization. The weakly active rows are released,
-removing the order-one `sigma`, a candidate working set pins their
-variables through Schur rows, and a candidate is accepted when every
-variable left out moves into its feasible side and every pin is
-necessary, meaning its removal alone makes its variable violate. The
-accepted direction is unique even when the working set is not, by the
-QP's strict convexity. All three modes consume the decision: `linear`
-takes the QP direction itself, `fix_relax` takes it as the predictor
-its refinement iterates from, and `path` starts with the held rows
-pinned and the left rows in its base-activity table, so a bound that
-is genuinely active for the first stretch of the perturbation, which
-happens when the held solve sits inside the ambiguous band rather
-than exactly at the kink, releases at the fraction where its
-multiplier reaches zero rather than at the start. The record then
-carries that departure at its measured fraction.
+sIPOPT paper's eq. 14). The weakly active rows are released, removing
+the order-one `sigma`, in one factorization that serves the whole
+decision, and the direction of the released system is computed. Rows
+it moves into violation are the ones the direction engages, and their
+pin forces solve a small quadratic program, one variable per engaged
+row with a nonnegativity bound, whose optimality conditions are
+eq. 14's complementarity: each engaged bound either holds with a
+nonnegative force or releases and moves feasibly. The active-set QP
+engine solves it, the decided direction is checked against every weak
+row, and the engaged set grows until no new row violates.
+
+A row engages only when its movement exceeds the square root of the
+barrier parameter relative to the direction's norm. A weak bound's
+slack and multiplier carry an uncertainty equal to their own size,
+so a movement below that band cannot be resolved against the bound,
+and deciding it exactly would assert precision the solve does not
+contain.
+
+All three modes consume the decision: `linear` takes the QP direction
+itself, `fix_relax` takes it as the predictor its refinement iterates
+from, and `path` starts with the held rows pinned and the left rows
+in its base-activity table, so a bound that is genuinely active for
+the first stretch of the perturbation, which happens when the held
+solve sits inside the ambiguous band rather than exactly at the kink,
+releases at the fraction where its multiplier reaches zero rather
+than at the start. The record then carries that departure at its
+measured fraction.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
@@ -374,13 +423,24 @@ at 0.0018, and `fix_relax` reaches 0.0018 either way because its own
 release test happens to read the right sign there, a favorable read
 that `directional` replaces with a guarantee.
 
-The cost is gated by the condition. Detection is a scan over the
-bound rows, orders of magnitude below the backsolve every call
-already pays, and the QP runs only at a degenerate base point, at
-roughly one Schur trial per candidate working set with both the
-trials and the size of the attempt bounded by the shared `max_iter`.
-Past the budget, or when no candidate is sign-consistent, the call
-falls back to the one-sided step and warns. Detection also returns
+The cost is gated by the condition, and budgeted by
+`degeneracy_iter` (default 16): the released solve, one further
+back-solve per engaged row, and one more to recover the direction all
+count against it, so the decision costs a handful of back-solves at a
+kink that engages a handful of bounds. A decision whose engaged set
+grows pays that recovering solve once per pass, so a set reached in
+two passes costs one more than the same set reached in one.
+
+A direction that engages more rows than the budget covers falls back to
+the one-sided step with a warning. Only a budget of zero fails before
+any work: which rows engage is not known until the released solve has
+run, so a budget too small to finish still pays that one factorization
+before reporting the shortfall. The warning names the engaged count and
+the number to raise `degeneracy_iter` to, which is the retry price and
+is a floor, since a later pass can engage more rows. It is always
+strictly above what the failed call spent, so each retry buys progress.
+`predictor_iter` keeps its meaning as the mode's own work and plays no
+part in the decision. Detection also returns
 nothing on a solve with relaxed bounds, where the classifier cannot
 read the slacks.
 
@@ -388,6 +448,69 @@ read the slacks.
 without a direction, so at a degenerate base point it warns, names
 the variables and bounds, and returns the one-sided value. The
 direction-aware answer is `estimate()`'s.
+
+### Refining the step: `corrector_iter`
+
+Every mode returns a step, and that step leaves a residual in the
+barrier KKT system at the perturbed parameter values. Newton iterations
+against the held factorization drive that residual down, one back-solve
+each and no factorization. `corrector_iter` is how many to run, on
+`estimate()` and `estimate_report()`, and it stops early when an
+iteration fails to improve the residual, so it is a budget rather than
+a count. It defaults to zero.
+
+The correction aims at the barrier solution at the `mu` the solve
+finished on, not at a re-solve, so the accuracy it can reach is bounded
+by that offset. It does not converge to the exact answer and does not
+claim to.
+
+What lets it work past a bound crossing is that the predictor already
+decided which bounds moved, and the corrector applies that decision
+once before iterating. A bound the step takes off its minimum comes out
+of the operator, its multiplier held at zero and its complementarity
+row gone. A bound the step brings onto its minimum has its diagonal
+raised to the stiffness the barrier assigns there. Every other row
+keeps the base point's term. Both directions are the same change to one
+diagonal, so a single factorization serves the whole correction.
+
+That decision is where the modes start from different places.
+`fix_relax` and `path` compute an active set and hand it over.
+`mode="linear"` holds the active set fixed as it builds the step, so
+all the correction has to work with is whatever the clamp left sitting
+on a bound. On the CSTR at a quarter of the change to its steady state
+that is one bound against the seven the other two pass over, which is
+why the linear estimate stays furthest from a re-solve. Below the first
+crossing all three are the same step.
+
+How far the correction reaches is set by how many crossings the
+predictor hands over rather than by the size of the perturbation
+directly. On the CSTR the notebook uses, whose first crossing is at
+1.3% of the change to its steady state, `fix_relax` with eight
+iterations takes the largest relative error from 2.4e-3 to 1e-6 at a 2%
+change, from 1.4e-2 to 2e-6 at 5%, and from 6.0e-2 to 6.0e-5 at 10%,
+which is four crossings. At seven crossings the same call improves the
+estimate by about 5% and stops.
+
+The reason it stops is the multipliers rather than the operator. They
+arrive extrapolated over the whole perturbation, nothing sets them at
+handoff, and once the perturbation is large that is the dominant error.
+Fitting them to minimize the stationarity residual at the predictor's
+variables does not help: it absorbs the error into the multipliers and
+removes the signal the iterations need, which is why the algorithm uses
+that estimate only to initialize multipliers before its first
+iteration.
+
+So a budget past the crossing count the correction carries buys little,
+and at large perturbations it can return an estimate no better than the
+step it was handed. `estimate()` warns when a correction ends without
+at least halving the residual, so an uncorrected step is never passed
+off as a corrected one, and `estimate_report(corrector_iter=...)`
+carries the iterations spent, the residual before and after, and that
+residual split into stationarity, feasibility and complementarity. The
+three carry different units and different consequences: a correction
+can leave the model's equations nearly satisfied and the multipliers
+complementary while the Lagrangian's gradient is far from zero, and
+only the first two say whether the values can be acted on.
 
 ### What the step did about the bounds: `estimate_report()`
 
@@ -409,6 +532,24 @@ r.violation      # constraint violation at the predicted point
 r.activity       # per coordinate: inactive / weakly_active /
 r.row_activity   # strongly_active / ambiguous / unidentified / ...
 ```
+
+`refine_stop` says why the `"fix_relax"` refinement stopped, one of
+`"settled"`, `"iteration_limit"`, `"degrees_of_freedom"` or
+`"worse_than_plain"`, and is None under the other two modes. A pass
+pins every crossing it sees, so the pin count says nothing about which
+limit was reached and this is the only thing that does.
+
+`mode` and `predictor_iter` select which step is measured and match
+`estimate()`'s arguments of the same names. `violation` and `corrector`
+are properties of the step, so a `fix_relax` estimate needs
+`estimate_report(mode="fix_relax")` to be described by its own numbers
+rather than the linear step's.
+
+Under `"fix_relax"` and `"path"` the step stops at the bound, so
+`alpha` is 1.0 and `crossed` is empty for every model. What those two
+did about the bounds is what `"linear"` reports at the same
+perturbation. `activity`, `row_activity` and `mu` come from the
+converged base point and do not depend on the mode.
 
 `alpha` comes from a ratio test along the step. Coordinates already on
 a bound take no part in it, on that side: the gap left at an active

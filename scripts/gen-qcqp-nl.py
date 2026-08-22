@@ -47,6 +47,15 @@ Usage
     gen-qcqp-nl.py --n 500 --quad-rows 10 --quad-density 1.0 \
                    --linear-rows 110 --eqns 10 --out /tmp/gen500.nl
 
+Deliberate column imbalance (gh #703)
+-------------------------------------
+`--column-scale S` applies the exact substitution `x_j -> x_j / c_j`, with
+`c_j` spanning `[S^-0.5, S^0.5]`. Values, objective and right-hand sides are
+untouched -- only the conditioning moves. It exists so a *column*
+equilibration scheme can be validated against a known answer: without it
+every `Q` entry comes from one `U(-10, 10)`, the columns are homogeneous by
+construction, and any column scaling has nothing to find.
+
 The other way the same algebra gets written (gh #673)
 -----------------------------------------------------
 `--form factored` writes each nonlinear row and the objective as a sum of
@@ -199,11 +208,44 @@ def emit(out, args) -> None:
         body_value = quad_value
     obj_g = [rng.uniform(-100.0, 100.0) for _ in range(n)]
 
+    # --- optional deliberate column imbalance (gh #703) ---
+    #
+    # `--column-scale S` substitutes `x_j -> x_j / c_j` with `c_j` spanning
+    # `[S^-0.5, S^0.5]` logarithmically. The substitution is exact: every
+    # value, the objective and every right-hand side are unchanged, and so
+    # is the optimum. What changes is the *conditioning* -- the columns of
+    # `Q` and of the linear block now span `S` orders of magnitude.
+    #
+    # This exists because the generator otherwise draws every `Q` entry
+    # from one `U(-10, 10)`, so its columns are homogeneous by construction
+    # and a column-equilibration scheme has nothing to find. A number taken
+    # there would measure the generator. With `--column-scale` the right
+    # answer is *known* -- a joint variable scaling should recover `c` --
+    # so the scheme can be validated rather than merely exercised.
+    if args.column_scale != 1.0:
+        col = [args.column_scale ** (j / max(n - 1, 1) - 0.5) for j in range(n)]
+        x_ref = [col[j] * x_ref[j] for j in range(n)]
+        obj_g = [obj_g[j] / col[j] for j in range(n)]
+        if factored:
+            def rescale_residuals(rs):
+                return [([(j, c / col[j]) for j, c in a], t) for a, t in rs]
+            quads = [rescale_residuals(q) for q in quads]
+            obj_q = rescale_residuals(obj_q)
+        else:
+            def rescale_quad(q):
+                return {i: {j: v / (col[i] * col[j]) for j, v in row.items()}
+                        for i, row in q.items()}
+            quads = [rescale_quad(q) for q in quads]
+            obj_q = rescale_quad(obj_q)
+
     # --- linear rows: `linear_nnz` entries each, first `eqns` are equalities ---
     lin_rows = []
     for _ in range(args.linear_rows):
         cols = sorted(rng.sample(range(n), min(args.linear_nnz, n)))
-        lin_rows.append([(c, rng.uniform(-10.0, 10.0)) for c in cols])
+        row = [(c, rng.uniform(-10.0, 10.0)) for c in cols]
+        if args.column_scale != 1.0:
+            row = [(c, v / col[c]) for c, v in row]
+        lin_rows.append(row)
 
     jac_nnz = sum(len(c) for c in nl_cols) + sum(len(r) for r in lin_rows)
 
@@ -320,6 +362,9 @@ def main(argv: list[str]) -> int:
                    help="squared residuals per nonlinear body, --form factored only")
     p.add_argument("--residual-nnz", type=int, default=20,
                    help="variables per residual, --form factored only")
+    p.add_argument("--column-scale", type=float, default=1.0,
+                   help="span of a deliberate per-variable column imbalance "
+                        "(gh #703); see the module docstring")
     p.add_argument("--slack", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", required=True)

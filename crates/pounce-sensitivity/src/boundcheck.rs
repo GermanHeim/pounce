@@ -72,27 +72,34 @@ pub fn expand_bounds(
     (lo, hi)
 }
 
-/// The coordinate whose predicted value leaves its bound by the most,
-/// as `(index, the bound it leaves)`.
+/// Every coordinate whose predicted value leaves its bound, as
+/// `(index, the bound it leaves, how far past it)`, worst first.
 ///
 /// This is the half of the bound check that fix-relax keeps. The clamp
 /// above answers "put it back", which loses the other coordinates; the
-/// refinement needs "which one, and where does it belong", and then
-/// re-solves with that coordinate pinned so the rest respond.
+/// refinement needs "which ones, and where do they belong", and then
+/// re-solves with those coordinates pinned so the rest respond.
 ///
-/// The worst violator is chosen rather than the first by index, so the
-/// order of the pins does not depend on how the model was written.
+/// Upstream's `BoundCheck` collects the whole list in one sweep and
+/// its caller pins all of it before re-solving, which is what makes
+/// the loop terminate on its own rather than on a pass budget: pinning
+/// the single worst one per pass needs as many passes as there are
+/// crossings, so on a model with more crossings than passes the budget
+/// decides the answer (gh#732).
+///
+/// The list is ordered by overshoot rather than by index so the pins do
+/// not depend on how the model was written, and ties keep index order.
 /// `skip` names coordinates already pinned by an earlier pass, which
 /// sit ON their bound and would otherwise be picked again.
-pub fn worst_violation(
+pub fn bound_violations(
     x_curr: &[Number],
     dx: &[Number],
     lo: &[Number],
     hi: &[Number],
     eps: Number,
     skip: &[usize],
-) -> Option<(usize, Number)> {
-    let mut worst: Option<(usize, Number, Number)> = None;
+) -> Vec<(usize, Number, Number)> {
+    let mut out: Vec<(usize, Number, Number)> = Vec::new();
     for i in 0..x_curr.len().min(dx.len()) {
         if skip.contains(&i) {
             continue;
@@ -105,11 +112,29 @@ pub fn worst_violation(
         } else {
             continue;
         };
-        if over > eps && worst.is_none_or(|(_, _, w)| over > w) {
-            worst = Some((i, bound, over));
+        if over > eps {
+            out.push((i, bound, over));
         }
     }
-    worst.map(|(i, bound, _)| (i, bound))
+    // stable, so equal overshoots keep index order
+    out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// The coordinate whose predicted value leaves its bound by the most,
+/// as `(index, the bound it leaves)`. The head of
+/// [`bound_violations`].
+pub fn worst_violation(
+    x_curr: &[Number],
+    dx: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+    eps: Number,
+    skip: &[usize],
+) -> Option<(usize, Number)> {
+    bound_violations(x_curr, dx, lo, hi, eps, skip)
+        .first()
+        .map(|&(i, bound, _)| (i, bound))
 }
 
 /// Extract dense values from a `dyn Vector` that wraps a `DenseVector`.
@@ -166,37 +191,6 @@ mod tests {
     fn expansion(n: Index, positions: &[Index]) -> Rc<dyn pounce_linalg::Matrix> {
         let space = ExpansionMatrixSpace::new(n, positions.len() as Index, positions, 0);
         Rc::new(ExpansionMatrix::new(space)) as Rc<dyn pounce_linalg::Matrix>
-    }
-
-    #[test]
-    fn combinations_advance_in_lexicographic_order_and_terminate() {
-        // The enumeration order is the determinism promise of the
-        // directional search: size first, least index within a size.
-        let n = 4;
-        let mut seen: Vec<Vec<usize>> = Vec::new();
-        for size in 0..=n {
-            let mut combo: Vec<usize> = (0..size).collect();
-            loop {
-                seen.push(combo.clone());
-                if !next_combination(&mut combo, n) {
-                    break;
-                }
-            }
-        }
-        assert_eq!(seen.len(), 16, "2^4 subsets in total");
-        let expected_size_2: Vec<Vec<usize>> = vec![
-            vec![0, 1],
-            vec![0, 2],
-            vec![0, 3],
-            vec![1, 2],
-            vec![1, 3],
-            vec![2, 3],
-        ];
-        let got_size_2: Vec<Vec<usize>> = seen.iter().filter(|c| c.len() == 2).cloned().collect();
-        assert_eq!(got_size_2, expected_size_2);
-        for w in seen.windows(2) {
-            assert!(w[0].len() <= w[1].len(), "sizes never decrease");
-        }
     }
 
     #[test]
@@ -263,6 +257,249 @@ mod tests {
         // just outside, but under the tolerance
         assert!(worst_violation(&x, &[0.5 + 1e-12], &[0.0], &[1.0], 1e-9, &[]).is_none());
     }
+
+    #[test]
+    fn bound_violations_returns_every_crossing_worst_first() {
+        let x = [0.5, 0.5, 0.5, 0.5];
+        let dx = [-0.6, -2.0, -0.7, 0.1];
+        let lo = [0.0; 4];
+        let hi = [10.0; 4];
+        let v = bound_violations(&x, &dx, &lo, &hi, 1e-9, &[]);
+        // x3 stays inside; the other three are out by 0.1, 1.5 and 0.2
+        assert_eq!(
+            v.iter().map(|&(i, _, _)| i).collect::<Vec<_>>(),
+            vec![1, 2, 0],
+            "the whole list, ordered by overshoot",
+        );
+        assert_eq!(v[0].1, 0.0, "and each carries the bound it left");
+    }
+
+    #[test]
+    fn bound_violations_leaves_out_what_is_already_pinned() {
+        let x = [0.5, 0.5];
+        let dx = [-0.6, -2.0];
+        let v = bound_violations(&x, &dx, &[0.0, 0.0], &[10.0, 10.0], 1e-9, &[1]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, 0, "the pinned coordinate is not offered again");
+    }
+
+    /// `K` for a two-row system where holding row 0 drags row 1 by
+    /// `lever`: solving `K y = e0` gives `y = (1, -lever)`.
+    fn lever_backsolver(lever: Number) -> crate::backsolver::DenseLuBacksolver {
+        crate::backsolver::DenseLuBacksolver::from_dense(2, &[1.0, 0.0, lever, 1.0])
+            .expect("nonsingular")
+    }
+
+    #[test]
+    fn a_refinement_that_ends_further_out_returns_the_unrefined_step() {
+        // Row 0 is 0.1 below its bound, and the pin that repairs it
+        // throws row 1 a thousand times further out than that. The pass
+        // limit stops the loop before it can pin row 1 as well, so what
+        // it has to return is worse than what it started from —
+        // gh#732's "return the unrefined step" guard, which the pin's
+        // own achievement check cannot see, since row 0 lands exactly
+        // where it was asked to.
+        let bs = lever_backsolver(1000.0);
+        let dx_plain = [-0.1, 0.0];
+        let (dx, rows, stop) = refine_step_onto_bounds(
+            &bs,
+            &dx_plain,
+            &[0.0, 0.0],
+            &[0.0, -1e-3],
+            &[Number::INFINITY, 1e-3],
+            &[],
+            &[0.0, 0.0],
+            1e-9,
+            1,
+        )
+        .expect("refinement");
+        assert_eq!(stop, RefineStop::WorseThanPlain);
+        assert!(rows.is_empty(), "nothing is reported as constrained");
+        assert_eq!(dx, dx_plain.to_vec(), "the unrefined step comes back");
+    }
+
+    #[test]
+    fn a_pass_whose_correction_is_out_of_scale_is_refused() {
+        // The same shape with the lever at 1e10: the pin is achieved to
+        // the last digit and the correction is 1e9 times the step it
+        // corrects, which is a near-singular solve rather than a
+        // repair. A check that reads only the pinned row accepts it.
+        let bs = lever_backsolver(1e10);
+        let dx_plain = [-0.1, 0.0];
+        let (dx, rows, stop) = refine_step_onto_bounds(
+            &bs,
+            &dx_plain,
+            &[0.0, 0.0],
+            &[0.0, Number::NEG_INFINITY],
+            &[Number::INFINITY, Number::INFINITY],
+            &[],
+            &[0.0, 0.0],
+            1e-9,
+            8,
+        )
+        .expect("refinement");
+        assert_eq!(stop, RefineStop::DegreesOfFreedom);
+        assert!(
+            rows.is_empty(),
+            "the pass was refused, so nothing is pinned"
+        );
+        assert_eq!(dx, dx_plain.to_vec());
+    }
+
+    /// A backsolver whose release half is scripted: the plain solves go
+    /// through a `DenseLuBacksolver`, `solve_released_step` answers
+    /// from `steps` keyed by how many rows are released — a missing
+    /// entry is a factorization that failed — and every call to it is
+    /// counted.
+    #[derive(Clone)]
+    struct ScriptedRelease {
+        base: crate::backsolver::DenseLuBacksolver,
+        rows: Vec<crate::backsolver::BoundRow>,
+        steps: std::collections::BTreeMap<usize, Vec<Number>>,
+        calls: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl crate::backsolver::SensBacksolver for ScriptedRelease {
+        fn dim(&self) -> usize {
+            self.base.dim()
+        }
+        fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+            self.base.solve(rhs, lhs)
+        }
+        fn bound_rows(&self) -> Option<&[crate::backsolver::BoundRow]> {
+            Some(&self.rows)
+        }
+        fn supports_release(&self) -> bool {
+            true
+        }
+        fn solve_released(&self, _released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+            self.base.solve(rhs, lhs)
+        }
+        fn solve_released_step(
+            &self,
+            released: &[usize],
+            _rhs: &[Number],
+            lhs: &mut [Number],
+        ) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            match self.steps.get(&released.len()) {
+                Some(s) => {
+                    lhs.copy_from_slice(s);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    /// `n × n` identity with `lever` at `(1, 0)`, so solving `K y = e0`
+    /// gives `y = (1, -lever, 0, …)`: pinning row 0 drags row 1.
+    fn lever_matrix(n: usize, lever: Number) -> Vec<Number> {
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 1.0;
+        }
+        a[n] = lever;
+        a
+    }
+
+    #[test]
+    fn a_release_batch_that_makes_the_step_worse_backs_off_to_one() {
+        // Two multipliers are negative. Releasing both takes x0 five
+        // below its lower bound; releasing the most negative one alone
+        // settles. The batch has to earn its place the way the pin
+        // batch does — without that, the CSTR of notebook 36 released
+        // 56 bounds where 41 were right and the step came back worse
+        // than not refining at all (gh#734 review).
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let bs = ScriptedRelease {
+            base: crate::backsolver::DenseLuBacksolver::from_dense(4, &lever_matrix(4, 0.0))
+                .expect("nonsingular"),
+            rows: vec![
+                crate::backsolver::BoundRow {
+                    row: 2,
+                    var_row: 0,
+                    lower: true,
+                },
+                crate::backsolver::BoundRow {
+                    row: 3,
+                    var_row: 1,
+                    lower: true,
+                },
+            ],
+            steps: [
+                (2usize, vec![-5.0, 0.0, 0.0, 0.0]),
+                (1usize, vec![0.0, 0.0, 0.0, 0.0]),
+            ]
+            .into_iter()
+            .collect(),
+            calls: Rc::clone(&calls),
+        };
+        let mults = [
+            BoundMultiplier { row: 2, base: 1.0 },
+            BoundMultiplier { row: 3, base: 1.0 },
+        ];
+        // z2 = 1 - 2 = -1 and z3 = 1 - 1.5 = -0.5, so both want out
+        let (dx, rows, stop) = refine_step_onto_bounds(
+            &bs,
+            &[0.0, 0.0, -2.0, -1.5],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+            &[Number::INFINITY, Number::INFINITY],
+            &mults,
+            &[0.0; 4],
+            1e-9,
+            8,
+        )
+        .expect("refinement");
+        assert_eq!(rows, vec![2], "the most negative one, alone");
+        assert_eq!(stop, RefineStop::Settled);
+        assert_eq!(dx, vec![0.0, 0.0, -1.0, 0.0], "and its multiplier is zero");
+    }
+
+    #[test]
+    fn a_release_the_factorization_refuses_is_not_asked_for_twice() {
+        // The one negative multiplier cannot be released at all. The
+        // pins carry on without it, and the loop neither asks for that
+        // factorization again on every later pass nor reports the pass
+        // limit for something no budget reaches.
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let bs = ScriptedRelease {
+            base: crate::backsolver::DenseLuBacksolver::from_dense(4, &lever_matrix(4, 1.0))
+                .expect("nonsingular"),
+            rows: vec![crate::backsolver::BoundRow {
+                row: 2,
+                var_row: 0,
+                lower: true,
+            }],
+            // no entry for any size: every released factorization fails
+            steps: std::collections::BTreeMap::new(),
+            calls: Rc::clone(&calls),
+        };
+        let mults = [BoundMultiplier { row: 2, base: 1.0 }];
+        // x0 is 1.0 below its bound and z2 = 1 - 2 = -1 wants out.
+        // Pinning x0 drags x1 to -1, under ITS bound of -0.5, so a
+        // second pass follows and would ask for the release again.
+        let (_dx, rows, stop) = refine_step_onto_bounds(
+            &bs,
+            &[-1.0, 0.0, -2.0, 0.0],
+            &[0.0, 0.0],
+            &[0.0, -0.5],
+            &[Number::INFINITY, Number::INFINITY],
+            &mults,
+            &[0.0; 4],
+            1e-9,
+            8,
+        )
+        .expect("refinement");
+        assert_eq!(calls.get(), 1, "asked for once, then barred");
+        assert_eq!(
+            stop,
+            RefineStop::DegreesOfFreedom,
+            "a bound that cannot leave the active set is not the pass limit",
+        );
+        assert_eq!(rows, vec![0, 1], "and the pins it could place still stand");
+    }
 }
 
 /// A bound multiplier the step can drive negative: where it sits in the
@@ -281,10 +518,62 @@ pub struct BoundMultiplier {
     pub base: Number,
 }
 
+/// Why [`refine_step_onto_bounds`] stopped.
+///
+/// Only [`RefineStop::Settled`] says the refinement finished: the
+/// violation list emptied, which is the loop's own termination
+/// condition. Every other value says the step returned is the last one
+/// a pass could achieve, and names what stopped it, so a caller can
+/// tell a limit it may raise from one it cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefineStop {
+    /// Nothing is outside a bound and no bound multiplier is negative.
+    Settled,
+    /// `max_iter` passes were spent with the list still not empty. A
+    /// safety limit rather than a budget: a pass now takes every
+    /// violation it can see, so reaching this means the conditions kept
+    /// moving and the answer is whatever the last pass reached.
+    IterationLimit,
+    /// A pass could not be solved or could not be achieved: the
+    /// conditions have exhausted the problem's degrees of freedom, and
+    /// no step holds them all. No budget helps.
+    DegreesOfFreedom,
+    /// The refinement ended further outside the bounds than the step it
+    /// started from, so the unrefined step was returned and no rows are
+    /// reported as constrained.
+    WorseThanPlain,
+}
+
+impl RefineStop {
+    /// A stable short name, for a caller reporting this across a
+    /// language boundary.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefineStop::Settled => "settled",
+            RefineStop::IterationLimit => "iteration_limit",
+            RefineStop::DegreesOfFreedom => "degrees_of_freedom",
+            RefineStop::WorseThanPlain => "worse_than_plain",
+        }
+    }
+}
+
+/// How far a pass's correction may exceed the step it corrects before
+/// the pass is refused. The singular case a dense LU does not report
+/// comes back around `1e15`, so this only has to sit above the
+/// leverage a real pin can have — moving one coordinate onto its bound
+/// can legitimately move another by orders of magnitude more.
+const CORRECTION_SCALE_LIMIT: Number = 1e4;
+
+/// How much further outside the bounds the refinement may end than the
+/// step it started from before the unrefined step is returned instead.
+/// A refinement that leaves a coordinate this much further out has not
+/// repaired an active set, whatever it achieved on the rows it pinned.
+const WORSE_THAN_PLAIN_FACTOR: Number = 10.0;
+
 /// Repair the active set the step implies, by pinning and releasing.
 ///
-/// Returns the refined step and the compound rows it constrained.
-/// This is upstream's fix-relax, both cases:
+/// Returns the refined step, the compound rows it constrained, and why
+/// it stopped. This is upstream's fix-relax, both cases:
 ///
 /// * a variable the step carries past a bound is pinned AT that bound,
 ///   which activates it (their equation 17);
@@ -296,28 +585,82 @@ pub struct BoundMultiplier {
 /// step holds complementarity. Measured on a model whose bound wants to
 /// release, that is the difference between 0.0 and 1.667.
 ///
-/// Each pass adds one condition and re-solves the augmented system
+/// # One list per pass
+///
+/// A pass takes EVERY violation it can see — every coordinate outside
+/// a bound and every multiplier driven negative — and constrains all of
+/// them before re-solving, which is upstream's `BoundCheck` filling one
+/// `x_bound_violations_idx` and its caller's `while (bounds_violated)`
+/// re-solving over the lot. The loop then ends on its own, when the
+/// list comes back empty.
+///
+/// Taking only the worst one per pass, which this did until gh#732,
+/// needs as many passes as there are crossings. On a model with more
+/// crossings than passes `max_iter` stopped the loop rather than the
+/// violations doing it, so the budget picked the answer: on the CSTR of
+/// notebook 36 the pin count equalled the budget at every budget tried,
+/// and at 100 pins — half that problem's degrees of freedom — the
+/// refined step came back 8.6 times worse than the unrefined one.
+/// `max_iter` is a safety limit now, and a stop of
+/// [`RefineStop::IterationLimit`] is what says it fired.
+///
+/// Each pass adds its conditions and re-solves the augmented system
 /// carrying all of them, against the original factorization, so its
-/// correction is measured from the plain step rather than the previous
+/// correction is measured from the base step rather than the previous
 /// pass. Adding successive corrections counts the earlier ones twice.
 /// The Schur complement over those rows is what upstream's equations 19
-/// through 22 describe. The factorization is never rebuilt, which is
-/// what makes this cheaper than a re-solve, but the Schur complement is
-/// rebuilt from scratch each pass: pass `k` costs one dense `k × k`
-/// solve and `k + 1` back-solves, so the work grows quadratically in
-/// the number of conditions, and the default `max_iter` of 16 is 136
-/// back-solves rather than 16.
+/// through 22 describe. The factorization is never rebuilt for a pin,
+/// which is what makes this cheaper than a re-solve; the Schur
+/// complement is rebuilt from scratch each pass, so a pass carrying `k`
+/// conditions costs one dense `k × k` solve and `k + 1` back-solves.
+/// Collecting the list makes `k` the number of crossings rather than
+/// the pass index, so the same repair costs passes instead of pins.
+///
+/// A release is not a Schur row here, unlike upstream, which puts the
+/// multiplier's row in the same list as the primal violations. It
+/// re-factors with that bound's `sigma` dropped, because an active
+/// bound's `sigma = z / s` grows as the solve converges and destroys
+/// the released system's information in the converged factor: computing
+/// a release from the held factor gets *worse* the better the solve
+/// converged, 2e-4 off at `tol = 1e-10` against 7e-9 at `1e-6`. What
+/// gh#732 fixes about a release is that the pins now survive it: their
+/// right-hand sides are re-measured against the re-solved base instead
+/// of the pin set being cleared, which is where that issue's budget
+/// table got its discontinuity. A pin batch that cannot be solved
+/// leaves the releases of its own pass standing for the same reason —
+/// a release repairs the active set on its own terms.
+///
+/// The release batch backs off the way the pin batch does, and for a
+/// sharper reason. A pin adds a condition, so an over-large batch shows
+/// up as an augmented system that cannot be solved. A release REMOVES
+/// one: every bound taken out is stiffness that is no longer holding
+/// its variable, and a batch that takes too many carries variables off
+/// bounds they were sitting on, with nothing left to pin them back.
+/// That has no failed solve to report it — on notebook 36's CSTR it was
+/// 56 releases where 41 were right, and the step came back worse than
+/// not refining at all. So a batch of more than one is kept only when
+/// the step it produces is no further outside the bounds than the one
+/// in hand.
 ///
 /// `multipliers` carry their base values in the solve's own
 /// coordinates. They are converted here, once, with the backsolver's
 /// [`SensBacksolver::natural_units_factor`], so they agree with the `z`
 /// rows of `dx_plain` before either is used.
 ///
-/// Passes stop when nothing is violated, at `max_iter`, or when a
-/// condition cannot be achieved, which is how an over-determined set is
-/// caught: once the conditions exhaust the problem's degrees of freedom
-/// no step satisfies them all, the augmented system is singular, and a
-/// dense LU returns a large solution rather than reporting it.
+/// # Two guards, independent of the loop
+///
+/// A pass is refused when its correction is out of scale with the step
+/// it corrects, not only when a pinned row misses its target. Checking
+/// the pinned rows alone is what let gh#732's 100 pins each land within
+/// `1e-3` of where they were asked to go while the step as a whole came
+/// back unusable: hitting the pinned coordinates says nothing about
+/// what the correction did to the other 1300.
+///
+/// And the unrefined step is returned when the refinement ends further
+/// outside the bounds than it started, which costs nothing since
+/// `dx_plain` is already in scope. Repairing an active set that leaves
+/// the box further out than not repairing it at all has failed on its
+/// own terms.
 pub fn refine_step_onto_bounds<B>(
     backsolver: &B,
     dx_plain: &[Number],
@@ -328,7 +671,7 @@ pub fn refine_step_onto_bounds<B>(
     rhs_plain: &[Number],
     eps: Number,
     max_iter: usize,
-) -> Result<(Vec<Number>, Vec<usize>), String>
+) -> Result<(Vec<Number>, Vec<usize>, RefineStop), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
 {
@@ -359,76 +702,48 @@ where
     let bound_rows = backsolver.bound_rows();
     let can_release = backsolver.supports_release() && rhs_plain.len() == n_full;
 
-    // (compound row, right-hand side), the rhs fixed at creation since
-    // it is measured from the base step
-    let mut pins: Vec<(usize, Number)> = Vec::new();
-    // Multiplier rows taken out of the active set. Unlike a pin these
-    // never become a Schur condition: they change the operator, so the
-    // step is re-solved against a factorization that does not carry
-    // their `sigma` at all.
-    let mut released: Vec<usize> = Vec::new();
-    // The step corrections are measured from. It moves whenever the
-    // released set does, since that is a different system.
-    let mut dx_base = dx_plain.to_vec();
+    // How far outside its bounds the worst coordinate of a step sits.
+    let worst_over = |d: &[Number]| {
+        bound_violations(x_curr, d, lo, hi, eps, &[])
+            .first()
+            .map_or(0.0, |&(_, _, over)| over)
+    };
 
-    for _ in 0..max_iter {
-        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
+    // Which multiplier rows the step drives negative, most negative
+    // first, ignoring any already out of the active set and any the
+    // factorization has already refused to release.
+    let releasable = |dx: &[Number], released: &[usize], refused: &[usize]| -> Vec<usize> {
+        if !can_release {
+            return Vec::new();
+        }
+        let mut v: Vec<(usize, Number)> = multipliers
+            .iter()
+            .filter(|m| !released.contains(&m.row) && !refused.contains(&m.row))
+            .filter(|m| bound_rows.is_some_and(|br| br.iter().any(|b| b.row == m.row)))
+            .map(|m| (m.row, m.base + dx[m.row]))
+            .filter(|&(_, v)| v < -eps)
+            .collect();
+        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.into_iter().map(|(r, _)| r).collect()
+    };
 
-        // one condition per pass, primal first: a variable outside its
-        // bound is the more direct violation, and releasing a bound can
-        // only matter once the variables it constrains have settled
-        let next = match worst_violation(x_curr, &dx, lo, hi, eps, &taken) {
-            Some((i, bound)) => Some((i, (x_curr[i] + dx_base[i]) - bound)),
-            None => None,
-        };
-
-        // Pins first. Only when nothing is outside its bound do we look
-        // at releasing, so the primal violations settle before a bound
-        // leaves the active set.
-        let Some((row, rhs_row)) = next else {
-            // A release is not a condition on the step, it is a
-            // different system: re-solve with that bound's `sigma`
-            // gone, then start over from the step that produced.
-            let worst = if can_release {
-                multipliers
-                    .iter()
-                    .filter(|m| !released.contains(&m.row))
-                    .filter(|m| bound_rows.is_some_and(|br| br.iter().any(|b| b.row == m.row)))
-                    .map(|m| (m.row, m.base + dx[m.row]))
-                    .filter(|&(_, v)| v < -eps)
-                    // most negative first
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(r, _)| r)
-            } else {
-                None
-            };
-            let Some(row) = worst else { break };
-            released.push(row);
-            let mut base = vec![0.0; n_full];
-            if !backsolver.solve_released_step(&released, rhs_plain, &mut base) {
-                // Could not factor with that bound out. Keep the step
-                // reached without it, which is what every other stop
-                // here does.
-                released.pop();
-                break;
-            }
-            // A released bound's multiplier is zero by construction; its
-            // own row of the re-solved step is a by-product of the
-            // complementarity row the factor still carries.
-            for &r in &released {
-                if let Some(m) = multipliers.iter().find(|m| m.row == r) {
-                    base[r] = -m.base;
-                }
-            }
-            dx_base = base;
-            dx.copy_from_slice(&dx_base);
-            // pins are measured from the base, which just moved
-            pins.clear();
-            continue;
-        };
-        pins.push((row, rhs_row));
-
+    // The step under the given conditions, or `None` when the augmented
+    // system cannot deliver it. `Err` is reserved for a malformed
+    // condition set, which is a caller's bug rather than a refusal.
+    let solve_pins = |pins: &[(usize, Number)],
+                      released: &[usize],
+                      dx_base: &[Number]|
+     -> Result<Option<Vec<Number>>, String> {
+        if pins.is_empty() {
+            return Ok(Some(dx_base.to_vec()));
+        }
         let rows: Vec<Index> = pins.iter().map(|&(r, _)| r as Index).collect();
+        // Measured from the base step, which moves whenever the
+        // released set does, so a pin outlives a release.
+        let rhs: Vec<Number> = pins
+            .iter()
+            .map(|&(r, bound)| (x_curr[r] + dx_base[r]) - bound)
+            .collect();
         let signs = vec![1; rows.len()];
         let mk = |r: Vec<Index>| {
             IndexSchurData::from_parts(r, signs.clone()).map_err(|e| format!("{e:?}"))
@@ -442,42 +757,220 @@ where
         // be solved in the system that reflects that.
         let view = ReleasedView {
             base: backsolver.clone(),
-            rows: released.clone(),
+            rows: released.to_vec(),
         };
         let mut pin_app = SensApplication::new(mk(rows.clone())?, view, opts);
-        let rhs: Vec<Number> = pins.iter().map(|&(_, r)| r).collect();
         let mut du = vec![0.0; rows.len()];
         let mut corr = vec![0.0; n_full];
         if !pin_app.run_sens_step(&mk(rows)?, &rhs, &mut du, &mut corr) {
-            // An exactly singular augmented system, where the
-            // near-singular case is what the achievement check below
-            // catches. Drop the condition that could not be solved and
-            // stop, rather than discarding the refinement and the plain
-            // step with it: the caller is told how far it got by the
-            // rows returned, which is what every other stop does.
-            pins.pop();
+            // An exactly singular augmented system, where the two
+            // guards below catch the near-singular case.
+            return Ok(None);
+        }
+
+        // A healthy pass lands its conditions within a few parts per
+        // million, so this is not an accuracy check: it is for the
+        // singular case, where a dense LU returns a solution around
+        // 1e15 rather than reporting it.
+        let achieved = pins
+            .iter()
+            .zip(rhs.iter())
+            .all(|(&(r, _), &want)| (corr[r] + want).abs() <= 1e-3 * want.abs().max(1.0));
+        if !achieved {
+            return Ok(None);
+        }
+        // Achieving every pinned row says nothing about what the
+        // correction did to the rest of the vector (gh#732), so the
+        // correction's own size is checked too.
+        let inf = |v: &[Number]| v.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        let scale = inf(dx_base).max(inf(&rhs)).max(1.0);
+        if inf(&corr) > CORRECTION_SCALE_LIMIT * scale {
+            return Ok(None);
+        }
+        Ok(Some(
+            dx_base
+                .iter()
+                .zip(corr.iter())
+                .map(|(b, c)| b + c)
+                .collect(),
+        ))
+    };
+
+    // The base step with `set` added to the released bounds, or `None`
+    // when the released system cannot be factored.
+    let apply_releases = |released: &[usize], set: &[usize]| -> Option<(Vec<usize>, Vec<Number>)> {
+        let mut trial = released.to_vec();
+        trial.extend_from_slice(set);
+        let mut base = vec![0.0; n_full];
+        if !backsolver.solve_released_step(&trial, rhs_plain, &mut base) {
+            return None;
+        }
+        // A released bound's multiplier is zero by construction; its
+        // own row of the re-solved step is a by-product of the
+        // complementarity row the factor still carries.
+        for &r in &trial {
+            if let Some(m) = multipliers.iter().find(|m| m.row == r) {
+                base[r] = -m.base;
+            }
+        }
+        Some((trial, base))
+    };
+
+    // (var-x row, the bound it is held at). The right-hand side is
+    // re-derived from the base step each pass rather than stored, so a
+    // release moves the pins with it instead of clearing them.
+    let mut pins: Vec<(usize, Number)> = Vec::new();
+    // Multiplier rows taken out of the active set. Unlike a pin these
+    // never become a Schur condition: they change the operator, so the
+    // step is re-solved against a factorization that does not carry
+    // their `sigma` at all.
+    let mut released: Vec<usize> = Vec::new();
+    // The step corrections are measured from. It moves whenever the
+    // released set does, since that is a different system.
+    let mut dx_base = dx_plain.to_vec();
+    // Bounds whose release the factorization would not deliver. Barred
+    // rather than retried: the same factorization would be asked for
+    // again every pass until the limit, and the limit is not what
+    // stopped it.
+    let mut refused_releases: Vec<usize> = Vec::new();
+    let mut stop = RefineStop::IterationLimit;
+
+    for _ in 0..max_iter {
+        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
+        let fresh_pins = bound_violations(x_curr, &dx, lo, hi, eps, &taken);
+        let fresh_releases = releasable(&dx, &released, &refused_releases);
+        if fresh_pins.is_empty() && fresh_releases.is_empty() {
+            // A bound whose release was refused is still one the step
+            // wants out of the active set. The loop has nothing left to
+            // try for it, which is not the same as having settled.
+            stop = if releasable(&dx, &released, &[]).is_empty() {
+                RefineStop::Settled
+            } else {
+                RefineStop::DegreesOfFreedom
+            };
             break;
         }
 
-        // The guard is for the singular case, where the conditions
-        // have exhausted the degrees of freedom and a dense LU returns a
-        // solution around 1e15 rather than reporting it. It is not an
-        // accuracy check: a healthy pass lands within a few parts per
-        // million, so demanding more than that rejects working pins.
-        let achieved = pins
-            .iter()
-            .all(|&(r, want)| (corr[r] + want).abs() <= 1e-3 * want.abs().max(1.0));
-        if !achieved {
-            pins.pop();
-            break;
+        if !fresh_releases.is_empty() {
+            // A release is not a condition on the step, it is a
+            // different system: re-solve with those bounds' `sigma`
+            // gone, and measure the pins from the step that produces.
+            //
+            // The batch backs off the way the pin batch below does.
+            // Taking every negative multiplier at once can release more
+            // stiffness than the step wanted: on notebook 36's CSTR, 56
+            // releases where 41 were right carried five `v1` intervals
+            // off the bound they had been sitting on, with no degrees
+            // of freedom left to pin them back (gh#734 review). So the
+            // batch is kept only when the step it produces is no
+            // further outside the bounds than the one in hand, and
+            // otherwise the most negative multiplier goes alone and the
+            // next pass re-measures the rest under it.
+            let before = worst_over(&dx);
+            let mut sets: Vec<&[usize]> = vec![&fresh_releases[..]];
+            if fresh_releases.len() > 1 {
+                sets.push(&fresh_releases[..1]);
+            }
+            let mut taken: Option<(Vec<usize>, Vec<Number>, Vec<Number>)> = None;
+            for (k, set) in sets.iter().enumerate() {
+                let Some((trial, base)) = apply_releases(&released, set) else {
+                    continue;
+                };
+                let Some(step) = solve_pins(&pins, &trial, &base)? else {
+                    continue;
+                };
+                // A single release is the smallest step the loop can
+                // take toward a bound that has to leave the active set,
+                // so it is taken whether or not it helps: refusing it
+                // would leave a negative multiplier with nothing left
+                // to do about it. The guard at the end still has the
+                // last word on what comes back.
+                let alone = k + 1 == sets.len();
+                if alone || worst_over(&step) <= before.max(eps) {
+                    taken = Some((trial, base, step));
+                    break;
+                }
+            }
+            match taken {
+                Some((trial, base, step)) => {
+                    released = trial;
+                    dx_base = base;
+                    dx = step;
+                }
+                None => {
+                    // The released system could not be factored, or
+                    // could not carry the pins already placed.
+                    refused_releases.extend_from_slice(&fresh_releases);
+                    if fresh_pins.is_empty() {
+                        stop = RefineStop::DegreesOfFreedom;
+                        break;
+                    }
+                }
+            }
+            if fresh_pins.is_empty() {
+                // The release phase already produced this pass's step.
+                continue;
+            }
         }
-        for (k, d) in dx.iter_mut().enumerate() {
-            *d = dx_base[k] + corr[k];
+
+        // What the pin batch can undo, snapshotted BELOW the release
+        // phase so a release is not among it. Both halves of that
+        // matter and they are separable (gh#734 review bisected them):
+        // keeping `released` is what leaves the bounds out of the
+        // active set at all, and snapshotting `dx` here rather than
+        // above is what leaves the STEP the release produced. Roll back
+        // only the first and the rows come back while the answer stays
+        // the plain step's; roll back both and a sound release is
+        // discarded because the pins that came with it did not fit. A
+        // release repairs the active set on its own terms.
+        let keep_pins = pins.clone();
+        let keep_dx = dx.clone();
+        pins.extend(fresh_pins.iter().map(|&(i, bound, _)| (i, bound)));
+        let mut next = solve_pins(&pins, &released, &dx_base)?;
+        if next.is_none() && fresh_pins.len() > 1 {
+            // The batch asked for more than the remaining degrees of
+            // freedom hold. Keep the worst of the new crossings and let
+            // the next pass re-measure the rest under it, which is what
+            // the one-at-a-time loop would have done.
+            pins.truncate(keep_pins.len());
+            pins.push((fresh_pins[0].0, fresh_pins[0].1));
+            next = solve_pins(&pins, &released, &dx_base)?;
+        }
+        match next {
+            Some(step) => dx = step,
+            None => {
+                pins = keep_pins;
+                dx = keep_dx;
+                stop = RefineStop::DegreesOfFreedom;
+                break;
+            }
         }
     }
+
+    // The loop can also run out of passes on the one that settled it,
+    // which is not the limit firing. And what is left can be a bound
+    // the factorization refused to release, which no budget reaches.
+    if stop == RefineStop::IterationLimit {
+        let taken: Vec<usize> = pins.iter().map(|&(r, _)| r).collect();
+        let pins_left = !bound_violations(x_curr, &dx, lo, hi, eps, &taken).is_empty();
+        let rel_left = releasable(&dx, &released, &[]);
+        if !pins_left && rel_left.is_empty() {
+            stop = RefineStop::Settled;
+        } else if !pins_left && rel_left.iter().all(|r| refused_releases.contains(r)) {
+            stop = RefineStop::DegreesOfFreedom;
+        }
+    }
+
+    // Whatever stopped it, a refinement that ends further outside the
+    // bounds than the step it started from has failed on its own terms.
+    let plain_worst = worst_over(dx_plain);
+    if worst_over(&dx) > WORSE_THAN_PLAIN_FACTOR * plain_worst.max(eps) {
+        return Ok((dx_plain.to_vec(), Vec::new(), RefineStop::WorseThanPlain));
+    }
+
     let mut out = released.clone();
     out.extend(pins.into_iter().map(|(r, _)| r));
-    Ok((dx, out))
+    Ok((dx, out, stop))
 }
 
 /// The converged backsolver with a set of bounds out of the active set,
@@ -496,6 +989,13 @@ impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBackso
         self.base.dim()
     }
     fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        // Nothing released is the converged system, so ask for it
+        // directly: routing an empty set through `solve_released` asks
+        // a backsolver that cannot release for something it does not
+        // need to do, and the ones that can already short-circuit it.
+        if self.rows.is_empty() {
+            return self.base.solve(rhs, lhs);
+        }
         self.base.solve_released(&self.rows, rhs, lhs)
     }
     fn natural_units_factor(&self) -> Option<&[Number]> {
@@ -933,142 +1433,7 @@ pub struct WeakBound {
     pub lower: bool,
 }
 
-/// The directional derivative at a degenerate base point: the QP of
-/// Pirnay, Lopez-Negrete and Biegler 2012, eq. 14, solved as an
-/// active-set search over the weakly active rows on the held
-/// factorization.
-///
-/// Every weakly active row is released in every trial, because its
-/// sigma is `z / s` with both of order sqrt(mu), an order-one term
-/// that half-enforces a bound the direction may need to leave, and it
-/// is wrong for both sides of the kink. A candidate working set then
-/// pins its variable rows to zero movement through Schur rows. The
-/// candidate is accepted when
-///
-/// 1. every out variable moves into its feasible side, and
-/// 2. every pin is necessary: removing it alone makes its variable
-///    move into violation.
-///
-/// The necessity probe stands in for the dual-feasibility sign test
-/// on the pin's Schur multiplier, whose sign convention the rest of
-/// this file deliberately never names. The two tests agree wherever
-/// the returned direction differs: a pin whose multiplier is exactly
-/// zero at a doubly degenerate QP can be in or out, and both answers
-/// give the same direction.
-///
-/// Candidates are enumerated by size and then by least index, so the
-/// result is deterministic, and every trial counts against
-/// `max_iter`, the shared budget. Returns the direction, the var rows
-/// pinned in the accepted set, and the trials spent. `Err` when no
-/// candidate fits the budget or none is sign-consistent, and the
-/// caller falls back to the plain direction and says so.
-pub fn directional_step<B>(
-    backsolver: &B,
-    rhs_plain: &[Number],
-    weak: &[WeakBound],
-    max_iter: usize,
-) -> Result<(Vec<Number>, Vec<usize>, usize), String>
-where
-    B: crate::backsolver::SensBacksolver + Clone,
-{
-    let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
-    let mut trials = 0usize;
-    // dx tolerance, relative to the direction's own magnitude so the
-    // decision is invariant to the perturbation's scale: an absolute
-    // tolerance accepted the all-released set at a perturbation of
-    // 1e-10, reading the holding side's derivative as -1 instead of 0.
-    // Zero movement of a pinned variable is roundoff relative to the
-    // direction's norm, so pinned rows still clear it.
-    const EPS_REL: Number = 1e-9;
-    let scale_of =
-        |d: &[Number]| -> Number { d.iter().fold(0.0_f64, |a, &b| a.max(b.abs())).max(1e-300) };
-    let feasible = |w: &WeakBound, di: Number, tol: Number| -> bool {
-        if w.lower { di >= -tol } else { di <= tol }
-    };
-    let violates = |w: &WeakBound, di: Number, tol: Number| -> bool {
-        if w.lower { di < -tol } else { di > tol }
-    };
-
-    let n = weak.len();
-    let budget_err = || {
-        format!(
-            "directional derivative: the budget of {max_iter} trials \
-             ran out over {n} weakly active bound(s)"
-        )
-    };
-    // Working sets are generated lazily in size-then-least-index
-    // order: the first accepted candidate is deterministic, the budget
-    // bounds the work, and nothing is materialized. Building all 2^n
-    // masks up front allocated gigabytes near n = 30 to try at most
-    // max_iter of them, and overflowed the shift at n = 32.
-    for size in 0..=n {
-        let mut combo: Vec<usize> = (0..size).collect();
-        loop {
-            if trials >= max_iter {
-                return Err(budget_err());
-            }
-            let pinned: Vec<usize> = combo.iter().map(|&k| weak[k].var_row).collect();
-            let (d, _) = path_direction(backsolver, rhs_plain, &released, &pinned)?;
-            trials += 1;
-            let tol = EPS_REL * scale_of(&d);
-            let out_ok = (0..n)
-                .filter(|k| !combo.contains(k))
-                .all(|k| feasible(&weak[k], d[weak[k].var_row], tol));
-            if out_ok {
-                // Necessity of each pin, one removal probe per member.
-                let mut all_needed = true;
-                for &k in &combo {
-                    if trials >= max_iter {
-                        return Err(budget_err());
-                    }
-                    let probe: Vec<usize> = combo
-                        .iter()
-                        .filter(|&&j| j != k)
-                        .map(|&j| weak[j].var_row)
-                        .collect();
-                    let (dp, _) = path_direction(backsolver, rhs_plain, &released, &probe)?;
-                    trials += 1;
-                    let ptol = EPS_REL * scale_of(&dp);
-                    if !violates(&weak[k], dp[weak[k].var_row], ptol) {
-                        all_needed = false;
-                        break;
-                    }
-                }
-                if all_needed {
-                    return Ok((d, pinned, trials));
-                }
-            }
-            if !next_combination(&mut combo, n) {
-                break;
-            }
-        }
-    }
-    Err(format!(
-        "directional derivative: no sign-consistent working set over \
-         {n} weakly active bound(s)"
-    ))
-}
-
-/// Advance `combo` to the next lexicographic combination of its size
-/// over `0..n`, returning `false` when it was the last one. The empty
-/// combination has no successor.
-fn next_combination(combo: &mut [usize], n: usize) -> bool {
-    let k = combo.len();
-    let mut i = k;
-    while i > 0 {
-        i -= 1;
-        if combo[i] != i + n - k {
-            combo[i] += 1;
-            for j in i + 1..k {
-                combo[j] = combo[j - 1] + 1;
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn path_direction<B>(
+pub(crate) fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
     released: &[usize],

@@ -394,6 +394,26 @@ impl PdSensBacksolver {
         let Some(sigma) = self.released_sigma_x(released) else {
             return false;
         };
+        self.solve_released_prebuilt(released, sigma, rhs, lhs, shift)
+    }
+
+    /// [`Self::solve_released_inner`] with the released `Σ` supplied by
+    /// the caller. Repeated solves against ONE released operator must
+    /// pass the same `Rc` every time: the factorization cache keys on
+    /// the sigma object's tag, so a sigma rebuilt per call forces a
+    /// re-factorization per call, while a held one factorizes once and
+    /// back-solves thereafter.
+    pub(crate) fn solve_released_prebuilt(
+        &self,
+        released: &[usize],
+        sigma: Rc<dyn pounce_linalg::Vector>,
+        rhs: &[Number],
+        lhs: &mut [Number],
+        shift: bool,
+    ) -> bool {
+        if rhs.len() != self.dim() || lhs.len() != self.dim() {
+            return false;
+        }
         let mut scaled: Vec<Number> = match self.conj.as_ref() {
             Some(c) => rhs.iter().zip(c.e.iter()).map(|(&r, &e)| r * e).collect(),
             None => rhs.to_vec(),
@@ -437,7 +457,30 @@ impl PdSensBacksolver {
     /// (gh#654): mixing a declared-frame `Σ` with relaxed-frame slacks
     /// would leave the released variable pinned in one frame and its
     /// neighbours in the other.
-    fn released_sigma_x(&self, released: &[usize]) -> Option<Rc<dyn pounce_linalg::Vector>> {
+    pub(crate) fn released_sigma_x(
+        &self,
+        released: &[usize],
+    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
+        self.active_set_sigma_x(released, &[])
+    }
+
+    /// [`Self::released_sigma_x`], also raising the diagonal on
+    /// variables a step brings onto a bound.
+    ///
+    /// The two directions an active set can move are the same
+    /// modification to one diagonal. A bound that leaves has its
+    /// `z / s` taken off the variable it constrains, and a bound that
+    /// becomes active has one put on, so a single vector describes
+    /// both and a single factorization serves the whole correction.
+    /// The two arguments are in different index spaces and both are
+    /// `usize`: `released` holds compound KKT rows of bound
+    /// multipliers, `pinned` holds var-x rows. Passing one where the
+    /// other belongs is not a type error and will not be caught here.
+    pub(crate) fn active_set_sigma_x(
+        &self,
+        released: &[usize],
+        pinned: &[(usize, Number)],
+    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let rows = self.bound_vars.as_deref()?;
         let base_row = rows.first()?.row;
@@ -488,6 +531,9 @@ impl PdSensBacksolver {
                 fresh += z / s;
             }
             *sigma.get_mut(br.var_row)? = fresh;
+        }
+        for &(var_row, add) in pinned {
+            *sigma.get_mut(var_row)? += add;
         }
         let space = DenseVectorSpace::new(sigma.len() as Index);
         let mut out = DenseVector::new(space);
@@ -1002,6 +1048,61 @@ impl PdSensBacksolver {
     /// whenever the solve removed a fixed variable.
     pub fn n_full_x(&self) -> Index {
         self.nlp.borrow().n_full_x()
+    }
+
+    /// `E` itself, the vector [`Self::solve`] pre-multiplies its
+    /// right-hand side by.
+    ///
+    /// The counterpart of [`SensBacksolver::natural_units_factor`],
+    /// which reports `F`. A caller holding a residual it assembled from
+    /// the algorithm's own calculated quantities holds it in the scaled
+    /// frame, and `solve` wants its right-hand side in natural units:
+    /// `K̃ = E K F` with `v_scaled = F⁻¹ v_nat` gives
+    /// `r_scaled = E r_nat`, so that caller divides by this before
+    /// handing the residual over. Passing `r_scaled` straight in applies
+    /// `E` twice and leaves a diagonally mis-scaled Newton direction.
+    pub(crate) fn scaled_rhs_factor(&self) -> Option<&[Number]> {
+        self.conj.as_ref().map(|c| c.e.as_slice())
+    }
+
+    /// [`Self::offsets`], for the corrector's residual assembly, which
+    /// writes one calculated-quantity block at a time.
+    pub(crate) fn offsets_public(&self) -> [usize; 9] {
+        self.offsets()
+    }
+
+    /// [`Self::pack`], for the corrector, which builds a trial iterate
+    /// from the flat point it is stepping.
+    pub(crate) fn pack_public(&self, flat: &[Number]) -> Result<IteratesVectorMut, ()> {
+        self.pack(flat)
+    }
+
+    /// The converged iterate, flattened into the compound layout.
+    ///
+    /// The corrector steps a point rather than a step, so it needs the
+    /// iterate the step is measured from, in the same layout the step
+    /// arrives in.
+    pub(crate) fn curr_flat(&self, out: &mut [Number]) -> Result<(), ()> {
+        if out.len() != self.dim() {
+            return Err(());
+        }
+        let curr = {
+            let d = self.data.borrow();
+            d.curr.clone().ok_or(())?
+        };
+        let off = self.offsets();
+        let blocks: [&Rc<dyn pounce_linalg::vector::Vector>; 8] = [
+            &curr.x, &curr.s, &curr.y_c, &curr.y_d, &curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u,
+        ];
+        for (i, b) in blocks.iter().enumerate() {
+            let vals = crate::vec_util::dense_to_vec(&***b);
+            let (a, e) = (off[i], off[i + 1]);
+            if vals.len() != e - a {
+                return Err(());
+            }
+            out[a..e].copy_from_slice(&vals);
+        }
+        Ok(())
     }
 
     /// Cumulative block offsets: `offset(i)` is the start index of

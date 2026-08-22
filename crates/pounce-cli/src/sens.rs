@@ -476,13 +476,31 @@ fn try_compute_sens_step(
             eps,
             16,
         ) {
-            Ok((refined, pinned)) => {
-                if !pinned.is_empty() {
+            Ok((refined, rows, stop)) => {
+                if !rows.is_empty() {
                     eprintln!(
                         "pounce: --sens-boundcheck pinned or released {} bound(s) \
                          and re-solved",
-                        pinned.len()
+                        rows.len()
                     );
+                }
+                // A safety limit that fired, or a refinement that gave
+                // up, is the caller's business: the step returned is
+                // not the one the refinement was asked for.
+                match stop {
+                    pounce_sensitivity::boundcheck::RefineStop::Settled => {}
+                    pounce_sensitivity::boundcheck::RefineStop::IterationLimit => eprintln!(
+                        "pounce: --sens-boundcheck stopped at its pass limit with \
+                         bounds still violated"
+                    ),
+                    pounce_sensitivity::boundcheck::RefineStop::DegreesOfFreedom => eprintln!(
+                        "pounce: --sens-boundcheck could not hold every bound at \
+                         once; the problem's degrees of freedom are spent"
+                    ),
+                    pounce_sensitivity::boundcheck::RefineStop::WorseThanPlain => eprintln!(
+                        "pounce: --sens-boundcheck ended further outside the bounds \
+                         than the unrefined step, which was returned instead"
+                    ),
                 }
                 dx_full = refined;
             }

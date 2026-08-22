@@ -253,7 +253,7 @@ impl PySolver {
     }
 
     /// Parametric step with the bounds respected by pinning rather than
-    /// clamping, as `(dx, pinned)`.
+    /// clamping, as `(dx, pinned, stop)`.
     ///
     /// `parametric_step` points where the linear predictor points,
     /// which can be outside the box. Clamping a coordinate back to its
@@ -280,18 +280,34 @@ impl PySolver {
     /// already respects every bound, and the step is then the plain
     /// one.
     ///
-    /// `max_iter` is a budget rather than a safeguard: the
-    /// refinement is only worth running while it stays cheaper than a
-    /// re-solve. The factorization is never rebuilt, but the Schur
-    /// complement is rebuilt each pass, so pass `k` costs one dense
-    /// `k × k` solve and `k + 1` back-solves and the total grows
-    /// quadratically. The default of 16 is 136 back-solves. What counts
-    /// as outside a bound comes from the solve's own
-    /// `bound_relax_factor` rather than from an argument. Passes stop
-    /// when nothing is outside by that much, at `max_iter`, or when
-    /// the conditions exhaust the problem's degrees of freedom, which
-    /// makes the augmented system singular. None is an error, and
-    /// `pinned` says how far the refinement got.
+    /// A pass takes every crossing it can see, pins them together and
+    /// re-solves, so the number of passes tracks how far the active set
+    /// has to move rather than how many bounds it moves. The
+    /// factorization is never rebuilt for a pin, but the Schur
+    /// complement is, so a pass carrying `k` pins costs one dense
+    /// `k × k` solve and `k + 1` back-solves. What counts as outside a
+    /// bound comes from the solve's own `bound_relax_factor` rather
+    /// than from an argument.
+    ///
+    /// `max_iter` is a safety limit rather than a budget. It was a
+    /// budget while a pass took one pin, which needed as many passes as
+    /// there were crossings, and on a model with more crossings than
+    /// passes the limit picked the answer (gh#732).
+    ///
+    /// `stop` says why the refinement stopped, and is one of:
+    ///
+    /// * `"settled"` — nothing is outside a bound and no multiplier is
+    ///   negative. Only this one says it finished.
+    /// * `"iteration_limit"` — `max_iter` passes were spent with
+    ///   violations left. Raising it may finish the job.
+    /// * `"degrees_of_freedom"` — the conditions exhausted the
+    ///   problem's degrees of freedom, so no step holds every bound at
+    ///   once. No budget helps.
+    /// * `"worse_than_plain"` — the refinement ended further outside
+    ///   the bounds than the unrefined step, which was returned instead
+    ///   with an empty `pinned`.
+    ///
+    /// None is an error, and `pinned` says how far the refinement got.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_bounded<'py>(
         &self,
@@ -299,7 +315,7 @@ impl PySolver {
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
         max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>)> {
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "parametric_step_bounded: no converged factor (call solve() first)",
@@ -313,13 +329,14 @@ impl PySolver {
                 pins.len(),
             )));
         }
-        let (dx, pinned) = s
+        let (dx, pinned, stop) = s
             .inner
             .parametric_step_bounded(&pins, &deltas, max_iter)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
             pinned.into_iter().map(|p| p as i64).collect(),
+            stop.as_str(),
         ))
     }
 
@@ -395,10 +412,115 @@ impl PySolver {
         Ok(weak.iter().map(|w| (w.var_row as i64, w.lower)).collect())
     }
 
-    /// `parametric_step` with the directional-derivative correction at
-    /// a degenerate base point (the 2012 paper's eq. 14 QP), as
-    /// `(dx, pinned_var_rows, trials)`. With no weakly active bounds
-    /// this is the plain step and `trials` is 0.
+    /// `parametric_step_bounded` with the weak-row decision
+    /// supplied by the caller (var-x rows the direction holds) instead
+    /// of searched for, as `(dx, pinned, stop)`. Study surface for an
+    /// externally solved eq. 14 QP.
+    #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16))]
+    fn parametric_step_bounded_decided<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        held_var_rows: Vec<i64>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_bounded_decided: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        // The rows index the primal block directly, and an
+        // out-of-range one reaches a raw `d[i]` inside the direction,
+        // so it is a panic out of the extension rather than a raised
+        // error. `Index` is signed, so a negative row becomes a very
+        // large `usize` there. Checked here, the way the sibling
+        // argument on this same call already is.
+        let n_x = s
+            .inner
+            .block_dims()
+            .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?[0];
+        let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
+        let (dx, pinned, stop) = s
+            .inner
+            .parametric_step_bounded_decided(&pins, &deltas, max_iter, &held)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            pinned.into_iter().map(|p| p as i64).collect(),
+            stop.as_str(),
+        ))
+    }
+
+    /// `parametric_step_path` with the weak-row decision supplied by
+    /// the caller (var-x rows the direction holds) instead of searched
+    /// for, as `(dx, segments)`. Study surface for an externally
+    /// solved eq. 14 QP.
+    #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16))]
+    fn parametric_step_path_decided<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        held_var_rows: Vec<i64>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<(Number, i64, bool, bool)>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_path_decided: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        // The rows index the primal block directly, and an
+        // out-of-range one reaches a raw `d[i]` inside the direction,
+        // so it is a panic out of the extension rather than a raised
+        // error. `Index` is signed, so a negative row becomes a very
+        // large `usize` there. Checked here, the way the sibling
+        // argument on this same call already is.
+        let n_x = s
+            .inner
+            .block_dims()
+            .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?[0];
+        let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
+        let (dx, segments) = s
+            .inner
+            .parametric_step_path_decided(&pins, &deltas, max_iter, &held)
+            .map_err(solver_error_to_py)?;
+        Ok((
+            dx.into_pyarray_bound(py),
+            segments
+                .into_iter()
+                .map(|g| (g.at, g.var_row as i64, g.lower, g.pinned))
+                .collect(),
+        ))
+    }
+
+    /// The eq. 14 directional derivative, decided by the pounce-qp
+    /// active-set engine on the reduced weak-row problem. `max_iter`
+    /// is the total
+    /// back-solve budget: the all-released solve, one basis column per
+    /// engaged weak row, and the combined solve that recovers the
+    /// direction all count against it. Only a budget of zero fails
+    /// before any work, since which rows engage is not known until the
+    /// all-released solve has run, so a budget too small to finish
+    /// still pays that factorization. The error names the engaged
+    /// count and the number to raise `degeneracy_iter` to. Returns
+    /// `(dx, held_var_rows, backsolves_spent)`.
     #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
     fn parametric_step_directional<'py>(
         &self,
@@ -420,94 +542,14 @@ impl PySolver {
                 pins.len(),
             )));
         }
-        let (dx, pinned, trials) = s
+        let (dx, held, work) = s
             .inner
             .parametric_step_directional(&pins, &deltas, max_iter)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
-            pinned.into_iter().map(|p| p as i64).collect(),
-            trials,
-        ))
-    }
-
-    /// `parametric_step_bounded` with the directional derivative as
-    /// its predictor at a degenerate base point, as
-    /// `(dx, pinned_rows, trials)`.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_bounded_directional<'py>(
-        &self,
-        py: Python<'py>,
-        pin_constraint_indices: Vec<i64>,
-        deltas: Vec<Number>,
-        max_iter: usize,
-    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, usize)> {
-        let s = self.state.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "parametric_step_bounded_directional: no converged factor (call solve() first)",
-            )
-        })?;
-        let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        if deltas.len() != pins.len() {
-            return Err(PyValueError::new_err(format!(
-                "deltas length {} must equal pin_constraint_indices length {}",
-                deltas.len(),
-                pins.len(),
-            )));
-        }
-        let (dx, pinned, trials) = s
-            .inner
-            .parametric_step_bounded_directional(&pins, &deltas, max_iter)
-            .map_err(solver_error_to_py)?;
-        Ok((
-            dx.into_pyarray_bound(py),
-            pinned.into_iter().map(|p| p as i64).collect(),
-            trials,
-        ))
-    }
-
-    /// `parametric_step_path` with the directional-derivative decision
-    /// applied first at a degenerate base point, as
-    /// `(dx, segments, trials)`. Rows the accepted working set leaves
-    /// are forced into the walk's base-activity table, so the record
-    /// carries each departure at the fraction where its multiplier
-    /// reaches zero, essentially zero at an exact kink.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
-    fn parametric_step_path_directional<'py>(
-        &self,
-        py: Python<'py>,
-        pin_constraint_indices: Vec<i64>,
-        deltas: Vec<Number>,
-        max_iter: usize,
-    ) -> PyResult<(
-        Bound<'py, PyArray1<Number>>,
-        Vec<(Number, i64, bool, bool)>,
-        usize,
-    )> {
-        let s = self.state.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "parametric_step_path_directional: no converged factor (call solve() first)",
-            )
-        })?;
-        let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        if deltas.len() != pins.len() {
-            return Err(PyValueError::new_err(format!(
-                "deltas length {} must equal pin_constraint_indices length {}",
-                deltas.len(),
-                pins.len(),
-            )));
-        }
-        let (dx, segments, trials) = s
-            .inner
-            .parametric_step_path_directional(&pins, &deltas, max_iter)
-            .map_err(solver_error_to_py)?;
-        Ok((
-            dx.into_pyarray_bound(py),
-            segments
-                .into_iter()
-                .map(|g| (g.at, g.var_row as i64, g.lower, g.pinned))
-                .collect(),
-            trials,
+            held.into_iter().map(|p| p as i64).collect(),
+            work,
         ))
     }
 
@@ -540,6 +582,66 @@ impl PySolver {
             .parametric_step_full(&pins, &deltas)
             .map_err(solver_error_to_py)?;
         Ok(dx_full.into_pyarray_bound(py))
+    }
+
+    /// Newton iterations on the barrier system, refining a compound
+    /// step against the held factor. One back-solve per iteration and
+    /// no factorization.
+    ///
+    /// `step` is a full compound step, the shape
+    /// [`Self::parametric_step_full`] returns, so any mode's result
+    /// can be corrected. Returns the refined step and a dict holding
+    /// the iterations spent, the residual before and after, whether
+    /// the loop stopped early, how many bounds changed status, and the
+    /// residual split into stationarity, feasibility and
+    /// complementarity, which carry different units and different
+    /// consequences for whether an estimate can be acted on.
+    ///
+    /// The corrector aims at the barrier solution at the μ the solve
+    /// finished on, so the accuracy it reaches is bounded by that
+    /// offset, and where the perturbation needs a bound the base point
+    /// held tightly to leave, the held barrier diagonal cannot
+    /// represent the change and the iterations make no progress. A
+    /// returned `residual` equal to `initial_residual` is that case.
+    /// The returned point always satisfies the variable bounds, so
+    /// `max_iter = 0` costs one evaluation and reports the step's
+    /// residual without iterating.
+    #[pyo3(signature = (pin_constraint_indices, deltas, step, max_iter=5))]
+    fn correct_step<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+        step: Vec<Number>,
+        max_iter: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("correct_step: no converged factor (call solve() first)")
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (out, rep) = s
+            .inner
+            .correct_step(&pins, &deltas, &step, max_iter)
+            .map_err(solver_error_to_py)?;
+        let info = PyDict::new_bound(py);
+        info.set_item("iterations", rep.iterations)?;
+        info.set_item("residual", rep.residual)?;
+        info.set_item("initial_residual", rep.initial_residual)?;
+        info.set_item("converged", rep.converged)?;
+        info.set_item("active_set_changes", rep.released + rep.pinned)?;
+        info.set_item("released", rep.released)?;
+        info.set_item("pinned", rep.pinned)?;
+        info.set_item("stationarity", rep.stationarity)?;
+        info.set_item("feasibility", rep.feasibility)?;
+        info.set_item("complementarity", rep.complementarity)?;
+        Ok((out.into_pyarray_bound(py), info))
     }
 
     /// Rows of the compound KKT vector holding the equality
@@ -858,6 +960,21 @@ impl PySolver {
         let g = s.inner.row_normal(j as usize).map_err(solver_error_to_py)?;
         Ok(g.into_pyarray_bound(py))
     }
+}
+
+fn validate_var_rows(held_var_rows: &[i64], n_x: usize) -> PyResult<Vec<Index>> {
+    held_var_rows
+        .iter()
+        .map(|&r| {
+            if r < 0 || (r as usize) >= n_x {
+                Err(PyValueError::new_err(format!(
+                    "held_var_rows[..] = {r} out of range [0, n_x={n_x})",
+                )))
+            } else {
+                Ok(r as Index)
+            }
+        })
+        .collect()
 }
 
 fn validate_pins(pin_constraint_indices: &[i64], m: usize) -> PyResult<Vec<Index>> {

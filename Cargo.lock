@@ -1114,8 +1114,10 @@ version = "0.10.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
+ "pounce-feral",
  "pounce-linalg",
  "pounce-nlp",
+ "pounce-qp",
  "tracing",
 ]
 

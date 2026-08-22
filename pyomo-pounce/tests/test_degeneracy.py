@@ -214,13 +214,13 @@ def test_a_clean_base_point_is_identical_under_both_settings():
 
 
 def test_an_exhausted_budget_falls_back_with_a_warning():
-    """max_iter=0 leaves the QP no trials, so the decision fails and
-    the estimate falls back to the one-sided step and says so."""
+    """degeneracy_iter=0 leaves the decision no back-solves, so it
+    fails and the estimate falls back to the one-sided step and says
+    so."""
     m = kink()
     with pytest.warns(UserWarning, match="one-sided step"):
-        fell = estimate(m, [(m.p, -1.0)], max_iter=0, clamp=False)
-    plain = estimate(m, [(m.p, -1.0)], degeneracy="one_sided", max_iter=0,
-                     clamp=False)
+        fell = estimate(m, [(m.p, -1.0)], degeneracy_iter=0, clamp=False)
+    plain = estimate(m, [(m.p, -1.0)], degeneracy="one_sided", clamp=False)
     assert fell[m.x] == plain[m.x]
 
 

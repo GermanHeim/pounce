@@ -573,7 +573,7 @@ impl SensSolve {
                         eps,
                         16,
                     ) {
-                        Ok((refined, _pinned)) => dx_full = refined,
+                        Ok((refined, _rows, _stop)) => dx_full = refined,
                         Err(e) => {
                             outbox_cb.borrow_mut().error = Some(e);
                             return;

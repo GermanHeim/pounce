@@ -9,6 +9,356 @@ changes.
 
 ## [Unreleased]
 
+- **`corrector_iter` refines a step by Newton iterations on the barrier
+  system, against the factorization the solve left behind.**
+
+  A parametric step leaves a residual in the barrier KKT system at the
+  perturbed parameter values. Iterating on it costs one back-solve each
+  and no factorization, which is what makes the correction worth taking
+  over a re-solve. Available on `estimate()` and `estimate_report()`
+  under every mode, default 0, stopping early when an iteration fails
+  to improve the residual, so the number is a budget rather than a
+  count.
+
+  The residual comes from the algorithm's own calculated quantities by
+  way of the trial iterate, so fixed variables and the bound expansions
+  are handled exactly as the solve handles them. The iterations run in
+  the model's own units, which is the frame the step and the bounds
+  arrive in, and the converged iterate is converted once on the way in
+  and back on the way to those quantities, so a variable-scaled solve
+  answers in the model's units the way every other query does. The
+  residual comes back through `E` before the back-solve, since `solve`
+  takes its right-hand side in natural units and applies `E` itself, so
+  handing it one the algorithm already scaled applies the factor twice.
+  That leaves the fixed point alone and puts every Newton direction on
+  the way there out by it. Setting a
+  trial point leaves `curr` alone, and `curr` is what the held
+  factorization was built from, so nothing here disturbs the factor or
+  any other consumer of the session.
+
+  A correction cannot change an active set on its own. The held
+  operator carries every bound's barrier diagonal from the base point,
+  `z / s`, which at a tightly held bound is `z² / mu`. So the predictor's
+  decision is applied once before iterating. A released bound comes out
+  of the operator with its multiplier held at zero and its
+  complementarity row gone, a bound the step brings in has its diagonal
+  raised to what the barrier assigns at that slack, and every other row
+  keeps the base point's term. Both are the same change to one
+  diagonal, so one factorization serves the whole correction.
+
+  The changes come from the step's own endpoint, so every mode hands
+  over something. `fix_relax` and `path` decide an active set and pass
+  it on. `mode="linear"` holds the active set fixed as it builds the
+  step, so what reaches the correction is whatever the clamp left
+  sitting on a bound, one change where the other two pass seven.
+
+  Measured on the CSTR of notebook 36, whose first crossing is at 1.3%
+  of the change to its steady state. With `fix_relax` and eight
+  iterations the largest relative error goes from 2.4e-3 to 1e-6 at a 2%
+  change, 1.4e-2 to 2e-6 at 5%, and 6.0e-2 to 6.0e-5 at 10%, which is
+  four crossings. At seven crossings it improves the estimate by about
+  5% and stops. The reach is set by the crossings handed over, not the
+  size of the change.
+
+  What it does not do is set the multipliers, which arrive extrapolated
+  over the whole perturbation and are the dominant error once that is
+  large. `estimate()` warns when a correction ends without at least
+  halving the residual, so an uncorrected step is never returned as a
+  corrected one, and the report splits the residual into stationarity,
+  feasibility and complementarity, which carry different units and
+  different consequences for whether an estimate can be acted on. It
+  also reports `released` and `pinned`, the bounds that left the active
+  set and the ones that joined, with `active_set_changes` their total.
+
+- **`estimate_report()` takes `mode` and `predictor_iter`, and measures
+  the step that mode builds.** `violation` is evaluated at the
+  predicted point and the `corrector` block starts from that point's
+  residual, so both are properties of the step. Reporting the linear
+  step's numbers for a `fix_relax` or `path` estimate described a step
+  the caller did not take. On one nonlinear model whose linear step
+  leaves a variable outside its bound, the violation is 3.64 under
+  `"linear"` and 0.427 under the other two.
+
+  Under `"fix_relax"` and `"path"` the step stops at the bound, so
+  `alpha` is 1.0 and `crossed` is empty for every model, which is the
+  correct answer for such a step. `activity`, `row_activity`, `mu`,
+  `perturbations` and `bounds_relaxed` come from the base point and the
+  solve, so none of them moves with the mode. The two new arguments
+  come after `corrector_iter`, since `estimate_report()` shipped in
+  0.10.0 and its positional order is fixed.
+
+  A `refine_stop` attribute carries why the `"fix_relax"` refinement
+  stopped, one of `"settled"`, `"iteration_limit"`,
+  `"degrees_of_freedom"` or `"worse_than_plain"`, and None under the
+  other two modes. A pass pins every crossing it sees, so the pin count
+  says nothing about which limit was reached and this is the only thing
+  that does. `"worse_than_plain"` means the step the report describes
+  is the unrefined one.
+
+- **`max_iter` on `estimate()` and `active_set_changes()` is now
+  `predictor_iter`.** It bounds the `fix_relax` refinement passes and
+  the active-set changes `path` applies, so it now says which work it
+  limits, alongside `corrector_iter` and `degeneracy_iter`. Neither
+  function is in a release, so nothing downstream carries the old name.
+  `estimate_report()` is unaffected and keeps the deprecated `max_iter`
+  it gained earlier in this cycle.
+- **`mode="fix_relax"` pins every crossing in a pass, so `max_iter` no
+  longer picks the answer (gh#732).**
+
+  The refinement took the single worst violation per pass, so repairing
+  `k` crossings needed `k` passes and `max_iter` — documented as a cost
+  budget — was the loop's only termination condition on any model with
+  more crossings than passes. On the CSTR of notebook 36 the pin count
+  equalled the budget at 16, 30, 60 and 100; at 100 pins, half that
+  problem's degrees of freedom, the refined step came back with a
+  largest relative error of 7.16 against `mode="linear"`'s 0.83 — 8.6
+  times worse than not refining at all — and the error was not even
+  monotonic in the budget.
+
+  A pass now collects the whole violation list, both halves of
+  fix-relax together, constrains all of it and re-solves, which is
+  upstream's own structure: one `x_bound_violations_idx` per pass and
+  `while (bounds_violated)` as the termination condition. The loop ends
+  when the list empties.
+
+  A release keeps its re-factorization rather than becoming a Schur row
+  as upstream has it — that is the computation the `eps · sigma`
+  cancellation measured at 2e-4 off at `tol = 1e-10` is about — but it
+  no longer clears the pins: their right-hand sides are re-measured
+  against the re-solved base. Clearing them is where the budget table's
+  discontinuity came from (a budget of 200 reached a release, wiped
+  100+ pins and ended with 3).
+
+  The release batch backs off the way the pin batch does, and the
+  asymmetry is the point: a pin ADDS a condition, so an over-large batch
+  shows up as an augmented system that cannot be solved, while a release
+  REMOVES one — each bound taken out is stiffness no longer holding its
+  variable, and taking too many at once carries variables off bounds
+  they were sitting on with nothing left to pin them back, and no failed
+  solve anywhere to say so. On notebook 36's CSTR that was 56 releases
+  where 41 were right, and two of its four perturbations came back worse
+  than the unrefined step. A batch of more than one is now kept only
+  when the step it produces is no further outside the bounds than the
+  step in hand; otherwise the most negative multiplier goes alone and
+  the next pass re-measures the rest under it. A release also survives a
+  pin batch that cannot be solved, rather than being rolled back with
+  it: a release repairs the active set on its own terms. That is two
+  separable things — the released set itself, and the step it produced
+  — and a pass that rolls back only the first recovers the released
+  bounds while still answering with the unrefined step.
+
+  A bound whose release the factorization refuses is barred rather than
+  retried — the same factorization was being asked for again on every
+  later pass — and the stop for it is `degrees_of_freedom`, which no
+  budget reaches, rather than the pass limit.
+
+  `max_iter` is a safety limit now, and the refinement reports which of
+  its stopping conditions fired. `Solver::parametric_step_bounded`,
+  `parametric_step_bounded_decided` and their Python bindings return
+  `(dx, pinned, stop)`, where `stop` is `"settled"`,
+  `"iteration_limit"`, `"degrees_of_freedom"` or `"worse_than_plain"`.
+  `estimate()` names it in the warning instead of inferring the reason
+  from the pin count, which a batched pass makes meaningless.
+
+  Two guards independent of the loop shape, both suggested on the
+  issue. A pass is refused when its correction is out of scale with the
+  step it corrects, not only when a pinned row misses its target: the
+  hundred pins above each landed within `1e-3` of where they were asked
+  to go, because achieving the pinned coordinates says nothing about
+  what the correction did to the other 1300. And the unrefined step is
+  returned when the refinement ends further outside the bounds than it
+  started, which is free — `dx_plain` is already in scope.
+
+  Also fixed on the way: the refinement's augmented solves routed an
+  empty released set through `solve_released`, which a backsolver
+  without release support answers `false` to, so such a backsolver
+  could not pin at all.
+
+- **`degeneracy="directional"` decides through the active-set QP engine,
+  budgeted by its own `degeneracy_iter`.**
+
+  The shipped decision enumerated candidate working sets over the weakly
+  active bounds, one released re-factorization per trial. On a dynamic
+  column model with 792 weakly active bounds that spent 32 s exhausting
+  its budget on every call before falling back, no budget could reach a
+  meaningful candidate, and any candidate holding a bound whose variable
+  an initial-condition equality already pins was singular, one such trial
+  ending the whole search. Both defects are structural to enumeration,
+  not tuning.
+
+  The decision is now solved as the QP it is: one released factorization
+  serves the whole call (the released `Sigma` is built once and every
+  solve reuses it, where rebuilding it per call was most of the old
+  per-trial cost), the released direction's violations name the engaged
+  rows, and their pin forces solve a small bound-constrained QP through
+  `pounce-qp` whose complementarity conditions are eq. 14's. Equality-
+  pinned rows never violate, so they never enter and nothing is singular.
+  Engagement uses a band of sqrt(mu) relative to the direction's norm: a
+  weak bound's slack and multiplier carry uncertainty equal to their own
+  size, and a movement below that band cannot be resolved against the
+  bound, so it keeps the released treatment rather than an asserted-exact
+  decision.
+
+  `degeneracy_iter` (default 16, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`) budgets the decision's back-solves, replacing
+  the borrowed `max_iter`, which keeps its meaning as the mode's own
+  work; the split matters because the two are different resources spent
+  on different questions. Exhaustion falls back to the one-sided step as
+  before, with the warning now naming the true engagement count.
+
+  The enumeration is removed, not kept alongside: `directional_step`
+  and its combination generator are gone, and the
+  `parametric_step_bounded_directional` /
+  `parametric_step_path_directional` entries and bindings with them
+  (their job, decide then consume, is now the decision plus the
+  `_decided` entries). `parametric_step_directional` remains the name
+  of the decision and is the QP implementation.
+
+  Measured on the fixtures and the 62k-variable column: kink decisions
+  identical to the enumeration's (direction difference 0 and 2e-19, in
+  fewer solves), the notebook's held-breakpoint example bit-identical
+  including its record, the column's default-budget call falling back
+  diagnosed in 5 s against 32 s, and the exact decision at a raised
+  budget, which enumeration cannot produce at all, terminating in 21.5 s
+  (232 back-solves, 76 of 792 held).
+
+  The basis columns are projected onto the weak rows' own entries and
+  the full-length vectors dropped, since that projection is all `S`
+  reads. What the columns were otherwise held for, the direction
+  `d0 + Σ λ_k X_k`, is recovered in one further solve on the combined
+  right-hand side `Σ λ_k a_k`, which is the same vector by linearity.
+  That trades one back-solve per expansion round for bounding the
+  memory by the weak-set size rather than by `dim` times the budget:
+  about 114 MB at that 62k configuration, and growing with
+  `degeneracy_iter` toward 390 MB for a caller raising it to reach the
+  exact decision. The engine's `use_schur_updates`
+  path hits `MaxIter` on dense reduced problems of hundreds of rows and
+  stays off here; that is engine-side follow-up work.
+
+  One caller-visible consequence of the split: `estimate_report()`'s
+  `max_iter` no longer does anything, since the decision was the only
+  work it budgeted there and that is `degeneracy_iter` now. It is still
+  accepted, for positional compatibility, but passing it raises a
+  `DeprecationWarning` rather than being ignored quietly —
+  `estimate_report(..., max_iter=0)` used to force the one-sided
+  fallback and would otherwise have started returning the directional
+  step without saying so. `estimate()` and `active_set_changes()` keep
+  `max_iter` as the mode's own work, where it still bites.
+
+- **`nlp_scaling_method=curvature-based`: scale a QCQP by its coefficients
+  instead of by one derivative sample** (#703).
+
+  The default `gradient-based` scaling reads `∇f` and the Jacobian once, at
+  x₀. A row `½xᵀQx ≤ b` written about the origin has `∇g(0) = 0`, so started
+  from `x₀ = 0` it is assigned factor **1.0** however far `Q` and `b` disagree
+  — at every value of `nlp_scaling_max_gradient`, since `100/0` and `1e-6/0`
+  both clamp to 1. There is also no column stage at all. Across POUNCE's own
+  fixture corpus that is 196 of 196 quadratic rows left unscaled.
+
+  The new method derives both from the model's quadratic coefficients: one
+  **joint** variable scaling `D`, Ruiz-equilibrated across the whole pencil
+  `Q₀ + Σλᵢ Qᵢ` through its λ-independent magnitude envelope, then a per-row
+  `eᵢ = 1/max(‖D Qᵢ D‖_∞, ‖D aᵢ‖_∞, |bᵢ|)`. The objective is deliberately
+  left unscaled.
+
+  The claim it is validated on is invariance rather than speed. Given a QCQP
+  and the same QCQP under an exact change of variables spanning nine orders
+  of magnitude, `curvature-based` returns the same answer to fourteen digits
+  in the same 16 iterations at every span, while `gradient-based` degrades
+  from 75 to 154 iterations and then fails outright with
+  `Maximum_Iterations_Exceeded`. On two QCQPs shaped like the Mittelmann
+  `qcqp*` family it is 75 → 15 and 50 → 33 iterations at an identical
+  objective.
+
+  **Off by default, and not free when asked for.** It requires every row and
+  the objective to be degree ≤ 2 and refuses with a message otherwise, rather
+  than accepting the option and solving unscaled. Of the 47 CLI fixtures it
+  accepts, 33 change status, iteration count or objective and 14 do not — it
+  answers a specific pathology, and is a different scaling everywhere else.
+  On a nonconvex model a change of scaling changes which local minimum you
+  reach, and which one is not a property of the method: on one draw
+  `pooling_rt2stp` goes from `-3273.955` in 128 iterations to `-4391.826`
+  (the published global optimum) in 1083, but across 11 round-off-scale
+  perturbations of `mu_init` the default reaches the better optimum 3 times
+  in 11 and `curvature-based` 4 in 11, at median 204 and 108 iterations. The
+  model is bistable — see #713, closed as not-a-regression on this same
+  mistake — so treat a nonconvex re-scale as a different search. Because the
+  option is off by default, the fixture sweep is unaffected by all of this.
+
+  **Asking for it declines the convex fast path** (`solver_selection=auto`),
+  the same bargain #483 established for `user-scaling`. The factors reach the
+  engine through `TNLP::get_scaling_parameters`, which the convex solvers
+  never call — and the models this method is defined for are exactly the
+  models with quadratic rows, which is the population `auto` routes to those
+  solvers: 38 of the 47 fixtures it accepts classify convex, including both
+  fixtures added for it. Left ungated the headline feature would have been
+  silently inert on most of them. Under an explicit convex `solver_selection`
+  the forced choice is respected and the skipped option is reported instead.
+
+  The reroute is paid only where there is curvature to read. A model with no
+  quadratic coefficient anywhere — an LP is degree ≤ 2 with every `Q` empty —
+  makes the scheme degenerate to Ruiz equilibration of `[A b]`, which
+  `pounce-convex` already does internally, so those 7 fixtures keep the fast
+  path bit-for-bit and get a note rather than a reroute. Without that
+  exception, asking for this scaling took `lp_israel` from 29 iterations to
+  296 (29 → 135 for the engine switch, 135 → 296 for a scaling scheme with
+  nothing to read).
+
+- **`pounce check-x0` now reports what automatic scaling will do — and, for a
+  quadratic row, what it cannot see** (#703).
+
+  `nlp_scaling_method=gradient-based` (the default) is a point sample: it
+  reads `∇f` and the Jacobian once at x₀ and never looks again. A row written
+  `½xᵀQx ≤ b` about the origin has `∇g(0) = 0`, so started from `x₀ = 0` the
+  sample reads nothing and the row is assigned factor **1.0** however far `Q`
+  and `b` disagree. No value of `nlp_scaling_max_gradient` reaches it — `100/0`
+  and `1e-6/0` both clamp to 1 — and the cutoff is a per-block gate besides,
+  so a block with no row above it gets no scale vector at all. Across the CLI
+  fixture corpus that is **196 of 196 quadratic rows left unscaled**, including
+  one at 250× and one at 52× right-hand-side-to-curvature mismatch.
+
+  The preflight's new `automatic scaling at x0` section reports the objective
+  factor, the per-block gate and the per-row factors — computed by the
+  solver's own arithmetic, not a copy of it — beside the coefficient
+  magnitudes (`‖Q‖_∞`, `‖a‖_∞`, `|b|`) that the sample cannot report. A
+  warning fires when a model has rows in that blind spot *and* a mismatch
+  above 100×, naming `nlp_scaling_method=user-scaling` as the remedy. The
+  remedy is a real one: supplying `eᵢ = 1/max(‖Qᵢ‖_∞, ‖aᵢ‖_∞, |bᵢ|)` through
+  the existing `scaling_factor` suffixes takes two QCQPs shaped like the
+  Mittelmann family from 75 → 15 and 50 → 33 iterations at an identical
+  objective, while `gradient-based` and `nlp_scaling_method=none` are
+  bit-identical on both.
+
+  Diagnostic only — no solver behaviour changes. New:
+  `--scaling-max-gradient` on `check-x0`, and a `scaling` block in its JSON
+  report. Background and measurements:
+  `dev-notes/quadratic-structure-exploitation.md` §8.
+- **A badly column-scaled convex QCQP could be reduced to the wrong cone and
+  the wrong answer reported as a success** (found by #703's fixtures).
+
+  Reducing `½xᵀQx ≤ b` to a second-order cone factors `Σ_k f_k f_kᵀ = Q` by
+  pivoted Cholesky, and the number of factor rows is the dimension of the
+  cone. The rank test cut at `1e-12 · max_diag` — one absolute threshold for
+  the whole matrix — so it asked how a pivot compared to the model's units
+  rather than how far its own downdate had moved it. On a model whose columns
+  span eight orders of magnitude that discarded **7 of 24** genuine
+  directions, making the cone larger than the constraint it stood for.
+
+  The solve then reached a better objective than the true optimum
+  (`-400.652` against `-364.210`, 10% out) and certified it: status
+  `SolveSucceeded`, self-reported constraint violation `2.66e-15`. Evaluating
+  the returned point against the actual model violates the quadratic row by
+  `4.948e+01` — 38% of its right-hand side. A relative residual check would
+  not have caught it either (`5.4e-13` against `‖Q‖ = 4.3e9`).
+
+  The test is now relative to each pivot's own starting diagonal, which is
+  invariant under the diagonal congruence `Q → CQC` that a change of units
+  is, and the loop settles a failed pivot and keeps looking rather than
+  stopping — with a relative threshold, pivot order and rank order are no
+  longer the same order. Affects the conic route only (`solver_selection`
+  `auto` or `socp` on a convex QCQP); the NLP path was always correct. The
+  fixture sweep moves two lines, both of them the fixture that exposed it.
+
 - **An LP whose convex solve ended in numerical failure was reported as the
   final answer, on models the NLP path solves** (#724).
 
