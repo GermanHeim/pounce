@@ -217,6 +217,66 @@ impl PdSensBacksolver {
         (&self.data, &self.cq, &self.nlp)
     }
 
+    /// The barrier level the **reported point** sits on.
+    ///
+    /// Normally that is `IpoptData::curr_mu`: the solve stops on the
+    /// `mu = 0` error with `mu` already driven to the floor, so the
+    /// driver's last barrier parameter still describes the iterate it
+    /// stopped at, and every complementarity product is within
+    /// tolerance of it.
+    ///
+    /// It stops describing the iterate when a terminating path
+    /// installs multipliers of its own. `ComputeFeasibilityMultipliers`
+    /// (`IpIpoptAlg.cpp:893`, ported in gh#508) is the one that bites:
+    /// on a square NLP -- `dim(x) == dim(y_c)`, so the objective is
+    /// decorative and the answer is just the feasible point -- it zeroes
+    /// all four bound-multiplier blocks, solves for the feasibility
+    /// multipliers, and converges the check outright. A square problem
+    /// can therefore be *reported solved at `mu = mu_init`* with every
+    /// complementarity product identically zero, on iteration 1, having
+    /// never reduced the barrier at all.
+    ///
+    /// Everything downstream that reads `curr_mu` then measures the
+    /// point against a barrier it is not on. It is not cosmetic: the
+    /// equation-11 barrier correction injects `mu` into the
+    /// complementarity rows, and on such a point that term is pure
+    /// error -- on the `cd_split_pin_mapping` fixture it flips the sign
+    /// of the returned bound-multiplier step (`-1.004e-4` against a
+    /// true `+1.004e-4`).
+    ///
+    /// Detected from the point, never from the problem's dimensions:
+    /// bound rows present with every bound multiplier exactly zero is a
+    /// state no barrier iterate can be in -- the algorithm holds
+    /// `z > 0` strictly -- and is exactly what that path leaves behind.
+    /// The barrier level there is `0`: the equation-11 correction has
+    /// nothing to carry the step off, and the complementarity rows are
+    /// already satisfied where they stand.
+    ///
+    /// The test is exact equality rather than a threshold on purpose.
+    /// `curr_avrg_compl` was measured as the alternative and rejected:
+    /// across the `pounce-sensitivity` suite it disagrees with
+    /// `curr_mu` by up to 4.7x on ordinary terminations, so reading the
+    /// barrier level off it would move every sensitivity result to fix
+    /// one. The zeroing, by contrast, is assignment, not arithmetic.
+    pub(crate) fn barrier_mu(&self) -> Number {
+        let d = self.data.borrow();
+        let mu = d.curr_mu;
+        let Some(curr) = d.curr.as_ref() else {
+            return mu;
+        };
+        let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
+        let n_bound: Index = blocks.iter().map(|v| v.dim()).sum();
+        if n_bound == 0 {
+            // No bounds at all: there is no barrier either way, and the
+            // complementarity blocks the caller would shift are empty.
+            return mu;
+        }
+        if blocks.iter().all(|v| v.amax() == 0.0) {
+            return 0.0;
+        }
+        mu
+    }
+
     /// Construct from the four handles handed in by the `on_converged`
     /// callback. Errors if `data` has no `curr` (i.e. the algorithm
     /// never reached an iterate — should not happen on
