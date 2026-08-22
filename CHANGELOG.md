@@ -9,6 +9,59 @@ changes.
 
 ## [Unreleased]
 
+- **Convex postsolve no longer manufactures a KKT residual on the way back to
+  the original problem space** (#745).
+
+  The LP arm exited `Solve_Succeeded` on the netlib LP `problem` while its own
+  summary block printed `Dual infeasibility 1.2486e-03` and
+  `Complementarity 1.1718e-04` — five orders above the `1e-8` tolerance the
+  termination test had just certified against. The filed diagnosis blamed the
+  termination test. It is not the termination test: the *reduced* solve
+  converges to `dual = 9.4e-12`. Both numbers were created by
+  `Presolve::postsolve`, and the residuals the summary prints are recomputed
+  in the restored space, so the check and the report were measuring two
+  different points. Two independent defects:
+
+  Postsolve **re-derives** every variable's bound multipliers rather than
+  carrying the reduced solve's through — it has to, since most of the columns
+  it restores were eliminated and never had one — and the rule it used was a
+  hard classification against a `1e-6` window: at the bound, `z = grad`;
+  otherwise `z = 0`. That cliff sits exactly where an interior-point solve
+  likes to stop. On `problem` a variable sat `1.5531e-6` off a zero lower
+  bound carrying `z_lb = 1.2486e-3`; their product, `1.9e-9`, *is* the
+  barrier's complementarity, so the pair was a perfectly good certificate —
+  but `1.5531e-6` is outside the window, so the multiplier was dropped and the
+  whole reduced cost reported as dual infeasibility. Widening the window only
+  moves the cliff, and the same model has a second variable `1.2e-13` off a
+  bound whose multiplier is `1e7`, so no fixed window serves both. Attribution
+  is now continuous: a leftover `r` on a variable a distance `d` from the
+  bound that could carry it is split so that the dual infeasibility it leaves
+  and the complementarity it creates are equal, `|r|·d/(1+d)` of each. That is
+  never worse than either endpoint, reproduces the old full attribution as
+  `d → 0`, and decays to nothing as `d → ∞`, so a genuinely dual-infeasible
+  point stays flagged rather than being papered over with a multiplier no
+  bound could justify. It runs per presolve layer, not once at the end,
+  because a bound can exist in one layer's space and not survive outward.
+
+  Separately, an eliminated column's primal is *computed* — a free-column
+  singleton back-substitutes its consumed row, an aggregation evaluates
+  `x = α·y + β` — so roundoff can leave it a few ulps outside the box it is
+  pinned to, and a variable that far outside a bound carries that bound's full
+  multiplier. `problem`'s column 0 sat `1.17e-11` below a lower bound whose
+  multiplier is `1e7`: the `1.17e-4` of complementarity, exactly. Postsolve
+  now puts such a value back inside the declared box, where the excursion
+  shows up as the row residual it actually is. A box that a bound tightening
+  has crossed by an ulp (`lb = 1.0`, `ub = 0.9999999999999999`, reached by
+  netlib `model3`, `model7` and `nesm` without tripping the toleranced
+  infeasibility test) is left alone — there is no side to prefer, and
+  `f64::clamp` panics on `min > max`.
+
+  Across the 371-LP corpus this takes the number of solves reporting a dual
+  infeasibility above `1e-6` from 210 to 25, with no objective regressing.
+  `problem` itself goes from `dual = 1.2486e-3` to `1.94e-9`, and its
+  objective from `-1.6001171` to `-1.5999999` against Ipopt/MA57's
+  `-1.5996991`.
+
 - **The convex arm applies `bound_relax_factor`, so the same `.nl` no longer
   gets two different models depending on `solver_selection`** (#744, #745).
 
