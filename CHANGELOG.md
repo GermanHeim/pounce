@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+- **The sensitivity back-solve no longer refines against a matrix its
+  factor does not decompose (gh#737 / gh#735 interaction).**
+
+  `may_refine` gates `PdFullSpaceSolver`'s iterative refinement, and its
+  own doc gives the rule: refinement measures its residual against the
+  system it thinks it is solving, which is this factor's system only
+  when no `SigmaOverride` is in play. It tested `declared.is_none()`
+  because crossover's declared frame was the only override that could
+  exist. gh#737's ceiling is a second one, and it fires on an ordinary
+  solve with no crossover, so refinement ran and escalated: on the
+  gh#737 fixture a step of `-0.21` came back as `7.97e22`. The test is
+  now on the override rather than on where it came from. Declared still
+  implies an override, so nothing changes where the gate was already
+  right.
+
+  Only reachable since both landed: the two changes merge without a
+  textual conflict and CI on each was green against a base without the
+  other.
+
 - **A barrier diagonal too stiff for the constraint rows it sits in no
   longer erases them (gh#737).**
 
