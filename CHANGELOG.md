@@ -142,7 +142,12 @@ changes.
   being the worse choice on this model rather than a POUNCE defect. Both codes
   reach the optimum and then fail to close the convergence test. It is an
   accepted cost of matching upstream, tracked with an owner in #748 rather
-  than left in a commit message. (`nql180` also appears to regress in the raw
+  than left in a commit message. It is recoverable today:
+  `mu_strategy_fallback=yes` retries under the other schedule when a solve
+  ends in `Maximum_Iterations_Exceeded` or `Solved_To_Acceptable_Level`, and
+  on `dirichlet120` that retry solves in 176 iterations to the pre-#746
+  objective. Whether that fallback should be on by default is the open
+  question in #748. (`nql180` also appears to regress in the raw
   table; re-run without competing load both arms hit the CPU limit, so that
   line is a timing artifact, not a schedule effect.)
 
