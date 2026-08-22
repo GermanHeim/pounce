@@ -372,6 +372,261 @@ def test_implicit_diff_active_inequality_pounce_73():
     np.testing.assert_allclose(analytic, fd, atol=5e-6)
 
 
+# ---------------------------------------------------------------------
+# gh#740 — bounds built with jnp.* *inside* a traced function.
+#
+# `jnp.full(n, -10.0)` in the body of a jitted loss is a tracer, not a
+# concrete array. It used to be closed over and dereferenced inside the
+# pure_callback host body, which leaked it out of the trace; JAX then
+# blamed the *user's* function for a side effect. Under plain `jax.grad`
+# the same expression evaluates eagerly (it does not depend on `p`), so
+# only the `jit` paths were broken — which is why the docs' own examples
+# looked fine.
+# ---------------------------------------------------------------------
+
+
+def test_jit_solve_with_in_trace_jnp_bounds_gh_740():
+    """The issue's own reproduction: min ||x - p||² with slack bounds.
+
+    x*(p) = p, so sum(x*) = sum(p) = 3. Eager already worked; `jax.jit`
+    raised UnexpectedTracerError.
+    """
+    from pounce.jax import solve
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def loss(p):
+        x = solve(
+            p, f=f, x0=jnp.zeros(2), n=2,
+            lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+            options={"tol": 1e-10, "print_level": 0},
+        )
+        return jnp.sum(x)
+
+    p0 = jnp.array([1.0, 2.0])
+    assert float(loss(p0)) == pytest.approx(3.0, abs=1e-6)
+    assert float(jax.jit(loss)(p0)) == pytest.approx(3.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("wrap", ["jit", "jit_of_grad", "grad_of_jit"])
+def test_jit_solve_bounds_flavours_agree_gh_740(wrap):
+    """In-trace `jnp` bounds must match `numpy` bounds under every
+    jit/grad composition — forward value *and* gradient.
+
+    `cl`/`cu` matter separately from `lb`/`ub`: they are read again in
+    the backward (to tell equality rows from slack ones), so a traced
+    constraint bound also has to reach the vjp without being closed over.
+    """
+    from pounce.jax import solve
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # x0 + x1 = p0  → one active equality row
+        return jnp.stack([x[0] + x[1] - p[0]])
+
+    def make_loss(full, zeros):
+        def loss(p):
+            x = solve(
+                p, f=f, g=g, x0=jnp.zeros(2), n=2, m=1,
+                lb=full(2, -10.0), ub=full(2, 10.0),
+                cl=zeros(1), cu=zeros(1),
+                options={"tol": 1e-10, "print_level": 0},
+            )
+            return jnp.sum(x ** 2)
+        return loss
+
+    def apply(loss, p):
+        if wrap == "jit":
+            return jax.jit(loss)(p)
+        if wrap == "jit_of_grad":
+            return jax.jit(jax.grad(loss))(p)
+        return jax.grad(jax.jit(loss))(p)
+
+    p0 = jnp.array([1.0, 2.0])
+    ref = np.asarray(apply(make_loss(np.full, np.zeros), p0))
+    got = np.asarray(apply(make_loss(jnp.full, jnp.zeros), p0))
+    np.testing.assert_allclose(got, ref, atol=1e-7)
+
+
+def test_jit_solve_with_warm_in_trace_jnp_bounds_gh_740():
+    """`solve_with_warm` carries the same closure, and the same fix."""
+    from pounce.jax import solve_with_warm
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def make_loss(full):
+        def loss(p):
+            x, _state = solve_with_warm(
+                p, f=f, x0=jnp.zeros(2), n=2, m=0,
+                lb=full(2, -10.0), ub=full(2, 10.0),
+                options={"tol": 1e-10, "print_level": 0},
+            )
+            return jnp.sum(x ** 2)
+        return loss
+
+    p0 = jnp.array([1.0, 2.0])
+    ref = np.asarray(jax.jit(jax.grad(make_loss(np.full)))(p0))
+    got = np.asarray(jax.jit(jax.grad(make_loss(jnp.full)))(p0))
+    np.testing.assert_allclose(got, ref, atol=1e-7)
+    np.testing.assert_allclose(got, 2.0 * np.asarray(p0), atol=1e-6)
+
+
+def test_jit_vmap_solve_parallel_in_trace_jnp_bounds_gh_740():
+    """The threadpool batch path routes bounds through the same split."""
+    from pounce.jax import vmap_solve_parallel
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def make_loss(full):
+        def loss(p_batch):
+            x = vmap_solve_parallel(
+                p_batch, f=f, x0=jnp.zeros(2), n=2, m=0,
+                lb=full(2, -10.0), ub=full(2, 10.0),
+                options={"tol": 1e-10, "print_level": 0},
+                workers=2,
+            )
+            return jnp.sum(x ** 2)
+        return loss
+
+    p_batch = jnp.array([[1.0, 2.0], [-0.5, 0.25]])
+    ref = np.asarray(jax.jit(jax.grad(make_loss(np.full)))(p_batch))
+    got = np.asarray(jax.jit(jax.grad(make_loss(jnp.full)))(p_batch))
+    np.testing.assert_allclose(got, ref, atol=1e-7)
+    np.testing.assert_allclose(got, 2.0 * np.asarray(p_batch), atol=1e-6)
+
+
+def _sq_loss_with_bounds(p, *, lb, ub, cl=None, cu=None, g=None, m=0):
+    """sum(x*²) for min ||x - p||² under the given bounds."""
+    from pounce.jax import solve
+
+    x = solve(
+        p,
+        f=lambda x, p: jnp.sum((x - p) ** 2),
+        g=g, x0=jnp.zeros(2), n=2, m=m,
+        lb=lb, ub=ub, cl=cl, cu=cu,
+        options={"tol": 1e-10, "print_level": 0},
+    )
+    return jnp.sum(x ** 2)
+
+
+def test_active_p_dependent_bound_trips_nan_gh_740():
+    """A p-derived bound that *binds* poisons the gradient with NaN.
+
+    `solve` holds the bounds constant, so dx*/d(bound) is dropped. That
+    is harmless for the ordinary `lb=jnp.full(n, -10.0)` idiom gh#740 is
+    about — a constant's cotangent transposes into nothing — but for a
+    bound built out of `p` the dropped term is a real part of dL/dp.
+    Before the fix that case raised UnexpectedTracerError; a plain zero
+    would have turned the crash into a *confidently wrong* number, so
+    the bound cotangent is NaN on exactly the active coordinates.
+    """
+    def loss(p):  # ub = p - 1 binds on every coordinate (x* wants x = p)
+        return _sq_loss_with_bounds(p, lb=jnp.full(2, -1e19), ub=p - 1.0)
+
+    p0 = jnp.array([1.0, 2.0])
+    grad = np.asarray(jax.jit(jax.grad(loss))(p0))
+    # True dL/dp = 2(p - 1) = (0, 2), and it arrives entirely through the
+    # bound. We cannot supply it, so we refuse to invent it.
+    assert np.all(np.isnan(grad)), grad
+
+
+def test_active_p_dependent_constraint_bound_trips_nan_gh_740():
+    """Same rule for `cu`, and only for the coordinates it feeds."""
+    def g(x, p):
+        return jnp.stack([x[0] + x[1]])
+
+    def loss(p):  # x0 + x1 <= p0 - 5 binds; only p[0] feeds the bound
+        return _sq_loss_with_bounds(
+            p, lb=jnp.full(2, -1e19), ub=jnp.full(2, 1e19),
+            cl=jnp.full(1, -1e19), cu=p[:1] - 5.0, g=g, m=1,
+        )
+
+    p0 = jnp.array([1.0, 2.0])
+    grad = np.asarray(jax.jit(jax.grad(loss))(p0))
+    assert np.isnan(grad[0]), grad
+    # p[1] never reaches the bound, so its gradient is untouched.
+    assert grad[1] == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["constant_slack", "constant_active", "p_dependent_slack",
+     "constant_active_equality", "p_dependent_constraint_slack"],
+)
+def test_bound_tripwire_does_not_false_fire_gh_740(case):
+    """Everything except a binding p-derived bound keeps its gradient.
+
+    The tripwire is gated on the bound's own multiplier, so it stays
+    silent where the dropped term is genuinely zero — including the
+    gh#740 idiom itself, whether or not that constant bound is active.
+    """
+    def g(x, p):
+        return jnp.stack([x[0] + x[1] - p[0]])
+
+    def loss(p):
+        if case == "constant_slack":
+            return _sq_loss_with_bounds(
+                p, lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0))
+        if case == "constant_active":
+            # A jnp bound that binds -- the issue's own idiom, at a
+            # corner. Must not be mistaken for a p-derived bound.
+            return _sq_loss_with_bounds(
+                p, lb=jnp.full(2, -10.0), ub=jnp.full(2, 0.5))
+        if case == "p_dependent_slack":
+            return _sq_loss_with_bounds(
+                p, lb=jnp.full(2, -10.0), ub=p + 5.0)
+        if case == "constant_active_equality":
+            return _sq_loss_with_bounds(
+                p, lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+                cl=jnp.zeros(1), cu=jnp.zeros(1), g=g, m=1)
+        return _sq_loss_with_bounds(
+            p, lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+            cl=jnp.full(1, -1e19), cu=p[:1] + 50.0, g=g, m=1)
+
+    p0 = jnp.array([1.0, 2.0])
+    grad = np.asarray(jax.jit(jax.grad(loss))(p0))
+    assert np.all(np.isfinite(grad)), grad
+    fd = _finite_diff_jacobian(loss, p0).ravel()
+    np.testing.assert_allclose(grad, fd, atol=5e-6)
+
+
+def test_bound_tripwire_covers_warm_and_parallel_gh_740():
+    """The warm-start and threadpool backward rules carry it too."""
+    from pounce.jax import solve_with_warm, vmap_solve_parallel
+
+    f = lambda x, p: jnp.sum((x - p) ** 2)  # noqa: E731
+
+    def warm_loss(p):
+        x, _state = solve_with_warm(
+            p, f=f, x0=jnp.zeros(2), n=2, m=0,
+            lb=jnp.full(2, -1e19), ub=p - 1.0,
+            options={"tol": 1e-10, "print_level": 0},
+        )
+        return jnp.sum(x ** 2)
+
+    def par_loss(p_batch):
+        x = vmap_solve_parallel(
+            p_batch, f=f, x0=jnp.zeros(2), n=2, m=0,
+            lb=jnp.full(2, -1e19), ub=p_batch[0] - 1.0,
+            options={"tol": 1e-10, "print_level": 0},
+            workers=2,
+        )
+        return jnp.sum(x ** 2)
+
+    p0 = jnp.array([1.0, 2.0])
+    assert np.all(np.isnan(np.asarray(jax.jit(jax.grad(warm_loss))(p0))))
+
+    p_batch = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    # The bound is shared across the batch, so one active element is
+    # enough to poison it.
+    grad = np.asarray(jax.jit(jax.grad(par_loss))(p_batch))
+    assert np.all(np.isnan(grad[0])), grad
+
+
 def test_solve_with_warm_reduces_iterations_pounce_74():
     """`solve_with_warm` should consume the previous solve's duals and
     take fewer interior-point iterations on a small perturbation —

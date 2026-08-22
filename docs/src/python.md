@@ -867,6 +867,21 @@ loss = lambda p: jnp.sum(x_star(p) ** 2)
 print(jax.grad(loss)(jnp.array([0.3, 0.7])))
 ```
 
+`lb` / `ub` / `cl` / `cu` may be built with `jnp.*` inside the traced
+function, as above, or passed as plain numpy — both compose with
+`jax.jit` (gh#740). They are treated as *constants* of the problem,
+though, so the implicit-diff rule does not produce `dx*/d(bound)`.
+
+That is exactly right for a fixed bound like the `jnp.full(2, -10.0)`
+above, and it costs nothing there. It is *not* right for a bound built
+out of `p` that ends up **active** at `x*`: the term being dropped is a
+genuine part of `dL/dp`. So `solve` returns `NaN` for those coordinates
+rather than a plausible-looking wrong number — a p-derived bound that
+merely stays slack keeps its correct gradient, and a fixed bound is
+unaffected whether or not it binds. If you need `dx*/d(bound)`, fold
+the bound into a constraint row of `g` instead, where the implicit-diff
+rule sees it.
+
 ### Warm-start across a parameter trajectory
 
 `solve_with_warm` returns the full primal-dual triple alongside `x*`,
