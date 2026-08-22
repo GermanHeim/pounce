@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+- **The convex arm applies `bound_relax_factor`, so the same `.nl` no longer
+  gets two different models depending on `solver_selection`** (#744, #745).
+
+  Ipopt widens the variable box and every inequality row by
+  `min(bound_relax_factor, constr_viol_tol)` before the algorithm starts —
+  `1e-8`, capped at `1e-4`, by default. POUNCE's NLP arm does this;
+  `pounce-convex`'s LP/QP/SOCP extractors read the `.nl` bounds verbatim and
+  did not, so the two arms of one binary solved different problems.
+
+  On a constraint-degenerate model that is not a rounding difference. Every
+  one of `LISWET1`'s 10 000 monotonicity rows is active at the optimum and its
+  multipliers sum to `1.6e9`, so a `1e-8` widening is worth `9.0` of
+  objective: the convex arm returned `36.1224` and the NLP arm and the
+  Ipopt-MA57 reference returned `27.1221`. Nine Maros-Meszaros QPs and 68 of
+  371 LPs disagreed that way, always in the same direction, and it read as a
+  wrong answer from the convex solver. It was not — `36.1224` is the exact
+  optimum of the model as declared, verifiable by hand (all 10 000 rows active
+  makes `x` affine, and the resulting 2-D solve has every multiplier positive)
+  — but "correct for a model nobody asked for" is still a defect, and it made
+  the two arms uncomparable on any degenerate problem. All nine QPs now agree
+  with the NLP arm to 5–7 digits, in both directions.
+
+  Rows are widened by the scale-relative `min(factor, cap)·|b|` and the box by
+  upstream's absolute `min(factor·max(|b|, 1), cap)`, matching what
+  `OrigIpoptNlp::relax_bounds` does on each. Equality rows are never widened;
+  neither is a fixed variable (`x_l == x_u`), which upstream removes before
+  relaxing. Neither is a *crossed* bound (`x_l > x_u`, or a row's `lo > hi`):
+  that is an empty set, which the NLP path rejects as
+  `Invalid_Problem_Definition` before relaxation, and closing a crossing
+  narrower than the widening would answer an inconsistent model instead of
+  refusing it. `bound_relax_factor=0` still solves the model exactly as
+  declared, on both arms.
+
+  Two iteration counts quoted in the test suite were measured against the
+  unrelaxed model and are now pinned to `bound_relax_factor=0`: gh #724's
+  `qp_tau=0.99` numerical-failure trigger on `afiro` (the widened box keeps
+  the KKT system non-singular, so no `qp_tau` in `0.9 … 0.9999` reaches that
+  exit any more) and gh #712's `max_iter` sweep on `scaled_feasible_a` (whose
+  three exactly-active constraints are exactly the degeneracy the widening
+  lifts — it converges in 69 iterations at defaults now, against ~3596 before,
+  and at a genuine `1.2e-10` KKT error).
+
 - **`pounce.jax.solve` composes with `jax.jit` when the bounds are built
   inside the traced function** (#740).
 
