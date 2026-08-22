@@ -745,6 +745,8 @@ fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
 
     let lower: Vec<_> = h
         .iter()
+        // QuadHessian is upper-triangular (i <= j). The certificate wants the
+        // lower triangle, so (i, j) is emitted at (row = j, col = i).
         .map(|(&(i, j), &val)| Triplet::new(j, i, val))
         .collect();
     certify_psd_lower_triangle(n, &lower, PSD_TOL, || {
