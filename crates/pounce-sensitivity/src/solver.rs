@@ -1097,8 +1097,18 @@ impl Solver {
         let mut proj: Vec<Option<Vec<Number>>> = vec![None; nw];
         let mut d = d0.clone();
         let held: Vec<usize>;
+        // A weak row whose own diagonal entry of `S` is zero cannot be
+        // decided by a pin force: an equality owns its coordinate, and
+        // under a parametric step the one equality that moves a
+        // coordinate is the pin of a perturbed parameter. Its movement
+        // is the perturbation itself, so the engagement test cannot
+        // exclude it, and admitting it puts a zero on the diagonal of
+        // `S` beside a nonzero gradient, which is an unbounded QP.
+        // The bound's status there is the parameter's business, inside
+        // the bound or infeasible, so the row stays out for good.
+        let mut inert: Vec<usize> = Vec::new();
         loop {
-            for &k in &engaged {
+            for &k in &engaged.clone() {
                 if proj[k].is_some() {
                     continue;
                 }
@@ -1113,7 +1123,17 @@ impl Solver {
                     return Err(SolverError::BacksolveFailed);
                 }
                 work += 1;
-                proj[k] = Some(weak.iter().map(|w| xk[w.var_row]).collect());
+                let col: Vec<Number> = weak.iter().map(|w| xk[w.var_row]).collect();
+                let own = sign(k) * col[k];
+                let col_scale = col.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+                if own.abs() <= 1e-12 * col_scale.max(1e-300) {
+                    inert.push(k);
+                }
+                proj[k] = Some(col);
+            }
+            engaged.retain(|k| !inert.contains(k));
+            if engaged.is_empty() {
+                return Ok((d[..n_x].to_vec(), Vec::new(), work));
             }
 
             // dense reduced data over the engaged rows, upper triangle
@@ -1238,7 +1258,7 @@ impl Solver {
             let tol = band * scale_of(&d);
             let mut grew = false;
             for k in 0..nw {
-                if engaged.contains(&k) {
+                if engaged.contains(&k) || inert.contains(&k) {
                     continue;
                 }
                 if movement(k, &d) < -tol {
@@ -1268,51 +1288,55 @@ impl Solver {
         Ok((d[..n_x].to_vec(), held, work))
     }
 
-    /// The bounds the activity classifier could not call at the base
-    /// point: on the bound with a multiplier of the same order as the
-    /// slack. Each entry is a bound row present in the held
-    /// factorization, with the side taken from the smaller slack,
-    /// which is the only side an ambiguous label can come from.
+    /// The bounds whose status at the base point is genuinely
+    /// undecided: the barrier holds them with a weight of order one.
+    /// Each entry is a bound row present in the held factorization,
+    /// with the side taken from the smaller slack.
     ///
-    /// The classifier reports per user variable, in full-x, while the
-    /// bound context and the factor's rows are var-x, and the two
-    /// index spaces diverge from the first fixed variable on. Each
-    /// var-x row's status is read through the same map the classifier
-    /// scattered through, so a fixed variable shifts nothing. Using
-    /// the full-x index as a factor row instead returns a NEIGHBORING
-    /// variable's answer, plausible and wrong, which is the gh#450
-    /// hazard the `primal_row` discipline exists to prevent.
+    /// Membership is read off the operator's own barrier diagonal:
+    /// a bound is weak when `sigma_i`, the entry `K` actually carries
+    /// for that variable, lies within [1e-2, 1e2]. At a kink the slack
+    /// and the multiplier vanish together, `s ~ z ~ sqrt(mu)`, and
+    /// their ratio is order one; an inactive bound's entry is `O(mu)`
+    /// and a strongly active one's is `O(1/mu)`, both orders of
+    /// magnitude outside the band. No curvature appears: whether a
+    /// bound sits at a kink is a fact about the bound's own geometry.
+    ///
+    /// The activity classifier is deliberately not consulted. Its
+    /// classes are bands on `sigma / |H_ii|`, the right object for the
+    /// covariance question of whether the barrier pins the variance
+    /// against the objective, and the wrong one here: on the double
+    /// column its ambiguous class held tray holdups a fifth of their
+    /// range away from any bound, because their curvature was smaller
+    /// still, and the directional QP then pinned 34 interior
+    /// coordinates and returned a direction with a first-order error
+    /// fifty times the one-sided step's.
     pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
-        use crate::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
+        /// `sigma` within this factor of one, either side, is weak.
+        const WEAK_SIGMA_BAND: Number = 1e2;
 
-        // A relaxed solve shifts the slacks the classifier reads, so
-        // degeneracy is undetectable there: the callers take the plain
-        // step, the same choice `estimate_report` makes when it fills
-        // `bounds_relaxed` instead of raising.
-        let report = match self.classify_activity() {
-            Ok(r) => r,
-            Err(SolverError::BadOptions(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
         let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        // A relaxed solve shifts every slack the diagonal is built
+        // from, so degeneracy is undetectable there: the callers take
+        // the plain step, the same choice `estimate_report` makes when
+        // it fills `bounds_relaxed` instead of raising.
+        if state.bound_relax_factor != 0.0 {
+            return Ok(Vec::new());
+        }
         let Some(rows) = state.backsolver.bound_rows() else {
             return Ok(Vec::new());
         };
-        let full_of: Vec<usize> = {
-            let (_, _, nlp) = state.backsolver.activity_handles();
-            let nl = nlp.borrow();
-            (0..ctx.n_x)
-                .map(|r| nl.var_x_to_full_x(r as Index) as usize)
-                .collect()
+        let Some(sigma) = state.backsolver.barrier_sigma_x_dense() else {
+            return Ok(Vec::new());
         };
         let mut out = Vec::new();
         for var_row in 0..ctx.n_x {
-            let Some(&st) = report.var_status.get(full_of[var_row]) else {
+            let Some(&sg) = sigma.get(var_row) else {
                 continue;
             };
-            if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
+            if !(sg >= 1.0 / WEAK_SIGMA_BAND && sg <= WEAK_SIGMA_BAND) {
                 continue;
             }
             let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];
