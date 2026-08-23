@@ -973,8 +973,10 @@ impl IpoptApplication {
             return self.run_with_l1_fallback(tnlp);
         }
         // μ-strategy auto-fallback (pounce#138): if the standard solve
-        // only reaches Solved_To_Acceptable_Level, retry once with the
-        // opposite mu_strategy and promote only on Solve_Succeeded.
+        // stalls, retry once with the opposite mu_strategy and promote
+        // only on Solve_Succeeded. Which stalls qualify depends on
+        // whether the caller asked for the retry — see
+        // `run_with_mu_strategy_fallback` (pounce#748).
         // Applies to constrained and unconstrained alike (both run the
         // same IPM). Independent of, and lower priority than, the ℓ₁
         // fallback above.
@@ -1050,14 +1052,70 @@ impl IpoptApplication {
             .unwrap_or(false)
     }
 
+    /// Did the caller set `mu_strategy` explicitly?
+    ///
+    /// The answer decides whether the limited-memory default applies
+    /// (see `algorithm_builder_from_options`): upstream only substitutes
+    /// `adaptive` for the registered `monotone` when the option is
+    /// absent from the list.
+    fn mu_strategy_was_set(&self) -> bool {
+        matches!(
+            self.options.get_string_value("mu_strategy", ""),
+            Ok((_, true))
+        )
+    }
+
+    /// Did the caller set `mu_strategy_fallback` themselves? Separates
+    /// the opted-in retry from the default-on one, which triggers on a
+    /// narrower set of statuses (pounce#748).
+    ///
+    /// True for an explicit `no` as well as an explicit `yes`, which is
+    /// harmless: this is only ever read downstream of
+    /// [`Self::is_mu_strategy_fallback_enabled`], and an explicit `no`
+    /// stops there.
+    fn mu_strategy_fallback_was_set(&self) -> bool {
+        matches!(
+            self.options.get_bool_value("mu_strategy_fallback", ""),
+            Ok((_, true))
+        )
+    }
+
+    /// The μ strategy this option table actually resolves to, as
+    /// `algorithm_builder_from_options` will build it: the explicit
+    /// value when there is one, otherwise `adaptive` for a
+    /// limited-memory Hessian and `monotone` for anything else.
+    ///
+    /// The fallback below flips *this*, not the registered default —
+    /// flipping the registered default under limited-memory would
+    /// "retry" with the strategy that just failed.
+    fn effective_mu_strategy_is_adaptive(&self) -> bool {
+        if let Ok((v, true)) = self.options.get_string_value("mu_strategy", "") {
+            return v == "adaptive";
+        }
+        matches!(
+            self.options.get_string_value("hessian_approximation", ""),
+            Ok((ref v, true)) if v == "limited-memory"
+        )
+    }
+
     /// Read the μ-strategy auto-fallback switch (pounce#138).
-    /// Default `false` when the option is not set.
+    ///
+    /// An explicit setting always wins. Absent one the default is **on**
+    /// (pounce#748) — but only while the user has not chosen a
+    /// `mu_strategy` themselves. Retrying under the other schedule is a
+    /// recovery for a solve that stalled on a strategy POUNCE picked; it
+    /// is not licence to override a strategy the caller named. Without
+    /// that condition, flipping the default would silently contaminate
+    /// every controlled comparison that pins `mu_strategy` on purpose,
+    /// this repository's own benchmark arms included. The motivating
+    /// case is unaffected: `dirichlet120` stalls under the
+    /// limited-memory substitution (pounce#746), which by definition
+    /// only happens when `mu_strategy` is unset.
     fn is_mu_strategy_fallback_enabled(&self) -> bool {
-        self.options
-            .get_bool_value("mu_strategy_fallback", "")
-            .ok()
-            .and_then(|(v, found)| found.then_some(v))
-            .unwrap_or(false)
+        match self.options.get_bool_value("mu_strategy_fallback", "") {
+            Ok((v, true)) => v,
+            _ => !self.mu_strategy_was_set(),
+        }
     }
 
     /// Has the user set `algorithm = active-set-sqp`? Reads the
@@ -1333,6 +1391,7 @@ impl IpoptApplication {
             "qp_tau",
             "qp_tau_max",
             "qp_reg",
+            "qp_gondzio_corr",
             "qp_infeas_tol",
             "qp_hsde",
             "qp_equilibrate",
@@ -2228,10 +2287,14 @@ impl IpoptApplication {
     /// stalls at `max_iter` — hence both triggers. flosp2tm is μ-independent
     /// and correctly does not promote.)
     ///
-    /// The flip direction is taken from the option's current value:
-    /// `adaptive` → `monotone`, anything else (including absent, which
-    /// the builder treats as monotone) → `adaptive`. The option table is
-    /// restored to the user's original view afterward.
+    /// The flip direction is taken from the strategy the option table
+    /// actually resolves to (`effective_mu_strategy_is_adaptive`):
+    /// `adaptive` → `monotone`, otherwise → `adaptive`. Absence is not
+    /// the same as `monotone` — under a limited-memory Hessian an unset
+    /// `mu_strategy` resolves to `adaptive` (gh#746), and flipping the
+    /// *registered* default there would re-run the strategy that just
+    /// stalled. The option table is restored to the resolved view
+    /// afterward.
     ///
     /// Caveat (shared with the ℓ₁ fallback): the user TNLP's
     /// `finalize_solution` runs once per attempt, so when the retry
@@ -2241,11 +2304,38 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
     ) -> ApplicationReturnStatus {
         let first_status = self.optimize_constrained(Rc::clone(&tnlp));
-        if !matches!(
-            first_status,
-            ApplicationReturnStatus::SolvedToAcceptableLevel
-                | ApplicationReturnStatus::MaximumIterationsExceeded
-        ) {
+        // Which statuses are worth a second solve depends on who asked
+        // for the retry (pounce#748).
+        //
+        // An explicit `mu_strategy_fallback=yes` keeps the historical
+        // pair: the caller opted in and can afford the second solve.
+        //
+        // The *default*-on retry is narrower — `Maximum_Iterations_
+        // Exceeded` only. `Solved_To_Acceptable_Level` is not a
+        // failure; it is a converged answer at the acceptable
+        // tolerance, and retrying it by default is wrong in three
+        // separate ways. It doubles the cost of a solve that already
+        // succeeded, which the "one extra solve on a run that had
+        // already failed" argument does not cover. It launders
+        // downgrades the caller induced deliberately -- a tight
+        // `kkt_fidelity_tol`, a certificate veto, `least_square_init_
+        // primal` -- so the signal the option exists to produce never
+        // reaches them. And because the retry returns the other run's
+        // *point*, not just its status, it can hand back a different
+        // local solution: on `autocorr_bern55-06` with the
+        // dual-divergence guard on it swaps -2304.0000278 for
+        // -2320.0000298 (crates/pounce-cli/tests/
+        // issue_250_dual_guard_never_worse.rs).
+        //
+        // `dirichlet120`, the case that motivated turning the retry on,
+        // stalls at `Maximum_Iterations_Exceeded`, so it is recovered
+        // either way.
+        let retry_worthy = match first_status {
+            ApplicationReturnStatus::MaximumIterationsExceeded => true,
+            ApplicationReturnStatus::SolvedToAcceptableLevel => self.mu_strategy_fallback_was_set(),
+            _ => false,
+        };
+        if !retry_worthy {
             return first_status;
         }
         // Flip the strategy for one retry. The parser maps "adaptive" →
@@ -2253,10 +2343,7 @@ impl IpoptApplication {
         // opposite of an explicit "adaptive" is "monotone" and the
         // opposite of anything else is "adaptive".
         let prev = self.options.get_string_value("mu_strategy", "").ok();
-        let was_adaptive = prev
-            .as_ref()
-            .map(|(v, found)| *found && v == "adaptive")
-            .unwrap_or(false);
+        let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
         let _ = self
             .options
@@ -2268,7 +2355,7 @@ impl IpoptApplication {
             prev.as_ref()
                 .filter(|(_, found)| *found)
                 .map(|(v, _)| v.as_str())
-                .unwrap_or("monotone"),
+                .unwrap_or(if was_adaptive { "adaptive" } else { "monotone" }),
             true,
             false,
         );
@@ -3444,6 +3531,36 @@ impl IpoptApplication {
                 };
             }
         }
+        // **Upstream changes the `mu_strategy` default for a
+        // limited-memory Hessian.** `IpAlgBuilder.cpp:1059`:
+        //
+        //     if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
+        //     {
+        //        // Change default for quasi-Newton option (then we use adaptive)
+        //        ... if( hessian_approximation == LIMITED_MEMORY )
+        //               smuupdate = "adaptive";
+        //     }
+        //
+        // and again at `:920` for the restoration-phase algorithm.
+        // Registered default is `monotone`; the quasi-Newton path takes
+        // `adaptive` unless the caller says otherwise. pounce read the
+        // registered default unconditionally, so every L-BFGS solve ran
+        // a barrier schedule Ipopt does not use on that path — a
+        // trajectory divergence on the arm the Python frontend and the
+        // CasADi plugin select automatically (gh#746).
+        //
+        // The restoration sub-IPM inherits this: `run_inner_resto`
+        // clones the configured `inner_alg_builder`, so the flag set
+        // here is what the resto algorithm gets, matching `:920`.
+        //
+        // Only when unset — an explicit `mu_strategy` still wins, and
+        // `mehrotra_algorithm` (parsed above) has already forced
+        // adaptive on its own terms.
+        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory
+            && !self.mu_strategy_was_set()
+        {
+            builder.mu_strategy = MuStrategyChoice::Adaptive;
+        }
         // Limited-memory quasi-Newton update formula. Registered upstream
         // (`limited_memory_update_type`, IpLimMemQuasiNewtonUpdater.cpp) but
         // until now read nowhere on the IPM path — the updater was hard-wired
@@ -3940,6 +4057,12 @@ impl IpoptApplication {
             if found {
                 builder.mu.adaptive_mu_restore_previous_iterate = v;
             }
+        }
+        if let Some(v) = read_int("adaptive_mu_max_free_returns") {
+            builder.mu.adaptive_mu_max_free_returns = v;
+        }
+        if let Some(v) = read_num("adaptive_mu_budget_pin_fraction") {
+            builder.mu.adaptive_mu_budget_pin_fraction = v;
         }
         if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
             if v >= 0 {
@@ -4876,50 +4999,33 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
 /// options ([`crate::sqp::SqpOptions`]); this one feeds the inner QP
 /// solver that `SqpAlgorithm` delegates each subproblem to. Consulted
 /// only on the `ActiveSetSqp` path. Each knob is forwarded only when
-/// the user explicitly set it (the `true` flag), so the `pounce_qp`
-/// defaults stand otherwise.
+/// the user explicitly set it, so the `pounce_qp` defaults stand
+/// otherwise.
+///
+/// The reading itself is [`pounce_qp::ActiveSetOverrides`], shared with
+/// `pounce_convex`'s direct active-set driver, which overlays the same
+/// eight names onto the same `QpOptions` type. This function had its own
+/// copy until then, and the two had drifted: this one silently ignored a
+/// `sqp_qp_max_iter` of 0 and an unknown `sqp_qp_anti_cycling` value where
+/// the other rejected them. Neither divergence was reachable — the
+/// registry bounds `sqp_qp_max_iter` at 1 and restricts `anti_cycling` to
+/// three values — but two readers of one option family is how a
+/// reachable one starts.
 fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOptions) {
-    use pounce_qp::AntiCyclingChoice;
-
-    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_iter", "") {
-        if v >= 0 {
-            opts.max_iter = v as u32;
-        }
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_feas_tol", "") {
-        opts.feas_tol = v;
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_opt_tol", "") {
-        opts.opt_tol = v;
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_elastic_gamma", "") {
-        opts.elastic_gamma = v;
-    }
-    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_schur_updates", "") {
-        opts.use_schur_updates = v;
-    }
-    // Registered by the homotopy work but never read here, so the knob was a
-    // no-op on the SQP path: `pounce_qp`'s own default is `false`, and only
-    // `pounce_convex::active_set` set it (in Rust, not through options). The
-    // inverse of gh #360 — registered-but-unread rather than
-    // read-but-unregistered — and invisible to that issue's guard test, which
-    // only checked one direction.
-    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_homotopy", "") {
-        opts.use_homotopy = v;
-    }
-    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")
-    {
-        if v >= 1 {
-            opts.max_schur_updates_before_refactor = v as u32;
-        }
-    }
-    if let Ok((s, true)) = options.get_string_value("sqp_qp_anti_cycling", "") {
-        opts.anti_cycling = match s.as_str() {
-            "expand" => AntiCyclingChoice::Expand,
-            "bland" => AntiCyclingChoice::Bland,
-            "none" => AntiCyclingChoice::None,
-            _ => opts.anti_cycling,
-        };
+    match pounce_qp::ActiveSetOverrides::try_from_options_list(options) {
+        Ok(overrides) => overrides.apply(opts),
+        // Unreachable from here: this runs after `initialize()`, so every
+        // value present has already been validated against the registered
+        // bound that the reader re-checks. Say so out loud anyway rather
+        // than solving with a configuration the user did not ask for —
+        // silently dropping the whole family is exactly the failure mode
+        // `tests/no_silent_options.rs` exists to prevent.
+        Err(error) => tracing::error!(
+            target: "pounce::options",
+            %error,
+            "sqp_qp_* options were rejected after the registry accepted them; \
+             the QP subproblem is running on pounce-qp defaults"
+        ),
     }
 }
 
@@ -5019,6 +5125,38 @@ fn finalize_via_sqp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pounce#748 — the flipped default is conditional on the caller not
+    /// having named a `mu_strategy`. All four combinations, because the
+    /// point of the condition is that an explicit strategy suppresses the
+    /// automatic retry while an explicit `mu_strategy_fallback` does not.
+    #[test]
+    fn mu_strategy_fallback_default_defers_to_an_explicit_strategy() {
+        // Nothing set: the retry is on.
+        let app = IpoptApplication::new();
+        assert!(app.is_mu_strategy_fallback_enabled());
+
+        // Caller named a strategy: the automatic retry stands down.
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy", "monotone", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+
+        // ... unless they also asked for the retry explicitly.
+        app.options_mut()
+            .set_string_value("mu_strategy_fallback", "yes", true, false)
+            .unwrap();
+        assert!(app.is_mu_strategy_fallback_enabled());
+
+        // An explicit "no" is honoured with no strategy set.
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy_fallback", "no", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+    }
+
     use pounce_nlp::tnlp::{
         BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
         StartingPoint,
@@ -5553,6 +5691,84 @@ mod tests {
         assert_eq!(
             app.algorithm_builder_from_options().linear_solver,
             LinearSolverChoice::Feral
+        );
+    }
+
+    /// gh#746. `IpAlgBuilder.cpp:1059` substitutes `adaptive` for the
+    /// registered `monotone` when `hessian_approximation` is
+    /// limited-memory and the caller left `mu_strategy` alone. pounce
+    /// read the registered default unconditionally, which is a
+    /// different barrier schedule on the whole quasi-Newton arm.
+    #[test]
+    fn limited_memory_defaults_mu_strategy_to_adaptive() {
+        // Exact Hessian, nothing set: monotone, as registered.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Monotone,
+            "the exact arm must keep the registered default"
+        );
+
+        // Limited memory, nothing set: adaptive.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("hessian_approximation limited-memory\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Adaptive,
+            "limited-memory must take upstream's quasi-Newton default"
+        );
+
+        // An explicit `monotone` still wins — the substitution is only
+        // for an absent option.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             mu_strategy monotone\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().mu_strategy,
+            MuStrategyChoice::Monotone,
+            "an explicit mu_strategy must not be overridden"
+        );
+    }
+
+    /// The μ-strategy auto-fallback retries with the *other* strategy.
+    /// Under limited-memory the first attempt is adaptive, so the flip
+    /// has to be monotone — reading the registered default there would
+    /// re-run the strategy that just stalled (gh#746).
+    #[test]
+    fn fallback_flip_follows_the_resolved_mu_strategy() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert!(
+            !app.effective_mu_strategy_is_adaptive(),
+            "unset + exact resolves to monotone"
+        );
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("hessian_approximation limited-memory\n")
+            .unwrap();
+        assert!(
+            app.effective_mu_strategy_is_adaptive(),
+            "unset + limited-memory resolves to adaptive"
+        );
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             mu_strategy monotone\n",
+        )
+        .unwrap();
+        assert!(
+            !app.effective_mu_strategy_is_adaptive(),
+            "an explicit monotone under limited-memory resolves to monotone"
         );
     }
 

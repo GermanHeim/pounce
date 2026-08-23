@@ -471,6 +471,23 @@ def _write_solution(gmo_h, gmo, view, x, info) -> None:  # pragma: no cover - ne
     if iters is not None:
         gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHiterused, float(iters))
 
+    # Solver time -- GAMS `resUsed`, the trace file's `SolverTime` column.
+    #
+    # `gams_pounce.c` reports this (`gmoSetHeadnTail(gmo, gmoHresused, ...)`)
+    # and this link did not, so every pip-link solve wrote `NA` where the C
+    # link and every other GAMS solver write seconds. That is not a cosmetic
+    # gap in the trace: `nlpbench_report.py` drops any instance whose time is
+    # missing from the head-to-head, so a full smoke suite reported
+    # `10/10 solved` for both solvers and `both solved: 0` in the same
+    # report, with POUNCE's mean/median time columns empty (gh#747).
+    #
+    # `wall_time` is one of the two info keys POUNCE always populates
+    # regardless of `timing_statistics` (the other is `iter_count`), so this
+    # costs nothing and cannot be turned off by an option file.
+    wall_time = info.get("wall_time")
+    if wall_time is not None:
+        gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHresused, float(wall_time))
+
     m = int(view.num_cons())
     # Constraint multipliers: POUNCE lambda -> GAMS pi. See `gams_pi`.
     mult_g = info.get("mult_g")

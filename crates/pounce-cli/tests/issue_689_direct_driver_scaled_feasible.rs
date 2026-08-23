@@ -89,6 +89,16 @@ const ITER_BUDGET: i32 = 60;
 /// against the `5e11` constant offset leaves resolvable.
 const OPTIMUM_TOL: f64 = 1e-3;
 
+/// gh #744 taught the convex extractors to apply `bound_relax_factor`, and on
+/// these two fixtures it is decisive: `a`'s optimum has three constraints
+/// *exactly* active, and widening them by `1e-8` lifts that degeneracy — the
+/// default route now converges in 69 iterations at `final_kkt_error 1.2e-10`
+/// instead of needing ~3596. Every iteration count quoted in this file was
+/// measured against the model exactly as declared, so the assertions that turn
+/// on one solve it that way. The relaxed model gets its own assertion below;
+/// what must hold on both is that a success verdict means a real optimum.
+const EXACT_DECLARED_BOUNDS: &str = "bound_relax_factor=0";
+
 #[test]
 fn direct_driver_solves_the_scaled_feasible_pair() {
     for model in ["scaled_feasible_a.nl", "scaled_feasible_b.nl"] {
@@ -167,12 +177,13 @@ fn the_default_route_reaches_the_same_optimum() {
         report.solution.status,
     );
 
-    // `a` does not, and must say so rather than certify the retry's point.
-    let report = solve("scaled_feasible_a.nl", &[]);
+    // `a` does not — on the model as declared, where ~3596 was measured — and
+    // must say so rather than certify the retry's point.
+    let report = solve("scaled_feasible_a.nl", &[EXACT_DECLARED_BOUNDS]);
     let code = report.solution.solve_result_num;
     assert!(
         !(0..100).contains(&code),
-        "scaled_feasible_a.nl at defaults: solve_result_num={code} (status {:?}) \
+        "scaled_feasible_a.nl as declared: solve_result_num={code} (status {:?}) \
          after {} iterations at final_kkt_error {:e}. This model needs ~3596 \
          iterations; a success verdict inside a 200-iteration budget is the \
          gh #712 false optimum, whose absolute KKT error is 2.3e3.",
@@ -180,6 +191,24 @@ fn the_default_route_reaches_the_same_optimum() {
         report.statistics.iteration_count,
         report.statistics.final_kkt_error,
     );
+
+    // With the default relaxation it converges inside the budget instead — and
+    // that verdict has to be a real one, not the 2.3e3 point wearing a success
+    // status. This is the same rule as above, asserted on the other model.
+    let report = solve("scaled_feasible_a.nl", &[]);
+    let code = report.solution.solve_result_num;
+    if (0..100).contains(&code) {
+        assert!(
+            report.statistics.final_kkt_error <= 1e-6
+                && report.solution.objective.abs() <= OPTIMUM_TOL,
+            "scaled_feasible_a.nl at defaults: reports success after {} \
+             iterations at final_kkt_error {:e}, objective {:e}. A success \
+             verdict has to carry a point that is one (gh #712).",
+            report.statistics.iteration_count,
+            report.statistics.final_kkt_error,
+            report.solution.objective,
+        );
+    }
 
     // Given the budget it needs, it reaches the same optimum as the direct
     // driver does — the verdict above is about the budget, not the model.
@@ -215,7 +244,10 @@ fn a_success_verdict_carries_the_same_accuracy_at_every_budget() {
     // Spans the historical flip (2610/2611) and the budget at which the cold
     // solve converges outright (3596).
     for cap in [200, 400, 2610, 2611, 3000, 3595, 3596, 4000] {
-        let report = solve("scaled_feasible_a.nl", &[&format!("max_iter={cap}")]);
+        let report = solve(
+            "scaled_feasible_a.nl",
+            &[&format!("max_iter={cap}"), EXACT_DECLARED_BOUNDS],
+        );
         let code = report.solution.solve_result_num;
         if !(0..100).contains(&code) {
             continue;

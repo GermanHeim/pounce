@@ -2537,6 +2537,26 @@ impl Presolve {
                 it.objective += self.layer_obj_offset;
             }
         }
+        // An eliminated column's primal is *computed* — a free-column
+        // singleton back-substitutes its consumed row, an aggregation
+        // evaluates `x = α·y + β` — so roundoff can leave it a few ulps
+        // outside the box it is supposed to sit on, and a variable that far
+        // outside a bound it is *pinned to* carries that bound's full
+        // multiplier. On gh #745's `problem.nl` that is `1.2e-11` outside a
+        // bound whose multiplier is `1e7`, i.e. `1.2e-4` of complementarity
+        // reported on an otherwise converged solve. The box is part of the
+        // model; put the value back inside it and let the excursion show up
+        // where it belongs, as the row residual it actually is.
+        for i in 0..out.x.len().min(self.orig.n) {
+            out.x[i] = clamp_into_box(out.x[i], self.orig.lb_of(i), self.orig.ub_of(i));
+        }
+        // Per layer, not once at the end: a bound can exist in *this* layer's
+        // space and not survive outward (an aggregation pins a column to a
+        // constant, a tightening turns a free column into a fixed one), and
+        // the multiplier it carries is what the next layer out re-attributes
+        // to the row that implied it. Repair here and that chain holds;
+        // repair only at the end and the leftover has nowhere left to go.
+        polish_bound_multipliers(&self.orig, &mut out);
         out
     }
 
@@ -2792,6 +2812,93 @@ impl Presolve {
     }
 }
 
+/// Put `x` back inside `[lo, hi]`, tolerating a box the arithmetic crossed.
+///
+/// A tightening can overshoot by an ulp and leave `lo > hi` — netlib `model3`
+/// and `model7` reach `lo = 1.0`, `hi = 0.9999999999999999`, `nesm` a crossed
+/// pair at `-3.1754` — without tripping the infeasibility test, which has a
+/// tolerance. [`f64::clamp`] *panics* on `min > max`, and on a crossed box
+/// there is no side for this repair to prefer anyway, so leave the value
+/// alone and let the excursion be reported as the bound violation it is.
+fn clamp_into_box(x: f64, lo: f64, hi: f64) -> f64 {
+    if lo <= hi { x.clamp(lo, hi) } else { x }
+}
+
+/// Attribute any leftover reduced cost to the bound that can carry it.
+///
+/// Postsolve *re-derives* each variable's bound multipliers rather than
+/// carrying the reduced solve's through, because most of the columns it
+/// restores were eliminated and have no multiplier of their own. The rule it
+/// uses is a hard classification — [`at_bound`] says active, so `z = grad`;
+/// otherwise `z = 0` — and that has a cliff exactly where an interior-point
+/// solve likes to stop.
+///
+/// gh #745: on the netlib LP `problem` a variable sat `1.55e-6` off a zero
+/// lower bound carrying `z_lb = 1.25e-3`. Their product, `1.9e-9`, *is* the
+/// barrier's complementarity, so the pair is a perfectly good certificate —
+/// but `1.55e-6` is outside the `1e-6` window, so the multiplier was dropped
+/// and the entire reduced cost `1.25e-3` was reported as dual infeasibility,
+/// on a solve that still exited `Solve_Succeeded`. Widening the window only
+/// moves the cliff, and the same model has a second variable `1.2e-13` off a
+/// bound whose multiplier is `1e7`, so no fixed window serves both.
+///
+/// So attribute continuously instead. A leftover `r` on a variable sitting a
+/// distance `d ≥ 0` from the bound that could carry it can be split: adding
+/// `θ·|r|` to that bound's multiplier leaves `(1−θ)·|r|` of dual
+/// infeasibility and `θ·|r|·d` of complementarity. Those are the two halves
+/// of the same KKT error, so take the `θ` that equalizes them —
+/// `θ = 1/(1+d)`, leaving `|r|·d/(1+d)` of each. That is never worse than
+/// either endpoint (`θ = 0` leaves `|r|`, `θ = 1` leaves `|r|·d`) and
+/// strictly better than both for any `0 < d < ∞`, it reproduces the old
+/// full attribution as `d → 0`, and it decays to zero attribution as
+/// `d → ∞` — so a genuinely dual-infeasible point stays flagged rather than
+/// being papered over with a multiplier no bound could justify.
+///
+/// Only the *bound* duals move; `y`, `z` and `x` are untouched, so primal
+/// feasibility and the row complementarities are exactly as postsolve left
+/// them.
+fn polish_bound_multipliers(orig: &QpProblem, sol: &mut QpSolution) {
+    let n = orig.n;
+    if sol.x.len() < n || sol.z_lb.len() < n || sol.z_ub.len() < n {
+        return;
+    }
+    let mut grad = orig.c.clone();
+    grad.resize(n, 0.0);
+    orig.p_mul(&sol.x, &mut grad);
+    orig.at_mul(&sol.y, &mut grad);
+    orig.gt_mul(&sol.z, &mut grad);
+    for i in 0..n {
+        // Stationarity residual with the multipliers postsolve produced.
+        let leftover = grad[i] - sol.z_lb[i] + sol.z_ub[i];
+        if leftover == 0.0 || !leftover.is_finite() {
+            continue;
+        }
+        // Only the sign-compatible side can carry it, and only if declared.
+        let to_lower = leftover > 0.0;
+        let bound = if to_lower {
+            orig.lb_of(i)
+        } else {
+            orig.ub_of(i)
+        };
+        if (to_lower && bound <= -BOUND_INF) || (!to_lower && bound >= BOUND_INF) {
+            continue;
+        }
+        // Clamp: a variable a hair *outside* its box is a primal-feasibility
+        // question, reported separately; for this purpose it is at the bound.
+        let dist = if to_lower {
+            (sol.x[i] - bound).max(0.0)
+        } else {
+            (bound - sol.x[i]).max(0.0)
+        };
+        let share = leftover.abs() / (1.0 + dist);
+        if to_lower {
+            sol.z_lb[i] += share;
+        } else {
+            sol.z_ub[i] += share;
+        }
+    }
+}
+
 /// Convenience: presolve, solve the reduced problem with `solve`, and
 /// postsolve — returning a solution in the *original* problem space. On a
 /// presolve-detected infeasibility / unboundedness, returns the matching
@@ -2818,6 +2925,165 @@ where
             let red = solve(&ps.reduced);
             ps.postsolve(&red)
         }
+    }
+}
+
+#[cfg(test)]
+mod issue745_polish_tests {
+    //! gh #745 — postsolve must not manufacture a KKT residual.
+    //!
+    //! End-to-end coverage of the netlib model that filed the issue lives in
+    //! `pounce-cli`'s `issue_745_postsolve_dual_residual`. What is pinned
+    //! here is the arithmetic of the two repairs, at the numbers the model
+    //! actually produced, because both are one-line rules that read as
+    //! arbitrary without them.
+
+    use super::*;
+
+    /// A one-variable problem with the box `[lb, ub]` and linear cost `c`.
+    fn boxed(c: f64, lb: f64, ub: f64) -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![c],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![lb],
+            ub: vec![ub],
+        }
+    }
+
+    fn sol(x: f64) -> QpSolution {
+        QpSolution {
+            status: QpStatus::Optimal,
+            x: vec![x],
+            y: vec![],
+            z: vec![],
+            z_lb: vec![0.0],
+            z_ub: vec![0.0],
+            obj: 0.0,
+            iters: 0,
+            iterates: vec![],
+        }
+    }
+
+    /// The residual left on the bound after attribution: `|r|·d/(1+d)` of
+    /// dual infeasibility, and the same again of complementarity.
+    fn residuals(p: &QpProblem, s: &QpSolution) -> (f64, f64) {
+        let g = p.c[0] - s.z_lb[0] + s.z_ub[0];
+        let comp = s.z_lb[0] * (s.x[0] - p.lb[0]).abs() + s.z_ub[0] * (p.ub[0] - s.x[0]).abs();
+        (g.abs(), comp)
+    }
+
+    /// The filed numbers: a variable `1.5531e-6` off a zero lower bound whose
+    /// reduced cost is `1.2486e-3`. `at_bound`'s `1e-6` window calls that
+    /// interior, drops the multiplier, and reports the whole reduced cost as
+    /// dual infeasibility — which is what the issue saw.
+    #[test]
+    fn a_variable_just_outside_the_window_still_gets_its_multiplier() {
+        let d = 1.5531e-6;
+        let r = 1.2486e-3;
+        let p = boxed(r, 0.0, BOUND_INF);
+        let mut s = sol(d);
+        // Precondition: this is exactly the case the hard rule mishandles.
+        assert!(!at_bound(d, 0.0), "window widened; pick a farther point");
+        let (dual_before, comp_before) = residuals(&p, &s);
+        assert!((dual_before - r).abs() < 1e-12, "{dual_before}");
+
+        polish_bound_multipliers(&p, &mut s);
+
+        let (dual, comp) = residuals(&p, &s);
+        let want = r * d / (1.0 + d);
+        assert!(
+            (dual - want).abs() <= 1e-12 * r,
+            "dual {dual:.6e}, want {want:.6e}"
+        );
+        assert!(
+            (comp - want).abs() <= 1e-12 * r,
+            "comp {comp:.6e}, want {want:.6e}"
+        );
+        // The point of equalizing: both halves are ~`d`-times smaller than
+        // the residual either endpoint would have left.
+        assert!(dual < 1e-8, "dual {dual:.6e} (was {dual_before:.6e})");
+        assert!(comp < 1e-8, "comp {comp:.6e} (was {comp_before:.6e})");
+    }
+
+    /// The other endpoint must stay honest: a reduced cost with no bound that
+    /// can carry it is real dual infeasibility, and attribution must leave it
+    /// alone rather than invent a multiplier.
+    #[test]
+    fn a_free_variable_keeps_its_dual_infeasibility() {
+        let p = boxed(1.0, -BOUND_INF, BOUND_INF);
+        let mut s = sol(0.0);
+        polish_bound_multipliers(&p, &mut s);
+        assert_eq!(s.z_lb[0], 0.0);
+        assert_eq!(s.z_ub[0], 0.0);
+        assert!((residuals(&p, &s).0 - 1.0).abs() < 1e-15);
+    }
+
+    /// A variable far from the only bound of the right sign is the same case
+    /// in slow motion: attribution decays as `1/(1+d)`, so a genuinely
+    /// dual-infeasible point is still flagged.
+    #[test]
+    fn attribution_decays_with_distance() {
+        for d in [1.0e-3, 1.0, 1.0e3] {
+            let p = boxed(1.0, 0.0, BOUND_INF);
+            let mut s = sol(d);
+            polish_bound_multipliers(&p, &mut s);
+            let want = d / (1.0 + d);
+            assert!(
+                (residuals(&p, &s).0 - want).abs() <= 1e-12,
+                "d={d}: {:?}",
+                residuals(&p, &s)
+            );
+        }
+    }
+
+    /// Only the sign-compatible side can carry the leftover: a *negative*
+    /// reduced cost needs an upper bound, and adding it to `z_lb` would make
+    /// a multiplier negative.
+    #[test]
+    fn the_sign_picks_the_bound() {
+        let p = boxed(-1.0, 0.0, 2.0);
+        let mut s = sol(2.0);
+        polish_bound_multipliers(&p, &mut s);
+        assert_eq!(s.z_lb[0], 0.0, "wrong side");
+        assert!((s.z_ub[0] - 1.0).abs() < 1e-15, "{}", s.z_ub[0]);
+    }
+
+    /// The primal repair, at the magnitudes that motivated it: `problem`'s
+    /// column 0 sits `1.17e-11` below a relaxed lower bound of `-1e-8`, and
+    /// the multiplier it is pinned to is `1e7`, so the excursion is worth
+    /// `1.17e-4` of complementarity until it is put back.
+    #[test]
+    fn a_primal_a_few_ulps_outside_its_box_is_put_back() {
+        let (lo, hi) = (-1e-8, BOUND_INF);
+        let outside = lo - 1.1717677116394e-11;
+        assert!(outside < lo);
+        assert_eq!(clamp_into_box(outside, lo, hi), lo);
+        // Interior values and values on the bound are untouched.
+        assert_eq!(clamp_into_box(1.0, lo, hi), 1.0);
+        assert_eq!(clamp_into_box(lo, lo, hi), lo);
+    }
+
+    /// Bound tightening can overshoot by an ulp and cross a box without
+    /// tripping the (toleranced) infeasibility test — netlib `model3` and
+    /// `model7` reach `lo = 1.0`, `hi = 0.9999999999999999`, `nesm` a crossed
+    /// pair at `-3.1754`. `f64::clamp` panics outright on `min > max`, so all
+    /// three aborted the process once the repair was added.
+    #[test]
+    fn a_box_crossed_by_an_ulp_leaves_the_value_alone() {
+        let (lo, hi) = (1.0f64, 1.0f64 - f64::EPSILON / 2.0);
+        assert!(lo > hi, "pick a genuinely crossed pair");
+        assert_eq!(clamp_into_box(0.5, lo, hi), 0.5);
+        assert_eq!(clamp_into_box(2.0, lo, hi), 2.0);
+        // And `nesm`'s pair, which crosses in the negatives.
+        assert_eq!(
+            clamp_into_box(0.0, -3.175399491935991, -3.175399491936332),
+            0.0
+        );
     }
 }
 

@@ -9,6 +9,626 @@ changes.
 
 ## [Unreleased]
 
+- **New `adaptive_mu_budget_pin_fraction` lets the adaptive strategy commit to
+  its endgame before the clock runs out** (#753). Default `0.75`, but inert
+  unless the caller set `max_cpu_time` or `max_wall_time`.
+
+  `mu_strategy_fallback` (#748) recovers a stalled adaptive solve by re-running
+  it monotone, and it deliberately declines a `Maximum_CpuTime_Exceeded` exit,
+  because the budget a retry needs is precisely the budget already spent. That
+  leaves exactly one configuration with no recovery at all: adaptive plus an
+  explicit time budget. It is not an exotic one — it is how the mittelmann
+  harness runs (`TIMELIMIT ?= 7200`), and it is how `nql180` fails.
+
+  This is that recovery done **in flight** rather than as a retry. Once the
+  named fraction of the budget is spent without converging, the strategy stops
+  returning to free-μ mode and finishes monotone *from the current iterate*.
+  The objection that blocks the retry does not apply: a retry restarts from
+  x0 and has nothing left to pay with, while an in-flight switch keeps the
+  iterate, so the time already spent is not wasted — it bought the point the
+  endgame starts from.
+
+  Both mode transitions are gated on one reading per update, and the
+  free→fixed switch is forced by ANDing into the existing `sufficient_progress`
+  test rather than adding a second transition path, so the accepted-iterate
+  restore, `new_fixed_mu` and the line-search reset all happen exactly as they
+  already did. The decision latches, so it cannot depend on where in an
+  iteration the clock is read. The restoration phase's own `AdaptiveMuUpdate`
+  shares the `Deadline` and pins independently, which is what you want — the
+  inner IPM should not be running the oracle either once the clock is gone.
+
+  **It cannot reach a caller who set no budget.** Both the builder default
+  (1e6 s) and the registered sentinel (1e20 s) leave the consumed fraction
+  indistinguishable from zero. The 142-line fixture sweep, which sets no
+  budget, moves **zero lines** — by construction, not by luck.
+
+  Verified end to end from the CLI on `lbfgs pooling_rt2stp` (0.23 CPU s
+  unbudgeted, 362 iterations): at `max_cpu_time` of 0.15 / 0.10 / 0.08 the pin
+  fires once at 75-76% of budget; with no budget, and with
+  `adaptive_mu_budget_pin_fraction=1`, it does not fire and the trajectory is
+  the unchanged 362 iterations.
+
+  **Why not simply default `adaptive_mu_max_free_returns=0`,** which also
+  solves `nql180` (95 iterations / 113 s)? Because the sweep says no: at `0`,
+  `lbfgs cresc4` goes `Solve_Succeeded`/105 → `Restoration_Failed`/361 and
+  `deb7` 709 → 1833. A cap is a trajectory perturbation that reaches every
+  solve; a budget-triggered pin reaches only solves that asked for a budget
+  and are about to fail anyway. It stays opt-in, and #749's reasoning stands.
+
+  **Correcting the record on #753's own framing.** That issue attributes the
+  gap to per-iteration throughput — "3.4× Ipopt per iteration on adaptive,
+  1.85× on monotone" — and proposed profiling the μ oracle. Profiling was done
+  and does not support the plan:
+
+  - The oracle's extra affine and centering solves **reuse the existing
+    factorization**. Instrumented with `POUNCE_DBG_PD_TAGS=1`, the KKT
+    dependency-cache miss count equals the iteration count in both arms, so
+    the two extra back-solves cost ~0.06 s/iter, not the gap.
+  - ~80% of runtime is `LinearSystemFactorization` in *every* arm. The adaptive
+    arm's higher cost per iteration is the trajectory demanding harder
+    factorizations, not oracle overhead — the second horn #753 named and could
+    not separate.
+  - The gh#540 inertia-trust floor was suspected of wasting factorizations. It
+    is not: `feral_inertia_pivot_floor=0` costs **4.5×** (184.7 s vs 41.3 s).
+    It only chooses which perturbation to bump on an inertia mismatch that has
+    already happened, so it never adds a factorization.
+  - "1.85× per iteration on monotone" does not mean POUNCE is slower on this
+    model. Against the only valid control (`ipopt-mumps`; `ipopt-feral` and
+    `ipopt-ma57` run at 78 s and ~180 s per iteration here and are unusable as
+    baselines), POUNCE's monotone arm **wins end to end** — 254.7 s to
+    `Optimal` against 314.5 s to `Solved To Acceptable Level` — because it
+    takes 2.7× fewer iterations at 1.85× the cost each.
+
+  Under plain default options `nql180` was in fact already recovered, by #748:
+  the adaptive leg exits `Maximum_Iterations_Exceeded` and the monotone retry
+  solves in 105 iterations. The genuine hole was only ever the budgeted case,
+  and that is what this closes.
+
+- **An auto-selected L-BFGS Hessian no longer picks the barrier schedule
+  too** (#746 follow-up).
+
+  #746 taught POUNCE what `IpAlgBuilder.cpp:1059` does — substitute
+  `adaptive` for an unset `mu_strategy` whenever the Hessian is
+  limited-memory. Upstream that inference is safe: the only way an Ipopt
+  caller gets limited-memory is by typing it, so pairing a barrier
+  schedule with the request is a second statement the caller is presumed
+  to accept.
+
+  The Python frontend breaks the presumption. `Problem.solve` sets
+  `hessian_approximation = limited-memory` on its own whenever the
+  problem object exposes no `hessian`, which is the ordinary case — a
+  caller who has never heard of L-BFGS gets it. Letting #746's rule fire
+  there reads a barrier-schedule preference out of a choice POUNCE made
+  for them, an inference stacked on an inference.
+
+  It was not free. Six full-suite Python tests failed on it, and two were
+  sign contracts rather than tuned thresholds:
+
+  - `test_a_transferred_start_beats_a_cold_solve_over_the_horizon`
+    asserts only `warm < cold`. Under adaptive it read 86/65, 88/67,
+    76/70, 79/68 — a transferred warm start was *worse* than a cold
+    solve at every horizon of #622's table (recorded: 45/67, 50/75,
+    54/77, 46/76). Free-mode adaptive recomputes mu from the current
+    point's complementarity, discarding the barrier state the transfer
+    exists to carry.
+  - `test_halving_costs_materially_less_across_the_suite`: the halving
+    ladder came to cost more than the fixed budget it was built to beat.
+
+  Plus `test_trf`'s displaced `start2` (Maximum iterations reached) and
+  `test_starts_racing`'s rung-0 cut.
+
+  So `crates/pounce-py` pins the registered `monotone` default
+  explicitly on the paths where it selects L-BFGS itself (`problem.rs`
+  and `nlp_batch.rs`). It is a default, not an override: it is applied
+  *before* the caller's own option list, so an explicit `mu_strategy`
+  still wins and upstream's pairing remains one word away.
+
+  Attribution was measured, not inferred. On this branch the three files
+  fail 8 tests; with #746's substitution block disabled and nothing else
+  changed they fail 2; `main` fails the same 2 with byte-identical
+  counts (4324/3077/3054), so those two are a pre-existing macOS/jax
+  artifact that passes on Linux CI, and #746 accounts for exactly the
+  other 6. With the pin: 1231 passed, 0 failed.
+
+  No fixture-sweep rerun: the change is confined to `pounce-py`, and the
+  sweep drives the CLI, where nothing auto-selects L-BFGS — the sweep's
+  `lbfgs` leg passes `hessian_approximation=limited-memory` explicitly,
+  which is the typed-it case #746 still governs unchanged.
+
+  Whether adaptive's discarding of a transferred warm start is itself
+  repairable is a real question and a better fix than avoiding the
+  schedule; it is not attempted here. See #749.
+
+- **The GAMS solver-link smoke check reports a solver time, actually re-runs,
+  and refuses to pass on traces it did not produce** (#747).
+
+  `make -C benchmarks gams-bench` completed inside a full sweep without
+  solving anything and emitted a report whose own numbers disagreed: 10/10
+  solved for both solvers, and, three lines further down, `both solved: 0`
+  with every head-to-head bucket at zero and POUNCE's mean and median time
+  columns empty. It is the only thing in the sweep that exercises the GAMS
+  solver link, so "it passed" was carrying more weight than any other line in
+  the report — and it could not fail.
+
+  Three defects, in the order they compound:
+
+  * `python/pounce/gams/link.py` never reported `resUsed`. It wrote
+    `gmoHobjval` and `gmoHiterused` and stopped there, so every pip-link
+    solve left `NA` in the trace's `SolverTime` column where `gams_pounce.c`
+    and every other GAMS solver write seconds. This is the root cause of the
+    contradiction, and it is fixed here: `info["wall_time"]` is one of the
+    two keys POUNCE always populates regardless of `timing_statistics`, so
+    the report costs nothing and no option file can switch it off.
+
+  * `nlpbench_report.py` folded "and both have a usable time" into the test
+    that decides whether an instance was jointly solved, so an instance with
+    a missing time fell out of *every* bucket instead of one — which is how a
+    fully-solved suite printed `both solved: 0`. (That file lives in
+    `gams/nlpbench/`, a private GAMS-licensed clone this repository does not
+    track; the fix is applied there but cannot ship in this commit.)
+
+  * the vendored `runsolver` Makefile keys `rungams` off the per-instance
+    trace CSVs rather than off the pounce build, so a rebuilt solver leaves
+    them satisfied — `Nothing to be done for 'rungams'` — and the report is
+    regenerated from months-old traces, stamped with the current commit and
+    the current date.
+
+  Since the last two live outside this repository, the guarantee is put on
+  this side of the boundary. `gams-bench` now forces the re-run
+  (`clean-bench-smoke` first) and then validates what it produced with a new
+  `benchmarks/scripts/check_gams_smoke.py`, which fails the target when a
+  trace is older than the run that was supposed to write it, when a trace has
+  no rows, when any row is missing a `SolverTime`, or when no instance was
+  solved by every solver. Each of those four is the signature of a smoke
+  check that did not smoke anything, and each was exercised against a
+  doctored trace. `gams-rerun` is kept as an alias; the two are now the same
+  thing.
+
+- **New `adaptive_mu_max_free_returns` caps the adaptive strategy's
+  free↔fixed oscillation** (#749). Off by default (`-1`, unlimited), so
+  nothing changes unless you ask for it.
+
+  The adaptive strategy switches into fixed-μ (monotone) mode when its
+  globalization judges free-mode progress insufficient, and switches back out
+  as soon as progress looks acceptable again. On some models it never commits:
+  `nql180` bounces out at iterations 8, 15, 19 and 23 and keeps paying the
+  quality-function oracle's extra affine and centering solves across a tail
+  that the monotone schedule closes cheaply. Uncapped, it does not converge —
+  250 iterations / 1241 s, dual infeasibility plateaued at 2.6e-06,
+  `Maximum_Iterations_Exceeded`. Ipopt's adaptive arm behaves the same way on
+  this model. This option caps how many times the strategy may leave fixed
+  mode; once the cap is spent it stays there, which is simply the
+  Fiacco-McCormick reduction the fixed branch already performs — no new
+  numerical path.
+
+  At `0` it turns that non-convergence into a solve, and beats monotone doing
+  it: **95 iterations / 132 s / NLP error 9.2e-10** against monotone's 105 /
+  277 s. Adaptive's early phase is genuinely the faster one (measured over the
+  first five iterations: 7.5 s and 4 factorizations, against monotone's 9.0 s
+  and 7); the oscillation is what squanders it. On the fixture sweep `0` also
+  takes `lbfgs pooling_rt2stp` from 295 iterations to **92** at the same
+  objective.
+
+  **It is not defaulted, because it is a trajectory perturbation rather than a
+  principled property, and the sweep says so.** At `0`, `lbfgs cresc4` goes
+  from `Solve_Succeeded`/105 to `Restoration_Failed`/361, and `lbfgs deb7`
+  from 709 iterations to 1833 on a worse objective; `jit1_node` inflates 19 →
+  27. Worse, the response is not monotone in the cap: `cresc4` fails at 0, 1
+  and 4 but succeeds at 2 and at `-1`. No single value serves both `cresc4`
+  and `nql180` (which needs exactly `0` — `1` leaves it worse than uncapped,
+  308 iterations to the CPU limit). A knob that erratic is a per-model tuning
+  aid, not a better barrier strategy, so it ships opt-in. This is the same bar
+  the abandoned μ-floor experiment below failed — and notably it broke
+  `cresc4` too, which suggests that model genuinely needs free-mode
+  adaptivity rather than that either fix was mistuned.
+
+  #749 proposed a principled sibling for this knob — judge each free
+  excursion by whether it lowered the KKT error, and pin only after one that
+  did not. It was implemented and measured, and the signal turns out to rank
+  the two models backwards: `cresc4`, which must keep its free mode, has 8 of
+  11 unproductive excursions, while `nql180`, which must be pinned, has 7 of
+  10 productive ones. Judging returned-to excursions only is worse than this
+  knob on `nql180` and breaks `cresc4`; judging the opening phase too
+  reproduces `0` byte for byte. #749 is closed with that result. What is left
+  for `nql180` is not the barrier schedule at all but per-iteration cost —
+  POUNCE runs 3.4× Ipopt on this model's adaptive arm and 1.85× on its
+  monotone arm, so at Ipopt's cost the default's 444 iterations would finish
+  in ~660 s. That is tracked in #753.
+
+- **The barrier-schedule retry is on by default** (#748).
+
+  `mu_strategy_fallback` has existed since #138 but shipped off, so the
+  recovery it provides was available only to users who already knew to ask
+  for it. It re-runs a stalled solve once under the other `mu_strategy` and
+  keeps the retry **only** if that reaches `Solve_Succeeded`; otherwise the
+  first status is returned untouched, so the status can never come back worse
+  than it would have been.
+
+  **What the default-on retry triggers on is narrower than the opt-in.** Since
+  #138 the retry fired on two statuses: `Maximum_Iterations_Exceeded` and
+  `Solved_To_Acceptable_Level`. Only the first is a default trigger. An
+  explicit `mu_strategy_fallback=yes` keeps both.
+
+  Carrying both into the default broke five test targets, all the same way,
+  and the fixture sweep saw none of it — the sweep runs default options, and
+  every one of these needs a non-default option to provoke the downgrade the
+  retry then erased: `optimize_hs71` (tight `kkt_fidelity_tol`),
+  `masked_certificate_fuzz` (certificate veto), `issue_616_ls_init_downgrades`
+  (`least_square_init_primal`), `issue_250_dual_guard_never_worse`
+  (`dual_diverging_streak`), and `issue_534_resto_decline_progress`.
+
+  `Solved_To_Acceptable_Level` is not a failure — it is a converged answer at
+  the acceptable tolerance — and retrying it by default is wrong three
+  separate ways. It doubles the cost of a solve that already succeeded, which
+  "one extra solve on a run that had already failed" does not describe. It
+  launders downgrades the caller induced *deliberately*, so the signal those
+  options exist to produce never arrives. And because the retry returns the
+  other run's **point**, not just its status, it can hand back a different
+  local solution: on `autocorr_bern55-06` with the dual-divergence guard on it
+  swapped `-2304.0000278` for `-2320.0000298`.
+
+  The trigger set is pinned in
+  `crates/pounce-cli/tests/issue_748_fallback_trigger.rs`.
+
+  Turning it on is what pays for #746. Defaulting a limited-memory Hessian to
+  `adaptive` is a clear net win on the 47-problem mittelmann corpus
+  (`Solve_Succeeded` 28 → 31, three `Error_In_Step_Computation` exits gone,
+  and a false `Infeasible_Problem_Detected` on `qcqp1000-1nc` gone), but it
+  costs `dirichlet120`, which monotone solves in 176 iterations and adaptive
+  grinds on for 3000. That is not a defect in POUNCE's adaptive strategy —
+  Ipopt 3.14.19 stalls on the same model in the same way, to the same
+  objective (`3.7377879e-02` at iteration 3000, against monotone's
+  `3.7377881e-02` at 178) — it is a case where neither schedule dominates,
+  which is the premise the option was registered on in the first place. With
+  the retry on, `dirichlet120` returns the monotone answer again.
+
+  The cost was measured rather than assumed. On the 71-fixture trajectory
+  sweep, both legs, **nothing moves: 0 of 142 lines**. `dirichlet120` is not
+  in that corpus, and no fixture in it stalls at `Maximum_Iterations_Exceeded`
+  under default options, so the narrowed trigger never fires there. The flip
+  is a no-op on the sweep and a recovery on the case that motivated it.
+
+  With the wide trigger the same sweep moved three lines, all improvements:
+  `exact csfi2` `Solved_To_Acceptable_Level`/35 → `Solve_Succeeded`/21, `lbfgs
+  pooling_rt2stp` `Solved_To_Acceptable_Level`/362 → `Solve_Succeeded`/295,
+  and `lbfgs eigenb2` 69 → 41 iterations. Those are real, and they are exactly
+  what narrowing gives up; all three come back under
+  `mu_strategy_fallback=yes`. Giving them up is the price of not erasing a
+  deliberate downgrade in the five cases above, and three fixture-legs is
+  worth less than a status the caller can trust. (The reported `it=` is the
+  retry's own count; total work is the first solve plus the retry.)
+
+  The flipped default is conditional in one respect: absent an explicit
+  setting, the retry is on **only while the caller has not named a
+  `mu_strategy` themselves**. Retrying under the other schedule recovers a
+  solve that stalled on a strategy POUNCE chose; it is not licence to override
+  a strategy the caller chose, and without that condition the flip would
+  silently contaminate every controlled comparison that pins `mu_strategy` on
+  purpose — this repository's own benchmark arms included. An explicit
+  `mu_strategy_fallback=yes` still retries regardless. `dirichlet120` is
+  unaffected either way, since it stalls under the limited-memory
+  substitution, which by definition only happens when `mu_strategy` is unset.
+
+  One limit is deliberate. The retry **cannot** rescue a
+  `Maximum_CpuTime_Exceeded` exit and does not try, because the budget a
+  retry needs is precisely the budget already spent. `nql180` regresses that
+  way under #746 and is not recovered *by the retry*; it is recoverable by
+  hand with `adaptive_mu_max_free_returns=0` (see below and #749). Upstream is not better off on
+  that model for the right reason either: Ipopt's adaptive arm also takes the
+  long path (623 iterations to `Optimal Solution Found`, against monotone's
+  279 to `Solved To Acceptable Level`) — it simply affords the wall clock
+  that POUNCE, at its current cost per iteration, does not. Set
+  `mu_strategy_fallback=no` to restore the previous default and upstream's
+  single-solve behaviour.
+
+  Fixing the adaptive endgame in-strategy was attempted first and rejected on
+  measurement, which is recorded here so it is not re-attempted blind. The
+  stall has a clear mechanism: the monotone schedule never reduces μ until
+  the barrier subproblem is solved to `barrier_tol_factor · μ`, so μ trails
+  the accuracy actually achieved, while free mode has no such invariant and
+  the oracle can park μ orders of magnitude below the achieved KKT error —
+  after which nothing can lift it off the floor, because the obj-constr
+  filter keeps accepting marginal improvements so the free→fixed switch never
+  fires, and `NewFixedMu` re-seeds at `0.8 · avrg_compl`, itself ~`mu_min`
+  once complementarity has collapsed. Restoring the trailing relationship as
+  a floor (μ ≥ `nlp_error / kappa`, applied where upstream's own
+  `adaptive_mu_safeguard_factor` hook sits disabled) fixes `dirichlet120`
+  outright — 3000 iterations / `Maximum_Iterations_Exceeded` / 185 s becomes
+  349 / `Solve_Succeeded` / 30 s at kappa 1e3. It does not generalise. On the
+  fixture sweep that same setting takes `cresc4` and `eigmaxa` from
+  `Solve_Succeeded` to `Restoration_Failed`, `autocorr_bern55-06` to
+  `Maximum_Iterations_Exceeded`, and `pooling_rt2stp` to
+  `Error_In_Step_Computation` on a materially worse objective, with `jit1`
+  and friends inflating 3–7×, and produces no improvement anywhere; kappa 1e2
+  avoids the restoration failures but still costs `cresc4` 105 → 904 and
+  `csfi2` 19 → 105. A single-problem win at that price is a tuning artifact,
+  not a barrier-strategy improvement, so nothing from it ships.
+
+- **A limited-memory Hessian now defaults `mu_strategy` to `adaptive`, as
+  upstream does** (#746).
+
+  Four nonconvex QCQPs — `qcqp1000-1nc`, `qcqp500-3nc`, `qcqp750-2c`,
+  `qcqp750-2nc` — that the exact-Hessian arm solves came apart under
+  `hessian_approximation=limited-memory`: three exited
+  `Error_In_Step_Computation`, and `qcqp1000-1nc` returned
+  `Infeasible_Problem_Detected` on a problem that is not infeasible, which is
+  a wrong answer rather than a failure to answer.
+
+  The cause is not in the quasi-Newton update. `IpAlgBuilder.cpp:1059`:
+
+      if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
+      {
+         // Change default for quasi-Newton option (then we use adaptive)
+         ... if( hessian_approximation == LIMITED_MEMORY )
+                smuupdate = "adaptive";
+      }
+
+  and again at `:920` for the restoration-phase algorithm. `monotone` is the
+  *registered* default; upstream substitutes `adaptive` whenever the option is
+  absent and the Hessian is limited-memory. POUNCE read the registered default
+  unconditionally, so every L-BFGS solve ran a barrier schedule Ipopt does not
+  use on that path. Running the two arms of a stock Ipopt 3.14.19 side by side
+  confirms it from the other direction: its default limited-memory run on
+  `qcqp1000-1nc` starts at `lg(mu) = 0.0` with a non-monotone μ and never
+  enters restoration, while `mu_strategy=monotone` reproduces POUNCE's
+  `1r`-and-stuck trajectory step for step. With the default corrected, POUNCE's
+  limited-memory arm matches Ipopt's digit for digit over the first four
+  iterations.
+
+  This is not an exotic corner: both the Python frontend and the CasADi plugin
+  select `limited-memory` on their own whenever no exact Lagrangian Hessian is
+  available, so it is what an embedder gets without typing an option.
+
+  On the four filed models the three `Error_In_Step_Computation` breakdowns
+  become honest budget/failure statuses (`qcqp750-2c` reaches
+  `Solved_To_Acceptable_Level`), and `qcqp1000-1nc`'s wrong
+  `Infeasible_Problem_Detected` is gone. It should be said plainly that this
+  does not make L-BFGS solve them: Ipopt's own limited-memory arm also fails
+  `qcqp1000-1nc`, at 3000 iterations with a constraint violation of `1.7e14`.
+  What was defective was the divergence from upstream's default, not L-BFGS's
+  reach on nonconvex QCQPs.
+
+  The fixture sweep (`scripts/sweep-fixtures.sh`, both legs) leaves the
+  exact-Hessian leg **byte-identical** and moves 27 of 71 lines on the L-BFGS
+  leg. No fixture goes from solved to unsolved. Three improve status —
+  `autocorr_bern55-06` `SolvedToAcceptableLevel`/945 → `SolveSucceeded`/58,
+  `eigmaxa` `RestorationFailed`/3 → `SolveSucceeded`/19, `pooling_rt2stp`
+  `ErrorInStepComputation`/105 → `SolvedToAcceptableLevel`/362 — and most of
+  the rest simply shorten (`jit1` 32 → 21, `csfi2` 31 → 19, `airport` 57 → 49,
+  and all four infeasibility detections reach their verdict sooner).
+
+  Three lines move the wrong way, and each was checked against Ipopt under the
+  same option change rather than accepted on faith:
+
+  * `deb7` `RestorationFailed`/2993 → `ErrorInStepComputation`/709. Both are
+    failures carrying `solve_result_num = 500`; neither claims a solution, and
+    the objectives they print (97.56, 101.09) are not answers. Ipopt's
+    limited-memory arm does not solve `deb7` either — 3000 iterations under
+    both `adaptive` and `monotone`. L-BFGS does not solve this model in any
+    code; the exact arm still does, in 147 iterations.
+  * `hs13_bigstart` `SolveSucceeded` both ways, objective 0.985014 → 0.979650.
+    HS13 violates MFCQ at its solution, so where a solver stops is soft; the
+    true optimum is 1.0. Ipopt moves the same direction under the same switch
+    (0.950376 → 0.919662) and lands further from 1.0 than POUNCE does at
+    either setting.
+  * `infeasible_equalities` `InfeasibleProblemDetected` at 33 → 127
+    iterations. Same verdict, later. Ipopt also takes longer under `adaptive`
+    on this model (43 → 79).
+
+  On the wider 47-problem mittelmann corpus, run under `limited-memory` both
+  ways, `Solve_Succeeded` goes 28 → 31: all three `Error_In_Step_Computation`
+  exits disappear, `qcqp1000-1nc`'s false `Infeasible_Problem_Detected`
+  becomes `Restoration_Failed`, and `robot_1600` (3000 → 33),
+  `steering_12800` (3000 → 59), `robot_c` (3000 → 2331) and `qcqp1500-1nc`
+  (timeout → 106) start solving.
+
+  One model moves from solved to unsolved and survives an uncontended re-run:
+  `dirichlet120`, `Solve_Succeeded`/176 → `Maximum_Iterations_Exceeded`/3000.
+  Ipopt does exactly the same thing — its default limited-memory arm and its
+  explicit `mu_strategy=adaptive` arm are identical to every printed digit
+  (3000 iterations, objective `3.7377878739899603e-02`), while its `monotone`
+  arm solves in 178. POUNCE now agrees with Ipopt on both arms and matches the
+  stalled objective to eight significant digits, so this is upstream's default
+  being the worse choice on this model rather than a POUNCE defect. Both codes
+  reach the optimum and then fail to close the convergence test. It is an
+  accepted cost of matching upstream, tracked with an owner in #748 rather
+  than left in a commit message. It is recoverable today:
+  `mu_strategy_fallback=yes` retries under the other schedule when a solve
+  ends in `Maximum_Iterations_Exceeded` or `Solved_To_Acceptable_Level`, and
+  on `dirichlet120` that retry solves in 176 iterations to the pre-#746
+  objective. Whether that fallback should be on by default is the open
+  question in #748.
+
+  `nql180` regresses the same way and is **not** recoverable by that fallback.
+  Given a 4000 s budget, monotone solves it in 105 iterations / 259 s while
+  adaptive runs 453 iterations / 2176 s and still exits on the time limit. The
+  fallback's trigger set is `Solved_To_Acceptable_Level` and
+  `Maximum_Iterations_Exceeded`; a `Maximum_CpuTime_Exceeded` exit returns
+  early, and widening it to cover that case would be wrong anyway, since the
+  time budget the retry would need is precisely the budget already spent.
+  It is recoverable a different way — `adaptive_mu_max_free_returns=0` solves
+  it in 95 iterations, faster than monotone — but not safely by default; see
+  that option's entry above and #749.
+
+  `recalc_y`'s upstream limited-memory default (`IpIpoptAlg.cpp:238`) is
+  deliberately still **not** followed; that decision and its measurements are
+  documented where it is read, in `application.rs`.
+
+- **Convex postsolve no longer manufactures a KKT residual on the way back to
+  the original problem space** (#745).
+
+  The LP arm exited `Solve_Succeeded` on the netlib LP `problem` while its own
+  summary block printed `Dual infeasibility 1.2486e-03` and
+  `Complementarity 1.1718e-04` — five orders above the `1e-8` tolerance the
+  termination test had just certified against. The filed diagnosis blamed the
+  termination test. It is not the termination test: the *reduced* solve
+  converges to `dual = 9.4e-12`. Both numbers were created by
+  `Presolve::postsolve`, and the residuals the summary prints are recomputed
+  in the restored space, so the check and the report were measuring two
+  different points. Two independent defects:
+
+  Postsolve **re-derives** every variable's bound multipliers rather than
+  carrying the reduced solve's through — it has to, since most of the columns
+  it restores were eliminated and never had one — and the rule it used was a
+  hard classification against a `1e-6` window: at the bound, `z = grad`;
+  otherwise `z = 0`. That cliff sits exactly where an interior-point solve
+  likes to stop. On `problem` a variable sat `1.5531e-6` off a zero lower
+  bound carrying `z_lb = 1.2486e-3`; their product, `1.9e-9`, *is* the
+  barrier's complementarity, so the pair was a perfectly good certificate —
+  but `1.5531e-6` is outside the window, so the multiplier was dropped and the
+  whole reduced cost reported as dual infeasibility. Widening the window only
+  moves the cliff, and the same model has a second variable `1.2e-13` off a
+  bound whose multiplier is `1e7`, so no fixed window serves both. Attribution
+  is now continuous: a leftover `r` on a variable a distance `d` from the
+  bound that could carry it is split so that the dual infeasibility it leaves
+  and the complementarity it creates are equal, `|r|·d/(1+d)` of each. That is
+  never worse than either endpoint, reproduces the old full attribution as
+  `d → 0`, and decays to nothing as `d → ∞`, so a genuinely dual-infeasible
+  point stays flagged rather than being papered over with a multiplier no
+  bound could justify. It runs per presolve layer, not once at the end,
+  because a bound can exist in one layer's space and not survive outward.
+
+  Separately, an eliminated column's primal is *computed* — a free-column
+  singleton back-substitutes its consumed row, an aggregation evaluates
+  `x = α·y + β` — so roundoff can leave it a few ulps outside the box it is
+  pinned to, and a variable that far outside a bound carries that bound's full
+  multiplier. `problem`'s column 0 sat `1.17e-11` below a lower bound whose
+  multiplier is `1e7`: the `1.17e-4` of complementarity, exactly. Postsolve
+  now puts such a value back inside the declared box, where the excursion
+  shows up as the row residual it actually is. A box that a bound tightening
+  has crossed by an ulp (`lb = 1.0`, `ub = 0.9999999999999999`, reached by
+  netlib `model3`, `model7` and `nesm` without tripping the toleranced
+  infeasibility test) is left alone — there is no side to prefer, and
+  `f64::clamp` panics on `min > max`.
+
+  Across the 371-LP corpus this takes the number of solves reporting a dual
+  infeasibility above `1e-6` from 210 to 25, with no objective regressing.
+  `problem` itself goes from `dual = 1.2486e-3` to `1.94e-9`, and its
+  objective from `-1.6001171` to `-1.5999999` against Ipopt/MA57's
+  `-1.5996991`.
+
+- **The convex arm applies `bound_relax_factor`, so the same `.nl` no longer
+  gets two different models depending on `solver_selection`** (#744, #745).
+
+  Ipopt widens the variable box and every inequality row by
+  `min(bound_relax_factor, constr_viol_tol)` before the algorithm starts —
+  `1e-8`, capped at `1e-4`, by default. POUNCE's NLP arm does this;
+  `pounce-convex`'s LP/QP/SOCP extractors read the `.nl` bounds verbatim and
+  did not, so the two arms of one binary solved different problems.
+
+  On a constraint-degenerate model that is not a rounding difference. Every
+  one of `LISWET1`'s 10 000 monotonicity rows is active at the optimum and its
+  multipliers sum to `1.6e9`, so a `1e-8` widening is worth `9.0` of
+  objective: the convex arm returned `36.1224` and the NLP arm and the
+  Ipopt-MA57 reference returned `27.1221`. Nine Maros-Meszaros QPs and 68 of
+  371 LPs disagreed that way, always in the same direction, and it read as a
+  wrong answer from the convex solver. It was not — `36.1224` is the exact
+  optimum of the model as declared, verifiable by hand (all 10 000 rows active
+  makes `x` affine, and the resulting 2-D solve has every multiplier positive)
+  — but "correct for a model nobody asked for" is still a defect, and it made
+  the two arms uncomparable on any degenerate problem. All nine QPs now agree
+  with the NLP arm to 5–7 digits, in both directions.
+
+  Rows are widened by the scale-relative `min(factor, cap)·|b|` and the box by
+  upstream's absolute `min(factor·max(|b|, 1), cap)`, matching what
+  `OrigIpoptNlp::relax_bounds` does on each. Equality rows are never widened;
+  neither is a fixed variable (`x_l == x_u`), which upstream removes before
+  relaxing. Neither is a *crossed* bound (`x_l > x_u`, or a row's `lo > hi`):
+  that is an empty set, which the NLP path rejects as
+  `Invalid_Problem_Definition` before relaxation, and closing a crossing
+  narrower than the widening would answer an inconsistent model instead of
+  refusing it. `bound_relax_factor=0` still solves the model exactly as
+  declared, on both arms.
+
+  Two iteration counts quoted in the test suite were measured against the
+  unrelaxed model and are now pinned to `bound_relax_factor=0`: gh #724's
+  `qp_tau=0.99` numerical-failure trigger on `afiro` (the widened box keeps
+  the KKT system non-singular, so no `qp_tau` in `0.9 … 0.9999` reaches that
+  exit any more) and gh #712's `max_iter` sweep on `scaled_feasible_a` (whose
+  three exactly-active constraints are exactly the degeneracy the widening
+  lifts — it converges in 69 iterations at defaults now, against ~3596 before,
+  and at a genuine `1.2e-10` KKT error).
+- **Convex `OptionsList` parsing is now a reusable library API.**
+
+  `pounce_convex::QpOptions::try_from_options_list`,
+  `pounce_convex::ConvexPresolveOptions::try_from_options_list`, and
+  `pounce_qp::ActiveSetOverrides::try_from_options_list` now own the names,
+  conversions, validation, and precedence rules for the convex `qp_*` and
+  `sqp_qp_*` controls. The CLI delegates to those typed readers instead of
+  maintaining private copies, so another frontend can materialize the same
+  configuration without reproducing CLI logic. Existing explicit-only handling
+  for shared `tol` / iteration / wall-time controls, `qp_tau_max` precedence,
+  and the `qp_presolve`-over-`presolve` rule is unchanged.
+
+  `ActiveSetOverrides` lives in `pounce-qp`, beside the `QpOptions` it
+  overlays, so that it is genuinely the only reader of the `sqp_qp_*` family:
+  the SQP subproblem path in `pounce-algorithm` — which has no `pounce-convex`
+  dependency, and until now kept a second copy of the same eight names —
+  reads through it too. `pounce_convex::ActiveSetOverrides` is unchanged as a
+  public path; it re-exports the type.
+
+  The bounds these readers re-check duplicate the registered ones on purpose,
+  for callers who build an `OptionsList` with no registry attached. A new test,
+  `pounce-cli`'s `convex_option_readers_match_the_registry`, derives the
+  registry's verdict at run time and fails if a reader is narrower than the
+  registration it mirrors, so the two copies cannot drift apart silently.
+
+  `qp_gondzio_corr` is also covered by the core library guard that refuses a
+  non-default convex-only option on an entry point unable to run the convex
+  solver, closing the one remaining silent-ignore case in that option family.
+
+- **`pounce.minimize`: `jac=True` no longer defeats convex structure
+  detection** (#750).
+
+  The convex routers probe `fun` as a bare `f(x) -> float` and `jac` as
+  `g(x) -> vector`. Under scipy's `jac=True` spelling — where `fun(x)`
+  returns the pair `(f, grad)` — they were handed a tuple-returning `fun`
+  and the bare bool `True` instead, so every probe raised and the routers'
+  catch-all ("a probe failure never becomes a wrong solver choice") reported
+  "not convex". On a textbook convex QP that meant
+  `solver_selection="qp-ipm"` (or `lp-ipm` / `qp-active-set` / `socp`)
+  raised `ValueError` rejecting a problem that satisfies its documented
+  precondition, while `solver_selection="auto"` silently fell back to the
+  general NLP solver and never took the convex fast path. The answer stayed
+  correct under `auto`; the routing did not.
+
+  `minimize` now splits the `(f, grad)` pair into the two plain callables the
+  routers expect, through a per-point cache so the user's `fun` is still
+  evaluated once per probe point, and copies the returned gradient so a
+  reused output buffer cannot poison cached probe data. The same block also
+  maps `jac=False` (scipy's explicit "no analytic gradient") to `None`, which
+  is the spelling `_route._grad_fn` reads as "finite-difference `fun`" —
+  `False is not None`, so that spelling failed every probe for the same
+  reason. Detection is unchanged otherwise: a genuinely nonconvex objective
+  spelled `jac=True` is still refused by a forced convex selector.
+
+  Same defect class as the `args`-binding fix that precedes it in the routing
+  block: a user input the convex route did not honor.
+- **`bound_eps` is refused at or below zero by the Rust API too, not
+  only by pyomo.** `Solver::bound_context` makes the check, so the
+  `pounce._pounce.Solver` bindings and every `Solver` caller get what
+  the CLI's `sens_bound_eps` gets from its strict lower bound. Neither
+  bad value failed on its own before: zero reinstated the roundoff
+  pinning the floor exists to prevent, and NaN made `over > eps` false
+  everywhere, so the refinement pinned nothing and still reported
+  `settled`. Both handed back a plausible vector. `pyomo_pounce`'s own
+  `_check_margins` is unchanged and still names the argument first.
+
+  The refinement's release threshold is one derivation,
+  `boundcheck::release_floor`, rather than three: `bound_context` reads
+  it off the recorded state and the CLI and `SensSolve` off the options
+  list through `options::release_floor_from_options`. No behaviour
+  change — the three copies agreed — but they can no longer drift.
+
+  `refine_step_onto_bounds` now documents what its two accept guards do
+  under a wide `bound_eps`. They scale with the primal margin, so a
+  margin far above the model's own scale takes them out of the picture:
+  at `bound_eps = 10.0` the worse-than-plain guard reads
+  `worst_over(dx) > 100.0` and `RefineStop::WorseThanPlain` cannot be
+  reached. That is deliberate — a margin wide enough to pin nothing is
+  wide enough to accept any release batch it produces — and it was
+  undocumented.
+
 - **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
   settable through the CLI and the `SensSolve` builder and were
   unreachable from pyomo (gh#736). Both are rejected at or below zero,
@@ -43,9 +663,12 @@ changes.
   drives to between `-sens_bound_eps` and the solve's margin now
   releases its bound, where before it was pinned.
 
-  A margin wide enough to cover the crossing leaves the step where the
-  predictor put it, so `alpha` comes back below one there, where under
-  `fix_relax` it is otherwise 1.0.
+  A margin wide enough to cover the crossing pins nothing, so `alpha`
+  comes back below one there, where under `fix_relax` it is otherwise
+  1.0. It is not quite the predictor's own step: the release test keeps
+  the solve's margin whatever the primal one is, so a bound the step
+  drives negative is still released and the step moves by that
+  multiplier's size.
 
   `max_pdpert` refuses rather than answering when the converged KKT
   factor carries an inertia correction larger than the value given.

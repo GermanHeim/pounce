@@ -1036,13 +1036,21 @@ pub fn main() -> ExitCode {
                     };
                     (p, args.json_detail, input)
                 });
-                // Build the convex IPM options from the registered CLI knobs.
-                // Each tunable forwards only when the user *explicitly* set it
-                // (the `true` flag from `get_*_value`); otherwise the convex
-                // driver keeps its own tuned `QpOptions` default. `max_iter` in
-                // particular must not be silently raised to the (far larger)
-                // Ipopt default, so it too is forwarded only when set.
-                let convex_opts = convex_cli_opts(&app);
+                // Materialize the convex controls in pounce-convex, which owns
+                // their typed representation and precedence rules. In
+                // particular, unset shared NLP options must not replace the
+                // convex driver's independently tuned defaults.
+                let convex_opts =
+                    match pounce_convex::QpOptions::try_from_options_list(app.options()) {
+                        Ok(options) => options,
+                        Err(error) => {
+                            eprintln!("pounce: convex option setup failed: {error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                // gh #744/#745: the same `bound_relax_factor` widening the NLP
+                // path applies, so both arms solve one model.
+                let bound_relax = convex_bound_relax(&app);
                 // When the convex attempt declines (gh #535 / `socp_nlp_fallback`)
                 // the NLP solve below opens its own `Deadline` from the *option
                 // value*, which still names the full budget — so a run that spent
@@ -1052,14 +1060,15 @@ pub fn main() -> ExitCode {
                 // the deduction below the block.
                 let convex_t0 = std::time::Instant::now();
                 // Resolve the convex-path presolve switch (#139) once, above
-                // the driver split: both convex drivers honour it. See
-                // `resolve_convex_presolve` for the aliasing rationale.
-                let presolve_on = {
-                    let opts = app.options();
-                    resolve_convex_presolve(
-                        opts.get_string_value("qp_presolve", "").ok(),
-                        opts.get_string_value("presolve", "").ok(),
-                    )
+                // the driver split: both convex drivers honour it.
+                let presolve_on = match pounce_convex::ConvexPresolveOptions::try_from_options_list(
+                    app.options(),
+                ) {
+                    Ok(options) => options.enabled,
+                    Err(error) => {
+                        eprintln!("pounce: convex presolve setup failed: {error}");
+                        return ExitCode::from(2);
+                    }
                 };
                 if matches!(choice, SolverChoice::SocpIpm) {
                     // `None` means the conic solve came back without a verified
@@ -1075,6 +1084,7 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        bound_relax,
                         presolve_on,
                         socp_nlp_fallback,
                     ) {
@@ -1086,13 +1096,19 @@ pub fn main() -> ExitCode {
                     // the-boundary). The active-set engine is a different
                     // algorithm with no such hook, so a `--debug*` request would
                     // otherwise silently no-op. Say so explicitly.
-                    // Forward the `sqp_qp_*` family to the inner engine. These knobs
-                    // named the QP subproblem *of the SQP outer loop*, which this
-                    // path no longer goes through, so every one of them silently
-                    // became a no-op when the dispatch moved to the convex driver.
-                    // The names are kept because they are the documented, in-use
-                    // spelling; only the delivery route changed.
-                    let engine_overrides = active_set_overrides(&app);
+                    // Forward the `sqp_qp_*` family to the inner engine. Only
+                    // explicit settings materialize as overrides, leaving the
+                    // direct driver's tuned defaults intact otherwise.
+                    let engine_overrides =
+                        match pounce_convex::ActiveSetOverrides::try_from_options_list(
+                            app.options(),
+                        ) {
+                            Ok(options) => options,
+                            Err(error) => {
+                                eprintln!("pounce: active-set option setup failed: {error}");
+                                return ExitCode::from(2);
+                            }
+                        };
                     if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
                         eprintln!(
                             "pounce: note: the interactive debugger is IPM-only and does \
@@ -1115,6 +1131,7 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        bound_relax,
                         matches!(choice, SolverChoice::QpActiveSet),
                         engine_overrides,
                         lp_nlp_fallback,
@@ -1229,10 +1246,7 @@ pub fn main() -> ExitCode {
         // The refinement releases a bound whose multiplier the step
         // drives negative past the solve's own margin, not past
         // `sens_bound_eps`, which is a primal margin.
-        let release_eps = app
-            .options()
-            .get_numeric_value("bound_relax_factor", "")
-            .map_or(1e-9, |(v, _)| v.abs().max(1e-9));
+        let release_eps = pounce_sensitivity::release_floor_from_options(app.options());
         let sens_opts_cb = sens_options;
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
@@ -2416,128 +2430,33 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
-/// Read the `sqp_qp_*` option family into inner-engine overrides for the
-/// active-set QP driver.
+/// The `bound_relax_factor` widening the convex path must apply so that the
+/// model it solves is the one the NLP path solves.
 ///
-/// Only options the user set **explicitly** are forwarded (the `true` flag from
-/// the `OptionsList` accessors), so the driver keeps its own tuned defaults
-/// otherwise — it deliberately picks a size-scaled `max_iter` and enables Schur
-/// updates, and must be able to tell "unset" from "set to the default value".
+/// Reads the same two options `Application` feeds `OrigIpoptNlp::relax_bounds`
+/// — `bound_relax_factor` (Ipopt default `1e-8`) and `constr_viol_tol`
+/// (default `1e-4`) — and uses the same defaults when the user set neither,
+/// so `pounce foo.nl` and `pounce foo.nl solver_selection=nlp` agree.
 ///
-/// These knobs were introduced for the QP subproblem of the active-set *SQP*
-/// outer loop. `solver_selection=qp-active-set` used to reach the engine that
-/// way, so they applied; it now drives the engine directly through the convex
-/// path, and without this they would all be silent no-ops. The `sqp_qp_`
-/// spelling is retained because it is the documented, already-in-use name.
-fn active_set_overrides(app: &IpoptApplication) -> pounce_convex::ActiveSetOverrides {
-    use pounce_qp::AntiCyclingChoice;
-    let mut o = pounce_convex::ActiveSetOverrides::default();
+/// gh #744 / #745: before this, the convex arm ignored both and solved the
+/// model exactly as declared. On the constraint-degenerate families
+/// (`LISWET*`, `YAO`, `POWELL20`, the `pldd*`/`delf*`/`large*` LPs) that made
+/// the two arms of the same binary disagree by up to 33% in the objective —
+/// the convex arm reporting the exact optimum and the NLP arm the relaxed one.
+/// See [`pounce_cli::qp_extract::BoundRelax`] for why so small a widening
+/// moves the objective so far.
+fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRelax {
     let opt = app.options();
-    if let Ok((v, true)) = opt.get_integer_value("sqp_qp_max_iter", "") {
-        if v >= 0 {
-            o.max_iter = Some(v as u32);
-        }
+    let num = |name: &str, default: f64| {
+        opt.get_numeric_value(name, "")
+            .ok()
+            .and_then(|(v, set)| set.then_some(v))
+            .unwrap_or(default)
+    };
+    pounce_cli::qp_extract::BoundRelax {
+        factor: num("bound_relax_factor", 1e-8),
+        cap: num("constr_viol_tol", 1e-4),
     }
-    if let Ok((v, true)) = opt.get_string_value("sqp_qp_anti_cycling", "") {
-        o.anti_cycling = match v.as_str() {
-            "bland" => Some(AntiCyclingChoice::Bland),
-            "expand" => Some(AntiCyclingChoice::Expand),
-            "none" => Some(AntiCyclingChoice::None),
-            _ => None,
-        };
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_feas_tol", "") {
-        o.feas_tol = Some(v);
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_opt_tol", "") {
-        o.opt_tol = Some(v);
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_elastic_gamma", "") {
-        o.elastic_gamma = Some(v);
-    }
-    if let Ok((v, true)) = opt.get_string_value("sqp_qp_use_schur_updates", "") {
-        o.use_schur_updates = Some(v == "yes");
-    }
-    if let Ok((v, true)) = opt.get_string_value("sqp_qp_use_homotopy", "") {
-        o.use_homotopy = Some(v == "yes");
-    }
-    if let Ok((v, true)) = opt.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "") {
-        if v >= 0 {
-            o.max_schur_updates_before_refactor = Some(v as u32);
-        }
-    }
-    o
-}
-
-/// Build the convex IPM [`pounce_convex::QpOptions`] from the registered CLI
-/// knobs.
-///
-/// Every field is overridden only when the user *explicitly* set the option
-/// (the `true` flag returned by the `OptionsList` accessors); otherwise the
-/// `QpOptions` default is kept. The standard `tol` / `max_iter` options feed
-/// the convex solve alongside the `qp_*` knobs registered in `main`.
-/// `max_iter` is forwarded only when set so the convex driver's own (smaller)
-/// cap is never silently raised to the much larger Ipopt default.
-fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
-    let mut o = pounce_convex::QpOptions::default();
-    let opt = app.options();
-    if let Ok((v, true)) = opt.get_integer_value("max_iter", "") {
-        // Forward `max_iter=0` too: AMPL/Ipopt semantics make it a
-        // "take no iterations" request that must not reach optimality
-        // (pounce#186). Only a negative value (invalid) is ignored so the
-        // usize cast can't wrap.
-        if v >= 0 {
-            o.max_iter = v as usize;
-        }
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("tol", "") {
-        o.tol = v;
-    }
-    // `max_wall_time`, honoured only when the user set it explicitly (the `true`
-    // flag) — Ipopt's default is 1e20, i.e. "no limit", and turning that into a
-    // `Duration` would put a nonsensical deadline on every solve.
-    //
-    // A value `Duration` cannot represent is *not* clamped to something huge:
-    // it means no limit, and it says so. `try_from_secs_f64` rejects exactly
-    // the values with no honest deadline — NaN, and anything past ~5.8e11
-    // years including `f64::INFINITY` and Ipopt's own 1e20 sentinel should a
-    // user type it out. Negative is invalid and likewise ignored. `0.0` is
-    // kept as a real (immediate) deadline: "take no time" is the wall-clock
-    // twin of `max_iter=0`, which pounce#186 requires to stop before solving.
-    if let Ok((v, true)) = opt.get_numeric_value("max_wall_time", "")
-        && v >= 0.0
-        && let Ok(d) = std::time::Duration::try_from_secs_f64(v)
-    {
-        o.time_limit = Some(d);
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("qp_tau", "") {
-        o.tau = v;
-        // A raised floor lifts the default ceiling with it, so `qp_tau` alone
-        // still means "use this τ"; an explicit `qp_tau_max` below wins.
-        o.tau_max = o.tau_max.max(v);
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("qp_tau_max", "") {
-        o.tau_max = v;
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("qp_reg", "") {
-        o.reg = v;
-    }
-    if let Ok((v, true)) = opt.get_integer_value("qp_gondzio_corr", "") {
-        o.gondzio_max_corr = v.max(0) as usize;
-    }
-    if let Ok((v, true)) = opt.get_numeric_value("qp_infeas_tol", "") {
-        o.infeas_tol = v;
-    }
-    if let Ok((v, true)) = opt.get_string_value("qp_hsde", "") {
-        o.use_hsde = v != "no";
-    }
-    if let Ok((v, true)) = opt.get_string_value("qp_equilibrate", "") {
-        o.equilibrate = v != "no";
-    }
-    if let Ok((v, true)) = opt.get_string_value("qp_crossover", "") {
-        o.crossover = v != "no";
-    }
-    o
 }
 
 fn convex_opts_with_remaining(
@@ -2585,30 +2504,6 @@ fn charge_wall_budget(
     }
 }
 
-/// Resolve the convex LP/QP presolve switch (#139).
-///
-/// The convex driver is gated by the `qp_presolve` option, but `presolve` is
-/// the spelling users carry over from the NLP path; on the convex path it used
-/// to be silently ignored. Honor whichever the user *explicitly* set, with the
-/// more specific `qp_presolve` winning when both are given; when neither is set
-/// keep the driver's default (on).
-///
-/// Each argument is `Some((value, explicitly_set))` as returned by
-/// `OptionsList::get_string_value(..).ok()`, or `None` if the lookup failed.
-fn resolve_convex_presolve(
-    qp_presolve: Option<(String, bool)>,
-    presolve: Option<(String, bool)>,
-) -> bool {
-    match (qp_presolve, presolve) {
-        // `qp_presolve` explicitly set → authoritative.
-        (Some((v, true)), _) => v != "no",
-        // else alias an explicitly-set `presolve` onto this path.
-        (_, Some((v, true))) => v != "no",
-        // neither set → keep the driver's default (on).
-        _ => true,
-    }
-}
-
 /// Returns `None` when the LP→NLP fallback fires (gh #535): the problem is an
 /// LP, the caller allowed the fallback, and the convex solve finished without a
 /// certificate, so the caller falls through to the general NLP interior-point
@@ -2626,6 +2521,9 @@ fn run_convex_qp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // gh #744/#745: the `bound_relax_factor` widening applied to the extracted
+    // model, so this path solves what the NLP path solves.
+    bound_relax: pounce_cli::qp_extract::BoundRelax,
     // Use the `pounce-qp` parametric active-set engine instead of the IPM
     // (`solver_selection=qp-active-set`). Everything else about this driver —
     // extraction, presolve, postsolve, reporting, `.sol` writing — is shared.
@@ -2640,16 +2538,17 @@ fn run_convex_qp(
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
-        Some(q) => q,
-        None => {
-            eprintln!(
-                "pounce: internal error: {} not extractable as QP",
-                class.name()
-            );
-            return Some(ExitCode::from(2));
-        }
-    };
+    let (qp, con_map, obj_nl_const) =
+        match pounce_cli::qp_extract::extract_qp_with_map(prob, bound_relax) {
+            Some(q) => q,
+            None => {
+                eprintln!(
+                    "pounce: internal error: {} not extractable as QP",
+                    class.name()
+                );
+                return Some(ExitCode::from(2));
+            }
+        };
 
     // The reported objective must include *both* constant sources: the
     // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
@@ -3019,6 +2918,8 @@ fn run_convex_socp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // gh #744/#745: see the same parameter on `run_convex_qp`.
+    bound_relax: pounce_cli::qp_extract::BoundRelax,
     // #139 / gh #588 (Q9b): the shared convex-path presolve switch. Q1 left
     // this driver with no presolve at all, so `qp_presolve` was silently
     // ignored on every convex QCQP; it is honoured here through the
@@ -3032,7 +2933,7 @@ fn run_convex_socp(
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
-        match pounce_cli::qp_extract::extract_socp_with_map(prob) {
+        match pounce_cli::qp_extract::extract_socp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
                 eprintln!(
@@ -4054,55 +3955,5 @@ mod nlp_exit_code_tests {
                 "{s:?} must not count as a successful solve"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod convex_presolve_tests {
-    //! #139: the convex LP/QP driver is gated by `qp_presolve`, but `presolve`
-    //! (the NLP-path spelling) used to be silently ignored on this path. These
-    //! lock the aliasing: `presolve` is honored, `qp_presolve` wins ties, and
-    //! only explicit settings count.
-    use super::resolve_convex_presolve;
-
-    // Helpers mirroring `OptionsList::get_string_value(..).ok()`:
-    //   set(v)   → user explicitly set the option to `v`
-    //   unset(v) → option carries its default `v`, not user-set
-    fn set(v: &str) -> Option<(String, bool)> {
-        Some((v.to_string(), true))
-    }
-    fn unset(v: &str) -> Option<(String, bool)> {
-        Some((v.to_string(), false))
-    }
-
-    #[test]
-    fn defaults_on_when_nothing_set() {
-        assert!(resolve_convex_presolve(None, None));
-        assert!(resolve_convex_presolve(unset("yes"), unset("yes")));
-    }
-
-    #[test]
-    fn explicit_presolve_is_honored() {
-        // The crux of #139: a bare `presolve no` must turn it off here.
-        assert!(!resolve_convex_presolve(unset("yes"), set("no")));
-        assert!(resolve_convex_presolve(unset("yes"), set("yes")));
-    }
-
-    #[test]
-    fn explicit_qp_presolve_is_honored() {
-        assert!(!resolve_convex_presolve(set("no"), None));
-        assert!(resolve_convex_presolve(set("yes"), None));
-    }
-
-    #[test]
-    fn qp_presolve_wins_when_both_explicit() {
-        // More specific spelling is authoritative when the two conflict.
-        assert!(!resolve_convex_presolve(set("no"), set("yes")));
-        assert!(resolve_convex_presolve(set("yes"), set("no")));
-    }
-
-    #[test]
-    fn explicit_presolve_overrides_unset_qp_presolve() {
-        assert!(!resolve_convex_presolve(unset("yes"), set("no")));
     }
 }

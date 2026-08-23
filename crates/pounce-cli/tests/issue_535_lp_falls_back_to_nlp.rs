@@ -53,6 +53,15 @@ const UNREACHABLE_TOL: &str = "tol=1e-20";
 /// reaches, which is exactly the distinction the gate must not make.
 const NUMERICAL_FAILURE_TRIGGER: &str = "qp_tau=0.99";
 
+/// Pairs with the trigger above. gh #744 taught the convex extractors to apply
+/// `bound_relax_factor`, and on afiro the widened box is enough to keep the
+/// KKT system non-singular: every `qp_tau` from `0.9` to `0.9999` now reaches
+/// the iteration limit instead, so the trigger stopped triggering. Solving the
+/// model exactly as declared restores the singular path at `~157` iterations.
+/// This is a knob to hold the *model* fixed at what the trigger was tuned
+/// against — it is not part of what these tests assert.
+const EXACT_DECLARED_BOUNDS: &str = "bound_relax_factor=0";
+
 /// afiro's published optimum. The NLP path reaches it on this model whichever
 /// way the convex attempt failed, which is what makes reporting the convex
 /// failure as the final answer a defect and not a limitation.
@@ -235,7 +244,11 @@ fn a_certified_lp_still_answers_from_the_convex_path() {
 fn an_explicitly_selected_convex_solve_is_not_rerouted() {
     for extra in [
         vec![UNREACHABLE_TOL],
-        vec![UNREACHABLE_TOL, NUMERICAL_FAILURE_TRIGGER],
+        vec![
+            UNREACHABLE_TOL,
+            NUMERICAL_FAILURE_TRIGGER,
+            EXACT_DECLARED_BOUNDS,
+        ],
     ] {
         for sel in ["solver_selection=qp-ipm", "solver_selection=lp-ipm"] {
             let mut args = vec![sel];
@@ -275,6 +288,7 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
         "solver_selection=lp-ipm",
         UNREACHABLE_TOL,
         NUMERICAL_FAILURE_TRIGGER,
+        EXACT_DECLARED_BOUNDS,
     ]);
     assert_eq!(
         named.solution.status,
@@ -288,6 +302,7 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
         "solver_selection=auto",
         UNREACHABLE_TOL,
         NUMERICAL_FAILURE_TRIGGER,
+        EXACT_DECLARED_BOUNDS,
     ]);
     assert!(
         stderr
@@ -318,6 +333,7 @@ fn the_rerouted_numerical_failure_reaches_the_published_optimum() {
         "solver_selection=auto",
         UNREACHABLE_TOL,
         NUMERICAL_FAILURE_TRIGGER,
+        EXACT_DECLARED_BOUNDS,
     ]);
     // Relative, and loose. `tol=1e-20` is unreachable on the NLP path too, so
     // it stops on a vanishing search direction rather than a certificate and
