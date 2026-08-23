@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+- **The directional degeneracy decision reads its weak set off the
+  barrier diagonal.** The set of bounds handed to the directional QP
+  (gh#708) came from the activity classifier's weakly active and
+  ambiguous classes. Those classes are bands on the ratio of barrier
+  weight to curvature, which answers the covariance question of
+  whether the barrier pins the variance against the objective. For
+  degeneracy that ratio is the wrong object. Low curvature widens the
+  bands until they admit coordinates far from any bound, and the QP
+  then held interior coordinates and returned a direction wrong at
+  first order. A bound now counts as weak when the barrier diagonal
+  entry the KKT matrix carries for it lies within a factor of `1e2`
+  of one. At a kink the slack and the multiplier vanish together, so
+  the entry is order one, while an inactive bound's is `O(mu)` and a
+  strongly active one's is `O(1/mu)`, both orders of magnitude
+  outside the band.
+
+  **A row an equality pins is dropped from the QP, not decided.**
+  Under a parametric step the pin of a perturbed parameter moves its
+  own coordinate, so the row enters the QP on movement grounds, and
+  its diagonal entry of the reduced matrix is zero, which makes the
+  QP unbounded. The row is now dropped and the remaining rows are
+  decided. The coordinate follows its pin wherever the parameter
+  sends it, inside the bound or infeasible, which is the parameter's
+  business rather than the QP's.
+
 - **New `adaptive_mu_budget_pin_fraction` lets the adaptive strategy commit to
   its endgame before the clock runs out** (#753). Default `0.75`, but inert
   unless the caller set `max_cpu_time` or `max_wall_time`.
