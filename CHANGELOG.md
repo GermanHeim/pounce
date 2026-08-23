@@ -9,6 +9,81 @@ changes.
 
 ## [Unreleased]
 
+- **The default-on `mu_strategy_fallback` retry now takes
+  `Solved_To_Acceptable_Level`, when the caller left the convergence
+  configuration alone** (#757). `cho_parmest` recovers its certificate:
+  `Solved_To_Acceptable_Level` in 38 iterations becomes `Optimal` in 20.
+
+  `cho_parmest` lost `Optimal` at `fa20c200` (`perf(nl): stop a dense Hessian
+  row from costing O(n^2)`), bisected over the 346-commit report window. That
+  commit validated on the 62 in-repo `.nl` fixtures; this model lives in the
+  external corpus and is a parameter fit, i.e. exactly the shared-parameter
+  dense-row shape it targets, so it exercised the new path and the fixtures did
+  not. The coloring half is already handled — `veto_ill_conditioned_peels`
+  vetoes 7 of 12 peeled columns here, and disabling peeling outright reproduces
+  the default run bit for bit — so what is left is the accumulation-order half,
+  a sub-ULP perturbation with no correct order to restore.
+
+  What it perturbed is a knife-edge. The overall error is entirely the dual
+  term (`7.008e-07 / s_d 66.4 = 1.055e-08` against `tol = 1e-8`), and the
+  endgame takes six null steps of ~1e-12 at `mu_min` while `inf_du` swings 10x
+  on evaluation noise — the "jitter floor near 1e-6"
+  `veto_ill_conditioned_peels` documents for this model. `mu` is pinned at
+  `certificate_safe_mu_min`, so the barrier subproblem is solved to noise and
+  nothing is left to drive. The committed report has flipped this model between
+  `Optimal` and `Acceptable` four times.
+
+  `mu_strategy=adaptive` certifies it in 20 iterations at `8.87e-09` — an 11%
+  margin under `tol` against monotone's 5% miss — and `mu_strategy_fallback` is
+  exactly that retry, registered for exactly this signature: the dual term
+  parked above `tol` while constraint violation (7.3e-13) and complementarity
+  (9.1e-10) are converged. It did not fire because #748 narrowed the
+  *default-on* trigger to `Maximum_Iterations_Exceeded`.
+
+  Two of #748's three reasons for that are properties of a **caller-modified**
+  configuration, not of the status: the retry launders a downgrade the caller
+  deliberately induced, and it can hand back the other run's point. All five
+  test targets the wide trigger broke arm a non-default termination option, and
+  #748 says so itself. So the trigger now defers to a named set,
+  `TERMINATION_POLICY_OPTIONS` — the tolerances, the `acceptable_*` family, the
+  certificate and divergence guards, the restoration-decline pair —
+  generalising the rule already in place for an explicitly-named
+  `mu_strategy`. Set any of them and the retry stands down;
+  `mu_strategy_fallback=yes` overrides that, `=no` restores upstream's single
+  solve. Options that only move the *starting point* are deliberately excluded:
+  `least_square_init_primal` was in the set and was removed, because a caller
+  choosing an initialization heuristic has said nothing about what convergence
+  means, and listing it made an explicit `=no` behave differently from omitting
+  the option.
+
+  #748's third reason, cost, stands and is the price: one extra solve on a run
+  that reached only the acceptable tolerance, paid to try for the certificate.
+
+  The 71-fixture sweep moves 3 of 142 lines across both legs, all improvements,
+  no regressions: `exact csfi2` `Solved_To_Acceptable_Level`/35 →
+  `Solve_Succeeded`/21, `lbfgs pooling_rt2stp` `Solved_To_Acceptable_Level`/362
+  → `Solve_Succeeded`/295, `lbfgs eigenb2` 69 → 41 iterations at the same
+  status and objective. These are the three legs #748 measured and gave up, and
+  they are the whole of the trajectory change.
+
+  `issue_534_resto_decline_progress` now pins `mu_strategy_fallback=no` on both
+  arms. It compares configurations that differ only in the #534 guard, and two
+  of them name a `TERMINATION_POLICY_OPTIONS` member, so leaving the retry to
+  its default would let it fire on the bare arm alone. On its `csfi2` fixture
+  the retry is a real promotion — `Solved_To_Acceptable_Level`/35 becomes
+  `Optimal`/21 at the same objective to nine digits — which is now asserted in
+  `issue_757_acceptable_retry.rs`.
+
+  `issue_616_ls_init_downgrades` pins `mu_strategy_fallback=no` for the same
+  reason, file-wide: every test in it compares two routes differing only in
+  `least_square_init_primal`, and on `csfi2` the retry succeeds, so leaving it
+  on would erase the downgrade the file exists to measure — and erase it on one
+  arm only, since the arms do not both end acceptable.
+
+  `issue_748_fallback_trigger` keeps #748's opt-in and `mu_strategy` pins and
+  replaces its status-only stand-down with the option-based one; its header
+  records why the narrowing was reversed rather than dropping the history.
+
 - **New `adaptive_mu_budget_pin_fraction` lets the adaptive strategy commit to
   its endgame before the clock runs out** (#753). Default `0.75`, but inert
   unless the caller set `max_cpu_time` or `max_wall_time`.

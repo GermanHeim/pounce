@@ -34,15 +34,15 @@
 //!    `autocorr_bern55-06` with the dual-divergence guard enabled it
 //!    swapped -2304.0000278 for -2320.0000298.
 //!
-//! So the default-on retry triggers on `Maximum_Iterations_Exceeded`
-//! alone, and an explicit `mu_strategy_fallback=yes` keeps the historical
-//! pair. `dirichlet120` stalls at max-iterations, so #748's motivating
-//! case is recovered either way.
+//! So #748 made the default-on retry trigger on
+//! `Maximum_Iterations_Exceeded` alone, and an explicit
+//! `mu_strategy_fallback=yes` kept the historical pair. `dirichlet120`
+//! stalls at max-iterations, so #748's motivating case is recovered
+//! either way.
 //!
-//! The cost of the narrowing, measured: the three fixture-legs the flip
-//! had gained go back to where main had them, and they were the only
-//! three that had moved. Against main the PR is now a no-op on all 142
-//! fixture-legs.
+//! The cost of that narrowing, measured at the time: the three
+//! fixture-legs the flip had gained went back to where main had them,
+//! and they were the only three that had moved.
 //!
 //! ```text
 //!   exact csfi2           SolveSucceeded 21  -> SolvedToAcceptableLevel 35
@@ -50,8 +50,32 @@
 //!   lbfgs pooling_rt2stp  SolveSucceeded 295 -> SolvedToAcceptableLevel 362
 //! ```
 //!
-//! All three remain available to anyone who asks for them by name, which
-//! is what the second test below pins.
+//! # pounce#757 supersedes the status-only half of that rule
+//!
+//! Narrowing by *status* threw out the stock-configuration recoveries to
+//! protect the caller-configured ones. Look again at the five broken
+//! targets above: every one of them arms a non-default option to provoke
+//! the downgrade the retry erased — `kkt_fidelity_tol`, a certificate
+//! veto, `dual_diverging_streak`, `resto_decline_deferrals`. Objections 2
+//! and 3 are properties of a caller-MODIFIED configuration, not of the
+//! exit status, so the condition that actually separates the cases is not
+//! "did we end acceptable" but "did the caller tell us what termination
+//! means".
+//!
+//! #757 makes that the rule. The default-on retry now also takes
+//! `Solved_To_Acceptable_Level`, but only while the caller has named none
+//! of `Application::TERMINATION_POLICY_OPTIONS`. Objection 1 — cost —
+//! survives intact and is the accepted price; what it buys is
+//! `cho_parmest`, which stalls 5% short of `tol` on the dual term alone
+//! with the iterate frozen, and which adaptive certifies in 20 iterations.
+//! The three fixture-legs in the table above come back, and the sweep
+//! moves nothing else: 3 of 142 lines, both legs, all improvements.
+//!
+//! What #748 pinned that still holds is below — the opt-in, the
+//! `mu_strategy` condition, and the stand-down, which has simply moved
+//! from "any acceptable-level exit" to "an acceptable-level exit the
+//! caller's own options may have caused". `issue_757_acceptable_retry`
+//! owns the positive half.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -100,23 +124,38 @@ fn solve(model: &str, opts: &[&str]) -> SolveReport {
     serde_json::from_str(&text).expect("parse SolveReport JSON")
 }
 
-/// `csfi2` finishes `Solved_To_Acceptable_Level` in 35 iterations, and the
-/// opposite μ strategy reaches `Solve_Succeeded` in 21. That is a genuine
-/// improvement and it is exactly what the default must **not** reach for
-/// on its own: taking it means every downgraded solve silently pays for a
-/// second one, and every deliberate downgrade elsewhere in the suite gets
-/// erased. Status only — the iteration count is the platform-sensitive
-/// half.
+/// The stand-down, in the form #757 left it: an acceptable-level exit is
+/// retried by default, *unless* the caller armed one of the options that
+/// decides what termination means. `csfi2` finishes
+/// `Solved_To_Acceptable_Level` in 35 iterations and the opposite μ
+/// strategy reaches `Solve_Succeeded` in 21 — a genuine improvement the
+/// stock configuration is now allowed to take, and a deliberate downgrade
+/// the tuned configuration must still be shown.
+///
+/// If the second half of this test starts reading `SolveSucceeded`, the
+/// trigger has widened past `TERMINATION_POLICY_OPTIONS` and every
+/// caller-induced downgrade in the suite is being laundered again — see
+/// the five targets in this file's header. Status only; the iteration
+/// count is the platform-sensitive half.
 #[test]
-fn the_default_retry_leaves_an_acceptable_level_solve_alone() {
-    let r = solve("csfi2", &[]);
+fn a_caller_set_termination_option_stands_the_retry_down() {
+    let stock = solve("csfi2", &[]);
     assert_eq!(
-        format!("{:?}", r.solution.status),
+        format!("{:?}", stock.solution.status),
+        "SolveSucceeded",
+        "with no options set, csfi2's acceptable-level exit must be retried \
+         and promoted (pounce#757). Reading SolvedToAcceptableLevel here means \
+         the default trigger has narrowed back to Maximum_Iterations_Exceeded \
+         alone and cho_parmest has stopped certifying",
+    );
+
+    let tuned = solve("csfi2", &["kkt_fidelity_tol=1e-14"]);
+    assert_eq!(
+        format!("{:?}", tuned.solution.status),
         "SolvedToAcceptableLevel",
-        "with no options set, csfi2 must come back downgraded. If this now \
-         reads SolveSucceeded the default-on retry has widened back to \
-         Solved_To_Acceptable_Level (pounce#748) — see this file's header \
-         for the five targets that breaks",
+        "naming a termination-policy option must stand the automatic retry \
+         down, so the downgrade that option exists to produce still reaches \
+         the caller (pounce#748 objection 2, pounce#757)",
     );
 }
 
