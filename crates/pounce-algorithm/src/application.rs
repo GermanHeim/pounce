@@ -973,8 +973,10 @@ impl IpoptApplication {
             return self.run_with_l1_fallback(tnlp);
         }
         // μ-strategy auto-fallback (pounce#138): if the standard solve
-        // only reaches Solved_To_Acceptable_Level, retry once with the
-        // opposite mu_strategy and promote only on Solve_Succeeded.
+        // stalls, retry once with the opposite mu_strategy and promote
+        // only on Solve_Succeeded. Which stalls qualify depends on
+        // whether the caller asked for the retry — see
+        // `run_with_mu_strategy_fallback` (pounce#748).
         // Applies to constrained and unconstrained alike (both run the
         // same IPM). Independent of, and lower priority than, the ℓ₁
         // fallback above.
@@ -1059,6 +1061,21 @@ impl IpoptApplication {
     fn mu_strategy_was_set(&self) -> bool {
         matches!(
             self.options.get_string_value("mu_strategy", ""),
+            Ok((_, true))
+        )
+    }
+
+    /// Did the caller set `mu_strategy_fallback` themselves? Separates
+    /// the opted-in retry from the default-on one, which triggers on a
+    /// narrower set of statuses (pounce#748).
+    ///
+    /// True for an explicit `no` as well as an explicit `yes`, which is
+    /// harmless: this is only ever read downstream of
+    /// [`Self::is_mu_strategy_fallback_enabled`], and an explicit `no`
+    /// stops there.
+    fn mu_strategy_fallback_was_set(&self) -> bool {
+        matches!(
+            self.options.get_bool_value("mu_strategy_fallback", ""),
             Ok((_, true))
         )
     }
@@ -2286,11 +2303,38 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
     ) -> ApplicationReturnStatus {
         let first_status = self.optimize_constrained(Rc::clone(&tnlp));
-        if !matches!(
-            first_status,
-            ApplicationReturnStatus::SolvedToAcceptableLevel
-                | ApplicationReturnStatus::MaximumIterationsExceeded
-        ) {
+        // Which statuses are worth a second solve depends on who asked
+        // for the retry (pounce#748).
+        //
+        // An explicit `mu_strategy_fallback=yes` keeps the historical
+        // pair: the caller opted in and can afford the second solve.
+        //
+        // The *default*-on retry is narrower — `Maximum_Iterations_
+        // Exceeded` only. `Solved_To_Acceptable_Level` is not a
+        // failure; it is a converged answer at the acceptable
+        // tolerance, and retrying it by default is wrong in three
+        // separate ways. It doubles the cost of a solve that already
+        // succeeded, which the "one extra solve on a run that had
+        // already failed" argument does not cover. It launders
+        // downgrades the caller induced deliberately -- a tight
+        // `kkt_fidelity_tol`, a certificate veto, `least_square_init_
+        // primal` -- so the signal the option exists to produce never
+        // reaches them. And because the retry returns the other run's
+        // *point*, not just its status, it can hand back a different
+        // local solution: on `autocorr_bern55-06` with the
+        // dual-divergence guard on it swaps -2304.0000278 for
+        // -2320.0000298 (crates/pounce-cli/tests/
+        // issue_250_dual_guard_never_worse.rs).
+        //
+        // `dirichlet120`, the case that motivated turning the retry on,
+        // stalls at `Maximum_Iterations_Exceeded`, so it is recovered
+        // either way.
+        let retry_worthy = match first_status {
+            ApplicationReturnStatus::MaximumIterationsExceeded => true,
+            ApplicationReturnStatus::SolvedToAcceptableLevel => self.mu_strategy_fallback_was_set(),
+            _ => false,
+        };
+        if !retry_worthy {
             return first_status;
         }
         // Flip the strategy for one retry. The parser maps "adaptive" →

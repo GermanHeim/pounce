@@ -97,12 +97,36 @@ changes.
 
   `mu_strategy_fallback` has existed since #138 but shipped off, so the
   recovery it provides was available only to users who already knew to ask
-  for it. It re-runs a solve that ended `Maximum_Iterations_Exceeded` or
-  `Solved_To_Acceptable_Level` once under the other `mu_strategy`, and keeps
-  the retry **only** if that reaches `Solve_Succeeded`; otherwise the first
-  status is returned untouched. The status can therefore never come back
-  worse than it would have been, and the cost is one extra solve on a run
-  that had already failed.
+  for it. It re-runs a stalled solve once under the other `mu_strategy` and
+  keeps the retry **only** if that reaches `Solve_Succeeded`; otherwise the
+  first status is returned untouched, so the status can never come back worse
+  than it would have been.
+
+  **What the default-on retry triggers on is narrower than the opt-in.** Since
+  #138 the retry fired on two statuses: `Maximum_Iterations_Exceeded` and
+  `Solved_To_Acceptable_Level`. Only the first is a default trigger. An
+  explicit `mu_strategy_fallback=yes` keeps both.
+
+  Carrying both into the default broke five test targets, all the same way,
+  and the fixture sweep saw none of it — the sweep runs default options, and
+  every one of these needs a non-default option to provoke the downgrade the
+  retry then erased: `optimize_hs71` (tight `kkt_fidelity_tol`),
+  `masked_certificate_fuzz` (certificate veto), `issue_616_ls_init_downgrades`
+  (`least_square_init_primal`), `issue_250_dual_guard_never_worse`
+  (`dual_diverging_streak`), and `issue_534_resto_decline_progress`.
+
+  `Solved_To_Acceptable_Level` is not a failure — it is a converged answer at
+  the acceptable tolerance — and retrying it by default is wrong three
+  separate ways. It doubles the cost of a solve that already succeeded, which
+  "one extra solve on a run that had already failed" does not describe. It
+  launders downgrades the caller induced *deliberately*, so the signal those
+  options exist to produce never arrives. And because the retry returns the
+  other run's **point**, not just its status, it can hand back a different
+  local solution: on `autocorr_bern55-06` with the dual-divergence guard on it
+  swapped `-2304.0000278` for `-2320.0000298`.
+
+  The trigger set is pinned in
+  `crates/pounce-cli/tests/issue_748_fallback_trigger.rs`.
 
   Turning it on is what pays for #746. Defaulting a limited-memory Hessian to
   `adaptive` is a clear net win on the 47-problem mittelmann corpus
@@ -117,14 +141,20 @@ changes.
   the retry on, `dirichlet120` returns the monotone answer again.
 
   The cost was measured rather than assumed. On the 71-fixture trajectory
-  sweep, both legs, **three of 142 lines move and all three improve**: `exact
-  csfi2` `Solved_To_Acceptable_Level`/35 → `Solve_Succeeded`/21, `lbfgs
+  sweep, both legs, **nothing moves: 0 of 142 lines**. `dirichlet120` is not
+  in that corpus, and no fixture in it stalls at `Maximum_Iterations_Exceeded`
+  under default options, so the narrowed trigger never fires there. The flip
+  is a no-op on the sweep and a recovery on the case that motivated it.
+
+  With the wide trigger the same sweep moved three lines, all improvements:
+  `exact csfi2` `Solved_To_Acceptable_Level`/35 → `Solve_Succeeded`/21, `lbfgs
   pooling_rt2stp` `Solved_To_Acceptable_Level`/362 → `Solve_Succeeded`/295,
-  and `lbfgs eigenb2` `Solved_To_Acceptable_Level` 69 → 41. Nothing
-  regresses. That only three lines move is the point: the retry fires rarely,
-  so the doubled budget lands on a small minority of already-failing runs.
-  (The reported `it=` is the retry's own count; total work is the first solve
-  plus the retry.)
+  and `lbfgs eigenb2` 69 → 41 iterations. Those are real, and they are exactly
+  what narrowing gives up; all three come back under
+  `mu_strategy_fallback=yes`. Giving them up is the price of not erasing a
+  deliberate downgrade in the five cases above, and three fixture-legs is
+  worth less than a status the caller can trust. (The reported `it=` is the
+  retry's own count; total work is the first solve plus the retry.)
 
   The flipped default is conditional in one respect: absent an explicit
   setting, the retry is on **only while the caller has not named a
