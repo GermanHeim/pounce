@@ -369,3 +369,111 @@ def test_solver_selection_values_match_rust():
         f"Python whitelist {sorted(_SOLVER_SELECTION_VALUES)} != "
         f"Rust registry {sorted(rust_values)}"
     )
+
+
+def test_jac_true_routes_like_a_separate_gradient_callable():
+    # scipy's `jac=True` spelling: `fun(x)` returns `(f, grad)`. The routers
+    # probe `fun` for a float and call `jac(x)` for a vector, so before the fix
+    # they were handed a tuple-returning `fun` and the bare bool `True`; every
+    # probe raised, the routers' catch-all read that as "not convex", and the
+    # same convex QP that routes under `jac=callable` was rejected. (#750)
+    #
+    # min ½‖x‖² − x0 − 2x1 on [−5, 5]²  → x* = (1, 2), interior to the box.
+    P, c = np.eye(2), np.array([-1.0, -2.0])
+    f = lambda x: float(0.5 * x @ P @ x + c @ x)
+    g = lambda x: P @ x + c
+    fg = lambda x: (f(x), g(x))
+    bounds = [(-5.0, 5.0)] * 2
+
+    separate = minimize(f, np.zeros(2), jac=g, bounds=bounds,
+                        options={"solver_selection": "qp-ipm"})
+    packed = minimize(fg, np.zeros(2), jac=True, bounds=bounds,
+                      options={"solver_selection": "qp-ipm"})
+
+    assert _routed_to(separate) == _routed_to(packed) == "qp-ipm"
+    np.testing.assert_allclose(packed.x, [1.0, 2.0], atol=1e-6)
+    np.testing.assert_allclose(packed.x, separate.x, atol=1e-8)
+    assert packed.fun == pytest.approx(separate.fun, abs=1e-8)
+
+    # `auto` must take the convex fast path too, not fall through to NLP.
+    auto = minimize(fg, np.zeros(2), jac=True, bounds=bounds,
+                    options={"solver_selection": "auto"})
+    assert _routed_to(auto) == "qp-ipm"
+    np.testing.assert_allclose(auto.x, [1.0, 2.0], atol=1e-6)
+
+
+def test_jac_true_lp_routes_to_lp_selector():
+    # The same spelling on an LP: min −x0 + x1 on [−5, 5]² → x* = (5, −5).
+    c = np.array([-1.0, 1.0])
+    fg = lambda x: (float(c @ x), c.copy())
+    res = minimize(fg, np.zeros(2), jac=True, bounds=[(-5.0, 5.0)] * 2,
+                   options={"solver_selection": "lp-ipm"})
+
+    assert _routed_to(res) == "lp-ipm"
+    np.testing.assert_allclose(res.x, [5.0, -5.0], atol=1e-6)
+
+
+def test_jac_true_pair_is_evaluated_once_per_probe_point():
+    # The pair is cached per point (and shared with the SOCP router on `auto`),
+    # so splitting `(f, grad)` must not double the user's forward passes.
+    P, c = np.eye(2), np.array([-1.0, -2.0])
+    calls = {"n": 0, "points": set()}
+
+    def fg(x):
+        calls["n"] += 1
+        calls["points"].add(np.asarray(x, dtype=float).tobytes())
+        return float(0.5 * x @ P @ x + c @ x), P @ x + c
+
+    minimize(fg, np.zeros(2), jac=True, bounds=[(-5.0, 5.0)] * 2,
+             options={"solver_selection": "qp-ipm"})
+
+    assert calls["n"] == len(calls["points"])
+
+
+def test_jac_true_gradient_buffer_reuse_does_not_poison_probes():
+    # A `fun` that returns one reused gradient buffer must not corrupt cached
+    # probe data (the hazard `_point_cache` guards against, on the pair cache).
+    P, c = np.eye(2), np.array([-1.0, -2.0])
+    buf = np.empty(2)
+
+    def fg(x):
+        buf[:] = P @ x + c
+        return float(0.5 * x @ P @ x + c @ x), buf
+
+    res = minimize(fg, np.zeros(2), jac=True, bounds=[(-5.0, 5.0)] * 2,
+                   options={"solver_selection": "qp-ipm"})
+
+    assert _routed_to(res) == "qp-ipm"
+    np.testing.assert_allclose(res.x, [1.0, 2.0], atol=1e-6)
+
+
+def test_jac_true_with_args_routes():
+    # `args` binding and the `(f, grad)` split have to compose.
+    fun = lambda x, k: ((x[0] - k) ** 2 + x[1] ** 2,
+                        np.array([2 * (x[0] - k), 2 * x[1]]))
+    res = minimize(fun, [0.0, 0.0], args=(3.0,), jac=True,
+                   bounds=[(-10, 10), (-10, 10)],
+                   options={"solver_selection": "qp-ipm"})
+
+    assert _routed_to(res) == "qp-ipm"
+    np.testing.assert_allclose(res.x, [3.0, 0.0], atol=1e-6)
+
+
+def test_jac_false_routes_like_an_omitted_jac():
+    # scipy's explicit "no gradient" spelling. `False is not None`, so it too
+    # reached the routers as a non-callable and failed every probe. (#750)
+    a = np.array([0.3, 0.7])
+    fun = lambda x: float((x[0] - a[0]) ** 2 + (x[1] - a[1]) ** 2)
+    res = minimize(fun, [0.0, 0.0], jac=False, bounds=[(0, 1), (0, 1)],
+                   options={"solver_selection": "qp-ipm"})
+
+    assert _routed_to(res) == "qp-ipm"
+    np.testing.assert_allclose(res.x, a, atol=1e-5)
+
+
+def test_jac_true_still_rejected_when_genuinely_not_convex():
+    # The fix must not weaken detection: a quartic objective spelled `jac=True`
+    # is still refused by a forced convex selector.
+    fg = lambda x: (x[0] ** 4 + x[1] ** 2, np.array([4 * x[0] ** 3, 2 * x[1]]))
+    with pytest.raises(ValueError):
+        minimize(fg, [1.0, 1.0], jac=True, options={"solver_selection": "qp-ipm"})

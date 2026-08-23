@@ -177,3 +177,23 @@ def test_plain_qp_still_routes_to_qp_not_socp():
                    options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "qp-ipm"
+
+
+def test_jac_true_qcqp_routes_to_socp():
+    # scipy's `jac=True` spelling reached the SOCP router as a tuple-returning
+    # `fun` plus the bare bool `True`, so every probe failed and a convex QCQP
+    # was rejected by `solver_selection="socp"` / skipped by `auto`. (#750)
+    # min −x0 + 2x1  s.t.  x0² + x1² ≤ 1  →  x* = (1, −2)/√5.
+    c = np.array([-1.0, 2.0])
+    fg = lambda x: (float(c @ x), c.copy())
+    expected = -c / np.linalg.norm(c)
+
+    forced = minimize(fg, [0.1, 0.1], jac=True, constraints=[_ball_constraint()],
+                      options={"solver_selection": "socp"})
+    assert _routed_to(forced) == "socp"
+    np.testing.assert_allclose(forced.x, expected, atol=1e-5)
+
+    auto = minimize(fg, [0.1, 0.1], jac=True, constraints=[_ball_constraint()],
+                    options={"solver_selection": "auto"})
+    assert _routed_to(auto) == "socp"
+    np.testing.assert_allclose(auto.x, expected, atol=1e-5)

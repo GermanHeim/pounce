@@ -1162,14 +1162,58 @@ def minimize(
             return f
         return lambda x, _f=f, _a=args: _f(x, *_a)
 
+    # Normalize the *spelling* of the gradient for the routers, which probe
+    # `fun` as a bare `f(x) -> float` and `jac` as `g(x) -> vector`. Two scipy
+    # spellings do not fit that shape:
+    #
+    #   * `jac=True` — `fun(x, *args)` returns the pair `(f, grad)`, and `jac`
+    #     is the bare bool. Handing those to the routers makes both probes
+    #     blow up (a tuple where a float belongs; a non-callable `True`), and
+    #     the routers' catch-all turns any probe failure into "not convex".
+    #   * `jac=False` — scipy's "no gradient, use finite differences" spelling.
+    #     `False` is not `None`, so it too would reach the routers as a
+    #     non-callable and fail every probe.
+    #
+    # Either way the same convex QP that routes fine under `jac=callable` is
+    # wrongly rejected: `solver_selection="auto"` silently falls back to the
+    # NLP solver, and a forced convex selector raises `ValueError` on a problem
+    # that satisfies its documented precondition. Same defect class as the
+    # `args` binding above — a user input the convex route does not honor.
+    # (#750)
+    def _split_fun_and_grad():
+        """Router `(fun, jac)` for `jac=True`, splitting the cached pair."""
+        pair_cache: dict[bytes, tuple[float, np.ndarray]] = {}
+
+        def pair(x):
+            key = np.asarray(x, dtype=np.float64).tobytes()
+            hit = pair_cache.get(key)
+            if hit is None:
+                f, g = fun(x, *args)
+                # Copy the gradient: a `fun` that reuses one output buffer
+                # across calls would otherwise mutate earlier cache entries in
+                # place (same hazard `_point_cache` guards against).
+                hit = (float(f), _to_array(g).ravel().copy())
+                pair_cache[key] = hit
+            return hit
+
+        return lambda x: pair(x)[0], lambda x: pair(x)[1]
+
+    if jac is True:
+        route_fun, route_jac = _split_fun_and_grad()
+    else:
+        route_fun = _bind_args(fun)
+        # `jac=False`/`None` both mean "no analytic gradient"; the routers
+        # finite-difference `fun` when `jac is None`.
+        route_jac = _bind_args(jac) if callable(jac) else None
+
     # Wrap router callables in one shared point-cache (M34): the LP/QP and SOCP
     # routers probe an identical point set (same seed), so caching makes the
     # second router's probes cache hits instead of re-evaluating the objective.
     # Only these router copies are cached; the NLP fallback below still calls
     # the original `fun`/`jac`/… so the actual solve is unaffected.
     route_kw = dict(
-        fun=_point_cache(_bind_args(fun)),
-        jac=_point_cache(_bind_args(jac)),
+        fun=_point_cache(route_fun),
+        jac=_point_cache(route_jac),
         hess=_point_cache(_bind_args(hess)),
         lb=lb,
         ub=ub,
