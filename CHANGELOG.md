@@ -54,6 +54,84 @@ changes.
   doctored trace. `gams-rerun` is kept as an alias; the two are now the same
   thing.
 
+- **The barrier-schedule retry is on by default** (#748).
+
+  `mu_strategy_fallback` has existed since #138 but shipped off, so the
+  recovery it provides was available only to users who already knew to ask
+  for it. It re-runs a solve that ended `Maximum_Iterations_Exceeded` or
+  `Solved_To_Acceptable_Level` once under the other `mu_strategy`, and keeps
+  the retry **only** if that reaches `Solve_Succeeded`; otherwise the first
+  status is returned untouched. The status can therefore never come back
+  worse than it would have been, and the cost is one extra solve on a run
+  that had already failed.
+
+  Turning it on is what pays for #746. Defaulting a limited-memory Hessian to
+  `adaptive` is a clear net win on the 47-problem mittelmann corpus
+  (`Solve_Succeeded` 28 → 31, three `Error_In_Step_Computation` exits gone,
+  and a false `Infeasible_Problem_Detected` on `qcqp1000-1nc` gone), but it
+  costs `dirichlet120`, which monotone solves in 176 iterations and adaptive
+  grinds on for 3000. That is not a defect in POUNCE's adaptive strategy —
+  Ipopt 3.14.19 stalls on the same model in the same way, to the same
+  objective (`3.7377879e-02` at iteration 3000, against monotone's
+  `3.7377881e-02` at 178) — it is a case where neither schedule dominates,
+  which is the premise the option was registered on in the first place. With
+  the retry on, `dirichlet120` returns the monotone answer again.
+
+  The cost was measured rather than assumed. On the 71-fixture trajectory
+  sweep, both legs, **three of 142 lines move and all three improve**: `exact
+  csfi2` `Solved_To_Acceptable_Level`/35 → `Solve_Succeeded`/21, `lbfgs
+  pooling_rt2stp` `Solved_To_Acceptable_Level`/362 → `Solve_Succeeded`/295,
+  and `lbfgs eigenb2` `Solved_To_Acceptable_Level` 69 → 41. Nothing
+  regresses. That only three lines move is the point: the retry fires rarely,
+  so the doubled budget lands on a small minority of already-failing runs.
+  (The reported `it=` is the retry's own count; total work is the first solve
+  plus the retry.)
+
+  The flipped default is conditional in one respect: absent an explicit
+  setting, the retry is on **only while the caller has not named a
+  `mu_strategy` themselves**. Retrying under the other schedule recovers a
+  solve that stalled on a strategy POUNCE chose; it is not licence to override
+  a strategy the caller chose, and without that condition the flip would
+  silently contaminate every controlled comparison that pins `mu_strategy` on
+  purpose — this repository's own benchmark arms included. An explicit
+  `mu_strategy_fallback=yes` still retries regardless. `dirichlet120` is
+  unaffected either way, since it stalls under the limited-memory
+  substitution, which by definition only happens when `mu_strategy` is unset.
+
+  One limit is deliberate. The retry **cannot** rescue a
+  `Maximum_CpuTime_Exceeded` exit and does not try, because the budget a
+  retry needs is precisely the budget already spent. `nql180` regresses that
+  way under #746 and is not recovered here. Upstream is not better off on
+  that model for the right reason either: Ipopt's adaptive arm also takes the
+  long path (623 iterations to `Optimal Solution Found`, against monotone's
+  279 to `Solved To Acceptable Level`) — it simply affords the wall clock
+  that POUNCE, at its current cost per iteration, does not. Set
+  `mu_strategy_fallback=no` to restore the previous default and upstream's
+  single-solve behaviour.
+
+  Fixing the adaptive endgame in-strategy was attempted first and rejected on
+  measurement, which is recorded here so it is not re-attempted blind. The
+  stall has a clear mechanism: the monotone schedule never reduces μ until
+  the barrier subproblem is solved to `barrier_tol_factor · μ`, so μ trails
+  the accuracy actually achieved, while free mode has no such invariant and
+  the oracle can park μ orders of magnitude below the achieved KKT error —
+  after which nothing can lift it off the floor, because the obj-constr
+  filter keeps accepting marginal improvements so the free→fixed switch never
+  fires, and `NewFixedMu` re-seeds at `0.8 · avrg_compl`, itself ~`mu_min`
+  once complementarity has collapsed. Restoring the trailing relationship as
+  a floor (μ ≥ `nlp_error / kappa`, applied where upstream's own
+  `adaptive_mu_safeguard_factor` hook sits disabled) fixes `dirichlet120`
+  outright — 3000 iterations / `Maximum_Iterations_Exceeded` / 185 s becomes
+  349 / `Solve_Succeeded` / 30 s at kappa 1e3. It does not generalise. On the
+  fixture sweep that same setting takes `cresc4` and `eigmaxa` from
+  `Solve_Succeeded` to `Restoration_Failed`, `autocorr_bern55-06` to
+  `Maximum_Iterations_Exceeded`, and `pooling_rt2stp` to
+  `Error_In_Step_Computation` on a materially worse objective, with `jit1`
+  and friends inflating 3–7×, and produces no improvement anywhere; kappa 1e2
+  avoids the restoration failures but still costs `cresc4` 105 → 904 and
+  `csfi2` 19 → 105. A single-problem win at that price is a tuning artifact,
+  not a barrier-strategy improvement, so nothing from it ships.
+
 - **A limited-memory Hessian now defaults `mu_strategy` to `adaptive`, as
   upstream does** (#746).
 

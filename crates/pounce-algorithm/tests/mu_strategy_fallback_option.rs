@@ -2,7 +2,8 @@
 //!
 //! `optimize_tnlp` consults `mu_strategy_fallback` to decide
 //! whether to retry a `Solved_To_Acceptable_Level` solve with the opposite
-//! `mu_strategy`. This test pins the option's registration, default, and the
+//! `mu_strategy`. This test pins the option's registration, its default (on since
+//! pounce#748), and the
 //! `"yes"`/`"no"` string round-trip the GAMS link depends on (the link
 //! forwards unknown keys via `AddIpoptStrOption`, so the bool must accept the
 //! string form). It does not run a solve — the end-to-end promotion is
@@ -10,14 +11,19 @@
 
 use pounce_algorithm::application::IpoptApplication;
 
+/// pounce#748 flipped this default from off to on. The registered default
+/// and the `unwrap_or` fallback in
+/// `IpoptApplication::is_mu_strategy_fallback_enabled` must agree, or the
+/// behaviour depends on how the option table was built; this pins the
+/// registered half.
 #[test]
-fn fallback_option_defaults_off() {
+fn fallback_option_defaults_on() {
     let mut app = IpoptApplication::new();
     let (value, _found) = app
         .options_mut()
         .get_bool_value("mu_strategy_fallback", "")
         .expect("option must be registered");
-    assert!(!value, "μ-strategy fallback must default to off");
+    assert!(value, "μ-strategy fallback must default to on (pounce#748)");
 }
 
 #[test]

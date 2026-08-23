@@ -1082,13 +1082,23 @@ impl IpoptApplication {
     }
 
     /// Read the μ-strategy auto-fallback switch (pounce#138).
-    /// Default `false` when the option is not set.
+    ///
+    /// An explicit setting always wins. Absent one the default is **on**
+    /// (pounce#748) — but only while the user has not chosen a
+    /// `mu_strategy` themselves. Retrying under the other schedule is a
+    /// recovery for a solve that stalled on a strategy POUNCE picked; it
+    /// is not licence to override a strategy the caller named. Without
+    /// that condition, flipping the default would silently contaminate
+    /// every controlled comparison that pins `mu_strategy` on purpose,
+    /// this repository's own benchmark arms included. The motivating
+    /// case is unaffected: `dirichlet120` stalls under the
+    /// limited-memory substitution (pounce#746), which by definition
+    /// only happens when `mu_strategy` is unset.
     fn is_mu_strategy_fallback_enabled(&self) -> bool {
-        self.options
-            .get_bool_value("mu_strategy_fallback", "")
-            .ok()
-            .and_then(|(v, found)| found.then_some(v))
-            .unwrap_or(false)
+        match self.options.get_bool_value("mu_strategy_fallback", "") {
+            Ok((v, true)) => v,
+            _ => !self.mu_strategy_was_set(),
+        }
     }
 
     /// Has the user set `algorithm = active-set-sqp`? Reads the
@@ -5081,6 +5091,38 @@ fn finalize_via_sqp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pounce#748 — the flipped default is conditional on the caller not
+    /// having named a `mu_strategy`. All four combinations, because the
+    /// point of the condition is that an explicit strategy suppresses the
+    /// automatic retry while an explicit `mu_strategy_fallback` does not.
+    #[test]
+    fn mu_strategy_fallback_default_defers_to_an_explicit_strategy() {
+        // Nothing set: the retry is on.
+        let app = IpoptApplication::new();
+        assert!(app.is_mu_strategy_fallback_enabled());
+
+        // Caller named a strategy: the automatic retry stands down.
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy", "monotone", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+
+        // ... unless they also asked for the retry explicitly.
+        app.options_mut()
+            .set_string_value("mu_strategy_fallback", "yes", true, false)
+            .unwrap();
+        assert!(app.is_mu_strategy_fallback_enabled());
+
+        // An explicit "no" is honoured with no strategy set.
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy_fallback", "no", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+    }
+
     use pounce_nlp::tnlp::{
         BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
         StartingPoint,
