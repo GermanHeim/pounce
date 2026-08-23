@@ -599,6 +599,16 @@ QP), a quadratic *equality*, or a quadratic inequality whose feasible set is
 nonconvex (a non-PSD constraint Hessian) all fall back to the NLP solver.
 **You never get a wrong "optimum" from a misclassification.**
 
+Because detection reads the callables, it is spelled-input agnostic: `args`
+are bound before probing, and every gradient spelling `minimize` accepts —
+a separate `jac=` callable, scipy's `jac=True` (`fun(x)` returning
+`(f, grad)`), or an omitted / `jac=False` gradient — describes the same
+problem and routes the same way. Under `jac=True` the pair is evaluated once
+per probe point, so the packed spelling costs no extra forward passes.
+Derivative-*free* detection is still weaker in one place: recovering a
+*constraint* Hessian from finite-differenced Jacobians is too noisy to
+confirm a quadratic, so a QCQP wants analytic constraint `jac`s (see below).
+
 #### Forcing the solver
 
 The `solver_selection` option (passed in `options=`) overrides the automatic
