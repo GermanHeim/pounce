@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+- **`pounce.minimize`: `jac=True` no longer defeats convex structure
+  detection** (#750).
+
+  The convex routers probe `fun` as a bare `f(x) -> float` and `jac` as
+  `g(x) -> vector`. Under scipy's `jac=True` spelling — where `fun(x)`
+  returns the pair `(f, grad)` — they were handed a tuple-returning `fun`
+  and the bare bool `True` instead, so every probe raised and the routers'
+  catch-all ("a probe failure never becomes a wrong solver choice") reported
+  "not convex". On a textbook convex QP that meant
+  `solver_selection="qp-ipm"` (or `lp-ipm` / `qp-active-set` / `socp`)
+  raised `ValueError` rejecting a problem that satisfies its documented
+  precondition, while `solver_selection="auto"` silently fell back to the
+  general NLP solver and never took the convex fast path. The answer stayed
+  correct under `auto`; the routing did not.
+
+  `minimize` now splits the `(f, grad)` pair into the two plain callables the
+  routers expect, through a per-point cache so the user's `fun` is still
+  evaluated once per probe point, and copies the returned gradient so a
+  reused output buffer cannot poison cached probe data. The same block also
+  maps `jac=False` (scipy's explicit "no analytic gradient") to `None`, which
+  is the spelling `_route._grad_fn` reads as "finite-difference `fun`" —
+  `False is not None`, so that spelling failed every probe for the same
+  reason. Detection is unchanged otherwise: a genuinely nonconvex objective
+  spelled `jac=True` is still refused by a forced convex selector.
+
+  Same defect class as the `args`-binding fix that precedes it in the routing
+  block: a user input the convex route did not honor.
+
 - **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
   settable through the CLI and the `SensSolve` builder and were
   unreachable from pyomo (gh#736). Both are rejected at or below zero,
