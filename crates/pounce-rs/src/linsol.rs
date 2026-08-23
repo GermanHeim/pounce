@@ -13,7 +13,10 @@
 //! Available whenever the `convex` or `qp` feature is on.
 
 pub use pounce_feral::FeralSolverInterface;
-pub use pounce_linsol::{Factorization, FactorizationError, SparseSymLinearSolverInterface};
+pub use pounce_linsol::{
+    EMatrixFormat, ESymSolverStatus, Factorization, FactorizationError,
+    SparseSymLinearSolverInterface,
+};
 
 /// The default backend: FERAL's sparse symmetric indefinite (LDLᵀ)
 /// factorization, parallel inside a single factor.
