@@ -142,11 +142,23 @@ changes.
   and 4 but succeeds at 2 and at `-1`. No single value serves both `cresc4`
   and `nql180` (which needs exactly `0` — `1` leaves it worse than uncapped,
   308 iterations to the CPU limit). A knob that erratic is a per-model tuning
-  aid, not a better barrier strategy, so it ships opt-in and `nql180` stays
-  open under #749. This is the same bar the abandoned μ-floor experiment below
-  failed — and notably it broke `cresc4` too, which suggests that model
-  genuinely needs free-mode adaptivity rather than that either fix was
-  mistuned.
+  aid, not a better barrier strategy, so it ships opt-in. This is the same bar
+  the abandoned μ-floor experiment below failed — and notably it broke
+  `cresc4` too, which suggests that model genuinely needs free-mode
+  adaptivity rather than that either fix was mistuned.
+
+  #749 proposed a principled sibling for this knob — judge each free
+  excursion by whether it lowered the KKT error, and pin only after one that
+  did not. It was implemented and measured, and the signal turns out to rank
+  the two models backwards: `cresc4`, which must keep its free mode, has 8 of
+  11 unproductive excursions, while `nql180`, which must be pinned, has 7 of
+  10 productive ones. Judging returned-to excursions only is worse than this
+  knob on `nql180` and breaks `cresc4`; judging the opening phase too
+  reproduces `0` byte for byte. #749 is closed with that result. What is left
+  for `nql180` is not the barrier schedule at all but per-iteration cost —
+  POUNCE runs 3.4× Ipopt on this model's adaptive arm and 1.85× on its
+  monotone arm, so at Ipopt's cost the default's 444 iterations would finish
+  in ~660 s. That is tracked in #753.
 
 - **The barrier-schedule retry is on by default** (#748).
 
