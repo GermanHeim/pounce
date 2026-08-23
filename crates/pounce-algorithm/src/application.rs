@@ -4060,6 +4060,9 @@ impl IpoptApplication {
         if let Some(v) = read_int("adaptive_mu_max_free_returns") {
             builder.mu.adaptive_mu_max_free_returns = v;
         }
+        if let Some(v) = read_num("adaptive_mu_budget_pin_fraction") {
+            builder.mu.adaptive_mu_budget_pin_fraction = v;
+        }
         if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
             if v >= 0 {
                 builder.mu.adaptive_mu_kkterror_red_iters = v as usize;

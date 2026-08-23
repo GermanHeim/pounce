@@ -592,6 +592,12 @@ pub struct MuOptions {
     /// extension). Cap on how many times the adaptive strategy may
     /// leave fixed-mu mode. `-1` = unlimited (upstream behavior).
     pub adaptive_mu_max_free_returns: i32,
+    /// `adaptive_mu_budget_pin_fraction` (pounce#753, POUNCE
+    /// extension). Fraction of an explicitly-set `max_cpu_time` /
+    /// `max_wall_time` after which the adaptive strategy stops
+    /// returning to free-mu mode and finishes monotone. `1.0`
+    /// disables. Inert unless the caller set a time budget.
+    pub adaptive_mu_budget_pin_fraction: Number,
     /// `adaptive_mu_kkterror_red_iters` — window length for the
     /// `KKT_ERROR` globalization history. Default 4.
     pub adaptive_mu_kkterror_red_iters: usize,
@@ -653,6 +659,7 @@ impl Default for MuOptions {
             adaptive_mu_monotone_init_factor: 0.8,
             adaptive_mu_restore_previous_iterate: false,
             adaptive_mu_max_free_returns: -1,
+            adaptive_mu_budget_pin_fraction: 0.75,
             adaptive_mu_kkterror_red_iters: 4,
             adaptive_mu_kkterror_red_fact: 0.9999,
             adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
@@ -1276,6 +1283,13 @@ impl AlgorithmBuilder {
                     self.mu.adaptive_mu_monotone_init_factor;
                 adaptive.restore_accepted_iterate = self.mu.adaptive_mu_restore_previous_iterate;
                 adaptive.max_free_returns = self.mu.adaptive_mu_max_free_returns;
+                adaptive.budget_pin_fraction = self.mu.adaptive_mu_budget_pin_fraction;
+                // The pin measures against the same budget the
+                // convergence check enforces (pounce#753); the
+                // `conv_check` copies are the ones the application
+                // also hands to `Deadline::new`.
+                adaptive.max_cpu_time = self.conv_check.max_cpu_time;
+                adaptive.max_wall_time = self.conv_check.max_wall_time;
                 adaptive.adaptive_mu_kkterror_red_iters = self.mu.adaptive_mu_kkterror_red_iters;
                 adaptive.adaptive_mu_kkterror_red_fact = self.mu.adaptive_mu_kkterror_red_fact;
                 adaptive.adaptive_mu_kkt_norm = self.mu.adaptive_mu_kkt_norm_type;

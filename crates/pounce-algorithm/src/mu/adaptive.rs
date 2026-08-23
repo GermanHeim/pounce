@@ -181,6 +181,29 @@ pub struct AdaptiveMuUpdate {
     /// Number of fixed->free transitions taken so far, compared
     /// against [`Self::max_free_returns`].
     free_returns_taken: i32,
+    /// `adaptive_mu_budget_pin_fraction` (pounce#753) — once this
+    /// fraction of an explicitly-set CPU or wall-clock budget has been
+    /// spent without converging, stop exploring in free-mu mode and
+    /// finish in the cheap fixed-mu (monotone) endgame. `1.0` disables.
+    /// POUNCE extension: no counterpart in `IpAdaptiveMuUpdate.cpp`.
+    ///
+    /// This is an *in-flight* switch, not a retry, and that is the whole
+    /// point. `mu_strategy_fallback` (pounce#748) deliberately declines
+    /// to retry a `Maximum_CpuTime_Exceeded` exit, because "the budget a
+    /// retry needs is precisely the budget already spent" — a second
+    /// solve starts from x0 and has nothing left to pay with. Switching
+    /// in place keeps the iterate, so the time already spent is not
+    /// wasted; it bought the point the monotone endgame starts from.
+    pub budget_pin_fraction: Number,
+    /// `max_cpu_time` / `max_wall_time` as the convergence check sees
+    /// them, mirrored here so [`Self::budget_spent`] can compute the
+    /// consumed fraction on the direct-driver path, where no shared
+    /// [`pounce_common::timing::Deadline`] is installed.
+    pub max_cpu_time: Number,
+    pub max_wall_time: Number,
+    /// Latched once [`Self::budget_spent`] first fires, so the endgame
+    /// cannot flap back into free mode as the clock keeps running.
+    budget_pinned: bool,
     /// `no_bounds_` flag — port of `IpAdaptiveMuUpdate.cpp:282-287`.
     /// Set to `true` on the first `update_barrier_parameter` call when
     /// the iterate has zero bound multipliers (z_l, z_u, v_l, v_u all
@@ -231,6 +254,10 @@ impl Default for AdaptiveMuUpdate {
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
             max_free_returns: -1,
+            budget_pin_fraction: 0.75,
+            max_cpu_time: 1e6,
+            max_wall_time: 1e6,
+            budget_pinned: false,
             free_returns_taken: 0,
             free_mu_mode: true,
             refs_vals: VecDeque::new(),
@@ -502,6 +529,87 @@ impl AdaptiveMuUpdate {
     fn tiny_step_is_terminal(tiny_step_flag: bool, new_mu: Number, curr_mu: Number) -> bool {
         tiny_step_flag && new_mu == curr_mu
     }
+
+    /// pounce#753 — has the caller's explicit time budget been consumed
+    /// past [`Self::budget_pin_fraction`]?
+    ///
+    /// POUNCE extension; no counterpart upstream. Free-μ mode costs
+    /// roughly 2.3x fixed-μ mode per iteration on nql180 (the oracle's
+    /// affine + centering back-solves, plus the trajectory it steers
+    /// into), and on that problem adaptive spends the whole tail
+    /// oscillating free->fixed->free and never reaches an endgame:
+    /// 444 iterations / 2234 s and a `Maximum_CpuTime_Exceeded` exit,
+    /// against 105 iterations / 258 s to `Optimal` if it is made to stay
+    /// in fixed mode. `mu_strategy_fallback` (pounce#748) already
+    /// recovers the *unbudgeted* form of that failure by retrying the
+    /// whole solve monotone after `Maximum_Iterations_Exceeded`, but it
+    /// deliberately declines to retry a CPU/wall exit — there is no
+    /// budget left to retry with. This is that recovery done in flight:
+    /// keep the iterate, drop the oracle, finish monotone.
+    ///
+    /// Returns `false` unless a budget was actually set. Both the
+    /// builder default (1e6 s) and the registered sentinel (1e20 s)
+    /// leave the consumed fraction indistinguishable from zero, so a
+    /// caller who never asked for a time limit never sees this fire —
+    /// which is also why the fixture sweep, which sets no budget, is
+    /// unaffected by construction.
+    ///
+    /// Latching matters: without [`Self::budget_pinned`] the pin would
+    /// depend on where in the iteration the clock is read, and a
+    /// borderline solve could flap back into free mode after paying for
+    /// the switch.
+    fn budget_spent(&mut self, data: &IpoptDataHandle) -> bool {
+        if self.budget_pinned {
+            return true;
+        }
+        if !(self.budget_pin_fraction < 1.0) {
+            // NaN-safe: only a fraction strictly below 1 can pin.
+            return false;
+        }
+        let d = data.borrow();
+        let frac = if let Some(deadline) = d.deadline.as_ref() {
+            // The shared deadline (pounce#242) measures from a fixed
+            // start instant and is what the convergence check trusts,
+            // so it is what we measure against too.
+            let cpu = fraction_of(
+                deadline.max_cpu(),
+                deadline.max_cpu() - deadline.remaining_cpu(),
+            );
+            let wall = fraction_of(
+                deadline.max_wall(),
+                deadline.max_wall() - deadline.remaining_wall(),
+            );
+            cpu.max(wall)
+        } else {
+            // Direct-driver / unit-test path — no deadline installed;
+            // mirror `conv_check::opt_error`'s fallback to `overall_alg`.
+            let timing = &d.timing;
+            let cpu = fraction_of(self.max_cpu_time, timing.overall_alg.live_cpu_time());
+            let wall = fraction_of(self.max_wall_time, timing.overall_alg.live_wallclock_time());
+            cpu.max(wall)
+        };
+        drop(d);
+        if frac >= self.budget_pin_fraction {
+            self.budget_pinned = true;
+            tracing::debug!(target: "pounce::mu",
+                "[AMU] pinning to fixed-mu mode: {:.0}% of the time budget spent (pounce#753)",
+                frac * 100.0,
+            );
+            return true;
+        }
+        false
+    }
+}
+
+/// `spent / budget`, or 0 when the budget is not a usable positive
+/// number. A non-finite or non-positive budget means "no limit was
+/// expressed", not "the limit is already blown".
+fn fraction_of(budget: Number, spent: Number) -> Number {
+    if budget.is_finite() && budget > 0.0 {
+        (spent / budget).max(0.0)
+    } else {
+        0.0
+    }
 }
 
 impl MuUpdate for AdaptiveMuUpdate {
@@ -538,6 +646,15 @@ impl MuUpdate for AdaptiveMuUpdate {
         self.mu_max = -1.0;
         // Reset no-bounds detection on re-solve.
         self.no_bounds = false;
+        // Both mode-pinning mechanisms are per-solve state, and
+        // `initialize` is what a re-solve calls. Carrying either across
+        // would let the first solve's history pin the second one before
+        // it has taken a step: `free_returns_taken` (pounce#749) is a
+        // budget of transitions this solve is allowed, and
+        // `budget_pinned` (pounce#753) is a decision about this solve's
+        // clock.
+        self.free_returns_taken = 0;
+        self.budget_pinned = false;
     }
 
     /// Adaptive μ update — port of `UpdateBarrierParameter`
@@ -662,6 +779,10 @@ impl MuUpdate for AdaptiveMuUpdate {
         let obj_scaling_factor = cq.borrow().obj_scaling_factor();
         let mu_min = self.certificate_safe_mu_min(obj_scaling_factor);
 
+        // pounce#753 — POUNCE extension. Read once per update so the
+        // two mode-transition sites below agree within an iteration.
+        let budget_spent = self.budget_spent(data);
+
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
             //
@@ -688,7 +809,9 @@ impl MuUpdate for AdaptiveMuUpdate {
             // `-1` disables the cap and reproduces upstream.
             let returns_left =
                 self.max_free_returns < 0 || self.free_returns_taken < self.max_free_returns;
-            if sufficient_progress && returns_left {
+            // pounce#753 — and once the time budget is nearly gone, do
+            // not return to free mode at all, whatever the cap says.
+            if sufficient_progress && returns_left && !budget_spent {
                 // Switch back to free mode and record the iterate —
                 // upstream `cpp:303-311`. Upstream does NOT return
                 // here: after flipping `FreeMuMode` to true the first
@@ -747,7 +870,13 @@ impl MuUpdate for AdaptiveMuUpdate {
             }
         } else {
             // Free-mu branch — `cpp:343-389`.
-            let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
+            // pounce#753 — `!budget_spent` forces the free->fixed
+            // switch below through the *existing* transition path
+            // (accepted-iterate restore, `new_fixed_mu`, line-search
+            // reset) rather than inventing a second one. Combined with
+            // the gate above, the switch is then permanent.
+            let sufficient_progress =
+                !force_no_progress && !budget_spent && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 self.remember_current_point_as_accepted(data, cq);
                 // Fall through to the oracle call below.
@@ -993,6 +1122,123 @@ mod tests {
     #[test]
     fn a_cap_of_one_spends_its_budget_and_then_pins() {
         assert!(returns_to_free_mode(1), "the first return is within budget");
+    }
+
+    /// pounce#753: same state machine as [`returns_to_free_mode`], but
+    /// the thing under test is the time budget rather than the return
+    /// cap. `budget` is `(max_wall, max_cpu)` for the shared
+    /// [`pounce_common::timing::Deadline`] the application installs.
+    fn returns_to_free_mode_under_budget(
+        budget: (Number, Number),
+        budget_pin_fraction: Number,
+    ) -> bool {
+        let mut a = AdaptiveMuUpdate::new();
+        a.budget_pin_fraction = budget_pin_fraction;
+        let (data, cq) = test_fixture::fixture(0.1);
+        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(budget.0, budget.1));
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(!a.free_mu_mode, "fixture must reach fixed mode first");
+        a.filter = Filter::new();
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        a.free_mu_mode
+    }
+
+    /// The default 1e6 s budget — what a caller who never asked for a
+    /// time limit gets — must leave the strategy behaving exactly as it
+    /// did before pounce#753.
+    #[test]
+    fn an_unset_time_budget_does_not_pin() {
+        assert!(
+            returns_to_free_mode_under_budget((1e6, 1e6), 0.75),
+            "the default budget is nowhere near spent, so nothing may change"
+        );
+    }
+
+    /// A budget already consumed many times over pins the strategy in
+    /// the monotone endgame instead of paying the oracle again.
+    #[test]
+    fn a_spent_time_budget_pins_the_monotone_endgame() {
+        assert!(
+            !returns_to_free_mode_under_budget((1e-9, 1e-9), 0.75),
+            "with the budget spent the strategy must stay in fixed mode"
+        );
+    }
+
+    /// `adaptive_mu_budget_pin_fraction = 1` is the documented off
+    /// switch and must restore the pre-pounce#753 trajectory even on a
+    /// budget that is comprehensively blown.
+    #[test]
+    fn a_pin_fraction_of_one_disables_the_mechanism() {
+        assert!(
+            returns_to_free_mode_under_budget((1e-9, 1e-9), 1.0),
+            "a fraction of 1 must disable the pin"
+        );
+    }
+
+    /// The other half of the mechanism: a solve *already* in free mode
+    /// with an empty filter would sail on making "sufficient progress"
+    /// forever. With the budget spent it must be pushed into fixed mode
+    /// through the ordinary free->fixed path.
+    #[test]
+    fn a_spent_time_budget_forces_free_mode_out_of_the_oracle() {
+        let mut a = AdaptiveMuUpdate::new();
+        let (data, cq) = test_fixture::fixture(0.1);
+        // Empty filter + free mode = sufficient progress on every call,
+        // which is precisely the nql180 tail this issue is about.
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        a.filter = Filter::new();
+        a.free_mu_mode = true;
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(a.free_mu_mode, "control: the oracle keeps free mode");
+
+        a.filter = Filter::new();
+        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(1e-9, 1e-9));
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(
+            !a.free_mu_mode,
+            "a spent budget must force the free->fixed switch"
+        );
+        assert!(
+            data.borrow().request_ls_reset,
+            "the switch must go through the ordinary free->fixed path, \
+             which resets the line search"
+        );
+    }
+
+    /// Once pinned, the strategy stays pinned: the latch means the
+    /// decision does not depend on when in an iteration the clock is
+    /// read, and a solve cannot flap back after paying for the switch.
+    #[test]
+    fn the_pin_latches() {
+        let mut a = AdaptiveMuUpdate::new();
+        let (data, _cq) = test_fixture::fixture(0.1);
+        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(1e-9, 1e-9));
+        assert!(a.budget_spent(&data));
+        // Swap in a budget that is not spent at all; the latch holds.
+        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(1e6, 1e6));
+        assert!(a.budget_spent(&data), "the pin must not un-fire");
+    }
+
+    /// A nonsensical or absent budget is "no limit expressed", not "the
+    /// limit is already blown" — otherwise a zero/NaN `max_cpu_time`
+    /// would silently disable the mu oracle for every solve.
+    #[test]
+    fn a_degenerate_budget_is_not_a_spent_budget() {
+        for (wall, cpu) in [
+            (0.0, 0.0),
+            (-1.0, -1.0),
+            (Number::NAN, Number::NAN),
+            (Number::INFINITY, Number::INFINITY),
+        ] {
+            let mut a = AdaptiveMuUpdate::new();
+            let (data, _cq) = test_fixture::fixture(0.1);
+            data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(wall, cpu));
+            assert!(
+                !a.budget_spent(&data),
+                "({wall}, {cpu}) expresses no budget and must not pin"
+            );
+        }
     }
 
     /// pounce#510: upstream resets the line search on **every** free-mode
