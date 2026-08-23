@@ -9,6 +9,61 @@ changes.
 
 ## [Unreleased]
 
+- **An auto-selected L-BFGS Hessian no longer picks the barrier schedule
+  too** (#746 follow-up).
+
+  #746 taught POUNCE what `IpAlgBuilder.cpp:1059` does — substitute
+  `adaptive` for an unset `mu_strategy` whenever the Hessian is
+  limited-memory. Upstream that inference is safe: the only way an Ipopt
+  caller gets limited-memory is by typing it, so pairing a barrier
+  schedule with the request is a second statement the caller is presumed
+  to accept.
+
+  The Python frontend breaks the presumption. `Problem.solve` sets
+  `hessian_approximation = limited-memory` on its own whenever the
+  problem object exposes no `hessian`, which is the ordinary case — a
+  caller who has never heard of L-BFGS gets it. Letting #746's rule fire
+  there reads a barrier-schedule preference out of a choice POUNCE made
+  for them, an inference stacked on an inference.
+
+  It was not free. Six full-suite Python tests failed on it, and two were
+  sign contracts rather than tuned thresholds:
+
+  - `test_a_transferred_start_beats_a_cold_solve_over_the_horizon`
+    asserts only `warm < cold`. Under adaptive it read 86/65, 88/67,
+    76/70, 79/68 — a transferred warm start was *worse* than a cold
+    solve at every horizon of #622's table (recorded: 45/67, 50/75,
+    54/77, 46/76). Free-mode adaptive recomputes mu from the current
+    point's complementarity, discarding the barrier state the transfer
+    exists to carry.
+  - `test_halving_costs_materially_less_across_the_suite`: the halving
+    ladder came to cost more than the fixed budget it was built to beat.
+
+  Plus `test_trf`'s displaced `start2` (Maximum iterations reached) and
+  `test_starts_racing`'s rung-0 cut.
+
+  So `crates/pounce-py` pins the registered `monotone` default
+  explicitly on the paths where it selects L-BFGS itself (`problem.rs`
+  and `nlp_batch.rs`). It is a default, not an override: it is applied
+  *before* the caller's own option list, so an explicit `mu_strategy`
+  still wins and upstream's pairing remains one word away.
+
+  Attribution was measured, not inferred. On this branch the three files
+  fail 8 tests; with #746's substitution block disabled and nothing else
+  changed they fail 2; `main` fails the same 2 with byte-identical
+  counts (4324/3077/3054), so those two are a pre-existing macOS/jax
+  artifact that passes on Linux CI, and #746 accounts for exactly the
+  other 6. With the pin: 1231 passed, 0 failed.
+
+  No fixture-sweep rerun: the change is confined to `pounce-py`, and the
+  sweep drives the CLI, where nothing auto-selects L-BFGS — the sweep's
+  `lbfgs` leg passes `hessian_approximation=limited-memory` explicitly,
+  which is the typed-it case #746 still governs unchanged.
+
+  Whether adaptive's discarding of a transferred warm start is itself
+  repairable is a real question and a better fix than avoiding the
+  schedule; it is not attempted here. See #749.
+
 - **The GAMS solver-link smoke check reports a solver time, actually re-runs,
   and refuses to pass on traces it did not produce** (#747).
 

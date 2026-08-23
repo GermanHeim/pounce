@@ -444,6 +444,12 @@ pub fn solve_problem_batch<'py>(
         if !pb.uses_exact_hessian() {
             o.str_opts
                 .push(("hessian_approximation".into(), "limited-memory".into()));
+            // Pin the barrier schedule for the same reason `solve` does
+            // (see `problem.rs`): gh#746's limited-memory -> adaptive
+            // substitution reads a preference out of a Hessian choice
+            // POUNCE made itself. The instance's own options are
+            // extended after this, so an explicit `mu_strategy` wins.
+            o.str_opts.push(("mu_strategy".into(), "monotone".into()));
         }
         let (s, num, int) = pb.option_sets();
         o.str_opts.extend(s.iter().cloned());
