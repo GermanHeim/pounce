@@ -103,6 +103,43 @@ through a release.
 
 Full post-mortem: `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`.
 
+## Sensitivity changes need the invariance legs
+
+`crates/pounce-sensitivity/tests/sens_invariance_legs.rs` runs one kink
+fixture down **three** dimensions. Each leg exists because a defect shipped
+through a corpus that was uniform in exactly that dimension, and each is
+mutation-checked: reintroduce the historical defect and the matching leg —
+and only that leg — goes red.
+
+1. **Scaling.** Both arms solve under `user-scaling`; only the per-variable
+   factors differ. Under `x̃ = d ⊙ x` the barrier diagonal carries `d⁻²`, so
+   anything compared against a bare `Sigma` moves. `Sigma` is also
+   proportional to the `mu` each run stopped at, so **the invariant is
+   `Sigma/mu`, never `Sigma`** — `variable_scaling_sensitivity.rs` says the
+   same thing about the classifier. This is what shipped `205bb67`: the
+   corrector added the scaled iterate to bounds in the model's units, which
+   "coincide only at unit scaling, which is every fixture it had."
+2. **Perturbation magnitude.** `delta` over eight orders, both sides of the
+   kink. gh#672 finding 4 put an absolute tolerance on a quantity that
+   scales with the perturbation, so a `1e-10` step cleared feasibility
+   everywhere and the holding side's derivative read `-1` instead of `0`.
+3. **Fixed variable ahead of the kink.** full-x and var-x diverge from the
+   first `make_parameter`-removed variable on, and reading one as the other
+   returns a *neighbouring* variable's answer — plausible and wrong. That is
+   gh#450, and gh#672 finding 1 shipped it again.
+
+The legs compare **slopes, not `dx/delta`**. The parametric step is affine
+in `delta`, not linear: it carries a base-point term of order `mu` that
+dividing by `delta` inflates until, at `1e-10`, it is the whole answer.
+`the_step_is_affine_in_delta` pins that term's size so a leg never fails for
+a reason its name does not describe.
+
+A change to membership, to the directional decision, or to any frame
+conversion in `pounce-sensitivity` runs these before merge. A new
+public accessor gets a row in each leg — the cost of leaving one out is
+that the next defect in that dimension is invisible, which is the whole
+history above.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
