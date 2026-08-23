@@ -91,7 +91,18 @@ fn solve(extra: &[&str]) -> SolveReport {
     cmd.arg(fixture("csfi2.nl"))
         .arg(&sol_path)
         .arg("--json-output")
-        .arg(&json_path);
+        .arg(&json_path)
+        // This file compares arms that differ only in the #534
+        // restoration-decline guard. Two of them name a
+        // `TERMINATION_POLICY_OPTIONS` member, which suppresses the
+        // default-on μ-strategy retry (gh #757), so leaving the retry
+        // to its default would let it fire on the bare arm alone and
+        // the comparison would no longer isolate the guard. On `csfi2`
+        // the retry is a real promotion -- Solved_To_Acceptable_Level
+        // in 35 iterations becomes Solve_Succeeded in 21, at the same
+        // objective to nine digits -- which is measured in
+        // `issue_757_acceptable_retry.rs`, not here.
+        .arg("mu_strategy_fallback=no");
     for o in extra {
         cmd.arg(o);
     }

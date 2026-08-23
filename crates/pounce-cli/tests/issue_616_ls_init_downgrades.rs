@@ -182,7 +182,18 @@ fn solve_with(model: &str, ls_init: bool, env: &[(&str, &str)], opts: &[&str]) -
         .arg(&json)
         .arg("--json-detail")
         .arg("summary")
-        .arg("print_level=0");
+        .arg("print_level=0")
+        // Every test in this file compares two routes that differ only in
+        // `least_square_init_primal`, so everything else has to be held
+        // fixed. The default-on `mu_strategy_fallback` is not: gh#757 lets
+        // it retry a `Solved_To_Acceptable_Level` exit under stock options,
+        // and on `csfi2` that retry succeeds. Left on, it would erase the
+        // downgrade this file exists to measure -- and erase it on only one
+        // of the two arms, since the arms do not both end acceptable. The
+        // pin keeps the pins below measuring the safeguard rather than the
+        // retry; the retry's own effect on `csfi2` is covered by
+        // `issue_757_acceptable_retry`.
+        .arg("mu_strategy_fallback=no");
     if ls_init {
         cmd.arg("least_square_init_primal=yes");
     }

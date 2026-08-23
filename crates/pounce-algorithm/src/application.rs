@@ -1080,6 +1080,63 @@ impl IpoptApplication {
         )
     }
 
+    /// Options whose presence means a `Solved_To_Acceptable_Level`
+    /// exit may be something the *caller* asked for rather than a stall
+    /// POUNCE fell into (gh #757).
+    ///
+    /// Every one of them either moves the bar a certificate has to clear
+    /// (`tol` and the component tolerances, the `acceptable_*` family),
+    /// arms a guard that refuses a certificate the iterate would
+    /// otherwise have earned (`kkt_fidelity_tol`, the certificate-mask
+    /// and noise-floor kappas, the divergence / infeasibility streaks,
+    /// the restoration-decline pair).
+    ///
+    /// Options that only move the *starting point* are deliberately not
+    /// here. `least_square_init_primal` was tried and removed: a caller
+    /// who picks an initialization heuristic has said nothing about what
+    /// convergence means, and listing it made an explicit `=no` behave
+    /// differently from omitting the option, which is a distinction the
+    /// rest of the solver does not draw.
+    const TERMINATION_POLICY_OPTIONS: &'static [&'static str] = &[
+        "tol",
+        "dual_inf_tol",
+        "constr_viol_tol",
+        "compl_inf_tol",
+        "acceptable_tol",
+        "acceptable_iter",
+        "acceptable_dual_inf_tol",
+        "acceptable_constr_viol_tol",
+        "acceptable_compl_inf_tol",
+        "acceptable_obj_change_tol",
+        "kkt_fidelity_tol",
+        "obj_scale_certificate_threshold",
+        "dual_inf_scale_kappa",
+        "primal_noise_floor_kappa",
+        "dual_diverging_streak",
+        "infeas_max_streak",
+        "resto_decline_deferrals",
+        "resto_decline_progress_ratio",
+    ];
+
+    /// Did the caller set any option from
+    /// [`Self::TERMINATION_POLICY_OPTIONS`]?
+    ///
+    /// This is what separates the two readings of a
+    /// `Solved_To_Acceptable_Level` exit. Under stock convergence
+    /// settings it means POUNCE's own schedule parked the dual term
+    /// above `tol` and a flipped schedule is worth one try. Under a
+    /// caller-modified one it may be the signal the caller armed the
+    /// option to receive, and erasing it with a retry is exactly the
+    /// laundering pounce#748 refused to do by default.
+    fn caller_set_termination_policy(&self) -> bool {
+        Self::TERMINATION_POLICY_OPTIONS.iter().any(|name| {
+            matches!(self.options.get_numeric_value(name, ""), Ok((_, true)))
+                || matches!(self.options.get_integer_value(name, ""), Ok((_, true)))
+                || matches!(self.options.get_bool_value(name, ""), Ok((_, true)))
+                || matches!(self.options.get_string_value(name, ""), Ok((_, true)))
+        })
+    }
+
     /// The μ strategy this option table actually resolves to, as
     /// `algorithm_builder_from_options` will build it: the explicit
     /// value when there is one, otherwise `adaptive` for a
@@ -2310,13 +2367,12 @@ impl IpoptApplication {
         // An explicit `mu_strategy_fallback=yes` keeps the historical
         // pair: the caller opted in and can afford the second solve.
         //
-        // The *default*-on retry is narrower — `Maximum_Iterations_
-        // Exceeded` only. `Solved_To_Acceptable_Level` is not a
-        // failure; it is a converged answer at the acceptable
-        // tolerance, and retrying it by default is wrong in three
-        // separate ways. It doubles the cost of a solve that already
-        // succeeded, which the "one extra solve on a run that had
-        // already failed" argument does not cover. It launders
+        // The *default*-on retry takes `Maximum_Iterations_Exceeded`
+        // unconditionally, and `Solved_To_Acceptable_Level` only when
+        // the caller left the convergence configuration alone
+        // (gh #757). pounce#748 refused the latter status outright, for
+        // three reasons; two of them are properties of a *caller-
+        // modified* configuration, not of the status. It launders
         // downgrades the caller induced deliberately -- a tight
         // `kkt_fidelity_tol`, a certificate veto, `least_square_init_
         // primal` -- so the signal the option exists to produce never
@@ -2325,14 +2381,26 @@ impl IpoptApplication {
         // local solution: on `autocorr_bern55-06` with the
         // dual-divergence guard on it swaps -2304.0000278 for
         // -2320.0000298 (crates/pounce-cli/tests/
-        // issue_250_dual_guard_never_worse.rs).
+        // issue_250_dual_guard_never_worse.rs). Both cases -- and all
+        // five test targets the wide trigger broke -- arm a
+        // non-default option from `TERMINATION_POLICY_OPTIONS`, so
+        // deferring to that set preserves every one of them while
+        // leaving a stock-options stall retryable. The third reason,
+        // cost, stands and is the price: one extra solve on a run that
+        // reached only the acceptable tolerance, paid to try for the
+        // certificate. `cho_parmest` is the motivating case -- monotone
+        // parks `inf_du` on a ~1e-6 evaluation-noise floor and misses
+        // `tol` by 5%, taking six null steps of 1e-12 at `mu_min`,
+        // while adaptive certifies it in 20 iterations.
         //
         // `dirichlet120`, the case that motivated turning the retry on,
         // stalls at `Maximum_Iterations_Exceeded`, so it is recovered
         // either way.
         let retry_worthy = match first_status {
             ApplicationReturnStatus::MaximumIterationsExceeded => true,
-            ApplicationReturnStatus::SolvedToAcceptableLevel => self.mu_strategy_fallback_was_set(),
+            ApplicationReturnStatus::SolvedToAcceptableLevel => {
+                self.mu_strategy_fallback_was_set() || !self.caller_set_termination_policy()
+            }
             _ => false,
         };
         if !retry_worthy {
