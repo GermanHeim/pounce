@@ -88,6 +88,33 @@ initial Hessian scalar used `scalar2` where Ipopt uses `scalar1`, because
 a rare opt-in — the Python frontend and the CasADi plugin both select it
 automatically when no exact Lagrangian Hessian is available.
 
+**The convex arm is covered — do not skip the sweep for a convex-path
+change.** Both legs run at the default `solver_selection=auto`, which routes
+to the most specialized engine available, so 40 of the 71 fixtures never touch
+the NLP arm at all: 35 reach the convex QP interior-point and 5 the convex
+QCQP conic one. gh#760 is the case for saying so explicitly — `4c02817d`
+skipped the sweep on the reasoning that "this is a trajectory change on the
+convex path, not the NLP path, so `scripts/sweep-fixtures.sh` does not cover
+it", and substituted an objective-parity check over the convex corpus.
+Objective parity is blind to trajectory by construction. Run across that
+commit the sweep moves 52 fixture-legs and flips `scaled_feasible_a` on the
+lbfgs leg from `MaximumIterationsExceeded`/199 to `SolveSucceeded`/69.
+
+Each line also records **which engine solved the model** (`cvx-qp`,
+`cvx-qcqp`, `nlp`). Status, objective and iteration count can all be unchanged
+while a model silently changes arms, and the JSON report does not name the
+engine, so a routing regression used to leave no trace in the diff. A line
+whose only moving field is the engine is a routing change, and is as
+reportable as a moved iteration count.
+
+What the corpus still cannot give you is **magnitude on large degenerate
+models**. Every convex fixture is 1–32 variables while the substantial models
+(`deb7`, `eigena2`/`eigenb2`, `pooling_rt2stp`) are all NLP class — see
+`dev-notes/convex-fixture-corpus.md`. Nothing in the corpus predicted the 4.4×
+iteration cost `4c02817d` carried on the Maros-Meszaros QSCFXM family
+(38 → 168). A moved convex line is a signal to go measure `benchmarks/qp`, not
+a bound on what you will find there.
+
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
 regression produces the *right* answer, slowly — or a differently-wrong
