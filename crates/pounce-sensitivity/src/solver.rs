@@ -956,11 +956,17 @@ impl Solver {
     ///
     /// whose KKT conditions are eq. 14's complementarity: a released
     /// row moves to its feasible side (the QP gradient `Sλ + m ≥ 0`)
-    /// and a held row's pin force is nonnegative. Rows outside the
-    /// engaged set are verified against the decided direction and the
-    /// set expands until no new row violates, so rows the equalities
-    /// already pin (movement exactly zero under every candidate)
-    /// never enter and never make anything singular.
+    /// and a held row's pin force is nonnegative. A row engages only
+    /// when the direction carries its coordinate past the remaining
+    /// slack toward the bound. The QP treats an engaged row as at its
+    /// bound, so a step that ends short of the bound decides nothing
+    /// and the row's plain movement stands. Rows outside the engaged
+    /// set are verified against the decided direction and the set
+    /// expands until no new row violates. A row whose own diagonal of
+    /// `S` is not positive cannot be decided by a pin force, which
+    /// happens when an equality owns its coordinate, so such rows are
+    /// dropped and their coordinates follow the equalities that own
+    /// them.
     ///
     /// `max_iter` is the total back-solve budget: the all-released
     /// solve, every basis column, and the combined solve that recovers
@@ -1073,6 +1079,26 @@ impl Solver {
         // feasible side for that row's bound
         let sign = |k: usize| if weak[k].lower { 1.0 } else { -1.0 };
         let movement = |k: usize, d: &[Number]| -> Number { sign(k) * d[weak[k].var_row] };
+        // Remaining slack of weak row k, the distance the direction
+        // must cover before the bound is reached. Engagement compares
+        // movement against it. The QP treats an engaged row as at its
+        // bound and the error of that model is the slack, so a step
+        // that ends short of the bound leaves the row out and its
+        // plain movement stands. At a kink the slack is order
+        // `sqrt(mu)` and the test reduces to the movement test, while
+        // an ambiguous row far from its bound is left alone by any
+        // step that cannot reach it.
+        let slack: Vec<Number> = weak
+            .iter()
+            .map(|w| {
+                let sl = if w.lower {
+                    ctx.x_curr[w.var_row] - ctx.lo[w.var_row]
+                } else {
+                    ctx.hi[w.var_row] - ctx.x_curr[w.var_row]
+                };
+                sl.max(0.0)
+            })
+            .collect();
         let scale_of = |d: &[Number]| -> Number {
             d[..n_x]
                 .iter()
@@ -1081,7 +1107,9 @@ impl Solver {
         };
 
         let tol0 = band * scale_of(&d0);
-        let mut engaged: Vec<usize> = (0..nw).filter(|&k| movement(k, &d0) < -tol0).collect();
+        let mut engaged: Vec<usize> = (0..nw)
+            .filter(|&k| movement(k, &d0) < -(slack[k] + tol0))
+            .collect();
         if engaged.is_empty() {
             return Ok((d0[..n_x].to_vec(), Vec::new(), work));
         }
@@ -1097,15 +1125,17 @@ impl Solver {
         let mut proj: Vec<Option<Vec<Number>>> = vec![None; nw];
         let mut d = d0.clone();
         let held: Vec<usize>;
-        // A weak row whose own diagonal entry of `S` is zero cannot be
-        // decided by a pin force: an equality owns its coordinate, and
-        // under a parametric step the one equality that moves a
-        // coordinate is the pin of a perturbed parameter. Its movement
-        // is the perturbation itself, so the engagement test cannot
-        // exclude it, and admitting it puts a zero on the diagonal of
-        // `S` beside a nonzero gradient, which is an unbounded QP.
-        // The bound's status there is the parameter's business, inside
-        // the bound or infeasible, so the row stays out for good.
+        // A weak row whose own diagonal entry of `S` is not positive
+        // cannot be decided by a pin force. The zero case is a
+        // coordinate an equality owns: under a parametric step the
+        // one equality that moves a coordinate is the pin of a
+        // perturbed parameter, and a pin shift larger than the
+        // coordinate's remaining slack passes the engagement test,
+        // which puts a zero on the diagonal of `S` beside a nonzero
+        // gradient, an unbounded QP. The bound's status there is the
+        // parameter's business, inside the bound or infeasible, so
+        // the row stays out for good. A negative diagonal is dropped
+        // the same way: the QP cannot bound it either.
         let mut inert: Vec<usize> = Vec::new();
         loop {
             for &k in &engaged {
@@ -1126,7 +1156,7 @@ impl Solver {
                 let col: Vec<Number> = weak.iter().map(|w| xk[w.var_row]).collect();
                 let own = sign(k) * col[k];
                 let col_scale = col.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
-                if own.abs() <= 1e-12 * col_scale.max(1e-300) {
+                if own <= 1e-12 * col_scale.max(1e-300) {
                     inert.push(k);
                 }
                 proj[k] = Some(col);
@@ -1261,7 +1291,7 @@ impl Solver {
                 if engaged.contains(&k) || inert.contains(&k) {
                     continue;
                 }
-                if movement(k, &d) < -tol {
+                if movement(k, &d) < -(slack[k] + tol) {
                     engaged.push(k);
                     grew = true;
                 }
@@ -1288,59 +1318,51 @@ impl Solver {
         Ok((d[..n_x].to_vec(), held, work))
     }
 
-    /// The bounds whose status at the base point is genuinely
-    /// undecided: the barrier holds them with a weight of order one.
-    /// Each entry is a bound row present in the held factorization,
-    /// with the side taken from the smaller slack.
+    /// The bounds the activity classifier could not call at the base
+    /// point: on the bound with a multiplier of the same order as the
+    /// slack. Each entry is a bound row present in the held
+    /// factorization, with the side taken from the smaller slack,
+    /// which is the only side an ambiguous label can come from.
     ///
-    /// Membership is read off the operator's own barrier diagonal:
-    /// a bound is weak when `sigma_i`, the entry `K` actually carries
-    /// for that variable, lies within [1e-2, 1e2]. At a kink the slack
-    /// and the multiplier vanish together, `s ~ z ~ sqrt(mu)`, and
-    /// their ratio is order one; an inactive bound's entry is `O(mu)`
-    /// and a strongly active one's is `O(1/mu)`, both orders of
-    /// magnitude outside the band. No curvature appears: whether a
-    /// bound sits at a kink is a fact about the bound's own geometry.
-    ///
-    /// The activity classifier is deliberately not consulted. Its
-    /// classes are bands on `sigma / |H_ii|`, the right object for the
-    /// covariance question of whether the barrier pins the variance
-    /// against the objective, and the wrong one here. Low curvature
-    /// widens its bands and admits interior coordinates.
+    /// The classifier reports per user variable, in full-x, while the
+    /// bound context and the factor's rows are var-x, and the two
+    /// index spaces diverge from the first fixed variable on. Each
+    /// var-x row's status is read through the same map the classifier
+    /// scattered through, so a fixed variable shifts nothing. Using
+    /// the full-x index as a factor row instead returns a NEIGHBORING
+    /// variable's answer, plausible and wrong, which is the gh#450
+    /// hazard the `primal_row` discipline exists to prevent.
     pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
-        /// `sigma` within this factor of one, either side, is weak.
-        const WEAK_SIGMA_BAND: Number = 1e2;
+        use crate::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
 
+        // A relaxed solve shifts the slacks the classifier reads, so
+        // degeneracy is undetectable there: the callers take the plain
+        // step, the same choice `estimate_report` makes when it fills
+        // `bounds_relaxed` instead of raising.
+        let report = match self.classify_activity() {
+            Ok(r) => r,
+            Err(SolverError::BadOptions(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
         let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        // A relaxed solve shifts every slack the diagonal is built
-        // from, so degeneracy is undetectable there: the callers take
-        // the plain step, the same choice `estimate_report` makes when
-        // it fills `bounds_relaxed` instead of raising.
-        if state.bound_relax_factor != 0.0 {
-            return Ok(Vec::new());
-        }
         let Some(rows) = state.backsolver.bound_rows() else {
             return Ok(Vec::new());
         };
-        let Some(sigma) = state.backsolver.barrier_sigma_x_dense() else {
-            return Ok(Vec::new());
+        let full_of: Vec<usize> = {
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            (0..ctx.n_x)
+                .map(|r| nl.var_x_to_full_x(r as Index) as usize)
+                .collect()
         };
-        // The diagonal is the operator's own var-x vector, so the
-        // lengths agree by construction. A mismatch is a bug, and
-        // skipping rows over it would silently shrink the weak set.
-        if sigma.len() != ctx.n_x {
-            return Err(SolverError::BadShape {
-                what: "barrier sigma diagonal",
-                got: sigma.len(),
-                expected: ctx.n_x,
-            });
-        }
         let mut out = Vec::new();
         for var_row in 0..ctx.n_x {
-            let sg = sigma[var_row];
-            if !(1.0 / WEAK_SIGMA_BAND..=WEAK_SIGMA_BAND).contains(&sg) {
+            let Some(&st) = report.var_status.get(full_of[var_row]) else {
+                continue;
+            };
+            if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
                 continue;
             }
             let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];

@@ -493,15 +493,6 @@ impl PdSensBacksolver {
         }
     }
 
-    /// [`Self::barrier_sigma_x`] as a dense var-x vector, `None` when
-    /// the diagonal is not a `DenseVector`.
-    pub(crate) fn barrier_sigma_x_dense(&self) -> Option<Vec<Number>> {
-        self.barrier_sigma_x()
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-    }
-
     /// [`Self::barrier_sigma_x`] for the `s` block.
     pub(crate) fn barrier_sigma_s(&self) -> Rc<dyn pounce_linalg::Vector> {
         match self.sigma.s.as_ref() {
