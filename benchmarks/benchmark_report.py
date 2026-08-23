@@ -373,7 +373,24 @@ def _followup_for(prov, name):
     return (prov.get('ipopt_followups') or {}).get(name)
 
 
-def time_limit_note(prov, comps):
+def _pounce_limits(env_stamps):
+    """Per suite, the time limit the POUNCE arm was actually given.
+
+    `run_nl_bench.sh` stamps the `timeout` it wrapped the solver in into
+    <suite>/pounce.env.json, so this is a record rather than an inference.
+    Keyed by suite display name, matching `read_env_stamp`'s caller.
+    """
+    limits = {}
+    for name, stamp in (env_stamps or {}).items():
+        if not stamp:
+            continue
+        lim = stamp.get('timelimit')
+        if isinstance(lim, (int, float)):
+            limits[name] = lim
+    return limits
+
+
+def time_limit_note(prov, comps, env_stamps=None):
     """Build the Time limits note, disclosing any per-suite Ipopt override.
 
     The base provenance stamp carries one `timelimit`, but
@@ -383,21 +400,40 @@ def time_limit_note(prov, comps):
     did not actually run under, and hides that a suite may compare a
     300s POUNCE arm against a 1800s reference. So: print the base, print
     every override, and name any instance the asymmetry decides.
+
+    The POUNCE limit is *recorded*, not guessed: `run_nl_bench.sh` writes it
+    into <suite>/pounce.env.json. This used to be inferred from the longest
+    run that was killed, which had two failure modes — it read a genuine
+    solver-side timeout as evidence of the harness limit, and it went blind
+    exactly when the suite stopped timing out, since a run with no kills
+    leaves nothing to infer from. Prefer the stamp; fall back to the
+    inference only for results predating it (gh#581).
     """
     base = prov.get('ipopt_timelimit')
     overrides = prov.get('ipopt_suite_overrides') or {}
     if base is None and not overrides:
         return []
 
-    lines = [f"> **Time limits.** The saved Ipopt reference ran at "
-             f"`max_cpu_time` = {base}s unless overridden below. The POUNCE arm "
-             "carries no time-limit flag — it is wrapped in "
-             "`timeout $BENCH_TIMELIMIT` (default 300s) and a kill is recorded "
-             "as `Maximum_CpuTime_Exceeded` — so its limit is not stamped in the "
-             "results and is inferred here from the longest run that was killed."]
-
     cutoffs = _timeout_cutoffs(comps)
-    by_lower = {s.lower(): s for s in cutoffs}
+    limits = _pounce_limits(env_stamps)
+
+    if limits:
+        how = ("The POUNCE arm carries no time-limit flag — it is wrapped in "
+               "`timeout $BENCH_TIMELIMIT` and a kill is recorded as "
+               "`Maximum_CpuTime_Exceeded` — but the limit in force is stamped "
+               "per suite into `<suite>/pounce.env.json` and is read from there "
+               "below.")
+    else:
+        how = ("The POUNCE arm carries no time-limit flag — it is wrapped in "
+               "`timeout $BENCH_TIMELIMIT` (default 300s) and a kill is recorded "
+               "as `Maximum_CpuTime_Exceeded` — and these results carry no "
+               "`pounce.env.json` stamp, so its limit is inferred here from the "
+               "longest run that was killed.")
+
+    lines = [f"> **Time limits.** The saved Ipopt reference ran at "
+             f"`max_cpu_time` = {base}s unless overridden below. {how}"]
+
+    by_lower = {s.lower(): s for s in set(cutoffs) | set(limits)}
 
     affected = []
     for suite, ov in sorted(overrides.items()):
@@ -413,10 +449,27 @@ def time_limit_note(prov, comps):
 
         display = by_lower.get(suite.lower())
         if display and isinstance(lim, (int, float)):
-            cut = cutoffs[display]
-            lines.append(f"> POUNCE runs in this suite were cut off at "
-                         f"~{cut:.0f}s, so the two columns are **not** held to "
-                         f"the same clock here.")
+            # Recorded beats inferred. `cut` is what POUNCE was allowed; it
+            # only doubles as "where runs were killed" in the fallback.
+            stamped = display in limits
+            cut = limits[display] if stamped else cutoffs.get(display)
+            if cut is None:
+                continue
+            if stamped and cut == lim:
+                lines.append(f"> POUNCE ran this suite at the same {cut:.0f}s "
+                             "(recorded in `pounce.env.json`), so both columns "
+                             "are held to the same clock here.")
+                # Same clock — nothing for the asymmetry to decide.
+                continue
+            if stamped:
+                lines.append(f"> POUNCE ran this suite at {cut:.0f}s (recorded "
+                             f"in `pounce.env.json`) against the reference's "
+                             f"{lim}s, so the two columns are **not** held to "
+                             "the same clock here.")
+            else:
+                lines.append(f"> POUNCE runs in this suite were cut off at "
+                             f"~{cut:.0f}s, so the two columns are **not** held "
+                             "to the same clock here.")
             # An instance is decided by the asymmetry only if POUNCE was
             # killed AND Ipopt needed longer than POUNCE was ever allowed.
             for c in comps:
@@ -926,7 +979,7 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
     for name, comps in suites:
         all_comps.extend(comps)
 
-    tl_note = time_limit_note(prov, all_comps)
+    tl_note = time_limit_note(prov, all_comps, env_stamps)
     if tl_note:
         lines.append("")
         lines.extend(tl_note)
