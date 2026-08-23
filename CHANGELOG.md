@@ -9,6 +9,81 @@ changes.
 
 ## [Unreleased]
 
+- **New `adaptive_mu_budget_pin_fraction` lets the adaptive strategy commit to
+  its endgame before the clock runs out** (#753). Default `0.75`, but inert
+  unless the caller set `max_cpu_time` or `max_wall_time`.
+
+  `mu_strategy_fallback` (#748) recovers a stalled adaptive solve by re-running
+  it monotone, and it deliberately declines a `Maximum_CpuTime_Exceeded` exit,
+  because the budget a retry needs is precisely the budget already spent. That
+  leaves exactly one configuration with no recovery at all: adaptive plus an
+  explicit time budget. It is not an exotic one — it is how the mittelmann
+  harness runs (`TIMELIMIT ?= 7200`), and it is how `nql180` fails.
+
+  This is that recovery done **in flight** rather than as a retry. Once the
+  named fraction of the budget is spent without converging, the strategy stops
+  returning to free-μ mode and finishes monotone *from the current iterate*.
+  The objection that blocks the retry does not apply: a retry restarts from
+  x0 and has nothing left to pay with, while an in-flight switch keeps the
+  iterate, so the time already spent is not wasted — it bought the point the
+  endgame starts from.
+
+  Both mode transitions are gated on one reading per update, and the
+  free→fixed switch is forced by ANDing into the existing `sufficient_progress`
+  test rather than adding a second transition path, so the accepted-iterate
+  restore, `new_fixed_mu` and the line-search reset all happen exactly as they
+  already did. The decision latches, so it cannot depend on where in an
+  iteration the clock is read. The restoration phase's own `AdaptiveMuUpdate`
+  shares the `Deadline` and pins independently, which is what you want — the
+  inner IPM should not be running the oracle either once the clock is gone.
+
+  **It cannot reach a caller who set no budget.** Both the builder default
+  (1e6 s) and the registered sentinel (1e20 s) leave the consumed fraction
+  indistinguishable from zero. The 142-line fixture sweep, which sets no
+  budget, moves **zero lines** — by construction, not by luck.
+
+  Verified end to end from the CLI on `lbfgs pooling_rt2stp` (0.23 CPU s
+  unbudgeted, 362 iterations): at `max_cpu_time` of 0.15 / 0.10 / 0.08 the pin
+  fires once at 75-76% of budget; with no budget, and with
+  `adaptive_mu_budget_pin_fraction=1`, it does not fire and the trajectory is
+  the unchanged 362 iterations.
+
+  **Why not simply default `adaptive_mu_max_free_returns=0`,** which also
+  solves `nql180` (95 iterations / 113 s)? Because the sweep says no: at `0`,
+  `lbfgs cresc4` goes `Solve_Succeeded`/105 → `Restoration_Failed`/361 and
+  `deb7` 709 → 1833. A cap is a trajectory perturbation that reaches every
+  solve; a budget-triggered pin reaches only solves that asked for a budget
+  and are about to fail anyway. It stays opt-in, and #749's reasoning stands.
+
+  **Correcting the record on #753's own framing.** That issue attributes the
+  gap to per-iteration throughput — "3.4× Ipopt per iteration on adaptive,
+  1.85× on monotone" — and proposed profiling the μ oracle. Profiling was done
+  and does not support the plan:
+
+  - The oracle's extra affine and centering solves **reuse the existing
+    factorization**. Instrumented with `POUNCE_DBG_PD_TAGS=1`, the KKT
+    dependency-cache miss count equals the iteration count in both arms, so
+    the two extra back-solves cost ~0.06 s/iter, not the gap.
+  - ~80% of runtime is `LinearSystemFactorization` in *every* arm. The adaptive
+    arm's higher cost per iteration is the trajectory demanding harder
+    factorizations, not oracle overhead — the second horn #753 named and could
+    not separate.
+  - The gh#540 inertia-trust floor was suspected of wasting factorizations. It
+    is not: `feral_inertia_pivot_floor=0` costs **4.5×** (184.7 s vs 41.3 s).
+    It only chooses which perturbation to bump on an inertia mismatch that has
+    already happened, so it never adds a factorization.
+  - "1.85× per iteration on monotone" does not mean POUNCE is slower on this
+    model. Against the only valid control (`ipopt-mumps`; `ipopt-feral` and
+    `ipopt-ma57` run at 78 s and ~180 s per iteration here and are unusable as
+    baselines), POUNCE's monotone arm **wins end to end** — 254.7 s to
+    `Optimal` against 314.5 s to `Solved To Acceptable Level` — because it
+    takes 2.7× fewer iterations at 1.85× the cost each.
+
+  Under plain default options `nql180` was in fact already recovered, by #748:
+  the adaptive leg exits `Maximum_Iterations_Exceeded` and the monotone retry
+  solves in 105 iterations. The genuine hole was only ever the budgeted case,
+  and that is what this closes.
+
 - **An auto-selected L-BFGS Hessian no longer picks the barrier schedule
   too** (#746 follow-up).
 
