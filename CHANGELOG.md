@@ -9,30 +9,30 @@ changes.
 
 ## [Unreleased]
 
-- **The directional degeneracy decision reads its weak set off the
-  barrier diagonal.** The set of bounds handed to the directional QP
-  (gh#708) came from the activity classifier's weakly active and
-  ambiguous classes. Those classes are bands on the ratio of barrier
-  weight to curvature, which answers the covariance question of
-  whether the barrier pins the variance against the objective. For
-  degeneracy that ratio is the wrong object. Low curvature widens the
-  bands until they admit coordinates far from any bound, and the QP
-  then held interior coordinates and returned a direction wrong at
-  first order. A bound now counts as weak when the barrier diagonal
-  entry the KKT matrix carries for it lies within a factor of `1e2`
-  of one. At a kink the slack and the multiplier vanish together, so
-  the entry is order one, while an inactive bound's is `O(mu)` and a
-  strongly active one's is `O(1/mu)`, both orders of magnitude
-  outside the band.
+- **The directional degeneracy QP engages a bound only when the step
+  reaches it.** The engagement test (gh#708) read movement toward the
+  bound alone, however far away the bound sat, and the QP treats an
+  engaged row as sitting at its bound. The weak set can hold
+  coordinates far from their bounds, since low curvature widens the
+  activity classifier's ambiguous class, and the QP then pinned
+  interior coordinates that a step a fraction of their slack could
+  never activate, returning a direction wrong at first order. A row
+  now engages when the step carries its coordinate past the remaining
+  slack toward the bound, plus the existing noise band. Both lengths
+  are measured at decision time, so no threshold is chosen: a kink's
+  slack is order `sqrt(mu)` and engages exactly as before at any
+  curvature, and a coordinate the step cannot reach keeps its plain
+  movement.
 
   **A row an equality pins is dropped from the QP, not decided.**
   Under a parametric step the pin of a perturbed parameter moves its
-  own coordinate, so the row enters the QP on movement grounds, and
-  its diagonal entry of the reduced matrix is zero, which makes the
-  QP unbounded. The row is now dropped and the remaining rows are
-  decided. The coordinate follows its pin wherever the parameter
-  sends it, inside the bound or infeasible, which is the parameter's
-  business rather than the QP's.
+  own coordinate, so a shift larger than the coordinate's slack
+  engages the row, and its column of the QP's reduced matrix is
+  zero, which makes the QP unbounded. The row is now dropped, along
+  with any row whose diagonal is not positive, and the remaining
+  rows are decided. The coordinate follows its pin wherever the
+  parameter sends it, inside the bound or infeasible, which is the
+  parameter's business rather than the QP's.
 
 - **New `adaptive_mu_budget_pin_fraction` lets the adaptive strategy commit to
   its endgame before the clock runs out** (#753). Default `0.75`, but inert
