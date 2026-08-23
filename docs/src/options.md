@@ -878,6 +878,8 @@ adaptive oracle stops making progress. Defaults mirror upstream
 | `adaptive_mu_kkterror_red_iters`        | `4`     | Window length for the `kkt-error` globalization history.                                      |
 | `adaptive_mu_kkterror_red_fact`         | `0.9999`| Required relative KKT-error reduction over that window.                                       |
 | `adaptive_mu_kkt_norm_type`             | `2-norm-squared` | Norm used to score the iterate in adaptive globalization decisions.                  |
+| `adaptive_mu_max_free_returns`          | `-1`    | Cap on returns to free-μ mode after entering monotone mode; `-1` is unlimited (upstream). POUNCE extension (#749). |
+| `adaptive_mu_budget_pin_fraction`       | `0.75`  | Fraction of an explicitly set `max_cpu_time`/`max_wall_time` after which the strategy finishes monotone; `1` disables. Inert without a time budget. POUNCE extension (#753). |
 
 ## Limited-memory Hessian (L-BFGS) initialization
 

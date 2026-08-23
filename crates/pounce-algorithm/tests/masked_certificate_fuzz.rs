@@ -2019,11 +2019,22 @@ impl TNLP for MonotoneToBound {
 
 #[test]
 fn a_masked_monotone_bound_optimum_is_reached_not_a_false_interior_success() {
-    let solve = |threshold: Number| {
+    let solve = |threshold: Number, mu_strategy: &str| {
         let mut app = IpoptApplication::new();
-        // The default quasi-Newton path the issue is about.
+        // The quasi-Newton path the issue is about.
         app.options_mut()
             .set_string_value("hessian_approximation", "limited-memory", true, false)
+            .unwrap();
+        // Pinned, not left to the default. gh #327 was reported on the
+        // monotone barrier schedule, which is what a limited-memory solve
+        // used to get by default here; gh #746 corrected that default to
+        // `adaptive`, matching `IpAlgBuilder.cpp:1059`, and under `adaptive`
+        // this problem no longer walks into the masked interior point at all.
+        // Leaving the schedule implicit would have silently turned the
+        // premise arm below into a no-op the day the default moved — which is
+        // exactly what it exists to prevent.
+        app.options_mut()
+            .set_string_value("mu_strategy", mu_strategy, true, false)
             .unwrap();
         app.options_mut()
             .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
@@ -2046,7 +2057,7 @@ fn a_masked_monotone_bound_optimum_is_reached_not_a_false_interior_success() {
     // x ≈ 2.84 (f ≈ 0.35). This guards the premise: if the baseline ever stopped
     // reproducing the masked false success, the assertion below would prove
     // nothing.
-    let (base_status, base_obj, _base_iters) = solve(0.0);
+    let (base_status, base_obj, _base_iters) = solve(0.0, "monotone");
     assert!(
         succeeded(base_status) && base_obj > 0.2,
         "premise broken: the veto-off baseline is supposed to reproduce the gh #327 \
@@ -2056,7 +2067,7 @@ fn a_masked_monotone_bound_optimum_is_reached_not_a_false_interior_success() {
     // Veto enabled (the default): the solve must reach the true bound optimum
     // f = 0.1, not roll back to the interior point. Anything materially above 0.1
     // means the fallback discarded the point the continuation actually reached.
-    let (veto_status, veto_obj, _veto_iters) = solve(1e-4);
+    let (veto_status, veto_obj, _veto_iters) = solve(1e-4, "monotone");
     assert!(
         veto_obj <= 0.1 + 1e-3,
         "gh #327: the masked monotone problem must converge to the bound optimum \
@@ -2069,4 +2080,18 @@ fn a_masked_monotone_bound_optimum_is_reached_not_a_false_interior_success() {
         succeeded(veto_status),
         "gh #327: reached the bound optimum but reported {veto_status:?}"
     );
+
+    // And on the schedule a limited-memory solve now actually gets by
+    // default (gh #746), the bound optimum must still be what comes back —
+    // with or without the veto. The pathology is absent there, so neither
+    // arm has anything to roll back to; this pins that it stays absent.
+    for threshold in [0.0, 1e-4] {
+        let (status, obj, _) = solve(threshold, "adaptive");
+        assert!(
+            succeeded(status) && obj <= 0.1 + 1e-3,
+            "the default limited-memory schedule must reach the bound optimum \
+             f = 0.1 at obj_scale_certificate_threshold={threshold}; got \
+             {status:?} f={obj:.6e}"
+        );
+    }
 }

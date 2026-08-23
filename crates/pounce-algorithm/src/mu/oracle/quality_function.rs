@@ -239,22 +239,74 @@ impl QualityFunctionMuOracle {
         // q(σ) closure. Captures the eight aff/cen step projections,
         // the four current slacks, the four current bound multipliers,
         // and the constant aggregates; pure scalar work per call.
+        // Scratch for the sigma sweep, allocated once per barrier
+        // update rather than once per trial sigma. `pick_sigma`
+        // evaluates `q` up to `quality_function_max_section_steps + 2`
+        // times, and each evaluation used to build sixteen fresh
+        // vectors: `Vector::set` frees the dense storage
+        // (`shrink_to_fit`) and the `add_two_vectors` that follows
+        // reallocates and zero-fills it via `ensure_storage`, only to
+        // overwrite every entry. On a model the size of mittelmann
+        // `nql180` that was ~190 megabyte-scale malloc/free pairs and
+        // ~190 dead zero-fills per iteration (pounce#749).
+        //
+        // Reuse is exact, not approximate: `add_two_vectors` with
+        // `c == 0` writes every element of the destination, so nothing
+        // carries over between trials and the arithmetic is unchanged
+        // bit for bit. The one-time `set` below is what marks each
+        // buffer initialized; after the first trial `ensure_storage`
+        // finds the buffer already at full length and does nothing.
+        let mut stp_x_l = step_aff_x_l.make_new();
+        let mut stp_x_u = step_aff_x_u.make_new();
+        let mut stp_s_l = step_aff_s_l.make_new();
+        let mut stp_s_u = step_aff_s_u.make_new();
+        let mut stp_z_l = step_aff_z_l.make_new();
+        let mut stp_z_u = step_aff_z_u.make_new();
+        let mut stp_v_l = step_aff_v_l.make_new();
+        let mut stp_v_u = step_aff_v_u.make_new();
+        let mut trial_s_x_l = curr_slack_x_l.make_new();
+        let mut trial_s_x_u = curr_slack_x_u.make_new();
+        let mut trial_s_s_l = curr_slack_s_l.make_new();
+        let mut trial_s_s_u = curr_slack_s_u.make_new();
+        let mut trial_z_l = curr_z_l.make_new();
+        let mut trial_z_u = curr_z_u.make_new();
+        let mut trial_v_l = curr_v_l.make_new();
+        let mut trial_v_u = curr_v_u.make_new();
+        for b in [
+            &mut stp_x_l,
+            &mut stp_x_u,
+            &mut stp_s_l,
+            &mut stp_s_u,
+            &mut stp_z_l,
+            &mut stp_z_u,
+            &mut stp_v_l,
+            &mut stp_v_u,
+            &mut trial_s_x_l,
+            &mut trial_s_x_u,
+            &mut trial_s_s_l,
+            &mut trial_s_s_u,
+            &mut trial_z_l,
+            &mut trial_z_u,
+            &mut trial_v_l,
+            &mut trial_v_u,
+        ] {
+            b.set(0.0);
+        }
+
+        // Hoisted out of the closure: this used to allocate a `String`
+        // and scan the environment on every trial sigma.
+        let dbg_aggr = std::env::var_os("POUNCE_DBG_QF_AGGR").is_some();
+
         let mut eval_q = |sigma: Number| -> Number {
             // step_σ = step_aff + σ · step_cen, projected blocks.
-            let combine = |aff: &Rc<dyn Vector>, cen: &Rc<dyn Vector>| -> Box<dyn Vector> {
-                let mut out = aff.make_new();
-                out.set(0.0);
-                out.add_two_vectors(1.0, &**aff, sigma, &**cen, 0.0);
-                out
-            };
-            let stp_x_l = combine(&step_aff_x_l, &step_cen_x_l);
-            let stp_x_u = combine(&step_aff_x_u, &step_cen_x_u);
-            let stp_s_l = combine(&step_aff_s_l, &step_cen_s_l);
-            let stp_s_u = combine(&step_aff_s_u, &step_cen_s_u);
-            let stp_z_l = combine(&step_aff_z_l, &step_cen_z_l);
-            let stp_z_u = combine(&step_aff_z_u, &step_cen_z_u);
-            let stp_v_l = combine(&step_aff_v_l, &step_cen_v_l);
-            let stp_v_u = combine(&step_aff_v_u, &step_cen_v_u);
+            stp_x_l.add_two_vectors(1.0, &*step_aff_x_l, sigma, &*step_cen_x_l, 0.0);
+            stp_x_u.add_two_vectors(1.0, &*step_aff_x_u, sigma, &*step_cen_x_u, 0.0);
+            stp_s_l.add_two_vectors(1.0, &*step_aff_s_l, sigma, &*step_cen_s_l, 0.0);
+            stp_s_u.add_two_vectors(1.0, &*step_aff_s_u, sigma, &*step_cen_s_u, 0.0);
+            stp_z_l.add_two_vectors(1.0, &*step_aff_z_l, sigma, &*step_cen_z_l, 0.0);
+            stp_z_u.add_two_vectors(1.0, &*step_aff_z_u, sigma, &*step_cen_z_u, 0.0);
+            stp_v_l.add_two_vectors(1.0, &*step_aff_v_l, sigma, &*step_cen_v_l, 0.0);
+            stp_v_u.add_two_vectors(1.0, &*step_aff_v_u, sigma, &*step_cen_v_u, 0.0);
 
             // α_pri = min over slacks of frac_to_bound(curr_slack, step, τ).
             let alpha_pri = curr_slack_x_l
@@ -269,30 +321,14 @@ impl QualityFunctionMuOracle {
                 .min(curr_v_u.frac_to_bound(&*stp_v_u, tau));
 
             // Build σ-step trial slacks/duals: trial = curr + α·step.
-            let mut trial_s_x_l = curr_slack_x_l.make_new();
-            trial_s_x_l.set(0.0);
             trial_s_x_l.add_two_vectors(1.0, &*curr_slack_x_l, alpha_pri, &*stp_x_l, 0.0);
-            let mut trial_s_x_u = curr_slack_x_u.make_new();
-            trial_s_x_u.set(0.0);
             trial_s_x_u.add_two_vectors(1.0, &*curr_slack_x_u, alpha_pri, &*stp_x_u, 0.0);
-            let mut trial_s_s_l = curr_slack_s_l.make_new();
-            trial_s_s_l.set(0.0);
             trial_s_s_l.add_two_vectors(1.0, &*curr_slack_s_l, alpha_pri, &*stp_s_l, 0.0);
-            let mut trial_s_s_u = curr_slack_s_u.make_new();
-            trial_s_s_u.set(0.0);
             trial_s_s_u.add_two_vectors(1.0, &*curr_slack_s_u, alpha_pri, &*stp_s_u, 0.0);
 
-            let mut trial_z_l = curr_z_l.make_new();
-            trial_z_l.set(0.0);
             trial_z_l.add_two_vectors(1.0, &*curr_z_l, alpha_du, &*stp_z_l, 0.0);
-            let mut trial_z_u = curr_z_u.make_new();
-            trial_z_u.set(0.0);
             trial_z_u.add_two_vectors(1.0, &*curr_z_u, alpha_du, &*stp_z_u, 0.0);
-            let mut trial_v_l = curr_v_l.make_new();
-            trial_v_l.set(0.0);
             trial_v_l.add_two_vectors(1.0, &*curr_v_l, alpha_du, &*stp_v_l, 0.0);
-            let mut trial_v_u = curr_v_u.make_new();
-            trial_v_u.set(0.0);
             trial_v_u.add_two_vectors(1.0, &*curr_v_u, alpha_du, &*stp_v_u, 0.0);
 
             // Complementarity products at the σ-trial point.
@@ -361,7 +397,7 @@ impl QualityFunctionMuOracle {
                 n_comp,
             };
 
-            if std::env::var("POUNCE_DBG_QF_AGGR").is_ok() {
+            if dbg_aggr {
                 tracing::debug!(target: "pounce::mu",
                     "[QF_AGGR] σ={:.6e} α_pri={:.6e} α_du={:.6e} xi={:.6e} dual_aggr={:.6e} primal_aggr={:.6e} compl_aggr={:.6e} n_dual={} n_pri={} n_comp={}",
                     sigma, alpha_pri, alpha_du, xi,

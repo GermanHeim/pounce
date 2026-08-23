@@ -38,12 +38,96 @@ use crate::nl_reader::NlProblem;
 use pounce_common::types::{lower_bound_present, upper_bound_present};
 use pounce_convex::{ConeSpec, QpProblem, QpSolution, Triplet};
 
+/// Ipopt's `bound_relax_factor` widening, as the convex extractors apply it.
+///
+/// The NLP path widens `x_L/x_U` and the inequality-row bounds `d_L/d_U`
+/// before the algorithm ever sees them (`OrigIpoptNlp::relax_bounds`, driven
+/// from `Application` with `bound_relax_factor` — Ipopt default `1e-8` —
+/// capped by `constr_viol_tol`, default `1e-4`). The convex path did not,
+/// so the *same binary* solved a materially different model depending on
+/// `solver_selection`.
+///
+/// That is not a hairline difference on a constraint-degenerate model. On
+/// `LISWET1` (gh #744) every one of the 10 000 monotonicity rows is active at
+/// the optimum and the multipliers sum to `1.6e9`, so a `1e-8` widening of the
+/// rows buys `9.0` of objective — the convex arm returned the exact optimum
+/// `36.1224` and the NLP arm (and Ipopt-MA57) the relaxed one, `27.1221`, and
+/// the 33% gap was read as a convex-solver bug. Both arms now relax, so both
+/// report `27.1221`, and `bound_relax_factor=0` gets `36.1224` from either.
+///
+/// Faithful to `relax_bounds` in three details that matter:
+/// * **Equality rows are not relaxed.** Upstream they live in `c(x) = 0`,
+///   which `relax_bounds` never touches; only `d_L/d_U` (inequality rows) and
+///   the variable box are widened.
+/// * **Rows use the scale-relative width** `min(factor, cap)·|b|` (with `|b|`
+///   read as `1` at a declared-zero bound), the gh #385 form. The variable box
+///   keeps the upstream absolute formula `min(factor·max(|b|,1), cap)`.
+/// * **Fixed variables (`x_l == x_u`) keep their bounds.** Under the default
+///   `fixed_variable_treatment=make_parameter` upstream removes them before
+///   `relax_bounds` runs, so they are never widened.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoundRelax {
+    /// `bound_relax_factor`. Non-positive disables the widening entirely.
+    pub factor: f64,
+    /// `constr_viol_tol` — the cap on the widening.
+    pub cap: f64,
+}
+
+impl BoundRelax {
+    /// No widening — the model exactly as declared. What the convex path did
+    /// unconditionally before gh #744, and what `bound_relax_factor=0` selects.
+    pub const NONE: Self = Self {
+        factor: 0.0,
+        cap: 0.0,
+    };
+
+    fn active(self) -> bool {
+        self.factor > 0.0 && self.cap > 0.0
+    }
+
+    /// Widening of a variable bound `b`: `min(factor·max(|b|,1), cap)`.
+    fn var_delta(self, b: f64) -> f64 {
+        if !self.active() {
+            return 0.0;
+        }
+        (self.factor.abs() * b.abs().max(1.0)).min(self.cap)
+    }
+
+    /// Widening of an inequality-row bound `b`: `min(factor, cap)·|b|`, with a
+    /// declared-zero bound taking the absolute width (it has no scale).
+    /// The widening to apply to a row whose declared sides are `lo`/`hi`.
+    ///
+    /// A crossed pair (`lo > hi`) declares an *empty* feasible set — an
+    /// inconsistent model, which the NLP path rejects as
+    /// `Invalid_Problem_Definition` before `relax_bounds` is ever reached.
+    /// Widening both sides of one closes the gap whenever the crossing is
+    /// narrower than the relaxation, turning "this model has no feasible
+    /// point" into an optimal answer. A crossed row is therefore passed
+    /// through exactly as declared, so the emptiness screen still sees it
+    /// (gh #491).
+    fn for_row(self, lo: f64, hi: f64) -> Self {
+        if lower_bound_present(lo) && upper_bound_present(hi) && lo > hi {
+            Self::NONE
+        } else {
+            self
+        }
+    }
+
+    fn row_delta(self, b: f64) -> f64 {
+        if !self.active() {
+            return 0.0;
+        }
+        let scale = if b == 0.0 { 1.0 } else { b.abs() };
+        self.factor.abs().min(self.cap) * scale
+    }
+}
+
 /// Convert a classified LP/convex-QP `NlProblem` into `QpProblem`
 /// standard form. Returns `None` if the objective is not actually a
 /// degree-≤2 polynomial (should not happen for a problem the classifier
 /// routed here, but the conversion is total and falls back gracefully).
-pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
-    Some(extract_qp_with_map(prob)?.0) // drops con_map + reporting constant
+pub fn extract_qp(prob: &NlProblem, relax: BoundRelax) -> Option<QpProblem> {
+    Some(extract_qp_with_map(prob, relax)?.0) // drops con_map + reporting constant
 }
 
 /// Where each `.nl` constraint's rows landed in the standard-form QP, so
@@ -72,7 +156,10 @@ pub enum ConRowMap {
 /// it to the *reported* objective so the convex solve agrees with the NLP
 /// path. It is returned in the problem's natural (user) sense, *not*
 /// multiplied by the maximize/minimize `sign`.
-pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap>, f64)> {
+pub fn extract_qp_with_map(
+    prob: &NlProblem,
+    relax: BoundRelax,
+) -> Option<(QpProblem, Vec<ConRowMap>, f64)> {
     let n = prob.n;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
@@ -145,13 +232,18 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             b.push(lo - const_shift);
             con_map.push(ConRowMap::Eq { a_row: eq_row });
         } else {
+            // Inequality row. Both sides carry the `bound_relax_factor`
+            // widening the NLP path applies to `d_L/d_U` (see [`BoundRelax`]);
+            // it is zero when the caller passed `BoundRelax::NONE`, and on a
+            // crossed row, which must stay crossed.
+            let relax = relax.for_row(lo, hi);
             // Upper bound: row ≤ hi.
             let upper = if upper_bound_present(hi) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, *v));
                 }
-                h.push(hi - const_shift);
+                h.push(hi + relax.row_delta(hi) - const_shift);
                 Some(gr)
             } else {
                 None
@@ -162,7 +254,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, -*v));
                 }
-                h.push(-(lo - const_shift));
+                h.push(-(lo - relax.row_delta(lo) - const_shift));
                 Some(gr)
             } else {
                 None
@@ -172,7 +264,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
     }
 
     // --- variable bounds as the explicit box (not as `G` rows) ---
-    let (lb, ub) = extract_box(prob);
+    let (lb, ub) = extract_box(prob, relax);
 
     Some((
         QpProblem {
@@ -216,24 +308,46 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
 ///
 /// The bound *multipliers* now come back in the solution's `z_lb`/`z_ub`
 /// rather than being decoded out of `z` by row position.
-fn extract_box(prob: &NlProblem) -> (Vec<f64>, Vec<f64>) {
+fn extract_box(prob: &NlProblem, relax: BoundRelax) -> (Vec<f64>, Vec<f64>) {
+    // Two declared boxes are passed through untouched.
+    //
+    // A variable pinned by `x_l == x_u` is fixed, and upstream's default
+    // `fixed_variable_treatment=make_parameter` lifts it out of the problem
+    // before `relax_bounds` runs — so it is never widened. Keep it pinned
+    // here too; widening it would hand the solver two decision variables'
+    // worth of slack that the NLP path does not have.
+    //
+    // A *crossed* box (`x_l > x_u`) is an empty set, and the NLP path rejects
+    // it as `Invalid_Problem_Definition` before relaxation. Widening it by
+    // more than the crossing would close the gap and return an optimal point
+    // for a model with no feasible one — gh #491's `1e-8` fixture crosses by
+    // less than the default `2 × 1e-8` widening. Leave it crossed so the
+    // empty-box screen downstream still sees it.
+    let as_declared = |i: usize| {
+        let (l, u) = (prob.x_l[i], prob.x_u[i]);
+        lower_bound_present(l) && upper_bound_present(u) && l >= u
+    };
     let lb = (0..prob.n)
         .map(|i| {
             let v = prob.x_l[i];
-            if lower_bound_present(v) {
+            if !lower_bound_present(v) {
+                f64::NEG_INFINITY
+            } else if as_declared(i) {
                 v
             } else {
-                f64::NEG_INFINITY
+                v - relax.var_delta(v)
             }
         })
         .collect();
     let ub = (0..prob.n)
         .map(|i| {
             let v = prob.x_u[i];
-            if upper_bound_present(v) {
+            if !upper_bound_present(v) {
+                f64::INFINITY
+            } else if as_declared(i) {
                 v
             } else {
-                f64::INFINITY
+                v + relax.var_delta(v)
             }
         })
         .collect();
@@ -381,6 +495,7 @@ struct SocBlock {
 /// iff the original constraint holds.
 pub fn extract_socp_with_map(
     prob: &NlProblem,
+    relax: BoundRelax,
 ) -> Option<(QpProblem, Vec<ConSocpMap>, f64, Vec<ConeSpec>)> {
     let n = prob.n;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
@@ -444,7 +559,7 @@ pub fn extract_socp_with_map(
             soc_blocks.push(SocBlock {
                 con_idx,
                 a: a_vec,
-                b_eff: nl_const - hi,
+                b_eff: nl_const - (hi + relax.row_delta(hi)),
                 f_rows,
             });
             continue;
@@ -470,12 +585,13 @@ pub fn extract_socp_with_map(
             b.push(lo - const_shift);
             con_map.push(ConSocpMap::Eq { a_row: eq_row });
         } else {
+            let relax = relax.for_row(lo, hi);
             let upper = if upper_bound_present(hi) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, *v));
                 }
-                h.push(hi - const_shift);
+                h.push(hi + relax.row_delta(hi) - const_shift);
                 Some(gr)
             } else {
                 None
@@ -485,7 +601,7 @@ pub fn extract_socp_with_map(
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, -*v));
                 }
-                h.push(-(lo - const_shift));
+                h.push(-(lo - relax.row_delta(lo) - const_shift));
                 Some(gr)
             } else {
                 None
@@ -498,7 +614,7 @@ pub fn extract_socp_with_map(
     // see [`extract_box`]. `solve_socp_ipm` appends them as a trailing
     // nonnegative block of its own, *after* the cones, so they stay outside
     // the partition `cones` has to cover.
-    let (lb, ub) = extract_box(prob);
+    let (lb, ub) = extract_box(prob, relax);
 
     // The nonnegative block is every G row built so far. The cones list must
     // cover G in row order: this orthant block, then one SOC per quadratic.
@@ -869,7 +985,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map, obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        let (qp, con_map, obj_const, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(obj_const, 0.0);
         // No linear inequalities / bounds → no nonneg block; one SOC of
         // dimension rank(Q)+2 = 2+2 = 4.
@@ -938,7 +1055,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, _con_map, obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        let (qp, _con_map, obj_const, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(obj_const, 0.0);
         assert_eq!(cones, vec![ConeSpec::SecondOrder(3)]); // rank 1 + 2.
 
@@ -995,7 +1113,8 @@ mod tests {
     #[test]
     fn socp_factor_columns_scatter_back_to_original_variables() {
         let prob = wide_ball(40, 11, 37);
-        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        let (qp, _con_map, _obj_const, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(cones, vec![ConeSpec::SecondOrder(4)]); // rank 2 + 2.
 
         // Every G entry in the two factor rows must sit in column 11 or 37.
@@ -1016,7 +1135,8 @@ mod tests {
     fn socp_extraction_is_sized_by_support_not_problem_width() {
         let n = 50_000;
         let prob = wide_ball(n, 7, n - 3);
-        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        let (qp, _con_map, _obj_const, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(cones, vec![ConeSpec::SecondOrder(4)]);
         // The cone contributes exactly two nonzeros per factor row.
         assert_eq!(qp.g.iter().filter(|t| t.row >= 2).count(), 2);
@@ -1040,7 +1160,8 @@ mod tests {
         let mut prob = wide_ball(40, 11, 37);
         prob.con_nonlinear = vec![NlBody::Tree(con)];
 
-        let (qp, _con_map, _obj_const, cones) = extract_socp_with_map(&prob).expect("extract");
+        let (qp, _con_map, _obj_const, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(cones, vec![ConeSpec::SecondOrder(3)], "rank 1 + 2");
         let factor_cols: std::collections::BTreeSet<usize> =
             qp.g.iter().filter(|t| t.row >= 2).map(|t| t.col).collect();
@@ -1343,7 +1464,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, con_map, obj_const) =
+            extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
         // No constant anywhere in this objective.
         assert_eq!(obj_const, 0.0);
         // P = 2I → two diagonal entries.
@@ -1408,7 +1530,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(qp.c.len(), 1);
         assert!(
             (qp.c[0] - (-6.0)).abs() < 1e-12,
@@ -1459,7 +1581,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, con_map, obj_const) =
+            extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
         // This model puts its constant in the `obj_constant` field, not the
         // nonlinear tree, so the tree constant is 0 here.
         assert_eq!(obj_const, 0.0);
@@ -1518,7 +1641,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map, _obj_const) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, con_map, _obj_const) =
+            extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
         // One inequality row: −x0 ≤ −3 (the lower bound, constant-shifted).
         assert_eq!(qp.m_ineq(), 1);
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
@@ -1575,7 +1699,8 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, _con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, _con_map, obj_const) =
+            extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
         // The degree-0 term of (x0-3)^2 is +9, recovered from the tree.
         assert!((obj_const - 9.0).abs() < 1e-12, "tree constant={obj_const}");
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
@@ -1618,7 +1743,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         // The bounds are the box, not `G` rows.
         assert_eq!(qp.m_ineq(), 0);
         assert_eq!((qp.lb[0], qp.ub[0]), (0.0, 1.0));
@@ -1655,7 +1780,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert!(qp.p_lower.is_empty(), "LP has no Hessian");
         assert_eq!(qp.m_ineq(), 0, "bounds are the box, not `G` rows");
         assert_eq!(qp.lb, vec![0.0, 0.0]);
@@ -1695,7 +1820,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         // minimize −x0.
         assert_eq!(qp.c[0], -1.0);
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
@@ -1739,7 +1864,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(
             qp.ub[0], -5e20,
             "`x0 <= -5e20` is a real bound and must reach the box; the \
@@ -1790,7 +1915,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(
             qp.m_eq(),
             0,
@@ -1843,7 +1968,7 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(qp.m_ineq(), 0, "bounds are the box, not `G` rows");
         // x0: no lower bound; a real upper bound past the *lower* sentinel.
         assert_eq!(qp.lb[0], f64::NEG_INFINITY);
@@ -1907,5 +2032,138 @@ mod tests {
         let (z_lb, z_ub) = recover_bound_mults(&prob, &empty);
         assert_eq!(z_lb, vec![0.0, 0.0]);
         assert_eq!(z_ub, vec![0.0, 0.0]);
+    }
+
+    /// gh #744/#745: `bound_relax_factor` reaches the extracted model.
+    ///
+    /// One inequality row (`x0 + x1 >= 2`), one two-sided range row, one
+    /// equality row, a bounded variable, a fixed variable, and a free
+    /// variable — so every case the widening treats differently is present.
+    fn relax_fixture() -> NlProblem {
+        NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
+            n: 3,
+            m: 3,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![
+                NlBody::Tree(Expr::Const(0.0)),
+                NlBody::Tree(Expr::Const(0.0)),
+                NlBody::Tree(Expr::Const(0.0)),
+            ],
+            con_linear: vec![
+                vec![(0, 1.0), (1, 1.0)],
+                vec![(1, 1.0), (2, 1.0)],
+                vec![(0, 1.0), (2, 1.0)],
+            ],
+            // x0 bounded above and below, x1 fixed, x2 free.
+            x_l: vec![-4.0, 5.0, -2e19],
+            x_u: vec![8.0, 5.0, 2e19],
+            // row 0: >= 2 (lower only); row 1: -3 <= . <= 6 (range);
+            // row 2: == 7 (equality).
+            g_l: vec![2.0, -3.0, 7.0],
+            g_u: vec![2e19, 6.0, 7.0],
+            x0: vec![0.0, 0.0, 0.0],
+            lambda0: vec![0.0, 0.0, 0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
+            nl_counts: None,
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn bound_relax_none_leaves_the_declared_model_alone() {
+        let prob = relax_fixture();
+        let (qp, _, _) = extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        assert_eq!(qp.lb, vec![-4.0, 5.0, f64::NEG_INFINITY]);
+        assert_eq!(qp.ub, vec![8.0, 5.0, f64::INFINITY]);
+        assert_eq!(qp.b, vec![7.0]);
+        // Rows, in emission order: row0's `>= 2` as `-x0-x1 <= -2`;
+        // row1's `<= 6` then its `>= -3` as `<= 3`.
+        assert_eq!(qp.h, vec![-2.0, 6.0, 3.0]);
+    }
+
+    #[test]
+    fn bound_relax_widens_inequality_rows_and_the_free_box_only() {
+        let prob = relax_fixture();
+        let relax = BoundRelax {
+            factor: 1e-8,
+            cap: 1e-4,
+        };
+        let (qp, _, _) = extract_qp_with_map(&prob, relax).expect("extract");
+
+        // Variable box: upstream's absolute formula `min(f*max(|b|,1), cap)`.
+        // x0's bounds widen outward; x1 is *fixed* and must not move (upstream
+        // removes fixed variables before `relax_bounds` runs); x2 is free.
+        assert!((qp.lb[0] - (-4.0 - 4e-8)).abs() < 1e-18);
+        assert!((qp.ub[0] - (8.0 + 8e-8)).abs() < 1e-18);
+        assert_eq!(qp.lb[1], 5.0);
+        assert_eq!(qp.ub[1], 5.0);
+        assert_eq!(qp.lb[2], f64::NEG_INFINITY);
+        assert_eq!(qp.ub[2], f64::INFINITY);
+
+        // Equality rows are never relaxed — upstream keeps them in `c(x) = 0`,
+        // which `relax_bounds` does not touch.
+        assert_eq!(qp.b, vec![7.0]);
+
+        // Inequality rows use the scale-relative width `min(f, cap)*|b|`.
+        // `x0+x1 >= 2` → `-x0-x1 <= -(2 - 2e-8)`.
+        assert!((qp.h[0] - -(2.0 - 2e-8)).abs() < 1e-18);
+        // `. <= 6` → `<= 6 + 6e-8`; `. >= -3` → `<= 3 + 3e-8`.
+        assert!((qp.h[1] - (6.0 + 6e-8)).abs() < 1e-18);
+        assert!((qp.h[2] - (3.0 + 3e-8)).abs() < 1e-18);
+    }
+
+    #[test]
+    fn bound_relax_caps_the_widening_and_floors_a_zero_row_bound() {
+        let mut prob = relax_fixture();
+        // A huge row bound: the relative width `min(f, cap)*|b|` would be
+        // enormous without the `min` against `cap` in the *factor*.
+        prob.g_l[0] = 0.0; // declared-zero bound: no scale, absolute width.
+        let relax = BoundRelax {
+            factor: 1e-2,
+            cap: 1e-4,
+        };
+        let (qp, _, _) = extract_qp_with_map(&prob, relax).expect("extract");
+        // Zero bound → width is `min(1e-2, 1e-4) * 1 = 1e-4`.
+        assert!((qp.h[0] - 1e-4).abs() < 1e-18, "{}", qp.h[0]);
+        // Variable box is capped by `cap` outright: `1e-2*max(4,1) = 4e-2`,
+        // capped to `1e-4`.
+        assert!((qp.lb[0] - (-4.0 - 1e-4)).abs() < 1e-18);
+    }
+
+    /// An empty declared set must survive extraction empty. Relaxation runs
+    /// *after* upstream's consistency check, and the emptiness screens on the
+    /// convex side read the extracted `lb`/`ub` and row pairs — so widening a
+    /// crossing narrower than the relaxation would silently make an
+    /// inconsistent model solvable (gh #491, gh #744).
+    #[test]
+    fn bound_relax_does_not_close_a_crossed_box_or_a_crossed_row() {
+        let mut prob = relax_fixture();
+        // x0's box crossed by 1e-8, narrower than the 2*4e-8 it would widen by.
+        prob.x_l[0] = 0.0;
+        prob.x_u[0] = -1e-8;
+        // Row 1 crossed by 1e-8 too: `1e-8 <= x1 + x2 <= 0`.
+        prob.g_l[1] = 1e-8;
+        prob.g_u[1] = 0.0;
+        let relax = BoundRelax {
+            factor: 1e-8,
+            cap: 1e-4,
+        };
+        let (qp, _, _) = extract_qp_with_map(&prob, relax).expect("extract");
+        assert_eq!(qp.lb[0], 0.0);
+        assert_eq!(qp.ub[0], -1e-8);
+        // Row 1's pair: `<= 0` and `>= 1e-8` (as `<= -1e-8`), both verbatim.
+        assert_eq!(qp.h[1], 0.0);
+        assert_eq!(qp.h[2], -1e-8);
+        // The uncrossed row 0 is still widened.
+        assert!((qp.h[0] - -(2.0 - 2e-8)).abs() < 1e-18);
     }
 }

@@ -1048,6 +1048,9 @@ pub fn main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
+                // gh #744/#745: the same `bound_relax_factor` widening the NLP
+                // path applies, so both arms solve one model.
+                let bound_relax = convex_bound_relax(&app);
                 // When the convex attempt declines (gh #535 / `socp_nlp_fallback`)
                 // the NLP solve below opens its own `Deadline` from the *option
                 // value*, which still names the full budget — so a run that spent
@@ -1081,6 +1084,7 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        bound_relax,
                         presolve_on,
                         socp_nlp_fallback,
                     ) {
@@ -1127,6 +1131,7 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        bound_relax,
                         matches!(choice, SolverChoice::QpActiveSet),
                         engine_overrides,
                         lp_nlp_fallback,
@@ -2425,6 +2430,35 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
+/// The `bound_relax_factor` widening the convex path must apply so that the
+/// model it solves is the one the NLP path solves.
+///
+/// Reads the same two options `Application` feeds `OrigIpoptNlp::relax_bounds`
+/// — `bound_relax_factor` (Ipopt default `1e-8`) and `constr_viol_tol`
+/// (default `1e-4`) — and uses the same defaults when the user set neither,
+/// so `pounce foo.nl` and `pounce foo.nl solver_selection=nlp` agree.
+///
+/// gh #744 / #745: before this, the convex arm ignored both and solved the
+/// model exactly as declared. On the constraint-degenerate families
+/// (`LISWET*`, `YAO`, `POWELL20`, the `pldd*`/`delf*`/`large*` LPs) that made
+/// the two arms of the same binary disagree by up to 33% in the objective —
+/// the convex arm reporting the exact optimum and the NLP arm the relaxed one.
+/// See [`pounce_cli::qp_extract::BoundRelax`] for why so small a widening
+/// moves the objective so far.
+fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRelax {
+    let opt = app.options();
+    let num = |name: &str, default: f64| {
+        opt.get_numeric_value(name, "")
+            .ok()
+            .and_then(|(v, set)| set.then_some(v))
+            .unwrap_or(default)
+    };
+    pounce_cli::qp_extract::BoundRelax {
+        factor: num("bound_relax_factor", 1e-8),
+        cap: num("constr_viol_tol", 1e-4),
+    }
+}
+
 fn convex_opts_with_remaining(
     mut opts: pounce_convex::QpOptions,
     started: std::time::Instant,
@@ -2487,6 +2521,9 @@ fn run_convex_qp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // gh #744/#745: the `bound_relax_factor` widening applied to the extracted
+    // model, so this path solves what the NLP path solves.
+    bound_relax: pounce_cli::qp_extract::BoundRelax,
     // Use the `pounce-qp` parametric active-set engine instead of the IPM
     // (`solver_selection=qp-active-set`). Everything else about this driver —
     // extraction, presolve, postsolve, reporting, `.sol` writing — is shared.
@@ -2501,16 +2538,17 @@ fn run_convex_qp(
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
-        Some(q) => q,
-        None => {
-            eprintln!(
-                "pounce: internal error: {} not extractable as QP",
-                class.name()
-            );
-            return Some(ExitCode::from(2));
-        }
-    };
+    let (qp, con_map, obj_nl_const) =
+        match pounce_cli::qp_extract::extract_qp_with_map(prob, bound_relax) {
+            Some(q) => q,
+            None => {
+                eprintln!(
+                    "pounce: internal error: {} not extractable as QP",
+                    class.name()
+                );
+                return Some(ExitCode::from(2));
+            }
+        };
 
     // The reported objective must include *both* constant sources: the
     // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
@@ -2880,6 +2918,8 @@ fn run_convex_socp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // gh #744/#745: see the same parameter on `run_convex_qp`.
+    bound_relax: pounce_cli::qp_extract::BoundRelax,
     // #139 / gh #588 (Q9b): the shared convex-path presolve switch. Q1 left
     // this driver with no presolve at all, so `qp_presolve` was silently
     // ignored on every convex QCQP; it is honoured here through the
@@ -2893,7 +2933,7 @@ fn run_convex_socp(
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
-        match pounce_cli::qp_extract::extract_socp_with_map(prob) {
+        match pounce_cli::qp_extract::extract_socp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
                 eprintln!(

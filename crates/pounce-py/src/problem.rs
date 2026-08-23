@@ -908,6 +908,31 @@ impl PyProblem {
                 true,
                 false,
             );
+            // gh#746 substitutes `adaptive` for an unset `mu_strategy`
+            // whenever the Hessian is limited-memory, matching
+            // IpAlgBuilder.cpp:1059. That inference is sound when the
+            // caller *typed* `limited-memory` — upstream's only case,
+            // since a cyipopt user who gets L-BFGS asked for it. Here
+            // POUNCE picked the Hessian itself, on the line above,
+            // because the problem object exposes no `hessian`. Reading
+            // a barrier-schedule preference out of a choice the caller
+            // never made is an inference on top of an inference, and it
+            // measurably costs: under adaptive, a transferred warm
+            // start stops beating a cold solve at every horizon of
+            // gh#622's table (86/65, 88/67, 76/70, 79/68 against 45/67,
+            // 50/75, 54/77, 46/76), because free-mode adaptive
+            // recomputes mu from the current point's complementarity
+            // and discards the barrier state the transfer carried.
+            //
+            // So pin the registered default explicitly on this path.
+            // This is set *before* the user's own option list is
+            // applied below, so an explicit `mu_strategy` still wins
+            // and someone who wants the upstream pairing can ask for
+            // it. Whether adaptive's warm-start handling is itself
+            // repairable is gh#749's neighborhood, not this default's.
+            let _ = app
+                .options_mut()
+                .set_string_value("mu_strategy", "monotone", true, false);
         }
         // Issue #348: when the problem object exposes no exact Lagrangian
         // Hessian (`has_hessian == false`), an explicit request for the exact
