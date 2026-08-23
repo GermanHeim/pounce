@@ -1789,9 +1789,12 @@ def estimate_report(model, perturb, max_iter=None,
     `crossed` is empty for every model. That is the correct answer for
     such a step rather than a missing one. A `bound_eps` wide enough to
     cover the crossing is the exception: the refinement then pins
-    nothing, so the step is the linear one and reaches a bound at a
-    fraction below one. The reason to run those
-    modes is what "linear" reports at the same perturbation.
+    nothing, so the step reaches a bound at a fraction below one. It is
+    not quite the linear step either, since the release test keeps the
+    solve's own margin whatever `bound_eps` is, so a bound the step
+    drives negative is released and the step moves by that multiplier's
+    size. The reason to run those modes is what "linear" reports at the
+    same perturbation.
 
     `activity`, `row_activity` and `mu` come from the converged base
     point and `perturbations` and `bounds_relaxed` from the solve, so

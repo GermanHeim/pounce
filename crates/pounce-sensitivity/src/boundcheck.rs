@@ -647,6 +647,26 @@ const CORRECTION_SCALE_LIMIT: Number = 1e4;
 /// repaired an active set, whatever it achieved on the rows it pinned.
 const WORSE_THAN_PLAIN_FACTOR: Number = 10.0;
 
+/// The refinement's release threshold: how far negative the step has to
+/// drive a bound multiplier before its bound is released, from the
+/// solve's own `bound_relax_factor`.
+///
+/// Never a caller's `bound_eps`. That is a primal margin, and a
+/// multiplier changing sign is not a primal event — reading one number
+/// for both is what let a `bound_eps` of `1e-2` stop every release on a
+/// model whose multipliers are of order `1e-3`.
+///
+/// The floor is `1e-9`, which is also what an unset or unreadable
+/// `bound_relax_factor` resolves to, since that is the floor by
+/// definition. Three callers reach this: [`crate::Solver::bound_context`]
+/// off the recorded state, and the CLI and [`crate::SensSolve`] off the
+/// options list through [`crate::options::release_floor_from_options`].
+/// One derivation, so they cannot drift on what the solve's own margin
+/// is.
+pub fn release_floor(bound_relax_factor: Number) -> Number {
+    bound_relax_factor.abs().max(1e-9)
+}
+
 /// Repair the active set the step implies, by pinning and releasing.
 ///
 /// Returns the refined step, the compound rows it constrained, and why
@@ -737,6 +757,16 @@ const WORSE_THAN_PLAIN_FACTOR: Number = 10.0;
 /// `bound_eps` of `1e-2` would stop every release on a model whose
 /// multipliers are of order `1e-3`, and return the wrong active set
 /// without saying so.
+///
+/// The two guards below stay on `eps`, since they compare primal
+/// overshoot and a caller who widened the primal margin has said that
+/// about overshoot too. The consequence is worth knowing before you
+/// widen it: both guards scale with `eps`, so a margin far above the
+/// model's own scale takes them out of the picture — at `eps = 10.0`
+/// the second reads `worst_over(dx) > 100.0`, and
+/// [`RefineStop::WorseThanPlain`] cannot be reached. A margin wide
+/// enough to pin nothing is also wide enough to accept any release
+/// batch it produces.
 ///
 /// # Two guards, independent of the loop
 ///

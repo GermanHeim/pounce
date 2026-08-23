@@ -1383,8 +1383,24 @@ impl Solver {
         // outside, so anything within that is on the bound, not past
         // it. A floor keeps an unrelaxed solve from pinning on
         // roundoff.
-        let floor = state.bound_relax_factor.abs().max(1e-9);
-        let eps = bound_eps.unwrap_or(floor);
+        let floor = crate::boundcheck::release_floor(state.bound_relax_factor);
+        // Rejected here rather than at each entry point, so the pyo3
+        // binding and every Rust caller get the check the CLI's
+        // `sens_bound_eps` gets from its strict lower bound. Zero
+        // reinstates the roundoff pinning the floor prevents, and NaN
+        // makes `over > eps` false everywhere, so the refinement pins
+        // nothing and still reports settled — both return a plausible
+        // vector rather than failing, which is the worse outcome.
+        // `> 0.0` is false for NaN, as `pyomo_pounce`'s own check is.
+        let eps = match bound_eps {
+            None => floor,
+            Some(e) if e > 0.0 => e,
+            Some(e) => {
+                return Err(SolverError::BadOptions(format!(
+                    "bound_eps must be a positive number, got {e}"
+                )));
+            }
+        };
         // A caller's `bound_eps` is a primal margin and says nothing
         // about when a multiplier has changed sign, so the release test
         // keeps the solve's own margin.

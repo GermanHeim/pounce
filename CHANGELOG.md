@@ -473,6 +473,22 @@ changes.
   three exactly-active constraints are exactly the degeneracy the widening
   lifts — it converges in 69 iterations at defaults now, against ~3596 before,
   and at a genuine `1.2e-10` KKT error).
+- **Convex `OptionsList` parsing is now a reusable library API.**
+
+  `pounce_convex::QpOptions::try_from_options_list`,
+  `ConvexPresolveOptions::try_from_options_list`, and
+  `ActiveSetOverrides::try_from_options_list` now own the names, conversions,
+  validation, and precedence rules for the convex `qp_*` and `sqp_qp_*`
+  controls. The CLI delegates to those typed readers instead of maintaining
+  private copies, so another frontend can materialize the same configuration
+  without reproducing CLI logic. Existing explicit-only handling for shared
+  `tol` / iteration / wall-time controls, `qp_tau_max` precedence, and the
+  `qp_presolve`-over-`presolve` rule is unchanged.
+
+  `qp_gondzio_corr` is also covered by the core library guard that refuses a
+  non-default convex-only option on an entry point unable to run the convex
+  solver, closing the one remaining silent-ignore case in that option family.
+
 - **`pounce.minimize`: `jac=True` no longer defeats convex structure
   detection** (#750).
 
@@ -500,6 +516,30 @@ changes.
 
   Same defect class as the `args`-binding fix that precedes it in the routing
   block: a user input the convex route did not honor.
+- **`bound_eps` is refused at or below zero by the Rust API too, not
+  only by pyomo.** `Solver::bound_context` makes the check, so the
+  `pounce._pounce.Solver` bindings and every `Solver` caller get what
+  the CLI's `sens_bound_eps` gets from its strict lower bound. Neither
+  bad value failed on its own before: zero reinstated the roundoff
+  pinning the floor exists to prevent, and NaN made `over > eps` false
+  everywhere, so the refinement pinned nothing and still reported
+  `settled`. Both handed back a plausible vector. `pyomo_pounce`'s own
+  `_check_margins` is unchanged and still names the argument first.
+
+  The refinement's release threshold is one derivation,
+  `boundcheck::release_floor`, rather than three: `bound_context` reads
+  it off the recorded state and the CLI and `SensSolve` off the options
+  list through `options::release_floor_from_options`. No behaviour
+  change — the three copies agreed — but they can no longer drift.
+
+  `refine_step_onto_bounds` now documents what its two accept guards do
+  under a wide `bound_eps`. They scale with the primal margin, so a
+  margin far above the model's own scale takes them out of the picture:
+  at `bound_eps = 10.0` the worse-than-plain guard reads
+  `worst_over(dx) > 100.0` and `RefineStop::WorseThanPlain` cannot be
+  reached. That is deliberate — a margin wide enough to pin nothing is
+  wide enough to accept any release batch it produces — and it was
+  undocumented.
 
 - **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
   settable through the CLI and the `SensSolve` builder and were
@@ -535,9 +575,12 @@ changes.
   drives to between `-sens_bound_eps` and the solve's margin now
   releases its bound, where before it was pinned.
 
-  A margin wide enough to cover the crossing leaves the step where the
-  predictor put it, so `alpha` comes back below one there, where under
-  `fix_relax` it is otherwise 1.0.
+  A margin wide enough to cover the crossing pins nothing, so `alpha`
+  comes back below one there, where under `fix_relax` it is otherwise
+  1.0. It is not quite the predictor's own step: the release test keeps
+  the solve's margin whatever the primal one is, so a bound the step
+  drives negative is still released and the step moves by that
+  multiplier's size.
 
   `max_pdpert` refuses rather than answering when the converged KKT
   factor carries an inertia correction larger than the value given.

@@ -1391,6 +1391,7 @@ impl IpoptApplication {
             "qp_tau",
             "qp_tau_max",
             "qp_reg",
+            "qp_gondzio_corr",
             "qp_infeas_tol",
             "qp_hsde",
             "qp_equilibrate",
