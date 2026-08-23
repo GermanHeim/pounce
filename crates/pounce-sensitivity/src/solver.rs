@@ -1108,7 +1108,7 @@ impl Solver {
         // the bound or infeasible, so the row stays out for good.
         let mut inert: Vec<usize> = Vec::new();
         loop {
-            for &k in &engaged.clone() {
+            for &k in &engaged {
                 if proj[k].is_some() {
                     continue;
                 }
@@ -1305,12 +1305,8 @@ impl Solver {
     /// The activity classifier is deliberately not consulted. Its
     /// classes are bands on `sigma / |H_ii|`, the right object for the
     /// covariance question of whether the barrier pins the variance
-    /// against the objective, and the wrong one here: on the double
-    /// column its ambiguous class held tray holdups a fifth of their
-    /// range away from any bound, because their curvature was smaller
-    /// still, and the directional QP then pinned 34 interior
-    /// coordinates and returned a direction with a first-order error
-    /// fifty times the one-sided step's.
+    /// against the objective, and the wrong one here. Low curvature
+    /// widens its bands and admits interior coordinates.
     pub fn weakly_active_bounds(&self) -> Result<Vec<crate::boundcheck::WeakBound>, SolverError> {
         /// `sigma` within this factor of one, either side, is weak.
         const WEAK_SIGMA_BAND: Number = 1e2;
@@ -1331,12 +1327,20 @@ impl Solver {
         let Some(sigma) = state.backsolver.barrier_sigma_x_dense() else {
             return Ok(Vec::new());
         };
+        // The diagonal is the operator's own var-x vector, so the
+        // lengths agree by construction. A mismatch is a bug, and
+        // skipping rows over it would silently shrink the weak set.
+        if sigma.len() != ctx.n_x {
+            return Err(SolverError::BadShape {
+                what: "barrier sigma diagonal",
+                got: sigma.len(),
+                expected: ctx.n_x,
+            });
+        }
         let mut out = Vec::new();
         for var_row in 0..ctx.n_x {
-            let Some(&sg) = sigma.get(var_row) else {
-                continue;
-            };
-            if !(sg >= 1.0 / WEAK_SIGMA_BAND && sg <= WEAK_SIGMA_BAND) {
+            let sg = sigma[var_row];
+            if !(1.0 / WEAK_SIGMA_BAND..=WEAK_SIGMA_BAND).contains(&sg) {
                 continue;
             }
             let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];
