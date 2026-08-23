@@ -173,6 +173,14 @@ pub struct AdaptiveMuUpdate {
     /// iterate; restored when switching to fixed mode if
     /// `restore_accepted_iterate` is on. Mirrors `accepted_point_`.
     accepted_point: Option<IteratesVector>,
+    /// `adaptive_mu_max_free_returns` (pounce#749) — cap on how many
+    /// times the strategy may switch back out of fixed-mu mode. `-1`
+    /// is unlimited, reproducing upstream. POUNCE extension: it has no
+    /// counterpart in `IpAdaptiveMuUpdate.cpp`.
+    pub max_free_returns: i32,
+    /// Number of fixed->free transitions taken so far, compared
+    /// against [`Self::max_free_returns`].
+    free_returns_taken: i32,
     /// `no_bounds_` flag — port of `IpAdaptiveMuUpdate.cpp:282-287`.
     /// Set to `true` on the first `update_barrier_parameter` call when
     /// the iterate has zero bound multipliers (z_l, z_u, v_l, v_u all
@@ -222,6 +230,8 @@ impl Default for AdaptiveMuUpdate {
             probing_iterate_quality_factor: 1e4,
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
+            max_free_returns: -1,
+            free_returns_taken: 0,
             free_mu_mode: true,
             refs_vals: VecDeque::new(),
             filter: Filter::new(),
@@ -666,7 +676,19 @@ impl MuUpdate for AdaptiveMuUpdate {
             // At the default `obj-constr-filter` the two are equal, so
             // this distinction only moves never-monotone-mode (pounce#512).
             let sufficient_progress = !tiny_step_flag && self.check_sufficient_progress(cq);
-            if sufficient_progress {
+            // pounce#749 — POUNCE extension. Upstream returns to free
+            // mode every time progress looks sufficient, which on some
+            // problems (nql180) oscillates for the whole tail: the
+            // strategy re-enters fixed mode a handful of iterations
+            // later having paid the oracle's extra affine + centering
+            // solves the entire time, and never runs the cheap
+            // monotone endgame that closes the problem. Once the cap is
+            // reached we stay in fixed mode, which is exactly the
+            // Fiacco-McCormick reduction in the `else` arm below.
+            // `-1` disables the cap and reproduces upstream.
+            let returns_left =
+                self.max_free_returns < 0 || self.free_returns_taken < self.max_free_returns;
+            if sufficient_progress && returns_left {
                 // Switch back to free mode and record the iterate —
                 // upstream `cpp:303-311`. Upstream does NOT return
                 // here: after flipping `FreeMuMode` to true the first
@@ -679,6 +701,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                 // mu_min, stalling to Maximum_Iterations_Exceeded.
                 // Fall through to the oracle call below.
                 self.free_mu_mode = true;
+                self.free_returns_taken += 1;
                 self.remember_current_point_as_accepted(data, cq);
             } else {
                 // Keep reducing μ Fiacco-McCormick style if the
@@ -928,6 +951,49 @@ impl MuUpdate for AdaptiveMuUpdate {
 mod tests {
     use super::*;
     use crate::mu::test_fixture;
+
+    /// pounce#749: `adaptive_mu_max_free_returns` caps how many times
+    /// the strategy may climb back out of fixed-μ mode. The default
+    /// (`-1`) must leave upstream's behavior exactly as it was, so the
+    /// two arms are asserted against the same starting state.
+    fn returns_to_free_mode(max_free_returns: i32) -> bool {
+        let mut a = AdaptiveMuUpdate::new();
+        a.max_free_returns = max_free_returns;
+        let (data, cq) = test_fixture::fixture(0.1);
+        // Drive the state machine into fixed mode the same way
+        // `free_to_fixed_switch_requests_ls_reset` does: the first call
+        // seeds the filter, the second finds the same (θ, f) dominated.
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(!a.free_mu_mode, "fixture must reach fixed mode first");
+        // Clearing the filter makes the next progress check succeed, so
+        // the only thing that can hold the strategy in fixed mode is the
+        // cap under test.
+        a.filter = Filter::new();
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        a.free_mu_mode
+    }
+
+    #[test]
+    fn unlimited_free_returns_is_upstream_behavior() {
+        assert!(
+            returns_to_free_mode(-1),
+            "-1 must not cap the return to free mode"
+        );
+    }
+
+    #[test]
+    fn a_zero_cap_pins_the_strategy_in_the_monotone_endgame() {
+        assert!(
+            !returns_to_free_mode(0),
+            "with no returns budgeted the strategy must stay in fixed mode"
+        );
+    }
+
+    #[test]
+    fn a_cap_of_one_spends_its_budget_and_then_pins() {
+        assert!(returns_to_free_mode(1), "the first return is within budget");
+    }
 
     /// pounce#510: upstream resets the line search on **every** free-mode
     /// iteration (`IpAdaptiveMuUpdate.cpp:431`), not only when μ moves.

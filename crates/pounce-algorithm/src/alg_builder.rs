@@ -588,6 +588,10 @@ pub struct MuOptions {
     /// recent free-mode iterate when switching to fixed mode.
     /// Default `false`.
     pub adaptive_mu_restore_previous_iterate: bool,
+    /// `adaptive_mu_max_free_returns` (pounce#749, POUNCE
+    /// extension). Cap on how many times the adaptive strategy may
+    /// leave fixed-mu mode. `-1` = unlimited (upstream behavior).
+    pub adaptive_mu_max_free_returns: i32,
     /// `adaptive_mu_kkterror_red_iters` — window length for the
     /// `KKT_ERROR` globalization history. Default 4.
     pub adaptive_mu_kkterror_red_iters: usize,
@@ -648,6 +652,7 @@ impl Default for MuOptions {
             adaptive_mu_safeguard_factor: 0.0,
             adaptive_mu_monotone_init_factor: 0.8,
             adaptive_mu_restore_previous_iterate: false,
+            adaptive_mu_max_free_returns: -1,
             adaptive_mu_kkterror_red_iters: 4,
             adaptive_mu_kkterror_red_fact: 0.9999,
             adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
@@ -1270,6 +1275,7 @@ impl AlgorithmBuilder {
                 adaptive.adaptive_mu_monotone_init_factor =
                     self.mu.adaptive_mu_monotone_init_factor;
                 adaptive.restore_accepted_iterate = self.mu.adaptive_mu_restore_previous_iterate;
+                adaptive.max_free_returns = self.mu.adaptive_mu_max_free_returns;
                 adaptive.adaptive_mu_kkterror_red_iters = self.mu.adaptive_mu_kkterror_red_iters;
                 adaptive.adaptive_mu_kkterror_red_fact = self.mu.adaptive_mu_kkterror_red_fact;
                 adaptive.adaptive_mu_kkt_norm = self.mu.adaptive_mu_kkt_norm_type;

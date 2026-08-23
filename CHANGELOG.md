@@ -54,6 +54,45 @@ changes.
   doctored trace. `gams-rerun` is kept as an alias; the two are now the same
   thing.
 
+- **New `adaptive_mu_max_free_returns` caps the adaptive strategy's
+  free↔fixed oscillation** (#749). Off by default (`-1`, unlimited), so
+  nothing changes unless you ask for it.
+
+  The adaptive strategy switches into fixed-μ (monotone) mode when its
+  globalization judges free-mode progress insufficient, and switches back out
+  as soon as progress looks acceptable again. On some models it never commits:
+  `nql180` bounces out at iterations 8, 15, 19 and 23 and keeps paying the
+  quality-function oracle's extra affine and centering solves across a tail
+  that the monotone schedule closes cheaply. Uncapped, it does not converge —
+  250 iterations / 1241 s, dual infeasibility plateaued at 2.6e-06,
+  `Maximum_Iterations_Exceeded`. Ipopt's adaptive arm behaves the same way on
+  this model. This option caps how many times the strategy may leave fixed
+  mode; once the cap is spent it stays there, which is simply the
+  Fiacco-McCormick reduction the fixed branch already performs — no new
+  numerical path.
+
+  At `0` it turns that non-convergence into a solve, and beats monotone doing
+  it: **95 iterations / 132 s / NLP error 9.2e-10** against monotone's 105 /
+  277 s. Adaptive's early phase is genuinely the faster one (measured over the
+  first five iterations: 7.5 s and 4 factorizations, against monotone's 9.0 s
+  and 7); the oscillation is what squanders it. On the fixture sweep `0` also
+  takes `lbfgs pooling_rt2stp` from 295 iterations to **92** at the same
+  objective.
+
+  **It is not defaulted, because it is a trajectory perturbation rather than a
+  principled property, and the sweep says so.** At `0`, `lbfgs cresc4` goes
+  from `Solve_Succeeded`/105 to `Restoration_Failed`/361, and `lbfgs deb7`
+  from 709 iterations to 1833 on a worse objective; `jit1_node` inflates 19 →
+  27. Worse, the response is not monotone in the cap: `cresc4` fails at 0, 1
+  and 4 but succeeds at 2 and at `-1`. No single value serves both `cresc4`
+  and `nql180` (which needs exactly `0` — `1` leaves it worse than uncapped,
+  308 iterations to the CPU limit). A knob that erratic is a per-model tuning
+  aid, not a better barrier strategy, so it ships opt-in and `nql180` stays
+  open under #749. This is the same bar the abandoned μ-floor experiment below
+  failed — and notably it broke `cresc4` too, which suggests that model
+  genuinely needs free-mode adaptivity rather than that either fix was
+  mistuned.
+
 - **The barrier-schedule retry is on by default** (#748).
 
   `mu_strategy_fallback` has existed since #138 but shipped off, so the
@@ -101,7 +140,8 @@ changes.
   One limit is deliberate. The retry **cannot** rescue a
   `Maximum_CpuTime_Exceeded` exit and does not try, because the budget a
   retry needs is precisely the budget already spent. `nql180` regresses that
-  way under #746 and is not recovered here. Upstream is not better off on
+  way under #746 and is not recovered *by the retry*; it is recoverable by
+  hand with `adaptive_mu_max_free_returns=0` (see below and #749). Upstream is not better off on
   that model for the right reason either: Ipopt's adaptive arm also takes the
   long path (623 iterations to `Optimal Solution Found`, against monotone's
   279 to `Solved To Acceptable Level`) — it simply affords the wall clock
@@ -234,6 +274,9 @@ changes.
   `Maximum_Iterations_Exceeded`; a `Maximum_CpuTime_Exceeded` exit returns
   early, and widening it to cover that case would be wrong anyway, since the
   time budget the retry would need is precisely the budget already spent.
+  It is recoverable a different way — `adaptive_mu_max_free_returns=0` solves
+  it in 95 iterations, faster than monotone — but not safely by default; see
+  that option's entry above and #749.
 
   `recalc_y`'s upstream limited-memory default (`IpIpoptAlg.cpp:238`) is
   deliberately still **not** followed; that decision and its measurements are

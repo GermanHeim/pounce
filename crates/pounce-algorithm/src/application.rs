@@ -4013,6 +4013,9 @@ impl IpoptApplication {
                 builder.mu.adaptive_mu_restore_previous_iterate = v;
             }
         }
+        if let Some(v) = read_int("adaptive_mu_max_free_returns") {
+            builder.mu.adaptive_mu_max_free_returns = v;
+        }
         if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
             if v >= 0 {
                 builder.mu.adaptive_mu_kkterror_red_iters = v as usize;
