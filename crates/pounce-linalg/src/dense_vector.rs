@@ -238,6 +238,40 @@ impl TaggedObject for DenseVector {
     }
 }
 
+/// Allocation-free read view of an elementwise-operand vector.
+///
+/// The three cases are exactly what the dense kernels below have to
+/// cope with: an operand whose coefficient is zero (never read), a
+/// homogeneous vector (one scalar standing in for all `n` entries),
+/// and a materialized dense vector. Broadcasting the scalar rather
+/// than expanding it into `n` copies is what keeps the homogeneous
+/// case free.
+#[derive(Clone, Copy)]
+enum Operand<'a> {
+    Zero,
+    Scalar(Number),
+    Dense(&'a [Number]),
+}
+
+impl<'a> Operand<'a> {
+    fn of(dv: Option<&'a DenseVector>, n: usize) -> Self {
+        match dv {
+            None => Operand::Zero,
+            Some(d) if d.homogeneous => Operand::Scalar(d.scalar),
+            Some(d) => Operand::Dense(&d.values[..n]),
+        }
+    }
+
+    #[inline(always)]
+    fn at(self, i: usize) -> Number {
+        match self {
+            Operand::Zero => 0.0,
+            Operand::Scalar(s) => s,
+            Operand::Dense(v) => v[i],
+        }
+    }
+}
+
 impl Vector for DenseVector {
     fn dim(&self) -> Index {
         self.space.dim()
@@ -785,37 +819,29 @@ impl Vector for DenseVector {
             self.materialize_from_scalar();
         }
 
-        // Get expanded slices of v1/v2 (allocate when homogeneous; the
-        // slow path is rare in practice).
-        let v1_arr: Option<Vec<Number>> = dv1.map(|d| {
-            if d.homogeneous {
-                vec![d.scalar; n]
-            } else {
-                d.values[..n].to_vec()
-            }
-        });
-        let v2_arr: Option<Vec<Number>> = dv2.map(|d| {
-            if d.homogeneous {
-                vec![d.scalar; n]
-            } else {
-                d.values[..n].to_vec()
-            }
-        });
+        // Read the operands in place. These used to be materialized
+        // into two fresh `Vec`s per call. That was a convenience, not
+        // a requirement: `dv1`/`dv2` borrow from the `v1`/`v2`
+        // arguments and never from `self`, so no copy is needed to
+        // satisfy the aliasing rules. The claim that this branch was
+        // "rare in practice" did not hold — the quality-function mu
+        // oracle reaches it for every block update of every trial
+        // sigma, so on a large model the operand copies were the
+        // dominant cost of the adaptive barrier update (pounce#749).
+        let v1_op = Operand::of(dv1, n);
+        let v2_op = Operand::of(dv2, n);
 
         // Single fused expression. IEEE multiplication by 0 / 1 / -1
         // is exact, so this is bit-equivalent to upstream's 64-case
         // dispatch in `IpDenseVector.cpp:843-1322`.
+        let out = &mut self.values[..n];
         if c == 0.0 {
-            for i in 0..n {
-                let v1i = v1_arr.as_ref().map(|v| v[i]).unwrap_or(0.0);
-                let v2i = v2_arr.as_ref().map(|v| v[i]).unwrap_or(0.0);
-                self.values[i] = a * v1i + b * v2i;
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = a * v1_op.at(i) + b * v2_op.at(i);
             }
         } else {
-            for i in 0..n {
-                let v1i = v1_arr.as_ref().map(|v| v[i]).unwrap_or(0.0);
-                let v2i = v2_arr.as_ref().map(|v| v[i]).unwrap_or(0.0);
-                self.values[i] = a * v1i + b * v2i + c * self.values[i];
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = a * v1_op.at(i) + b * v2_op.at(i) + c * *o;
             }
         }
         self.initialized = true;
@@ -851,23 +877,19 @@ impl Vector for DenseVector {
         } else if self.homogeneous {
             self.materialize_from_scalar();
         }
-        let z_arr: Vec<Number> = if homog_z {
-            vec![dz.scalar; n]
-        } else {
-            dz.values[..n].to_vec()
-        };
-        let s_arr: Vec<Number> = if homog_s {
-            vec![ds.scalar; n]
-        } else {
-            ds.values[..n].to_vec()
-        };
+        // In place, for the same reason as `add_two_vectors_impl`
+        // above: `dz`/`ds` borrow from the arguments, so the two
+        // full-length temporaries bought nothing (pounce#749).
+        let z_op = Operand::of(Some(dz), n);
+        let s_op = Operand::of(Some(ds), n);
+        let out = &mut self.values[..n];
         if c == 0.0 {
-            for i in 0..n {
-                self.values[i] = a * z_arr[i] / s_arr[i];
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = a * z_op.at(i) / s_op.at(i);
             }
         } else {
-            for i in 0..n {
-                self.values[i] = c * self.values[i] + a * z_arr[i] / s_arr[i];
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = c * *o + a * z_op.at(i) / s_op.at(i);
             }
         }
         self.initialized = true;
