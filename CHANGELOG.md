@@ -71,9 +71,12 @@ changes.
   drives to between `-sens_bound_eps` and the solve's margin now
   releases its bound, where before it was pinned.
 
-  A margin wide enough to cover the crossing leaves the step where the
-  predictor put it, so `alpha` comes back below one there, where under
-  `fix_relax` it is otherwise 1.0.
+  A margin wide enough to cover the crossing pins nothing, so `alpha`
+  comes back below one there, where under `fix_relax` it is otherwise
+  1.0. It is not quite the predictor's own step: the release test keeps
+  the solve's margin whatever the primal one is, so a bound the step
+  drives negative is still released and the step moves by that
+  multiplier's size.
 
   `max_pdpert` refuses rather than answering when the converged KKT
   factor carries an inertia correction larger than the value given.
