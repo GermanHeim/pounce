@@ -36,6 +36,30 @@ changes.
 
   Same defect class as the `args`-binding fix that precedes it in the routing
   block: a user input the convex route did not honor.
+- **`bound_eps` is refused at or below zero by the Rust API too, not
+  only by pyomo.** `Solver::bound_context` makes the check, so the
+  `pounce._pounce.Solver` bindings and every `Solver` caller get what
+  the CLI's `sens_bound_eps` gets from its strict lower bound. Neither
+  bad value failed on its own before: zero reinstated the roundoff
+  pinning the floor exists to prevent, and NaN made `over > eps` false
+  everywhere, so the refinement pinned nothing and still reported
+  `settled`. Both handed back a plausible vector. `pyomo_pounce`'s own
+  `_check_margins` is unchanged and still names the argument first.
+
+  The refinement's release threshold is one derivation,
+  `boundcheck::release_floor`, rather than three: `bound_context` reads
+  it off the recorded state and the CLI and `SensSolve` off the options
+  list through `options::release_floor_from_options`. No behaviour
+  change — the three copies agreed — but they can no longer drift.
+
+  `refine_step_onto_bounds` now documents what its two accept guards do
+  under a wide `bound_eps`. They scale with the primal margin, so a
+  margin far above the model's own scale takes them out of the picture:
+  at `bound_eps = 10.0` the worse-than-plain guard reads
+  `worst_over(dx) > 100.0` and `RefineStop::WorseThanPlain` cannot be
+  reached. That is deliberate — a margin wide enough to pin nothing is
+  wide enough to accept any release batch it produces — and it was
+  undocumented.
 
 - **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
   settable through the CLI and the `SensSolve` builder and were

@@ -1229,10 +1229,7 @@ pub fn main() -> ExitCode {
         // The refinement releases a bound whose multiplier the step
         // drives negative past the solve's own margin, not past
         // `sens_bound_eps`, which is a primal margin.
-        let release_eps = app
-            .options()
-            .get_numeric_value("bound_relax_factor", "")
-            .map_or(1e-9, |(v, _)| v.abs().max(1e-9));
+        let release_eps = pounce_sensitivity::release_floor_from_options(app.options());
         let sens_opts_cb = sens_options;
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {

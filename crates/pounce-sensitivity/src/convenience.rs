@@ -311,10 +311,7 @@ impl SensSolve {
         // The refinement's release test keeps the solve's own margin,
         // whatever `sens_bound_eps` says: that option is a primal
         // margin and a multiplier changing sign is not a primal event.
-        let release_eps = app
-            .options()
-            .get_numeric_value("bound_relax_factor", "")
-            .map_or(1e-9, |(v, _)| v.abs().max(1e-9));
+        let release_eps = crate::options::release_floor_from_options(app.options());
 
         // Side channel: the callback writes here, the outer caller
         // reads after optimize_tnlp returns. RefCell + Rc because the

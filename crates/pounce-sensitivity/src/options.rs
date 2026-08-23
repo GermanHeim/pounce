@@ -198,6 +198,20 @@ impl SensOptionOverrides {
 /// through the `Solver.pdpert_verdict` binding, which
 /// `pyomo_pounce.sens._refuse_on_pdpert` calls. Each of them words its
 /// own message from `worst`.
+/// The refinement's release threshold read off an options list, for the
+/// two callers that have one rather than a converged state.
+///
+/// `bound_relax_factor` unset or unreadable resolves to the `1e-9`
+/// floor, which is what [`crate::boundcheck::release_floor`] gives it
+/// anyway; the arithmetic lives there so the three readers of this
+/// number share one definition.
+pub fn release_floor_from_options(options: &OptionsList) -> Number {
+    let brf = options
+        .get_numeric_value("bound_relax_factor", "")
+        .map_or(0.0, |(v, _)| v);
+    crate::boundcheck::release_floor(brf)
+}
+
 pub fn pdpert_verdict(perturbations: &[Number; 4], limit: Number) -> (bool, Number) {
     let worst = perturbations
         .iter()
@@ -301,5 +315,43 @@ mod tests {
         // strictly above, so a cap AT the correction accepts it
         assert!(!pdpert_verdict(&[1e-6, 0.0, 0.0, 0.0], 1e-6).0);
         assert!(pdpert_verdict(&[1.0000001e-6, 0.0, 0.0, 0.0], 1e-6).0);
+    }
+
+    /// The release threshold is one derivation, and an unset or
+    /// unreadable `bound_relax_factor` is the floor rather than zero:
+    /// zero would release on any multiplier below it, which is every
+    /// multiplier that has not changed sign.
+    #[test]
+    fn the_release_floor_is_the_solves_margin_never_below_the_floor() {
+        assert_eq!(crate::boundcheck::release_floor(0.0), 1e-9);
+        assert_eq!(crate::boundcheck::release_floor(1e-12), 1e-9);
+        assert_eq!(crate::boundcheck::release_floor(1e-8), 1e-8);
+        // a relaxation is a magnitude here, as the multiplier test is
+        assert_eq!(crate::boundcheck::release_floor(-1e-8), 1e-8);
+        // and the options reader agrees with it. `bound_relax_factor`
+        // belongs to the algorithm rather than to `register_options`,
+        // so a list carrying only the sens keys cannot read it -- which
+        // is the unreadable case, and it resolves to the floor.
+        let sens_only = list();
+        assert_eq!(release_floor_from_options(&sens_only), 1e-9);
+
+        let reg = RegisteredOptions::new();
+        crate::sens_app::register_options(&reg).expect("register");
+        reg.add_lower_bounded_number_option(
+            "bound_relax_factor",
+            "the algorithm's own, as the two option-reading callers see it",
+            0.0,
+            false,
+            1e-8,
+            "",
+        )
+        .expect("register bound_relax_factor");
+        let mut l = OptionsList::with_registered(reg);
+        // unset reads the registered default rather than the floor,
+        // which is what an unconfigured solve hands the refinement
+        assert_eq!(release_floor_from_options(&l), 1e-8);
+        l.set_numeric_value("bound_relax_factor", 0.0, true, false)
+            .unwrap();
+        assert_eq!(release_floor_from_options(&l), 1e-9);
     }
 }

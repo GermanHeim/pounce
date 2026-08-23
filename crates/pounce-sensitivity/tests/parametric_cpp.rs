@@ -39,6 +39,7 @@ use pounce_nlp::tnlp::{
     TNLP,
 };
 use pounce_sensitivity::boundcheck::RefineStop;
+use pounce_sensitivity::solver::SolverError;
 use pounce_sensitivity::{
     IndexSchurData, PdSensBacksolver, SensApplication, SensBacksolver, SensOptions,
 };
@@ -782,6 +783,43 @@ fn three_free_solver() -> pounce_sensitivity::Solver {
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
     solver
+}
+
+/// The margin is rejected where the CLI's `sens_bound_eps` is, at the
+/// one place both the Rust API and the pyo3 binding pass through.
+///
+/// Neither value fails on its own: a zero margin reinstates the
+/// roundoff pinning the floor exists to prevent, and a NaN makes
+/// `over > eps` false everywhere, so the refinement pins nothing and
+/// still reports `Settled`. Both hand back a plausible vector, which
+/// is why they have to be refused rather than left to the caller to
+/// notice.
+#[test]
+fn a_margin_at_or_below_zero_is_refused() {
+    let solver = three_free_solver();
+    for bad in [0.0, -1.0, Number::NAN] {
+        let err = solver
+            .parametric_step_bounded(&[0], &[-2.0], 8, Some(bad))
+            .expect_err(&format!("bound_eps={bad} must be refused"));
+        assert!(
+            matches!(&err, SolverError::BadOptions(m) if m.contains("bound_eps")),
+            "bound_eps={bad} should name the argument, got {err:?}"
+        );
+        // and the decided twin, which reaches bound_context its own way
+        assert!(
+            solver
+                .parametric_step_bounded_decided(&[0], &[-2.0], 8, &[], Some(bad))
+                .is_err(),
+            "bound_eps={bad} must be refused on the decided route too"
+        );
+    }
+    // the boundary itself is accepted: strictly above zero, as the
+    // option's `add_lower_bounded_number_option(.., 0.0, true, ..)` is
+    assert!(
+        solver
+            .parametric_step_bounded(&[0], &[-2.0], 8, Some(Number::MIN_POSITIVE))
+            .is_ok()
+    );
 }
 
 #[test]
