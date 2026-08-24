@@ -149,6 +149,25 @@ public accessor gets a row in each leg — the cost of leaving one out is
 that the next defect in that dimension is invisible, which is the whole
 history above.
 
+**A leg is only evidence about the branch its fixture reaches.** If the
+rule under test *branches* — on an activity class, on a status, on which
+side of a threshold a quantity falls — then a fixture that always takes
+one branch says nothing about the other, and it stays green while the
+other branch is broken. This is not hypothetical: the legs above passed on
+gh#756's head while that PR's defect was live, because their kink
+certifies `WEAKLY_ACTIVE` and that PR's rule gave certified rows an
+early return — so the code actually under review was never executed. The leg that found the defect
+is the one whose fixture lands in the *other* class. Before trusting a
+green leg on a change, check which branch its fixture takes, and add a
+fixture for each branch the rule can take — the second fixture is the
+test, not a duplicate of the first.
+
+Corollary for the classifier specifically: `AMBIGUOUS` is not "probably
+not a kink". A genuine kink lands there whenever its coordinate is
+coupled, because the ratio is `reduced/diagonal` (gh#763). Never use the
+activity class as a proxy for kink-ness — that inference is exactly what
+produced the gh#756 defect.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
