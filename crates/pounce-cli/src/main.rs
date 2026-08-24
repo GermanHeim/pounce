@@ -1087,6 +1087,7 @@ pub fn main() -> ExitCode {
                         bound_relax,
                         presolve_on,
                         socp_nlp_fallback,
+                        convex_console(&app, json_dbg),
                     ) {
                         return code;
                     }
@@ -1135,6 +1136,7 @@ pub fn main() -> ExitCode {
                         matches!(choice, SolverChoice::QpActiveSet),
                         engine_overrides,
                         lp_nlp_fallback,
+                        convex_console(&app, json_dbg),
                     ) {
                         return code;
                     }
@@ -2459,6 +2461,86 @@ fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRe
     }
 }
 
+/// The console-contract knobs the convex drivers need from the options list.
+///
+/// Resolved once at the dispatch site because neither driver carries the
+/// [`IpoptApplication`] the options live on, and both must answer the same
+/// questions: may they print the end-of-run verdict, and were they asked for
+/// timing statistics (gh #767).
+#[derive(Debug, Clone, Copy, Default)]
+struct ConvexConsole {
+    /// `print_level >= 1` — gates the `EXIT:` / `POUNCE:` / `Status:` block,
+    /// exactly as `Application::emit_end_summary` gates the NLP path's. At
+    /// print_level 0 the console is silent by request.
+    verdict: bool,
+    /// `--json-debug`: stdout is a pure protocol channel there, so the
+    /// machine-readable `Status:` line stays off it — the same carve-out the
+    /// NLP path makes.
+    json_debug: bool,
+    /// `timing_statistics` or `print_timing_statistics` (which implies it) —
+    /// run the detailed per-phase timers.
+    collect_timing: bool,
+    /// `print_timing_statistics` — emit the timing block after the verdict.
+    print_timing: bool,
+}
+
+/// Read [`ConvexConsole`] off the application's options list.
+///
+/// gh #767: `print_timing_statistics` was registered, accepted, and reported
+/// `(used)` by `print_user_options` on this path while emitting nothing —
+/// so a tool attributing solve cost by phase read 0% for every phase of a
+/// convex-routed instance, which is indistinguishable from "already fast".
+fn convex_console(app: &IpoptApplication, json_dbg: bool) -> ConvexConsole {
+    let opt = app.options();
+    let yes = |name: &str| {
+        opt.get_bool_value(name, "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(false)
+    };
+    let print_timing = yes("print_timing_statistics");
+    ConvexConsole {
+        verdict: opt
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true),
+        json_debug: json_dbg,
+        // `print_timing_statistics=yes` implies `timing_statistics=yes` per
+        // its own option help, so either one arms the detailed timers.
+        collect_timing: print_timing || yes("timing_statistics"),
+        print_timing,
+    }
+}
+
+/// Emit the convex path's end-of-run verdict: the `EXIT:` banner block and
+/// the machine-readable `Status:` line, under the same gates the NLP path
+/// applies to its own (see [`ConvexConsole`]). Shared by both convex drivers
+/// so the two cannot drift.
+fn print_convex_verdict(
+    console: ConvexConsole,
+    status: pounce_convex::QpStatus,
+    timing: &pounce_common::timing::ConvexTimingStatistics,
+) {
+    if !console.verdict {
+        return;
+    }
+    if console.print_timing {
+        print!("{}", timing.report());
+    }
+    // One status vocabulary across both engines: the convex verdict mapped
+    // onto the NLP-side enumerator, which is what `status_message` phrases
+    // and what `upstream_name` spells the way CUTEst tables and the
+    // reference JSONs do.
+    let ars = qp_status_to_ars(status);
+    // The same quantity the NLP path prints on this line: the driver's own
+    // `OverallAlgorithm` total, not the solve-only figure the one-line result
+    // above already carries.
+    print::print_convex_end(ars, timing.overall_alg.total_wallclock_time());
+    if !console.json_debug {
+        println!("Status: {}", ars.upstream_name());
+    }
+}
+
 fn convex_opts_with_remaining(
     mut opts: pounce_convex::QpOptions,
     started: std::time::Instant,
@@ -2532,13 +2614,25 @@ fn run_convex_qp(
     engine_overrides: pounce_convex::ActiveSetOverrides,
     // gh #535: may an uncertified LP solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
+    // Verdict / timing-statistics switches read off the options list.
+    console: ConvexConsole,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const) =
+    // gh #767: per-phase wall clock for the convex path. The struct is always
+    // built (it costs nothing when the detailed timers are off) and the sink
+    // is always installed, so `pounce-linsol` can charge the factorization and
+    // back-solve rows from several crates below this driver.
+    let timing = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
+    timing.set_detailed_enabled(console.collect_timing);
+    timing.overall_alg.start();
+    let _timing_scope = pounce_common::timing::ConvexTimingScope::open(&timing);
+
+    let (qp, con_map, obj_nl_const) = {
+        let _t = timing.extraction.guard();
         match pounce_cli::qp_extract::extract_qp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
@@ -2548,7 +2642,8 @@ fn run_convex_qp(
                 );
                 return Some(ExitCode::from(2));
             }
-        };
+        }
+    };
 
     // The reported objective must include *both* constant sources: the
     // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
@@ -2635,9 +2730,14 @@ fn run_convex_qp(
         // user selected. The caller has already printed the note explaining
         // the debugger does not engage; fall through and solve normally.
         let mut h = hook.borrow_mut();
+        let _t = timing.solve.guard();
         solve_qp_ipm_debug(&qp, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
-        match presolve(&qp) {
+        let outcome = {
+            let _t = timing.presolve.guard();
+            presolve(&qp)
+        };
+        match outcome {
             PresolveOutcome::Reduced(ps) => {
                 // A screen claimed infeasibility and the re-derivation without
                 // the speculative fixings would not reproduce it, so presolve
@@ -2686,17 +2786,23 @@ fn run_convex_qp(
                         exit,
                     ));
                 }
-                let red = if use_active_set {
-                    let mut mk = backend;
-                    solve_qp_active_set(
-                        &ps.reduced,
-                        &solve_opts_offset(ps.obj_offset()),
-                        &engine_overrides,
-                        &mut mk,
-                    )
-                } else {
-                    solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
+                let red = {
+                    let _t = timing.solve.guard();
+                    if use_active_set {
+                        let mut mk = backend;
+                        solve_qp_active_set(
+                            &ps.reduced,
+                            &solve_opts_offset(ps.obj_offset()),
+                            &engine_overrides,
+                            &mut mk,
+                        )
+                    } else {
+                        solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
+                    }
                 };
+                // The postsolve lift is presolve's other half, so it is
+                // charged to the same row.
+                let _t = timing.presolve.guard();
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible(trigger) => {
@@ -2710,8 +2816,10 @@ fn run_convex_qp(
         }
     } else if use_active_set {
         let mut mk = backend;
+        let _t = timing.solve.guard();
         solve_qp_active_set(&qp, &solve_opts(), &engine_overrides, &mut mk)
     } else {
+        let _t = timing.solve.guard();
         solve_qp_ipm(&qp, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
@@ -2793,6 +2901,7 @@ fn run_convex_qp(
     // Recover per-constraint duals once (mapped from the QP multipliers back
     // to per-`.nl`-constraint order); used by both the `.sol` and the JSON
     // report.
+    let recovery = timing.solution_recovery.guard();
     let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). The QP extractor puts
@@ -2819,6 +2928,14 @@ fn run_convex_qp(
             values: nl_writer::SolSuffixValues::Real(z_u_suffix),
         },
     ];
+    recovery.stop();
+
+    // The end-of-run verdict, in the shape the NLP path emits it (gh #767).
+    // After the residual block and the dual recovery so the timing rows cover
+    // the whole driver, and before the `.sol` / JSON writes, which report
+    // nothing to stdout.
+    timing.overall_alg.end();
+    print_convex_verdict(console, sol.status, &timing);
 
     // Write a `.sol` if requested: primal x and recovered constraint duals in
     // the AMPL `.sol` convention.
@@ -2927,12 +3044,21 @@ fn run_convex_socp(
     presolve_on: bool,
     // gh #535: may an unverified conic solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
+    // Verdict / timing-statistics switches read off the options list.
+    console: ConvexConsole,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
     use pounce_convex::presolve::{PresolveOutcome, presolve_conic};
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const, cones) =
+    // Per-phase wall clock; see the same block in `run_convex_qp` (gh #767).
+    let timing = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
+    timing.set_detailed_enabled(console.collect_timing);
+    timing.overall_alg.start();
+    let _timing_scope = pounce_common::timing::ConvexTimingScope::open(&timing);
+
+    let (qp, con_map, obj_nl_const, cones) = {
+        let _t = timing.extraction.guard();
         match pounce_cli::qp_extract::extract_socp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
@@ -2942,7 +3068,8 @@ fn run_convex_socp(
                 );
                 return Some(ExitCode::from(2));
             }
-        };
+        }
+    };
 
     // Reported objective includes both constant sources (the `.nl` linear
     // section and the degree-0 term folded into the nonlinear objective tree),
@@ -2989,6 +3116,7 @@ fn run_convex_socp(
         // so the debugger's blocks correspond to the user's rows rather than
         // a reduced set. Same carve-out as the QP path.
         let mut h = hook.borrow_mut();
+        let _t = timing.solve.guard();
         solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         // **`presolve_conic`, never `presolve`.** The orthant entry point
@@ -3003,7 +3131,11 @@ fn run_convex_socp(
         // `presolve_conic` protects every non-orthant row, which is what
         // makes this call safe; §7 of `dev-notes/quadratic-structure-
         // exploitation.md` is the validity table.
-        match presolve_conic(&qp, &cones) {
+        let outcome = {
+            let _t = timing.presolve.guard();
+            presolve_conic(&qp, &cones)
+        };
+        match outcome {
             PresolveOutcome::Reduced(ps) => {
                 if let Some(trigger) = ps.discarded_infeasibility() {
                     presolve_log.push(format!(
@@ -3038,7 +3170,12 @@ fn run_convex_socp(
                 // row indices, so `con_map`'s `z_row0`/`z_row1` — and hence
                 // `recover_socp_duals` below — need no remapping.
                 let red_cones = ps.reduced_cones(&cones);
-                let red = solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend);
+                let red = {
+                    let _t = timing.solve.guard();
+                    solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend)
+                };
+                // The postsolve lift is presolve's other half.
+                let _t = timing.presolve.guard();
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible(trigger) => {
@@ -3048,6 +3185,7 @@ fn run_convex_socp(
             PresolveOutcome::Unbounded => trivial(pounce_convex::QpStatus::DualInfeasible),
         }
     } else {
+        let _t = timing.solve.guard();
         solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
@@ -3117,6 +3255,7 @@ fn run_convex_socp(
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
     // constraint order (best-effort for the quadratic rows; see
     // `recover_socp_duals`).
+    let recovery = timing.solution_recovery.guard();
     let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). As on the QP path the
@@ -3140,6 +3279,12 @@ fn run_convex_socp(
             values: nl_writer::SolSuffixValues::Real(z_u_suffix),
         },
     ];
+    recovery.stop();
+
+    // The end-of-run verdict, in the shape the NLP path emits it (gh #767);
+    // see the same call in `run_convex_qp` for the placement.
+    timing.overall_alg.end();
+    print_convex_verdict(console, sol.status, &timing);
 
     if let Some(path) = sol_path {
         let payload = nl_writer::SolutionFile {
