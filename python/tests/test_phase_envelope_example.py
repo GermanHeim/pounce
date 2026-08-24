@@ -194,7 +194,7 @@ def test_published_binary_fold_and_inverse_design_regression():
         beta=0.0,
         mode="temperature",
         ds=0.1,
-        n_steps=145,
+        n_steps=170,
     )
     verification_fold = refine_fold(
         verification_trace,
@@ -210,6 +210,13 @@ def test_published_binary_fold_and_inverse_design_regression():
         beta=0.0,
         mode="temperature",
     )
+    terminal = diagnose_phase_point(
+        verification_trace.x[-1],
+        verification_trace.theta[-1],
+        design.mixture,
+        beta=0.0,
+        mode="temperature",
+    )
     assert abs(verification_fold.temperature_k - design.target) < 1e-6  # [K]
     assert verification_fold.max_residual < 1e-9
     assert verification.max_residual < 1e-9
@@ -217,3 +224,14 @@ def test_published_binary_fold_and_inverse_design_regression():
     assert verification.roots_are_admissible
     assert np.isclose(verification.liquid_sum, 1.0, atol=1e-10)
     assert np.isclose(verification.vapor_sum, 1.0, atol=1e-10)
+    assert verification_trace.status == "corrector_failed"
+    assert verification_trace.n_steps > 145
+    assert terminal.max_residual < 1e-9
+    assert terminal.branch_distance > 0.5
+    assert terminal.roots_are_admissible
+    assert np.isclose(terminal.liquid_sum, 1.0, atol=1e-10)
+    assert np.isclose(terminal.vapor_sum, 1.0, atol=1e-10)
+    assert (
+        np.exp(verification_trace.x[-1, design.mixture.n_components])
+        < verification_fold.pressure_pa
+    )
