@@ -9,6 +9,7 @@ from pounce.examples.phase_envelope import (
     design_parameters,
     diagnose_phase_point,
     phase_boundary_with_sensitivity,
+    reparameterize_trace,
     refine_fold,
     simplex_coordinates,
     solve_low_pressure_anchor,
@@ -66,6 +67,22 @@ def test_fixed_pressure_sensitivity_matches_fresh_phase_boundary_solves():
         atol=2e-4,
     )
 
+    # A caller-provided state is a warm start, not permission to differentiate
+    # an arbitrary non-root.  Perturb the temperature enough to give a large
+    # equilibrium residual and require the public helper to solve it back.
+    perturbed_seed = point.state.copy()
+    perturbed_seed[-1] += 0.02
+    recovered = phase_boundary_with_sensitivity(
+        mixture,
+        beta=0.0,
+        pressure_pa=pressure_pa,
+        kij_pair=kij_pair,
+        initial_state=perturbed_seed,
+    )
+    assert recovered.max_residual < 1e-10
+    assert not np.array_equal(recovered.state, perturbed_seed)
+    np.testing.assert_allclose(recovered.state, point.state, rtol=1e-9, atol=1e-9)
+
 
 def test_published_binary_fold_and_inverse_design_regression():
     """Reproduce a published maxcondentherm and solve an inverse design."""
@@ -83,6 +100,18 @@ def test_published_binary_fold_and_inverse_design_regression():
         mixture,
         beta=0.0,
         mode="temperature",
+        kij_pair=(0, 1),
+    )
+    pressure_fold = refine_fold(
+        reparameterize_trace(
+            trace,
+            mixture,
+            from_mode="temperature",
+            to_mode="pressure",
+        ),
+        mixture,
+        beta=0.0,
+        mode="pressure",
         kij_pair=(0, 1),
     )
     diagnostics = diagnose_phase_point(
@@ -103,6 +132,51 @@ def test_published_binary_fold_and_inverse_design_regression():
     assert np.isclose(diagnostics.liquid_sum, 1.0, atol=1e-10)
     assert np.isclose(diagnostics.vapor_sum, 1.0, atol=1e-10)
 
+    # The augmented folds should be insensitive to the continuation sampling
+    # once each run brackets the same two extrema.
+    fine_trace = trace_envelope(
+        mixture,
+        beta=0.0,
+        mode="temperature",
+        ds=0.08,
+        n_steps=180,
+    )
+    fine_temperature_fold = refine_fold(
+        fine_trace,
+        mixture,
+        beta=0.0,
+        mode="temperature",
+        kij_pair=(0, 1),
+    )
+    fine_pressure_fold = refine_fold(
+        reparameterize_trace(
+            fine_trace,
+            mixture,
+            from_mode="temperature",
+            to_mode="pressure",
+        ),
+        mixture,
+        beta=0.0,
+        mode="pressure",
+        kij_pair=(0, 1),
+    )
+    np.testing.assert_allclose(
+        [
+            pressure_fold.pressure_pa,
+            pressure_fold.temperature_k,
+            fold.temperature_k,
+            fold.pressure_pa,
+        ],
+        [
+            fine_pressure_fold.pressure_pa,
+            fine_pressure_fold.temperature_k,
+            fine_temperature_fold.temperature_k,
+            fine_temperature_fold.pressure_pa,
+        ],
+        rtol=1e-8,
+        atol=1e-6,
+    )
+
     design = design_composition_for_extremum(
         fold,
         mixture,
@@ -114,3 +188,32 @@ def test_published_binary_fold_and_inverse_design_regression():
     assert design.max_residual < 1e-9
     assert np.isclose(design.mixture.composition.sum(), 1.0, atol=1e-12)
     assert np.all(design.mixture.composition > 0.0)
+
+    verification_trace = trace_envelope(
+        design.mixture,
+        beta=0.0,
+        mode="temperature",
+        ds=0.1,
+        n_steps=145,
+    )
+    verification_fold = refine_fold(
+        verification_trace,
+        design.mixture,
+        beta=0.0,
+        mode="temperature",
+        kij_pair=(0, 1),
+    )
+    verification = diagnose_phase_point(
+        verification_fold.state,
+        verification_fold.log_parameter,
+        design.mixture,
+        beta=0.0,
+        mode="temperature",
+    )
+    assert abs(verification_fold.temperature_k - design.target) < 1e-6  # [K]
+    assert verification_fold.max_residual < 1e-9
+    assert verification.max_residual < 1e-9
+    assert verification.branch_distance > 0.5
+    assert verification.roots_are_admissible
+    assert np.isclose(verification.liquid_sum, 1.0, atol=1e-10)
+    assert np.isclose(verification.vapor_sum, 1.0, atol=1e-10)

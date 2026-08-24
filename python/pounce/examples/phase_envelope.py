@@ -520,13 +520,21 @@ def phase_boundary_with_sensitivity(
 
     q0 = design_parameters(mixture, kij_pair)
     if initial_state is None:
-        initial_state = solve_low_pressure_anchor(
-            mixture,
-            beta=beta,
-            pressure_pa=pressure_pa,
-            design=q0,
-            kij_pair=kij_pair,
+        composition = np.asarray(_decode_design(mixture, q0, kij_pair)[0])
+        initial_state, _ = wilson_start(
+            pressure_pa, beta, mixture, composition=composition
         )
+    problem = make_envelope_problem(
+        mixture,
+        beta,
+        mode="pressure",
+        design=q0,
+        kij_pair=kij_pair,
+    )
+    state = problem.solve(
+        jnp.asarray([np.log(pressure_pa)]),
+        jnp.asarray(initial_state, dtype=jnp.float64),
+    )
 
     def residual(state, design):
         return envelope_residual(
@@ -538,12 +546,12 @@ def phase_boundary_with_sensitivity(
             kij_pair=kij_pair,
         )
 
-    state = jnp.asarray(initial_state, dtype=jnp.float64)
     design = jnp.asarray(q0, dtype=jnp.float64)
     state_jacobian = jax.jacobian(residual, argnums=0)(state, design)
     design_jacobian = jax.jacobian(residual, argnums=1)(state, design)
-    # F(x(q), q) = 0 implies dx/dq = -F_x^{-1} F_q.  The state came
-    # from POUNCE's converged fixed-pressure solve immediately above.
+    # F(x(q), q) = 0 implies dx/dq = -F_x^{-1} F_q.  The state always comes
+    # from POUNCE's converged fixed-pressure solve immediately above; a caller
+    # supplied ``initial_state`` is only its warm start.
     jacobian = -jnp.linalg.solve(state_jacobian, design_jacobian)
     residual_value = residual(state, design)
     return PhaseBoundaryPoint(
@@ -600,6 +608,44 @@ def trace_envelope(
         ds=ds,
         n_steps=n_steps,
         direction=direction,
+    )
+
+
+def reparameterize_trace(
+    trace: PathTrace,
+    mixture: PengRobinsonMixture,
+    *,
+    from_mode: Mode,
+    to_mode: Mode,
+) -> PathTrace:
+    """Express one phase-envelope trace in the other scalar parameterization.
+
+    A pressure-mode point stores ``[ln K, ln T]`` with parameter ``ln P``;
+    temperature mode stores ``[ln K, ln P]`` with parameter ``ln T``.  This
+    function only rearranges those already-converged coordinates.  It does not
+    perform or claim an independent continuation run.
+    """
+
+    if from_mode not in ("pressure", "temperature"):
+        raise ValueError("from_mode must be 'pressure' or 'temperature'")
+    if to_mode not in ("pressure", "temperature"):
+        raise ValueError("to_mode must be 'pressure' or 'temperature'")
+    if from_mode == to_mode:
+        return replace(trace)
+
+    n = mixture.n_components
+    theta = np.asarray(trace.x[:, n], dtype=float)
+    state = np.column_stack(
+        [np.asarray(trace.x[:, :n], dtype=float), np.asarray(trace.theta, dtype=float)]
+    )
+    increments = np.diff(theta)
+    reversals = np.flatnonzero(increments[:-1] * increments[1:] < 0.0) + 1
+    return replace(
+        trace,
+        theta=theta,
+        x=state,
+        active_set_changes=[],
+        turning_points=theta[reversals].tolist(),
     )
 
 
@@ -1084,6 +1130,7 @@ __all__ = [
     "mixture_from_design",
     "physical_coordinates",
     "phase_boundary_with_sensitivity",
+    "reparameterize_trace",
     "refine_fold",
     "simplex_coordinates",
     "solve_low_pressure_anchor",
