@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+- **`jacobianstructure` is optional again on the Python `Problem`, as
+  cyipopt documents it** (#765). A constrained `problem_obj` that omits the
+  callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and
+  `solve_nlp_batch()` used to call the method unconditionally and raise a
+  bare `AttributeError: 'O' object has no attribute 'jacobianstructure'`.
+
+  The asymmetry was the tell: `hessianstructure` *is* feature-detected
+  (`has_hessian` is a `hasattr` probe, and the Hessian block is gated on
+  it) — only the Jacobian block called blind. So did POUNCE's own entry
+  points: `pounce.preflight` implements the dense fallback in
+  `_preflight.py` and reported `ok: True` for the very object `solve()`
+  then rejected.
+
+  The synthesized pattern is `np.divmod(np.arange(m * n), n)` — the same
+  row-major order `_preflight.py` uses and the order a `jacobian(x)`
+  written against the dense default returns. A model whose `m * n`
+  overflows the signed-32-bit nonzero count is refused with a message
+  naming `jacobianstructure`, rather than wrapping to a truncated count.
+  Nothing changes for an object that supplies the callback: it takes the
+  same branch as before and the trajectory is bit-for-bit identical.
+
+  Also on this path: a `jacobian(x)` whose length is not `nele_jac` now
+  logs the mismatch instead of discarding the error and ending the solve
+  in a bare `Invalid_Number_Detected`. With the dense default that is a
+  realistic user error — returning only the structural nonzeros while
+  declaring no pattern.
+
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
   configuration alone** (#757). `cho_parmest` recovers its certificate:
