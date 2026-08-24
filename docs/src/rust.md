@@ -211,6 +211,46 @@ runs one per rayon worker, and `QpFactorization` reuses the AMD ordering and
 symbolic analysis across instances that share a sparsity pattern. See
 [Convex Solver](convex-solver.md).
 
+A *family* of convex QPs — one parameter moving, the structure fixed — is what
+`ActiveSetSession` is for. It is a persistent handle over the **active-set**
+driver (`solver_selection=qp-active-set`'s engine) that owns the convex →
+`pounce-qp` translation and the presolve/postsolve wrapper, keeps the previous
+solve, and traces a parametric homotopy to the next problem instead of solving
+it cold. Reuse is a cost claim only: a warm answer passes through the same
+verification a cold one does, and anything that does not stand up falls back to
+the full cold driver.
+
+```rust
+use pounce_rs::convex::{ActiveSetSession, QpProblem, QpStatus, Reuse, Triplet};
+use pounce_rs::linsol::backend;
+
+let qp = |t: f64| QpProblem {
+    n: 2,
+    p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+    c: vec![-2.0 * t, -2.0 * t],
+    a: vec![],
+    b: vec![],
+    g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+    h: vec![1.0],
+    lb: vec![0.0, 0.0],
+    ub: vec![5.0, 5.0],
+};
+
+let mut session = ActiveSetSession::new(backend);
+for t in [0.2, 0.3, 0.4, 0.9] {
+    let sol = session.solve(&qp(t));
+    assert_eq!(sol.status, QpStatus::Optimal);
+}
+assert_eq!(session.last_reuse(), Reuse::Parametric);
+```
+
+`solve_cold` forces a cold solve, `reset` drops the reuse state, and `stats`
+reports how often reuse engaged. `with_presolve(false)` turns the reduction
+off when the reported iterate has to be in the coordinates of the problem
+exactly as posed. `cargo run -p pounce-convex --example active_set_session`
+is the measurement: on an 8-step path at `n = 40`, ~116 ms of wall clock cold
+against ~26 ms through a session.
+
 ### Active-set QP and SQP warm starts
 
 `pounce_rs::qp` is the parametric active-set engine — a different solver

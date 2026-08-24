@@ -85,6 +85,45 @@
 //! assert!((sols[2].x[0] - 1.0).abs() < 1e-6);      // clamped by the box
 //! ```
 //!
+//! ## Parametric families — [`ActiveSetSession`]
+//!
+//! The batch and warm-start entry points above are the *interior-point*
+//! answer to a family of nearby QPs. The **active-set** answer is
+//! [`ActiveSetSession`]: a persistent handle that keeps the previous solve in
+//! the engine's own coordinates and traces a homotopy to the next problem
+//! instead of starting over, falling back to the full cold driver whenever
+//! reuse is not valid. It also owns the convex → `pounce-qp` translation and
+//! the presolve/postsolve wrapper, so a frontend reaching the active-set
+//! engine no longer restates either (gh #769).
+//!
+//! Vary `c`, `b` or `h` and keep the structure fixed — that is the family the
+//! homotopy interpolates.
+//!
+//! ```
+//! use pounce_rs::convex::{ActiveSetSession, QpProblem, QpStatus, Reuse, Triplet};
+//! use pounce_rs::linsol::backend;
+//!
+//! // min ‖x‖² − 2·tᵀx  s.t.  x0 + x1 ≤ 1,  0 ≤ x ≤ 5, swept over t.
+//! let qp = |t: f64| QpProblem {
+//!     n: 2,
+//!     p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+//!     c: vec![-2.0 * t, -2.0 * t],
+//!     a: vec![],
+//!     b: vec![],
+//!     g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+//!     h: vec![1.0],
+//!     lb: vec![0.0, 0.0],
+//!     ub: vec![5.0, 5.0],
+//! };
+//!
+//! let mut session = ActiveSetSession::new(backend);
+//! for t in [0.2, 0.3, 0.4, 0.9] {
+//!     let sol = session.solve(&qp(t));
+//!     assert_eq!(sol.status, QpStatus::Optimal);
+//! }
+//! assert_eq!(session.last_reuse(), Reuse::Parametric);
+//! ```
+//!
 //! ## Sensitivity
 //!
 //! [`QpSensitivity`] differentiates a solved QP with respect to its data and
@@ -99,14 +138,15 @@
 //! without adding a dependency.
 
 pub use pounce_convex::{
-    ActiveSetOverrides, ConeSpec, NEG_INF, POS_INF, PolyProblem, Polynomial, PsdCertificateError,
-    QpFactorization, QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution,
-    QpStatus, QpWarmStart, ReducedHessian, SensError, SosBound, SosSolution, Triplet,
-    certify_psd_lower_triangle, solve_qp_active_set, solve_qp_batch, solve_qp_batch_parallel,
-    solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
-    solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug,
-    solve_socp_ipm_warm, sos_constrained_lower_bound, sos_constrained_lower_bound_opts,
-    sos_lower_bound, sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
+    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, ConeSpec, NEG_INF, POS_INF, PolyProblem,
+    Polynomial, PresolveNote, PsdCertificateError, QpFactorization, QpIterate, QpOptions,
+    QpProblem, QpResiduals, QpSensitivity, QpSolution, QpStatus, QpWarmStart, ReducedHessian,
+    Reuse, SensError, SessionStats, SosBound, SosSolution, Triplet, certify_psd_lower_triangle,
+    solve_qp_active_set, solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm,
+    solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm, solve_qp_multi_rhs,
+    solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
+    sos_constrained_lower_bound, sos_constrained_lower_bound_opts, sos_lower_bound,
+    sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
 };
 
 /// The underlying crate, for anything not surfaced above.

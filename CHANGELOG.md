@@ -35,6 +35,44 @@ changes.
   in a bare `Invalid_Number_Detected`. With the dense default that is a
   realistic user error — returning only the structural nonzeros while
   declaring no pattern.
+- **`ActiveSetSession`: the convex active-set driver as a persistent handle,
+  so a parametric family is solved parametrically** (#769).
+  `pounce_convex::ActiveSetSession` owns the convex → `pounce-qp` translation
+  (`ActiveSetQp`), the presolve/postsolve wrapper, and the previous solve, and
+  traces `QpSolver::solve_parametric` from it when the next problem is
+  eligible. Reachable from `pounce-rs` as `convex::ActiveSetSession`.
+
+  Two things were dropped on the floor at every call to `solve_qp_active_set`.
+  The **translation** — the `+1` index shift, the `[A_eq ; G]` row stacking,
+  the `±1e19` free-bound convention and the dual sign transform on the way
+  back — lived in locals inside the driver, so a frontend wanting the
+  active-set engine over a convex `QpProblem` had to restate it, and a
+  restatement that gets the sign transform wrong still returns something that
+  looks like a multiplier. The **previous solve** went with it, so every
+  convex-path solve was cold even when the caller was sweeping one parameter:
+  `pounce-qp`'s headline capability is parametric reuse, and the convex path
+  could not reach it at all.
+
+  Reuse changes the cost, not the verdict. A warm answer is verified against
+  the problem as posed by the same `verify_status` the cold path runs — the
+  engine's `Optimal` is re-derived, not propagated — and is reported only if
+  it stands up; otherwise the full cold ladder (screen → unscaled → Ruiz retry
+  → simplex-seeded retry) runs and owns the answer. Eligibility beyond a shape
+  match is left to `solve_parametric`'s own guards, deliberately including the
+  `A` / variable-box guard that gh #602 measured and declined.
+
+  Measured on `examples/active_set_session` (8-step path, `n = 40`, one
+  parameter moving, release build at `20be289` + this change, 4-core VM):
+  115.9 ms of wall clock cold against 25.8 ms through a session — a repeat run
+  gave 121.8 against 24.6 — with 7 of 7 attempts accepted, i.e. ~13 ms per
+  solve becoming ~0.9 ms once warm. Both arms report the same status and
+  objective on every step, which the example asserts.
+
+  No behaviour change for existing callers: `solve_qp_active_set` is the same
+  function with its internals hoisted, and a session with nothing to reuse is
+  bit-identical to it (`session_cold_matches_free_function`). Both legs of
+  `scripts/sweep-fixtures.sh` are unchanged, at `solver_selection=auto` and at
+  `solver_selection=qp-active-set`.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
