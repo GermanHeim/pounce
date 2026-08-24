@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 
+import pounce.examples.asnmpc_cstr as asnmpc
 from pounce.examples.asnmpc_cstr import (
     BASE_STATE,
     POLICIES,
@@ -45,6 +46,7 @@ def test_every_policy_completes_the_same_nominal_closed_loop(policy, smoke_confi
     assert result.policy == policy
     assert result.campaign == nominal.name
     assert result.metrics.solver_failures == 0
+    assert result.metrics.solver_recoveries == 0
     assert result.metrics.maximum_temperature_violation == 0.0
     assert math.isfinite(result.metrics.iae)
     assert math.isfinite(result.metrics.economic_stage_cost)
@@ -111,3 +113,26 @@ def test_plant_mismatch_is_independent_of_the_controller_model(smoke_config):
     )
 
     assert not np.allclose(nominal, mismatched, rtol=0.0, atol=1.0e-6)
+
+
+def test_failed_warm_start_is_retried_cold_and_counted(monkeypatch, smoke_config):
+    warm_start = object()
+    recovered_model = object()
+    attempted_warm_starts = []
+
+    def fake_solve(initial_state, config=None, warm_start=None):
+        attempted_warm_starts.append(warm_start)
+        if warm_start is not None:
+            raise RuntimeError("injected warm-start failure")
+        return asnmpc.SolveRecord(model=recovered_model, latency_s=0.01)
+
+    monkeypatch.setattr(asnmpc, "solve_controller", fake_solve)
+    solved = asnmpc._solve_with_recovery(
+        BASE_STATE, smoke_config, warm_start=warm_start
+    )
+
+    assert attempted_warm_starts == [warm_start, None]
+    assert solved.model is recovered_model
+    assert solved.solver_failures == 1
+    assert solved.solver_recoveries == 1
+    assert solved.latency_s > 0.0

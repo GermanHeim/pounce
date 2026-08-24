@@ -12,9 +12,10 @@ changes.
 - Add a reproducible closed-loop advanced-step NMPC CSTR tutorial.  It compares
   full re-solves, stale predictions, clamped linear, fix-relax, path, and guarded
   path updates across nominal, active-set-switching, and model-mismatch
-  campaigns; records control quality, safety, fallback, and stamped latency
-  metrics; and demonstrates directional sensitivity at a degenerate control
-  bound.  The reusable driver and CI regression tests exercise the same model.
+  campaigns; records control quality, safety, fallback, solver
+  failure/recovery, and stamped latency metrics; and demonstrates directional
+  sensitivity at a degenerate control bound.  The reusable driver and CI
+  regression tests exercise the same model.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence

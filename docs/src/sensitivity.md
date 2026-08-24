@@ -1223,11 +1223,14 @@ does not replace plant-side interlocks, state estimation, robust constraint
 tightening, or a deadline-aware real-time scheduler.
 
 The notebook reports IAE, ISE, stage cost, control movement, maximum temperature
-violation, active-set changes, fallback counts, solver failures, and median/p95
-online latency.  Timing rows carry the POUNCE commit, model revision, tolerance,
-platform, Python version, and whether a warm-up was excluded.  Re-run timing on
-the target controller hardware; notebook wall-clock values are evidence for the
-recorded machine, not portable deadlines.
+violation, active-set changes, fallback counts, solver failures and recoveries,
+and median/p95 online latency.  A failed warm-started controller solve is retried
+once from a cold model and both the failure and recovery are counted; an
+unrecovered cold solve aborts the campaign rather than silently applying an
+unverified control.  Timing rows carry the POUNCE commit, model revision,
+tolerance, platform, Python version, and whether a warm-up was excluded.  Re-run
+timing on the target controller hardware; notebook wall-clock values are
+evidence for the recorded machine, not portable deadlines.
 
 The final experiment holds the paper-scale 100-interval model at its first
 active-set breakpoint and steps in both directions.  It shows why a derivative

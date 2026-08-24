@@ -190,10 +190,17 @@ class Campaign:
 
 @dataclass(frozen=True)
 class SolveRecord:
-    """One converged controller NLP and its wall-clock latency [s]."""
+    """One converged controller NLP and its wall-clock latency [s].
+
+    A warm-start failure is retried once from a cold start. The counters make
+    that recovery visible instead of quietly reporting only the successful
+    attempt.
+    """
 
     model: pyo.ConcreteModel
     latency_s: float
+    solver_failures: int = 0
+    solver_recoveries: int = 0
 
 
 @dataclass(frozen=True)
@@ -253,6 +260,8 @@ class SampleRecord:
     applied_control: tuple[float, float]
     plant_state_after: tuple[float, float]
     background_latency_s: float
+    solver_failures: int
+    solver_recoveries: int
     diagnostics: CorrectionDiagnostics
 
     def event_row(self) -> dict[str, object]:
@@ -268,6 +277,8 @@ class SampleRecord:
             "accepted": self.diagnostics.accepted,
             "guard_reasons": self.diagnostics.reasons,
             "full_resolve": self.diagnostics.full_solve_latency_s is not None,
+            "solver_failures": self.solver_failures,
+            "solver_recoveries": self.solver_recoveries,
         }
 
 
@@ -289,6 +300,7 @@ class ClosedLoopMetrics:
     deadline_s: float
     deadline_misses: int
     solver_failures: int
+    solver_recoveries: int
 
 
 @dataclass(frozen=True)
@@ -524,6 +536,36 @@ def solve_controller(
     if condition != TerminationCondition.optimal:
         raise RuntimeError(f"POUNCE controller solve ended with {condition}")
     return SolveRecord(model=model, latency_s=latency_s)
+
+
+def _solve_with_recovery(
+    initial_state: Sequence[float],
+    config: CstrConfig,
+    warm_start: pyo.ConcreteModel | None = None,
+) -> SolveRecord:
+    """Retry one failed warm-started NLP from a cold controller model.
+
+    An initial cold-start failure remains fatal because there is no previously
+    verified solve to recover from. The returned latency includes both the
+    failed warm attempt and the successful retry.
+    """
+    started = time.perf_counter()
+    try:
+        solved = solve_controller(initial_state, config, warm_start)
+    except RuntimeError:
+        if warm_start is None:
+            raise
+        solved = solve_controller(initial_state, config)
+        return SolveRecord(
+            model=solved.model,
+            latency_s=time.perf_counter() - started,
+            solver_failures=1,
+            solver_recoveries=1,
+        )
+    return SolveRecord(
+        model=solved.model,
+        latency_s=time.perf_counter() - started,
+    )
 
 
 def _component_value(
@@ -989,7 +1031,8 @@ def _closed_loop_metrics(
         ),
         deadline_s=config.deadline_s,
         deadline_misses=int((update_latencies > config.deadline_s).sum()),
-        solver_failures=0,
+        solver_failures=sum(sample.solver_failures for sample in samples),
+        solver_recoveries=sum(sample.solver_recoveries for sample in samples),
     )
 
 
@@ -1017,16 +1060,20 @@ def run_closed_loop(
     background: SolveRecord | None = None
     previous_model: pyo.ConcreteModel | None = None
     if policy != "full_resolve":
-        background = solve_controller(predicted_state, cfg)
+        background = _solve_with_recovery(predicted_state, cfg)
 
     samples: list[SampleRecord] = []
     fallback_count = 0
     for sample in range(campaign.steps):
         measured_state = _measure_state(plant_state, campaign, sample, cfg)
         background_latency_s = 0.0 if background is None else background.latency_s
+        solver_failures = 0 if background is None else background.solver_failures
+        solver_recoveries = 0 if background is None else background.solver_recoveries
 
         if policy == "full_resolve":
-            full = solve_controller(measured_state, cfg, previous_model)
+            full = _solve_with_recovery(measured_state, cfg, previous_model)
+            solver_failures += full.solver_failures
+            solver_recoveries += full.solver_recoveries
             chosen = trajectory(full.model)
             diagnostics = _empty_diagnostics(
                 update_latency_s=full.latency_s,
@@ -1056,7 +1103,11 @@ def run_closed_loop(
                         cfg,
                     )
                 if reasons:
-                    fallback = solve_controller(measured_state, cfg, background.model)
+                    fallback = _solve_with_recovery(
+                        measured_state, cfg, background.model
+                    )
+                    solver_failures += fallback.solver_failures
+                    solver_recoveries += fallback.solver_recoveries
                     chosen = trajectory(fallback.model)
                     chosen_model = fallback.model
                     fallback_count += 1
@@ -1098,6 +1149,8 @@ def run_closed_loop(
                 applied_control=applied_control,
                 plant_state_after=next_plant_state,
                 background_latency_s=background_latency_s,
+                solver_failures=solver_failures,
+                solver_recoveries=solver_recoveries,
                 diagnostics=diagnostics,
             )
         )
@@ -1106,7 +1159,9 @@ def run_closed_loop(
         predicted_state = next_predicted_state
         previous_model = chosen_model
         if policy != "full_resolve" and sample + 1 < campaign.steps:
-            background = solve_controller(predicted_state, cfg, warm_start=chosen_model)
+            background = _solve_with_recovery(
+                predicted_state, cfg, warm_start=chosen_model
+            )
 
     return ClosedLoopResult(
         policy=policy,
