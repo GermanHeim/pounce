@@ -406,32 +406,31 @@ perturbation's own direction by the directional-derivative QP (the
 sIPOPT paper's eq. 14). The weakly active rows are released, removing
 the order-one `sigma`, in one factorization that serves the whole
 decision, and the direction of the released system is computed. Rows
-it carries past their remaining slack toward the bound are the ones
-the direction engages, and their pin forces solve a small quadratic
-program, one variable per engaged row with a nonnegativity bound,
-whose optimality conditions are eq. 14's complementarity: each
-engaged bound either holds with a nonnegative force or releases and
-moves feasibly. A row an equality pins cannot be decided by a pin
-force, its column of the QP's matrix is zero, so it is dropped and
-the coordinate follows the equality that owns it. The active-set QP
+it moves toward their bounds are the ones the direction engages, and
+their pin forces solve a small quadratic program, one variable per
+engaged row with a nonnegativity bound, whose optimality conditions
+are eq. 14's complementarity: each engaged bound either holds with a
+nonnegative force or releases and moves feasibly. An engaged row is
+decided only when its bound is at a kink, which the QP reads off its
+own reduced matrix: the barrier weight times the row's own diagonal
+is 1 at an exact kink, at any curvature, coupling, or scaling, and
+falls as the squared ratio of kink width to slack away from one. A
+row far below one is dropped and its plain movement stands, since a
+pin force there would hold the coordinate a full slack from where
+its bound actually is, and the error of not deciding is bounded by
+that same slack. A row an equality pins is the limiting case, its
+diagonal exactly zero, dropped by the same test. The active-set QP
 engine solves the rest, the decided direction is checked against
 every weak row, and the engaged set grows until no new row violates.
 
-A row engages only when its movement toward the bound exceeds its
-remaining slack plus a noise band, the square root of the barrier
-parameter relative to the direction's norm. The QP treats an engaged
-row as sitting at its bound, so a step that ends short of the bound
-decides nothing and the row's plain movement stands. A bound the
-classifier certifies weakly active sits at barrier width, its
-measured slack is the solve's own inflation and is treated as zero,
-so a certified kink's decision is the same at every perturbation
-scale. The measured slack applies to the ambiguous class, which
-holds kinks and genuinely interior coordinates under one verdict,
-and the slack is what separates them. The band is there because a
-weak bound's slack
-and multiplier carry an uncertainty equal to their own size, so a
-movement below it cannot be resolved against the bound, and deciding
-it exactly would assert precision the solve does not contain.
+A row engages only when its movement toward the bound exceeds a
+noise band, the square root of the barrier parameter relative to the
+direction's norm, so nothing in the decision reads the
+perturbation's size and the answer is linear in the step. The band
+is there because a weak bound's slack and multiplier carry an
+uncertainty equal to their own size, so a movement below it cannot
+be resolved against the bound, and deciding it exactly would assert
+precision the solve does not contain.
 
 All three modes consume the decision: `linear` takes the QP direction
 itself, `fix_relax` takes it as the predictor its refinement iterates

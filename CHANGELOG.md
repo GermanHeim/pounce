@@ -9,33 +9,29 @@ changes.
 
 ## [Unreleased]
 
-- **The directional degeneracy QP engages a bound only when the step
-  reaches it.** The engagement test (gh#708) read movement toward the
-  bound alone, however far away the bound sat, and the QP treats an
-  engaged row as sitting at its bound. The weak set can hold
-  coordinates far from their bounds, since low curvature widens the
-  activity classifier's ambiguous class, and the QP then pinned
-  interior coordinates that a step a fraction of their slack could
-  never activate, returning a direction wrong at first order. A row
-  now engages when the step carries its coordinate past the remaining
-  slack toward the bound, plus the existing noise band. A bound the
-  classifier certifies weakly active is at a kink, its measured slack
-  is the barrier's own width and is treated as zero, so a certified
-  kink engages by direction alone, at any scale and any curvature.
-  The measured slack applies to the ambiguous class, where a kink and
-  a genuinely interior coordinate share one verdict and the slack is
-  the datum that separates them. A coordinate the step cannot reach
-  keeps its plain movement.
+- **The directional degeneracy QP decides a bound only when it is at
+  a kink.** The QP (gh#708) treats an engaged row as sitting at its
+  bound, and the weak set can hold coordinates far from their bounds,
+  since low curvature widens the activity classifier's ambiguous
+  class. The QP then pinned interior coordinates a fifth of their
+  range from bounds they could never reach, returning a direction
+  wrong at first order. Each engaged row's kink test is now read off
+  the QP's own reduced matrix: the barrier weight times the row's own
+  diagonal equals 1 at an exact kink, at any curvature, coupling, or
+  scaling, and falls as the squared ratio of kink width to slack away
+  from one. A row far below one is dropped and its plain movement
+  stands. The error of not deciding such a row is bounded by its own
+  slack, and nothing in the decision reads the perturbation's size,
+  so the answer stays linear in the step.
 
-  **A row an equality pins is dropped from the QP, not decided.**
-  Under a parametric step the pin of a perturbed parameter moves its
-  own coordinate, so a shift larger than the coordinate's slack
-  engages the row, and its column of the QP's reduced matrix is
-  zero, which makes the QP unbounded. The row is now dropped, along
-  with any row whose diagonal is not positive, and the remaining
-  rows are decided. The coordinate follows its pin wherever the
-  parameter sends it, inside the bound or infeasible, which is the
-  parameter's business rather than the QP's.
+  **A row an equality pins is the limiting case, dropped by the same
+  test.** The pin of a perturbed parameter moves its own coordinate,
+  which engages the row, and its diagonal of the reduced matrix is
+  exactly zero, which would make the QP unbounded. The row is
+  dropped and the coordinate follows its pin wherever the parameter
+  sends it, inside the bound or infeasible, which is the parameter's
+  business rather than the QP's.
+
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
   configuration alone** (#757). `cho_parmest` recovers its certificate:
