@@ -9,6 +9,19 @@ changes.
 
 ## [Unreleased]
 
+- **The Peng–Robinson phase-envelope tutorial now treats extrema and design
+  variables as solve outputs, not plot samples** (#1).  A reusable, tested
+  `pounce.examples.phase_envelope` model traces dew/bubble isopleths through
+  pressure and temperature folds, refines cricondenbar/cricondentherm points
+  with the augmented simple-fold equations, differentiates them with respect
+  to `N-1` simplex composition coordinates and one binary interaction
+  parameter, and solves an inverse-composition design whose target is checked
+  by a completely fresh envelope trace.  The notebook also reproduces the
+  published 282.53 K methane/propane maxcondentherm of Deiters and Bell
+  (AIChE J. 65, 2019, e16730), adds residual/root/branch guards, and states the
+  important limitation that these local guards are not a global TPD
+  phase-stability calculation.
+
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
   configuration alone** (#757). `cho_parmest` recovers its certificate:
