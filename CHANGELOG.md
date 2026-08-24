@@ -9,6 +9,16 @@ changes.
 
 ## [Unreleased]
 
+- **A new flagship Python tutorial performs uncertainty-aware inverse design
+  of a nonisothermal CO2-methanation catalyst pellet** (#3). The reusable
+  conservative finite-volume model includes published four-species kinetics,
+  finite films, exact JAX derivatives, nested and simultaneous design routes,
+  bounded/inventory/regularized activity profiles, refined-mesh physical
+  checks, reduced-Hessian parameter covariance, and scenario-based worst-case
+  redesign. The commit-stamped notebook and focused CI test state every
+  transport assumption and explicitly limit the result to a local,
+  activity-only single-pellet design.
+
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
   configuration alone** (#757). `cho_parmest` recovers its certificate:

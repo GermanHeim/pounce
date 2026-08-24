@@ -100,6 +100,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 24 | [`24_boundary_value_problems.ipynb`](24_boundary_value_problems.ipynb) | `pounce.solve_bvp` — SciPy-compatible BVPs (fast FERAL Newton + adaptive refinement), differentiable JAX/Torch solves, and constrained / optimal-control BVPs unique to pounce. |
+| 37 | [`37_catalyst_pellet_inverse_design.ipynb`](37_catalyst_pellet_inverse_design.ipynb) | A commit-stamped nonisothermal CO2-methanation pellet: analytical/mesh/balance/gradient validation, nested versus simultaneous activity design, reduced-Hessian covariance, and scenario-based worst-case redesign. |
 
 ## ODE / DAE initial value problems
 
