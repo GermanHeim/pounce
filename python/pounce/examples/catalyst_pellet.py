@@ -83,6 +83,8 @@ class PelletConfig:
     in the reactor paper.  Effective diffusivities and film coefficients are
     explicit tutorial assumptions representative of a small porous pellet;
     they must be replaced when a particular support is being modeled.
+    ``nodes`` must be divisible by ``zones`` so each activity coefficient owns
+    the same physical volume on every solve and refinement mesh.
     """
 
     radius_m: float = 1.25e-3  # [m], 2.5 mm diameter
@@ -344,10 +346,11 @@ def solve_first_order_sphere(thiele_modulus: float, nodes: int = 160):
 def _zone_index(nodes: int, zones: int) -> np.ndarray:
     if zones < 1 or zones > nodes:
         raise ValueError("zones must satisfy 1 <= zones <= nodes")
-    # Equal-volume cells make this grouping an equal-volume parameterization
-    # when nodes is divisible by zones; otherwise the final groups differ by
-    # at most one cell and inventory uses the exact cell assignment.
-    return np.minimum((np.arange(nodes) * zones) // nodes, zones - 1)
+    if nodes % zones != 0:
+        raise ValueError(
+            "nodes must be divisible by zones to preserve equal-volume activity zones"
+        )
+    return np.repeat(np.arange(zones), nodes // zones)
 
 
 def _cell_activity_backend(activity, nodes: int, zones: int, xp):
@@ -513,7 +516,7 @@ def egg_shell_activity(config: PelletConfig, zones: int | None = None) -> np.nda
     """Bounded outer-first step profile at the configured inventory."""
 
     zones = config.zones if zones is None else int(zones)
-    weights = np.full(zones, 1.0 / zones)
+    weights = _inventory_weights(config.nodes, zones)
     remaining = config.activity_inventory
     activity = np.zeros(zones)
     for k in range(zones - 1, -1, -1):
@@ -1273,7 +1276,7 @@ def fit_effective_parameters(
     import jax
     import jax.numpy as jnp
 
-    from ._curve_fit import curve_fit
+    from .._curve_fit import curve_fit
 
     data = make_calibration_data(config) if data is None else data
 

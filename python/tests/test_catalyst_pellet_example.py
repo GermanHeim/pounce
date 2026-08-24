@@ -7,8 +7,9 @@ import pytest
 
 pytest.importorskip("jax")
 
-from pounce.catalyst_pellet import (  # noqa: E402
+from pounce.examples.catalyst_pellet import (  # noqa: E402
     PelletConfig,
+    Scenario,
     analytical_effectiveness,
     egg_shell_activity,
     fit_effective_parameters,
@@ -82,6 +83,24 @@ def test_uniform_pellet_closes_balances_films_and_mesh():
     assert film_limited.production_mol_s < coarse.production_mol_s
 
 
+def test_activity_zones_require_an_equal_volume_partition():
+    invalid = PelletConfig(nodes=8, zones=3)
+    message = "nodes must be divisible by zones"
+    with pytest.raises(ValueError, match=message):
+        egg_shell_activity(invalid)
+    with pytest.raises(ValueError, match=message):
+        solve_forward(np.full(3, invalid.activity_inventory), invalid)
+    with pytest.raises(ValueError, match=message):
+        solve_design(invalid)
+    with pytest.raises(ValueError, match=message):
+        solve_nested_design(invalid)
+
+    valid = PelletConfig(nodes=8, zones=4)
+    solution = solve_forward(np.full(4, valid.activity_inventory), valid)
+    with pytest.raises(ValueError, match=message):
+        refine_solution(solution, valid, nodes=10)
+
+
 def test_implicit_design_gradient_matches_perturb_and_resolve():
     config = PelletConfig(nodes=6, zones=3)
     activity = np.full(config.zones, config.activity_inventory)
@@ -117,6 +136,51 @@ def test_implicit_design_gradient_matches_perturb_and_resolve():
         )
     np.testing.assert_allclose(
         exact, np.stack(finite_difference, axis=1), rtol=2e-6, atol=2e-10
+    )
+
+    scenario_exact = implicit_observable_jacobian(
+        solution, config, with_respect_to="scenario"
+    )
+    scenario_finite_difference = []
+    for index in range(2):
+        displacement = np.zeros(2)
+        displacement[index] = epsilon
+        plus_scenario = Scenario(*displacement, label=f"parameter-{index}+")
+        minus_scenario = Scenario(*(-displacement), label=f"parameter-{index}-")
+        plus_solution = solve_forward(
+            activity,
+            config,
+            scenario=plus_scenario,
+            initial_state=solution.state_scaled,
+        )
+        minus_solution = solve_forward(
+            activity,
+            config,
+            scenario=minus_scenario,
+            initial_state=solution.state_scaled,
+        )
+        scenario_finite_difference.append(
+            (
+                np.array(
+                    [
+                        plus_solution.production_mol_s,
+                        plus_solution.max_temperature_k,
+                    ]
+                )
+                - np.array(
+                    [
+                        minus_solution.production_mol_s,
+                        minus_solution.max_temperature_k,
+                    ]
+                )
+            )
+            / (2.0 * epsilon)
+        )
+    np.testing.assert_allclose(
+        scenario_exact,
+        np.stack(scenario_finite_difference, axis=1),
+        rtol=2e-6,
+        atol=2e-10,
     )
 
 

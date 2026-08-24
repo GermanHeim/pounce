@@ -8,7 +8,7 @@ pellet-in-reactor co-design: the point is to make the equations, exact
 derivatives, physical checks, covariance model, and robust redesign auditable
 in one POUNCE example.
 
-The reusable implementation is in `pounce.catalyst_pellet`. The
+The reusable implementation is in `pounce.examples.catalyst_pellet`. The
 notebook records the source commit, model revision, package versions, solver
 tolerances, mesh, and activity basis in its saved output.
 
@@ -119,8 +119,10 @@ NLP and catches basis/mesh artifacts.
 ## Nominal design problem
 
 The pellet volume is divided into a small number of equal-volume activity
-zones. The NLP maximizes normalized methane production with a quadratic
-manufacturability penalty,
+zones. The finite-volume cell count must be divisible by the zone count; the
+public solve/design/refinement functions reject other combinations so catalyst
+inventory cannot drift when the mesh changes. The NLP maximizes normalized
+methane production with a quadratic manufacturability penalty,
 
 ```text
 maximize  production / production_uniform
