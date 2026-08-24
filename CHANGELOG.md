@@ -18,11 +18,14 @@ changes.
   interior coordinates that a step a fraction of their slack could
   never activate, returning a direction wrong at first order. A row
   now engages when the step carries its coordinate past the remaining
-  slack toward the bound, plus the existing noise band. Both lengths
-  are measured at decision time, so no threshold is chosen: a kink's
-  slack is order `sqrt(mu)` and engages exactly as before at any
-  curvature, and a coordinate the step cannot reach keeps its plain
-  movement.
+  slack toward the bound, plus the existing noise band. A bound the
+  classifier certifies weakly active is at a kink, its measured slack
+  is the barrier's own width and is treated as zero, so a certified
+  kink engages by direction alone, at any scale and any curvature.
+  The measured slack applies to the ambiguous class, where a kink and
+  a genuinely interior coordinate share one verdict and the slack is
+  the datum that separates them. A coordinate the step cannot reach
+  keeps its plain movement.
 
   **A row an equality pins is dropped from the QP, not decided.**
   Under a parametric step the pin of a perturbed parameter moves its

@@ -421,10 +421,14 @@ A row engages only when its movement toward the bound exceeds its
 remaining slack plus a noise band, the square root of the barrier
 parameter relative to the direction's norm. The QP treats an engaged
 row as sitting at its bound, so a step that ends short of the bound
-decides nothing and the row's plain movement stands. A kink's slack
-is itself of the order of the noise band, so the slack term does not
-change a true kink's engagement. The band is there because a weak
-bound's slack
+decides nothing and the row's plain movement stands. A bound the
+classifier certifies weakly active sits at barrier width, its
+measured slack is the solve's own inflation and is treated as zero,
+so a certified kink's decision is the same at every perturbation
+scale. The measured slack applies to the ambiguous class, which
+holds kinks and genuinely interior coordinates under one verdict,
+and the slack is what separates them. The band is there because a
+weak bound's slack
 and multiplier carry an uncertainty equal to their own size, so a
 movement below it cannot be resolved against the bound, and deciding
 it exactly would assert precision the solve does not contain.

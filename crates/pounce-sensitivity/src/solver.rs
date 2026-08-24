@@ -960,7 +960,13 @@ impl Solver {
     /// when the direction carries its coordinate past the remaining
     /// slack toward the bound. The QP treats an engaged row as at its
     /// bound, so a step that ends short of the bound decides nothing
-    /// and the row's plain movement stands. Rows outside the engaged
+    /// and the row's plain movement stands. A bound the classifier
+    /// certifies weakly active sits at barrier width, its slack is
+    /// the solve's own inflation and is treated as zero, so a
+    /// certified kink's decision is linear in the step at any scale.
+    /// The measured slack applies to the ambiguous class only, where
+    /// a kink and a genuinely interior coordinate share one verdict
+    /// and the slack is the datum that separates them. Rows outside the engaged
     /// set are verified against the decided direction and the set
     /// expands until no new row violates. A row whose own diagonal of
     /// `S` is not positive cannot be decided by a pin force, which
@@ -1084,13 +1090,34 @@ impl Solver {
         // movement against it. The QP treats an engaged row as at its
         // bound and the error of that model is the slack, so a step
         // that ends short of the bound leaves the row out and its
-        // plain movement stands. At a kink the slack is order
-        // `sqrt(mu)` and the test reduces to the movement test, while
-        // an ambiguous row far from its bound is left alone by any
-        // step that cannot reach it.
+        // plain movement stands. A row the classifier certifies
+        // weakly active is at a kink: its measured slack is the
+        // barrier's own width, the true slack is zero, and zero is
+        // used, which keeps the decision linear in the step at any
+        // scale. The measured slack applies to the ambiguous rows
+        // only. That class holds kinks and genuinely interior
+        // coordinates under one verdict, the slack separates them,
+        // and an interior row far from its bound is left alone by
+        // any step that cannot reach it.
+        let certified: Vec<bool> = {
+            use crate::activity::WEAKLY_ACTIVE;
+            let report = self.classify_activity()?;
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            weak.iter()
+                .map(|w| {
+                    let full = nl.var_x_to_full_x(w.var_row as Index) as usize;
+                    report.var_status.get(full) == Some(&WEAKLY_ACTIVE)
+                })
+                .collect()
+        };
         let slack: Vec<Number> = weak
             .iter()
-            .map(|w| {
+            .zip(&certified)
+            .map(|(w, &cert)| {
+                if cert {
+                    return 0.0;
+                }
                 let sl = if w.lower {
                     ctx.x_curr[w.var_row] - ctx.lo[w.var_row]
                 } else {
