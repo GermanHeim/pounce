@@ -1072,6 +1072,7 @@ notebooks = [
     { name = "ipykernel", version = "7.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pyomo", version = "6.9.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pyomo", version = "6.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pyomo-cvp" },
     { name = "pyomo-pounce" },
 ]
 
@@ -1092,6 +1093,7 @@ provides-extras = ["jax", "scipy", "dev"]
 notebooks = [
     { name = "ipykernel", specifier = ">=6" },
     { name = "pyomo", specifier = ">=6.7" },
+    { name = "pyomo-cvp", specifier = "==0.4.0" },
     { name = "pyomo-pounce", editable = "../pyomo-pounce" },
 ]
 
@@ -1274,6 +1276,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/65/bd/cb4535b0bb63a7bcc968464ab739f54d2f4d15fe7924547336f5bd299513/pyomo-6.10.0-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0590505b282468c9fc2555ced544213227a0a466bbc667826a36cc922afec6d7", size = 4506738, upload-time = "2026-02-20T21:50:17.382Z" },
     { url = "https://files.pythonhosted.org/packages/88/1d/b5dad00739979353726059137a647acf031ef3af5557a9d227ca7b32481d/pyomo-6.10.0-py3-none-any.whl", hash = "sha256:3fc34402474f78c9144c735499c8dc6a0570948034f4c668d24727ec1b4671b1", size = 4052690, upload-time = "2026-02-27T17:10:13.653Z" },
 ]
+
+[[package]]
+name = "pyomo-cvp"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyomo", version = "6.9.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pyomo", version = "6.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/1c/2327c05d151f8fa4a99f8af0c518d6d841b5b3f22160bbd0e540182b39b9/pyomo_cvp-0.4.0.tar.gz", hash = "sha256:fc652b6952bb42260849905399f6f4b0f6d3978d1e23c31933c99e52772a3c4e", size = 154483, upload-time = "2026-07-13T16:11:51.605786Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/26/82774f6c6370680ba6c4d68dea05671e65b4742e8c0f7f8bb8afe31876be/pyomo_cvp-0.4.0-py3-none-any.whl", hash = "sha256:cf1db5f5bf3059d9255d3301e73f7291f675051f3a6ba8eeacedac8c9b1daac8", size = 13038, upload-time = "2026-07-13T16:11:50.045821Z" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyomo", specifier = ">=6.7" }]
 
 [[package]]
 name = "pyomo-pounce"

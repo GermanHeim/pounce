@@ -42,6 +42,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 26 | [`26_parameter_covariance.ipynb`](26_parameter_covariance.ipynb) | Parameter covariance and identifiability from the reduced Hessian: standard errors, a Monte Carlo validated confidence ellipse, and a sloppy-direction diagnosis. |
 | 31 | [`31_information_identifiability.ipynb`](31_information_identifiability.ipynb) | The information matrix as the un-inverted view of the covariance: eigen() naming a poorly identified combination, the duality check, and zero variance versus finite information at a bound. |
 | 32 | [`32_wrt_blocks_and_retain_kkt.ipynb`](32_wrt_blocks_and_retain_kkt.ipynb) | One solve, many questions: wrt= sub-block marginals, confidence and prediction bands on undeclared prediction variables, conditioned_on, retain_kkt() with nothing declared, and release_kkt() to give the factor's memory back. |
+| 36 | [`36_active_set_parametric_sensitivity.ipynb`](36_active_set_parametric_sensitivity.ipynb) | Closed-loop advanced-step NMPC for a constrained CSTR: six update policies, independent plant mismatch, active-set timelines, full-point fallback guards, degeneracy at a control kink, and stamped latency/quality metrics (needs `pyomo-cvp`). |
 
 ## Performance & sparsity
 

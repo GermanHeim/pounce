@@ -1192,6 +1192,48 @@ perturbed system per scaling method. The perturbations are reported —
 trusting `-inv(reduced_hessian)`; on well-posed estimation problems
 the final factor is unregularized and the invariance is exact.
 
+## Closed-loop advanced-step NMPC
+
+The CSTR case in
+[`36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
+now closes the loop around the held-factor examples above.  Its reusable driver
+lives in `pounce.examples.asnmpc_cstr`; the notebook runs 30 one-minute samples
+for nominal, constraint-switching, and model-mismatch campaigns and compares:
+
+- a fresh nonlinear-programming solve after every measurement;
+- the stale predicted solution with no measurement correction;
+- a clamped linear sensitivity update;
+- fix-relax and active-set path updates; and
+- the same path update behind a full-point acceptance guard and fallback solve.
+
+Each sensitivity-policy sample follows the same ordering: solve the next horizon
+at the predicted state in the background, receive the measurement, update from
+that solve's held KKT factor, validate the corrected point, apply the first
+piecewise-constant control, integrate an independent plant, shift the horizon,
+and prepare the next background solve.  The full re-solve baseline deliberately
+does its solve after measurement, so its solve time is online latency; background
+solve time is reported separately for advanced-step policies.
+
+The guard checks the scaled measurement displacement, full corrected-point
+primal feasibility, stationarity and complementarity, corrector progress, path
+budget, predicted temperature, and ambiguous manipulated-variable activity.  A
+rejection performs a fresh solve at the measurement and resets the warm start and
+factorization.  This is an example policy, not a safety certificate: the guard
+does not replace plant-side interlocks, state estimation, robust constraint
+tightening, or a deadline-aware real-time scheduler.
+
+The notebook reports IAE, ISE, stage cost, control movement, maximum temperature
+violation, active-set changes, fallback counts, solver failures, and median/p95
+online latency.  Timing rows carry the POUNCE commit, model revision, tolerance,
+platform, Python version, and whether a warm-up was excluded.  Re-run timing on
+the target controller hardware; notebook wall-clock values are evidence for the
+recorded machine, not portable deadlines.
+
+The final experiment holds the paper-scale 100-interval model at its first
+active-set breakpoint and steps in both directions.  It shows why a derivative
+at a kink is directional and why the guard treats ambiguous control activity as
+a reason to re-solve.
+
 ## Verification
 
 All three entry points are verified against upstream sIPOPT 3.14.19's
