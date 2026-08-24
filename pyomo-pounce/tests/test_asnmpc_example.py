@@ -59,7 +59,11 @@ def test_guard_accepts_nominal_updates_and_falls_back_under_stress(smoke_config)
     guarded = run_closed_loop("guarded_path", stress, smoke_config)
 
     assert accepted.metrics.fallback_full_solves == 0
+    assert accepted.metrics.fallback_fraction == 0.0
     assert 0 < guarded.metrics.fallback_full_solves <= stress.steps
+    assert guarded.metrics.fallback_fraction == pytest.approx(
+        guarded.metrics.fallback_full_solves / stress.steps
+    )
     rejected = [sample for sample in guarded.samples if not sample.diagnostics.accepted]
     assert len(rejected) == guarded.metrics.fallback_full_solves
     assert all(sample.diagnostics.reasons for sample in rejected)
@@ -136,3 +140,60 @@ def test_failed_warm_start_is_retried_cold_and_counted(monkeypatch, smoke_config
     assert solved.solver_failures == 1
     assert solved.solver_recoveries == 1
     assert solved.latency_s > 0.0
+
+
+def test_accepted_correction_populates_the_next_warm_start(monkeypatch, smoke_config):
+    campaign = asnmpc.Campaign(
+        name="warm_start_probe",
+        feed_temperature_shift=(0.0, 0.0),
+        measurement_noise=((0.01, 0.005), (0.0, 0.0)),
+    )
+    corrected_trajectories = []
+    warm_start_sources = []
+    real_correction = asnmpc._corrected_update
+    real_solve = asnmpc._solve_with_recovery
+
+    def capture_correction(*args, **kwargs):
+        result = real_correction(*args, **kwargs)
+        corrected_trajectories.append(result[0])
+        return result
+
+    def capture_warm_start(initial_state, config, warm_start=None):
+        if warm_start is not None:
+            warm_start_sources.append(trajectory(warm_start))
+        return real_solve(initial_state, config, warm_start)
+
+    monkeypatch.setattr(asnmpc, "_corrected_update", capture_correction)
+    monkeypatch.setattr(asnmpc, "_solve_with_recovery", capture_warm_start)
+    run_closed_loop("path", campaign, smoke_config)
+
+    expected = corrected_trajectories[0]
+    supplied = warm_start_sources[0]
+    assert supplied.state_at(smoke_config.sample_time_min) == pytest.approx(
+        expected.state_at(smoke_config.sample_time_min)
+    )
+    assert supplied.control_at(smoke_config.sample_time_min) == pytest.approx(
+        expected.control_at(smoke_config.sample_time_min)
+    )
+
+
+def test_recovery_counts_reach_the_sample_and_summary(monkeypatch, smoke_config):
+    nominal = make_campaigns(steps=6, seed=19)[0]
+    real_solve = asnmpc.solve_controller
+    injected = False
+
+    def fail_one_warm_start(initial_state, config=None, warm_start=None):
+        nonlocal injected
+        if warm_start is not None and not injected:
+            injected = True
+            raise RuntimeError("injected warm-start failure")
+        return real_solve(initial_state, config, warm_start)
+
+    monkeypatch.setattr(asnmpc, "solve_controller", fail_one_warm_start)
+    result = run_closed_loop("full_resolve", nominal, smoke_config)
+
+    assert injected
+    assert sum(sample.solver_failures for sample in result.samples) == 1
+    assert sum(sample.solver_recoveries for sample in result.samples) == 1
+    assert result.metrics.solver_failures == 1
+    assert result.metrics.solver_recoveries == 1

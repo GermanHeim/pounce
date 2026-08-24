@@ -293,6 +293,7 @@ class ClosedLoopMetrics:
     maximum_temperature_violation: float
     active_set_changes: int
     fallback_full_solves: int
+    fallback_fraction: float
     update_latency_median_s: float
     update_latency_p95_s: float
     full_solve_latency_median_s: float | None
@@ -631,14 +632,20 @@ def _corrected_update(
     measured_state: Sequence[float],
     policy: Policy,
     config: CstrConfig,
-) -> tuple[Trajectory, object | None, tuple[str, ...], float]:
+) -> tuple[
+    Trajectory,
+    object | None,
+    tuple[str, ...],
+    float,
+    pyo.ComponentMap | None,
+]:
     """Apply one held-factor update and collect its diagnostics."""
     perturbation = [
         (background.zc0, float(measured_state[0])),
         (background.zt0, float(measured_state[1])),
     ]
     if policy == "no_correction":
-        return trajectory(background), None, (), 0.0
+        return trajectory(background), None, (), 0.0, None
 
     mode = {
         "clamped_linear": "linear",
@@ -682,7 +689,13 @@ def _corrected_update(
                 )
             )
     latency_s = time.perf_counter() - started
-    return trajectory(background, values), report, events, latency_s
+    return trajectory(background, values), report, events, latency_s, values
+
+
+def _load_estimate(values: pyo.ComponentMap) -> None:
+    """Materialize an accepted estimate as the next primal warm start."""
+    for variable, value in values.items():
+        variable.set_value(float(value), skip_validation=True)
 
 
 def _ambiguous_activity(
@@ -1019,6 +1032,7 @@ def _closed_loop_metrics(
             len(sample.diagnostics.path_events) for sample in samples
         ),
         fallback_full_solves=int(fallback_count),
+        fallback_fraction=float(fallback_count / len(samples)),
         update_latency_median_s=float(np.median(update_latencies)),
         update_latency_p95_s=float(np.percentile(update_latencies, 95)),
         full_solve_latency_median_s=(
@@ -1082,9 +1096,13 @@ def run_closed_loop(
             chosen_model = full.model
         else:
             assert background is not None
-            chosen, report, events, update_latency_s = _corrected_update(
-                background.model, measured_state, policy, cfg
-            )
+            (
+                chosen,
+                report,
+                events,
+                update_latency_s,
+                corrected_values,
+            ) = _corrected_update(background.model, measured_state, policy, cfg)
             if policy == "no_correction":
                 diagnostics = _empty_diagnostics(
                     update_latency_s=update_latency_s,
@@ -1120,6 +1138,8 @@ def run_closed_loop(
                         events=events,
                     )
                 else:
+                    assert corrected_values is not None
+                    _load_estimate(corrected_values)
                     chosen_model = background.model
                     diagnostics = _diagnostics(
                         report=report,

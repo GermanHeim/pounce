@@ -1223,11 +1223,13 @@ does not replace plant-side interlocks, state estimation, robust constraint
 tightening, or a deadline-aware real-time scheduler.
 
 The notebook reports IAE, ISE, stage cost, control movement, maximum temperature
-violation, active-set changes, fallback counts, solver failures and recoveries,
-and median/p95 online latency.  A failed warm-started controller solve is retried
-once from a cold model and both the failure and recovery are counted; an
-unrecovered cold solve aborts the campaign rather than silently applying an
-unverified control.  Timing rows carry the POUNCE commit, model revision,
+violation, active-set changes, fallback counts and fractions, solver failures
+and recoveries, and median/p95 online latency.  A failed warm-started controller
+solve is retried once from a cold model and both the failure and recovery are
+counted; an unrecovered cold solve aborts the campaign rather than silently
+applying an unverified control.  Accepted corrected trajectories supply the
+state, derivative, and control warm start for the shifted horizon; rejected
+guarded points do not.  Timing rows carry the POUNCE commit, model revision,
 tolerance, platform, Python version, and whether a warm-up was excluded.  Re-run
 timing on the target controller hardware; notebook wall-clock values are
 evidence for the recorded machine, not portable deadlines.
