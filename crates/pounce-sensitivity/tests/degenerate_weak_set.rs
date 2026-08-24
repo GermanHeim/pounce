@@ -1,12 +1,13 @@
 //! The two weak rows the directional QP must not decide.
 //!
 //! An ambiguous coordinate far from its bound may sit in the weak
-//! set, but a step that ends short of the bound cannot activate it,
-//! so the QP must not engage it and its plain movement stands. And a
-//! coordinate an equality pins cannot be decided by a pin force: its
-//! own diagonal entry of the reduced `S` is zero, so the row is
-//! dropped from the engaged set rather than handed to the QP, which
-//! would be unbounded along it.
+//! set, but its bound is not at a kink, `kappa = sigma * S_kk` is
+//! orders of magnitude below one, so the QP drops it and its plain
+//! movement stands. And a coordinate an equality pins cannot be
+//! decided by a pin force: its own diagonal entry of the reduced `S`
+//! is exactly zero, the limiting case of the same test, so the row
+//! is dropped rather than handed to the QP, which would be unbounded
+//! along it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -282,7 +283,7 @@ fn solved(tnlp: Rc<RefCell<dyn TNLP>>) -> Solver {
 }
 
 #[test]
-fn a_coordinate_the_step_cannot_reach_is_not_held() {
+fn a_coordinate_far_from_its_bound_is_not_held() {
     let solver = solved(Rc::new(RefCell::new(SoftInteriorQp)));
     let x = solver.converged().expect("converged").x.clone();
     assert!(x[0].abs() < 1e-3, "x1 sits on its bound, got {}", x[0]);
@@ -303,9 +304,10 @@ fn a_coordinate_the_step_cannot_reach_is_not_held() {
     );
 
     // dp = -1e-3 moves both coordinates toward their lower bounds by
-    // A1 dp. That carries x1 past its bound, so it is held. It moves
-    // xs a thousandth of the 5.0 between it and its bound, so the QP
-    // must leave xs alone and its plain movement must stand.
+    // A1 dp. x1 is at its kink, kappa near one, so the QP holds it.
+    // xs sits 5.0 from its bound with soft curvature, kappa orders of
+    // magnitude below one, so the QP drops it and its plain movement
+    // stands.
     let dp = -1.0e-3;
     let (d, held, _spent) = solver
         .parametric_step_directional(&[0], &[dp], 16)
@@ -342,9 +344,10 @@ fn a_row_an_equality_pins_is_dropped_not_decided() {
         "xp must be in the weak set for this test to test anything: {weak:?}"
     );
 
-    // Pin row 0 moves toward x1's hold side, pin row 1 moves xp toward
-    // its bound. The QP cannot decide xp, no force moves a coordinate
-    // an equality owns, so the row is dropped and the rest is decided.
+    // Pin row 0 moves toward x1's hold side, pin row 1 moves xp
+    // toward its bound, so both engage. The QP cannot decide xp, no
+    // force moves a coordinate an equality owns, so its row is
+    // dropped and the rest is decided.
     let (d, held, _spent) = solver
         .parametric_step_directional(&[0, 1], &[-1.0, -1.0e-3], 16)
         .expect("the decision completes with the pinned row dropped");

@@ -181,12 +181,11 @@ fn a_kink_is_weak_at_any_curvature() {
     );
 }
 
-/// A certified kink's decision is a directional derivative, linear
-/// in the step. Its measured slack is barrier width and is treated
-/// as zero, so the holding side holds at a step far below that
-/// width, not only at steps that cover it.
+/// A kink's decision is a directional derivative, linear in the
+/// step, so the holding side holds at a step far below the barrier
+/// width, not only at steps that cover the remaining slack.
 #[test]
-fn a_certified_kink_decides_by_direction_at_any_scale() {
+fn a_kink_decides_by_direction_at_any_scale() {
     let solver = solved();
     let dp = -1.0e-10;
     let (d, held, _spent) = solver

@@ -956,23 +956,24 @@ impl Solver {
     ///
     /// whose KKT conditions are eq. 14's complementarity: a released
     /// row moves to its feasible side (the QP gradient `Sλ + m ≥ 0`)
-    /// and a held row's pin force is nonnegative. A row engages only
-    /// when the direction carries its coordinate past the remaining
-    /// slack toward the bound. The QP treats an engaged row as at its
-    /// bound, so a step that ends short of the bound decides nothing
-    /// and the row's plain movement stands. A bound the classifier
-    /// certifies weakly active sits at barrier width, its slack is
-    /// the solve's own inflation and is treated as zero, so a
-    /// certified kink's decision is linear in the step at any scale.
-    /// The measured slack applies to the ambiguous class only, where
-    /// a kink and a genuinely interior coordinate share one verdict
-    /// and the slack is the datum that separates them. Rows outside the engaged
-    /// set are verified against the decided direction and the set
-    /// expands until no new row violates. A row whose own diagonal of
-    /// `S` is not positive cannot be decided by a pin force, which
-    /// happens when an equality owns its coordinate, so such rows are
-    /// dropped and their coordinates follow the equalities that own
-    /// them.
+    /// and a held row's pin force is nonnegative. Rows outside the
+    /// engaged set are verified against the decided direction and the
+    /// set expands until no new row violates. Nothing reads the
+    /// perturbation's size, so the decision is linear in the step.
+    ///
+    /// An engaged row is decided only when its bound is at a kink,
+    /// read off `kappa = sigma * S_kk`, the barrier weight times the
+    /// row's own diagonal of the reduced matrix. `sigma` equals the
+    /// curvature reduced along the coordinate at an exact kink, and
+    /// `S_kk` is that reduced curvature's inverse, so `kappa` is 1
+    /// there at any curvature, coupling, or scaling, and it falls as
+    /// the squared ratio of kink width to slack away from one. A row
+    /// below `KAPPA_MIN` is dropped from the engaged set and its
+    /// plain movement stands: its bound is too far from a kink for a
+    /// pin force to decide, and the error of leaving it undecided is
+    /// bounded by its own slack, order `sqrt(mu)` at the threshold.
+    /// A coordinate an equality pins is the limiting case, `S_kk`
+    /// exactly zero, dropped by the same test.
     ///
     /// `max_iter` is the total back-solve budget: the all-released
     /// solve, every basis column, and the combined solve that recovers
@@ -997,6 +998,16 @@ impl Solver {
         use pounce_qp::solver::{ParametricActiveSetSolver, QpSolver};
 
         const EPS_REL: Number = 1e-9;
+        /// A row whose `kappa = sigma * S_kk` is below this is not at
+        /// a kink and is dropped from the QP. `kappa` is 1 at an
+        /// exact kink and equals the squared ratio of kink width to
+        /// slack, so a row at the threshold sits about 30 widths from
+        /// its bound and the cost of deciding it either way is
+        /// bounded by that slack. Measured populations: exact fixture
+        /// kinks 1.0, held solves near a release 4e-2 and 6e-3,
+        /// genuinely interior rows 3e-8 and below, pin-owned rows at
+        /// or below zero.
+        const KAPPA_MIN: Number = 1e-3;
 
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
         let weak = self.weakly_active_bounds()?;
@@ -1085,47 +1096,22 @@ impl Solver {
         // feasible side for that row's bound
         let sign = |k: usize| if weak[k].lower { 1.0 } else { -1.0 };
         let movement = |k: usize, d: &[Number]| -> Number { sign(k) * d[weak[k].var_row] };
-        // Remaining slack of weak row k, the distance the direction
-        // must cover before the bound is reached. Engagement compares
-        // movement against it. The QP treats an engaged row as at its
-        // bound and the error of that model is the slack, so a step
-        // that ends short of the bound leaves the row out and its
-        // plain movement stands. A row the classifier certifies
-        // weakly active is at a kink: its measured slack is the
-        // barrier's own width, the true slack is zero, and zero is
-        // used, which keeps the decision linear in the step at any
-        // scale. The measured slack applies to the ambiguous rows
-        // only. That class holds kinks and genuinely interior
-        // coordinates under one verdict, the slack separates them,
-        // and an interior row far from its bound is left alone by
-        // any step that cannot reach it.
-        let certified: Vec<bool> = {
-            use crate::activity::WEAKLY_ACTIVE;
+        // The barrier weight of each weak row's variable, in natural
+        // units to match the natural-units response the back-solves
+        // return, so `kappa` below is frame-invariant. The classifier
+        // succeeded inside `weakly_active_bounds`, so a nonempty weak
+        // set implies this call succeeds too.
+        let nat_sigma: Vec<Number> = {
             let report = self.classify_activity()?;
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
             weak.iter()
                 .map(|w| {
                     let full = nl.var_x_to_full_x(w.var_row as Index) as usize;
-                    report.var_status.get(full) == Some(&WEAKLY_ACTIVE)
+                    report.var_sigma.get(full).copied().unwrap_or(0.0)
                 })
                 .collect()
         };
-        let slack: Vec<Number> = weak
-            .iter()
-            .zip(&certified)
-            .map(|(w, &cert)| {
-                if cert {
-                    return 0.0;
-                }
-                let sl = if w.lower {
-                    ctx.x_curr[w.var_row] - ctx.lo[w.var_row]
-                } else {
-                    ctx.hi[w.var_row] - ctx.x_curr[w.var_row]
-                };
-                sl.max(0.0)
-            })
-            .collect();
         let scale_of = |d: &[Number]| -> Number {
             d[..n_x]
                 .iter()
@@ -1134,9 +1120,7 @@ impl Solver {
         };
 
         let tol0 = band * scale_of(&d0);
-        let mut engaged: Vec<usize> = (0..nw)
-            .filter(|&k| movement(k, &d0) < -(slack[k] + tol0))
-            .collect();
+        let mut engaged: Vec<usize> = (0..nw).filter(|&k| movement(k, &d0) < -tol0).collect();
         if engaged.is_empty() {
             return Ok((d0[..n_x].to_vec(), Vec::new(), work));
         }
@@ -1152,17 +1136,19 @@ impl Solver {
         let mut proj: Vec<Option<Vec<Number>>> = vec![None; nw];
         let mut d = d0.clone();
         let held: Vec<usize>;
-        // A weak row whose own diagonal entry of `S` is not positive
-        // cannot be decided by a pin force. The zero case is a
-        // coordinate an equality owns: under a parametric step the
-        // one equality that moves a coordinate is the pin of a
-        // perturbed parameter, and a pin shift larger than the
-        // coordinate's remaining slack passes the engagement test,
-        // which puts a zero on the diagonal of `S` beside a nonzero
-        // gradient, an unbounded QP. The bound's status there is the
-        // parameter's business, inside the bound or infeasible, so
-        // the row stays out for good. A negative diagonal is dropped
-        // the same way: the QP cannot bound it either.
+        // A weak row is decided only when its bound is at a kink,
+        // and `kappa = sigma * S_kk` measures exactly that: 1 at an
+        // exact kink, falling as the squared ratio of kink width to
+        // slack away from one. A row below the threshold is dropped
+        // and its plain movement stands, since a pin force there
+        // holds the coordinate a full slack from where the bound
+        // actually is, and the error of not deciding is bounded by
+        // that same slack. The limiting cases fall out of the one
+        // test: a coordinate an equality owns has `S_kk` exactly
+        // zero (its pin absorbs any bound force, and admitting it
+        // puts a zero diagonal beside a nonzero gradient, an
+        // unbounded QP), and a negative diagonal, which the QP could
+        // not bound either, is likewise below the threshold.
         let mut inert: Vec<usize> = Vec::new();
         loop {
             for &k in &engaged {
@@ -1182,8 +1168,7 @@ impl Solver {
                 work += 1;
                 let col: Vec<Number> = weak.iter().map(|w| xk[w.var_row]).collect();
                 let own = sign(k) * col[k];
-                let col_scale = col.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
-                if own <= 1e-12 * col_scale.max(1e-300) {
+                if nat_sigma[k] * own < KAPPA_MIN {
                     inert.push(k);
                 }
                 proj[k] = Some(col);
@@ -1318,7 +1303,7 @@ impl Solver {
                 if engaged.contains(&k) || inert.contains(&k) {
                     continue;
                 }
-                if movement(k, &d) < -(slack[k] + tol) {
+                if movement(k, &d) < -tol {
                     engaged.push(k);
                     grew = true;
                 }
