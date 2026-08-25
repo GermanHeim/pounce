@@ -20,9 +20,9 @@
 //!    the objective offset the reduction moved carried back too.
 
 use pounce_convex::{
-    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, PresolveNote, QpOptions, QpProblem,
-    QpSolution, QpStatus, Reuse, Triplet, back_translate, back_translate_verified, engine_options,
-    solve_qp_active_set, verify_status,
+    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, PresolveNote, QpOptions,
+    QpProblem, QpSolution, QpStatus, Reuse, Triplet, back_translate, back_translate_verified,
+    engine_options, screen_variable_box, solve_qp_active_set, verify_status,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -467,6 +467,13 @@ fn an_external_caller_can_translate_solve_and_read_back() {
     let prob = target_qp(3.0, 2.0);
     let opts = QpOptions::default();
 
+    // Step 1 of the recipe, and the one that is not optional: the box screen.
+    let prob = match screen_variable_box(&prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Snapped(repaired) => repaired,
+        BoxScreen::Empty => unreachable!("this fixture's box is fine"),
+    };
+
     let native = ActiveSetQp::from_convex(&prob);
     let qopts = engine_options(
         &opts,
@@ -494,4 +501,46 @@ fn an_external_caller_can_translate_solve_and_read_back() {
     assert_eq!(by_hand.status, got.status, "composition matches its pieces");
     assert_eq!(by_hand.x, got.x);
     assert_eq!(by_hand.z, got.z);
+}
+
+/// The screen an external caller must run is reachable, and it is the step
+/// that decides a class the engine cannot.
+///
+/// `solve_qp_active_set` and `ActiveSetSession` screen the variable box before
+/// translating, because two classes of empty box do not survive the engine:
+/// a reversed box (`lb > ub`) is rejected by `pounce_qp`'s `validate` as a hard
+/// `Err`, and a *present* `+∞` lower bound is dropped as if absent and comes
+/// back `Optimal` at a point violating it (gh #295, gh #491). Exporting the
+/// translation without exporting the screen would have left an external caller
+/// to rediscover both — the same half-a-surface problem @GermanHeim raised
+/// about the read-back, one step earlier in the recipe.
+#[test]
+fn the_box_screen_is_reachable_and_decides_what_the_engine_cannot() {
+    // Reversed beyond the hairline tolerance: empty by inspection.
+    let mut reversed = target_qp(3.0, 2.0);
+    reversed.lb = vec![5.0, 0.0];
+    reversed.ub = vec![1.0, 10.0];
+    assert!(
+        matches!(screen_variable_box(&reversed), BoxScreen::Empty),
+        "a reversed box is empty by inspection, and needs no certificate"
+    );
+    // And that is the verdict the driver reports for it, rather than the
+    // `InvertedBounds` error the engine would raise on the raw translation.
+    assert_eq!(cold(&reversed).status, QpStatus::PrimalInfeasible);
+
+    // A hairline crossing is a tolerance artifact, not an empty set: the screen
+    // repairs it and the solve proceeds on the repaired copy.
+    let mut hairline = target_qp(3.0, 2.0);
+    hairline.lb = vec![0.5 + 1e-12, 0.0];
+    hairline.ub = vec![0.5, 10.0];
+    match screen_variable_box(&hairline) {
+        BoxScreen::Snapped(repaired) => {
+            assert!(
+                repaired.lb_of(0) <= repaired.ub_of(0),
+                "repaired to a point"
+            );
+        }
+        other => panic!("hairline crossing must snap, got {other:?}"),
+    }
+    assert_eq!(cold(&hairline).status, QpStatus::Optimal);
 }

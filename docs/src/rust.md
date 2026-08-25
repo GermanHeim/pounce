@@ -264,14 +264,27 @@ path at `n = 40`, ~104-111 ms of wall clock cold against ~19-24 ms through a
 session, with all 7 reusing steps tracing the path.
 
 If you are driving the engine yourself rather than through a session — a
-frontend doing something the session does not cover — translate with
-`ActiveSetQp::from_convex`, take the engine settings from `engine_options`, and
-read the answer back with `back_translate_verified`. The last one is not
-optional dressing: it applies the dual sign transform, recomputes the objective
-in convex coordinates and re-derives the verdict (the engine's `Optimal` is a
-claim, not a verdict — see `verify_status`). `back_translate` and
-`verify_status` are exported separately for callers that need to do something
-between them.
+frontend doing something the session does not cover — the recipe is four steps,
+and the first and last are the ones that are easy to skip and wrong to:
+
+1. `screen_variable_box`. `BoxScreen::Empty` is a certified `PrimalInfeasible`
+   with no solve behind it; `Snapped` hands back a repaired copy to solve
+   instead. Skip it and a reversed box reaches the engine as an
+   `InvertedBounds` error, while a *present* `+∞` lower bound is dropped as if
+   absent and the solve returns `Optimal` at a point that violates it.
+2. `ActiveSetQp::from_convex` on whatever step 1 handed back.
+3. `engine_options` for the settings this path was measured under, then solve
+   `ActiveSetQp::problem` with `pounce_qp`.
+4. `back_translate_verified`. It applies the dual sign transform, recomputes
+   the objective in convex coordinates and re-derives the verdict — the
+   engine's `Optimal` is a claim, not a verdict (see `verify_status`).
+   `back_translate` and `verify_status` are exported separately for callers
+   that need to do something between them.
+
+What the recipe does *not* reproduce is the cold driver's retry ladder (Ruiz
+equilibration, the simplex-seeded retry, the objective-free feasibility probe).
+Those are `solve_qp_active_set`'s and `ActiveSetSession`'s job; if you want
+them, call one of those instead.
 
 ### Active-set QP and SQP warm starts
 

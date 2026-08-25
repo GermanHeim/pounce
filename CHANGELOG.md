@@ -99,6 +99,18 @@ changes.
   `engine_options` exported for callers that need the pieces. Re-exported from
   `pounce-rs` as `convex::*`.
 
+  `screen_variable_box` and `BoxScreen` are public for the same reason, one
+  step earlier: the screen's own documentation says *every solve entry point
+  runs this*, and a caller translating and solving the native problem is now
+  one of them. It is not an optimization — an empty box reaches the engine as
+  an `InvertedBounds` error where the driver reports a certified
+  `PrimalInfeasible`, and a *present* `+∞` lower bound is dropped as if absent
+  and comes back `Optimal` at a point violating it (gh #295, gh #491). The
+  four-step recipe is documented on `ActiveSetQp::from_convex` and in
+  `docs/src/rust.md`; what it deliberately does not reproduce is the cold
+  driver's retry ladder, which is what `solve_qp_active_set` and
+  `ActiveSetSession` are for.
+
 - **`QpSolution::stats.parametric_source` names what a `solve_parametric` call
   actually reused** — `Homotopy`, `WorkingSet` or `Cold`, and `None` on every
   other entry point (#769). The three internal outcomes of that call were

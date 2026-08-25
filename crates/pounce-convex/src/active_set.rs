@@ -454,8 +454,22 @@ impl ActiveSetQp {
     ///
     /// Total: every convex problem has a `pounce-qp` image, so this cannot
     /// fail. What it does *not* do is screen the problem — see
-    /// `screen_variable_box`, which the drivers run first because an empty
+    /// [`screen_variable_box`], which the drivers run first because an empty
     /// variable box panicked the engine (gh #295).
+    ///
+    /// **An external caller runs it too.** The full recipe, which is what
+    /// [`solve_qp_active_set`] and [`ActiveSetSession`] do internally:
+    ///
+    /// 1. [`screen_variable_box`] — `Empty` is a certified `PrimalInfeasible`
+    ///    with no solve; `Snapped` replaces the problem with the repaired copy;
+    ///    `Feasible` passes through. Skipping this turns an empty box into a
+    ///    hard `Err`, and an *impossible* bound into a wrong `Optimal`.
+    /// 2. `from_convex` on whatever step 1 handed back, then
+    ///    [`engine_options`] and a solve of [`Self::problem`].
+    /// 3. [`back_translate_verified`] for the answer.
+    ///
+    /// [`screen_variable_box`]: crate::screen_variable_box
+    /// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
     pub fn from_convex(prob: &QpProblem) -> Self {
         let n = prob.n;
         let m_eq = prob.m_eq();
