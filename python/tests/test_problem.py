@@ -551,3 +551,191 @@ def test_add_option_large_but_in_range_solves():
     x, info = prob.solve(x0=np.array([1.0, 1.0]))
     assert info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(x, [0.0, 0.0], atol=1e-6)
+
+
+# --- gh#765: jacobianstructure is optional --------------------------------
+#
+# In the cyipopt interface POUNCE advertises, `jacobianstructure` is an
+# *optional* callback: an object that omits it declares a dense (m, n)
+# Jacobian, and its `jacobian(x)` returns all m*n entries row-major.
+# `Problem.solve()` used to call the method unconditionally and die with a
+# bare AttributeError, while `pounce.preflight` -- which implements the
+# fallback in `_preflight.py` -- accepted the very same object.
+#
+# Each test below is run against *both* branches of the new feature
+# detection: the structure-less object and an otherwise identical one that
+# supplies the pattern explicitly. A green run on the fallback alone would
+# say nothing about the path every existing model takes, and vice versa.
+
+
+class HS071Dense:
+    """HS071 with the (already dense) `jacobianstructure` omitted.
+
+    Delegates to an `HS071` rather than subclassing it: an inherited
+    `jacobianstructure` is still `hasattr`-visible, so a subclass that
+    merely deletes the name from its own dict would keep taking the
+    explicit-structure branch and test nothing.
+
+    `jacobian` is unchanged -- the 8 entries it returns are exactly the
+    dense (m, n) = (2, 4) block in row-major order, which is what the
+    fallback pattern addresses.
+    """
+
+    def __init__(self):
+        self._inner = HS071()
+
+    def objective(self, x):
+        return self._inner.objective(x)
+
+    def gradient(self, x):
+        return self._inner.gradient(x)
+
+    def constraints(self, x):
+        return self._inner.constraints(x)
+
+    def jacobian(self, x):
+        return self._inner.jacobian(x)
+
+
+class SumToOne:
+    """The issue's reproduction: min x·x s.t. x0 + x1 == 1, optimum
+    x = [0.5, 0.5], obj = 0.5. No `jacobianstructure`."""
+
+    def objective(self, x):
+        return float(np.asarray(x, float) @ np.asarray(x, float))
+
+    def gradient(self, x):
+        return 2 * np.asarray(x, float)
+
+    def constraints(self, x):
+        return np.array([float(np.sum(x))])
+
+    def jacobian(self, x):
+        return np.ones(2)  # dense (m=1, n=2), row-major
+
+
+class SumToOneWithStructure(SumToOne):
+    def jacobianstructure(self):
+        return (np.array([0, 0]), np.array([0, 1]))
+
+
+def _sum_to_one_problem(obj):
+    p = pounce.Problem(
+        n=2, m=1, problem_obj=obj, lb=[-10.0] * 2, ub=[10.0] * 2, cl=[1.0], cu=[1.0]
+    )
+    p.add_option("print_level", 0)
+    return p
+
+
+@pytest.mark.parametrize("obj", [SumToOne(), SumToOneWithStructure()])
+def test_missing_jacobianstructure_solves_as_dense(obj):
+    """The filed repro, plus the explicit-structure control."""
+    x, info = _sum_to_one_problem(obj).solve(x0=np.array([0.0, 0.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, [0.5, 0.5], atol=1e-7)
+    np.testing.assert_allclose(info["obj_val"], 0.5, atol=1e-9)
+
+
+def test_missing_jacobianstructure_matches_explicit_structure():
+    """Same model, same answer, whichever branch resolves the sparsity.
+
+    HS071 rather than the 2-variable repro: it has m = 2 and a genuinely
+    dense 2x4 block, so a fallback that transposed the row-major order
+    (`np.divmod(k, m)` instead of `np.divmod(k, n)`) would still solve the
+    1-row model and fail here.
+    """
+    kw = dict(n=4, m=2, lb=[1.0] * 4, ub=[5.0] * 4, cl=[25.0, 40.0], cu=[2e19, 40.0])
+    out = []
+    for obj in (HS071Dense(), HS071()):
+        p = pounce.Problem(problem_obj=obj, **kw)
+        p.add_option("tol", 1e-8)
+        p.add_option("print_level", 0)
+        out.append(p.solve(x0=np.array([1.0, 5.0, 5.0, 1.0])))
+    (x_dense, info_dense), (x_sparse, info_sparse) = out
+    assert info_dense["status_msg"] == "Solve_Succeeded"
+    # The published HS071 optimum, from the issue's third oracle.
+    np.testing.assert_allclose(info_dense["obj_val"], 17.0140173, rtol=1e-8)
+    np.testing.assert_allclose(x_dense, [1.0, 4.7430, 3.8211, 1.3794], atol=1e-3)
+    # ... and bit-for-bit the same trajectory as the explicit pattern: the
+    # fallback declares the same (rows, cols), so nothing downstream moves.
+    np.testing.assert_array_equal(x_dense, x_sparse)
+    assert info_dense["iter_count"] == info_sparse["iter_count"]
+    assert info_dense["obj_val"] == info_sparse["obj_val"]
+
+
+@pytest.mark.parametrize("obj", [SumToOne(), SumToOneWithStructure()])
+def test_missing_jacobianstructure_solves_in_batch(obj):
+    """`solve_nlp_batch` builds its `PyTnlpInit` through the same helper."""
+    (x, info), = pounce.solve_nlp_batch([_sum_to_one_problem(obj)], [np.zeros(2)])
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, [0.5, 0.5], atol=1e-7)
+
+
+@pytest.mark.parametrize("obj", [SumToOne(), SumToOneWithStructure()])
+def test_preflight_and_solve_agree_on_the_same_object(obj):
+    """The internal inconsistency the issue reports: `preflight` accepted
+    an object `solve` rejected. Whatever preflight calls solvable, solve
+    must solve."""
+    report = pounce.preflight(
+        obj, np.zeros(2), lb=[-10.0] * 2, ub=[10.0] * 2, cl=[1.0], cu=[1.0]
+    )
+    assert not report.fatal
+    _, info = _sum_to_one_problem(obj).solve(x0=np.zeros(2))
+    assert info["status_msg"] == "Solve_Succeeded"
+
+
+def test_missing_jacobianstructure_unaffected_when_m_is_zero():
+    """m = 0 skips the Jacobian block entirely; no dense pattern is
+    synthesized and `jacobian` is never called."""
+
+    class Unconstrained:
+        def objective(self, x):
+            return float(np.asarray(x, float) @ np.asarray(x, float))
+
+        def gradient(self, x):
+            return 2 * np.asarray(x, float)
+
+    p = pounce.Problem(n=2, m=0, problem_obj=Unconstrained(), lb=[-10.0] * 2, ub=[10.0] * 2)
+    p.add_option("print_level", 0)
+    x, info = p.solve(x0=np.array([1.0, 1.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, [0.0, 0.0], atol=1e-6)
+
+
+def test_dense_jacobian_fallback_rejects_an_out_of_range_pattern():
+    """The dense pattern is m*n entries, and `nele_jac` is a signed 32-bit
+    count. A problem big enough to overflow it is not one that meant to be
+    dense, so the message names the callback that declares the real
+    pattern -- rather than wrapping to a negative or truncated nonzero
+    count and mis-sizing every structure buffer downstream.
+
+    No callback is ever invoked: the check runs while the sparsity is
+    being resolved, so the bogus object below is never asked for values.
+    """
+
+    class Big:
+        def objective(self, x):
+            return 0.0
+
+        def gradient(self, x):
+            return np.zeros(len(x))
+
+        def constraints(self, x):
+            return np.zeros(100_000)
+
+        def jacobian(self, x):
+            raise AssertionError("must not be reached")
+
+    n = m = 100_000  # m*n = 1e10 > i32::MAX
+    p = pounce.Problem(
+        n=n,
+        m=m,
+        problem_obj=Big(),
+        lb=[-1.0] * n,
+        ub=[1.0] * n,
+        cl=[-1.0] * m,
+        cu=[1.0] * m,
+    )
+    p.add_option("print_level", 0)
+    with pytest.raises(ValueError, match="jacobianstructure"):
+        p.solve(x0=np.zeros(n))

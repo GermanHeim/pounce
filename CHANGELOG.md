@@ -21,6 +21,76 @@ changes.
   (AIChE J. 65, 2019, e16730), adds residual/root/branch guards, and states the
   important limitation that these local guards are not a global TPD
   phase-stability calculation.
+- **`jacobianstructure` is optional again on the Python `Problem`, as
+  cyipopt documents it** (#765). A constrained `problem_obj` that omits the
+  callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and
+  `solve_nlp_batch()` used to call the method unconditionally and raise a
+  bare `AttributeError: 'O' object has no attribute 'jacobianstructure'`.
+
+  The asymmetry was the tell: `hessianstructure` *is* feature-detected
+  (`has_hessian` is a `hasattr` probe, and the Hessian block is gated on
+  it) — only the Jacobian block called blind. So did POUNCE's own entry
+  points: `pounce.preflight` implements the dense fallback in
+  `_preflight.py` and reported `ok: True` for the very object `solve()`
+  then rejected.
+
+  The synthesized pattern is `np.divmod(np.arange(m * n), n)` — the same
+  row-major order `_preflight.py` uses and the order a `jacobian(x)`
+  written against the dense default returns. A model whose `m * n`
+  overflows the signed-32-bit nonzero count is refused with a message
+  naming `jacobianstructure`, rather than wrapping to a truncated count.
+  Nothing changes for an object that supplies the callback: it takes the
+  same branch as before and the trajectory is bit-for-bit identical.
+
+  Also on this path: a `jacobian(x)` whose length is not `nele_jac` now
+  logs the mismatch instead of discarding the error and ending the solve
+  in a bare `Invalid_Number_Detected`. With the dense default that is a
+  realistic user error — returning only the structural nonzeros while
+  declaring no pattern.
+- **The convex path now presents the same end-of-run contract as the NLP
+  path**: timing statistics when asked for, an `EXIT:` banner, and a
+  machine-readable `Status:` line (#767).
+
+  All three gaps were found while instrumenting the Mittelmann suite, where
+  2 of 47 instances route convex.
+
+  `print_timing_statistics=yes` was accepted on the convex path, reported
+  `(used)` by `print_user_options`, and emitted nothing — so a tool
+  attributing solve cost by phase read 0% for *every* phase of a
+  convex-routed instance, which reads as "already fast" rather than "not
+  measured". `bearing_400` ran 9.8 s and printed no timer at all. The convex
+  drivers now emit a phase report in the same row layout the NLP path uses:
+  `OverallAlgorithm` and the three `LinearSystem*` rows carry the same labels
+  because they are the same quantities, beside `ProblemExtraction`,
+  `Presolve`, `ConvexSolve` and `SolutionRecovery` for the stages this path
+  actually has. The linear-algebra rows are charged from inside
+  `pounce-linsol` (both interior-point engines) and `pounce-qp` (the
+  parametric active-set engine), so no engine reports a solve it spent real
+  time in as costing nothing in the linear system.
+
+  The log also ended after the residual block, with no `EXIT:` banner and no
+  terminal status. `benchmarks/scripts/run_nl_bench.sh` already prefers a
+  `Status:` line and only falls back to its ladder of convex-specific stdout
+  scrapes because nothing emitted one; every other consumer of the CLI had to
+  reimplement that ladder. Both blocks are gated exactly as the NLP path's
+  are — `print_level >= 1`, and no `Status:` line under `--debug-json` — and a
+  convex attempt that declines to the NLP path (gh #535, `socp_nlp_fallback`)
+  still prints no verdict, so a run has exactly one.
+
+- **The JSON solve report carries the verdict in IPOPT's own enumerator
+  spelling**, as `solution.status_upstream` (#767).
+
+  `solution.status` is the Rust variant name (`SolveSucceeded`) — on both
+  paths, not just the convex one — while the spelling every IPOPT-facing
+  consumer keys off is `Solve_Succeeded`: CUTEst status tables, the reference
+  JSONs under `benchmarks/*/ipopt_ma57.json`, and pounce's own `Status:` line.
+  A consumer comparing `solution.status == "Solve_Succeeded"` matched nothing
+  and silently classified every solve as a failure. The new field is derived
+  from `status` in `ReportBuilder::finish`, so the two cannot disagree, and
+  `status` keeps its documented meaning — existing consumers are unaffected.
+  It is an added field, which the schema documents as non-breaking, so
+  `pounce.solve-report/v1` is unchanged; reports written by pounce ≤ 0.10.0
+  do not carry it.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence

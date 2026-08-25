@@ -5,7 +5,7 @@
 
 use crate::types::Number;
 use crate::utils::{cpu_time, sys_time, wallclock_time};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Which time budget a [`Deadline`] check found crossed.
@@ -567,6 +567,209 @@ impl TimingStatistics {
         self.eval_constr_jac.reset();
         self.eval_lag_hess.reset();
     }
+}
+
+/// Which linear-system phase a [`ConvexTimingStatistics`] row is charging.
+/// Named after the rows [`TimingStatistics::report`] already prints, so a
+/// tool that attributes cost by phase reads one vocabulary across both
+/// solver paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearSystemPhase {
+    /// Pattern analysis / ordering (`Factorization::new`'s structure pass).
+    SymbolicFactorization,
+    /// Numeric factorization of the KKT matrix.
+    Factorization,
+    /// Triangular back-substitution against an existing factor.
+    BackSolve,
+}
+
+/// Wall-clock phase accumulator for the dedicated convex (LP / QP / conic)
+/// path, the counterpart of [`TimingStatistics`] for a solve that has no
+/// callbacks, no Hessian updates and no filter line search to attribute time
+/// to.
+///
+/// gh #767: `print_timing_statistics=yes` was accepted on the convex path,
+/// reported `(used)` by `print_user_options`, and emitted nothing — so a tool
+/// attributing cost by phase read 0% everywhere on a convex-routed instance,
+/// which is indistinguishable from "already fast" rather than "not measured".
+/// A 9.8 s `bearing_400` printed no timer at all.
+///
+/// The rows this reports are the phases the convex path actually has. Four of
+/// them — `OverallAlgorithm` and the three `LinearSystem*` rows — carry the
+/// *same* labels [`TimingStatistics::report`] prints, because they are the
+/// same quantities; the rest are named for the convex driver's own stages
+/// rather than reusing NLP row names that would always read zero.
+#[derive(Debug, Default)]
+pub struct ConvexTimingStatistics {
+    /// The whole convex driver: extraction through solution recovery.
+    /// Reported regardless of the detailed-timer switch, matching
+    /// [`TimingStatistics::overall_alg`].
+    pub overall_alg: TimedTask,
+    /// Reading the `.nl` model into the standard-form convex problem.
+    pub extraction: TimedTask,
+    /// Convex presolve plus the matching postsolve lift.
+    pub presolve: TimedTask,
+    /// The engine call itself (interior-point or active-set iterations).
+    pub solve: TimedTask,
+    /// Recovering per-constraint duals and bound multipliers in the
+    /// original model's ordering.
+    pub solution_recovery: TimedTask,
+
+    pub linear_system_symbolic_factorization: TimedTask,
+    pub linear_system_factorization: TimedTask,
+    pub linear_system_back_solve: TimedTask,
+}
+
+impl ConvexTimingStatistics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Format the per-phase report, in the row layout
+    /// [`TimingStatistics::report`] uses (label padded to 42 columns, wall
+    /// seconds right-aligned). Returns a multi-line string ending in a
+    /// trailing newline so callers can `print!` it directly.
+    pub fn report(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let row = |s: &mut String, label: &str, t: &TimedTask| {
+            let _ = writeln!(
+                s,
+                "{label:<42} {wall:>10.3}s",
+                wall = t.total_wallclock_time()
+            );
+        };
+        s.push_str("\nTiming Statistics:\n");
+        row(
+            &mut s,
+            "OverallAlgorithm....................:",
+            &self.overall_alg,
+        );
+        row(
+            &mut s,
+            " ProblemExtraction..................:",
+            &self.extraction,
+        );
+        row(
+            &mut s,
+            " Presolve...........................:",
+            &self.presolve,
+        );
+        row(&mut s, " ConvexSolve........................:", &self.solve);
+        row(
+            &mut s,
+            " SolutionRecovery...................:",
+            &self.solution_recovery,
+        );
+        row(
+            &mut s,
+            "LinearSystemSymbolicFactorization...:",
+            &self.linear_system_symbolic_factorization,
+        );
+        row(
+            &mut s,
+            "LinearSystemFactorization...........:",
+            &self.linear_system_factorization,
+        );
+        row(
+            &mut s,
+            "LinearSystemBackSolve...............:",
+            &self.linear_system_back_solve,
+        );
+        s
+    }
+
+    /// Enable or disable the *detailed* per-phase timers, mirroring
+    /// [`TimingStatistics::set_detailed_enabled`] and therefore upstream
+    /// Ipopt's `timing_statistics` gating: with the option off, every
+    /// `start()` / `end()` on these tasks is a no-op and the solve pays no
+    /// clock syscalls for them.
+    ///
+    /// [`Self::overall_alg`] is deliberately left enabled, for the same
+    /// reason it is on the NLP path — upstream's help text is explicit that
+    /// the overall algorithm time is unaffected by this option.
+    pub fn set_detailed_enabled(&self, on: bool) {
+        let set = |t: &TimedTask| {
+            if on {
+                t.enable();
+            } else {
+                t.disable();
+            }
+        };
+        set(&self.extraction);
+        set(&self.presolve);
+        set(&self.solve);
+        set(&self.solution_recovery);
+        set(&self.linear_system_symbolic_factorization);
+        set(&self.linear_system_factorization);
+        set(&self.linear_system_back_solve);
+    }
+
+    fn phase(&self, phase: LinearSystemPhase) -> &TimedTask {
+        match phase {
+            LinearSystemPhase::SymbolicFactorization => &self.linear_system_symbolic_factorization,
+            LinearSystemPhase::Factorization => &self.linear_system_factorization,
+            LinearSystemPhase::BackSolve => &self.linear_system_back_solve,
+        }
+    }
+}
+
+thread_local! {
+    /// The convex-path sink, when a [`ConvexTimingScope`] is open.
+    /// Thread-local rather than threaded through the drivers because the
+    /// factorization and back-solve rows are charged from inside
+    /// `pounce-linsol`, several crates below the driver that wants them —
+    /// the same reason `pounce-convex`'s solve deadline is thread-local.
+    static CONVEX_TIMING: RefCell<Option<Rc<ConvexTimingStatistics>>> =
+        const { RefCell::new(None) };
+}
+
+/// RAII installation of a convex-path timing sink: [`ConvexTimingScope::open`]
+/// makes `stats` the active sink, and dropping the returned guard restores
+/// whatever was installed before it.
+///
+/// A guard rather than a `with(…, closure)` wrapper because the driver that
+/// opens the scope is a long function with several early returns, and each of
+/// those must still restore the previous sink.
+///
+/// The tasks inside `stats` carry their own enabled flag, so a solve that was
+/// not asked for timing statistics pays one thread-local read per
+/// [`time_linear_system`] call and no clock syscalls at all.
+///
+/// Thread-local means exactly that: work a scope-holding thread hands to
+/// worker threads (`pounce_convex::solve_qp_batch_parallel`) is not charged,
+/// because those threads have no scope. The convex CLI driver — the only
+/// caller that opens one — solves on the thread that opened it.
+#[must_use = "the scope ends when the guard is dropped; bind it to a variable"]
+pub struct ConvexTimingScope {
+    previous: Option<Rc<ConvexTimingStatistics>>,
+}
+
+impl ConvexTimingScope {
+    pub fn open(stats: &Rc<ConvexTimingStatistics>) -> Self {
+        let previous = CONVEX_TIMING.with(|slot| slot.borrow_mut().replace(Rc::clone(stats)));
+        Self { previous }
+    }
+}
+
+impl Drop for ConvexTimingScope {
+    fn drop(&mut self) {
+        CONVEX_TIMING.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Charge the wall time `f` takes against `phase` of the active convex-path
+/// sink. A no-op wrapper when no [`ConvexTimingScope`] is open.
+///
+/// Phases never nest (a factorization does not run inside a back-solve), so
+/// the guard cannot clobber an outer start on the same task.
+pub fn time_linear_system<T>(phase: LinearSystemPhase, f: impl FnOnce() -> T) -> T {
+    let Some(stats) = CONVEX_TIMING.with(|slot| slot.borrow().clone()) else {
+        return f();
+    };
+    let task = stats.phase(phase);
+    let _guard = task.guard();
+    f()
 }
 
 #[cfg(test)]

@@ -9,11 +9,18 @@
 //!     def gradient(self, x):            -> array(n)
 //!     def constraints(self, x):         -> array(m)             # if m > 0
 //!     def jacobian(self, x):            -> array(nnz_jac)       # if m > 0
-//!     def jacobianstructure(self):      -> (rows, cols)         # called once
+//!     def jacobianstructure(self):      -> (rows, cols)         # optional
 //!     def hessian(self, x, lam, obj_f): -> array(nnz_hess)      # if exact-hess
 //!     def hessianstructure(self):       -> (rows, cols)         # called once
 //!     def intermediate(self, *stats):   -> bool | None          # optional
 //! ```
+//!
+//! Both structure callbacks are resolved once, in `build_tnlp_init`, and
+//! both are optional. Omitting `jacobianstructure` declares a dense
+//! `(m, n)` Jacobian whose `jacobian(x)` returns all `m * n` entries
+//! row-major (cyipopt's documented default, gh#765); omitting `hessian` /
+//! `hessianstructure` runs the solve with `hessian_approximation =
+//! limited-memory`.
 //!
 //! Bounds (`lb`, `ub`, `cl`, `cu`) and starting point come through
 //! [`PyTnlpInit`], populated by the `Problem.solve` wrapper.
@@ -290,7 +297,20 @@ impl TNLP for PyTnlp {
                         return false;
                     }
                 };
-                copy_pyarray_into(&res, values, "jacobian").is_ok()
+                // Log the copy failure rather than dropping it. The only
+                // way to get here is a `jacobian(x)` whose length is not
+                // `nele_jac`, and since gh#765 that is a realistic user
+                // error: an object with no `jacobianstructure` declares a
+                // dense `(m, n)` Jacobian, so returning only the structural
+                // nonzeros mismatches. Without this line the solve just ends
+                // in `Invalid_Number_Detected` with nothing said about why.
+                match copy_pyarray_into(&res, values, "jacobian") {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(target: "pounce::py", "pounce-py: jacobian(): {e}");
+                        false
+                    }
+                }
             }
         }
     }
