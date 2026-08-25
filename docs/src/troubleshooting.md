@@ -354,6 +354,14 @@ shipped — if you are parsing pounce's output, read `Status:` and ignore the
 banners. It carries the upstream IPOPT enumerator spelling
 (`Infeasible_Problem_Detected`, `Maximum_Iterations_Exceeded`, …).
 
+The specialized convex engines (LP / QP interior-point, the parametric
+active-set QP engine, and the conic QCQP engine) print the same `EXIT:` block
+and the same `Status:` line, in the same spelling, so a parser needs no
+convex-specific case. If you are reading the JSON report rather than the log,
+compare against `solution.status_upstream`, which carries that spelling;
+`solution.status` is the Rust enum-variant name (`Solve_Succeeded` vs
+`SolveSucceeded`) and does not match IPOPT's tables.
+
 The two rungs probe different things, and the distinction matters when
 you are reading a log:
 

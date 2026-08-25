@@ -607,6 +607,35 @@ pub fn print_convex_summary(
     println!();
 }
 
+/// The end-of-run verdict block for the convex path: wall-clock total,
+/// `EXIT:` banner, and the `POUNCE <version>:` line — the same three lines,
+/// in the same order and spelling, that [`print_summary`] ends the NLP
+/// path's log with.
+///
+/// gh #767: the convex log stopped after the residual block, with no `EXIT:`
+/// banner and no terminal status of any kind. `benchmarks/scripts/run_nl_bench.sh`
+/// already compensates with a ladder of convex-specific stdout scrapes, so
+/// every *other* consumer of the CLI had to reimplement that ladder to learn
+/// how a convex-routed solve ended. The phrases come from [`status_message`],
+/// the table the NLP path prints from, so a consumer that recognises Ipopt's
+/// end-of-run vocabulary needs no convex-specific case at all.
+///
+/// The caller supplies the status already mapped onto the NLP-side
+/// [`ApplicationReturnStatus`] (the CLI's `qp_status_to_ars`), for the same
+/// reason: one status vocabulary across both engines.
+pub fn print_convex_end(status: ApplicationReturnStatus, total_seconds: f64) {
+    println!();
+    println!("Total seconds in POUNCE                              = {total_seconds:.3}");
+    println!();
+    println!("EXIT: {}", status_message(status));
+    println!();
+    println!(
+        "POUNCE {}: {}",
+        env!("CARGO_PKG_VERSION"),
+        status_message(status)
+    );
+}
+
 /// Format a number in Ipopt's scientific notation: 16-digit mantissa,
 /// signed 2-digit exponent (e.g. `3.7952009505566139e+03`). Rust's
 /// `{:.16e}` is close but emits a 1-digit exponent without leading
