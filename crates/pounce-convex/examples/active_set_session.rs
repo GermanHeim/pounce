@@ -115,12 +115,28 @@ fn main() {
     println!(
         "\nworking-set changes: cold={cold_total} session={warm_total}\n\
          wall clock: cold={cold_time:.1}ms session={warm_time:.1}ms\n\
-         attempts={} accepted={} cold_solves={}",
-        st.parametric_attempts, st.parametric_accepted, st.cold_solves
+         attempts={} accepted={} (homotopy={} working-set={} engine-cold={}) \
+         cold_solves={}",
+        st.parametric_attempts,
+        st.attempts_accepted(),
+        st.homotopy_accepted,
+        st.working_set_accepted,
+        st.engine_cold_accepted,
+        st.cold_solves
     );
     assert_eq!(
-        st.parametric_accepted + st.cold_solves,
+        st.attempts_accepted() + st.cold_solves,
         steps,
         "every step is either reused or solved cold"
+    );
+    // The point of the run is the homotopy, so say so where it can fail. An
+    // accepted attempt is not evidence the path was traced: `solve_parametric`
+    // declines on a changed `H` or topology and answers from the working set
+    // instead, which is warm but not what this family is demonstrating
+    // (gh #769, review). Without this the timing table could report a win from
+    // a route the text does not describe.
+    assert_eq!(
+        st.homotopy_accepted, st.parametric_attempts,
+        "this family moves only `c`, so every attempt should trace the path"
     );
 }

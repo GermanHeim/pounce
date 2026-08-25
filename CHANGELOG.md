@@ -58,21 +58,54 @@ changes.
   engine's `Optimal` is re-derived, not propagated — and is reported only if
   it stands up; otherwise the full cold ladder (screen → unscaled → Ruiz retry
   → simplex-seeded retry) runs and owns the answer. Eligibility beyond a shape
-  match is left to `solve_parametric`'s own guards, deliberately including the
-  `A` / variable-box guard that gh #602 measured and declined.
+  match is left to `solve_parametric`'s own guards — including the deliberate
+  *absence* of the `A` / variable-box guard that gh #602 measured and declined.
+
+  `last_reuse()` and `stats()` report **which route the engine took**, not
+  whether an attempt was made. `solve_parametric` declines the homotopy on a
+  changed `P` or a changed equality/fixed topology and answers from the
+  previous working set instead (`Reuse::WorkingSet` — warm, but not the traced
+  path), and solves cold internally when the previous solve is not a usable
+  base (`Reuse::EngineCold`). All three return an ordinary conclusive `Ok`, so
+  the first version of this session counted declines as parametric hits: a
+  family that never traced a single path would have reported perfect reuse.
+  Found in review by @GermanHeim, who reproduced it with a Hessian changing
+  from 2 to 4.
 
   Measured on `examples/active_set_session` (8-step path, `n = 40`, one
-  parameter moving, release build at `20be289` + this change, 4-core VM):
-  115.9 ms of wall clock cold against 25.8 ms through a session — a repeat run
-  gave 121.8 against 24.6 — with 7 of 7 attempts accepted, i.e. ~13 ms per
-  solve becoming ~0.9 ms once warm. Both arms report the same status and
-  objective on every step, which the example asserts.
+  parameter moving, release build, 4-core VM): 104.4 ms of wall clock cold
+  against 19.3 ms through a session — a repeat run gave 111.4 against 24.2 —
+  with all 7 reusing steps tracing the homotopy (asserted, not assumed), i.e.
+  ~13 ms per solve becoming ~1 ms once warm. Both arms report the same status
+  and objective on every step, which the example asserts.
 
   No behaviour change for existing callers: `solve_qp_active_set` is the same
   function with its internals hoisted, and a session with nothing to reuse is
   bit-identical to it (`session_cold_matches_free_function`). Both legs of
   `scripts/sweep-fixtures.sh` are unchanged, at `solver_selection=auto` and at
   `solver_selection=qp-active-set`.
+
+- **The `pounce-qp` return leg of the convex active-set translation is public**
+  (#769). `ActiveSetQp` shipped with the forward translation public and the
+  read-back crate-private, which left an external driver — the case in the
+  issue is oximo — able to build and solve the native problem and then obliged
+  to restate the dual sign transform, the objective reconstruction and the
+  status verification: the three parts of this that are wrong *silently*. Also
+  found in review by @GermanHeim.
+
+  `pounce_convex::back_translate_verified` is the whole return leg in one call
+  (read back, re-derive the verdict, reject non-finite fields, relabel a
+  deadline crossing), with `back_translate`, `verify_status` and
+  `engine_options` exported for callers that need the pieces. Re-exported from
+  `pounce-rs` as `convex::*`.
+
+- **`QpSolution::stats.parametric_source` names what a `solve_parametric` call
+  actually reused** — `Homotopy`, `WorkingSet` or `Cold`, and `None` on every
+  other entry point (#769). The three internal outcomes of that call were
+  previously indistinguishable in its result, so no caller could tell a traced
+  path from a declined one, and "is the warm path engaging?" had no checkable
+  answer. Adding the field is a breaking change for anyone constructing
+  `QpStats` with an exhaustive struct literal.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence

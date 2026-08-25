@@ -427,6 +427,15 @@ enum FeasibilityProbe {
 /// reach the engine; this type is public so that a caller doing something the
 /// session does not cover translates rather than re-derives.
 ///
+/// Translating is only half of it, and shipping only that half was the first
+/// review finding on gh #769: a caller who can build the native problem but
+/// cannot read its answer back still restates the dual sign transform, the
+/// objective reconstruction and the verification gate — the three parts of
+/// this that go wrong silently. So the return leg is public too:
+/// [`engine_options`] for the settings this path was measured under, and
+/// [`back_translate_verified`] (or [`back_translate`] plus [`verify_status`])
+/// for the answer.
+///
 /// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
 pub struct ActiveSetQp {
     n: usize,
@@ -579,8 +588,11 @@ impl ActiveSetQp {
 /// [`ActiveSetSession`](crate::active_set_session::ActiveSetSession) runs on
 /// the *same* configuration as the cold one (gh #769) — a session whose warm
 /// and cold legs disagreed about `max_iter` or the Schur updates would be
-/// reporting on two different solvers.
-pub(crate) fn engine_options(
+/// reporting on two different solvers. Public for the third caller the issue
+/// is about: an external driver solving [`ActiveSetQp::problem`] directly gets
+/// the iteration budget, the Schur-update choice and the homotopy setting this
+/// path was measured under, rather than `ActiveSetOptions::default()`.
+pub fn engine_options(
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
     n: usize,
@@ -815,16 +827,22 @@ where
 /// transform** included.
 ///
 /// Split out of `solve_translated` so the warm parametric path reads its
-/// answer with the identical code (gh #769): the sign transform is the part of
-/// this translation that is easy to get subtly wrong and impossible to see
-/// afterwards, since a flipped multiplier still looks like a multiplier. The
-/// returned status is a placeholder — [`verify_status`] decides the verdict,
-/// and no caller of this function may skip it.
+/// answer with the identical code (gh #769), and public for the same reason
+/// the forward translation is: the sign transform is the part of this
+/// translation that is easy to get subtly wrong and impossible to see
+/// afterwards, since a flipped multiplier still looks like a multiplier. An
+/// external caller that can build [`ActiveSetQp`] but not read its answer back
+/// has to restate exactly that (raised in review of gh #769 by @GermanHeim).
+///
+/// The returned status is a placeholder — [`verify_status`] decides the
+/// verdict, and no caller of this function may skip it.
+/// [`back_translate_verified`] is the composition that cannot be
+/// half-applied, and is what most callers want.
 ///
 /// The engine's own `obj` is deliberately **not** carried over: the objective
 /// is recomputed here in convex coordinates (`½xᵀPx + cᵀx`) so the two forms
 /// cannot silently drift apart.
-pub(crate) fn back_translate(prob: &QpProblem, qsol: &pounce_qp::QpSolution) -> QpSolution {
+pub fn back_translate(prob: &QpProblem, qsol: &pounce_qp::QpSolution) -> QpSolution {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -869,6 +887,47 @@ pub(crate) fn back_translate(prob: &QpProblem, qsol: &pounce_qp::QpSolution) -> 
         // and the quantity a user tuning `max_iter` is actually spending.
         iters: qsol.stats.n_working_set_changes as usize,
         iterates: Vec::new(),
+    }
+}
+
+/// Read a `pounce-qp` solution back into convex coordinates **and decide the
+/// verdict** — [`back_translate`] followed by [`verify_status`], plus the two
+/// gates every driver here applies afterwards.
+///
+/// This is the whole of what a caller outside this crate needs after solving
+/// [`ActiveSetQp::problem`] itself, and the reason it exists as one call is
+/// that the ordering is not optional. `back_translate` returns a *provisional*
+/// `Optimal`; a caller who stops there has propagated the engine's claim
+/// unchecked, which is the failure `verify_status` documents at length
+/// (`QSC205` returns `Optimal` at the wrong objective, `DUALC1` certifies a
+/// feasible QP infeasible). Two composed calls with a rule about their order
+/// is an API that reads as complete when it is half-applied — so the composition
+/// is the supported entry point and the pieces are exported for callers doing
+/// something in between.
+///
+/// The two gates after verification are the driver's, not the engine's:
+/// non-finite fields are replaced by an honest failure rather than shipped as
+/// numbers, and a deadline crossing observed after the solve returned relabels
+/// a give-up status (never a verdict).
+///
+/// What this does **not** include is the cold driver's second rung on a
+/// rejected infeasibility claim — the objective-free `feasibility_probe`, which
+/// needs a backend and another solve. A caller wanting that behaviour wants
+/// [`solve_qp_active_set`] or [`ActiveSetSession`], which run it.
+///
+/// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
+pub fn back_translate_verified(
+    prob: &QpProblem,
+    qsol: &pounce_qp::QpSolution,
+    opts: &QpOptions,
+) -> QpSolution {
+    let mut sol = back_translate(prob, qsol);
+    sol.status = verify_status(qsol.status, qsol.unbounded_ray.as_deref(), &sol, prob, opts);
+    let sol = finite_or_failed(prob, sol);
+    if crate::deadline::expired() {
+        crate::ipm::mark_timed_out(sol)
+    } else {
+        sol
     }
 }
 
@@ -1127,7 +1186,7 @@ fn adjudicated_kkt_error(prob: &QpProblem, sol: &QpSolution, tol: f64, obj_const
 /// [`adjudicated_kkt_error`] rather than the raw `kkt_error()` — see there for
 /// why an unnormalized residual cannot be compared to an absolute `tol` on a
 /// large-data QP (gh #641).
-pub(crate) fn verify_status(
+pub fn verify_status(
     engine: ActiveSetStatus,
     ray: Option<&[f64]>,
     sol: &QpSolution,

@@ -121,8 +121,21 @@
 //!     let sol = session.solve(&qp(t));
 //!     assert_eq!(sol.status, QpStatus::Optimal);
 //! }
-//! assert_eq!(session.last_reuse(), Reuse::Parametric);
+//! assert_eq!(session.last_reuse(), Reuse::Homotopy);
 //! ```
+//!
+//! [`Reuse`] names what the *engine* did, not what was attempted: the
+//! homotopy is declined when `P` or a row's equality/fixed status changes, and
+//! the previous working set is reused instead ([`Reuse::WorkingSet`] — still
+//! warm, but not the traced path). [`SessionStats`] breaks the counts out the
+//! same way, so "is the warm path engaging?" is a question with an answer.
+//!
+//! A frontend driving the engine directly instead of through a session gets
+//! the return leg too: [`back_translate_verified`] applies the dual sign
+//! transform, recomputes the objective in convex coordinates and re-derives
+//! the verdict, with [`back_translate`] and [`verify_status`] exported for
+//! callers that need the pieces. Reading a raw `pounce-qp` solution without
+//! that step is the restatement gh #769 exists to remove.
 //!
 //! ## Sensitivity
 //!
@@ -141,12 +154,13 @@ pub use pounce_convex::{
     ActiveSetOverrides, ActiveSetQp, ActiveSetSession, ConeSpec, NEG_INF, POS_INF, PolyProblem,
     Polynomial, PresolveNote, PsdCertificateError, QpFactorization, QpIterate, QpOptions,
     QpProblem, QpResiduals, QpSensitivity, QpSolution, QpStatus, QpWarmStart, ReducedHessian,
-    Reuse, SensError, SessionStats, SosBound, SosSolution, Triplet, certify_psd_lower_triangle,
-    solve_qp_active_set, solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm,
-    solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm, solve_qp_multi_rhs,
-    solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
-    sos_constrained_lower_bound, sos_constrained_lower_bound_opts, sos_lower_bound,
-    sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
+    Reuse, SensError, SessionStats, SosBound, SosSolution, Triplet, back_translate,
+    back_translate_verified, certify_psd_lower_triangle, engine_options, solve_qp_active_set,
+    solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm,
+    solve_qp_ipm_debug, solve_qp_ipm_warm, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel,
+    solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm, sos_constrained_lower_bound,
+    sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,
+    sos_minimize_opts, sos_opts, verify_status,
 };
 
 /// The underlying crate, for anything not surfaced above.

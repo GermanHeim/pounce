@@ -53,7 +53,10 @@ pub mod sensitivity;
 pub(crate) mod simplex;
 pub mod sos;
 
-pub use active_set::{ActiveSetQp, solve_qp_active_set};
+pub use active_set::{
+    ActiveSetQp, back_translate, back_translate_verified, engine_options, solve_qp_active_set,
+    verify_status,
+};
 pub use active_set_session::{ActiveSetSession, PresolveNote, Reuse, SessionStats};
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,

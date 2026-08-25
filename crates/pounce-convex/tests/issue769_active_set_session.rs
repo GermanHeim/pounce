@@ -20,8 +20,9 @@
 //!    the objective offset the reduction moved carried back too.
 
 use pounce_convex::{
-    ActiveSetOverrides, ActiveSetSession, PresolveNote, QpOptions, QpProblem, QpSolution, QpStatus,
-    Reuse, Triplet, solve_qp_active_set,
+    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, PresolveNote, QpOptions, QpProblem,
+    QpSolution, QpStatus, Reuse, Triplet, back_translate, back_translate_verified, engine_options,
+    solve_qp_active_set, verify_status,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -133,11 +134,19 @@ fn parametric_reuse_engages_and_agrees_with_cold() {
         st.parametric_attempts >= 5,
         "every member after the first is eligible: {st:?}"
     );
-    assert!(
-        st.parametric_accepted >= 5,
+    // The route, not just the count. This family is the one the homotopy is
+    // for — same `P`, same rows, only `c` moving — so every accepted attempt
+    // must report the traced path. Asserting `attempts_accepted()` here would
+    // pass just as well if the engine had declined all five and fallen back to
+    // the working-set hint, which is the hole @GermanHeim found in the first
+    // version of this test (gh #769).
+    assert_eq!(
+        st.homotopy_accepted, 5,
         "the family is exactly the one the homotopy traces: {st:?}"
     );
-    assert_eq!(s.last_reuse(), Reuse::Parametric);
+    assert_eq!(st.working_set_accepted, 0, "{st:?}");
+    assert_eq!(st.engine_cold_accepted, 0, "{st:?}");
+    assert_eq!(s.last_reuse(), Reuse::Homotopy);
 }
 
 /// The first solve of a session has nothing to trace from, and says so.
@@ -212,7 +221,7 @@ fn an_infeasible_member_is_still_certified() {
     infeasible.h = vec![-5.0];
 
     let got = s.solve(&infeasible);
-    assert_eq!(s.last_reuse(), Reuse::Parametric, "reached through reuse");
+    assert_eq!(s.last_reuse(), Reuse::Homotopy, "reached through reuse");
     assert_eq!(got.status, QpStatus::PrimalInfeasible);
     assert_same_solution(&got, &cold(&infeasible), "infeasible member");
 }
@@ -235,7 +244,7 @@ fn a_rejected_warm_verdict_falls_through_to_the_cold_ladder() {
     let got = s.solve(&prob);
     assert_eq!(s.last_reuse(), Reuse::ParametricRejected);
     assert_eq!(s.stats().parametric_attempts, 1);
-    assert_eq!(s.stats().parametric_accepted, 0);
+    assert_eq!(s.stats().attempts_accepted(), 0);
     // Two cold solves: the first member, and the fallback for this one.
     assert_eq!(s.stats().cold_solves, 2);
     // The reported answer is the cold ladder's, honest failure and all.
@@ -366,4 +375,123 @@ fn options_reach_the_engine_and_a_budget_is_not_warm_started_around() {
         QpStatus::Optimal,
         "a one-iteration budget cannot certify this QP"
     );
+}
+
+/// The engine declined the path; the session must say the engine declined the
+/// path.
+///
+/// `solve_parametric` guards on an unchanged `H` — it interpolates `g` and the
+/// row bounds along the path, not the Hessian — so a member whose curvature
+/// moved is answered from the previous *working set* instead. That is still a
+/// warm solve and still the right answer, but it is not the homotopy, and the
+/// first version of this session reported it as one: every conclusive return
+/// counted as `parametric_accepted`, so a family that never traced a single
+/// path reported perfect reuse. Reproduced by @GermanHeim in review of
+/// gh #769 with exactly this change (`P`'s diagonal 2 → 4).
+#[test]
+fn a_declined_homotopy_is_reported_as_a_working_set_reuse() {
+    let mut s = session().with_presolve(false);
+    s.solve(&target_qp(3.0, 2.0));
+    assert_eq!(s.last_reuse(), Reuse::Cold, "first solve has no base");
+
+    // Same shape, same rows, same box — only the curvature moves.
+    let mut stiffer = target_qp(3.0, 2.0);
+    stiffer.p_lower = vec![Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 4.0)];
+
+    let got = s.solve(&stiffer);
+    assert_eq!(
+        s.last_reuse(),
+        Reuse::WorkingSet,
+        "a changed Hessian declines the path — reporting `Homotopy` here is \
+         the defect this test exists for"
+    );
+    assert!(s.last_reuse().is_warm(), "the working set did carry over");
+
+    let st = s.stats();
+    assert_eq!(st.parametric_attempts, 1, "{st:?}");
+    assert_eq!(st.homotopy_accepted, 0, "the path was never traced: {st:?}");
+    assert_eq!(st.working_set_accepted, 1, "{st:?}");
+    assert_eq!(st.attempts_accepted(), 1, "{st:?}");
+    assert_eq!(st.warm_accepted(), 1, "{st:?}");
+
+    // Declined or not, the answer is the cold one.
+    assert_same_solution(&got, &cold(&stiffer), "stiffer member");
+}
+
+/// The session never hands the engine a base it will discard, so
+/// [`Reuse::EngineCold`] should not be reachable through it.
+///
+/// `solve_parametric` solves cold when the previous status is not `Optimal` or
+/// its working set does not fit the new problem — and the session's `remember`
+/// keeps a pair only when the engine *and* the driver called it `Optimal`,
+/// while its own shape guard covers the dimensions. The variant exists anyway
+/// because that decision belongs to the engine's guards, which can grow: what
+/// must never happen is the session inventing a route the engine did not
+/// report. This pins the current state so a future engine change that starts
+/// cold-solving inside `solve_parametric` shows up here rather than as a
+/// silently inflated reuse count.
+#[test]
+fn the_session_never_reports_a_route_the_engine_did_not_take() {
+    let mut s = session().with_presolve(false);
+    for (a, b) in [(3.0, 2.0), (2.0, 1.0), (0.4, 0.4), (5.0, 5.0)] {
+        s.solve(&target_qp(a, b));
+        assert_ne!(
+            s.last_reuse(),
+            Reuse::EngineCold,
+            "({a}, {b}): the session only warm-starts from an Optimal base"
+        );
+    }
+    let st = s.stats();
+    assert_eq!(st.engine_cold_accepted, 0, "{st:?}");
+    assert_eq!(
+        st.attempts_accepted(),
+        st.warm_accepted(),
+        "every accepted attempt reused something: {st:?}"
+    );
+}
+
+/// The return leg of the translation is public, and composing it correctly is
+/// one call.
+///
+/// This is the second review finding on gh #769: `ActiveSetQp` shipped with the
+/// forward translation public and the read-back crate-private, so an external
+/// driver (oximo, the case in the issue) could build and solve the native
+/// problem and then had to restate the dual sign transform, the objective
+/// reconstruction and the verification gate — the three parts that fail
+/// silently. This test is written the way such a caller writes it: nothing but
+/// the crate's public API, no session and no free function.
+#[test]
+fn an_external_caller_can_translate_solve_and_read_back() {
+    use pounce_qp::{ParametricActiveSetSolver, QpSolver};
+
+    let prob = target_qp(3.0, 2.0);
+    let opts = QpOptions::default();
+
+    let native = ActiveSetQp::from_convex(&prob);
+    let qopts = engine_options(
+        &opts,
+        &ActiveSetOverrides::default(),
+        native.n(),
+        native.m(),
+    );
+    let qsol = ParametricActiveSetSolver::new(backend())
+        .solve(&native.problem(), None, &qopts)
+        .expect("native solve");
+
+    let got = back_translate_verified(&prob, &qsol, &opts);
+    assert_eq!(got.status, QpStatus::Optimal);
+    assert_same_solution(&got, &cold(&prob), "external caller");
+
+    // The pieces are exported too, and the composition is exactly them.
+    let mut by_hand = back_translate(&prob, &qsol);
+    by_hand.status = verify_status(
+        qsol.status,
+        qsol.unbounded_ray.as_deref(),
+        &by_hand,
+        &prob,
+        &opts,
+    );
+    assert_eq!(by_hand.status, got.status, "composition matches its pieces");
+    assert_eq!(by_hand.x, got.x);
+    assert_eq!(by_hand.z, got.z);
 }

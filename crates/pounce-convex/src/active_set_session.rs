@@ -81,14 +81,15 @@
 
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
-    ActiveSetOverrides, ParametricActiveSetSolver, QpSolver, QpStatus as ActiveSetStatus,
+    ActiveSetOverrides, ParametricActiveSetSolver, ParametricSource, QpSolver,
+    QpStatus as ActiveSetStatus,
 };
 
 use crate::active_set::{
-    ActiveSetQp, NativeSolve, back_translate, empty_solution, engine_options, is_conclusive,
-    is_solved, solve_qp_active_set_attempt, verify_status,
+    ActiveSetQp, NativeSolve, back_translate_verified, empty_solution, engine_options,
+    is_conclusive, is_solved, solve_qp_active_set_attempt,
 };
-use crate::ipm::{QpOptions, finite_or_failed};
+use crate::ipm::QpOptions;
 use crate::presolve::{PresolveOutcome, PresolveStats, presolve};
 use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
 
@@ -122,18 +123,55 @@ pub struct ActiveSetSession {
 }
 
 /// Where the answer the session just reported came from.
+///
+/// The three warm variants are distinguished because a parametric *call* is
+/// not a parametric *solve*: [`QpSolver::solve_parametric`] declines the
+/// homotopy on a changed `H` or a changed equality/fixed topology, and falls
+/// back — first to the previous working set, then to a cold solve — all of
+/// which return a perfectly good answer through the same `Ok`. Reporting the
+/// call as reuse made this session's own numbers unfalsifiable: every
+/// conclusive return counted as a parametric hit, so a family that never once
+/// traced the path reported 100% reuse (found in review by @GermanHeim). The
+/// engine now names the route it took ([`ParametricSource`]) and this reports
+/// what it said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reuse {
     /// No solve ran — presolve or a screen concluded the problem on its own.
     NoSolve,
-    /// Nothing was eligible to reuse; the cold driver produced the answer.
+    /// The session did not attempt reuse: nothing to trace from, a shape
+    /// change, or an expired deadline. The cold ladder produced the answer.
     Cold,
-    /// A parametric solve from the previous problem produced the answer.
-    Parametric,
-    /// A parametric solve ran, its verdict did not stand up against the
-    /// original problem, and the cold driver produced the reported answer.
-    /// The reuse cost one solve and changed nothing about what was reported.
+    /// The engine traced the homotopy from the previous solution — reuse in
+    /// the full sense, and the only variant that earns the word *parametric*.
+    Homotopy,
+    /// The engine declined the homotopy and reused only the previous working
+    /// set as a hint. Still warm, and worth having — which constraints bind is
+    /// far more stable than the iterate (gh #602) — but the path was not
+    /// traced, and a caller tuning a sweep for the homotopy should read this
+    /// as "the guards said no".
+    WorkingSet,
+    /// The attempt reached the engine and the engine reused *nothing*: the
+    /// previous solve was not usable as a base, so `solve_parametric` cold-
+    /// solved internally. The answer is sound (it is verified like any other)
+    /// but no reuse happened, and this is the variant that used to be
+    /// indistinguishable from [`Homotopy`](Self::Homotopy).
+    EngineCold,
+    /// A parametric attempt ran, its verdict did not stand up against the
+    /// original problem, and the cold ladder produced the reported answer.
+    /// The attempt cost one solve and changed nothing about what was reported.
     ParametricRejected,
+}
+
+impl Reuse {
+    /// Whether the engine actually reused something from the previous solve.
+    ///
+    /// [`WorkingSet`](Self::WorkingSet) counts: the discrete state is what
+    /// warm-starting an active-set method is *for*. [`EngineCold`](Self::EngineCold)
+    /// does not — an attempt that reused nothing is a cold solve that took the
+    /// scenic route.
+    pub fn is_warm(self) -> bool {
+        matches!(self, Reuse::Homotopy | Reuse::WorkingSet)
+    }
 }
 
 /// What presolve did to the problem the session was handed.
@@ -171,10 +209,37 @@ pub struct SessionStats {
     pub solves: usize,
     /// Solves that ran a parametric attempt.
     pub parametric_attempts: usize,
-    /// Parametric attempts whose verdict stood up and was reported.
-    pub parametric_accepted: usize,
+    /// Accepted attempts where the engine traced the homotopy — reuse proper.
+    pub homotopy_accepted: usize,
+    /// Accepted attempts where the engine declined the path and reused only
+    /// the previous working set.
+    pub working_set_accepted: usize,
+    /// Accepted attempts where the engine reused nothing and solved cold
+    /// internally. Counted apart from `cold_solves`, which is the *session's*
+    /// ladder: this one is a cold solve that ran inside `solve_parametric`,
+    /// without the Ruiz retry or the simplex seed behind it.
+    pub engine_cold_accepted: usize,
     /// Solves that ran the cold ladder (including after a rejected attempt).
     pub cold_solves: usize,
+}
+
+impl SessionStats {
+    /// Attempts whose verdict stood up and was reported, whatever route the
+    /// engine took to reach it.
+    ///
+    /// This is the old `parametric_accepted`, and the reason it is a method
+    /// over a breakdown rather than a stored counter is that the stored
+    /// version was read as "the homotopy ran this often" — which it never
+    /// measured.
+    pub fn attempts_accepted(&self) -> usize {
+        self.homotopy_accepted + self.working_set_accepted + self.engine_cold_accepted
+    }
+
+    /// Accepted attempts where the engine reused *something* — the number a
+    /// caller asking "is the warm path engaging?" wants.
+    pub fn warm_accepted(&self) -> usize {
+        self.homotopy_accepted + self.working_set_accepted
+    }
 }
 
 impl ActiveSetSession {
@@ -340,8 +405,10 @@ impl ActiveSetSession {
         // again below when one is accepted; a solve that never attempts reuse
         // leaves it here.
         self.last_reuse = Reuse::Cold;
+        // `try_parametric` sets `last_reuse` itself when an attempt runs: only
+        // it knows which route the engine took, and inferring one here is the
+        // mistake this whole breakdown exists to prevent.
         if allow_reuse && let Some(sol) = self.try_parametric(prob, &opts) {
-            self.last_reuse = Reuse::Parametric;
             return sol;
         }
         self.stats.cold_solves += 1;
@@ -409,23 +476,38 @@ impl ActiveSetSession {
         // Verified against the problem as posed, by the same gate the cold
         // path runs. A warm start is a hint about *where* the answer is; it
         // earns nothing about whether the point returned is one.
-        let mut sol = back_translate(prob, &qsol);
-        sol.status = verify_status(qsol.status, qsol.unbounded_ray.as_deref(), &sol, prob, opts);
-        let sol = finite_or_failed(prob, sol);
-        // Same policy as the cold driver: a deadline crossing observed after
-        // the solve returned relabels a give-up status, never a verdict.
-        let sol = if crate::deadline::expired() {
-            crate::ipm::mark_timed_out(sol)
-        } else {
-            sol
-        };
+        let sol = back_translate_verified(prob, &qsol, opts);
         if !is_conclusive(sol.status) {
             // The attempt ran and cost a solve; say so rather than reporting
             // this as a cold solve that never tried.
             self.last_reuse = Reuse::ParametricRejected;
             return None;
         }
-        self.stats.parametric_accepted += 1;
+        // What the *engine* did, not what we asked it to do. `solve_parametric`
+        // declines the homotopy on a changed `H` or a changed equality/fixed
+        // topology and falls back to the working-set hint, or — if the previous
+        // solve is not a usable base — to a cold solve, and all three come back
+        // as an ordinary conclusive `Ok`. Counting the call was counting
+        // declines as hits (gh #769, review).
+        //
+        // `None` cannot reach here from `solve_parametric`, which stamps every
+        // route including the cancelled one; it is mapped with the cold case
+        // rather than unwrapped, because a future entry point that forgets to
+        // stamp should under-report reuse, not claim it.
+        self.last_reuse = match qsol.stats.parametric_source {
+            Some(ParametricSource::Homotopy) => {
+                self.stats.homotopy_accepted += 1;
+                Reuse::Homotopy
+            }
+            Some(ParametricSource::WorkingSet) => {
+                self.stats.working_set_accepted += 1;
+                Reuse::WorkingSet
+            }
+            Some(ParametricSource::Cold) | None => {
+                self.stats.engine_cold_accepted += 1;
+                Reuse::EngineCold
+            }
+        };
         let status = sol.status;
         self.remember(
             Some(NativeSolve {

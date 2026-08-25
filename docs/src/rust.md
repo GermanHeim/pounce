@@ -241,15 +241,37 @@ for t in [0.2, 0.3, 0.4, 0.9] {
     let sol = session.solve(&qp(t));
     assert_eq!(sol.status, QpStatus::Optimal);
 }
-assert_eq!(session.last_reuse(), Reuse::Parametric);
+assert_eq!(session.last_reuse(), Reuse::Homotopy);
 ```
 
-`solve_cold` forces a cold solve, `reset` drops the reuse state, and `stats`
-reports how often reuse engaged. `with_presolve(false)` turns the reduction
-off when the reported iterate has to be in the coordinates of the problem
-exactly as posed. `cargo run -p pounce-convex --example active_set_session`
-is the measurement: on an 8-step path at `n = 40`, ~116 ms of wall clock cold
-against ~26 ms through a session.
+`last_reuse` names the route the **engine** took, which is not the same as
+whether reuse was attempted. `solve_parametric` declines the homotopy when the
+Hessian changes or a row's equality/fixed status changes, and answers from the
+previous working set instead — still warm, but not the traced path
+(`Reuse::WorkingSet`); if the previous solve is not a usable base it solves
+cold internally (`Reuse::EngineCold`). `Reuse::is_warm()` is the coarse
+question, and `stats()` breaks the counts out the same way
+(`homotopy_accepted`, `working_set_accepted`, `engine_cold_accepted`, plus
+`warm_accepted()`). A family whose reuse count is high but whose
+`homotopy_accepted` is zero is not being traced — usually because something in
+`P` moves between members.
+
+`solve_cold` forces a cold solve and `reset` drops the reuse state.
+`with_presolve(false)` turns the reduction off when the reported iterate has to
+be in the coordinates of the problem exactly as posed. `cargo run -p
+pounce-convex --example active_set_session` is the measurement: on an 8-step
+path at `n = 40`, ~104-111 ms of wall clock cold against ~19-24 ms through a
+session, with all 7 reusing steps tracing the path.
+
+If you are driving the engine yourself rather than through a session — a
+frontend doing something the session does not cover — translate with
+`ActiveSetQp::from_convex`, take the engine settings from `engine_options`, and
+read the answer back with `back_translate_verified`. The last one is not
+optional dressing: it applies the dual sign transform, recomputes the objective
+in convex coordinates and re-derives the verdict (the engine's `Optimal` is a
+claim, not a verdict — see `verify_status`). `back_translate` and
+`verify_status` are exported separately for callers that need to do something
+between them.
 
 ### Active-set QP and SQP warm starts
 

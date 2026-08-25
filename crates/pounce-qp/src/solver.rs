@@ -17,7 +17,9 @@ use crate::kkt::{
     is_pure_equality_no_bounds, rhs_equality_only,
 };
 use crate::options::{AntiCyclingChoice, QpOptions};
-use crate::problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
+use crate::problem::{
+    HessianInertia, ParametricSource, QpProblem, QpSolution, QpStats, QpWarmStart,
+};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
@@ -604,6 +606,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: None,
                 });
@@ -662,6 +665,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: Some(p),
                 });
@@ -703,6 +707,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates: 0,
                 used_phase1: false,
                 time: started.elapsed(),
+                ..Default::default()
             },
             unbounded_ray: None,
         })
@@ -866,6 +871,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: None,
                 });
@@ -917,6 +923,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: Some(p),
                 });
@@ -951,6 +958,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates: 0,
                 used_phase1: false,
                 time: started.elapsed(),
+                ..Default::default()
             },
             unbounded_ray: None,
         })
@@ -1097,6 +1105,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: Some(ray),
                 });
@@ -1127,6 +1136,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates: 0,
                 used_phase1: false,
                 time: started.elapsed(),
+                ..Default::default()
             },
             unbounded_ray: None,
         })
@@ -1425,6 +1435,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: None,
                 });
@@ -1554,6 +1565,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: Some(ray),
                 });
@@ -1665,6 +1677,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates: 0,
                 used_phase1: false,
                 time: started.elapsed(),
+                ..Default::default()
             },
             unbounded_ray: None,
         })
@@ -1996,6 +2009,7 @@ impl ParametricActiveSetSolver {
                     n_schur_updates: sol_aug.stats.n_schur_updates,
                     used_phase1: true,
                     time: started.elapsed(),
+                    ..Default::default()
                 },
                 unbounded_ray: None,
             });
@@ -2160,6 +2174,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates: sol_aug.stats.n_schur_updates,
                 used_phase1: true,
                 time: started.elapsed(),
+                ..Default::default()
             },
             // Deliberately `None` even when `status` carries an `Unbounded`
             // forwarded from phase-1: that ray lives in the *augmented*
@@ -3023,6 +3038,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: None,
                 });
@@ -3103,6 +3119,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: Some(ray),
                 });
@@ -3227,6 +3244,7 @@ impl ParametricActiveSetSolver {
                 n_schur_updates,
                 used_phase1: false,
                 time: started.elapsed(),
+                ..Default::default()
             },
             unbounded_ray: None,
         })
@@ -3676,7 +3694,20 @@ impl QpSolver for ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         let _deadline = crate::deadline::enter(opts.time_limit);
         let out = self.solve_parametric_scoped(qp_prev, sol_prev, qp_new, opts);
-        soften_deadline(qp_new, Some(&sol_prev.x), out)
+        let mut out = soften_deadline(qp_new, Some(&sol_prev.x), out);
+        // Every route through `solve_parametric_scoped` stamps its own source,
+        // so the only way to arrive here unstamped is the deadline stub
+        // `soften_deadline` just substituted for a cancelled solve. Nothing was
+        // reused on that path either, which is what `Cold` says. Stamping it
+        // here rather than leaving `None` keeps the field's contract exact:
+        // `None` means "not a parametric call", never "a parametric call whose
+        // route went unrecorded".
+        if let Ok(sol) = &mut out
+            && sol.stats.parametric_source.is_none()
+        {
+            sol.stats.parametric_source = Some(ParametricSource::Cold);
+        }
+        out
     }
 
     fn solve_with_working_set(
@@ -3699,6 +3730,18 @@ impl QpSolver for ParametricActiveSetSolver {
 /// a timeout is a *soft* outcome, reported as `QpStatus::TimeLimit` on an
 /// `Ok` solution exactly like `MaxIter`. Every public entry point converts it
 /// here, so the error can never escape.
+/// Record which route a `solve_parametric` call took on the solution it is
+/// about to return.
+///
+/// Applied at each of the three exits rather than inferred by the caller: the
+/// guards that choose between them live here, `solve_homotopy` can decline the
+/// path after they pass, and a caller re-deriving any of that would be keeping
+/// a second copy of this function's control flow (gh #769).
+fn stamp(mut sol: QpSolution, source: ParametricSource) -> QpSolution {
+    sol.stats.parametric_source = Some(source);
+    sol
+}
+
 fn soften_deadline(
     qp: &QpProblem,
     hint: Option<&[Number]>,
@@ -3823,7 +3866,10 @@ impl ParametricActiveSetSolver {
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp_new, Some(&sol_prev.x), 0));
+            return Ok(stamp(
+                time_limit_solution(qp_new, Some(&sol_prev.x), 0),
+                ParametricSource::Cold,
+            ));
         }
         // Trace the homotopy from the previous problem to the new one, starting
         // from the previous solution's working set.
@@ -3909,7 +3955,7 @@ impl ParametricActiveSetSolver {
             && sol_prev.x.len() == qp_new.n
             && let Some(sol) = self.solve_homotopy(qp_new, Some((qp_prev, sol_prev)), opts)?
         {
-            return Ok(sol);
+            return Ok(stamp(sol, ParametricSource::Homotopy));
         }
 
         // The path did not run — the guard declined it, or the tracer returned
@@ -3964,9 +4010,12 @@ impl ParametricActiveSetSolver {
             && sol_prev.working.validate_dims(qp_new.n, qp_new.m).is_ok()
         {
             let hint = sol_prev.working.reconciled_with(qp_new, opts);
-            return self.solve_with_working_set(qp_new, &hint, opts);
+            return self
+                .solve_with_working_set(qp_new, &hint, opts)
+                .map(|sol| stamp(sol, ParametricSource::WorkingSet));
         }
         self.solve(qp_new, None, opts)
+            .map(|sol| stamp(sol, ParametricSource::Cold))
     }
 
     fn solve_with_working_set_scoped(
@@ -4068,6 +4117,7 @@ fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32)
             n_schur_updates: 0,
             used_phase1: false,
             time: crate::deadline::scope_elapsed(),
+            ..Default::default()
         },
         unbounded_ray: None,
     }

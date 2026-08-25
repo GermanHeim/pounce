@@ -168,4 +168,48 @@ pub struct QpStats {
     pub used_phase1: bool,
     /// Wall-clock time spent inside `solve`.
     pub time: Duration,
+    /// What a [`QpSolver::solve_parametric`] call actually reused from the
+    /// pair it was handed. `None` on every other entry point.
+    ///
+    /// `solve_parametric` has three internal outcomes and only one of them is
+    /// the homotopy: the eligibility guards decline a changed `H` or a changed
+    /// equality/fixed topology, and the tracer itself can return "path could
+    /// not be started". Both fall through to the working-set hint, and a
+    /// previous solve that did not reach `Optimal` falls through again to a
+    /// cold solve. All three return `Ok`, all three are conclusive, and
+    /// nothing in the returned solution distinguished them — so a caller
+    /// counting parametric reuse counted declines as successes, and a
+    /// benchmark asking "is the warm path engaging?" could not be answered
+    /// (gh #769, found in review by @GermanHeim).
+    ///
+    /// [`QpSolver::solve_parametric`]: crate::QpSolver::solve_parametric
+    pub parametric_source: Option<ParametricSource>,
+}
+
+/// What a [`QpSolver::solve_parametric`](crate::QpSolver::solve_parametric)
+/// call reused from the `(qp_prev, sol_prev)` pair it was handed.
+///
+/// Ordered by how much of the previous solve survived: [`Homotopy`] traces the
+/// path from the previous *solution*, [`WorkingSet`] keeps only the discrete
+/// state, [`Cold`] keeps nothing.
+///
+/// [`Homotopy`]: ParametricSource::Homotopy
+/// [`WorkingSet`]: ParametricSource::WorkingSet
+/// [`Cold`]: ParametricSource::Cold
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParametricSource {
+    /// The homotopy path was traced from the previous solution — the
+    /// parametric route proper.
+    Homotopy,
+    /// The homotopy was declined by a guard, or the tracer could not start
+    /// the path. The previous working set was reconciled onto the new problem
+    /// and used as a hint instead, which is worth having even when it is
+    /// stale: what it encodes is *which constraints bind*, and that survives a
+    /// perturbation of `H` far better than the iterate does (gh #602).
+    WorkingSet,
+    /// Nothing from the previous solve was usable — the previous status was
+    /// not `Optimal`, or its working set was dimensionally invalid here — so
+    /// the call solved cold. Also reported when the call was cancelled by the
+    /// deadline before it could choose a route: in both, nothing was reused.
+    Cold,
 }

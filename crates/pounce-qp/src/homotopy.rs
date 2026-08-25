@@ -722,6 +722,7 @@ impl ParametricActiveSetSolver {
                         n_schur_updates: 0,
                         used_phase1: false,
                         time: started.elapsed(),
+                        ..Default::default()
                     },
                     unbounded_ray: None,
                 }));
@@ -1115,6 +1116,7 @@ impl ParametricActiveSetSolver {
             n_schur_updates: sol.stats.n_schur_updates,
             used_phase1: false,
             time: started.elapsed(),
+            ..Default::default()
         };
         Ok(Some(sol))
     }
