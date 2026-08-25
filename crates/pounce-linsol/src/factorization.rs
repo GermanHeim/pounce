@@ -31,6 +31,7 @@
 use crate::error::FactorizationError;
 use crate::sparse_sym_iface::SparseSymLinearSolverInterface;
 use crate::t_sym_solver::TSymLinearSolver;
+use pounce_common::timing::{LinearSystemPhase, time_linear_system};
 use pounce_common::types::{Index, Number};
 
 /// Value-typed handle holding a sparse symmetric factorization.
@@ -98,7 +99,15 @@ impl Factorization {
         assert_eq!(values.len(), airn.len(), "values must match nnz");
         let nnz = airn.len() as Index;
         let mut inner = TSymLinearSolver::new(backend, None, false);
-        FactorizationError::from_status(inner.initialize_structure(dim, &airn, &ajcn))?;
+        // Charged as the symbolic phase whenever a convex-path timing scope
+        // is open (gh #767); a no-op otherwise. Backends differ in how much
+        // analysis they do here versus fold into the first numeric factor —
+        // feral defers its ordering, so this row reads near zero for it, the
+        // same way it does in the NLP path's report.
+        let structure = time_linear_system(LinearSystemPhase::SymbolicFactorization, || {
+            inner.initialize_structure(dim, &airn, &ajcn)
+        });
+        FactorizationError::from_status(structure)?;
 
         let mut me = Self {
             inner,
@@ -134,14 +143,16 @@ impl Factorization {
             self.dim as usize * nrhs,
             "rhs length must equal dim * nrhs"
         );
-        let status = self.inner.multi_solve(
-            &self.values,
-            false, // new_matrix = false: pure back-substitution
-            nrhs as Index,
-            rhs,
-            false,
-            0,
-        );
+        let status = time_linear_system(LinearSystemPhase::BackSolve, || {
+            self.inner.multi_solve(
+                &self.values,
+                false, // new_matrix = false: pure back-substitution
+                nrhs as Index,
+                rhs,
+                false,
+                0,
+            )
+        });
         FactorizationError::from_status(status)
     }
 
@@ -196,14 +207,16 @@ impl Factorization {
     /// Internal helper: issue a factor (and discard the back-solve).
     fn do_factor(&mut self) -> Result<(), FactorizationError> {
         let mut dummy_rhs = vec![0.0; self.dim as usize];
-        let status = self.inner.multi_solve(
-            &self.values,
-            true, // new_matrix = true: factor now
-            1,
-            &mut dummy_rhs,
-            false,
-            0,
-        );
+        let status = time_linear_system(LinearSystemPhase::Factorization, || {
+            self.inner.multi_solve(
+                &self.values,
+                true, // new_matrix = true: factor now
+                1,
+                &mut dummy_rhs,
+                false,
+                0,
+            )
+        });
         FactorizationError::from_status(status)?;
         self.inertia_known = true;
         Ok(())
@@ -486,6 +499,89 @@ mod tests {
         let r1 = rhs[0] + 5.0 * rhs[1] - 6.0;
         assert!(r0.abs() < 1e-10);
         assert!(r1.abs() < 1e-10);
+    }
+
+    /// gh #767: with a convex-path timing scope open, each operation charges
+    /// its own row — and the three rows are distinguishable, so a report
+    /// cannot attribute a back-solve to the factorization or vice versa.
+    ///
+    /// Asserted on the raw wall-clock totals rather than the printed report:
+    /// `Instant` resolves nanoseconds, so any real work is strictly positive
+    /// even when the report's three-decimal row rounds it to `0.000s`.
+    #[test]
+    fn a_convex_timing_scope_charges_each_phase_to_its_own_row() {
+        use pounce_common::timing::{ConvexTimingScope, ConvexTimingStatistics};
+        use std::rc::Rc;
+
+        let stats = Rc::new(ConvexTimingStatistics::new());
+        let scope = ConvexTimingScope::open(&stats);
+
+        let mut f = Factorization::new(
+            2,
+            vec![1, 2, 2],
+            vec![1, 1, 2],
+            vec![2.0, 1.0, 3.0],
+            Box::new(DenseLuBackend::new()),
+        )
+        .unwrap();
+        // `new` charges the structure pass and the initial numeric factor;
+        // nothing has back-substituted through `solve` yet.
+        assert!(
+            stats
+                .linear_system_symbolic_factorization
+                .total_wallclock_time()
+                > 0.0,
+            "construction must charge the symbolic row"
+        );
+        assert!(
+            stats.linear_system_factorization.total_wallclock_time() > 0.0,
+            "construction must charge the factorization row"
+        );
+        assert_eq!(
+            stats.linear_system_back_solve.total_wallclock_time(),
+            0.0,
+            "no `solve` has run yet, so the back-solve row must be untouched"
+        );
+
+        let after_construction = stats.linear_system_factorization.total_wallclock_time();
+        let mut rhs = vec![5.0, 6.0];
+        f.solve_one(&mut rhs).unwrap();
+        assert!(
+            stats.linear_system_back_solve.total_wallclock_time() > 0.0,
+            "`solve` must charge the back-solve row"
+        );
+        assert_eq!(
+            stats.linear_system_factorization.total_wallclock_time(),
+            after_construction,
+            "a pure back-substitution must not be charged as a factorization"
+        );
+
+        let before_refactor = stats.linear_system_back_solve.total_wallclock_time();
+        f.refactor(&[4.0, 1.0, 5.0]).unwrap();
+        assert!(
+            stats.linear_system_factorization.total_wallclock_time() > after_construction,
+            "`refactor` must charge the factorization row"
+        );
+        assert_eq!(
+            stats.linear_system_back_solve.total_wallclock_time(),
+            before_refactor,
+            "`refactor`'s discarded no-op back-solve is factorization cost, not \
+             back-solve cost"
+        );
+
+        // Outside the scope nothing is charged at all — the NLP path runs
+        // through this same type and keeps its own timers.
+        drop(scope);
+        let totals = || {
+            (
+                stats.linear_system_factorization.total_wallclock_time(),
+                stats.linear_system_back_solve.total_wallclock_time(),
+            )
+        };
+        let before = totals();
+        f.refactor(&[4.0, 1.0, 5.0]).unwrap();
+        f.solve_one(&mut [5.0, 6.0]).unwrap();
+        assert_eq!(totals(), before, "a closed scope must record nothing");
     }
 
     /// Singular matrix → Singular error.
