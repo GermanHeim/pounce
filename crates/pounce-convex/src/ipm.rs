@@ -3518,6 +3518,19 @@ pub(crate) struct KktStructure {
     /// converge below `tol` instead of flooring the primal residual at
     /// `δ·‖dy‖`. Empty when there are no equality rows.
     y_diag_pos: Vec<usize>,
+    /// Value-array positions of the `(x, x)` diagonal, one per column, and
+    /// the `P` diagonal that sits under the regularization. Seeded with
+    /// `P + reg` in [`Self::build`] and overwritten each iteration with
+    /// `P + δ_w` by [`Self::update_primal_reg`].
+    ///
+    /// For an LP `P = 0`, so this block *is* the regularization: at the
+    /// 1e-10 static default the x-pivots sit at the roundoff floor and LDLᵀ
+    /// loses their signs, which reads out as a wrong-inertia deficit that no
+    /// amount of `δ_c` / `(z, z)` escalation can repair — those bumps are on
+    /// the wrong blocks. Ipopt's Algorithm IC escalates exactly this δ_w for
+    /// wrong inertia; `δ_c` answers a rank-deficient equality Jacobian.
+    x_diag_pos: Vec<usize>,
+    x_diag_base: Vec<f64>,
 }
 
 impl KktStructure {
@@ -3536,9 +3549,15 @@ impl KktStructure {
             *entries.entry((r, c)).or_insert(0.0) += v;
         };
 
-        // (x,x): P + δI.
+        // (x,x): P + δ_w I. The P diagonal is captured before the
+        // regularization is folded in so `update_primal_reg` can rewrite δ_w
+        // each iteration without losing P.
+        let mut x_diag_base = vec![0.0f64; n];
         for t in &prob.p_lower {
             add(t.row, t.col, t.val);
+            if t.row == t.col {
+                x_diag_base[t.row] += t.val;
+            }
         }
         for i in 0..n {
             add(i, i, reg);
@@ -3644,6 +3663,7 @@ impl KktStructure {
         // per-iteration adaptive regularization. Built unconditionally; the
         // `-reg` seed is already in `values` from the loop above.
         let y_diag_pos: Vec<usize> = (0..m_eq).map(|i| coord_to_pos[&(n + i, n + i)]).collect();
+        let x_diag_pos: Vec<usize> = (0..n).map(|i| coord_to_pos[&(i, i)]).collect();
 
         KktStructure {
             airn,
@@ -3652,6 +3672,8 @@ impl KktStructure {
             dim,
             z_blocks,
             y_diag_pos,
+            x_diag_pos,
+            x_diag_base,
         }
     }
 
@@ -3717,6 +3739,15 @@ impl KktStructure {
     pub(crate) fn update_eq_reg(&self, delta_c: f64, out: &mut [Number]) {
         for &p in &self.y_diag_pos {
             out[p] = -delta_c;
+        }
+    }
+
+    /// Overwrite the `(x, x)` diagonal with `P + δ_w` for the current primal
+    /// regularization. Call once per iteration, on the same `out` buffer as
+    /// [`Self::update_blocks`] / [`Self::update_eq_reg`].
+    pub(crate) fn update_primal_reg(&self, delta_w: f64, out: &mut [Number]) {
+        for (&p, &base) in self.x_diag_pos.iter().zip(&self.x_diag_base) {
+            out[p] = base + delta_w;
         }
     }
 }
