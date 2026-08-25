@@ -1051,10 +1051,30 @@ impl PyProblem {
     ) -> PyResult<PyTnlpInit> {
         let n = self.n as usize;
         let m = self.m as usize;
+        // Jacobian sparsity. `jacobianstructure` is *optional* in the
+        // cyipopt interface we advertise: an object that omits it declares a
+        // dense `(m, n)` Jacobian, whose `jacobian(x)` returns all `m * n`
+        // entries row-major. Feature-detect it the way the Hessian block
+        // below does. Calling it unconditionally raised a bare
+        // `AttributeError` out of `Problem.solve()` / `solve_nlp_batch()` for
+        // every object that took that documented default — while
+        // `pounce.preflight`, which implements the fallback in
+        // `_preflight.py`, accepted the very same object and reported
+        // `ok: True` (gh#765).
         let (jac_rows, jac_cols, nele_jac) = if m > 0 {
-            let s = call0(&self.problem_obj, "jacobianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
+            let has_structure = self
+                .problem_obj
+                .bind(py)
+                .hasattr("jacobianstructure")
+                .unwrap_or(false);
+            if has_structure {
+                let s = call0(&self.problem_obj, "jacobianstructure")?;
+                let (rows, cols) = decode_structure_inferred(&s)?;
+                let nnz = rows.len() as Index;
+                (rows, cols, nnz)
+            } else {
+                dense_jacobian_structure(m, n)?
+            }
         } else {
             (Vec::new(), Vec::new(), 0)
         };
@@ -1341,6 +1361,41 @@ pub(crate) fn build_info_dict<'py>(
     )?;
     info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(info)
+}
+
+/// The dense `(m, n)` Jacobian pattern, row-major — the same index pairs
+/// `np.divmod(np.arange(m * n), n)` produces in `_preflight.py`, and the
+/// order in which a `jacobian(x)` written against the dense default returns
+/// its values. Used when the user object omits the optional
+/// `jacobianstructure` callback (gh#765).
+///
+/// `m * n` is computed in `usize` and range-checked before it is narrowed:
+/// `nele_jac` is a signed 32-bit `Index`, so a large dense pattern (m = n =
+/// 50 000 is already 2.5e9 entries) would otherwise wrap to a negative or
+/// truncated count and mis-size every structure buffer downstream. Such a
+/// problem cannot be meant to be dense anyway, so the message points at the
+/// callback that declares the real pattern.
+fn dense_jacobian_structure(m: usize, n: usize) -> PyResult<(Vec<Index>, Vec<Index>, Index)> {
+    let nnz = m
+        .checked_mul(n)
+        .filter(|&nnz| nnz <= Index::MAX as usize)
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "problem_obj has no jacobianstructure(), so the Jacobian is taken \
+                 to be dense (m, n) = ({m}, {n}) -- but m*n exceeds the solver's \
+                 signed-32-bit nonzero count. Add a jacobianstructure() method \
+                 returning the (rows, cols) of the actual sparse pattern."
+            ))
+        })?;
+    let mut rows = Vec::with_capacity(nnz);
+    let mut cols = Vec::with_capacity(nnz);
+    for i in 0..m {
+        for j in 0..n {
+            rows.push(i as Index);
+            cols.push(j as Index);
+        }
+    }
+    Ok((rows, cols, nnz as Index))
 }
 
 /// Variant of `decode_structure` that infers `nnz` from the input

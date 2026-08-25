@@ -36,8 +36,18 @@ VENDORED = os.path.join(
 
 
 def status_underscored(s: str) -> str:
-    """`SolveSucceeded` -> `Solve_Succeeded` (the composite-report form)."""
+    """`SolveSucceeded` -> `Solve_Succeeded` (the composite-report form).
+
+    Fallback only: since gh #767 the report carries that spelling itself as
+    `solution.status_upstream`, which `report_status` prefers. Kept for
+    reports written by an older binary, where the field is absent.
+    """
     return re.sub(r"(?<!^)(?=[A-Z])", "_", s)
+
+
+def report_status(solution: dict) -> str:
+    """The solve's verdict in IPOPT's enumerator spelling."""
+    return solution.get("status_upstream") or status_underscored(solution["status"])
 
 
 def build_binary() -> None:
@@ -82,7 +92,7 @@ def run_one(name, path, detail):
             "name": name,
             "n": r["problem"]["n_variables"],
             "m": r["problem"]["n_constraints"],
-            "status": status_underscored(r["solution"]["status"]),
+            "status": report_status(r["solution"]),
             "objective": r["solution"]["objective"],
             "iterations": r["statistics"]["iteration_count"],
             "solve_time": r["statistics"]["total_wallclock_time_secs"],

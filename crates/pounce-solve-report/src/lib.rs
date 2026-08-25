@@ -292,6 +292,24 @@ pub struct SolutionInfo {
     /// `SolveSucceeded`, `MaximumIterationsExceeded`, etc. The string
     /// form is the Rust enum variant name verbatim.
     pub status: ApplicationReturnStatus,
+    /// The same verdict in upstream Ipopt's C enumerator spelling —
+    /// `Solve_Succeeded`, `Infeasible_Problem_Detected` — from
+    /// `IpReturnCodes_inc.h`.
+    ///
+    /// [`Self::status`] carries the Rust variant name, which is *not* the
+    /// name any Ipopt-facing consumer already keys off: CUTEst status
+    /// tables, `benchmarks/scripts/run_nl_bench.sh`, the reference JSONs
+    /// under `benchmarks/*/ipopt_ma57.json` and the CLI's own `Status:`
+    /// line all spell it with separators. A consumer comparing
+    /// `solution.status == "Solve_Succeeded"` against the report matched
+    /// nothing and silently classified every solve as a failure (gh #767).
+    /// This field is that spelling, so the comparison can be literal.
+    ///
+    /// Derived from [`Self::status`] by [`ReportBuilder::finish`] — never
+    /// set by a caller, so the two cannot disagree. Empty when read back
+    /// from a pre-#767 report.
+    #[serde(default)]
+    pub status_upstream: String,
     /// AMPL-style solve-result code (Gay 2005, §5 p. 23 table).
     pub solve_result_num: i32,
     /// Final unscaled objective value (mirrors
@@ -421,6 +439,8 @@ impl ReportBuilder {
             },
             solution: SolutionInfo {
                 status: ApplicationReturnStatus::InternalError,
+                // Overwritten from `status` by `finish`; see the field docs.
+                status_upstream: String::new(),
                 solve_result_num: 500,
                 // 0.0 (not NaN) so JSON round-trips. Callers that
                 // need "unknown objective" semantics check
@@ -476,6 +496,12 @@ impl ReportBuilder {
             .elapsed()
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
+        // Derived here rather than at each call site: every producer of a
+        // report (CLI, C interface, Python bindings, the CBF driver) sets
+        // `solution.status` and none of them can forget the upstream
+        // spelling, nor set one that disagrees with the other (gh #767).
+        let mut solution = self.solution;
+        solution.status_upstream = solution.status.upstream_name().to_string();
         let result_id = format!("{}-{}", self.started_unix_nanos, std::process::id());
         let created_at_iso = unix_nanos_to_iso(self.started_unix_nanos);
 
@@ -497,7 +523,7 @@ impl ReportBuilder {
                 environment: capture_solve_env_overrides(),
             },
             problem: self.problem,
-            solution: self.solution,
+            solution,
             statistics: self.stats,
             iterations: self.iterations,
             linear_solver: self.linear_solver,
@@ -741,6 +767,49 @@ mod tests {
             back.solution.status,
             ApplicationReturnStatus::SolveSucceeded,
         ));
+    }
+
+    /// gh #767: the report is the FAIR-aligned machine surface, and a
+    /// consumer keyed on Ipopt's own enumerator spelling — which is what
+    /// CUTEst tables, the reference JSONs and the CLI's `Status:` line all
+    /// use — must be able to compare a field literally. `status` carries
+    /// the Rust variant name (`SolveSucceeded`); `status_upstream` carries
+    /// `Solve_Succeeded`. A consumer that compared the former against the
+    /// latter's spelling matched nothing and read every solve as a failure.
+    #[test]
+    fn report_carries_the_upstream_status_spelling_beside_the_rust_one() {
+        let mut b = ReportBuilder::new(
+            ReportDetail::Summary,
+            InputDescriptor::Builtin {
+                name: "rosenbrock".into(),
+            },
+        );
+        b.solution.status = ApplicationReturnStatus::SolveSucceeded;
+        let json = serde_json::to_value(b.finish()).expect("serialize");
+        assert_eq!(json["solution"]["status"], "SolveSucceeded");
+        assert_eq!(json["solution"]["status_upstream"], "Solve_Succeeded");
+    }
+
+    /// The derived field tracks whatever `status` was last set to — it is
+    /// computed in `finish`, so a caller cannot leave it stale or set the
+    /// two to different verdicts.
+    #[test]
+    fn upstream_status_spelling_is_derived_not_stored() {
+        for status in [
+            ApplicationReturnStatus::MaximumIterationsExceeded,
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+        ] {
+            let mut b = ReportBuilder::new(
+                ReportDetail::Summary,
+                InputDescriptor::Builtin { name: "x".into() },
+            );
+            // Deliberately wrong; `finish` must overwrite it.
+            b.solution.status_upstream = "Solve_Succeeded".to_string();
+            b.solution.status = status;
+            let report = b.finish();
+            assert_eq!(report.solution.status_upstream, status.upstream_name());
+        }
     }
 
     #[test]

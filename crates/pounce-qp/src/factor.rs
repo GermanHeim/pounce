@@ -29,6 +29,7 @@
 
 use crate::error::QpError;
 use crate::kkt::KktTriplet;
+use pounce_common::timing::{LinearSystemPhase, time_linear_system};
 use pounce_common::{Index, Number};
 use pounce_linsol::status::ESymSolverStatus;
 use pounce_linsol::{EMatrixFormat, SparseSymLinearSolverInterface};
@@ -95,9 +96,15 @@ impl LinearSolver {
         let dim = kkt.dim as Index;
         let nnz = kkt.irn.len() as Index;
 
-        let st = self
-            .backend
-            .initialize_structure(dim, nnz, &kkt.irn, &kkt.jcn);
+        // Charged to the convex path's timing sink when one is open (gh
+        // #767); a no-op otherwise. Without this the active-set engine's
+        // three `LinearSystem*` rows read 0.000s beside a `ConvexSolve` row
+        // carrying the whole solve — the same "0% everywhere" report the
+        // issue is about, one engine down.
+        let st = time_linear_system(LinearSystemPhase::SymbolicFactorization, || {
+            self.backend
+                .initialize_structure(dim, nnz, &kkt.irn, &kkt.jcn)
+        });
         if st != ESymSolverStatus::Success {
             return Err(QpError::LinearSolverFailure(format!(
                 "initialize_structure → {st:?}"
@@ -113,10 +120,12 @@ impl LinearSolver {
             None => (false, 0),
         };
 
-        let st = self.backend.multi_solve(
-            true, // new_matrix
-            &kkt.irn, &kkt.jcn, 1, rhs, check, expected,
-        );
+        let st = time_linear_system(LinearSystemPhase::Factorization, || {
+            self.backend.multi_solve(
+                true, // new_matrix
+                &kkt.irn, &kkt.jcn, 1, rhs, check, expected,
+            )
+        });
         match st {
             ESymSolverStatus::Success => {
                 self.cached_irn = Some(kkt.irn.clone());
@@ -163,10 +172,12 @@ impl LinearSolver {
         }
         let irn = self.cached_irn.as_ref().expect("factored ⇒ cache present");
         let jcn = self.cached_jcn.as_ref().expect("factored ⇒ cache present");
-        let st = self.backend.multi_solve(
-            false, // new_matrix=false ⇒ reuse cached factor
-            irn, jcn, 1, rhs, false, 0,
-        );
+        let st = time_linear_system(LinearSystemPhase::BackSolve, || {
+            self.backend.multi_solve(
+                false, // new_matrix=false ⇒ reuse cached factor
+                irn, jcn, 1, rhs, false, 0,
+            )
+        });
         match st {
             ESymSolverStatus::Success => Ok(()),
             other => Err(QpError::LinearSolverFailure(format!(
