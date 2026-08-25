@@ -98,6 +98,23 @@ const DYN_REG_RES_TOL: f64 = 1e-8;
 /// new primal residual at `δ_c·‖dy‖`, and as `μ → 0` both `δ_c` and `dy`
 /// shrink, so that residual drives to zero (Ipopt's convergence argument on
 /// degenerate equality systems).
+/// Primal `(x, x)` regularization δ_w, escalated on wrong inertia — Ipopt's
+/// Algorithm IC knob, which the HSDE loop previously had no way to move.
+/// For an LP the `(x, x)` block *is* δ_w (`P = 0`), so at the 1e-10 static
+/// default its pivots sit at the roundoff floor and the factorization loses
+/// their signs; escalating `δ_c` / `(z, z)` cannot repair a defect that lives
+/// in `(x, x)`. Measured on NETLIB `gen`: 4.19 extra refactorizations per
+/// iteration and a 134-eigenvalue mean inertia deficit at the static default,
+/// both going to zero once δ_w reaches ~1e-6.
+///
+/// Escalated, not raised statically: a static 1e-6 fixes `gen` (199 → 16
+/// iterations) but biases `pilot.we`'s objective by 12% while still
+/// certifying Optimal — the regularized problem is a different problem. Only
+/// the iterates that actually show a deficit should pay.
+const DELTA_W_INIT: f64 = 1e-8;
+const DELTA_W_FACTOR: f64 = 10.0;
+const DELTA_W_MAX: f64 = 1e-4;
+
 const DELTA_C_INIT: f64 = 1e-8;
 const DELTA_C_FACTOR: f64 = 10.0;
 const DELTA_C_MAX: f64 = 1e-1;
@@ -416,6 +433,12 @@ where
     // record at the converged iterate (α = 0).
     let mut trace: Vec<QpIterate> = Vec::new();
 
+    // Latched once δ_w has climbed to its cap without curing the defect: on
+    // that solve the rank loss is not in `(x, x)`, so re-probing the whole
+    // δ_w ladder every subsequent iteration is pure wasted factorization.
+    // Only the *decision* is carried across iterations — the δ values
+    // themselves still reset, unlike a regularization warm start.
+    let mut dw_exhausted = false;
     for it in 0..opts.max_iter {
         iters = it;
         if crate::deadline::expired() {
@@ -663,6 +686,10 @@ where
         // slack block keeps `reg_eff`, whose iterate-norm scaling is correct
         // for full-rank large-dual problems (LISWET).
         let mut delta_c = crate::ipm::adaptive_eq_reg(mu, opts.reg);
+        // δ_w on the (x,x) primal block. Starts at the static `opts.reg` — no
+        // change from the previous behaviour on a healthy iterate — and is
+        // escalated below only when the factorization reports a defect.
+        let mut delta_w = opts.reg;
         // Correct KKT inertia has one negative eigenvalue per equality and per
         // inequality row; the SOC auxiliary variables contribute positives
         // only. Too few negatives ⇒ the factor is an indefinite saddle.
@@ -672,19 +699,33 @@ where
         loop {
             kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
             kkt.update_eq_reg(delta_c, &mut kkt_vals);
+            kkt.update_primal_reg(delta_w, &mut kkt_vals);
 
             // Escalation budget (tries + per-block ceilings) and the bump that
             // raises δ_c (equality/Jacobian reg) and the (z,z) reg together.
             // `macro` would be cleaner, but inlined to keep the borrow trivial.
-            let budget =
-                tries < INERTIA_MAX_TRIES && (delta_c < DELTA_C_MAX || reg_eff < DYN_REG_MAX);
+            let budget = tries < INERTIA_MAX_TRIES
+                && (delta_c < DELTA_C_MAX || reg_eff < DYN_REG_MAX || delta_w < DELTA_W_MAX);
 
             match fact.refactor(&kkt_vals) {
                 Err(_) => {
                     // Singular factorization: rank-deficient KKT. Escalate.
                     if budget {
-                        delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
-                        reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        // Staged ladder: δ_w answers wrong inertia (Ipopt
+                        // Algorithm IC). Only once δ_w has saturated without
+                        // curing it does the defect look like something other
+                        // than a (x,x) rank loss, and the older δ_c / (z,z)
+                        // knobs take over. Bumping all three together drags
+                        // δ_c up on iterates that never needed it — the gh
+                        // #218 ratchet — which costs cq5 and maros their
+                        // Optimal verdict.
+                        if dw_exhausted || delta_w >= DELTA_W_MAX {
+                            dw_exhausted = true;
+                            delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
+                            reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        } else {
+                            delta_w = (delta_w.max(DELTA_W_INIT) * DELTA_W_FACTOR).min(DELTA_W_MAX);
+                        }
                         tries += 1;
                         continue;
                     }
@@ -697,8 +738,21 @@ where
                     let wrong_inertia =
                         matches!(fact.number_of_neg_evals(), Some(n) if n < expected_neg);
                     if wrong_inertia && budget {
-                        delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
-                        reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        // Staged ladder: δ_w answers wrong inertia (Ipopt
+                        // Algorithm IC). Only once δ_w has saturated without
+                        // curing it does the defect look like something other
+                        // than a (x,x) rank loss, and the older δ_c / (z,z)
+                        // knobs take over. Bumping all three together drags
+                        // δ_c up on iterates that never needed it — the gh
+                        // #218 ratchet — which costs cq5 and maros their
+                        // Optimal verdict.
+                        if dw_exhausted || delta_w >= DELTA_W_MAX {
+                            dw_exhausted = true;
+                            delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
+                            reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        } else {
+                            delta_w = (delta_w.max(DELTA_W_INIT) * DELTA_W_FACTOR).min(DELTA_W_MAX);
+                        }
                         tries += 1;
                         continue;
                     }
