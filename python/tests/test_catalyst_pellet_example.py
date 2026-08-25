@@ -183,6 +183,34 @@ def test_implicit_design_gradient_matches_perturb_and_resolve():
         atol=2e-10,
     )
 
+    # The fitted transport parameter is specifically the CO2 effective
+    # diffusivity; applying a scenario perturbation must leave the H2, CH4,
+    # and H2O diffusivities unchanged.
+    diffusivities = np.asarray(config.effective_diffusivities_m2_s)
+    perturbed_config = replace(
+        config,
+        effective_diffusivities_m2_s=tuple(
+            diffusivities * np.array([np.exp(epsilon), 1.0, 1.0, 1.0])
+        ),
+    )
+    scenario_solution = solve_forward(
+        activity,
+        config,
+        scenario=Scenario(log_diffusivity_scale=epsilon),
+        initial_state=solution.state_scaled,
+    )
+    explicit_solution = solve_forward(
+        activity,
+        perturbed_config,
+        initial_state=solution.state_scaled,
+    )
+    np.testing.assert_allclose(
+        [scenario_solution.production_mol_s, scenario_solution.max_temperature_k],
+        [explicit_solution.production_mol_s, explicit_solution.max_temperature_k],
+        rtol=2e-10,
+        atol=2e-14,
+    )
+
 
 def test_simultaneous_and_nested_design_agree_and_refine():
     config = PelletConfig(nodes=6, zones=3)

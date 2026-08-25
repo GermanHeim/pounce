@@ -140,7 +140,7 @@ class PelletConfig:
 
 @dataclass(frozen=True)
 class Scenario:
-    """Log-scale kinetic and diffusivity perturbations, both dimensionless."""
+    """Log-scale kinetic and CO2-diffusivity perturbations, both dimensionless."""
 
     log_rate_scale: float = 0.0
     log_diffusivity_scale: float = 0.0
@@ -358,6 +358,14 @@ def _cell_activity_backend(activity, nodes: int, zones: int, xp):
     return activity[index]
 
 
+def _effective_diffusivities_backend(config, log_diffusivity_scale, xp):
+    """Species diffusivities with the fitted CO2 multiplier applied."""
+
+    selector = xp.asarray([1.0, 0.0, 0.0, 0.0])
+    scale = 1.0 + selector * (xp.exp(log_diffusivity_scale) - 1.0)
+    return xp.asarray(config.effective_diffusivities_m2_s) * scale
+
+
 def _state_bounds(config: PelletConfig, nodes: int):
     lower = np.empty((5, nodes), dtype=float)
     upper = np.empty((5, nodes), dtype=float)
@@ -408,8 +416,8 @@ def _residual_backend(
     faces = xp.asarray(faces_np)
     volumes = xp.asarray(volumes_np)
     areas = xp.asarray(areas_np)
-    diffusivities = xp.asarray(config.effective_diffusivities_m2_s) * xp.exp(
-        log_diffusivity_scale
+    diffusivities = _effective_diffusivities_backend(
+        config, log_diffusivity_scale, xp
     )
     mass_transfer = xp.asarray(config.mass_transfer_coefficients_m_s)
     bulk_concentrations = xp.asarray(config.bulk_concentrations_mol_m3)
@@ -556,8 +564,8 @@ def _solution_from_state(
     rate = np.asarray(specific_rate) * config.catalyst_density_g_m3
     production = 4.0 * np.pi * float(np.dot(rate, volumes))
 
-    diffusivities = np.asarray(config.effective_diffusivities_m2_s) * np.exp(
-        scenario.log_diffusivity_scale
+    diffusivities = _effective_diffusivities_backend(
+        config, scenario.log_diffusivity_scale, np
     )
     bulk = config.bulk_concentrations_mol_m3
     surface_fluxes = np.empty(4)
