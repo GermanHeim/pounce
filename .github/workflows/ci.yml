@@ -517,10 +517,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # PINNED, deliberately against this job's own design (gh #782).
+      # Everything below derives the version it builds against from the
+      # installed wheel, so that a CasADi release bumps this job
+      # automatically. 3.8.0 (2026-08-25) exercised that and turned the job
+      # red on both runners in two independent ways: the Linux wheel appears
+      # to be built with the new libstdc++ ABI, against `casadi/Makefile`'s
+      # hardcoded `CXX11_ABI ?= 0`, so every `std::string`-taking symbol goes
+      # undefined at link; and macOS -- no dual-ABI there at all -- fails the
+      # code-generation check instead. Every PR opened that day failed this
+      # job regardless of its contents.
+      #
+      # `3.7.*` still tracks patch releases within the last known-good minor.
+      # Remove the pin when gh #782 is fixed; the auto-tracking is the point
+      # of the job and this pin is the thing standing in its way.
       - name: Install CasADi
         run: |
           python -m pip install --upgrade pip
-          python -m pip install casadi numpy
+          python -m pip install "casadi==3.7.*" numpy
 
       # The tag has to match the installed wheel exactly; `make fetch-src`
       # derives it from `casadi.__version__` rather than pinning a literal,
@@ -574,7 +588,10 @@ jobs:
         run: |
           cd casadi/wheel && ./build.sh
           python -m venv /tmp/casadi-wheel-env
-          /tmp/casadi-wheel-env/bin/pip install -q casadi dist/pounce_casadi-*.whl
+          # Same pin as the install step above (gh #782): the wheel under
+          # test was built against 3.7, so resolving a newer CasADi here
+          # would test a pairing the build never produced.
+          /tmp/casadi-wheel-env/bin/pip install -q "casadi==3.7.*" dist/pounce_casadi-*.whl
           /tmp/casadi-wheel-env/bin/python - <<'PY'
           import casadi as ca
           import pounce_casadi  # registers the plugin in-process
