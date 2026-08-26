@@ -9,6 +9,16 @@ changes.
 
 ## [Unreleased]
 
+- Add a reproducible closed-loop advanced-step NMPC CSTR tutorial.  It compares
+  full re-solves, stale predictions, clamped linear, fix-relax, path, and guarded
+  path updates across nominal, active-set-switching, and model-mismatch
+  campaigns; records control quality, safety, fallback, solver
+  failure/recovery, and stamped latency metrics; and demonstrates directional
+  sensitivity at a degenerate control bound.  The reusable driver and CI
+  regression tests exercise the same model.  The guard now judges the applied
+  corrector residual rather than the pre-corrector predictor, timing excludes
+  the separately replayed event ledger, warm recovery handles Pyomo application
+  failures, and the notebook environment consistently pins `pyomo-cvp` 0.7.2.
 - **The Peng–Robinson phase-envelope tutorial now treats extrema and design
   variables as solve outputs, not plot samples** (#773).  A reusable, tested
   `pounce.examples.phase_envelope` model traces dew/bubble isopleths through
