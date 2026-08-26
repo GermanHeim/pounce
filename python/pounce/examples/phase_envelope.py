@@ -13,6 +13,7 @@ dimensionless unless a docstring says otherwise.
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -986,6 +987,82 @@ def _fold_initial_guess(
     return np.concatenate([np.asarray(state), [float(parameter)], null_vector])
 
 
+_FOLD_PROBLEM_CACHE: "collections.OrderedDict[tuple, JaxProblem]" = (
+    collections.OrderedDict()
+)
+_FOLD_PROBLEM_CACHE_SIZE = 8
+
+
+def _fold_problem(
+    mixture: PengRobinsonMixture,
+    beta: float,
+    mode: Mode,
+    kij_pair: tuple[int, int],
+) -> JaxProblem:
+    """Return the augmented-fold :class:`JaxProblem`, built at most once.
+
+    A ``JaxProblem`` compiles its callbacks on first use and caches them on
+    the instance.  For this seven-equation system the first solve costs
+    ~30 s and every later solve of the *same instance* ~1 s, because the
+    fold equations already contain a ``jax.jacobian``, so the Lagrangian
+    Hessian POUNCE asks for is a third derivative of the Peng--Robinson
+    residual.  Measured on the binary fold: 26.5 s of the first call's
+    33 s is XLA compilation, 12.7 s of it that one Hessian and 5.6 s the
+    sparsity probes ``JaxProblem.__init__`` runs.
+
+    Constructing a fresh problem per call therefore paid that cost once
+    per fold rather than once per *kind* of fold — five times over in
+    ``test_published_binary_fold_and_inverse_design_regression`` alone,
+    and once per refined extremum in notebook 34.
+
+    The key is the complete mixture, not just the parts the traced graph
+    reads.  ``refine_fold`` always supplies the design vector, and
+    ``_decode_design`` takes the composition from *that* and ignores
+    ``mixture.composition``, so keying on everything but the composition
+    would hit more often and still be correct today.  It is deliberately
+    not done: that correctness rests on an invariant inside a different
+    function, and if a later edit makes the residual read the mixture's
+    own composition, a composition-blind key returns a stale graph and the
+    answer is wrong rather than merely slow.
+    """
+
+    key = (
+        mixture.names,
+        mixture.critical_temperature.tobytes(),
+        mixture.critical_pressure.tobytes(),
+        mixture.acentric_factor.tobytes(),
+        mixture.composition.tobytes(),
+        mixture.binary_interaction.tobytes(),
+        float(beta),
+        mode,
+        kij_pair,
+    )
+    cached = _FOLD_PROBLEM_CACHE.get(key)
+    if cached is not None:
+        _FOLD_PROBLEM_CACHE.move_to_end(key)
+        return cached
+
+    n_fold = 2 * (mixture.n_components + 1) + 1
+    problem = JaxProblem(
+        f=lambda fold_state, design: (
+            0.0 * jnp.sum(fold_state) * (1.0 + 0.0 * jnp.sum(design))
+        ),
+        g=lambda fold_state, design: _fold_equations(
+            fold_state, design, mixture, beta, mode, kij_pair
+        ),
+        n=n_fold,
+        m=n_fold,
+        p_example=jnp.asarray(design_parameters(mixture, kij_pair)),
+        cl=jnp.zeros(n_fold),
+        cu=jnp.zeros(n_fold),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes", "max_iter": 500},
+    )
+    _FOLD_PROBLEM_CACHE[key] = problem
+    while len(_FOLD_PROBLEM_CACHE) > _FOLD_PROBLEM_CACHE_SIZE:
+        _FOLD_PROBLEM_CACHE.popitem(last=False)
+    return problem
+
+
 def refine_fold(
     trace: PathTrace,
     mixture: PengRobinsonMixture,
@@ -1004,23 +1081,9 @@ def refine_fold(
     """
 
     n_state = mixture.n_components + 1
-    n_fold = 2 * n_state + 1
     q0 = design_parameters(mixture, kij_pair)
     w0 = _fold_initial_guess(trace, mixture, beta, mode, q0, kij_pair)
-    problem = JaxProblem(
-        f=lambda fold_state, design: (
-            0.0 * jnp.sum(fold_state) * (1.0 + 0.0 * jnp.sum(design))
-        ),
-        g=lambda fold_state, design: _fold_equations(
-            fold_state, design, mixture, beta, mode, kij_pair
-        ),
-        n=n_fold,
-        m=n_fold,
-        p_example=jnp.asarray(q0),
-        cl=jnp.zeros(n_fold),
-        cu=jnp.zeros(n_fold),
-        options={"tol": 1e-11, "print_level": 0, "sb": "yes", "max_iter": 500},
-    )
+    problem = _fold_problem(mixture, beta, mode, kij_pair)
     solution, _, jacobian = problem.solve_with_jacobian(jnp.asarray(q0), w0)
     solution_np = np.asarray(solution, dtype=float)
     residual = np.asarray(
