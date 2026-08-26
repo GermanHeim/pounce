@@ -41,6 +41,15 @@ changes.
   before. The three unmarked tests in that file — cubic root branches,
   simplex coordinates, implicit derivatives — still run on every PR.
 
+- **A new flagship Python tutorial performs uncertainty-aware inverse design
+  of a nonisothermal CO2-methanation catalyst pellet** (#775). The reusable
+  conservative finite-volume model includes published four-species kinetics,
+  finite films, exact JAX derivatives, nested and simultaneous design routes,
+  bounded/inventory/regularized activity profiles, refined-mesh physical
+  checks, reduced-Hessian parameter covariance, and scenario-based worst-case
+  redesign. The commit-stamped notebook and focused CI test state every
+  transport assumption and explicitly limit the result to a local,
+  activity-only single-pellet design.
 - Add a reproducible closed-loop advanced-step NMPC CSTR tutorial.  It compares
   full re-solves, stale predictions, clamped linear, fix-relax, path, and guarded
   path updates across nominal, active-set-switching, and model-mismatch
