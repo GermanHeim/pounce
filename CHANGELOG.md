@@ -18,6 +18,28 @@ changes.
   redesign. The commit-stamped notebook and focused CI test state every
   transport assumption and explicitly limit the result to a local,
   activity-only single-pellet design.
+- Add a reproducible closed-loop advanced-step NMPC CSTR tutorial.  It compares
+  full re-solves, stale predictions, clamped linear, fix-relax, path, and guarded
+  path updates across nominal, active-set-switching, and model-mismatch
+  campaigns; records control quality, safety, fallback, solver
+  failure/recovery, and stamped latency metrics; and demonstrates directional
+  sensitivity at a degenerate control bound.  The reusable driver and CI
+  regression tests exercise the same model.  The guard now judges the applied
+  corrector residual rather than the pre-corrector predictor, timing excludes
+  the separately replayed event ledger, warm recovery handles Pyomo application
+  failures, and the notebook environment consistently pins `pyomo-cvp` 0.7.2.
+- **The Peng–Robinson phase-envelope tutorial now treats extrema and design
+  variables as solve outputs, not plot samples** (#773).  A reusable, tested
+  `pounce.examples.phase_envelope` model traces dew/bubble isopleths through
+  pressure and temperature folds, refines cricondenbar/cricondentherm points
+  with the augmented simple-fold equations, differentiates them with respect
+  to `N-1` simplex composition coordinates and one binary interaction
+  parameter, and solves an inverse-composition design whose target is checked
+  by a completely fresh envelope trace.  The notebook also reproduces the
+  published 282.53 K methane/propane maxcondentherm of Deiters and Bell
+  (AIChE J. 65, 2019, e16730), adds residual/root/branch guards, and states the
+  important limitation that these local guards are not a global TPD
+  phase-stability calculation.
 - **A failed solve now reports what was wrong with the starting point, and
   tries one displaced start before believing itself.** Inspired by KRONOS
   (Ahmed, M. G. T. & Hasan, M. M. F., *Computers & Chemical Engineering*

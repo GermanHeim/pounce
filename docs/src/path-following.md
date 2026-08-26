@@ -185,6 +185,47 @@ that treats \\(\theta\\) as the independent variable has nowhere to go.
 `direction` sets the sign of the initial step in \\(\theta\\);
 `newton_tol` / `newton_max` control the corrector.
 
+### Chemical-engineering example: phase envelopes and inverse design
+
+The phase boundary of a multicomponent mixture is a natural fold problem.
+With equilibrium ratios \\(K_i=y_i/x_i\\), a fixed vapor fraction \\(\beta\\),
+and a Peng–Robinson fugacity model, an isopleth is the square system
+
+\\[
+\log K_i + \log\phi_i^v(y,T,P)-\log\phi_i^l(x,T,P)=0,
+\qquad \sum_i(y_i-x_i)=0.
+\\]
+
+A pressure ladder stops at the cricondenbar, while a prescribed-parameter
+predictor can silently land on the algebraically exact but physically vacuous
+\\(K_i=1\\) branch.  Pseudo-arclength continuation passes the fold.  For a
+quantitative extremum, the example then solves the augmented simple-fold
+system
+
+\\[
+F(x,\theta,q)=0,\qquad F_xv=0,\qquad v^Tv=1,
+\\]
+
+where \\(q\\) contains \\(N-1\\) unconstrained log-ratio composition coordinates
+and one binary interaction parameter \\(k_{ij}\\).  This removes the
+arclength-grid error from the reported cricondenbar or cricondentherm and makes
+the refined extremum differentiable with respect to the physical design.
+
+Notebook
+[`34_phase_envelope_peng_robinson.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/34_phase_envelope_peng_robinson.ipynb)
+contains the complete workflow and uses the tested
+`pounce.examples.phase_envelope` implementation.  It independently reproduces
+the 282.53 K methane/propane maxcondentherm reported by
+[Deiters and Bell (2019)](https://doi.org/10.1002/aic.16730), validates every
+binary design derivative by central perturbations that each retrace the full
+envelope, and verifies an inverse composition design with another fresh trace.
+
+The guards in the example check equation residuals, composition normalization,
+distance from the trivial branch, and admissibility of the selected cubic
+roots.  They are deliberately described as local guards: a production flash
+or envelope code should also perform a global tangent-plane-distance stability
+test and should not treat this example module as a general property package.
+
 ## Inverse / uncertainty mapping: `inverse_map_rhs`
 
 A related problem runs the map backwards: given a prescribed path in
