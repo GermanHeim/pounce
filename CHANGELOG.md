@@ -91,6 +91,73 @@ changes.
   It is an added field, which the schema documents as non-breaking, so
   `pounce.solve-report/v1` is unchanged; reports written by pounce ≤ 0.10.0
   do not carry it.
+- **The convex arm now escalates the primal `(x,x)` regularization when the
+  factorization reports wrong inertia**, which is what Ipopt's Algorithm IC
+  does and what POUNCE was missing. LP+QP corpus (509 problems, no NLP
+  fallback): **1261.3 s -> 605.7 s (-52.0%), 4 verdicts gained, 0 lost, 0
+  objective moves above 1e-6 relative.** `gen` and `gen1` go from 174 s at the
+  199-iteration cap (`Solved to acceptable level`) to 2.8 s in 18 iterations
+  (`Optimal`); `df2177` from 78 s at the cap to 0.66 s in 9; `dsbmip` from the
+  cap to `Optimal`.
+
+  `KktStructure::build` wrote `P + reg*I` into the `(x,x)` block once and
+  nothing ever rewrote it — `update_blocks` touches only the cone blocks,
+  `update_eq_reg` only the `y` diagonal. For an LP `P = 0`, so that block *is*
+  the regularization, frozen at the 1e-10 static default for the life of the
+  solve. Against a Jacobian with entries O(1) that leaves the x-pivots on the
+  roundoff floor and LDL^T loses their signs. The driver read the result back
+  as a wrong-inertia deficit and escalated `delta_c` and the `(z,z)`
+  regularization — neither of which can repair a defect living in `(x,x)` — so
+  it refactored, saw the same deficit, and escalated again until the try budget
+  was gone. On `gen`: 4.19 refactorizations per iteration, a mean first-try
+  deficit of 134.8 eigenvalues, 376 of 400 iterations starting wrong. Pinning
+  `(x,x)` alone at 1e-6 takes that solve from 176.04 s to 1.69 s; moving only
+  `delta_c` and `(z,z)` gets 113.02 s.
+
+  Escalated, not raised statically. A static 1e-6 fixes `gen` and looks
+  spectacular in isolation, but costs 48 verdicts across the corpus and shifts
+  `pilot.we`'s objective by 12% while still certifying `Optimal` — the
+  regularized problem is a different problem. And `delta_w` is staged *ahead
+  of* `delta_c`/`(z,z)` rather than raised alongside them: bumping all three
+  together drags `delta_c` up on iterates that never needed it, which is the
+  #218 ratchet (`delta_c*||dy||` biases the equality residual and floors
+  `pres` permanently) and cost `cq5` and `maros` their `Optimal` verdict in a
+  first draft. Problems without the defect pay nothing — `pilot.we`, `forplan`,
+  `greenbea` and `pilot87` return bit-identical objectives.
+
+  `scripts/sweep-fixtures.sh` moves exactly one line, identically on both legs:
+  `lp_degen2`, the corpus's one degenerate LP on this arm, 20 -> 18 iterations
+  with the objective agreeing to 10 significant figures (-1435.178018 ->
+  -1435.178017, relative 2.1e-10). It crosses the termination threshold two
+  iterations earlier rather than settling to a worse point; both exits are
+  `Optimal`. The ~20 other LP/QP/QCQP fixtures on the same arm are
+  byte-identical.
+
+- **The gh #293 equilibrated retry is capped at half the budget for a pure LP
+  whose first solve merely failed to converge.** The retry re-solves with Ruiz
+  equilibration and re-runs the full `max_iter`; for an LP that is almost
+  always wasted, since every accepted LP retry in the corpus converged by
+  iteration 78 while every one that ran to the 199-iteration cap was
+  discarded.
+
+  Two gates, both load-bearing. `P = 0`, because equilibration exists to
+  surface curvature the NT scaling cannot see and a QP retry genuinely needs
+  the room — `QSCFXM1/2/3` and `Q25FV47` are accepted at 131-168 iterations and
+  a flat cap would demote four clean `Optimal` results. And
+  `IterationLimit | OptimalInaccurate` rather than `NumericalFailure`, because a
+  `NumericalFailure` first solve accepts a retry on status alone, so a cap
+  there could *manufacture* an `IterationLimit` and have it accepted —
+  reporting "Maximum iterations exceeded" where the honest answer is "Numerical
+  failure". `issue_535_lp_falls_back_to_nlp` pins that.
+
+  Measured on its own against the previous behaviour this was worth 124.6 s,
+  concentrated in `gen` -47.9, `gen1` -47.5, `df2177` -19.8, `complex` -9.6.
+  **Stacked on the `(x,x)` regularization fix above it is worth -0.4 s (-0.1%),
+  which is the noise floor**: `gen`, `gen1` and `df2177` now converge on the
+  first solve and never reach the retry at all. What survives is `complex`
+  -9.2 s and `pilot.ja` -1.1 s, the two LPs that still hit the cap on the first
+  solve and still pay for a rejected retry. It is kept for those and for the
+  correctness of the two gates, not for the original headline number.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence
