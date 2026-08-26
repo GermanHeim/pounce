@@ -34,7 +34,18 @@ changes.
   is missing while its header still declares the nonzeros is now a parse
   error (exit 2) rather than `InfeasibleProblemDetected` (exit 1). The row
   reduced to `0 = 6`, so the old answer was a claim about the *model* made
-  from a corrupt file.
+  from a corrupt file. A hand-written `.nl` with a loose header is rejected
+  for the same reason — the same trade the `k`-segment count check already
+  makes, and the error names the exact mismatch.
+
+  The check found four stale headers on its way in. Three CLI fixtures
+  (`convex_qp.nl`, `infeasible_qp.nl`, `nonconvex_qp.nl`) and the reader's
+  own `WITH_CON_SUFFIX` declared a Jacobian nonzero count their `J` segments
+  contradicted; the field had never been read, so nothing caught the drift.
+  Headers corrected — the parse and the solutions are unchanged, since the
+  count the solver uses was always derived from the segments themselves.
+  Every other `.nl` in the repository, all of them writer-generated, already
+  agreed.
 
 - **Refining more than one phase-envelope fold no longer recompiles the same
   problem each time.** `pounce.examples.phase_envelope.refine_fold` built a
