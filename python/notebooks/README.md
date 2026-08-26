@@ -55,6 +55,12 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 14 | [`14_path_following.ipynb`](14_path_following.ipynb) | Predictor–corrector path following & inverse mapping. |
 | 33 | [`33_asdex_sparsity.ipynb`](33_asdex_sparsity.ipynb) | Automatic sparsity detection and coloring with [`asdex`](https://github.com/adrhill/asdex): derive `jac_pattern`/`hess_pattern` from the jaxpr instead of by hand, feed them to `from_jax(sparse=True)` or a raw `pounce.Problem`, and see why a graph-derived pattern beats a probed one on branchy (`where`/`clip`) models. |
 
+## Chemical-engineering applications
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 34 | [`34_phase_envelope_peng_robinson.ipynb`](34_phase_envelope_peng_robinson.ipynb) | Peng–Robinson phase envelopes through cricondenbar/cricondentherm folds; augmented fold refinement, published-mixture validation, composition/`k_ij` sensitivities checked by complete retraces, and inverse composition design. |
+
 ## Convex & conic (`pounce.qp`)
 
 | # | Notebook | What it shows |
