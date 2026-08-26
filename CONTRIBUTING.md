@@ -29,6 +29,14 @@ the same PR:
 1. **Code + test.** The behavior, with a test that pins it (Rust `cargo test`
    and/or Python `pytest`).
 
+   A handful of Python tests are marked `slow` — currently one, the
+   phase-envelope reproduction, which costs ~9 minutes of CI on its own.
+   `pytest python/tests` still runs them; the `Python tests (jax)` job
+   deselects them on a PR that touches neither `python/pounce/examples/`
+   nor `python/pounce/jax/`, and runs them in full on every push to `main`.
+   The job logs which choice it made and why. Mark a new test `slow` only
+   if it costs minutes *and* nothing outside those paths can move it.
+
 2. **CHANGELOG entry.** Add a bullet under the `## [Unreleased]` section of
    `CHANGELOG.md` (create that section if it is absent — it sits directly above
    the most recent released version). One entry per feature, in the user's

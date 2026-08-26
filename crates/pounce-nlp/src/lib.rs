@@ -23,6 +23,7 @@
 
 pub mod alg_types;
 pub mod constant_derivatives;
+pub mod degeneracy;
 pub mod derivative_test;
 pub mod expression_provider;
 pub mod ipopt_nlp;
@@ -31,6 +32,7 @@ pub mod quadratic;
 pub mod return_codes;
 pub mod scaling_tnlp;
 pub mod solve_statistics;
+pub mod start_conditioner;
 pub mod tnlp;
 pub mod tnlp_adapter;
 

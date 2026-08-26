@@ -19,6 +19,7 @@ use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
+use pounce_restoration::second_opinion_driver::{SecondOpinionOutcome, run_second_opinion_ladder};
 use pounce_sensitivity::SensSolve;
 use pounce_solve_report::{
     InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num, write_report_file,
@@ -351,8 +352,12 @@ impl PyProblem {
         // impl`) rather than peeking at the inner `Rc` directly.
         let app_guard = SendGuard::new(app);
         let bridge_guard = SendGuard::new(bridge);
-        let (status, app_back, bridge_back): (
+        #[allow(clippy::type_complexity)]
+        let (status, stats, second_opinion, second_opinion_log, app_back, bridge_back): (
             ApplicationReturnStatus,
+            SolveStatistics,
+            SecondOpinionOutcome,
+            Vec<String>,
             SendGuard<IpoptApplication>,
             SendGuard<Rc<RefCell<PyTnlp>>>,
         ) = py.allow_threads(move || {
@@ -360,11 +365,43 @@ impl PyProblem {
             let bridge = bridge_guard.into_inner();
             let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
             let status = app.optimize_tnlp(bridge_for_solve);
-            (status, SendGuard::new(app), SendGuard::new(bridge))
+            let stats = app.statistics();
+            // Second-opinion ladder: an `Infeasible_Problem_Detected` or
+            // `Invalid_Number_Detected` gets re-solved along up to three
+            // deliberately different trajectories before it is believed, and a
+            // re-solve is promoted only if it converges. A converged solve —
+            // which is nearly all of them — pays nothing: the ladder inspects
+            // the status and returns.
+            //
+            // This is on by default here for the same reason it is in the CLI,
+            // only more so: a caller reaching POUNCE from a modelling layer is
+            // the one most likely to hand over an uninitialized starting
+            // point, and an all-zero start is where a squared slack loses rank
+            // or a log/sqrt goes non-finite. The three `*_retry` options turn
+            // individual rungs off.
+            //
+            // Deliberately *not* wired into `solve_nlp_batch`: a failed start
+            // is routine in a multi-start search, and up to three extra solves
+            // per failed start is a large multiplier for no benefit there.
+            let mut lines: Vec<String> = Vec::new();
+            let outcome = run_second_opinion_ladder(
+                &mut app,
+                bridge.clone() as Rc<RefCell<dyn TNLP>>,
+                status,
+                stats.clone(),
+                &mut |line| lines.push(line.to_string()),
+            );
+            (
+                outcome.status,
+                outcome.statistics.clone(),
+                outcome,
+                lines,
+                SendGuard::new(app),
+                SendGuard::new(bridge),
+            )
         });
         let app = app_back.into_inner();
         let bridge = bridge_back.into_inner();
-        let stats = app.statistics();
         // Pick up any working set the SQP path produced; surface
         // it in the info dict and stash on the Problem instance.
         self.last_working_set = app.last_sqp_working_set().cloned();
@@ -380,6 +417,23 @@ impl PyProblem {
             None => py.None(),
         };
         info.set_item("working_set", ws_obj)?;
+        // What the second-opinion ladder did, if it ran at all: `None` on the
+        // overwhelmingly common path where the solve did not fail in a way the
+        // ladder second-guesses. When it did run, `tried` names the rungs in
+        // order and `promoted_by` names the one whose re-solve was adopted
+        // (`None` if the original verdict survived every rung). `log` is the
+        // progress narration the CLI prints to stderr, collected rather than
+        // printed so an embedder is not spammed on someone else's stream.
+        let so_obj: PyObject = if second_opinion.ran() {
+            let d = PyDict::new_bound(py);
+            d.set_item("tried", PyList::new_bound(py, &second_opinion.tried))?;
+            d.set_item("promoted_by", second_opinion.promoted_by)?;
+            d.set_item("log", PyList::new_bound(py, &second_opinion_log))?;
+            d.into_any().unbind()
+        } else {
+            py.None()
+        };
+        info.set_item("second_opinion", so_obj)?;
         // Per-subsystem wall-clock breakdown (seconds) of this solve
         // (pounce#180 item 3). `info["timing"]` is a dict keyed by
         // subsystem (`overall_alg`, the linear-algebra split, and the
@@ -721,6 +775,13 @@ impl PyProblem {
     /// column read as a direction reproduces across builds; a repeated
     /// eigenvalue still leaves the basis within its eigenspace free.
     ///
+    /// The second-opinion ladder does **not** run here, unlike
+    /// `solve`: a displaced start can converge to a different local
+    /// solution, and the pins and deltas are posed against the one the
+    /// caller expected. `info["second_opinion"]` is therefore always
+    /// `None`. To get both, call `solve` first and pass the `x` it
+    /// returns back in as `x0`.
+    ///
     /// Passing `sens_boundcheck=True` clamps the perturbed primal step
     /// against the variable bounds (single-pass projection — simpler
     /// than upstream's iterative Schur refinement; see
@@ -841,6 +902,25 @@ impl PyProblem {
         // from "sensitivity not requested". `Option<String>` maps
         // `None` ⇒ Python `None`, `Some(msg)` ⇒ the error string.
         info.set_item("sens_error", result.error.clone())?;
+        // The second-opinion ladder deliberately does not run here, and the
+        // key is set to `None` rather than left absent so `info` has the same
+        // shape as `solve`'s.
+        //
+        // Sensitivity is taken *about a particular solution*. The third rung
+        // displaces the starting point, which on a multi-modal model can
+        // converge somewhere else entirely -- and the caller's
+        // `pin_constraint_indices` and `deltas` are posed against the solution
+        // they expected, so quietly answering about a different local optimum
+        // is worse than reporting the failure. (`SensSolve` also builds its
+        // Schur complement from the solve's final factorization, so a rung
+        // would have to carry its factorization out with it.)
+        //
+        // The visible consequence is that `solve` and `solve_with_sens` can
+        // disagree about whether a model is solvable. That is documented in
+        // `docs/src/troubleshooting.md` under "The ladder is not a CLI
+        // feature", along with the composition that gets you both: run
+        // `solve`, then feed its `x` back in as `x0`.
+        info.set_item("second_opinion", py.None())?;
 
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
@@ -1051,10 +1131,30 @@ impl PyProblem {
     ) -> PyResult<PyTnlpInit> {
         let n = self.n as usize;
         let m = self.m as usize;
+        // Jacobian sparsity. `jacobianstructure` is *optional* in the
+        // cyipopt interface we advertise: an object that omits it declares a
+        // dense `(m, n)` Jacobian, whose `jacobian(x)` returns all `m * n`
+        // entries row-major. Feature-detect it the way the Hessian block
+        // below does. Calling it unconditionally raised a bare
+        // `AttributeError` out of `Problem.solve()` / `solve_nlp_batch()` for
+        // every object that took that documented default — while
+        // `pounce.preflight`, which implements the fallback in
+        // `_preflight.py`, accepted the very same object and reported
+        // `ok: True` (gh#765).
         let (jac_rows, jac_cols, nele_jac) = if m > 0 {
-            let s = call0(&self.problem_obj, "jacobianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
+            let has_structure = self
+                .problem_obj
+                .bind(py)
+                .hasattr("jacobianstructure")
+                .unwrap_or(false);
+            if has_structure {
+                let s = call0(&self.problem_obj, "jacobianstructure")?;
+                let (rows, cols) = decode_structure_inferred(&s)?;
+                let nnz = rows.len() as Index;
+                (rows, cols, nnz)
+            } else {
+                dense_jacobian_structure(m, n)?
+            }
         } else {
             (Vec::new(), Vec::new(), 0)
         };
@@ -1341,6 +1441,41 @@ pub(crate) fn build_info_dict<'py>(
     )?;
     info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(info)
+}
+
+/// The dense `(m, n)` Jacobian pattern, row-major — the same index pairs
+/// `np.divmod(np.arange(m * n), n)` produces in `_preflight.py`, and the
+/// order in which a `jacobian(x)` written against the dense default returns
+/// its values. Used when the user object omits the optional
+/// `jacobianstructure` callback (gh#765).
+///
+/// `m * n` is computed in `usize` and range-checked before it is narrowed:
+/// `nele_jac` is a signed 32-bit `Index`, so a large dense pattern (m = n =
+/// 50 000 is already 2.5e9 entries) would otherwise wrap to a negative or
+/// truncated count and mis-size every structure buffer downstream. Such a
+/// problem cannot be meant to be dense anyway, so the message points at the
+/// callback that declares the real pattern.
+fn dense_jacobian_structure(m: usize, n: usize) -> PyResult<(Vec<Index>, Vec<Index>, Index)> {
+    let nnz = m
+        .checked_mul(n)
+        .filter(|&nnz| nnz <= Index::MAX as usize)
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "problem_obj has no jacobianstructure(), so the Jacobian is taken \
+                 to be dense (m, n) = ({m}, {n}) -- but m*n exceeds the solver's \
+                 signed-32-bit nonzero count. Add a jacobianstructure() method \
+                 returning the (rows, cols) of the actual sparse pattern."
+            ))
+        })?;
+    let mut rows = Vec::with_capacity(nnz);
+    let mut cols = Vec::with_capacity(nnz);
+    for i in 0..m {
+        for j in 0..n {
+            rows.push(i as Index);
+            cols.push(j as Index);
+        }
+    }
+    Ok((rows, cols, nnz as Index))
 }
 
 /// Variant of `decode_structure` that infers `nnz` from the input

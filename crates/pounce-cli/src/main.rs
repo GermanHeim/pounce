@@ -30,7 +30,6 @@ use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
 };
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
-use pounce_nlp::SolveStatistics;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::{InfeasibilityProof, TNLP};
@@ -38,6 +37,7 @@ use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
+use pounce_restoration::second_opinion_driver::{SecondOpinionOutcome, run_second_opinion_ladder};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1087,6 +1087,7 @@ pub fn main() -> ExitCode {
                         bound_relax,
                         presolve_on,
                         socp_nlp_fallback,
+                        convex_console(&app, json_dbg),
                     ) {
                         return code;
                     }
@@ -1135,6 +1136,7 @@ pub fn main() -> ExitCode {
                         matches!(choice, SolverChoice::QpActiveSet),
                         engine_overrides,
                         lp_nlp_fallback,
+                        convex_console(&app, json_dbg),
                     ) {
                         return code;
                     }
@@ -1577,189 +1579,146 @@ pub fn main() -> ExitCode {
     // adopt the retry's stats only when the retry is actually promoted (below).
     let mut solve_stats = app.statistics();
 
-    // Local-infeasibility second-opinion ladder. A local-infeasibility verdict
-    // is a *local* statement about a nonconvex problem — the IPM found a
-    // stationary point of the constraint violation, not a proof that none of
-    // the feasible set is reachable. Before shipping that verdict, re-solve
-    // along a genuinely different trajectory and promote only if the re-solve
-    // actually converges. Two rungs, in order, each varying exactly one knob
-    // from the baseline options:
+    // Second-opinion ladder: a failing verdict gets re-solved along up to
+    // three deliberately different trajectories before it ships. Policy in
+    // `pounce_algorithm::second_opinion`, driver in
+    // `pounce_restoration::second_opinion_driver` — the CLI is one of four
+    // surfaces that run it, and the rationale for every rung lives with the
+    // policy rather than here.
     //
-    //  1. `feral_scaling=mc64` — *numerical* diversity
-    //     (`feral_infeasibility_scaling_retry`, on by default). Some KKT
-    //     trajectories are chaotic: under two equally backward-stable
-    //     linear-solver scalings the iterates stay bit-identical for many
-    //     iterations, then diverge by ~1 ULP and fall into different basins —
-    //     one optimal, the other a spurious stationary point of the constraint
-    //     violation (discs.nl: InfNorm → infeasible, MC64/Identity/MA57/IPOPT →
-    //     optimal). Sensitive dependence, not a bad solve, so the a-priori
-    //     scaling router can't tell the two apart and no per-factor residual
-    //     flags it; the only reliable signal is the whole-solve verdict.
+    // Two CLI-only exemptions gate it:
     //
-    //  2. `mu_strategy=adaptive` — *algorithmic* diversity
-    //     (`infeasibility_mu_strategy_retry`, on by default). Rung 1 perturbs
-    //     only the linear algebra, so it is evidence *only* when the trajectory
-    //     is ULP-hypersensitive. When it isn't, MC64 retraces the same iterates
-    //     and agrees for the same reason the first solve was wrong — on gh #524
-    //     (`cresc4`, 6 vars / 8 constraints, feasible, Ipopt solves it in 71
-    //     iterations) the MC64 re-solve reproduced the original trajectory
-    //     bit-identically and "corroborated" the false verdict. A different
-    //     barrier strategy changes the iterate sequence itself, which is what
-    //     the monotone-µ default gets wrong here: adaptive µ walks to the known
-    //     optimum. This is also the remedy IPOPT's own documentation gives a
-    //     user who gets an infeasibility verdict on a problem they believe is
-    //     feasible; running it automatically just spares them the round trip.
-    //
-    // Rungs are *not* cumulative — rung 2 restores the baseline scaling first.
-    // On gh #524's `cresc4`, `mu_strategy=adaptive` alone solves the problem and
-    // `mu_strategy=adaptive` + `feral_scaling=mc64` does not, so stacking the
-    // knobs would have thrown the fix away.
-    let scaling_retry_enabled = app
-        .options()
-        .get_bool_value("feral_infeasibility_scaling_retry", "")
-        .map(|(v, _found)| v)
-        .unwrap_or(true);
-    let mu_retry_enabled = app
-        .options()
-        .get_bool_value("infeasibility_mu_strategy_retry", "")
-        .map(|(v, _found)| v)
-        .unwrap_or(true);
-    let already_mc64 = matches!(
-        pounce_algorithm::application::feral_config_from_options(app.options()).scaling,
-        pounce_feral::ScalingStrategy::Mc64Symmetric
-    );
-    // The tag the barrier rung must restore. Read the *resolved* strategy, not
-    // the option string: `feral_scaling` is applied only when set explicitly,
-    // and otherwise `FeralConfig::from_env()` governs via `POUNCE_FERAL_SCALING`
-    // — so the option string reads "auto" for an env-configured run, and
-    // writing that back would silently override the environment on the retry
-    // instead of restoring it. `External` is unreachable from the string option;
-    // if it ever arrives here there is no tag to write, so the barrier rung is
-    // dropped rather than guessed at.
-    let baseline_scaling =
-        match pounce_algorithm::application::feral_config_from_options(app.options()).scaling {
-            pounce_feral::ScalingStrategy::Auto => Some("auto"),
-            pounce_feral::ScalingStrategy::InfNorm => Some("infnorm"),
-            pounce_feral::ScalingStrategy::Mc64Symmetric => Some("mc64"),
-            pounce_feral::ScalingStrategy::Identity => Some("identity"),
-            pounce_feral::ScalingStrategy::External(_) => None,
-        };
-    let already_adaptive = app
-        .options()
-        .get_string_value("mu_strategy", "")
-        .map(|(v, _found)| v == "adaptive")
-        .unwrap_or(false);
-    // A presolve-*certified* infeasibility is exempt. This ladder exists to
-    // second-guess a numerical local-infeasibility verdict that a bad scaling
-    // or an unlucky barrier trajectory may have manufactured; re-solving to
-    // double-check an exact proof would burn whole solves to re-derive
-    // something neither knob can affect.
+    //  * A presolve-*certified* infeasibility. The ladder exists to
+    //    second-guess a *numerical* local-infeasibility verdict that a bad
+    //    scaling or an unlucky barrier trajectory may have manufactured;
+    //    re-solving to double-check an exact proof would burn whole solves to
+    //    re-derive something no knob can affect.
+    //  * An attached debugger. Each rung is a fresh `optimize_tnlp`, and the
+    //    debug hook is consumed per solve — an interactive session would find
+    //    its breakpoints gone and the iterate replaced under it.
     let presolve_certified = presolve_handle
         .as_ref()
         .and_then(|p| p.borrow().certified_infeasible());
-    let rungs = second_opinion_rungs(SecondOpinionAvailability {
-        scaling_retry_enabled,
-        mu_retry_enabled,
-        already_mc64,
-        already_adaptive,
-        baseline_scaling,
-    });
-    if !rungs.is_empty()
-        && debug_hook.is_none()
-        && presolve_certified.is_none()
-        && status == ApplicationReturnStatus::InfeasibleProblemDetected
-    {
-        eprintln!(
-            "pounce: local infeasibility — re-solving along {} different trajector{} before \
-             believing it (second-opinion ladder: {}).",
-            rungs.len(),
-            if rungs.len() == 1 { "y" } else { "ies" },
-            rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
+    let second_opinion = if debug_hook.is_none() && presolve_certified.is_none() {
+        // Gated like every other banner the CLI prints: `print_level 0` is a
+        // request for silence, and the ladder's narration is no more exempt
+        // than the `EXIT:` block or the degeneracy diagnosis. The ladder still
+        // *runs* -- silence is about the console, not about the answer. The
+        // gate itself is shared with the C interface so the two cannot drift.
+        let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
+        let outcome = run_second_opinion_ladder(
+            &mut app,
+            Rc::clone(&tnlp),
+            status,
+            solve_stats.clone(),
+            &mut |line| {
+                if narrate {
+                    eprintln!("{line}");
+                }
+            },
         );
-        let mut retry_status = status;
-        let mut retry_stats = solve_stats.clone();
-        let mut tried: Vec<&'static str> = Vec::new();
-        for rung in &rungs {
-            eprintln!("pounce: second opinion — re-solving with {}…", rung.label);
-            // Apply this rung's option assignments. The main IPM rereads its
-            // options fresh each solve, but the restoration sub-IPM uses the
-            // provider snapshotted above at the *original* options — so rebuild
-            // it too, or the restoration leg would stay on the failing settings.
-            for assignment in &rung.assignments {
-                let _ = app.options_mut().read_from_str(assignment, true);
-            }
-            let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-            let bff_mint = move || -> InnerBackendFactoryFactory {
-                let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
-            };
-            let resto_provider = make_default_restoration_factory_provider(
-                RestoAlgorithmBuilder::new(),
-                app.algorithm_builder_from_options(),
-                bff_mint,
-            );
-            app.set_restoration_factory_provider(resto_provider);
+        status = outcome.status;
+        solve_stats = outcome.statistics.clone();
+        outcome
+    } else {
+        SecondOpinionOutcome::unchanged(status, solve_stats.clone())
+    };
+    // Keep the *console* in lockstep with the verdict that shipped (gh #508).
+    // Every rung prints its own end-of-run summary, which is expected and
+    // announced — but when nothing is promoted the last banner on the terminal
+    // is the last rejected rung's, while the `.sol`, the summary and the JSON
+    // report all carry the original verdict. Two banners disagreeing about one
+    // solve misleads a human reading the tail of the log and a machine reading
+    // it the same way: `validation/p3_control.py` keeps the last `EXIT:` line
+    // it sees and pairs it with the `.sol`, so it recorded a status the `.sol`
+    // never held. Measured on `min (x-5)² s.t. x²+δ = 0` at `tol=1e-4`: the
+    // console ended `Error in step computation.` (δ=1e-9) and `Maximum Number
+    // of Iterations Exceeded.` (δ=1e-1) over a `.sol` that said locally
+    // infeasible in both. Re-emitting the verdict that actually shipped makes
+    // the terminal's final word the true one.
+    //
+    // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
+    // which is what printed the banners this one arbitrates; at `print_level 0`
+    // there are none to disagree.
+    if second_opinion.ran()
+        && second_opinion.promoted_by.is_none()
+        && app
+            .options()
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true)
+    {
+        println!();
+        println!("EXIT: {}", print::status_message(status));
+        println!();
+        println!(
+            "POUNCE {}: {}",
+            env!("CARGO_PKG_VERSION"),
+            print::status_message(status)
+        );
+    }
 
-            retry_status = app.optimize_tnlp(Rc::clone(&tnlp));
-            retry_stats = app.statistics();
-            tried.push(rung.label);
-            if scaling_retry_promoted(retry_status) {
-                eprintln!(
-                    "pounce: {} re-solve recovered the problem — promoting ({retry_status:?}).",
-                    rung.label
-                );
-                break;
-            }
-            eprintln!(
-                "pounce: {} re-solve did not recover ({retry_status:?}).",
-                rung.label
-            );
+    // Failure diagnosis, printed once, after the ladder has finished moving
+    // `status` and before the machine-readable verdict below.
+    //
+    // Two statuses get a diagnosis because two statuses are routinely correct
+    // and useless. `Invalid_Number_Detected` says a non-finite value reached
+    // the algorithm and says nothing about which one: on the KRONOS corpus all
+    // four such losses had the culprit sitting in the starting vector the model
+    // itself supplied — `hong`'s x0 is literally `[NaN, NaN, NaN, NaN, 0, …]` —
+    // and the user was told none of that. `Infeasible_Problem_Detected` is a
+    // *local* statement about a nonconvex problem, and when the constraint
+    // Jacobian is rank-deficient at the point the solve started from, LICQ
+    // fails there and the verdict is a statement about the point at least as
+    // much as about the problem: ten of the fifteen corpus losses carry that
+    // verdict on models an independent solver proves feasible to 2.4e-7.
+    //
+    // The audit runs on `inner_tnlp` — the user's own TNLP, before presolve,
+    // elimination, scaling or the counting wrapper — for the same reason
+    // `run_derivative_test` does: a wrapper renumbers variables, so naming
+    // `x[3]` of a presolved model points at a *neighbouring* variable's
+    // answer. That is the gh#450 failure mode, and a diagnosis that names the
+    // wrong variable is worse than none. Going around `counting` also keeps
+    // the reported eval counts honest — this costs one call of each callback,
+    // and they are the diagnosis's, not the solver's.
+    //
+    // It is spent only on a run that has already failed, and it changes
+    // nothing — not the status, not the trajectory, not an option.
+    if matches!(
+        status,
+        ApplicationReturnStatus::InvalidNumberDetected
+            | ApplicationReturnStatus::InfeasibleProblemDetected
+    ) && app
+        .options()
+        .get_integer_value("print_level", "")
+        .map(|(v, _found)| v >= 1)
+        .unwrap_or(true)
+        && let Some(diagnosis) = pounce_nlp::degeneracy::diagnose_start_point(&inner_tnlp, 6)
+    {
+        if let Some(what) = diagnosis.audit.describe() {
+            eprintln!("pounce: the model is not finite at its own starting point: {what}.");
         }
-        if !scaling_retry_promoted(retry_status) {
-            eprintln!(
-                "pounce: keeping the original local-infeasibility verdict; it survived {} \
-                 independent re-solve(s) ({}).",
-                tried.len(),
-                tried.join(", "),
-            );
-        }
-        // Keep `status` and `solve_stats` in lockstep: on promotion the retry
-        // is authoritative (its verdict + its statistics); otherwise both stay
-        // the original local-infeasibility verdict and the original solve's
-        // statistics. See `resolve_scaling_retry_outcome` (code review L23).
-        (status, solve_stats) =
-            resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
-        // …and keep the *console* in lockstep with them too (gh #508). Both
-        // solves print their own end-of-run summary, which is expected and
-        // announced — but when the retry is not promoted the last banner on the
-        // terminal is the retry's, while the `.sol`, the summary and the JSON
-        // report all carry the original verdict. Two banners disagreeing about
-        // one solve misleads a human reading the tail of the log and a machine
-        // reading it the same way: `validation/p3_control.py` keeps the last
-        // `EXIT:` line it sees and pairs it with the `.sol`, so it recorded a
-        // status the `.sol` never held. Measured on `min (x-5)² s.t. x²+δ = 0`
-        // at `tol=1e-4`: the console ended `Error in step computation.`
-        // (δ=1e-9) and `Maximum Number of Iterations Exceeded.` (δ=1e-1) over a
-        // `.sol` that said locally infeasible in both. Re-emitting the verdict
-        // that actually shipped makes the terminal's final word the true one.
+        // Not when presolve *proved* the infeasibility. The ladder is exempt
+        // there for the reason given at its own guard — re-solving to
+        // second-guess a proof is a waste — and the advice below is the same
+        // mistake in words: on a certified-infeasible model with any
+        // structurally-zero Jacobian row, this told the user to doubt a
+        // verdict the `.sol` had just stamped `solve_result_num` 201,
+        // "proved". Rank-deficiency is a statement about the starting point,
+        // and a bound-propagation refutation is not.
         //
-        // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
-        // which is what printed the two banners this one arbitrates; at
-        // `print_level 0` there are none to disagree.
-        if !scaling_retry_promoted(retry_status)
-            && app
-                .options()
-                .get_integer_value("print_level", "")
-                .map(|(v, _found)| v >= 1)
-                .unwrap_or(true)
+        // The non-finite audit above keeps running: "your model is NaN at its
+        // own start" is true and worth saying whoever proved what.
+        if presolve_certified.is_none()
+            && status == ApplicationReturnStatus::InfeasibleProblemDetected
+            && let Some(jac) = diagnosis.jacobian.as_ref()
+            && let Some(what) = jac.describe(6)
         {
-            println!();
-            println!("EXIT: {}", print::status_message(status));
-            println!();
-            println!(
-                "POUNCE {}: {}",
-                env!("CARGO_PKG_VERSION"),
-                print::status_message(status)
+            eprintln!("pounce: the constraint Jacobian is rank-deficient there: {what}.");
+            eprintln!(
+                "pounce: LICQ fails at a point like that, so a local-infeasibility verdict \
+                 reached from it is as much a statement about the starting point as about the \
+                 problem. Try a different starting point, or `start_point_perturbation 1e-2`."
             );
         }
     }
@@ -2201,103 +2160,6 @@ fn build_debugger(
     }
 }
 
-/// One rung of the local-infeasibility second-opinion ladder: a label for the
-/// console plus the option assignments that define this re-solve's trajectory.
-///
-/// Assignments are applied on top of the *baseline* options, not on top of the
-/// previous rung — see `second_opinion_rungs`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SecondOpinionRung {
-    label: &'static str,
-    assignments: Vec<String>,
-}
-
-/// What the baseline options already provide, so a rung that would be a no-op
-/// can be dropped instead of burning a solve to re-derive the same answer.
-#[derive(Debug, Clone, Copy)]
-struct SecondOpinionAvailability {
-    scaling_retry_enabled: bool,
-    mu_retry_enabled: bool,
-    already_mc64: bool,
-    already_adaptive: bool,
-    /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy,
-    /// which the barrier rung re-asserts so it varies exactly one knob.
-    /// `None` when the resolved strategy has no tag to write back
-    /// (`ScalingStrategy::External`), which drops the barrier rung rather than
-    /// let it run under a scaling the baseline never used.
-    baseline_scaling: Option<&'static str>,
-}
-
-/// Build the ladder of second-opinion re-solves for a local-infeasibility
-/// verdict, in the order they should be tried.
-///
-/// Rung 1 (`feral_scaling=mc64`) perturbs the linear algebra only. Rung 2
-/// (`mu_strategy=adaptive`) perturbs the barrier trajectory, and **restores the
-/// baseline scaling first** so it varies exactly one knob from the original
-/// solve. That reset is load-bearing, not tidiness: on gh #524's `cresc4`,
-/// `mu_strategy=adaptive` recovers the optimum but `mu_strategy=adaptive` with
-/// `feral_scaling=mc64` still reports local infeasibility, so a cumulative
-/// ladder would have discarded the fix.
-fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpinionRung> {
-    let mut rungs = Vec::new();
-    if avail.scaling_retry_enabled && !avail.already_mc64 {
-        rungs.push(SecondOpinionRung {
-            label: "feral_scaling=mc64",
-            assignments: vec!["feral_scaling mc64\n".to_string()],
-        });
-    }
-    if let Some(baseline_scaling) = avail.baseline_scaling
-        && avail.mu_retry_enabled
-        && !avail.already_adaptive
-    {
-        rungs.push(SecondOpinionRung {
-            label: "mu_strategy=adaptive",
-            assignments: vec![
-                format!("feral_scaling {baseline_scaling}\n"),
-                "mu_strategy adaptive\n".to_string(),
-            ],
-        });
-    }
-    rungs
-}
-
-/// Did a second-opinion re-solve converge well enough to overturn the original
-/// local-infeasibility verdict? Only a clean or acceptable-level solve
-/// promotes; everything else (including a second infeasibility verdict) leaves
-/// the original verdict standing.
-fn scaling_retry_promoted(retry_status: ApplicationReturnStatus) -> bool {
-    matches!(
-        retry_status,
-        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
-    )
-}
-
-/// Resolve the final `(status, statistics)` after an MC64 hypersensitivity
-/// re-solve (code review L23).
-///
-/// On promotion the retry is the authoritative solve, so its status **and** its
-/// statistics are reported together. Otherwise the original local-infeasibility
-/// verdict is kept — and so are the *original* solve's statistics, so the
-/// summary / JSON report never pair the original verdict with the failed
-/// retry's iteration count or objective. The pre-fix code reverted `status` to
-/// `InfeasibleProblemDetected` but read `app.statistics()` *after* the retry,
-/// leaking the retry solve's stats into a report labeled with the original
-/// verdict.
-fn resolve_scaling_retry_outcome(
-    retry_status: ApplicationReturnStatus,
-    original_stats: SolveStatistics,
-    retry_stats: SolveStatistics,
-) -> (ApplicationReturnStatus, SolveStatistics) {
-    if scaling_retry_promoted(retry_status) {
-        (retry_status, retry_stats)
-    } else {
-        (
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            original_stats,
-        )
-    }
-}
-
 /// Should an LP whose convex solve came back without a certificate be handed
 /// to the general NLP interior-point path instead (gh #535)?
 ///
@@ -2459,6 +2321,86 @@ fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRe
     }
 }
 
+/// The console-contract knobs the convex drivers need from the options list.
+///
+/// Resolved once at the dispatch site because neither driver carries the
+/// [`IpoptApplication`] the options live on, and both must answer the same
+/// questions: may they print the end-of-run verdict, and were they asked for
+/// timing statistics (gh #767).
+#[derive(Debug, Clone, Copy, Default)]
+struct ConvexConsole {
+    /// `print_level >= 1` — gates the `EXIT:` / `POUNCE:` / `Status:` block,
+    /// exactly as `Application::emit_end_summary` gates the NLP path's. At
+    /// print_level 0 the console is silent by request.
+    verdict: bool,
+    /// `--json-debug`: stdout is a pure protocol channel there, so the
+    /// machine-readable `Status:` line stays off it — the same carve-out the
+    /// NLP path makes.
+    json_debug: bool,
+    /// `timing_statistics` or `print_timing_statistics` (which implies it) —
+    /// run the detailed per-phase timers.
+    collect_timing: bool,
+    /// `print_timing_statistics` — emit the timing block after the verdict.
+    print_timing: bool,
+}
+
+/// Read [`ConvexConsole`] off the application's options list.
+///
+/// gh #767: `print_timing_statistics` was registered, accepted, and reported
+/// `(used)` by `print_user_options` on this path while emitting nothing —
+/// so a tool attributing solve cost by phase read 0% for every phase of a
+/// convex-routed instance, which is indistinguishable from "already fast".
+fn convex_console(app: &IpoptApplication, json_dbg: bool) -> ConvexConsole {
+    let opt = app.options();
+    let yes = |name: &str| {
+        opt.get_bool_value(name, "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(false)
+    };
+    let print_timing = yes("print_timing_statistics");
+    ConvexConsole {
+        verdict: opt
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true),
+        json_debug: json_dbg,
+        // `print_timing_statistics=yes` implies `timing_statistics=yes` per
+        // its own option help, so either one arms the detailed timers.
+        collect_timing: print_timing || yes("timing_statistics"),
+        print_timing,
+    }
+}
+
+/// Emit the convex path's end-of-run verdict: the `EXIT:` banner block and
+/// the machine-readable `Status:` line, under the same gates the NLP path
+/// applies to its own (see [`ConvexConsole`]). Shared by both convex drivers
+/// so the two cannot drift.
+fn print_convex_verdict(
+    console: ConvexConsole,
+    status: pounce_convex::QpStatus,
+    timing: &pounce_common::timing::ConvexTimingStatistics,
+) {
+    if !console.verdict {
+        return;
+    }
+    if console.print_timing {
+        print!("{}", timing.report());
+    }
+    // One status vocabulary across both engines: the convex verdict mapped
+    // onto the NLP-side enumerator, which is what `status_message` phrases
+    // and what `upstream_name` spells the way CUTEst tables and the
+    // reference JSONs do.
+    let ars = qp_status_to_ars(status);
+    // The same quantity the NLP path prints on this line: the driver's own
+    // `OverallAlgorithm` total, not the solve-only figure the one-line result
+    // above already carries.
+    print::print_convex_end(ars, timing.overall_alg.total_wallclock_time());
+    if !console.json_debug {
+        println!("Status: {}", ars.upstream_name());
+    }
+}
+
 fn convex_opts_with_remaining(
     mut opts: pounce_convex::QpOptions,
     started: std::time::Instant,
@@ -2532,13 +2474,25 @@ fn run_convex_qp(
     engine_overrides: pounce_convex::ActiveSetOverrides,
     // gh #535: may an uncertified LP solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
+    // Verdict / timing-statistics switches read off the options list.
+    console: ConvexConsole,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const) =
+    // gh #767: per-phase wall clock for the convex path. The struct is always
+    // built (it costs nothing when the detailed timers are off) and the sink
+    // is always installed, so `pounce-linsol` can charge the factorization and
+    // back-solve rows from several crates below this driver.
+    let timing = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
+    timing.set_detailed_enabled(console.collect_timing);
+    timing.overall_alg.start();
+    let _timing_scope = pounce_common::timing::ConvexTimingScope::open(&timing);
+
+    let (qp, con_map, obj_nl_const) = {
+        let _t = timing.extraction.guard();
         match pounce_cli::qp_extract::extract_qp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
@@ -2548,7 +2502,8 @@ fn run_convex_qp(
                 );
                 return Some(ExitCode::from(2));
             }
-        };
+        }
+    };
 
     // The reported objective must include *both* constant sources: the
     // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
@@ -2635,9 +2590,14 @@ fn run_convex_qp(
         // user selected. The caller has already printed the note explaining
         // the debugger does not engage; fall through and solve normally.
         let mut h = hook.borrow_mut();
+        let _t = timing.solve.guard();
         solve_qp_ipm_debug(&qp, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
-        match presolve(&qp) {
+        let outcome = {
+            let _t = timing.presolve.guard();
+            presolve(&qp)
+        };
+        match outcome {
             PresolveOutcome::Reduced(ps) => {
                 // A screen claimed infeasibility and the re-derivation without
                 // the speculative fixings would not reproduce it, so presolve
@@ -2686,17 +2646,23 @@ fn run_convex_qp(
                         exit,
                     ));
                 }
-                let red = if use_active_set {
-                    let mut mk = backend;
-                    solve_qp_active_set(
-                        &ps.reduced,
-                        &solve_opts_offset(ps.obj_offset()),
-                        &engine_overrides,
-                        &mut mk,
-                    )
-                } else {
-                    solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
+                let red = {
+                    let _t = timing.solve.guard();
+                    if use_active_set {
+                        let mut mk = backend;
+                        solve_qp_active_set(
+                            &ps.reduced,
+                            &solve_opts_offset(ps.obj_offset()),
+                            &engine_overrides,
+                            &mut mk,
+                        )
+                    } else {
+                        solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
+                    }
                 };
+                // The postsolve lift is presolve's other half, so it is
+                // charged to the same row.
+                let _t = timing.presolve.guard();
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible(trigger) => {
@@ -2710,8 +2676,10 @@ fn run_convex_qp(
         }
     } else if use_active_set {
         let mut mk = backend;
+        let _t = timing.solve.guard();
         solve_qp_active_set(&qp, &solve_opts(), &engine_overrides, &mut mk)
     } else {
+        let _t = timing.solve.guard();
         solve_qp_ipm(&qp, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
@@ -2793,6 +2761,7 @@ fn run_convex_qp(
     // Recover per-constraint duals once (mapped from the QP multipliers back
     // to per-`.nl`-constraint order); used by both the `.sol` and the JSON
     // report.
+    let recovery = timing.solution_recovery.guard();
     let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). The QP extractor puts
@@ -2819,6 +2788,14 @@ fn run_convex_qp(
             values: nl_writer::SolSuffixValues::Real(z_u_suffix),
         },
     ];
+    recovery.stop();
+
+    // The end-of-run verdict, in the shape the NLP path emits it (gh #767).
+    // After the residual block and the dual recovery so the timing rows cover
+    // the whole driver, and before the `.sol` / JSON writes, which report
+    // nothing to stdout.
+    timing.overall_alg.end();
+    print_convex_verdict(console, sol.status, &timing);
 
     // Write a `.sol` if requested: primal x and recovered constraint duals in
     // the AMPL `.sol` convention.
@@ -2927,12 +2904,21 @@ fn run_convex_socp(
     presolve_on: bool,
     // gh #535: may an unverified conic solve be handed back to the NLP path?
     allow_nlp_fallback: bool,
+    // Verdict / timing-statistics switches read off the options list.
+    console: ConvexConsole,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
     use pounce_convex::presolve::{PresolveOutcome, presolve_conic};
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
-    let (qp, con_map, obj_nl_const, cones) =
+    // Per-phase wall clock; see the same block in `run_convex_qp` (gh #767).
+    let timing = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
+    timing.set_detailed_enabled(console.collect_timing);
+    timing.overall_alg.start();
+    let _timing_scope = pounce_common::timing::ConvexTimingScope::open(&timing);
+
+    let (qp, con_map, obj_nl_const, cones) = {
+        let _t = timing.extraction.guard();
         match pounce_cli::qp_extract::extract_socp_with_map(prob, bound_relax) {
             Some(q) => q,
             None => {
@@ -2942,7 +2928,8 @@ fn run_convex_socp(
                 );
                 return Some(ExitCode::from(2));
             }
-        };
+        }
+    };
 
     // Reported objective includes both constant sources (the `.nl` linear
     // section and the degree-0 term folded into the nonlinear objective tree),
@@ -2989,6 +2976,7 @@ fn run_convex_socp(
         // so the debugger's blocks correspond to the user's rows rather than
         // a reduced set. Same carve-out as the QP path.
         let mut h = hook.borrow_mut();
+        let _t = timing.solve.guard();
         solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         // **`presolve_conic`, never `presolve`.** The orthant entry point
@@ -3003,7 +2991,11 @@ fn run_convex_socp(
         // `presolve_conic` protects every non-orthant row, which is what
         // makes this call safe; §7 of `dev-notes/quadratic-structure-
         // exploitation.md` is the validity table.
-        match presolve_conic(&qp, &cones) {
+        let outcome = {
+            let _t = timing.presolve.guard();
+            presolve_conic(&qp, &cones)
+        };
+        match outcome {
             PresolveOutcome::Reduced(ps) => {
                 if let Some(trigger) = ps.discarded_infeasibility() {
                     presolve_log.push(format!(
@@ -3038,7 +3030,12 @@ fn run_convex_socp(
                 // row indices, so `con_map`'s `z_row0`/`z_row1` — and hence
                 // `recover_socp_duals` below — need no remapping.
                 let red_cones = ps.reduced_cones(&cones);
-                let red = solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend);
+                let red = {
+                    let _t = timing.solve.guard();
+                    solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend)
+                };
+                // The postsolve lift is presolve's other half.
+                let _t = timing.presolve.guard();
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible(trigger) => {
@@ -3048,6 +3045,7 @@ fn run_convex_socp(
             PresolveOutcome::Unbounded => trivial(pounce_convex::QpStatus::DualInfeasible),
         }
     } else {
+        let _t = timing.solve.guard();
         solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
@@ -3117,6 +3115,7 @@ fn run_convex_socp(
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
     // constraint order (best-effort for the quadratic rows; see
     // `recover_socp_duals`).
+    let recovery = timing.solution_recovery.guard();
     let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). As on the QP path the
@@ -3140,6 +3139,12 @@ fn run_convex_socp(
             values: nl_writer::SolSuffixValues::Real(z_u_suffix),
         },
     ];
+    recovery.stop();
+
+    // The end-of-run verdict, in the shape the NLP path emits it (gh #767);
+    // see the same call in `run_convex_qp` for the placement.
+    timing.overall_alg.end();
+    print_convex_verdict(console, sol.status, &timing);
 
     if let Some(path) = sol_path {
         let payload = nl_writer::SolutionFile {
@@ -3721,205 +3726,6 @@ mod lp_nlp_fallback_tests {
                     "{class:?}/{status:?} must not reroute when the caller declines"
                 );
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod scaling_retry_tests {
-    use super::{
-        SecondOpinionAvailability, resolve_scaling_retry_outcome, scaling_retry_promoted,
-        second_opinion_rungs,
-    };
-    use pounce_nlp::SolveStatistics;
-    use pounce_nlp::return_codes::ApplicationReturnStatus;
-
-    fn avail() -> SecondOpinionAvailability {
-        SecondOpinionAvailability {
-            scaling_retry_enabled: true,
-            mu_retry_enabled: true,
-            already_mc64: false,
-            already_adaptive: false,
-            baseline_scaling: Some("auto"),
-        }
-    }
-
-    /// The default ladder is two rungs, scaling first (it is the cheaper and
-    /// longer-standing one), barrier strategy second.
-    #[test]
-    fn default_ladder_is_scaling_then_barrier_strategy() {
-        let rungs = second_opinion_rungs(avail());
-        let labels: Vec<_> = rungs.iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["feral_scaling=mc64", "mu_strategy=adaptive"]);
-    }
-
-    /// gh #524: the rungs are applied to the *baseline*, not stacked. The
-    /// barrier rung re-asserts the baseline scaling, because on `cresc4`
-    /// `mu_strategy=adaptive` recovers the optimum while `mu_strategy=adaptive`
-    /// together with `feral_scaling=mc64` still reports local infeasibility —
-    /// a cumulative ladder would throw the fix away.
-    #[test]
-    fn barrier_rung_restores_the_baseline_scaling() {
-        for baseline in ["auto", "infnorm"] {
-            let rungs = second_opinion_rungs(SecondOpinionAvailability {
-                baseline_scaling: Some(baseline),
-                ..avail()
-            });
-            let barrier = rungs
-                .iter()
-                .find(|r| r.label == "mu_strategy=adaptive")
-                .expect("barrier rung present");
-            assert!(
-                barrier
-                    .assignments
-                    .iter()
-                    .any(|a| a.trim() == format!("feral_scaling {baseline}")),
-                "barrier rung must reset the scaling to the baseline {baseline}, \
-                 got {:?}",
-                barrier.assignments,
-            );
-        }
-    }
-
-    /// A rung that cannot change anything is dropped rather than burning a
-    /// whole solve to re-derive the same answer.
-    #[test]
-    fn rungs_already_satisfied_at_baseline_are_dropped() {
-        let only_barrier = second_opinion_rungs(SecondOpinionAvailability {
-            already_mc64: true,
-            ..avail()
-        });
-        assert_eq!(
-            only_barrier.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
-        );
-
-        let only_scaling = second_opinion_rungs(SecondOpinionAvailability {
-            already_adaptive: true,
-            ..avail()
-        });
-        assert_eq!(
-            only_scaling.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-
-        assert!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                already_mc64: true,
-                already_adaptive: true,
-                ..avail()
-            })
-            .is_empty(),
-            "nothing left to vary means no ladder at all",
-        );
-    }
-
-    /// A resolved scaling with no `feral_scaling` tag to write back
-    /// (`ScalingStrategy::External`) drops the barrier rung rather than run it
-    /// under a scaling the baseline never used. The scaling rung is unaffected
-    /// — it does not need to restore anything.
-    #[test]
-    fn barrier_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
-        let rungs = second_opinion_rungs(SecondOpinionAvailability {
-            baseline_scaling: None,
-            ..avail()
-        });
-        assert_eq!(
-            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-    }
-
-    /// Each rung has its own opt-out, and turning both off restores upstream
-    /// IPOPT's behaviour of shipping the first verdict.
-    #[test]
-    fn each_rung_can_be_disabled_independently() {
-        assert_eq!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                scaling_retry_enabled: false,
-                ..avail()
-            })
-            .iter()
-            .map(|r| r.label)
-            .collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
-        );
-        assert_eq!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                mu_retry_enabled: false,
-                ..avail()
-            })
-            .iter()
-            .map(|r| r.label)
-            .collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-        assert!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                scaling_retry_enabled: false,
-                mu_retry_enabled: false,
-                ..avail()
-            })
-            .is_empty(),
-        );
-    }
-
-    fn stats_with_iters(n: i32) -> SolveStatistics {
-        SolveStatistics {
-            iteration_count: n,
-            final_objective: n as f64,
-            ..SolveStatistics::default()
-        }
-    }
-
-    /// Code review L23: when the MC64 hypersensitivity re-solve does **not**
-    /// recover, the verdict reverts to the original local-infeasibility status
-    /// — and the reported statistics must revert with it, not leak the failed
-    /// retry's iteration count / objective.
-    #[test]
-    fn failed_retry_keeps_original_status_and_stats() {
-        let original = stats_with_iters(7);
-        let retry = stats_with_iters(42);
-        for retry_status in [
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            ApplicationReturnStatus::MaximumIterationsExceeded,
-            ApplicationReturnStatus::RestorationFailed,
-        ] {
-            assert!(!scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
-            assert_eq!(
-                status,
-                ApplicationReturnStatus::InfeasibleProblemDetected,
-                "a non-promoting retry ({retry_status:?}) keeps the original verdict"
-            );
-            assert_eq!(
-                stats.iteration_count, 7,
-                "stats must stay the original solve's, not the failed retry's"
-            );
-            assert_eq!(stats.final_objective, 7.0);
-        }
-    }
-
-    /// On promotion the retry is authoritative: its status AND its statistics
-    /// are reported together.
-    #[test]
-    fn promoted_retry_adopts_retry_status_and_stats() {
-        let original = stats_with_iters(7);
-        let retry = stats_with_iters(42);
-        for retry_status in [
-            ApplicationReturnStatus::SolveSucceeded,
-            ApplicationReturnStatus::SolvedToAcceptableLevel,
-        ] {
-            assert!(scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
-            assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
-            assert_eq!(
-                stats.iteration_count, 42,
-                "promoted: stats must be the retry solve's"
-            );
-            assert_eq!(stats.final_objective, 42.0);
         }
     }
 }

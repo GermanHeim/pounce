@@ -33,6 +33,9 @@ walks through adding it.
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 | `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
+| `Infeasible_Problem_Detected` on a model you believe is feasible | [the second-opinion ladder](#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are), then [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
+| `Invalid_Number_Detected` with no indication of which number | [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
+| Fails from the bundled start, solves from a hand-picked one | [conditioning the starting point](initialization.md#conditioning-the-starting-point) |
 
 ---
 
@@ -332,15 +335,17 @@ The recipe in plain English:
 
 ### The second-opinion ladder (what those extra solves in your log are)
 
-Before shipping a local-infeasibility verdict the CLI re-solves the
-problem along up to two *different* trajectories and only keeps the
-verdict if they agree. You will see this in the log:
+Before shipping a local-infeasibility verdict POUNCE re-solves the
+problem along up to three *different* trajectories and only keeps the
+verdict if they agree. This is not a CLI feature — see
+[The ladder is not a CLI feature](#the-ladder-is-not-a-cli-feature)
+below — but the CLI is where you see it narrated:
 
 ```
 EXIT: Converged to a point of local infeasibility. Problem may be infeasible.
-pounce: local infeasibility — re-solving along 2 different trajectories before
+pounce: local infeasibility — re-solving along 3 different trajectories before
         believing it (second-opinion ladder: feral_scaling=mc64,
-        mu_strategy=adaptive).
+        mu_strategy=adaptive, start_point_perturbation=1e-2).
 pounce: second opinion — re-solving with feral_scaling=mc64…
 pounce: feral_scaling=mc64 re-solve did not recover (InfeasibleProblemDetected).
 pounce: second opinion — re-solving with mu_strategy=adaptive…
@@ -348,19 +353,35 @@ pounce: mu_strategy=adaptive re-solve recovered the problem — promoting (Solve
 Status: Solve_Succeeded
 ```
 
+An `Invalid_Number_Detected` opens the ladder too, but reaches only the third
+rung. A NaN out of your model is a statement about the *callbacks* at a point;
+re-running the same callbacks at the same point under a different
+linear-solver scaling or a different barrier strategy evaluates the same
+non-finite quantity again, so those two rungs are not evidence about it and
+would only burn solves.
+
 Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
 so a laddered run has several and only the last one is the verdict that
 shipped — if you are parsing pounce's output, read `Status:` and ignore the
 banners. It carries the upstream IPOPT enumerator spelling
 (`Infeasible_Problem_Detected`, `Maximum_Iterations_Exceeded`, …).
 
-The two rungs probe different things, and the distinction matters when
+The specialized convex engines (LP / QP interior-point, the parametric
+active-set QP engine, and the conic QCQP engine) print the same `EXIT:` block
+and the same `Status:` line, in the same spelling, so a parser needs no
+convex-specific case. If you are reading the JSON report rather than the log,
+compare against `solution.status_upstream`, which carries that spelling;
+`solution.status` is the Rust enum-variant name (`Solve_Succeeded` vs
+`SolveSucceeded`) and does not match IPOPT's tables.
+
+The three rungs probe different things, and the distinction matters when
 you are reading a log:
 
 | rung | option | varies |
 |---|---|---|
 | `feral_scaling=mc64` | `feral_infeasibility_scaling_retry` | the linear algebra |
 | `mu_strategy=adaptive` | `infeasibility_mu_strategy_retry` | the barrier trajectory |
+| `start_point_perturbation=1e-2` | `infeasibility_perturbed_start_retry` | where the trajectory starts |
 
 The first rung is evidence only when the trajectory is
 hypersensitive — two equally backward-stable scalings staying
@@ -373,6 +394,42 @@ a reason to believe the verdict**. That is why the barrier rung exists
 `cresc4` is feasible, Ipopt solves it in 71 iterations, and the MC64
 re-solve reproduced the failing trajectory bit-identically).
 
+The third rung changes neither of those — it changes the point the
+trajectory starts from, by displacing each variable by a relative `1e-2`
+and clipping back into its bounds. It is last because it is the biggest
+change, and it exists because measurement said it is by far the most
+effective. Over a 244-problem corpus taken from the
+[KRONOS](acknowledgments.md#starting-point-conditioning-kronos) benchmark set, fifteen models failed from
+their bundled start; ten of them are models an independent solver proves
+feasible to `2.4e-7` or better, so the verdict was wrong. Of those fifteen:
+
+| what was tried | recovered |
+|---|---|
+| nothing (the default) | 0 / 15 |
+| `start_with_resto` | 0 / 15 |
+| `expect_infeasible_problem` | 0 / 15 |
+| `mu_strategy=adaptive` | 4 / 15 |
+| a displaced start | **13 / 15** |
+| a displaced start + restoration | 14 / 15 |
+
+That ordering is the diagnosis. The iterate does not need to be *better*,
+it needs to be *non-degenerate*. The common failure is a start at which
+the constraint Jacobian is structurally rank-deficient — a squared slack
+sitting at zero, or an origin start on a homogeneous quadratic — where
+LICQ fails and the filter line search has no descent direction to find,
+whatever you hand it. Displacing the point restores rank, and the solve
+that follows is an ordinary one.
+
+The displacement is deterministic: it is drawn from a SplitMix64 stream
+seeded by `start_point_perturbation_seed` and nothing else — no clock, no
+address, no thread identity — so a promoted retry reproduces and a failed
+one is reportable. Non-finite entries in the starting vector are replaced
+with a finite in-bounds value first, because NaN plus noise is NaN.
+
+You can apply the same displacement yourself, without waiting for a
+failure, with `start_point_perturbation 1e-2`; vary
+`start_point_perturbation_seed` to drive a multistart by hand.
+
 Things worth knowing:
 
 - A rung is promoted only if it returns `Solve_Succeeded` /
@@ -383,11 +440,130 @@ Things worth knowing:
   `mu_strategy=adaptive`) is skipped.
 - The extra solves are spent only on runs that would otherwise report
   failure. Nothing changes on a successful solve.
-- Both rungs are on by default; set them to `no` for upstream IPOPT's
-  behaviour of shipping the first verdict.
+- All three rungs are on by default; set them to `no` for upstream
+  IPOPT's behaviour of shipping the first verdict.
 - If a rung recovers the problem, that is a signal about your model as
   well as about the solver: the verdict was trajectory-dependent, so
   the starting point or the scaling of the formulation is worth a look.
+
+#### The ladder is not a CLI feature
+
+Every ordinary single-solve entry point runs it, on by default and with
+the same three options: the CLI, the Python `Problem.solve`, the C
+`IpoptSolve`, and the `pounce-rs` builder. If you drive POUNCE from a
+modelling layer you are, if anything, the caller who needs it most — an
+uninitialized decision variable reaches the solver as a zero, and the
+origin is where a squared slack or a homogeneous quadratic loses rank.
+
+Three entry points deliberately do **not** run it, and it is worth
+knowing which, because on a model the ladder would have recovered they
+report the failure that `Problem.solve` does not:
+
+| Entry point | Why not |
+|---|---|
+| `solve_nlp_batch` | A failed start is routine in a multi-start; up to three extra solves per failed start multiplies the search cost for no benefit. |
+| the CLI's `minima` global search | Same reason. |
+| `Problem.solve_with_sens` | Sensitivity is taken *about a particular solution*. The third rung displaces the starting point, which on a multi-modal model can converge somewhere else entirely — and your `pin_constraint_indices` and `deltas` are posed against the solution you expected, so silently answering about a different local optimum is worse than reporting the failure. |
+
+So `problem.solve(x0)` and `problem.solve_with_sens(x0, ...)` can
+disagree about whether a model is solvable, and on a degenerate start
+they will. If you want the ladder's starting point *and* sensitivity
+about it, run `solve` first, then pass the `x` it returns back into
+`solve_with_sens` as `x0` — that makes the choice of base point explicit
+and reproducible, which is what sensitivity analysis wants anyway.
+`info["second_opinion"]` is always `None` from `solve_with_sens`.
+
+From Python, what the ladder did comes back in the info dict:
+
+```python
+x, info = problem.solve(x0)
+so = info["second_opinion"]          # None if the ladder never ran
+if so:
+    print(so["tried"])               # e.g. ['feral_scaling=mc64', 'mu_strategy=adaptive']
+    print(so["promoted_by"])         # the rung that was adopted, or None
+    print("\n".join(so["log"]))     # the narration the CLI prints to stderr
+```
+
+`info["second_opinion"]` is `None` on the overwhelmingly common path —
+the solve did not fail in a way the ladder second-guesses, and nothing
+extra was spent. When it is not `None` and `promoted_by` is `None`, the
+original verdict survived every rung, which is a much stronger statement
+about your model than a single failed solve.
+
+The narration is collected rather than printed for the library callers,
+so an embedded solve does not write to someone else's stderr; the C
+interface prints it, matching where the solver's own banners already go.
+
+One place deliberately does **not** run it: the multi-start paths
+(`solve_nlp_batch`, the CLI's `minima` global search). A failed start is
+routine there, and up to three extra solves per failed start multiplies
+the cost of a search for no benefit.
+
+### What POUNCE says when it stops from a degenerate point
+
+If the ladder runs out and the failure verdict stands, POUNCE audits
+the starting point once — one evaluation of each callback, spent only
+on a run that has already failed — and prints what it finds before the
+machine-readable `Status:` line. There are two findings.
+
+**The model is not finite where it starts.** All four
+`Invalid_Number_Detected` cases in the corpus above were correct stops
+reported unhelpfully: the solver said a number was invalid without
+saying which one. Now it names it.
+
+```
+$ pounce nanstart.nl
+pounce: invalid number — re-solving along 1 different trajectory before believing it
+        (second-opinion ladder: start_point_perturbation=1e-2).
+pounce: second opinion — re-solving with start_point_perturbation=1e-2…
+pounce: start_point_perturbation=1e-2 re-solve did not recover (InvalidNumberDetected).
+pounce: keeping the original Invalid_Number_Detected verdict; it survived
+        1 independent re-solve(s) (start_point_perturbation=1e-2).
+pounce: the model is not finite at its own starting point: objective f(x) = NaN.
+Status: Invalid_Number_Detected
+```
+
+The audit covers `x` itself, `f`, `grad f`, `g` and the Jacobian, names
+the offending index (and column, for a Jacobian entry), and reports the
+value's sign for an infinity. It caps the list and counts the rest, so
+a model that is non-finite everywhere prints a line, not a wall. One
+corpus model, `hong`, ships a starting point that is literally
+`[nan, nan, nan, nan, 0, …]` — worth knowing before you go looking for
+a bug in the objective.
+
+**The constraint Jacobian is rank-deficient there.** This is the one
+that changes an answer rather than a message. A local-infeasibility
+verdict reached from a point where LICQ fails is not evidence about the
+problem:
+
+```
+$ pounce degen.nl
+pounce: keeping the original Infeasible_Problem_Detected verdict; it survived
+        3 independent re-solve(s) (feral_scaling=mc64, mu_strategy=adaptive,
+        start_point_perturbation=1e-2).
+pounce: the constraint Jacobian is rank-deficient there: 2 of 2 constraint rows
+        have an identically zero gradient here (rows 0, 1); 2 of 2 variable
+        columns are identically zero here (variables 0, 1).
+pounce: LICQ fails at a point like that, so a local-infeasibility verdict reached
+        from it is as much a statement about the starting point as about the
+        problem. Try a different starting point, or `start_point_perturbation 1e-2`.
+Status: Infeasible_Problem_Detected
+```
+
+Two caveats on how to read it. POUNCE reports *identically zero* rows
+and columns, not a rank estimate — an SVD is not affordable to run
+speculatively on every failed solve, and a zero row is the degeneracy
+that actually shows up in practice (a squared slack at zero, an origin
+start on a homogeneous quadratic). A full-rank-looking Jacobian can
+still be numerically rank-deficient, so the absence of this line is not
+a clean bill of health. And **structural** absence is never reported:
+a column the model never declared is not a finding, only a column the
+model declared and then evaluated to zero.
+
+The audit runs on your own model — before presolve, elimination and
+scaling — so the indices it prints are the ones in your file. That is
+deliberate: a wrapper renumbers variables, and naming `x[3]` of a
+presolved model would point at a neighbouring variable's answer.
 
 ### When the residual is small but the verdict still says infeasible
 

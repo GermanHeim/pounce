@@ -36,7 +36,7 @@ verified via Crossref on 2026-05-14):
 |---|---|
 | **F**indable | `result_id` (`<unix_nanos>-<pid>`, globally unique and time-ordered), `created_at_iso`, `created_at_unix_nanos`. |
 | **A**ccessible | Plain-text JSON on disk; no protocol gating; UTF-8. Same trust model as the `.sol` file. |
-| **I**nteroperable | Schema-versioned (`pounce.solve-report/v1`); JSON primitives only (no binary blobs); units documented per-field below; `solution.status` is the enum-variant string for cross-language consumption. |
+| **I**nteroperable | Schema-versioned (`pounce.solve-report/v1`); JSON primitives only (no binary blobs); units documented per-field below; `solution.status` is the enum-variant string for cross-language consumption, beside `solution.status_upstream` in IPOPT's own enumerator spelling. |
 | **R**eusable | `solver` (name + version + git commit + target triple), `license`, `input` (kind + path + size), and `environment` (solve-affecting env-var overrides in force) capture enough provenance to reproduce a solve. |
 
 ## Versioning policy
@@ -162,6 +162,7 @@ Problem dimensions reported by the TNLP at `get_nlp_info()`.
 | Field | Type | Notes |
 |---|---|---|
 | `status` | string | `ApplicationReturnStatus` enum variant name verbatim (e.g. `"SolveSucceeded"`, `"MaximumIterationsExceeded"`). |
+| `status_upstream` | string | The same verdict in upstream IPOPT's C enumerator spelling from `IpReturnCodes_inc.h` (e.g. `"Solve_Succeeded"`, `"Infeasible_Problem_Detected"`) — the spelling CUTEst status tables, the CLI's own `Status:` line and the reference JSONs under `benchmarks/*/ipopt_ma57.json` all use. Derived from `status`, so the two can never disagree. Compare against this field, not `status`, when your consumer already keys off IPOPT's names. Added after `pounce.solve-report/v1` shipped; absent from reports written by pounce ≤ 0.10.0. |
 | `solve_result_num` | integer | AMPL-style solve-result code (Gay 2005, "Hooking Your Solver to AMPL" §5, p. 23 table): 0 = solved, 100-range = warning, 200-range = infeasible, 400-range = limit reached, 500-range = failure. Within the solved range, `0` is `SolveSucceeded` and `1` is `SolvedToAcceptableLevel` — IPOPT's codes ([solution output](../solution-output.md#solved-strict-vs-acceptable)). Identical to the `objno` code in the `.sol`. |
 | `objective` | float | Final unscaled objective value. `0.0` (not NaN) when the solve never completed; check `statistics.iteration_count > 0` to distinguish. |
 | `x` | array of float \| empty | Primal vector, length `problem.n_variables`. Empty when the binary doesn't capture the final iterate (currently: `pounce` on the `newton_driver` fast-path). Omitted from JSON when empty. |
@@ -319,6 +320,7 @@ Levels map to verbosity in the same spirit as upstream's `print_level`
   "problem": { "n_variables": 5, "n_constraints": 4, "n_objectives": 1, "minimize": true },
   "solution": {
     "status": "SolveSucceeded",
+    "status_upstream": "Solve_Succeeded",
     "solve_result_num": 0,
     "objective": 0.5510204081632656,
     "x":      [0.6326530575201161, 0.3877551079678144, 0.020408165487930466, 5.0, 1.0],

@@ -1204,6 +1204,71 @@ perturbed system per scaling method. The perturbations are reported —
 trusting `-inv(reduced_hessian)`; on well-posed estimation problems
 the final factor is unregularized and the invariance is exact.
 
+## Closed-loop advanced-step NMPC
+
+The CSTR case in
+[`36_active_set_parametric_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/36_active_set_parametric_sensitivity.ipynb)
+now closes the loop around the held-factor examples above.  Its reusable driver
+lives in `pounce.examples.asnmpc_cstr`.  The driver uses optional Pyomo
+integrations that are not installed by the base wheel.  On Python 3.10 or
+newer, install them with
+`pip install pounce-solver pyomo-pounce pyomo-cvp==0.7.2` before importing the
+example module.  The notebook runs 30 one-minute samples for nominal,
+constraint-switching, and model-mismatch campaigns and compares:
+
+- a fresh nonlinear-programming solve after every measurement;
+- the stale predicted solution with no measurement correction;
+- a clamped linear sensitivity update;
+- fix-relax and active-set path updates; and
+- the same path update behind a full-point acceptance guard and fallback solve.
+
+Each sensitivity-policy sample follows the same ordering: solve the next horizon
+at the predicted state in the background, receive the measurement, update from
+that solve's held KKT factor, validate the corrected point, apply the first
+piecewise-constant control, integrate an independent plant, shift the horizon,
+and prepare the next background solve.  The full re-solve baseline deliberately
+does its solve after measurement, so its solve time is online latency; background
+solve time is reported separately for advanced-step policies.
+
+The guard checks the scaled measurement displacement, the corrector's
+full-point feasibility, stationarity and complementarity, corrector progress,
+path budget, predicted temperature, and ambiguous manipulated-variable
+activity.  A rejection performs a fresh solve at the measurement and resets the
+warm start and factorization.  This is an example policy, not a safety
+certificate: the guard does not replace plant-side interlocks, state estimation,
+robust constraint tightening, or a deadline-aware real-time scheduler.
+
+The notebook reports IAE, ISE, stage cost, control movement, maximum temperature
+violation, active-set changes, fallback counts and fractions, solver failures
+and recoveries, and median/p95 online latency.  A failed warm-started controller
+solve is retried once from a cold model and both the failure and recovery are
+counted; an unrecovered cold solve aborts the campaign rather than silently
+applying an unverified control.  Accepted corrected trajectories supply the
+state, derivative, and control warm start for the shifted horizon; rejected
+guarded points do not.  Timing rows carry the POUNCE commit, model revision,
+tolerance, platform, Python version, and whether a warm-up was excluded.  Re-run
+timing on the target controller hardware; notebook wall-clock values are
+evidence for the recorded machine, not portable deadlines.
+
+The online sensitivity timing includes both the applied `estimate()` and the
+separate `estimate_report()` replay needed for the residual diagnostics; the
+current public API computes their predictor and corrector work separately.
+The active-set event-ledger replay is excluded from that timer and reported as
+diagnostic work.  Because the illustrative path-budget guard reads that ledger,
+a production end-to-end guard should add its cost unless it obtains the record
+from the applied update itself.  The stress campaign's initial concentration
+bias is 4.5 times the configured local trust scale, so it deliberately forces
+an outside-the-validity-region fallback.  After that reset, later corrected
+points can be accepted; this is not evidence that the guard detects subtle
+model mismatch.  Measured temperature is capped at the controller model's upper
+bound because that model pins its initial state there; real over-temperature
+handling belongs to a plant interlock, not this example.
+
+The final experiment holds the paper-scale 100-interval model at its first
+active-set breakpoint and steps in both directions.  It shows why a derivative
+at a kink is directional and why the guard treats ambiguous control activity as
+a reason to re-solve.
+
 ## Verification
 
 All three entry points are verified against upstream sIPOPT 3.14.19's

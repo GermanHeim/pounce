@@ -271,6 +271,10 @@ def test_solve_view_writes_solve_report(tmp_path):
     doc = json.loads(report.read_text())
     assert doc["schema"] == "pounce.solve-report/v1"
     assert doc["solution"]["status"] == "SolveSucceeded"
+    # gh #767: every producer of a report derives the upstream spelling in
+    # `ReportBuilder::finish`, so the Python route carries it too — a GAMS
+    # consumer comparing against IPOPT's own enumerator names matches.
+    assert doc["solution"]["status_upstream"] == "Solve_Succeeded"
     assert doc["problem"]["n_variables"] == 4
     assert doc["problem"]["n_constraints"] == 2
     # `full` detail carries the per-iteration trace the studio/MCP post-mortem

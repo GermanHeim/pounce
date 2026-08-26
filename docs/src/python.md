@@ -57,6 +57,20 @@ x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
 print(info['status_msg'], info['obj_val'], x)
 ```
 
+`objective` is required; `gradient` is required for any real solve.
+Everything else is conditional or optional, on cyipopt's rules:
+
+| method | when |
+| --- | --- |
+| `constraints` / `jacobian` | required when `m > 0` |
+| `jacobianstructure` | **optional.** Omit it and the Jacobian is dense `(m, n)`: `jacobian(x)` then returns all `m*n` entries, row-major. Supply it to declare a sparse pattern — worth doing for anything but a small dense block. |
+| `hessian` + `hessianstructure` | **optional, both or neither.** Without them the solve runs `hessian_approximation=limited-memory` (L-BFGS). |
+| `intermediate` | optional per-iteration callback; return `False` to stop. |
+
+`pounce.preflight(problem_obj, x0, ...)` evaluates the same object once
+and reports what the solver's first iteration will see, under exactly
+these rules.
+
 ### Verifying convergence / trustworthy duals
 
 `info` carries the final KKT residuals so a consumer can independently
