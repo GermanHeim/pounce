@@ -1244,12 +1244,13 @@ current public API computes their predictor and corrector work separately.
 The active-set event-ledger replay is excluded from that timer and reported as
 diagnostic work.  Because the illustrative path-budget guard reads that ledger,
 a production end-to-end guard should add its cost unless it obtains the record
-from the applied update itself.  The stress campaign's concentration bias is
-4.5 times the configured local trust scale, so its 30-of-30 fallback result is
-an intentional outside-the-validity-region control, not evidence that the
-guard detects subtle model mismatch.  Measured temperature is capped at the
-controller model's upper bound because that model pins its initial state there;
-real over-temperature handling belongs to a plant interlock, not this example.
+from the applied update itself.  The stress campaign's initial concentration
+bias is 4.5 times the configured local trust scale, so it deliberately forces
+an outside-the-validity-region fallback.  After that reset, later corrected
+points can be accepted; this is not evidence that the guard detects subtle
+model mismatch.  Measured temperature is capped at the controller model's upper
+bound because that model pins its initial state there; real over-temperature
+handling belongs to a plant interlock, not this example.
 
 The final experiment holds the paper-scale 100-interval model at its first
 active-set breakpoint and steps in both directions.  It shows why a derivative
