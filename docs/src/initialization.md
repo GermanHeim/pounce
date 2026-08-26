@@ -974,6 +974,153 @@ Exit code 0 means the model evaluates cleanly at x0 (warnings allowed);
 * **`pounce-studio analyze-nl`** gives a structural pre-flight of a
   model file without solving.
 
+## Conditioning the starting point
+
+Two options displace the point *before* the first barrier iteration.
+Both are off by default and both are trajectory changes: they alter
+which local solution the run converges to, not just how fast it gets
+there. Neither is set by anything automatic except the third rung of
+the [local-infeasibility ladder](troubleshooting.md), which only runs
+after a solve has already failed.
+
+They exist because of a measurement. Over a 244-problem corpus taken
+from the KRONOS benchmark set (Ahmed & Hasan 2026 — see
+[Acknowledgments](acknowledgments.md#starting-point-conditioning-kronos)),
+fifteen models ended `Infeasible_Problem_Detected` or
+`Invalid_Number_Detected` from their bundled starting point. Ten of
+those are models an independent solver proves feasible to 2.4e-7 or
+better, so the verdict was wrong. What recovered them:
+
+| Remedy | Recovered (of 15) |
+|---|---|
+| default | 0 |
+| `start_with_resto=yes` | 0 |
+| `expect_infeasible_problem=yes` | 0 |
+| `mu_strategy=adaptive` | 4 |
+| Adam warm-up | 3 |
+| **one displaced start** | **13** |
+| restoration + displaced start | 14 |
+
+That ordering is the diagnosis. The iterate does not need to be
+*better*, it needs to be *non-degenerate*. The common failure is a
+start at which the constraint Jacobian is rank-deficient — a squared
+slack sitting at zero, or an origin start on a homogeneous quadratic —
+where LICQ fails and the filter line search has no descent direction
+to find, whatever else it is given. Restoration does not help because
+restoration inherits the same degenerate point.
+
+### Jitter (`start_point_perturbation`)
+
+```sh
+pounce model.nl start_point_perturbation=1e-2
+pounce model.nl start_point_perturbation=1e-2 start_point_perturbation_seed=7
+```
+
+Each variable is displaced by `scale * (1 + |x_i|) * u_i`, with `u_i`
+drawn uniformly from `[-1, 1)`, then clipped back inside any bound it
+has. The `(1 + |x_i|)` factor is the part that matters: a purely
+relative perturbation is identically zero at `x_i = 0`, and a start at
+the origin is the single most common degenerate start in the corpus
+above.
+
+Non-finite entries are repaired *first* — replaced by the midpoint of a
+two-sided box, one unit inside a one-sided bound, or zero if the
+variable is free — because NaN plus noise is NaN, and without that step
+the displacement reproduces the original `Invalid_Number_Detected`
+exactly.
+
+The draw is SplitMix64 seeded by `start_point_perturbation_seed` and
+nothing else — no clock, no address, no thread identity — so the same
+seed and the same incoming point give the same displaced point on every
+platform and every run. Vary the seed to drive a multistart by hand.
+
+Only `x` is displaced; a warm-started `z` or `lambda` is passed through
+untouched. Read that as a caveat rather than a safeguard: under
+`warm_start_init_point=yes` the displacement does pair a moved primal
+point with multipliers certified at the old one. There is no meaningful
+"same displacement" for a dual, so moving them alongside is not on
+offer, and declining to displace at all would switch the third retry rung
+off for exactly the warm-started runs. That is the wrong trade — the rung
+only ever runs *after* a solve has already failed, so the stale duals are
+being weighed against a verdict, not against a solution. The barrier's
+first iteration re-derives `z` from the bounds in any case; `lambda` is
+what actually carries over.
+
+The conditioned point is computed once per incoming start and cached, so
+a warm start does not pay for the Adam warm-up twice.
+
+### Adam warm-up (`start_point_conditioner=adam`)
+
+```sh
+pounce model.nl start_point_conditioner=adam
+pounce model.nl start_point_conditioner=adam \
+       adam_warmup_iters=500 adam_warmup_penalty=1.0
+```
+
+Runs Adam on the penalised merit
+
+```
+f(x) + rho * || violation(x) ||^2
+```
+
+and starts the barrier solve from where it lands. This is stage 0 of
+the KRONOS algorithm, generalised from that paper's equality-only
+`rho*||h(x)||^2` so it applies to an arbitrary NLP rather than only to
+a squared-slack reformulation: the violation of a row is its distance
+outside `[g_l, g_u]` and zero inside, which reduces to `g - b` on an
+equality row. Iterates are clipped into the variable bounds at every
+step, so the warm-up never hands back a point outside the box.
+
+It changes only *where* the solve starts. No algorithm, no derivative
+and no option below it moves, so the barrier solve that follows is
+exactly the solve POUNCE would have run had the conditioned point been
+passed in by hand.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `adam_warmup_iters` | 200 | Iteration budget |
+| `adam_warmup_learning_rate` | 5e-2 | Step size |
+| `adam_warmup_penalty` | 10.0 | `rho` on the squared violation |
+
+The defaults are KRONOS's published stage-0 values. Two properties are
+worth knowing before tuning them. Adam normalises by its second-moment
+estimate, so the learning rate is very nearly the per-coordinate step
+length *in the model's own units* — it wants setting against the size
+of the variables, not the size of the derivatives. And because the step
+is size-capped near the learning rate regardless of how large the
+gradient is, the budget buys roughly `iters * learning_rate` units of
+travel per coordinate: about 10 units at the defaults. A start that is
+1000 units from anywhere useful will not arrive in 200 iterations.
+
+The warm-up is **guarded**: if it does not reduce the merit it restores
+the original point and reports zero iterations, so enabling it can
+never cost more than the function evaluations it spent.
+
+#### Why it is not a default
+
+It is a real preconditioner with a fat tail. Measured over 40 problems
+POUNCE already solves, it broke none of them and cut the iteration
+count on 22, sometimes hard:
+
+| Model | before | after |
+|---|---|---|
+| `rk23` | 82 | 11 |
+| `bt5` | 45 | 9 |
+| `chnrosnb` | 40 | 10 |
+| `hs056` | 42 | 12 |
+
+Median 0.83x, geometric mean 0.79x — and yet the **total rose 1.62x**,
+3030 to 4900 iterations, driven by two models: `palmer1c` 71 -> 1023
+and `biggs6` 1906 -> 2938. Excluding those two the ratio is 0.89x.
+
+`palmer1c` is the case to understand. A fixed, unscaled penalty against
+a badly-scaled model walks the iterate somewhere that the barrier
+method then has to walk back from, and it is `adam_warmup_penalty` that
+is wrong there, not the idea. If the warm-up hurts a particular model,
+that is the first knob to move.
+
+A median win with a 14x tail is an option, not a default.
+
 ## No good starting point at all?
 
 Three composable primitives cover the "generate or repair a point"
