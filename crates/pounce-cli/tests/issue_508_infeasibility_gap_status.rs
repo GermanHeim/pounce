@@ -301,3 +301,70 @@ fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_second_opinion() {
          it with a `.sol` that never held it:\nstdout:\n{stdout}"
     );
 }
+
+/// …and the *numbers* in that `.sol` must be the kept solve's too, not the
+/// re-solve's.
+///
+/// Each rung of the second-opinion ladder is a full `optimize_tnlp` through the
+/// same TNLP, so each one overwrites the captured `(x, lambda)` — both the
+/// IPM's `on_converged` capture and `CountingTnlp`'s `finalize_solution` one.
+/// `resolve_scaling_retry_outcome` restores `status` and the statistics when no
+/// rung promotes, but it never had a handle on the solution vectors. The result
+/// was a `.sol` carrying the original verdict over the *last non-promoted
+/// rung's* iterate — a point the solver had just decided not to believe, shipped
+/// as the answer.
+///
+/// Measured before the fix on four benchmark models (`cresc100`, `discs`,
+/// `launch` for rungs 1–2, `himmelbj` for rung 3): the `.sol` primal block
+/// differed from the ladder-disabled run while the status line was identical,
+/// so nothing downstream that checks status could see it.
+///
+/// The pin: with the ladder on but not promoting, the whole `.sol` must be
+/// byte-identical to the same solve with the ladder off. On the pre-fix binary
+/// this fixture's two runs differ.
+#[test]
+fn a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected() {
+    let run = |tag: &str, extra: &[&str]| -> (String, String) {
+        let sol = std::env::temp_dir().join(format!("pounce_issue_508_keep_{tag}.sol"));
+        let _ = std::fs::remove_file(&sol);
+        let out = Command::new(pounce_exe())
+            .arg(fixture("issue_508_infeasible_gap_1em2.nl"))
+            .arg("-AMPL")
+            .arg("--sol-output")
+            .arg(&sol)
+            .arg("tol=1e-8")
+            .arg("acceptable_tol=1e-12")
+            .arg("print_level=0")
+            .args(extra)
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+        (
+            std::fs::read_to_string(&sol).expect("read .sol"),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (with_ladder, stderr) = run("on", &[]);
+    assert!(
+        stderr.contains("keeping the original"),
+        "fixture no longer exercises the non-promoted retry path, so this test \
+         proves nothing — pick a model/tol that still does:\nstderr:\n{stderr}"
+    );
+    let (without_ladder, _) = run(
+        "off",
+        &[
+            "feral_infeasibility_scaling_retry=no",
+            "infeasibility_mu_strategy_retry=no",
+            "infeasibility_perturbed_start_retry=no",
+        ],
+    );
+
+    assert_eq!(
+        with_ladder, without_ladder,
+        "a second opinion that was *not* promoted changed the reported \
+         solution. The ladder must be transparent to the `.sol` unless a rung \
+         is promoted — otherwise the file pairs the original verdict with a \
+         rejected rung's iterate."
+    );
+}

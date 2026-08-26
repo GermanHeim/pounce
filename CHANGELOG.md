@@ -88,6 +88,34 @@ changes.
   so rung 3 ran on all 22 and promoted none — the fixtures that assert
   infeasibility are genuinely infeasible.
 
+  On the *existing* benchmark corpus, which is not degenerate, the new rung
+  costs **+0.28 s of 16.14 s (+1.8 %) across the six re-measurable models
+  that reach it, with no promotions and no verdict changed** — every one of
+  those six was already failing, and the whole delta disappears under
+  `infeasibility_perturbed_start_retry=no`. Two of the six never reach the
+  ladder at all: `model8` is presolve-certified infeasible, and `iprob`
+  routes to the convex LP interior point, which never enters
+  `optimize_tnlp` where the ladder lives — the ladder is an NLP-arm
+  feature. The seventh candidate, `gaslib40_dynamic`, could not be
+  regenerated (its generator's `gas_net` editable install is dangling), so
+  it is unmeasured. Table in `dev-notes/degenerate-starts.md`.
+
+- **A second opinion that is not promoted no longer replaces the solution
+  it rejected.** Each rung of the ladder is a full `optimize_tnlp` through
+  the same TNLP, so each one overwrote the captured `(x, lambda)`.
+  `resolve_scaling_retry_outcome` restored `status` and the statistics when
+  nothing promoted, but never had a handle on the solution vectors — so the
+  `.sol` shipped the original verdict over the *last non-promoted rung's*
+  iterate, a point the solver had just decided not to believe. The status
+  line was identical either way, so nothing downstream that checks status
+  could see it. Found while measuring the benchmark models above:
+  `cresc100`, `discs` and `launch` reproduce it on the pre-branch binary
+  for rungs 1–2, and rung 3 extended it to the `Invalid_Number_Detected`
+  class (`himmelbj`). Both captures are now snapshotted before the ladder
+  and restored when no rung promotes; on promotion the promoted rung's
+  capture is kept. Pinned, and mutation-checked against the pre-fix binary,
+  by `a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected`.
+
 - **`jacobianstructure` is optional again on the Python `Problem`, as
   cyipopt documents it** (#765). A constrained `problem_obj` that omits the
   callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and

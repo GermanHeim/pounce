@@ -52,6 +52,15 @@ impl CountingTnlp {
     pub fn captured_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
         self.captured_solution.borrow().clone()
     }
+
+    /// Put back a previously-captured solution, discarding whatever a later
+    /// solve recorded. The second-opinion ladder needs this: each rung is a
+    /// full `optimize_tnlp` through this same wrapper, so each one overwrites
+    /// the capture, and a rung that does *not* promote must not leave its
+    /// iterate behind as the answer the `.sol` reports.
+    pub fn restore_captured_solution(&self, sol: Option<(Vec<Number>, Vec<Number>)>) {
+        *self.captured_solution.borrow_mut() = sol;
+    }
 }
 
 impl TNLP for CountingTnlp {

@@ -236,3 +236,90 @@ What the corpus cannot tell you is anything about magnitude on large
 degenerate models — every fixture is small. The measurements above are
 the substitute, and they are on a different corpus, which is a real
 gap.
+
+## What rung 3 costs the models that already ship in `benchmarks/`
+
+The corpus rung 3 was designed against is degenerate by construction.
+The existing benchmark corpus is not, so the honest question is what the
+new rung costs there, and the honest answer is: it fires on the models
+that were already failing, and nothing else.
+
+Seven entries in `benchmarks/BENCHMARK_REPORT.json` end in a status that
+opens the ladder. Six were regenerated and re-measured against a
+baseline binary built at `f6231f40` (`iprob`/`model8` via
+`benchmarks/lp/generate_nl.py --meszaros-only`; `cresc100`, `discs`,
+`himmelbj`, `launch` from Vanderbei's `.mod` sources per
+`benchmarks/vanderbei/README.md`). Iteration counts, which are
+deterministic where wall-clock is not:
+
+| model | engine | base solve(s) | + rung 3 | wall-clock |
+|---|---|---|---|---|
+| `cresc100` | nlp | 1473, 3000, 780, 2711 | +198 | 15.25 → 15.42 s |
+| `discs`    | nlp | 73, 73, 106 | +126 | 0.233 → 0.299 s |
+| `launch`   | nlp | 90, 90, 99  | +59  | 0.151 → 0.194 s |
+| `himmelbj` | nlp | 63          | +62  | 0.043 → 0.055 s |
+| `iprob`    | cvx-lp | 15 | — | 0.423 → 0.412 s |
+| `model8`   | — (presolve-certified) | 0 | — | 0.043 → 0.040 s |
+
+**+0.28 s on 16.14 s across the six, or +1.8 %, and no promotions** — every
+verdict is unchanged. That is the expected shape: none of these models
+has a degenerate *start*, which is the only thing rung 3 addresses. A
+run with `infeasibility_perturbed_start_retry=no` reproduces the
+baseline timings everywhere, so the whole delta is rung 3 and none of it
+is a change to the solve itself.
+
+Two of the six never reach the ladder at all, for reasons worth stating
+because they bound how much of the corpus the new rung can ever touch:
+
+- `model8` is **presolve-certified** infeasible, and the ladder is gated
+  on `presolve_certified.is_none()`. A certificate is not a numerical
+  verdict and there is nothing for a second opinion to overturn.
+- `iprob` routes to the **convex LP interior point**, and a model that
+  routes to `pounce-convex` never reaches `optimize_tnlp`, where the
+  ladder lives (`main.rs`, the comment at the `solver_selection`
+  dispatch). Its infeasibility is numerically determined, not certified,
+  and it *still* runs zero rungs. The ladder is an NLP-arm feature.
+
+The seventh, `gaslib40_dynamic`, could not be regenerated: its generator
+imports `gas_net` as an editable install pointing at a checkout that no
+longer exists on this machine. It reaches the ladder like the other four
+NLP models, so it is expected to carry the same shape of cost, but that
+is inference and not a measurement.
+
+## A non-promoted rung must not replace the solution it rejected
+
+Measuring the six above turned up a defect, and it is older than this
+branch.
+
+Every rung is a full `optimize_tnlp` through the same TNLP, so every
+rung overwrites the captured `(x, lambda)` — both the IPM's
+`on_converged` capture and `CountingTnlp::finalize_solution`'s.
+`resolve_scaling_retry_outcome` puts `status` and the statistics back
+when nothing promotes, but it never had a handle on the solution
+vectors. The `.sol` therefore shipped the original verdict over the
+*last non-promoted rung's* iterate: a point the solver had just decided
+not to believe, written out as the answer, under a status line that was
+identical either way. Nothing downstream that checks status could see
+it.
+
+It reproduces on the pre-branch binary for rungs 1–2 (`cresc100`,
+`discs`, `launch`: the `.sol` differs from the same solve with
+`feral_infeasibility_scaling_retry=no infeasibility_mu_strategy_retry=no`),
+and this branch extended it to the `Invalid_Number_Detected` class,
+where `himmelbj` had previously run zero rungs and so had nothing to
+leak.
+
+The fix snapshots both captures before the ladder and restores them when
+no rung promotes; on promotion the promoted rung's capture is kept,
+which is what should ship. Pinned by
+`a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected`
+in `crates/pounce-cli/tests/issue_508_infeasibility_gap_status.rs`,
+which asserts the whole `.sol` is byte-identical to the ladder-disabled
+run. Mutation-checked: on the pre-fix binary that fixture's two runs
+differ.
+
+With the fix in place, all four ladder-running models produce a `.sol`
+byte-identical to their own ladder-disabled run, and the ladder-disabled
+runs are byte-identical across the two binaries — i.e. the branch
+changes no trajectory on this corpus, only what gets reported when a
+second opinion is declined.

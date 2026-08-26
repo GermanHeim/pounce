@@ -1721,6 +1721,18 @@ pub fn main() -> ExitCode {
         let mut retry_status = status;
         let mut retry_stats = solve_stats.clone();
         let mut tried: Vec<&'static str> = Vec::new();
+        // Snapshot the answer the original solve produced. Every rung below is
+        // a full `optimize_tnlp` through the same `tnlp`, so every rung
+        // overwrites both captures — `nominal_capture` via the IPM's
+        // `on_converged` hook, and `CountingTnlp`'s via `finalize_solution`.
+        // `resolve_scaling_retry_outcome` puts `status` and `solve_stats` back
+        // when nothing promotes, but it cannot reach the solution vectors, so
+        // without this a non-promoted rung leaves *its* iterate in the `.sol`
+        // under the *original* verdict. Measured on `himmelbj` and `discs`: the
+        // `.sol` primal block differed from the no-ladder run while the status
+        // line was identical.
+        let nominal_before_ladder = nominal_capture.borrow().clone();
+        let counted_before_ladder = counting.borrow().captured_solution();
         for rung in &rungs {
             eprintln!("pounce: second opinion — re-solving with {}…", rung.label);
             // Apply this rung's option assignments. The main IPM rereads its
@@ -1765,6 +1777,15 @@ pub fn main() -> ExitCode {
                 tried.len(),
                 tried.join(", "),
             );
+        }
+        if !scaling_retry_promoted(retry_status) {
+            // Put the original solve's answer back alongside its verdict — see
+            // the snapshot above. On promotion we deliberately keep the last
+            // rung's capture: that rung's verdict is the one shipping.
+            *nominal_capture.borrow_mut() = nominal_before_ladder;
+            counting
+                .borrow()
+                .restore_captured_solution(counted_before_ladder);
         }
         // Keep `status` and `solve_stats` in lockstep: on promotion the retry
         // is authoritative (its verdict + its statistics); otherwise both stay
