@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+- **Refining more than one phase-envelope fold no longer recompiles the same
+  problem each time.** `pounce.examples.phase_envelope.refine_fold` built a
+  fresh `JaxProblem` per call, and a `JaxProblem` compiles its callbacks once
+  per instance — so every fold paid the full compilation again. On the binary
+  methane/propane fold that is 33 s per call, 26.5 s of it XLA compilation:
+  12.7 s for the Lagrangian Hessian alone (the fold equations already contain
+  a `jax.jacobian`, so that Hessian is a third derivative of the
+  Peng--Robinson residual) and 5.6 s for the sparsity probes in
+  `JaxProblem.__init__`. A second solve of the same instance costs 1.3 s.
+  Folds that share a mixture, `beta`, `mode` and `kij_pair` now share the
+  problem, which is worth ~55 s to the regression test and one compilation
+  per *kind* of fold rather than per fold to notebook 34.
+
+  The cache key is the complete mixture. Keying on everything except the
+  composition would hit more often and be correct today, because
+  `_decode_design` reads the composition from the supplied design vector and
+  ignores the mixture's own — but that invariant lives in a different
+  function, and if it ever changes, a composition-blind key hands back a
+  stale graph and the answer is wrong rather than slow.
+
+- **The published phase-envelope reproduction no longer runs on every pull
+  request.** `test_published_binary_fold_and_inverse_design_regression` is
+  marked `slow`: it costs ~9 minutes on a CI runner by itself, and it was the
+  whole of `Python tests (jax)` going from 8m23s to 22m12s when the example
+  landed — on the job that is the long pole gating every PR. It asserts a
+  published thermodynamic value and a continuation step-size invariance,
+  claims only the example, the JAX frontend it drives, or the solver can
+  move. A PR touching none of those deselects it; every push to `main` runs
+  it in full, so a solver change is still covered, after merge rather than
+  before. The three unmarked tests in that file — cubic root branches,
+  simplex coordinates, implicit derivatives — still run on every PR.
+
 - **A new flagship Python tutorial performs uncertainty-aware inverse design
   of a nonisothermal CO2-methanation catalyst pellet** (#775). The reusable
   conservative finite-volume model includes published four-species kinetics,

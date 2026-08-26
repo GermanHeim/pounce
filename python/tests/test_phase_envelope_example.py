@@ -104,8 +104,25 @@ def test_fixed_pressure_sensitivity_matches_fresh_phase_boundary_solves():
     np.testing.assert_allclose(recovered.state, point.state, rtol=1e-9, atol=1e-9)
 
 
+@pytest.mark.slow
 def test_published_binary_fold_and_inverse_design_regression():
-    """Reproduce a published maxcondentherm and solve an inverse design."""
+    """Reproduce a published maxcondentherm and solve an inverse design.
+
+    Marked slow because it is the most expensive test in the suite by an
+    order of magnitude: ~150 s locally and ~9 min on a CI runner, nearly
+    all of it XLA compiling the Lagrangian Hessian of the augmented fold
+    equations, which is a third derivative of the Peng--Robinson residual.
+    ``_fold_problem`` already caches that compilation across the folds
+    that share a mixture and mode; the three that remain are irreducible.
+
+    What it asserts is a *published-value* and *step-size-invariance*
+    claim about the example, not a claim about the solver's arithmetic,
+    and it can only move when the example, the JAX frontend, or the solver
+    itself moves.  So it is deselected on pull requests that touch none of
+    those, and runs in full on every push to `main`.  The three unmarked
+    tests in this file still cover the cubic root branches, the simplex
+    coordinates, and the implicit derivatives on every PR.
+    """
 
     mixture = DEITERS_BELL_METHANE_PROPANE
     trace = trace_envelope(

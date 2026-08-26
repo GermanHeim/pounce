@@ -75,5 +75,11 @@ def _check_extension_freshness() -> None:
         )
 
 
-def pytest_configure(config):  # noqa: ARG001 (pytest hook signature)
+def pytest_configure(config):
     _check_extension_freshness()
+    config.addinivalue_line(
+        "markers",
+        "slow: reproduces a published result or a convergence-invariance "
+        "claim, at a cost measured in minutes; deselected on pull requests "
+        "that cannot affect it (see .github/workflows/ci.yml)",
+    )
