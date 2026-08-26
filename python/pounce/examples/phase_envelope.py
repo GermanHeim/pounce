@@ -690,7 +690,7 @@ class PhasePointDiagnostics:
         return self.liquid_z_minus_b > 0.0 and self.vapor_z_minus_b > 0.0
 
 
-def diagnose_phase_point(
+def _phase_point_diagnostic_values(
     state,
     parameter,
     mixture: PengRobinsonMixture,
@@ -700,12 +700,7 @@ def diagnose_phase_point(
     design=None,
     kij_pair: tuple[int, int] | None = None,
 ) -> PhasePointDiagnostics:
-    """Evaluate branch, normalization, residual, and cubic-root guards.
-
-    ``parameter`` is ``ln(P/Pa)`` in pressure mode and ``ln(T/K)`` in
-    temperature mode.  This is a local root-admissibility check, not a global
-    tangent-plane-distance phase-stability calculation.
-    """
+    """Return the six scalar diagnostics for one phase-envelope point."""
 
     n = mixture.n_components
     state = jnp.asarray(state, dtype=jnp.float64)
@@ -751,13 +746,87 @@ def diagnose_phase_point(
         )
         return z_factor - b_red
 
-    return PhasePointDiagnostics(
-        max_residual=float(jnp.max(jnp.abs(residual))),
-        branch_distance=float(jnp.max(jnp.abs(log_k))),
-        liquid_sum=float(jnp.sum(liquid)),
-        vapor_sum=float(jnp.sum(vapor)),
-        liquid_z_minus_b=float(z_minus_b(liquid, largest=False)),
-        vapor_z_minus_b=float(z_minus_b(vapor, largest=True)),
+    return jnp.asarray(
+        [
+            jnp.max(jnp.abs(residual)),
+            jnp.max(jnp.abs(log_k)),
+            jnp.sum(liquid),
+            jnp.sum(vapor),
+            z_minus_b(liquid, largest=False),
+            z_minus_b(vapor, largest=True),
+        ]
+    )
+
+
+def diagnose_phase_point(
+    state,
+    parameter,
+    mixture: PengRobinsonMixture,
+    *,
+    beta: float,
+    mode: Mode,
+    design=None,
+    kij_pair: tuple[int, int] | None = None,
+) -> PhasePointDiagnostics:
+    """Evaluate branch, normalization, residual, and cubic-root guards.
+
+    ``parameter`` is ``ln(P/Pa)`` in pressure mode and ``ln(T/K)`` in
+    temperature mode.  This is a local root-admissibility check, not a global
+    tangent-plane-distance phase-stability calculation.
+    """
+
+    values = np.asarray(
+        _phase_point_diagnostic_values(
+            state,
+            parameter,
+            mixture,
+            beta=beta,
+            mode=mode,
+            design=design,
+            kij_pair=kij_pair,
+        ),
+        dtype=float,
+    )
+    return PhasePointDiagnostics(*(float(value) for value in values))
+
+
+def diagnose_phase_trace(
+    trace: PathTrace,
+    mixture: PengRobinsonMixture,
+    *,
+    beta: float,
+    mode: Mode,
+    design=None,
+    kij_pair: tuple[int, int] | None = None,
+) -> tuple[PhasePointDiagnostics, ...]:
+    """Evaluate physical diagnostics at every accepted point in a trace.
+
+    The calculations are vectorized across the trace so an all-point
+    admissibility check does not repeat JAX tracing for every point.  As for
+    :func:`diagnose_phase_point`, these are local root checks rather than a
+    global tangent-plane-distance phase-stability calculation.
+    """
+
+    def diagnostics_at_point(state, parameter):
+        return _phase_point_diagnostic_values(
+            state,
+            parameter,
+            mixture,
+            beta=beta,
+            mode=mode,
+            design=design,
+            kij_pair=kij_pair,
+        )
+
+    values = np.asarray(
+        jax.vmap(diagnostics_at_point)(
+            jnp.asarray(trace.x, dtype=jnp.float64),
+            jnp.asarray(trace.theta, dtype=jnp.float64),
+        ),
+        dtype=float,
+    )
+    return tuple(
+        PhasePointDiagnostics(*(float(value) for value in row)) for row in values
     )
 
 
@@ -880,7 +949,7 @@ def _fold_initial_guess(
 
     theta = np.asarray(trace.theta, dtype=float)
     increments = np.diff(theta)
-    reversals = np.flatnonzero(increments[:-1] * increments[1:] <= 0.0) + 1
+    reversals = np.flatnonzero(increments[:-1] * increments[1:] < 0.0) + 1
     if reversals.size == 0:
         raise ValueError("trace does not bracket a turning point")
     index = int(reversals[np.argmax(theta[reversals])])
@@ -925,11 +994,13 @@ def refine_fold(
     mode: Mode,
     kij_pair: tuple[int, int],
 ) -> RefinedFold:
-    """Refine a traced extremum and differentiate it with POUNCE.
+    """Refine a traced maximum and differentiate it with POUNCE.
 
     The fold is solved from ``F=0``, ``F_x v=0``, and ``||v||=1``.  The
     POUNCE implicit solve returns derivatives with respect to ``N-1`` simplex
     coordinates followed by the selected binary interaction parameter [-].
+    If a trace contains multiple turning points, the one with the largest
+    pressure or temperature parameter is selected; minima are not supported.
     """
 
     n_state = mixture.n_components + 1
@@ -949,7 +1020,6 @@ def refine_fold(
         cl=jnp.zeros(n_fold),
         cu=jnp.zeros(n_fold),
         options={"tol": 1e-11, "print_level": 0, "sb": "yes", "max_iter": 500},
-        factor_reuse=False,
     )
     solution, _, jacobian = problem.solve_with_jacobian(jnp.asarray(q0), w0)
     solution_np = np.asarray(solution, dtype=float)
@@ -1033,7 +1103,6 @@ def design_composition_for_extremum(
         cl=jnp.zeros(n_fold + 1),
         cu=jnp.zeros(n_fold + 1),
         options={"tol": 1e-10, "print_level": 0, "sb": "yes", "max_iter": 1000},
-        factor_reuse=False,
     )
     solution = np.asarray(problem.solve(jnp.zeros(0), x0), dtype=float)
     eta = solution[: n - 1]
@@ -1057,31 +1126,127 @@ def vapor_pressure(
     *,
     bracket_pa: tuple[float, float] = (1e3, 3.5e6),
 ) -> float:
-    """Return pure-component saturation pressure [Pa] by fugacity equality."""
+    """Return pure-component saturation pressure [Pa] by fugacity equality.
+
+    Parameters
+    ----------
+    mixture
+        Peng--Robinson component data and binary interactions [-].
+    component
+        Index of the pure component [-].
+    temperature_k
+        Saturation temperature [K].
+    bracket_pa
+        Pressure search interval [Pa].
+
+    Returns
+    -------
+    float
+        Saturation pressure [Pa].
+
+    Raises
+    ------
+    ValueError
+        If the interval does not contain a strict fugacity-residual sign
+        change while the liquid and vapor cubic roots are distinct and
+        satisfy ``Z > B``.
+    """
+
+    lo_pa, hi_pa = (float(value) for value in bracket_pa)  # [Pa]
+    if not (np.isfinite(lo_pa) and np.isfinite(hi_pa) and 0.0 < lo_pa < hi_pa):
+        raise ValueError("bracket_pa must be finite, positive, and increasing")
+    if not (0 <= component < mixture.n_components):
+        raise ValueError("component index is outside the mixture")
+    if not np.isfinite(temperature_k) or temperature_k <= 0.0:
+        raise ValueError("temperature_k must be finite and positive")
+    if temperature_k >= mixture.critical_temperature[component]:
+        raise ValueError("no two-phase saturation root exists at or above Tc")
 
     composition = np.zeros(mixture.n_components)
-    composition[component] = 1.0
+    composition[component] = 1.0  # [-]
+    _, component_b = _component_ab(mixture, temperature_k)
+    b_pure = float(component_b[component])  # [m^3 mol^-1]
 
-    def residual(log_pressure: float) -> float:
-        pressure_pa = np.exp(log_pressure)
-        vapor = log_fugacity_coefficients(
+    def admissible_residual(log_pressure: float) -> float | None:
+        pressure_pa = float(np.exp(log_pressure))  # [Pa]
+        vapor_z = float(
+            compressibility(
+                composition,
+                temperature_k,
+                pressure_pa,
+                mixture,
+                largest=True,
+            )
+        )  # [-]
+        liquid_z = float(
+            compressibility(
+                composition,
+                temperature_k,
+                pressure_pa,
+                mixture,
+                largest=False,
+            )
+        )  # [-]
+        b_reduced = b_pure * pressure_pa / (R * temperature_k)  # [-]
+        if not (
+            np.isfinite(vapor_z)
+            and np.isfinite(liquid_z)
+            and vapor_z > liquid_z
+            and liquid_z > b_reduced
+            and vapor_z > b_reduced
+        ):
+            return None
+
+        vapor_log_phi = log_fugacity_coefficients(
             composition,
             temperature_k,
             pressure_pa,
             mixture,
             largest=True,
         )[component]
-        liquid = log_fugacity_coefficients(
+        liquid_log_phi = log_fugacity_coefficients(
             composition,
             temperature_k,
             pressure_pa,
             mixture,
             largest=False,
         )[component]
-        return float(vapor - liquid)
+        value = float(vapor_log_phi - liquid_log_phi)  # [-]
+        return value if np.isfinite(value) else None
 
-    lo, hi = np.log(bracket_pa)
-    return float(np.exp(brentq(residual, lo, hi)))
+    # Scan downward from the caller's upper limit. The one-root region gives
+    # identical liquid/vapor roots and an identically zero residual, so it is
+    # deliberately excluded from the root-finding bracket.
+    pressure_samples_pa = np.geomspace(hi_pa, lo_pa, num=513)  # [Pa]
+    previous: tuple[float, float] | None = None  # [(ln Pa), -]
+    strict_bracket: tuple[float, float] | None = None  # [ln Pa]
+    for pressure_pa in pressure_samples_pa:
+        log_pressure = float(np.log(pressure_pa))  # [ln Pa]
+        value = admissible_residual(log_pressure)
+        if value is None:
+            previous = None
+            continue
+        if value == 0.0:
+            raise ValueError(
+                "could not form a strict bracket for the two-phase saturation root"
+            )
+        if previous is not None and value * previous[1] < 0.0:
+            strict_bracket = tuple(sorted((log_pressure, previous[0])))
+            break
+        previous = (log_pressure, value)
+
+    if strict_bracket is None:
+        raise ValueError(
+            "pressure interval does not bracket a two-phase saturation root"
+        )
+
+    def residual(log_pressure: float) -> float:
+        value = admissible_residual(log_pressure)
+        if value is None:
+            raise ValueError("root finder left the admissible two-phase region")
+        return value
+
+    return float(np.exp(brentq(residual, *strict_bracket)))
 
 
 NATURAL_GAS = PengRobinsonMixture(
@@ -1124,6 +1289,7 @@ __all__ = [
     "design_composition_for_extremum",
     "design_parameters",
     "diagnose_phase_point",
+    "diagnose_phase_trace",
     "envelope_residual",
     "log_fugacity_coefficients",
     "make_envelope_problem",

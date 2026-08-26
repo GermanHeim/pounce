@@ -10,7 +10,7 @@ changes.
 ## [Unreleased]
 
 - **The Peng–Robinson phase-envelope tutorial now treats extrema and design
-  variables as solve outputs, not plot samples** (#1).  A reusable, tested
+  variables as solve outputs, not plot samples** (#773).  A reusable, tested
   `pounce.examples.phase_envelope` model traces dew/bubble isopleths through
   pressure and temperature folds, refines cricondenbar/cricondentherm points
   with the augmented simple-fold equations, differentiates them with respect

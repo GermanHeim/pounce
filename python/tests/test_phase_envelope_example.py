@@ -1,19 +1,23 @@
 """Regression tests for the differentiable phase-envelope example."""
 
 import numpy as np
+import pytest
 
 from pounce.examples.phase_envelope import (
     DEITERS_BELL_METHANE_PROPANE,
+    NATURAL_GAS,
     composition_from_coordinates,
     design_composition_for_extremum,
     design_parameters,
     diagnose_phase_point,
+    diagnose_phase_trace,
     phase_boundary_with_sensitivity,
     reparameterize_trace,
     refine_fold,
     simplex_coordinates,
     solve_low_pressure_anchor,
     trace_envelope,
+    vapor_pressure,
 )
 
 
@@ -27,6 +31,22 @@ def test_simplex_log_ratio_coordinates_round_trip():
     np.testing.assert_allclose(recovered, mixture.composition, atol=1e-14)
     assert np.all(recovered > 0.0)
     assert np.isclose(recovered.sum(), 1.0, atol=1e-14)
+
+
+def test_n_butane_vapor_pressure_matches_literature():
+    """Pure-component roots stay on distinct, admissible cubic branches."""
+
+    expected_bar = np.array([1.03, 2.58, 9.42])  # [bar]
+    actual_bar = np.array(
+        [
+            vapor_pressure(NATURAL_GAS, 3, temperature_k) / 1e5
+            for temperature_k in (273.15, 300.0, 350.0)  # [K]
+        ]
+    )  # [bar]
+
+    np.testing.assert_allclose(actual_bar, expected_bar, rtol=0.01, atol=0.02)
+    with pytest.raises(ValueError, match="two-phase saturation root"):
+        vapor_pressure(NATURAL_GAS, 3, 450.0)  # [K], above n-butane's Tc
 
 
 def test_fixed_pressure_sensitivity_matches_fresh_phase_boundary_solves():
@@ -210,13 +230,14 @@ def test_published_binary_fold_and_inverse_design_regression():
         beta=0.0,
         mode="temperature",
     )
-    terminal = diagnose_phase_point(
-        verification_trace.x[-1],
-        verification_trace.theta[-1],
+    trace_diagnostics = diagnose_phase_trace(
+        verification_trace,
         design.mixture,
         beta=0.0,
         mode="temperature",
     )
+    trace_temperatures_k = np.exp(verification_trace.theta)  # [K]
+    traced_fold_index = int(np.argmax(trace_temperatures_k))  # [-]
     assert abs(verification_fold.temperature_k - design.target) < 1e-6  # [K]
     assert verification_fold.max_residual < 1e-9
     assert verification.max_residual < 1e-9
@@ -224,14 +245,14 @@ def test_published_binary_fold_and_inverse_design_regression():
     assert verification.roots_are_admissible
     assert np.isclose(verification.liquid_sum, 1.0, atol=1e-10)
     assert np.isclose(verification.vapor_sum, 1.0, atol=1e-10)
-    assert verification_trace.status == "corrector_failed"
-    assert verification_trace.n_steps > 145
-    assert terminal.max_residual < 1e-9
-    assert terminal.branch_distance > 0.5
-    assert terminal.roots_are_admissible
-    assert np.isclose(terminal.liquid_sum, 1.0, atol=1e-10)
-    assert np.isclose(terminal.vapor_sum, 1.0, atol=1e-10)
-    assert (
-        np.exp(verification_trace.x[-1, design.mixture.n_components])
-        < verification_fold.pressure_pa
+    assert len(trace_diagnostics) == len(trace_temperatures_k) > 2
+    assert 0 < traced_fold_index < len(trace_temperatures_k) - 1
+    assert trace_temperatures_k[-1] < trace_temperatures_k[traced_fold_index]
+    assert max(point.max_residual for point in trace_diagnostics) < 1e-8
+    assert all(point.roots_are_admissible for point in trace_diagnostics)
+    assert all(
+        np.isclose(point.liquid_sum, 1.0, atol=1e-9) for point in trace_diagnostics
+    )
+    assert all(
+        np.isclose(point.vapor_sum, 1.0, atol=1e-9) for point in trace_diagnostics
     )
