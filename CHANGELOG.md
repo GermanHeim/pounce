@@ -68,7 +68,13 @@ changes.
     (`a_sanitised_start_survives_a_warm_up_that_does_not_help`). Which
     bounds count as infinite is read from the application's own
     `nlp_lower_bound_inf` / `nlp_upper_bound_inf`, so a model that narrows
-    them is not silently widened back to POUNCE's default.
+    them is not silently widened back to POUNCE's default. And the
+    conditioned point is computed once per incoming start and cached: the
+    warm-start path asks for the starting point a second time
+    (`fetch_warm_start_snapshot`), so `warm_start_init_point=yes` was paying
+    for two complete Adam warm-ups and using one. The cache is keyed on the
+    raw point rather than on "have I run yet", because a `Problem` can be
+    re-solved from a start the caller has since changed.
 
   New options: `infeasibility_perturbed_start_retry`,
   `start_point_perturbation`, `start_point_perturbation_seed`,

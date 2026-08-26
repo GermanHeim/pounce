@@ -133,6 +133,21 @@ pub struct ConditionedStartTnlp {
     lower_inf: Number,
     upper_inf: Number,
     report: RefCell<Option<ConditionerReport>>,
+    /// The last `(raw start, conditioned start, report)` triple, so a second
+    /// `get_starting_point` for the *same* incoming point does not redo the
+    /// work. There is a second call on the warm-start path
+    /// (`OrigIpoptNlp::fetch_warm_start_snapshot`), and with
+    /// `start_point_conditioner=adam` that is a whole extra 200-iteration
+    /// warm-up. Both conditioners are deterministic, so this is a pure cost
+    /// and never changed the answer -- but the cost is the entire feature.
+    ///
+    /// Keyed on the raw point rather than merely "have I run yet", because a
+    /// `Problem` can be solved again from a start the caller has since
+    /// changed, and answering that with the previous solve's conditioned
+    /// point would be silently wrong. The comparison is on `to_bits`, so a
+    /// `NaN` component matches itself -- a non-finite start is exactly the
+    /// case that must hit the cache rather than re-sanitise.
+    cache: RefCell<Option<(Vec<Number>, Vec<Number>, ConditionerReport)>>,
 }
 
 impl ConditionedStartTnlp {
@@ -143,6 +158,7 @@ impl ConditionedStartTnlp {
             lower_inf: -DEFAULT_BOUND_INF,
             upper_inf: DEFAULT_BOUND_INF,
             report: RefCell::new(None),
+            cache: RefCell::new(None),
         }
     }
 
@@ -491,6 +507,20 @@ impl TNLP for ConditionedStartTnlp {
         let Some((x_l, x_u, g_l, g_u)) = self.bounds(n, m) else {
             return true;
         };
+        // Same incoming point as last time? Then the conditioned point is the
+        // same too -- see `cache`.
+        if let Some((raw, conditioned, report)) = self.cache.borrow().as_ref()
+            && raw.len() == n
+            && raw
+                .iter()
+                .zip(x[..n].iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        {
+            x[..n].copy_from_slice(conditioned);
+            *self.report.borrow_mut() = Some(report.clone());
+            return true;
+        }
+        let raw = x[..n].to_vec();
         let report = match self.conditioner {
             StartConditioner::Jitter { seed, scale } => {
                 self.apply_jitter(&mut x[..n], &x_l, &x_u, seed, scale)
@@ -499,6 +529,7 @@ impl TNLP for ConditionedStartTnlp {
                 self.apply_adam(&mut x[..n], &info, &x_l, &x_u, &g_l, &g_u, &cfg)
             }
         };
+        *self.cache.borrow_mut() = Some((raw, x[..n].to_vec(), report.clone()));
         *self.report.borrow_mut() = Some(report);
         true
     }
@@ -891,6 +922,64 @@ mod tests {
             iters,
             ..Default::default()
         })
+    }
+
+    /// A second `get_starting_point` for the same point must not redo the
+    /// warm-up. The warm-start path makes exactly that second call
+    /// (`OrigIpoptNlp::fetch_warm_start_snapshot`), so before the cache
+    /// `warm_start_init_point=yes` + `start_point_conditioner=adam` paid for
+    /// two full warm-ups and used one.
+    #[test]
+    fn the_warm_up_does_not_run_twice_for_the_same_start() {
+        let toy = Rc::new(RefCell::new(Toy::new(3)));
+        toy.borrow_mut().target = vec![1.0, -2.0, 0.5];
+        toy.borrow_mut().start = vec![5.0, 5.0, 5.0];
+        let inner: Rc<RefCell<dyn TNLP>> = toy.clone();
+        let mut wrapped = ConditionedStartTnlp::new(inner, adam(200));
+
+        let mut ask = |w: &mut ConditionedStartTnlp| {
+            let (mut x, mut z_l, mut z_u, mut lam) =
+                (vec![0.0; 3], vec![0.0; 3], vec![0.0; 3], vec![0.0; 1]);
+            assert!(w.get_starting_point(StartingPoint {
+                init_x: true,
+                x: &mut x,
+                init_z: false,
+                z_l: &mut z_l,
+                z_u: &mut z_u,
+                init_lambda: false,
+                lambda: &mut lam,
+            }));
+            x
+        };
+
+        let first = ask(&mut wrapped);
+        let after_first = toy.borrow().f_calls;
+        assert!(after_first > 0, "the warm-up should have evaluated f");
+
+        let second = ask(&mut wrapped);
+        assert_eq!(
+            toy.borrow().f_calls,
+            after_first,
+            "the second call re-ran the warm-up",
+        );
+        assert_eq!(
+            first, second,
+            "and it must still answer with the same point"
+        );
+        assert!(
+            wrapped.report().is_some(),
+            "the report survives the cache hit"
+        );
+
+        // But a start the caller has since *changed* is a different question,
+        // and answering it from the cache would be silently wrong.
+        toy.borrow_mut().start = vec![-4.0, 0.0, 7.0];
+        let third = ask(&mut wrapped);
+        assert!(
+            toy.borrow().f_calls > after_first,
+            "a changed start must re-run the warm-up",
+        );
+        assert_ne!(third, first);
     }
 
     #[test]

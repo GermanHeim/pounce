@@ -1034,10 +1034,20 @@ nothing else — no clock, no address, no thread identity — so the same
 seed and the same incoming point give the same displaced point on every
 platform and every run. Vary the seed to drive a multistart by hand.
 
-Only `x` is displaced. A warm-started `z` or `lambda` is passed through
-untouched, because displacing the primal point while keeping
-multipliers certified at the *old* one pairs a moved iterate with
-duals that no longer belong to it.
+Only `x` is displaced; a warm-started `z` or `lambda` is passed through
+untouched. Read that as a caveat rather than a safeguard: under
+`warm_start_init_point=yes` the displacement does pair a moved primal
+point with multipliers certified at the old one. There is no meaningful
+"same displacement" for a dual, so moving them alongside is not on
+offer, and declining to displace at all would switch the third retry rung
+off for exactly the warm-started runs. That is the wrong trade — the rung
+only ever runs *after* a solve has already failed, so the stale duals are
+being weighed against a verdict, not against a solution. The barrier's
+first iteration re-derives `z` from the bounds in any case; `lambda` is
+what actually carries over.
+
+The conditioned point is computed once per incoming start and cached, so
+a warm start does not pay for the Adam warm-up twice.
 
 ### Adam warm-up (`start_point_conditioner=adam`)
 
