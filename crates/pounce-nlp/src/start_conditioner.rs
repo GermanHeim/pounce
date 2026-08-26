@@ -289,7 +289,6 @@ impl ConditionedStartTnlp {
         // Sanitise before the first evaluation: Adam breaks on a non-finite
         // gradient and keeps the last good iterate, so a NaN start would make
         // the whole warm-up a no-op that reports success.
-        let start = x.to_vec();
         for i in 0..n {
             if !x[i].is_finite() {
                 report.sanitised.push(i);
@@ -298,6 +297,16 @@ impl ConditionedStartTnlp {
                 x[i] = self.sanitised_value(lo, hi);
             }
         }
+        // Snapshot *after* sanitising, not before. This is the point the
+        // revert below restores and the point `max_shift` measures against,
+        // and both have to mean "the start as the solver will see it". Taken
+        // before the loop, a warm-up that failed to reduce the merit handed
+        // the un-sanitised NaN straight back to the solver while
+        // `report.sanitised` said the variable had been repaired — and
+        // `max_shift`, folding `(NaN - NaN).abs()`, read 0.0 and hid it.
+        // `a_sanitised_start_survives_a_warm_up_that_does_not_help` is the
+        // leg that lands in that branch.
+        let start = x.to_vec();
 
         // Jacobian structure, once. Zero-based internally regardless of the
         // inner model's index style.
@@ -462,9 +471,20 @@ impl TNLP for ConditionedStartTnlp {
         }) {
             return false;
         }
-        // Only the primal start is conditioned. Displacing `x` while keeping a
-        // warm-started `z` / `λ` would pair a moved primal point with
-        // multipliers certified at the old one.
+        // Only the primal start is conditioned; `z` and `λ` are forwarded
+        // exactly as the inner model set them.
+        //
+        // That is a *caveat*, not an exclusion, and this comment used to read
+        // as though it were the latter. Under `warm_start_init_point=yes` the
+        // displacement does pair a moved primal point with multipliers
+        // certified at the old one. Displacing them alongside is not
+        // available — there is no meaningful "same displacement" for a dual —
+        // and declining to displace instead would switch the ladder's third
+        // rung off for exactly the warm-started runs, which is the wrong
+        // trade: the rung only ever runs after a solve has already failed, so
+        // stale duals are being compared against a verdict, not a solution.
+        // The barrier's first iteration re-derives `z` from the bounds
+        // anyway; `λ` is what actually carries over.
         if !init_x || n == 0 {
             return true;
         }
@@ -924,6 +944,34 @@ mod tests {
         assert_eq!(report.iters, 0);
         assert_eq!(report.merit_final, report.merit_initial);
         assert_eq!(report.max_shift, 0.0);
+    }
+
+    /// The other branch of the revert guard, and the one that was broken.
+    ///
+    /// `the_warm_up_sanitises_a_non_finite_start_too` picks a start where
+    /// Adam *does* reduce the merit, so it never reaches the revert;
+    /// `a_warm_up_that_does_not_help_returns_the_original_point` reverts but
+    /// from a finite start. Sanitise-and-revert together was covered by
+    /// neither, which is the branch-coverage trap CLAUDE.md describes for the
+    /// invariance legs. Here the start is both non-finite and already at the
+    /// target, so the warm-up sanitises, fails to help, and reverts — and
+    /// what it reverts to must be the *sanitised* point, because that is what
+    /// the report claims and what the solver is about to evaluate.
+    #[test]
+    fn a_sanitised_start_survives_a_warm_up_that_does_not_help() {
+        let mut toy = Toy::new(3);
+        toy.target = vec![0.0, 2.0, 3.0];
+        toy.start = vec![Number::NAN, 2.0, 3.0];
+        let (x, report) = conditioned(toy, adam(50));
+        assert_eq!(report.sanitised, vec![0]);
+        assert!(
+            x.iter().all(|v| v.is_finite()),
+            "the solver must not receive the un-sanitised start back: {x:?}",
+        );
+        assert_eq!(&x[1..], &[2.0, 3.0]);
+        // `max_shift` folds against the same snapshot, so a NaN there used to
+        // read as a shift of exactly 0.0 and corroborate the wrong answer.
+        assert!(report.max_shift.is_finite(), "{}", report.max_shift);
     }
 
     #[test]

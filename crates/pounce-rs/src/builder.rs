@@ -383,9 +383,36 @@ impl<P: Problem + 'static> Nlp<P> {
             crate::collector_scope()
         });
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&adapter) as _;
-        let status = app.optimize_tnlp(tnlp);
-        drop(scope);
+        let status = app.optimize_tnlp(Rc::clone(&tnlp));
         let stats = app.statistics();
+        // Second-opinion ladder, on by default here as in the CLI and the
+        // Python / C frontends: an `Infeasible_Problem_Detected` or an
+        // `Invalid_Number_Detected` is re-solved along up to three
+        // deliberately different trajectories, and a re-solve is promoted only
+        // if it converges. A converged solve pays nothing — the ladder reads
+        // the status and returns without touching the application. The three
+        // `*_retry` options turn individual rungs off; `.string("…_retry",
+        // "no")` on this builder disables one.
+        //
+        // Narration is dropped rather than printed: a library caller has not
+        // asked for a running commentary on its own stderr, and the outcome
+        // is visible in `Solution::status` either way.
+        let ladder = pounce_restoration::second_opinion_driver::run_second_opinion_ladder(
+            &mut app,
+            tnlp,
+            status,
+            stats,
+            &mut |_line| {},
+        );
+        let status = ladder.status;
+        // `ladder.statistics` is the shipped solve's — the original's when
+        // nothing promotes, the promoted rung's when one does — so the
+        // captured trajectory below belongs to the answer being returned. The
+        // collector scope therefore has to stay open *across* the ladder: drop
+        // it first and a promoted rung's re-solve captures nothing, leaving
+        // `stats.iterations` empty under a `stats.iteration_count` that is not.
+        let stats = ladder.statistics;
+        drop(scope);
         let a = adapter.borrow();
         Ok(Solution {
             status,

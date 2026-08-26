@@ -48,7 +48,11 @@ changes.
     identically zero Jacobian rows and columns, not a rank estimate — an
     SVD is not affordable to run speculatively — so absence of the finding
     is not a clean bill of health. Structural absence is never reported;
-    only a column the model declared and then evaluated to zero.
+    only a column the model declared and then evaluated to zero. The
+    advice is gated on the verdict it explains: a presolve-certified
+    infeasibility is a statement about the model's structure that no
+    starting point bears on, and gets the non-finite audit without a
+    paragraph about LICQ.
   - **`start_point_conditioner=adam`** (off by default) runs KRONOS's
     stage-0 Adam warm-up on `f(x) + ρ‖violation(x)‖²`, generalised from
     that paper's equality-only form to two-sided bounds so it applies to an
@@ -57,7 +61,14 @@ changes.
     82 → 11, `bt5` 45 → 9), median 0.83×, but the **total rose 1.62×**
     (3030 → 4900) on `palmer1c` 71 → 1023 and `biggs6` 1906 → 2938 —
     a fixed, unscaled ρ against a badly-scaled model. Guarded: if the
-    warm-up does not reduce the merit it hands back the original point.
+    warm-up does not reduce the merit it hands back the original point —
+    the *sanitised* one, since a non-finite component is replaced before
+    the warm-up runs and handing the raw `NaN` back on the revert path
+    would undo the only thing that had helped
+    (`a_sanitised_start_survives_a_warm_up_that_does_not_help`). Which
+    bounds count as infinite is read from the application's own
+    `nlp_lower_bound_inf` / `nlp_upper_bound_inf`, so a model that narrows
+    them is not silently widened back to POUNCE's default.
 
   New options: `infeasibility_perturbed_start_retry`,
   `start_point_perturbation`, `start_point_perturbation_seed`,
@@ -77,10 +88,7 @@ changes.
   solves and **+2.0 s** across the whole corpus, spent only on runs that
   had already failed. Twelve of the sixteen recoveries are rung 3's, and
   every promoted answer is feasible to 1.0e-8 or better. The fifteen
-  losses are down to three (`a10_perm`, `a29_rump`, `hong`). Note the
-  ladder is CLI-only: the conditioner options are reachable from Python
-  but the retry logic that drives them is not, so an embedder does not get
-  rung 3 today.
+  losses are down to three (`a10_perm`, `a29_rump`, `hong`).
 
   `scripts/sweep-fixtures.sh` against a `f6231f40` baseline is an **empty
   diff** across both legs, 142 fixture-legs each. That is evidence rather
@@ -115,6 +123,93 @@ changes.
   and restored when no rung promotes; on promotion the promoted rung's
   capture is kept. Pinned, and mutation-checked against the pre-fix binary,
   by `a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected`.
+
+  Now fixed one level lower, and so for every caller rather than the CLI
+  only: the ladder solves through a `SecondOpinionTnlp` decorator that
+  forwards `finalize_solution` only for a solve that converged. Since the
+  ladder stops at the first promotion, at most one rung ever reaches the
+  caller's TNLP and it is by construction the winner. That closes the leak
+  in solution state this crate cannot reach — `PyTnlp`'s `final_x`, the C
+  interface's `LastSolve` — where a per-caller snapshot could not.
+
+- **The second-opinion ladder is no longer a CLI feature.** It now runs, on
+  by default and honouring the same three `*_retry` options, from the
+  Python `Problem.solve`, the C `IpoptSolve`, and the `pounce-rs` builder
+  as well as the CLI. The asymmetry was backwards: a caller reaching POUNCE
+  from a modelling layer is the one most likely to hand over an
+  uninitialized starting point, an uninitialized decision variable arrives
+  as a zero, and the origin is exactly where a squared slack or a
+  homogeneous quadratic loses rank — the failure the ladder's third rung
+  exists for. The KRONOS measurement that motivated rung 3 had to
+  re-implement the ladder in Python, option for option, to score the corpus
+  against what a CLI user actually received. That reimplementation is now
+  redundant, and measurably so: run through a plain `Problem.solve` with no
+  ladder code in the harness at all, the corpus comes back **identical
+  problem for problem** — same status, same global-optimum verdict, the same
+  34 rungs spent and the same rung promoting each of the sixteen recoveries,
+  zero differences over 243 problems (238 solved / 198 global on that
+  subset). The 244th, `lch`, has no library-leg result to compare: the
+  harness's 300 s per-problem cap expires inside its 221 s *Python model
+  construction*, before any solve. Its CLI-leg result stands, which is what
+  makes the full-corpus figures above 239 / 199 rather than 238 / 198.
+
+  The policy — which rungs a failure opens, what each changes, how the
+  outcome resolves — moved verbatim to
+  `pounce_algorithm::second_opinion`, with its tests. The driver is
+  `pounce_restoration::second_opinion_driver::run_second_opinion_ladder`,
+  one crate further out because each rung has to rebuild the restoration
+  sub-IPM's factory provider and that provider is defined there. `pounce-rs`
+  gains `pounce-restoration` as its one new default dependency.
+
+  Two things the inlined CLI version did not have to get right, and a
+  library one does. **Options are restored**: each rung writes
+  `feral_scaling`, `mu_strategy` and `start_point_perturbation` into the
+  live options list, which the CLI could leave there because the process
+  was about to exit — a `Problem` that is solved twice cannot, or the
+  second solve silently inherits rung 3's displaced start. They are
+  restored to *set-ness*, not to a value, because writing back a resolved
+  `feral_scaling=auto` that an env-configured run never set would override
+  `POUNCE_FERAL_SCALING` on every later solve. And **narration does not go
+  to stderr** for the Rust and Python callers: Python collects it into
+  `info["second_opinion"]["log"]` alongside `tried` and `promoted_by`
+  (`None` when the ladder never ran, which is the overwhelmingly common
+  path), and `pounce-rs` drops it.
+
+  The multi-start paths — `solve_nlp_batch` and the CLI's `minima` global
+  search — deliberately do **not** run it. A failed start is routine in a
+  multi-start search, and up to three extra solves per failed start
+  multiplies the cost of a search for no benefit.
+
+  `scripts/sweep-fixtures.sh` across the move is an **empty diff**, both
+  legs, 142 fixture-legs each: the CLI's trajectory is unchanged.
+
+- **Each rung of the ladder now really does start from the baseline — it
+  did not, and rung 3 was quietly switching off POUNCE's own stall retry.**
+  The ladder's contract is that a rung varies exactly one knob from the
+  original solve, never two stacked; gh#524's `cresc4` is the case where
+  stacking rungs 1 and 2 threw the fix away. That was implemented by having
+  each later rung write the earlier rungs' knobs back to their *resolved*
+  values — `mu_strategy monotone`, `feral_scaling` as `auto` had picked it
+  — which is a no-op by value and not by set-ness. Things branch on
+  set-ness: `is_mu_strategy_fallback_enabled` is default-on exactly while
+  `mu_strategy` is unset, so rung 3 handing back a resolved `mu_strategy
+  monotone` disabled `run_with_mu_strategy_fallback`, the
+  `Maximum_Iterations_Exceeded` stall retry — on the solve most likely to
+  need it. Mutation-checked on KRONOS's `a18_ackley1`, which is
+  `Solve_Succeeded` in 237 iterations with the fix and
+  `Maximum_Iterations_Exceeded` at 3000 without it.
+
+  This is a pre-existing defect, inherited verbatim from the CLI's inlined
+  ladder rather than introduced by the move — it simply could not be *seen*
+  while every rung ran in a process that was about to exit. The rung table
+  no longer emits write-backs at all
+  (`no_rung_writes_back_a_knob_it_does_not_vary` asserts each assignment's
+  tag equals its own rung's label); the driver re-applies the baseline
+  `OptionSnapshot` before each rung instead, which restores set-ness and so
+  reconstructs the caller's real starting options.
+  `each_rung_starts_from_the_baseline` pins the resulting per-rung
+  set-ness. `scripts/sweep-fixtures.sh` across the fix is an empty diff,
+  both legs.
 
 - **`jacobianstructure` is optional again on the Python `Problem`, as
   cyipopt documents it** (#765). A constrained `problem_obj` that omits the

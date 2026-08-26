@@ -335,9 +335,11 @@ The recipe in plain English:
 
 ### The second-opinion ladder (what those extra solves in your log are)
 
-Before shipping a local-infeasibility verdict the CLI re-solves the
+Before shipping a local-infeasibility verdict POUNCE re-solves the
 problem along up to three *different* trajectories and only keeps the
-verdict if they agree. You will see this in the log:
+verdict if they agree. This is not a CLI feature — see
+[The ladder is not a CLI feature](#the-ladder-is-not-a-cli-feature)
+below — but the CLI is where you see it narrated:
 
 ```
 EXIT: Converged to a point of local infeasibility. Problem may be infeasible.
@@ -444,6 +446,41 @@ Things worth knowing:
   well as about the solver: the verdict was trajectory-dependent, so
   the starting point or the scaling of the formulation is worth a look.
 
+#### The ladder is not a CLI feature
+
+Every single-solve entry point runs it, on by default and with the same
+three options: the CLI, the Python `Problem.solve`, the C
+`IpoptSolve`, and the `pounce-rs` builder. If you drive POUNCE from a
+modelling layer you are, if anything, the caller who needs it most — an
+uninitialized decision variable reaches the solver as a zero, and the
+origin is where a squared slack or a homogeneous quadratic loses rank.
+
+From Python, what the ladder did comes back in the info dict:
+
+```python
+x, info = problem.solve(x0)
+so = info["second_opinion"]          # None if the ladder never ran
+if so:
+    print(so["tried"])               # e.g. ['feral_scaling=mc64', 'mu_strategy=adaptive']
+    print(so["promoted_by"])         # the rung that was adopted, or None
+    print("\n".join(so["log"]))     # the narration the CLI prints to stderr
+```
+
+`info["second_opinion"]` is `None` on the overwhelmingly common path —
+the solve did not fail in a way the ladder second-guesses, and nothing
+extra was spent. When it is not `None` and `promoted_by` is `None`, the
+original verdict survived every rung, which is a much stronger statement
+about your model than a single failed solve.
+
+The narration is collected rather than printed for the library callers,
+so an embedded solve does not write to someone else's stderr; the C
+interface prints it, matching where the solver's own banners already go.
+
+One place deliberately does **not** run it: the multi-start paths
+(`solve_nlp_batch`, the CLI's `minima` global search). A failed start is
+routine there, and up to three extra solves per failed start multiplies
+the cost of a search for no benefit.
+
 ### What POUNCE says when it stops from a degenerate point
 
 If the ladder runs out and the failure verdict stands, POUNCE audits
@@ -484,7 +521,8 @@ problem:
 ```
 $ pounce degen.nl
 pounce: keeping the original Infeasible_Problem_Detected verdict; it survived
-        1 independent re-solve(s) (mu_strategy=adaptive).
+        3 independent re-solve(s) (feral_scaling=mc64, mu_strategy=adaptive,
+        start_point_perturbation=1e-2).
 pounce: the constraint Jacobian is rank-deficient there: 2 of 2 constraint rows
         have an identically zero gradient here (rows 0, 1); 2 of 2 variable
         columns are identically zero here (variables 0, 1).

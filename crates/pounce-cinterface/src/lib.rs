@@ -50,6 +50,7 @@ use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
+use pounce_restoration::second_opinion_driver::run_second_opinion_ladder;
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::rc::Rc;
@@ -748,9 +749,26 @@ pub unsafe extern "C" fn IpoptSolve(
 
             let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
             let status = info.app.optimize_tnlp(bridge_for_solve);
+            let stats = info.app.statistics();
+            // Second-opinion ladder, on by default as it is in the CLI and the
+            // Python frontend: an `Infeasible_Problem_Detected` or
+            // `Invalid_Number_Detected` is re-solved along up to three
+            // deliberately different trajectories and a re-solve is promoted
+            // only if it converges. A converged solve pays nothing — the
+            // ladder reads the status and returns. Progress narration goes to
+            // stderr, matching where the solver's own banners already go; the
+            // three `*_retry` options turn individual rungs off.
+            let ladder = run_second_opinion_ladder(
+                &mut info.app,
+                bridge.clone() as Rc<RefCell<dyn TNLP>>,
+                status,
+                stats,
+                &mut |line| eprintln!("{line}"),
+            );
+            let status = ladder.status;
             let bridge_ref = bridge.borrow();
             info.last_solve = Some(LastSolve {
-                stats: info.app.statistics(),
+                stats: ladder.statistics.clone(),
                 status,
                 linear_solver: info.app.linear_solver_summary(),
                 final_x: bridge_ref.final_x.clone(),

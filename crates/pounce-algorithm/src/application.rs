@@ -803,9 +803,7 @@ impl IpoptApplication {
     /// when both are set, because the only thing that sets it is a solve that
     /// has already failed.
     fn install_start_conditioner(&self, tnlp: Rc<RefCell<dyn TNLP>>) -> Rc<RefCell<dyn TNLP>> {
-        use pounce_nlp::start_conditioner::{
-            AdamConfig, ConditionedStartTnlp, DEFAULT_BOUND_INF, StartConditioner,
-        };
+        use pounce_nlp::start_conditioner::{AdamConfig, ConditionedStartTnlp, StartConditioner};
         // Each option is read with its literal tag rather than through a
         // `|name, fallback|` helper. A helper reads better and costs the
         // wiring guard in `tests/init_options_wiring.rs` its evidence: that
@@ -863,10 +861,18 @@ impl IpoptApplication {
         // conditioner's own default: a caller who moved `nlp_lower_bound_inf`
         // would otherwise have a bound the algorithm treats as absent clipped
         // against as if it were real.
+        //
+        // Passed through unclamped. These were once `lower.min(-DEFAULT)` /
+        // `upper.max(DEFAULT)`, which honours only a *loosened* sentinel and
+        // leaves the failure above intact for a tightened one: at
+        // `nlp_lower_bound_inf=-1e10` the conditioner still used `-1e19`, so a
+        // `-1e15` bound was absent to the algorithm and present to the
+        // clipper — the exact case the comment exists to rule out. The
+        // sentinel means "absent"; there is only one right answer for what it
+        // is, and it is the caller's.
         let lower = self.nlp_lower_bound_inf();
         let upper = self.nlp_upper_bound_inf();
-        let wrapped = ConditionedStartTnlp::new(tnlp, conditioner)
-            .with_bound_inf(lower.min(-DEFAULT_BOUND_INF), upper.max(DEFAULT_BOUND_INF));
+        let wrapped = ConditionedStartTnlp::new(tnlp, conditioner).with_bound_inf(lower, upper);
         Rc::new(RefCell::new(wrapped))
     }
 
