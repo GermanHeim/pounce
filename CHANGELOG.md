@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+- **A truncated `.nl` file is rejected instead of solved** (#785). A `.nl`
+  cut short before its trailing segments — an interrupted write, a full disk,
+  a partial copy, a killed AMPL/Pyomo writer — parsed without complaint:
+  every segment the truncation ate silently reverted to its default, so the
+  rows became unconstrained, the variables free and the linear parts empty,
+  and POUNCE reported `Optimal Solution Found` / `SolveSucceeded` with exit
+  code 0 on a model it had quietly replaced. The reporter's two-variable
+  model returned `obj=0.0` against a closed-form optimum of `12.5`. That made
+  truncation the one malformed input that answers confidently instead of
+  failing: an empty file, non-UTF-8 bytes and a missing file each already
+  exit 2.
+
+  The header carries enough to tell a truncated file from a legitimately
+  short one, and the parser now reads it: `r` and `b` are required whenever
+  the model declares rows or columns (both are unconditional in the format —
+  a free row or variable gets the `3` "no bounds" code, not an omitted line),
+  and the `J` segments must supply exactly the `nzc` Jacobian nonzeros header
+  line 8 declares. The three cut points fail differently and are checked
+  separately: the nonzero cross-check is the only one that fires when the
+  bounds all survived and only the coefficients are gone.
+
+  One behaviour change beyond the truncation case: a file whose `J` segment
+  is missing while its header still declares the nonzeros is now a parse
+  error (exit 2) rather than `InfeasibleProblemDetected` (exit 1). The row
+  reduced to `0 = 6`, so the old answer was a claim about the *model* made
+  from a corrupt file.
+
 - **Refining more than one phase-envelope fold no longer recompiles the same
   problem each time.** `pounce.examples.phase_envelope.refine_fold` built a
   fresh `JaxProblem` per call, and a `JaxProblem` compiles its callbacks once
