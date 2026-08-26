@@ -36,6 +36,7 @@
   - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
+- [Catalyst-Pellet Inverse Design](catalyst-pellet.md)
 - [ODE / DAE Initial Value Problems](ode.md)
 - [Implicit DAEs](dae.md)
 - [Glass Box / Black Box Optimization](trf.md)

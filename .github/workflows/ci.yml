@@ -172,6 +172,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The `slow` selection below diffs this branch against its base,
+          # which the default shallow clone cannot do.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -197,8 +201,43 @@ jobs:
           # GAMS in the loop — the link runs, the value is in range, and the
           # `.lst` just says the wrong thing.
           python -m pip install "gamsapi[core]"
+      # `test_published_binary_fold_and_inverse_design_regression` is marked
+      # `slow` and costs ~9 minutes here on its own — it was the whole of this
+      # job's 8m23s -> 22m12s jump when the phase-envelope example landed, and
+      # this job is the long pole gating every PR. What it asserts is a
+      # published thermodynamic value and a continuation step-size invariance:
+      # claims about the *example*, which only the example, the JAX frontend
+      # it drives, or the solver underneath can move. So a PR that touches
+      # none of those deselects it, every push to `main` runs it in full, and
+      # a solver change is covered after merge rather than before — the same
+      # trade `coverage.yml` documents for the same reason. The three unmarked
+      # tests in that file still run on every PR.
+      - name: Decide whether the slow tests run
+        id: select
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "reason=not a pull request" >>"$GITHUB_OUTPUT"
+            echo "markers=" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          base=$(git merge-base FETCH_HEAD HEAD)
+          if git diff --name-only "$base" HEAD | grep -Eq \
+              '^(python/pounce/examples/|python/pounce/jax/|python/tests/test_phase_envelope_example\.py)'; then
+            echo "reason=PR touches the example or the JAX frontend" >>"$GITHUB_OUTPUT"
+            echo "markers=" >>"$GITHUB_OUTPUT"
+          else
+            echo "reason=PR touches neither the example nor the JAX frontend" >>"$GITHUB_OUTPUT"
+            echo "markers=not slow" >>"$GITHUB_OUTPUT"
+          fi
       - name: Run Python tests
-        run: python -m pytest python/tests -q
+        run: |
+          echo "slow tests: ${{ steps.select.outputs.markers && 'deselected' || 'included' }} (${{ steps.select.outputs.reason }})"
+          if [ -n "${{ steps.select.outputs.markers }}" ]; then
+            python -m pytest python/tests -q -m "${{ steps.select.outputs.markers }}"
+          else
+            python -m pytest python/tests -q
+          fi
 
   # Exercise the PyTorch frontend (`pounce.torch`, pounce#109) on every
   # PR. Mirrors `python-test` but installs the CPU torch wheel alongside
@@ -414,7 +453,7 @@ jobs:
           # them the redundancy guard of gh #444 never executes here.
           # The locally-built pounce-solver wheel provides the `pounce`
           # Python package + CLI.
-          python -m pip install pyomo numpy pandas networkx scipy
+          python -m pip install pyomo pyomo-cvp==0.7.2 numpy pandas networkx scipy
           python -m pip install python/dist/*.whl
           # pyomo-pounce itself installed without deps: its declared
           # pounce-solver dep is satisfied by the wheel installed just above.
@@ -517,10 +556,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # PINNED, deliberately against this job's own design (gh #782).
+      # Everything below derives the version it builds against from the
+      # installed wheel, so that a CasADi release bumps this job
+      # automatically. 3.8.0 (2026-08-25) exercised that and turned the job
+      # red on both runners in two independent ways: the Linux wheel appears
+      # to be built with the new libstdc++ ABI, against `casadi/Makefile`'s
+      # hardcoded `CXX11_ABI ?= 0`, so every `std::string`-taking symbol goes
+      # undefined at link; and macOS -- no dual-ABI there at all -- fails the
+      # code-generation check instead. Every PR opened that day failed this
+      # job regardless of its contents.
+      #
+      # `3.7.*` still tracks patch releases within the last known-good minor.
+      # Remove the pin when gh #782 is fixed; the auto-tracking is the point
+      # of the job and this pin is the thing standing in its way.
       - name: Install CasADi
         run: |
           python -m pip install --upgrade pip
-          python -m pip install casadi numpy
+          python -m pip install "casadi==3.7.*" numpy
 
       # The tag has to match the installed wheel exactly; `make fetch-src`
       # derives it from `casadi.__version__` rather than pinning a literal,
@@ -574,7 +627,10 @@ jobs:
         run: |
           cd casadi/wheel && ./build.sh
           python -m venv /tmp/casadi-wheel-env
-          /tmp/casadi-wheel-env/bin/pip install -q casadi dist/pounce_casadi-*.whl
+          # Same pin as the install step above (gh #782): the wheel under
+          # test was built against 3.7, so resolving a newer CasADi here
+          # would test a pairing the build never produced.
+          /tmp/casadi-wheel-env/bin/pip install -q "casadi==3.7.*" dist/pounce_casadi-*.whl
           /tmp/casadi-wheel-env/bin/python - <<'PY'
           import casadi as ca
           import pounce_casadi  # registers the plugin in-process

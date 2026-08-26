@@ -42,6 +42,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 26 | [`26_parameter_covariance.ipynb`](26_parameter_covariance.ipynb) | Parameter covariance and identifiability from the reduced Hessian: standard errors, a Monte Carlo validated confidence ellipse, and a sloppy-direction diagnosis. |
 | 31 | [`31_information_identifiability.ipynb`](31_information_identifiability.ipynb) | The information matrix as the un-inverted view of the covariance: eigen() naming a poorly identified combination, the duality check, and zero variance versus finite information at a bound. |
 | 32 | [`32_wrt_blocks_and_retain_kkt.ipynb`](32_wrt_blocks_and_retain_kkt.ipynb) | One solve, many questions: wrt= sub-block marginals, confidence and prediction bands on undeclared prediction variables, conditioned_on, retain_kkt() with nothing declared, and release_kkt() to give the factor's memory back. |
+| 36 | [`36_active_set_parametric_sensitivity.ipynb`](36_active_set_parametric_sensitivity.ipynb) | Closed-loop advanced-step NMPC for a constrained CSTR: six update policies, independent plant mismatch, active-set timelines, full-point fallback guards, degeneracy at a control kink, and stamped latency/quality metrics (needs `pyomo-cvp`). |
 
 ## Performance & sparsity
 
@@ -53,6 +54,12 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 12 | [`12_kkt_solve_many_perf.ipynb`](12_kkt_solve_many_perf.ipynb) | Batched `kkt_solve_many` performance. |
 | 14 | [`14_path_following.ipynb`](14_path_following.ipynb) | Predictor–corrector path following & inverse mapping. |
 | 33 | [`33_asdex_sparsity.ipynb`](33_asdex_sparsity.ipynb) | Automatic sparsity detection and coloring with [`asdex`](https://github.com/adrhill/asdex): derive `jac_pattern`/`hess_pattern` from the jaxpr instead of by hand, feed them to `from_jax(sparse=True)` or a raw `pounce.Problem`, and see why a graph-derived pattern beats a probed one on branchy (`where`/`clip`) models. |
+
+## Chemical-engineering applications
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 34 | [`34_phase_envelope_peng_robinson.ipynb`](34_phase_envelope_peng_robinson.ipynb) | Peng–Robinson phase envelopes through cricondenbar/cricondentherm folds; augmented fold refinement, published-mixture validation, composition/`k_ij` sensitivities checked by complete retraces, and inverse composition design. |
 
 ## Convex & conic (`pounce.qp`)
 
@@ -100,6 +107,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 24 | [`24_boundary_value_problems.ipynb`](24_boundary_value_problems.ipynb) | `pounce.solve_bvp` — SciPy-compatible BVPs (fast FERAL Newton + adaptive refinement), differentiable JAX/Torch solves, and constrained / optimal-control BVPs unique to pounce. |
+| 37 | [`37_catalyst_pellet_inverse_design.ipynb`](37_catalyst_pellet_inverse_design.ipynb) | A commit-stamped nonisothermal CO2-methanation pellet: analytical/mesh/balance/gradient validation, nested versus simultaneous activity design, reduced-Hessian covariance, and scenario-based worst-case redesign. |
 
 ## ODE / DAE initial value problems
 

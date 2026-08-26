@@ -33,6 +33,57 @@ wrapper — from two reference projects, gratefully acknowledged:
   rows, iterated to a fixpoint — is modeled on PaPILO's catalog and
   postsolve discipline.
 
+## Starting-point conditioning: KRONOS
+
+Two features that condition the starting point — the third rung of the
+[second-opinion ladder](troubleshooting.md#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are)
+and the optional Adam warm-up (`start_point_conditioner=adam`, see
+[Initialization](initialization.md#adam-warm-up-start_point_conditioneradam))
+— come directly from reading **KRONOS**:
+
+> Ahmed, M. G. T. and Hasan, M. M. F. (2026). "KRONOS: An algorithm for
+> solving ill-conditioned nonlinear programs." *Computers & Chemical
+> Engineering* **215**, 109839.
+> [doi:10.1016/j.compchemeng.2026.109839](https://doi.org/10.1016/j.compchemeng.2026.109839)
+
+KRONOS reformulates every inequality and bound as an equality with a
+squared slack (`g ≤ 0` becomes `g + s² = 0`) and runs Newton on the full
+KKT system with least-norm steps. POUNCE does not adopt that
+reformulation — it is precisely the thing an interior-point filter line
+search cannot digest, because at `s = 0` the derivative of `s²` vanishes
+and the constraint Jacobian loses rank exactly on the active set, so LICQ
+fails wherever the solution lives. What POUNCE took is what running the
+two solvers against each other on KRONOS's own 244-problem benchmark set
+made visible:
+
+- **Stage 0 of KRONOS is Adam on a penalised merit**, run before the
+  Newton phase. POUNCE reproduces it as
+  `start_point_conditioner=adam`, generalised from KRONOS's
+  equality-only `ρ‖h(x)‖²` to two-sided constraint bounds. It is
+  off by default, for measured reasons documented with the option.
+- **Where POUNCE lost, it usually lost at the starting point.** Fifteen
+  models failed from their bundled start and thirteen of them solve
+  cleanly from a start displaced by a relative `1e-2` — which is what the
+  ladder's third rung now does automatically, and what
+  `start_point_perturbation` exposes.
+- **The failures had a shared shape worth naming out loud**, which is why
+  a failing solve now reports whether the constraint Jacobian is
+  rank-deficient at the starting point, and which variable or callback
+  produced a non-finite value.
+
+The head-to-head itself, and the measurements behind each default, are
+written up in
+[`dev-notes/degenerate-starts.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/degenerate-starts.md).
+The short version: on identical starting points POUNCE solved 223 of
+244 to KRONOS's 225, found the global optimum on 189 to KRONOS's 175,
+and was about 12× faster end-to-end on the 208 both solved. Solving the
+models *as KRONOS states them*, with the squared slacks, POUNCE manages
+only 191 — which is the reformulation point above, measured.
+
+With the third rung in place those become **239 solved and 199 global**,
+for 34 extra solves and two seconds across the whole corpus. The
+remaining three are `a10_perm`, `a29_rump` and `hong`.
+
 ## Contributors
 
 - **David Bernal Neira** ([@bernalde](https://github.com/bernalde))
@@ -56,6 +107,10 @@ wrapper — from two reference projects, gratefully acknowledged:
 
 ## Key references
 
+- Ahmed, M.G.T., Hasan, M.M.F. "KRONOS: An algorithm for solving
+  ill-conditioned nonlinear programs." *Computers & Chemical
+  Engineering* **215**, 109839 (2026).
+  [doi:10.1016/j.compchemeng.2026.109839](https://doi.org/10.1016/j.compchemeng.2026.109839)
 - Wächter, A., Biegler, L.T. "On the implementation of an
   interior-point filter line-search algorithm for large-scale
   nonlinear programming." *Mathematical Programming* 106(1), 25–57
