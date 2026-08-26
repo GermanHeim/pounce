@@ -775,6 +775,13 @@ impl PyProblem {
     /// column read as a direction reproduces across builds; a repeated
     /// eigenvalue still leaves the basis within its eigenspace free.
     ///
+    /// The second-opinion ladder does **not** run here, unlike
+    /// `solve`: a displaced start can converge to a different local
+    /// solution, and the pins and deltas are posed against the one the
+    /// caller expected. `info["second_opinion"]` is therefore always
+    /// `None`. To get both, call `solve` first and pass the `x` it
+    /// returns back in as `x0`.
+    ///
     /// Passing `sens_boundcheck=True` clamps the perturbed primal step
     /// against the variable bounds (single-pass projection — simpler
     /// than upstream's iterative Schur refinement; see
@@ -895,6 +902,25 @@ impl PyProblem {
         // from "sensitivity not requested". `Option<String>` maps
         // `None` ⇒ Python `None`, `Some(msg)` ⇒ the error string.
         info.set_item("sens_error", result.error.clone())?;
+        // The second-opinion ladder deliberately does not run here, and the
+        // key is set to `None` rather than left absent so `info` has the same
+        // shape as `solve`'s.
+        //
+        // Sensitivity is taken *about a particular solution*. The third rung
+        // displaces the starting point, which on a multi-modal model can
+        // converge somewhere else entirely -- and the caller's
+        // `pin_constraint_indices` and `deltas` are posed against the solution
+        // they expected, so quietly answering about a different local optimum
+        // is worse than reporting the failure. (`SensSolve` also builds its
+        // Schur complement from the solve's final factorization, so a rung
+        // would have to carry its factorization out with it.)
+        //
+        // The visible consequence is that `solve` and `solve_with_sens` can
+        // disagree about whether a model is solvable. That is documented in
+        // `docs/src/troubleshooting.md` under "The ladder is not a CLI
+        // feature", along with the composition that gets you both: run
+        // `solve`, then feed its `x` back in as `x0`.
+        info.set_item("second_opinion", py.None())?;
 
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))

@@ -158,20 +158,44 @@ fn the_diagnosis_names_the_rank_deficient_rows_and_columns() {
     assert!(log.contains("LICQ fails at a point like that"), "{log}");
 }
 
-/// `print_level=0` is a request for silence, and the diagnosis honours it.
-/// Worth pinning because the banners go to stderr through `eprintln!` rather
-/// than through the journalist, so nothing else enforces the level for them.
+/// `print_level=0` is a request for silence, and the ladder honours it — the
+/// rank diagnosis *and* the running narration of which rung is being tried.
+/// Worth pinning because both go to stderr through `eprintln!` rather than
+/// through the journalist, so nothing else enforces the level for them; the
+/// narration was unconditional until it was gated, which meant `print_level=0`
+/// still produced ten `pounce:` lines on this fixture.
+///
+/// The `print_level=1` leg is the positive control: without it this test would
+/// keep passing if the ladder stopped running altogether.
 #[test]
-fn the_diagnosis_respects_print_level_zero() {
-    let (log, _) = run(
+fn the_ladder_respects_print_level_zero() {
+    let (quiet, _) = run(
         "degenerate_start_infeasible.nl",
         "quiet",
         &["print_level=0"],
     );
-    assert!(
-        !log.contains("rank-deficient there"),
-        "print_level=0 must silence the diagnosis:\n{log}",
-    );
+    for line in [
+        "rank-deficient there",
+        "re-solving along 3 different trajectories",
+        "keeping the original",
+    ] {
+        assert!(
+            !quiet.contains(line),
+            "print_level=0 must silence `{line}`:\n{quiet}",
+        );
+    }
+
+    let (loud, _) = run("degenerate_start_infeasible.nl", "loud", &["print_level=1"]);
+    for line in [
+        "rank-deficient there",
+        "re-solving along 3 different trajectories",
+        "keeping the original",
+    ] {
+        assert!(
+            loud.contains(line),
+            "print_level=1 must print `{line}`:\n{loud}"
+        );
+    }
 }
 
 /// Turning the third rung off restores upstream IPOPT's behaviour on the

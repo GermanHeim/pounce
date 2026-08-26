@@ -129,11 +129,12 @@ pub struct SecondOpinionAvailability {
 ///    evidence about an `Invalid_Number_Detected` — see
 ///    [`SecondOpinionTrigger`].
 ///
-/// Rungs are **not** cumulative: rung 2 restores the baseline scaling first
-/// and rung 3 restores both earlier knobs. That reset is load-bearing, not
-/// tidiness: on gh #524's `cresc4`, `mu_strategy=adaptive` recovers the
-/// optimum but `mu_strategy=adaptive` with `feral_scaling=mc64` still reports
-/// local infeasibility, so a cumulative ladder would have discarded the fix.
+/// Rungs are **not** cumulative: the driver restores the baseline before each
+/// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
+/// earlier knob. That reset is load-bearing, not tidiness: on gh #524's
+/// `cresc4`, `mu_strategy=adaptive` recovers the optimum but
+/// `mu_strategy=adaptive` with `feral_scaling=mc64` still reports local
+/// infeasibility, so a cumulative ladder would have discarded the fix.
 pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpinionRung> {
     let mut rungs = Vec::new();
     let infeasible = avail.trigger == SecondOpinionTrigger::LocalInfeasibility;
@@ -168,6 +169,32 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
         });
     }
     rungs
+}
+
+/// Whether the ladder's narration should reach the console.
+///
+/// `print_level 0` is a request for silence, and the ladder's running
+/// commentary is no more exempt from it than the `EXIT:` block — the C
+/// interface is an Ipopt drop-in, where `print_level=0 sb=yes` is the
+/// documented way to get a quiet solve, and up to five unexpected `pounce:`
+/// lines on a failing one is exactly what that asks not to happen. The ladder
+/// still *runs*; only the console is quiet.
+///
+/// Lives here rather than at each call site because the CLI and the C
+/// interface both need it and a duplicated branch is a branch that can drift
+/// — one of them silently losing the gate would look identical to the other
+/// keeping it. `pounce-rs` and Python do not call this: they never print,
+/// they hand the narration back to the caller.
+///
+/// Only an *explicit* `print_level` silences: a level nobody set narrates,
+/// and so does an unregistered or unreadable one. That is the pre-gate
+/// behaviour and the safe direction — too much on a failing solve, never too
+/// little.
+pub fn narration_is_wanted(options: &OptionsList) -> bool {
+    options
+        .get_integer_value("print_level", "")
+        .map(|(level, found)| !found || level >= 1)
+        .unwrap_or(true)
 }
 
 /// Did a second-opinion re-solve converge well enough to overturn the original
@@ -296,9 +323,10 @@ impl SecondOpinionAvailability {
 #[cfg(test)]
 mod scaling_retry_tests {
     use super::{
-        SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
-        scaling_retry_promoted, second_opinion_rungs,
+        SecondOpinionAvailability, SecondOpinionTrigger, narration_is_wanted,
+        resolve_scaling_retry_outcome, scaling_retry_promoted, second_opinion_rungs,
     };
+    use pounce_common::options_list::OptionsList;
     use pounce_nlp::SolveStatistics;
     use pounce_nlp::return_codes::ApplicationReturnStatus;
 
@@ -391,10 +419,13 @@ mod scaling_retry_tests {
         );
     }
 
-    /// A resolved scaling with no `feral_scaling` tag to write back
-    /// (`ScalingStrategy::External`) drops the barrier rung rather than run it
-    /// under a scaling the baseline never used. The scaling rung is unaffected
-    /// — it does not need to restore anything.
+    /// A resolved scaling with no `feral_scaling` tag
+    /// (`ScalingStrategy::External`) drops the barrier rung; the scaling rung
+    /// is unaffected. The gate is now conservatism rather than necessity —
+    /// the driver restores by set-ness, so a missing tag no longer strands
+    /// the rung under rung 1's scaling — and it is kept because lifting it
+    /// would add rungs on externally-scaled models, which is a trajectory
+    /// change. See the note on `baseline_scaling`.
     #[test]
     fn barrier_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
         let rungs = second_opinion_rungs(SecondOpinionAvailability {
@@ -515,9 +546,10 @@ mod scaling_retry_tests {
         }
     }
 
-    /// Like rung 2, rung 3 has a baseline scaling to restore, so a resolved
-    /// strategy with no tag to write back drops it rather than run it under a
-    /// scaling the baseline never used.
+    /// Rung 3 sits behind the same `baseline_scaling` gate as rung 2 and is
+    /// dropped with it, for the same reason: kept as conservatism about a
+    /// trajectory change on externally-scaled models, not because the rung
+    /// needs a tag to put back.
     #[test]
     fn start_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
         let rungs = second_opinion_rungs(SecondOpinionAvailability {
@@ -531,6 +563,23 @@ mod scaling_retry_tests {
             "{:?}",
             rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
         );
+    }
+
+    /// The console gate, which both printing surfaces share. An explicit `0`
+    /// is silence; anything above it, or no setting at all, stays loud — a
+    /// caller who did not ask for quiet is not asking for less.
+    #[test]
+    fn narration_follows_print_level() {
+        let mut opts = OptionsList::new();
+        // Unset: narrate, the pre-gate behaviour.
+        assert!(narration_is_wanted(&opts));
+        // …and an unset level narrates whatever the registered default reads
+        // as, which is what distinguishes "nobody asked" from "asked for 0".
+        for (level, want) in [(0, false), (1, true), (5, true), (12, true)] {
+            opts.set_integer_value("print_level", level, true, true)
+                .unwrap();
+            assert_eq!(narration_is_wanted(&opts), want, "print_level={level}");
+        }
     }
 
     /// An `Invalid_Number_Detected` reaches only the rung that moves the

@@ -1600,12 +1600,22 @@ pub fn main() -> ExitCode {
         .as_ref()
         .and_then(|p| p.borrow().certified_infeasible());
     let second_opinion = if debug_hook.is_none() && presolve_certified.is_none() {
+        // Gated like every other banner the CLI prints: `print_level 0` is a
+        // request for silence, and the ladder's narration is no more exempt
+        // than the `EXIT:` block or the degeneracy diagnosis. The ladder still
+        // *runs* -- silence is about the console, not about the answer. The
+        // gate itself is shared with the C interface so the two cannot drift.
+        let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
         let outcome = run_second_opinion_ladder(
             &mut app,
             Rc::clone(&tnlp),
             status,
             solve_stats.clone(),
-            &mut |line| eprintln!("{line}"),
+            &mut |line| {
+                if narrate {
+                    eprintln!("{line}");
+                }
+            },
         );
         status = outcome.status;
         solve_stats = outcome.statistics.clone();

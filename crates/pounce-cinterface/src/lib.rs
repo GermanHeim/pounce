@@ -755,15 +755,26 @@ pub unsafe extern "C" fn IpoptSolve(
             // `Invalid_Number_Detected` is re-solved along up to three
             // deliberately different trajectories and a re-solve is promoted
             // only if it converges. A converged solve pays nothing — the
-            // ladder reads the status and returns. Progress narration goes to
-            // stderr, matching where the solver's own banners already go; the
-            // three `*_retry` options turn individual rungs off.
+            // ladder reads the status and returns. The three `*_retry`
+            // options turn individual rungs off.
+            //
+            // Narration goes to stderr, where the solver's own banners already
+            // go -- but gated on `print_level >= 1`. This crate is the Ipopt
+            // drop-in, so `print_level=0 sb=yes` is a caller asking for
+            // silence, and eight unexpected `pounce:` lines on a failing
+            // solve is exactly what that asks not to happen. The ladder still runs;
+            // only the console is quiet.
+            let narrate = pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
             let ladder = run_second_opinion_ladder(
                 &mut info.app,
                 bridge.clone() as Rc<RefCell<dyn TNLP>>,
                 status,
                 stats,
-                &mut |line| eprintln!("{line}"),
+                &mut |line| {
+                    if narrate {
+                        eprintln!("{line}");
+                    }
+                },
             );
             let status = ladder.status;
             let bridge_ref = bridge.borrow();

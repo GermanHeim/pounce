@@ -27,7 +27,7 @@
 //! let sol = Nlp::new(P)                       // variable count inferred below
 //!     .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
 //!     .constraint_bounds(&[3.0], &[3.0])      // equality: lower == upper
-//!     .x0(&[0.0, 0.0])
+//!     .x0(&[2.0, 0.5])
 //!     .option_num("tol", 1e-10)
 //!     .solve();
 //!
@@ -82,6 +82,31 @@ pub trait Problem {
 /// by the solver's `finalize_solution` callback. They stay empty
 /// when the solve aborts before finalization, so check
 /// `success`/`status` before indexing.
+/// What the second-opinion ladder did, when it ran.
+///
+/// Present on [`Solution::second_opinion`] only when a failing solve
+/// actually opened the ladder; `None` is the overwhelmingly common path
+/// and means nothing extra was spent.
+///
+/// Without this a Rust embedder saw only a failing solve that took up to
+/// four times as long as it used to, with nothing to attribute the time
+/// to -- the ladder is on by default, so that is a real reporting gap
+/// rather than a nicety. Mirrors Python's `info["second_opinion"]`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SecondOpinion {
+    /// Rung labels actually run, in order.
+    pub tried: Vec<&'static str>,
+    /// The rung whose re-solve was promoted, if any. `None` here with a
+    /// non-empty `tried` means every rung was tried and the original
+    /// verdict stood -- which is evidence *for* the verdict.
+    pub promoted_by: Option<&'static str>,
+    /// The narration the CLI would have printed to stderr. Collected
+    /// rather than printed: a library caller has not asked for a running
+    /// commentary on its own stderr.
+    pub log: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Solution {
@@ -107,6 +132,8 @@ pub struct Solution {
     /// `stats.iterations` holds the per-iteration trajectory and is
     ///  non-empty only when [`Nlp::capture_iterations`] was requested.
     pub stats: SolveStatistics,
+    /// What the second-opinion ladder did, or `None` if it never ran.
+    pub second_opinion: Option<SecondOpinion>,
 }
 
 /// Why a solve could not be started.
@@ -394,16 +421,24 @@ impl<P: Problem + 'static> Nlp<P> {
         // `*_retry` options turn individual rungs off; `.string("…_retry",
         // "no")` on this builder disables one.
         //
-        // Narration is dropped rather than printed: a library caller has not
-        // asked for a running commentary on its own stderr, and the outcome
-        // is visible in `Solution::status` either way.
+        // Narration is collected rather than printed: a library caller has
+        // not asked for a running commentary on its own stderr. It comes back
+        // on `Solution::second_opinion`, alongside which rungs ran and which
+        // one was promoted -- otherwise a failing solve that quietly costs up
+        // to four solves is unattributable from the outside.
+        let mut ladder_log: Vec<String> = Vec::new();
         let ladder = pounce_restoration::second_opinion_driver::run_second_opinion_ladder(
             &mut app,
             tnlp,
             status,
             stats,
-            &mut |_line| {},
+            &mut |line| ladder_log.push(line.to_string()),
         );
+        let second_opinion = ladder.ran().then(|| SecondOpinion {
+            tried: ladder.tried.clone(),
+            promoted_by: ladder.promoted_by,
+            log: ladder_log,
+        });
         let status = ladder.status;
         // `ladder.statistics` is the shipped solve's — the original's when
         // nothing promotes, the promoted rung's when one does — so the
@@ -428,6 +463,7 @@ impl<P: Problem + 'static> Nlp<P> {
             z_l: a.sol_z_l.clone(),
             z_u: a.sol_z_u.clone(),
             stats,
+            second_opinion,
         })
     }
 }
@@ -666,6 +702,95 @@ mod tests {
             "forced qp-ipm must not silently succeed via NLP"
         );
         assert_eq!(sol.status, ApplicationReturnStatus::InvalidOption);
+    }
+
+    /// `min (x - 1)^2`, with a singularity at exactly `x == 0` — the value a
+    /// modelling layer hands over for a decision variable nobody
+    /// initialised. The origin evaluates to NaN, so the first solve exits
+    /// `Invalid_Number_Detected`; displacing the start clears the
+    /// singularity and the re-solve converges. That is the failure rung 3
+    /// exists for, and the only rung an invalid number opens.
+    struct SingularAtOrigin;
+    impl Problem for SingularAtOrigin {
+        fn objective(&self, x: &[f64]) -> f64 {
+            if x[0] == 0.0 {
+                f64::NAN
+            } else {
+                (x[0] - 1.0).powi(2)
+            }
+        }
+        fn gradient(&self, x: &[f64], grad: &mut [f64]) -> bool {
+            grad[0] = if x[0] == 0.0 {
+                f64::NAN
+            } else {
+                2.0 * (x[0] - 1.0)
+            };
+            true
+        }
+    }
+
+    fn from_the_origin() -> Nlp<SingularAtOrigin> {
+        Nlp::new(SingularAtOrigin)
+            .x0(&[0.0])
+            .option_int("print_level", 0)
+    }
+
+    /// The ladder runs from `pounce-rs` too, recovers this model, and says
+    /// so. The narration goes nowhere on this surface unless the caller
+    /// reads it, so `log` is the only place it exists — the ladder is on by
+    /// default, and without this field an embedder sees a solve that
+    /// silently took several times as long with nothing to attribute the
+    /// time to.
+    #[test]
+    fn a_recovered_solve_reports_the_rung_that_recovered_it() {
+        let sol = from_the_origin().solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!((sol.x[0] - 1.0).abs() < 1e-5, "x = {:?}", sol.x);
+        let so = sol
+            .second_opinion
+            .as_ref()
+            .unwrap_or_else(|| panic!("no ladder; status = {:?}", sol.status));
+        // An invalid number opens exactly the rung that moves the point:
+        // re-running the same callbacks at the same point under a different
+        // scaling or barrier strategy evaluates the same NaN again.
+        assert_eq!(so.tried, ["start_point_perturbation=1e-2"]);
+        assert_eq!(so.promoted_by, Some("start_point_perturbation=1e-2"));
+        assert!(
+            so.log
+                .iter()
+                .any(|l| l.contains("start_point_perturbation")),
+            "the narration must be collected, not dropped: {:?}",
+            so.log
+        );
+    }
+
+    /// `None` is not "the ladder found nothing" — it is "the ladder did not
+    /// run", which is the overwhelmingly common path. A caller that reads
+    /// `promoted_by` without checking for `Some` first would otherwise read a
+    /// converged solve as a rejected recovery.
+    #[test]
+    fn a_succeeding_solve_has_no_second_opinion() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .solve();
+        assert!(sol.success);
+        assert!(sol.second_opinion.is_none());
+    }
+
+    /// The opt-outs reach this surface as well — and this is the mutation
+    /// guard for the test above: with the start rung off, the same model
+    /// keeps its `Invalid_Number_Detected` and the field goes back to
+    /// `None`, so `Some` there is evidence the ladder ran rather than an
+    /// artifact of the status.
+    #[test]
+    fn turning_the_start_rung_off_gives_the_upstream_verdict_back() {
+        let sol = from_the_origin()
+            .option_str("infeasibility_perturbed_start_retry", "no")
+            .solve();
+        assert!(!sol.success, "status = {:?}", sol.status);
+        assert_eq!(sol.status, ApplicationReturnStatus::InvalidNumberDetected);
+        assert!(sol.second_opinion.is_none(), "{:?}", sol.second_opinion);
     }
 
     #[test]

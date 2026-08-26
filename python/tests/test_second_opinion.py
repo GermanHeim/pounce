@@ -142,3 +142,36 @@ def test_the_ladder_stays_out_of_the_multi_start_path():
     _x, info = res[0]
     assert info["status_msg"] == "Infeasible_Problem_Detected"
     assert "second_opinion" not in info
+
+
+def test_the_ladder_stays_out_of_the_sensitivity_path():
+    """`solve_with_sens` deliberately does not ladder either, and says so by
+    setting the key rather than omitting it.
+
+    A sensitivity result is *about a particular solution*: the reduced
+    Hessian and the parametric step are built from the factorization the
+    solve ended on, and rung 3 displaces the very starting point the caller
+    chose. Laddering here would silently answer a different question. The key
+    is present and `None` — not absent — so `info` has the same shape as
+    `solve`'s and a caller can read `info["second_opinion"]` on either.
+
+    The mutation guard is the pair: on the *same* failing problem the plain
+    `solve` below does open the ladder, so `None` here is the sensitivity
+    path's own choice and not an artifact of the model.
+    """
+    prob = pounce.Problem(
+        n=1, m=1, problem_obj=NoRealSolution(), lb=[-10.0], ub=[10.0],
+        cl=[0.0], cu=[0.0],
+    )
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    _x, info = prob.solve_with_sens(
+        x0=[0.5], pin_constraint_indices=[0], deltas=[0.0]
+    )
+    assert info["status_msg"] == "Infeasible_Problem_Detected"
+    assert "second_opinion" in info
+    assert info["second_opinion"] is None
+
+    _x2, info2 = _solve(NoRealSolution())
+    assert info2["status_msg"] == "Infeasible_Problem_Detected"
+    assert info2["second_opinion"] is not None

@@ -179,12 +179,49 @@ changes.
   to stderr** for the Rust and Python callers: Python collects it into
   `info["second_opinion"]["log"]` alongside `tried` and `promoted_by`
   (`None` when the ladder never ran, which is the overwhelmingly common
-  path), and `pounce-rs` drops it.
+  path), and `pounce-rs` returns the same three fields on
+  `Solution::second_opinion`. On the two surfaces that *do* print — the CLI
+  and the C interface — the narration is gated on `print_level >= 1`
+  through one shared predicate
+  (`pounce_algorithm::second_opinion::narration_is_wanted`, not a branch
+  copied into each). `print_level=0 sb=yes` is the documented way to ask
+  Ipopt for a quiet solve, and the eight-to-ten unexpected `pounce:` lines
+  a failing one produced is what that asks not to happen. The ladder still runs; only
+  the console is quiet.
+
+  The ladder's decorator forwards `is_presolve_wrapper` and
+  `scaling_factors` to the TNLP underneath rather than falling through to
+  the trait defaults. The defaults answer `false` / `None` — "there is no
+  presolve wrapper and no scaling below me" — which is a claim a
+  transparent decorator is in no position to make, and it is read: the
+  answer decides whether a caller above sees the model in its own units.
+
+  **What it costs.** On a converged solve, nothing: the ladder reads the
+  status and returns before any work. On a failing solve it is one extra
+  solve per rung, and that is the whole cost — measured through
+  `Problem.solve` on a small model that fails and is not recovered, 30
+  solves averaged over four repeats, **5.5 ms → 21.4 ms (3.9×)**, which is
+  the three rungs and no overhead beyond them. An independent measurement
+  on a different failing model came back 14.5 ms → 61.5 ms (4.2×) — the
+  absolute numbers are the model's, the ~4× is the ladder's. A model that recovers
+  pays less (the ladder stops at the first promotion) and buys an answer it
+  did not have. The three `*_retry` options —
+  `feral_infeasibility_scaling_retry`, `infeasibility_mu_strategy_retry`,
+  `infeasibility_perturbed_start_retry` — each turn one rung off, and all
+  three off restores the previous behaviour exactly on every surface.
 
   The multi-start paths — `solve_nlp_batch` and the CLI's `minima` global
   search — deliberately do **not** run it. A failed start is routine in a
   multi-start search, and up to three extra solves per failed start
-  multiplies the cost of a search for no benefit.
+  multiplies the cost of a search for no benefit. Neither does
+  `Problem.solve_with_sens`: a sensitivity result is about a *particular*
+  solution, built from the factorization the solve ended on, and rung 3
+  displaces the caller's starting point — laddering there would answer a
+  different question quietly. It sets `info["second_opinion"]` to `None`
+  rather than omitting the key, so `info` keeps the same shape as
+  `solve`'s. The three exclusions are named in
+  `docs/src/troubleshooting.md`, with the composition that gets you both:
+  `solve` first, then feed its `x` back as `x0` to `solve_with_sens`.
 
   `scripts/sweep-fixtures.sh` across the move is an **empty diff**, both
   legs, 142 fixture-legs each: the CLI's trajectory is unchanged.

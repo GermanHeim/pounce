@@ -448,12 +448,30 @@ Things worth knowing:
 
 #### The ladder is not a CLI feature
 
-Every single-solve entry point runs it, on by default and with the same
-three options: the CLI, the Python `Problem.solve`, the C
+Every ordinary single-solve entry point runs it, on by default and with
+the same three options: the CLI, the Python `Problem.solve`, the C
 `IpoptSolve`, and the `pounce-rs` builder. If you drive POUNCE from a
 modelling layer you are, if anything, the caller who needs it most — an
 uninitialized decision variable reaches the solver as a zero, and the
 origin is where a squared slack or a homogeneous quadratic loses rank.
+
+Three entry points deliberately do **not** run it, and it is worth
+knowing which, because on a model the ladder would have recovered they
+report the failure that `Problem.solve` does not:
+
+| Entry point | Why not |
+|---|---|
+| `solve_nlp_batch` | A failed start is routine in a multi-start; up to three extra solves per failed start multiplies the search cost for no benefit. |
+| the CLI's `minima` global search | Same reason. |
+| `Problem.solve_with_sens` | Sensitivity is taken *about a particular solution*. The third rung displaces the starting point, which on a multi-modal model can converge somewhere else entirely — and your `pin_constraint_indices` and `deltas` are posed against the solution you expected, so silently answering about a different local optimum is worse than reporting the failure. |
+
+So `problem.solve(x0)` and `problem.solve_with_sens(x0, ...)` can
+disagree about whether a model is solvable, and on a degenerate start
+they will. If you want the ladder's starting point *and* sensitivity
+about it, run `solve` first, then pass the `x` it returns back into
+`solve_with_sens` as `x0` — that makes the choice of base point explicit
+and reproducible, which is what sensitivity analysis wants anyway.
+`info["second_opinion"]` is always `None` from `solve_with_sens`.
 
 From Python, what the ladder did comes back in the info dict:
 

@@ -429,6 +429,29 @@ impl TNLP for SecondOpinionTnlp {
     fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
         self.inner.borrow().presolve_infeasibility_proof()
     }
+
+    // The two below are what makes a decorator *transparent* rather than
+    // merely forwarding: they are what a caller above uses to see what is
+    // underneath. Falling through to the trait defaults reports `false` /
+    // `None`, i.e. "there is no presolve wrapper and no scaling under me",
+    // which is a lie this type is in no position to tell -- it does not know
+    // what it wraps.
+    //
+    // No live path reaches the failure today: `optimize_tnlp` only calls
+    // `wrap_from_options` when `presolve_already_applied` is unset, the CLI
+    // sets it, and no other entry point pre-wraps. It bites a caller who
+    // calls `wrap_with_presolve` themselves *and* leaves `presolve=yes` --
+    // the original solve gets one wrapper and every rung gets two, so the
+    // rung stops being "baseline plus one knob", which is the whole contract
+    // (gh #524). Forwarding costs two lines and removes the need to re-derive
+    // that reachability argument every time something upstream moves.
+    fn is_presolve_wrapper(&self) -> bool {
+        self.inner.borrow().is_presolve_wrapper()
+    }
+
+    fn scaling_factors(&self) -> Option<Vec<Number>> {
+        self.inner.borrow().scaling_factors()
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +459,79 @@ mod tests {
     use super::*;
     use pounce_algorithm::second_opinion::scaling_retry_promoted;
     use pounce_common::options_list::OptionsList;
+
+    /// A model that *is* a presolve wrapper and *does* carry scaling factors,
+    /// so the decorator has something real to hide.
+    struct Underneath;
+
+    impl TNLP for Underneath {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            None
+        }
+        fn get_bounds_info(&mut self, _b: BoundsInfo<'_>) -> bool {
+            false
+        }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            false
+        }
+        fn eval_f(&mut self, _x: &[Number], _n: bool) -> Option<Number> {
+            None
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+            false
+        }
+        fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+            false
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _n: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            false
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _n: bool,
+            _o: Number,
+            _l: Option<&[Number]>,
+            _nl: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            false
+        }
+        fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {}
+        fn is_presolve_wrapper(&self) -> bool {
+            true
+        }
+        fn scaling_factors(&self) -> Option<Vec<Number>> {
+            Some(vec![2.0, 4.0])
+        }
+    }
+
+    /// The decorator has to answer these two for the model *underneath* it.
+    /// Both have trait defaults that are plausible-looking lies (`false` /
+    /// `None`) for a decorator, so forgetting to forward one is silent: the
+    /// caller above concludes there is no presolve wrapper and no scaling
+    /// below, and a caller who pre-wrapped gets a second presolve on every
+    /// rung — which is exactly the "one difference from baseline" contract
+    /// (gh #524) broken.
+    #[test]
+    fn the_decorator_is_transparent_about_what_is_underneath_it() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Underneath));
+        let deco = SecondOpinionTnlp::new(inner);
+        assert!(
+            deco.is_presolve_wrapper(),
+            "the decorator hid a presolve wrapper below it",
+        );
+        assert_eq!(
+            deco.scaling_factors(),
+            Some(vec![2.0, 4.0]),
+            "the decorator hid the scaling factors below it",
+        );
+    }
 
     /// The two promotion predicates sit at different levels — one reads the
     /// `SolverReturn` the TNLP is handed, the other the
@@ -596,12 +692,6 @@ mod tests {
         o
     }
 
-    /// An option the caller never set must come back *unset*, not set to
-    /// whatever it read as. `feral_scaling` is the case that matters: unset it
-    /// resolves through `FeralConfig::from_env()`, so writing the resolved tag
-    /// back would pin `POUNCE_FERAL_SCALING`'s value into the options list and
-    /// silently override the environment on every later solve of the same
-    /// application.
     /// The loop's core invariant, and the regression that motivated it.
     ///
     /// Rung N must see the *baseline*, not rung N-1's leftovers, and
@@ -669,6 +759,12 @@ mod tests {
         rungs.iter().map(|r| r.label).collect()
     }
 
+    /// An option the caller never set must come back *unset*, not set to
+    /// whatever it read as. `feral_scaling` is the case that matters: unset it
+    /// resolves through `FeralConfig::from_env()`, so writing the resolved tag
+    /// back would pin `POUNCE_FERAL_SCALING`'s value into the options list and
+    /// silently override the environment on every later solve of the same
+    /// application.
     #[test]
     fn restoring_an_unset_option_leaves_it_unset() {
         let mut opts = opts_with(&[]);

@@ -324,7 +324,7 @@ fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_second_opinion() {
 /// this fixture's two runs differ.
 #[test]
 fn a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected() {
-    let run = |tag: &str, extra: &[&str]| -> (String, String) {
+    let run = |tag: &str, print_level: &str, extra: &[&str]| -> (String, String) {
         let sol = std::env::temp_dir().join(format!("pounce_issue_508_keep_{tag}.sol"));
         let _ = std::fs::remove_file(&sol);
         let out = Command::new(pounce_exe())
@@ -334,7 +334,7 @@ fn a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected() {
             .arg(&sol)
             .arg("tol=1e-8")
             .arg("acceptable_tol=1e-12")
-            .arg("print_level=0")
+            .arg(format!("print_level={print_level}"))
             .args(extra)
             .output()
             .expect("spawn pounce");
@@ -345,14 +345,20 @@ fn a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected() {
         )
     };
 
-    let (with_ladder, stderr) = run("on", &[]);
+    // The guard — that this fixture still reaches a non-promoted ladder — takes
+    // its own run at `print_level=1`, because the ladder's narration is
+    // print-level gated and `print_level=0` is silent by design. The two runs
+    // whose `.sol` files are compared stay at 0, and identical to each other.
+    let (_, stderr) = run("guard", "1", &[]);
     assert!(
         stderr.contains("keeping the original"),
         "fixture no longer exercises the non-promoted retry path, so this test \
          proves nothing — pick a model/tol that still does:\nstderr:\n{stderr}"
     );
+    let (with_ladder, _) = run("on", "0", &[]);
     let (without_ladder, _) = run(
         "off",
+        "0",
         &[
             "feral_infeasibility_scaling_retry=no",
             "infeasibility_mu_strategy_retry=no",
