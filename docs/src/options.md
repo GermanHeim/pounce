@@ -824,6 +824,39 @@ to the specialized convex solvers (LP / convex QP / SOCP, see
 A positive factor is a pure conditioning knob; the convex path reports
 natural units either way, so it keeps the fast path.
 
+## Starting-point conditioning
+
+Three options displace the starting point before the barrier solve, and
+one turns the automatic retry that uses them on or off. All are off by
+default except the retry, which fires only after a solve has already
+failed. Full rationale and the measurements behind the defaults:
+[Conditioning the starting point](initialization.md#conditioning-the-starting-point).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `infeasibility_perturbed_start_retry` | `yes` | Rung 3 of the [second-opinion ladder](troubleshooting.md#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are): on `Infeasible_Problem_Detected` or `Invalid_Number_Detected`, re-solve once from a displaced start. Promoted only on `Solve_Succeeded` / `Solved_To_Acceptable_Level`. |
+| `start_point_perturbation` | `0.0` | Relative displacement `scale·(1 + \|x_i\|)·u_i`, `u_i` uniform on `[-1, 1)`, clipped into bounds. `0` disables. Non-finite entries are repaired to a finite in-bounds value first. |
+| `start_point_perturbation_seed` | `0` | SplitMix64 seed for that displacement — no clock, no address, no thread identity, so the same seed gives the same point on every platform. |
+| `start_point_conditioner` | `none` | `none`, or `adam` to run a first-order warm-up on `f(x) + ρ‖violation(x)‖²` and start from where it lands. |
+
+`start_point_conditioner=adam` reads three more. They are ignored unless
+it is set, and their defaults are KRONOS's published stage-0 values
+(Ahmed & Hasan 2026, see
+[Acknowledgments](acknowledgments.md#starting-point-conditioning-kronos)).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `adam_warmup_iters` | `200` | Iteration budget. Adam's step is size-capped near the learning rate, so this buys about `iters × learning_rate` units of travel per coordinate. |
+| `adam_warmup_learning_rate` | `5e-2` | Step size. Because Adam normalizes by its second-moment estimate this is nearly the per-coordinate step *in the model's units*, so set it against the size of the variables, not the derivatives. |
+| `adam_warmup_penalty` | `10.0` | ρ on the squared violation. Trades objective against feasibility during the warm-up only. The fixed, unscaled default is the likeliest cause of the measured tail on badly-scaled models — the first knob to move if the warm-up hurts. |
+
+The warm-up is guarded: if it does not reduce the merit it hands back
+the original point unchanged. It is off by default because across 40
+problems POUNCE already solves it cut the median iteration count to
+0.83× while raising the **total** 1.62×, on the strength of two
+outliers (`palmer1c` 71 → 1023). A median win with a 14× tail is an
+option, not a default.
+
 ## Barrier-parameter (μ) strategy
 
 The barrier parameter μ controls the inner subproblem's relaxation of

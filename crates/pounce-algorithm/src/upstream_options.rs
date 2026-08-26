@@ -1590,6 +1590,62 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Rung 2 of the local-infeasibility second-opinion ladder, and the one that varies the iterate sequence rather than the linear algebra. A local-infeasibility verdict is a local statement about a nonconvex problem — the IPM reached a stationary point of the constraint violation, not a proof that no feasible point is reachable — and which stationary point it reaches depends on the barrier trajectory. gh #524 is the worked case: on the CUTE problem cresc4 (6 variables, 8 constraints, feasible, IPOPT solves it in 71 iterations) the monotone-mu default converges to a point with constraint violation 0.51 and reports Infeasible_Problem_Detected, while mu_strategy=adaptive reaches the known optimum 0.8718975; the MC64 rung above reproduced the failing trajectory character-for-character through iteration 15, diverged at iteration 16 in the eighth significant digit, and landed in the same basin anyway, so its agreement added no information. Retrying with a different barrier strategy is also the standard remedy IPOPT's own documentation gives a user who gets an infeasibility verdict on a problem they believe is feasible. When this option is set (default), a solve that ends in Infeasible_Problem_Detected is re-run once with mu_strategy=adaptive (main IPM and restoration sub-IPM both) AND with feral_scaling restored to its baseline value, so exactly one knob differs from the original solve — stacking it on top of the MC64 rung loses the fix on cresc4. The result is promoted only if it returns Solve_Succeeded / Solved_To_Acceptable_Level, so a promotion is always backed by the retry's own convergence check rather than by trusting the strategy; otherwise the original infeasibility verdict stands. Costs one extra solve only on runs that would otherwise report failure. Skipped when mu_strategy is already adaptive, when the infeasibility was certified by presolve, and when the interactive debugger is active. Set to no to keep behaviour bit-for-bit faithful to upstream IPOPT (which does not retry). Driven by the pounce CLI; library embedders that inject their own restoration provider implement the retry themselves.",
     )?;
 
+    r.set_registering_category("Initialization");
+    r.add_bool_option(
+        "infeasibility_perturbed_start_retry",
+        "Re-solve once from a slightly displaced starting point if the solve declares local infeasibility or hits an invalid number.",
+        true,
+        "Rung 3 of the second-opinion ladder, and the one that varies neither the linear algebra (rung 1) nor the barrier trajectory (rung 2) but the point the trajectory starts from. It exists because a measurement said the starting point, not the algorithm, is where most of these failures are decided. Over a 244-problem corpus taken from the KRONOS benchmark set (Ahmed & Hasan 2026, doi:10.1016/j.compchemeng.2026.109839), fifteen models ended Infeasible_Problem_Detected or Invalid_Number_Detected from their bundled start; ten of those are models an independent solver proves feasible to 2.4e-7 or better, so the verdict was wrong. Of the fifteen, start_with_resto recovered 0, expect_infeasible_problem 0, mu_strategy=adaptive 4, and one displaced start 13 — and adding restoration on top of the displaced start reached 14. That ordering is the diagnosis: the iterate does not need to be BETTER, it needs to be NON-DEGENERATE. The common failure is a start where the constraint Jacobian is structurally rank-deficient — a squared slack sitting at zero, or an origin start on a homogeneous quadratic — at which LICQ fails and the filter line search has no descent direction to find, whatever it is given. Displacing the point by a relative 1e-2 restores rank, and the solve that follows is an ordinary one. When this option is set (default), a solve that ends Infeasible_Problem_Detected or Invalid_Number_Detected is re-run once with start_point_perturbation=1e-2 AND with the earlier rungs' knobs restored to baseline, so exactly one thing differs from the original solve. The result is promoted only if it returns Solve_Succeeded / Solved_To_Acceptable_Level. The displacement is deterministic given start_point_perturbation_seed, so a promotion is reproducible and a failure is reportable. Non-finite entries in the starting point are replaced with a finite in-bounds value before the displacement, because NaN plus noise is NaN and without that step the retry would reproduce the original Invalid_Number_Detected exactly. Costs one extra solve only on runs that would otherwise report failure. Skipped when the infeasibility was certified by presolve, and when the interactive debugger is active. Set to no to keep behaviour bit-for-bit faithful to upstream IPOPT (which does not retry).",
+    )?;
+    r.add_lower_bounded_number_option(
+        "start_point_perturbation",
+        "Relative magnitude of a deterministic displacement applied to the starting point before the solve (0 disables).",
+        0.0,
+        false,
+        0.0,
+        "Each variable is displaced by scale*(1 + |x_i|)*u_i with u_i drawn uniformly from [-1, 1), then clipped back inside any bound it has. The (1 + |x_i|) factor is what makes the displacement nonzero at x_i = 0: a purely relative perturbation is identically zero at the origin, and a start at the origin is the single most common degenerate start in the corpus this was measured on. Non-finite entries are replaced by a finite in-bounds value (the midpoint of a two-sided box, one unit inside a one-sided bound, zero if free) before the displacement, so this also rescues a start carrying a NaN. Off by default: displacing a start the user chose is a trajectory change, and a user who supplied a considered initial guess is entitled to have it used. The intended way to reach this is the automatic rung — see infeasibility_perturbed_start_retry — which applies it only after the solve has already failed, where there is no good trajectory left to preserve. Setting it directly is for reproducing such a retry, or for a deliberate multistart driven from outside.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "start_point_perturbation_seed",
+        "Seed for the start_point_perturbation displacement.",
+        0,
+        0,
+        "The displacement is drawn from SplitMix64 seeded by this value and nothing else — no clock, no address, no thread identity — so the same seed and the same incoming point give the same displaced point on every platform and every run. That is what makes a promoted retry reproducible and a failed one reportable. Vary it to drive a multistart by hand.",
+    )?;
+    r.add_string_option(
+        "start_point_conditioner",
+        "Optional first-order warm-up run on the starting point before the barrier solve.",
+        "none",
+        &[
+            ("none", "Use the starting point as given."),
+            ("adam", "Run Adam on the penalised merit f(x) + rho*||violation(x)||^2 and start the barrier solve from where it lands."),
+        ],
+        "The `adam` setting is stage 0 of the KRONOS algorithm (Ahmed & Hasan 2026, doi:10.1016/j.compchemeng.2026.109839), generalised from that paper's equality-only rho*||h(x)||^2 to two-sided constraint bounds so it applies to an arbitrary NLP rather than only to a squared-slack reformulation; the violation of a row is its distance outside [g_l, g_u] and zero inside, which reduces to g - b on an equality row. It changes only where the solve starts — no algorithm, no derivative, no option below it moves — so the barrier solve that follows is exactly the solve pounce would have run had the conditioned point been passed in. It is off by default because it is a real preconditioner with a fat tail. Measured on 40 problems pounce already solves it broke none of them and cut the iteration count on 22, sometimes hard (rk23 82 -> 11, bt5 45 -> 9, chnrosnb 40 -> 10, hs056 42 -> 12), with median 0.83x and geometric mean 0.79x — but the TOTAL rose 1.62x (3030 -> 4900 iterations), driven by palmer1c 71 -> 1023 and biggs6 1906 -> 2938; excluding those two the ratio is 0.89x. A fixed unscaled penalty against a badly-scaled model walks the iterate somewhere the barrier method then has to walk back from. A median win with a 14x tail is an option, not a default. The warm-up is also guarded: if it does not reduce the merit it hands back the original point unchanged, so enabling it can never cost more than the function evaluations it spent.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "adam_warmup_iters",
+        "Iteration budget for start_point_conditioner=adam.",
+        0,
+        200,
+        "KRONOS's published stage-0 budget. Adam's step is size-capped near the learning rate regardless of the gradient, so this budget buys roughly iters*learning_rate units of travel in each coordinate — 10 units at the defaults. Raise it for a model whose start is far from anywhere useful; the cost is that many objective, constraint and Jacobian evaluations. Ignored unless start_point_conditioner=adam.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "adam_warmup_learning_rate",
+        "Step size for start_point_conditioner=adam.",
+        0.0,
+        true,
+        5e-2,
+        "KRONOS's published stage-0 value. Because Adam normalises by the second-moment estimate, this is very nearly the per-coordinate step length in the model's own units, not a scale factor on the gradient — so it wants setting against the size of the variables, not the size of the derivatives. Ignored unless start_point_conditioner=adam.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "adam_warmup_penalty",
+        "Weight rho on the squared constraint violation in the start_point_conditioner=adam merit.",
+        0.0,
+        false,
+        10.0,
+        "KRONOS's published stage-0 value. The merit is f(x) + rho*||violation(x)||^2, so rho trades the objective against feasibility during the warm-up only; it has no effect on the barrier solve that follows. The fixed, unscaled default is the most likely cause of the measured tail on badly-scaled models (palmer1c 71 -> 1023 iterations) — if the warm-up hurts a particular model, this is the first knob to move. Ignored unless start_point_conditioner=adam.",
+    )?;
+
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");
     r.add_integer_option("ma77_print_level", "Debug printing level for the linear solver MA77", -1, "<0: no printing; 0: Error and warning messages only; 1: Limited diagnostic printing; >1 Additional diagnostic printing.")?;

@@ -1651,6 +1651,24 @@ pub fn main() -> ExitCode {
         .get_string_value("mu_strategy", "")
         .map(|(v, _found)| v == "adaptive")
         .unwrap_or(false);
+    // The tag the start rung must restore, resolved the same way
+    // `baseline_scaling` is. `mu_strategy` has exactly two registered values,
+    // so "not adaptive" is "monotone" and there is no third case to guess at.
+    let baseline_mu_strategy = if already_adaptive {
+        "adaptive"
+    } else {
+        "monotone"
+    };
+    let perturbed_start_retry_enabled = app
+        .options()
+        .get_bool_value("infeasibility_perturbed_start_retry", "")
+        .map(|(v, _found)| v)
+        .unwrap_or(true);
+    let already_perturbed = app
+        .options()
+        .get_numeric_value("start_point_perturbation", "")
+        .map(|(v, _found)| v > 0.0)
+        .unwrap_or(false);
     // A presolve-*certified* infeasibility is exempt. This ladder exists to
     // second-guess a numerical local-infeasibility verdict that a bad scaling
     // or an unlucky barrier trajectory may have manufactured; re-solving to
@@ -1659,21 +1677,43 @@ pub fn main() -> ExitCode {
     let presolve_certified = presolve_handle
         .as_ref()
         .and_then(|p| p.borrow().certified_infeasible());
-    let rungs = second_opinion_rungs(SecondOpinionAvailability {
-        scaling_retry_enabled,
-        mu_retry_enabled,
-        already_mc64,
-        already_adaptive,
-        baseline_scaling,
-    });
-    if !rungs.is_empty()
-        && debug_hook.is_none()
-        && presolve_certified.is_none()
-        && status == ApplicationReturnStatus::InfeasibleProblemDetected
-    {
+    // `Invalid_Number_Detected` joins local infeasibility as a ladder trigger,
+    // but reaches only the third rung — see `SecondOpinionTrigger`. It is here
+    // because the measurement that motivated that rung found the two failures
+    // have the same cause more often than not: of fifteen losses on the KRONOS
+    // corpus, four were non-finite evaluations and all four came from a
+    // starting point the model cannot be evaluated at, not from a model that
+    // cannot be evaluated anywhere.
+    let trigger = match status {
+        ApplicationReturnStatus::InfeasibleProblemDetected => {
+            Some(SecondOpinionTrigger::LocalInfeasibility)
+        }
+        ApplicationReturnStatus::InvalidNumberDetected => Some(SecondOpinionTrigger::InvalidNumber),
+        _ => None,
+    };
+    let rungs = trigger
+        .map(|trigger| {
+            second_opinion_rungs(SecondOpinionAvailability {
+                trigger,
+                scaling_retry_enabled,
+                mu_retry_enabled,
+                perturbed_start_retry_enabled,
+                already_mc64,
+                already_adaptive,
+                already_perturbed,
+                baseline_scaling,
+                baseline_mu_strategy,
+            })
+        })
+        .unwrap_or_default();
+    if !rungs.is_empty() && debug_hook.is_none() && presolve_certified.is_none() {
         eprintln!(
-            "pounce: local infeasibility — re-solving along {} different trajector{} before \
+            "pounce: {} — re-solving along {} different trajector{} before \
              believing it (second-opinion ladder: {}).",
+            match trigger {
+                Some(SecondOpinionTrigger::InvalidNumber) => "invalid number",
+                _ => "local infeasibility",
+            },
             rungs.len(),
             if rungs.len() == 1 { "y" } else { "ies" },
             rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
@@ -1719,8 +1759,9 @@ pub fn main() -> ExitCode {
         }
         if !scaling_retry_promoted(retry_status) {
             eprintln!(
-                "pounce: keeping the original local-infeasibility verdict; it survived {} \
+                "pounce: keeping the original {} verdict; it survived {} \
                  independent re-solve(s) ({}).",
+                status.upstream_name(),
                 tried.len(),
                 tried.join(", "),
             );
@@ -1730,7 +1771,7 @@ pub fn main() -> ExitCode {
         // the original local-infeasibility verdict and the original solve's
         // statistics. See `resolve_scaling_retry_outcome` (code review L23).
         (status, solve_stats) =
-            resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
+            resolve_scaling_retry_outcome(status, retry_status, solve_stats, retry_stats);
         // …and keep the *console* in lockstep with them too (gh #508). Both
         // solves print their own end-of-run summary, which is expected and
         // announced — but when the retry is not promoted the last banner on the
@@ -1762,6 +1803,59 @@ pub fn main() -> ExitCode {
                 "POUNCE {}: {}",
                 env!("CARGO_PKG_VERSION"),
                 print::status_message(status)
+            );
+        }
+    }
+
+    // Failure diagnosis, printed once, after the ladder has finished moving
+    // `status` and before the machine-readable verdict below.
+    //
+    // Two statuses get a diagnosis because two statuses are routinely correct
+    // and useless. `Invalid_Number_Detected` says a non-finite value reached
+    // the algorithm and says nothing about which one: on the KRONOS corpus all
+    // four such losses had the culprit sitting in the starting vector the model
+    // itself supplied — `hong`'s x0 is literally `[NaN, NaN, NaN, NaN, 0, …]` —
+    // and the user was told none of that. `Infeasible_Problem_Detected` is a
+    // *local* statement about a nonconvex problem, and when the constraint
+    // Jacobian is rank-deficient at the point the solve started from, LICQ
+    // fails there and the verdict is a statement about the point at least as
+    // much as about the problem: ten of the fifteen corpus losses carry that
+    // verdict on models an independent solver proves feasible to 2.4e-7.
+    //
+    // The audit runs on `inner_tnlp` — the user's own TNLP, before presolve,
+    // elimination, scaling or the counting wrapper — for the same reason
+    // `run_derivative_test` does: a wrapper renumbers variables, so naming
+    // `x[3]` of a presolved model points at a *neighbouring* variable's
+    // answer. That is the gh#450 failure mode, and a diagnosis that names the
+    // wrong variable is worse than none. Going around `counting` also keeps
+    // the reported eval counts honest — this costs one call of each callback,
+    // and they are the diagnosis's, not the solver's.
+    //
+    // It is spent only on a run that has already failed, and it changes
+    // nothing — not the status, not the trajectory, not an option.
+    if matches!(
+        status,
+        ApplicationReturnStatus::InvalidNumberDetected
+            | ApplicationReturnStatus::InfeasibleProblemDetected
+    ) && app
+        .options()
+        .get_integer_value("print_level", "")
+        .map(|(v, _found)| v >= 1)
+        .unwrap_or(true)
+        && let Some(diagnosis) = pounce_nlp::degeneracy::diagnose_start_point(&inner_tnlp, 6)
+    {
+        if let Some(what) = diagnosis.audit.describe() {
+            eprintln!("pounce: the model is not finite at its own starting point: {what}.");
+        }
+        if status == ApplicationReturnStatus::InfeasibleProblemDetected
+            && let Some(jac) = diagnosis.jacobian.as_ref()
+            && let Some(what) = jac.describe(6)
+        {
+            eprintln!("pounce: the constraint Jacobian is rank-deficient there: {what}.");
+            eprintln!(
+                "pounce: LICQ fails at a point like that, so a local-infeasibility verdict \
+                 reached from it is as much a statement about the starting point as about the \
+                 problem. Try a different starting point, or `start_point_perturbation 1e-2`."
             );
         }
     }
@@ -2214,20 +2308,43 @@ struct SecondOpinionRung {
     assignments: Vec<String>,
 }
 
+/// Which failure opened the ladder. Not every rung is evidence about every
+/// failure: an `Invalid_Number_Detected` is a statement about the *callbacks*
+/// at a point, and re-running the same callbacks at the same point under a
+/// different linear-solver scaling or a different barrier strategy evaluates
+/// the same non-finite quantity again. Only the rung that moves the point
+/// applies there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondOpinionTrigger {
+    /// `Infeasible_Problem_Detected` — a *local* statement about a nonconvex
+    /// problem, which every rung is evidence against.
+    LocalInfeasibility,
+    /// `Invalid_Number_Detected` — a NaN or infinity out of the model.
+    InvalidNumber,
+}
+
 /// What the baseline options already provide, so a rung that would be a no-op
 /// can be dropped instead of burning a solve to re-derive the same answer.
 #[derive(Debug, Clone, Copy)]
 struct SecondOpinionAvailability {
+    trigger: SecondOpinionTrigger,
     scaling_retry_enabled: bool,
     mu_retry_enabled: bool,
+    perturbed_start_retry_enabled: bool,
     already_mc64: bool,
     already_adaptive: bool,
+    /// The baseline already displaces the start, so there is no displacement
+    /// left for the third rung to add that the failing solve did not have.
+    already_perturbed: bool,
     /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy,
     /// which the barrier rung re-asserts so it varies exactly one knob.
     /// `None` when the resolved strategy has no tag to write back
     /// (`ScalingStrategy::External`), which drops the barrier rung rather than
     /// let it run under a scaling the baseline never used.
     baseline_scaling: Option<&'static str>,
+    /// `mu_strategy` tag naming the baseline's barrier strategy, which the
+    /// start rung re-asserts for the same reason.
+    baseline_mu_strategy: &'static str,
 }
 
 /// Build the ladder of second-opinion re-solves for a local-infeasibility
@@ -2242,13 +2359,15 @@ struct SecondOpinionAvailability {
 /// ladder would have discarded the fix.
 fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpinionRung> {
     let mut rungs = Vec::new();
-    if avail.scaling_retry_enabled && !avail.already_mc64 {
+    let infeasible = avail.trigger == SecondOpinionTrigger::LocalInfeasibility;
+    if infeasible && avail.scaling_retry_enabled && !avail.already_mc64 {
         rungs.push(SecondOpinionRung {
             label: "feral_scaling=mc64",
             assignments: vec!["feral_scaling mc64\n".to_string()],
         });
     }
     if let Some(baseline_scaling) = avail.baseline_scaling
+        && infeasible
         && avail.mu_retry_enabled
         && !avail.already_adaptive
     {
@@ -2257,6 +2376,25 @@ fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpinionRu
             assignments: vec![
                 format!("feral_scaling {baseline_scaling}\n"),
                 "mu_strategy adaptive\n".to_string(),
+            ],
+        });
+    }
+    // Rung 3 restores *both* earlier knobs before displacing the start, for
+    // the same reason rung 2 restores rung 1's: the ladder tests one
+    // difference at a time, and gh #524 is the case where stacking two of
+    // them threw the fix away. It needs a `feral_scaling` tag to write back,
+    // so like rung 2 it is dropped under `ScalingStrategy::External` rather
+    // than left running under a scaling the baseline never used.
+    if let Some(baseline_scaling) = avail.baseline_scaling
+        && avail.perturbed_start_retry_enabled
+        && !avail.already_perturbed
+    {
+        rungs.push(SecondOpinionRung {
+            label: "start_point_perturbation=1e-2",
+            assignments: vec![
+                format!("feral_scaling {baseline_scaling}\n"),
+                format!("mu_strategy {}\n", avail.baseline_mu_strategy),
+                "start_point_perturbation 1e-2\n".to_string(),
             ],
         });
     }
@@ -2286,6 +2424,7 @@ fn scaling_retry_promoted(retry_status: ApplicationReturnStatus) -> bool {
 /// leaking the retry solve's stats into a report labeled with the original
 /// verdict.
 fn resolve_scaling_retry_outcome(
+    original_status: ApplicationReturnStatus,
     retry_status: ApplicationReturnStatus,
     original_stats: SolveStatistics,
     retry_stats: SolveStatistics,
@@ -2293,10 +2432,7 @@ fn resolve_scaling_retry_outcome(
     if scaling_retry_promoted(retry_status) {
         (retry_status, retry_stats)
     } else {
-        (
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            original_stats,
-        )
+        (original_status, original_stats)
     }
 }
 
@@ -3873,29 +4009,41 @@ mod lp_nlp_fallback_tests {
 #[cfg(test)]
 mod scaling_retry_tests {
     use super::{
-        SecondOpinionAvailability, resolve_scaling_retry_outcome, scaling_retry_promoted,
-        second_opinion_rungs,
+        SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
+        scaling_retry_promoted, second_opinion_rungs,
     };
     use pounce_nlp::SolveStatistics;
     use pounce_nlp::return_codes::ApplicationReturnStatus;
 
     fn avail() -> SecondOpinionAvailability {
         SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::LocalInfeasibility,
             scaling_retry_enabled: true,
             mu_retry_enabled: true,
+            perturbed_start_retry_enabled: true,
             already_mc64: false,
             already_adaptive: false,
+            already_perturbed: false,
             baseline_scaling: Some("auto"),
+            baseline_mu_strategy: "monotone",
         }
     }
 
-    /// The default ladder is two rungs, scaling first (it is the cheaper and
-    /// longer-standing one), barrier strategy second.
+    /// The default ladder is three rungs, in increasing order of how much
+    /// they change: linear algebra, then barrier trajectory, then the point
+    /// the trajectory starts from.
     #[test]
-    fn default_ladder_is_scaling_then_barrier_strategy() {
+    fn default_ladder_is_scaling_then_barrier_strategy_then_start() {
         let rungs = second_opinion_rungs(avail());
         let labels: Vec<_> = rungs.iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["feral_scaling=mc64", "mu_strategy=adaptive"]);
+        assert_eq!(
+            labels,
+            [
+                "feral_scaling=mc64",
+                "mu_strategy=adaptive",
+                "start_point_perturbation=1e-2"
+            ]
+        );
     }
 
     /// gh #524: the rungs are applied to the *baseline*, not stacked. The
@@ -3936,7 +4084,7 @@ mod scaling_retry_tests {
         });
         assert_eq!(
             only_barrier.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
+            ["mu_strategy=adaptive", "start_point_perturbation=1e-2"],
         );
 
         let only_scaling = second_opinion_rungs(SecondOpinionAvailability {
@@ -3945,13 +4093,14 @@ mod scaling_retry_tests {
         });
         assert_eq!(
             only_scaling.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
+            ["feral_scaling=mc64", "start_point_perturbation=1e-2"],
         );
 
         assert!(
             second_opinion_rungs(SecondOpinionAvailability {
                 already_mc64: true,
                 already_adaptive: true,
+                already_perturbed: true,
                 ..avail()
             })
             .is_empty(),
@@ -3987,7 +4136,7 @@ mod scaling_retry_tests {
             .iter()
             .map(|r| r.label)
             .collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
+            ["mu_strategy=adaptive", "start_point_perturbation=1e-2"],
         );
         assert_eq!(
             second_opinion_rungs(SecondOpinionAvailability {
@@ -3997,16 +4146,163 @@ mod scaling_retry_tests {
             .iter()
             .map(|r| r.label)
             .collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
+            ["feral_scaling=mc64", "start_point_perturbation=1e-2"],
+        );
+        assert_eq!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                perturbed_start_retry_enabled: false,
+                ..avail()
+            })
+            .iter()
+            .map(|r| r.label)
+            .collect::<Vec<_>>(),
+            ["feral_scaling=mc64", "mu_strategy=adaptive"],
         );
         assert!(
             second_opinion_rungs(SecondOpinionAvailability {
                 scaling_retry_enabled: false,
                 mu_retry_enabled: false,
+                perturbed_start_retry_enabled: false,
                 ..avail()
             })
             .is_empty(),
         );
+    }
+
+    /// gh #524's lesson applied to the third rung: it varies exactly one thing
+    /// from the *baseline*, so it must undo both earlier rungs, not inherit
+    /// them.
+    #[test]
+    fn start_rung_restores_both_earlier_knobs() {
+        for (baseline_scaling, baseline_mu) in [("auto", "monotone"), ("infnorm", "monotone")] {
+            let rungs = second_opinion_rungs(SecondOpinionAvailability {
+                baseline_scaling: Some(baseline_scaling),
+                baseline_mu_strategy: baseline_mu,
+                ..avail()
+            });
+            let start = rungs
+                .iter()
+                .find(|r| r.label == "start_point_perturbation=1e-2")
+                .expect("start rung present");
+            let assigned: Vec<_> = start.assignments.iter().map(|a| a.trim()).collect();
+            assert_eq!(
+                assigned,
+                [
+                    format!("feral_scaling {baseline_scaling}").as_str(),
+                    format!("mu_strategy {baseline_mu}").as_str(),
+                    "start_point_perturbation 1e-2",
+                ],
+            );
+        }
+    }
+
+    /// A baseline that already runs `mu_strategy=adaptive` drops rung 2, and
+    /// rung 3 must then restore *adaptive*, not the monotone default — writing
+    /// back the wrong tag would silently change a second knob.
+    #[test]
+    fn start_rung_restores_an_adaptive_baseline_as_adaptive() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            already_adaptive: true,
+            baseline_mu_strategy: "adaptive",
+            ..avail()
+        });
+        let start = rungs
+            .iter()
+            .find(|r| r.label == "start_point_perturbation=1e-2")
+            .expect("start rung present");
+        assert!(
+            start
+                .assignments
+                .iter()
+                .any(|a| a.trim() == "mu_strategy adaptive"),
+            "{:?}",
+            start.assignments,
+        );
+    }
+
+    /// Like rung 2, rung 3 has a baseline scaling to restore, so a resolved
+    /// strategy with no tag to write back drops it rather than run it under a
+    /// scaling the baseline never used.
+    #[test]
+    fn start_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            baseline_scaling: None,
+            ..avail()
+        });
+        assert!(
+            !rungs
+                .iter()
+                .any(|r| r.label == "start_point_perturbation=1e-2"),
+            "{:?}",
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+        );
+    }
+
+    /// An `Invalid_Number_Detected` reaches only the rung that moves the
+    /// point. Re-running the same callbacks at the same point under a
+    /// different linear-solver scaling or a different barrier strategy
+    /// evaluates the same non-finite quantity again, so those two rungs are
+    /// not evidence about this failure and would only burn solves.
+    #[test]
+    fn an_invalid_number_reaches_only_the_start_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::InvalidNumber,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["start_point_perturbation=1e-2"],
+        );
+    }
+
+    /// …and disabling that rung leaves an invalid-number run with no ladder at
+    /// all, rather than falling back to the two rungs that cannot help.
+    #[test]
+    fn an_invalid_number_with_the_start_rung_off_has_no_ladder() {
+        assert!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                trigger: SecondOpinionTrigger::InvalidNumber,
+                perturbed_start_retry_enabled: false,
+                ..avail()
+            })
+            .is_empty(),
+        );
+    }
+
+    /// A baseline that already displaces the start has nothing left for rung 3
+    /// to add: re-running with the same displacement reproduces the failing
+    /// solve.
+    #[test]
+    fn a_baseline_that_already_perturbs_drops_the_start_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            already_perturbed: true,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["feral_scaling=mc64", "mu_strategy=adaptive"],
+        );
+    }
+
+    /// The verdict a failed ladder keeps is the one the solve actually
+    /// shipped. Before the ladder took `Invalid_Number_Detected` as a trigger
+    /// this function hard-coded `Infeasible_Problem_Detected`, which for the
+    /// new trigger would have reported the wrong failure.
+    #[test]
+    fn a_failed_ladder_keeps_whichever_verdict_opened_it() {
+        for original in [
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            ApplicationReturnStatus::InvalidNumberDetected,
+        ] {
+            let (status, stats) = resolve_scaling_retry_outcome(
+                original,
+                ApplicationReturnStatus::MaximumIterationsExceeded,
+                stats_with_iters(7),
+                stats_with_iters(42),
+            );
+            assert_eq!(status, original);
+            assert_eq!(stats.iteration_count, 7);
+        }
     }
 
     fn stats_with_iters(n: i32) -> SolveStatistics {
@@ -4031,8 +4327,12 @@ mod scaling_retry_tests {
             ApplicationReturnStatus::RestorationFailed,
         ] {
             assert!(!scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            let (status, stats) = resolve_scaling_retry_outcome(
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                retry_status,
+                original.clone(),
+                retry.clone(),
+            );
             assert_eq!(
                 status,
                 ApplicationReturnStatus::InfeasibleProblemDetected,
@@ -4057,8 +4357,12 @@ mod scaling_retry_tests {
             ApplicationReturnStatus::SolvedToAcceptableLevel,
         ] {
             assert!(scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            let (status, stats) = resolve_scaling_retry_outcome(
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                retry_status,
+                original.clone(),
+                retry.clone(),
+            );
             assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
             assert_eq!(
                 stats.iteration_count, 42,

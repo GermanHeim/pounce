@@ -227,12 +227,18 @@ fn the_gap_models_are_never_reported_solved() {
 /// with the `.sol`).
 ///
 /// The retry is a ladder as of gh #524 (`feral_scaling=mc64`, then
-/// `mu_strategy=adaptive`), so this now covers a run that emits *three* end-of-
-/// run banners rather than two — which is strictly more of the failure mode the
-/// invariant is about. The path is detected off the ladder's own
-/// "keeping the original local-infeasibility verdict" line rather than any one
-/// rung's message, so adding or reordering rungs cannot silently turn this test
-/// into a no-op the way naming a rung would.
+/// `mu_strategy=adaptive`, then `start_point_perturbation=1e-2`), so this now
+/// covers a run that emits *four* end-of-run banners rather than two — which is
+/// strictly more of the failure mode the invariant is about. The path is
+/// detected off the ladder's own "keeping the original … verdict" line rather
+/// than any one rung's message, so adding or reordering rungs cannot silently
+/// turn this test into a no-op the way naming a rung would.
+///
+/// That line names the status it kept rather than saying "local infeasibility"
+/// in prose, because the third rung also fires on `Invalid_Number_Detected` and
+/// the old wording would have been a lie on that path. The sentinel below spells
+/// out the status this fixture reaches, so it still fails loudly — rather than
+/// passing vacuously — if the fixture stops exercising the non-promoted retry.
 ///
 /// **Known gap, stated deliberately: this is an invariant guard, not a
 /// bite-on-parent regression pin.** It asserts the right thing and it does
@@ -269,7 +275,7 @@ fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_second_opinion() {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        stderr.contains("keeping the original local-infeasibility verdict"),
+        stderr.contains("keeping the original Infeasible_Problem_Detected verdict"),
         "fixture no longer exercises the non-promoted retry path, so this test \
          proves nothing — pick a model/tol that still does:\nstderr:\n{stderr}"
     );

@@ -9,6 +9,74 @@ changes.
 
 ## [Unreleased]
 
+- **A failed solve now reports what was wrong with the starting point, and
+  tries one displaced start before believing itself.** Inspired by KRONOS
+  (Ahmed, M. G. T. & Hasan, M. M. F., *Computers & Chemical Engineering*
+  **215** (2026) 109839, doi:10.1016/j.compchemeng.2026.109839); see
+  `docs/src/acknowledgments.md` and `dev-notes/degenerate-starts.md`.
+
+  Running KRONOS's 244-problem benchmark set head-to-head turned up
+  fifteen models POUNCE failed from their bundled starting point — ten of
+  them models KRONOS proves feasible to 2.4e-7 or better, so the verdict
+  was wrong. What recovered them is the finding: `start_with_resto` 0,
+  `expect_infeasible_problem` 0, `mu_strategy=adaptive` 4, **one displaced
+  start 13**. Restoration is the textbook answer and it recovers nothing,
+  because it inherits the same degenerate point. The iterate does not need
+  to be *better*, it needs to be *non-degenerate* — at a start where the
+  constraint Jacobian is rank-deficient (a squared slack at zero, an origin
+  start on a homogeneous quadratic) LICQ fails and the filter line search
+  has no descent direction to find, whatever else it is handed.
+
+  Four changes follow from that:
+
+  - **Rung 3 of the second-opinion ladder**
+    (`infeasibility_perturbed_start_retry`, on by default): one re-solve
+    from a start displaced by a relative `1e-2`, promoted only on
+    `Solve_Succeeded` / `Solved_To_Acceptable_Level`. Like the other rungs
+    it restores every earlier knob to baseline first, so exactly one thing
+    differs from the original solve. It is the only rung that also fires on
+    `Invalid_Number_Detected`, where re-running the same evaluation with
+    different linear algebra would reproduce the NaN exactly.
+  - **`Invalid_Number_Detected` names the number.** All four such cases in
+    the corpus were correct stops reported unhelpfully. The audit covers
+    `x`, `f`, `grad f`, `g` and the Jacobian, names the index (and column),
+    and reports an infinity's sign. One corpus model ships a starting point
+    that is literally `[nan, nan, nan, nan, 0, …]`.
+  - **A local-infeasibility verdict reached from a rank-deficient point
+    says so**, and says that LICQ failing there makes the verdict as much a
+    statement about the start as about the problem. POUNCE reports
+    identically zero Jacobian rows and columns, not a rank estimate — an
+    SVD is not affordable to run speculatively — so absence of the finding
+    is not a clean bill of health. Structural absence is never reported;
+    only a column the model declared and then evaluated to zero.
+  - **`start_point_conditioner=adam`** (off by default) runs KRONOS's
+    stage-0 Adam warm-up on `f(x) + ρ‖violation(x)‖²`, generalised from
+    that paper's equality-only form to two-sided bounds so it applies to an
+    arbitrary NLP. It is an option and not a default on measurement: over
+    40 problems POUNCE already solves it broke none and cut 22 (`rk23`
+    82 → 11, `bt5` 45 → 9), median 0.83×, but the **total rose 1.62×**
+    (3030 → 4900) on `palmer1c` 71 → 1023 and `biggs6` 1906 → 2938 —
+    a fixed, unscaled ρ against a badly-scaled model. Guarded: if the
+    warm-up does not reduce the merit it hands back the original point.
+
+  New options: `infeasibility_perturbed_start_retry`,
+  `start_point_perturbation`, `start_point_perturbation_seed`,
+  `start_point_conditioner`, `adam_warmup_iters`,
+  `adam_warmup_learning_rate`, `adam_warmup_penalty`. The displacement is
+  SplitMix64-seeded and reads no clock, address or thread identity, so a
+  promoted retry is reproducible and a failed one is reportable.
+
+  The diagnosis runs on the user's own TNLP — before presolve,
+  elimination, scaling and the counting wrapper — so its indices are the
+  ones in the user's file; naming `x[3]` of a presolved model would point
+  at a neighbouring variable's answer (the gh#450 failure mode).
+
+  `scripts/sweep-fixtures.sh` against a `f6231f40` baseline is an **empty
+  diff** across both legs, 142 fixture-legs each. That is evidence rather
+  than a skipped check: 22 of those legs end `Infeasible_Problem_Detected`,
+  so rung 3 ran on all 22 and promoted none — the fixtures that assert
+  infeasibility are genuinely infeasible.
+
 - **`jacobianstructure` is optional again on the Python `Problem`, as
   cyipopt documents it** (#765). A constrained `problem_obj` that omits the
   callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and
