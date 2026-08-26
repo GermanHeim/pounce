@@ -23,6 +23,7 @@ pub mod resto_alg_builder;
 pub mod resto_inner_solver;
 pub mod resto_nlp;
 pub mod resto_resto;
+pub mod second_opinion_driver;
 pub mod r#trait;
 
 pub use r#trait::RestorationPhase;
