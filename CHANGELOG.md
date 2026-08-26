@@ -16,6 +16,251 @@ changes.
   failure/recovery, and stamped latency metrics; and demonstrates directional
   sensitivity at a degenerate control bound.  The reusable driver and CI
   regression tests exercise the same model.
+- **A failed solve now reports what was wrong with the starting point, and
+  tries one displaced start before believing itself.** Inspired by KRONOS
+  (Ahmed, M. G. T. & Hasan, M. M. F., *Computers & Chemical Engineering*
+  **215** (2026) 109839, doi:10.1016/j.compchemeng.2026.109839); see
+  `docs/src/acknowledgments.md` and `dev-notes/degenerate-starts.md`.
+
+  Running KRONOS's 244-problem benchmark set head-to-head turned up
+  fifteen models POUNCE failed from their bundled starting point — ten of
+  them models KRONOS proves feasible to 2.4e-7 or better, so the verdict
+  was wrong. What recovered them is the finding: `start_with_resto` 0,
+  `expect_infeasible_problem` 0, `mu_strategy=adaptive` 4, **one displaced
+  start 13**. Restoration is the textbook answer and it recovers nothing,
+  because it inherits the same degenerate point. The iterate does not need
+  to be *better*, it needs to be *non-degenerate* — at a start where the
+  constraint Jacobian is rank-deficient (a squared slack at zero, an origin
+  start on a homogeneous quadratic) LICQ fails and the filter line search
+  has no descent direction to find, whatever else it is handed.
+
+  Four changes follow from that:
+
+  - **Rung 3 of the second-opinion ladder**
+    (`infeasibility_perturbed_start_retry`, on by default): one re-solve
+    from a start displaced by a relative `1e-2`, promoted only on
+    `Solve_Succeeded` / `Solved_To_Acceptable_Level`. Like the other rungs
+    it restores every earlier knob to baseline first, so exactly one thing
+    differs from the original solve. It is the only rung that also fires on
+    `Invalid_Number_Detected`, where re-running the same evaluation with
+    different linear algebra would reproduce the NaN exactly.
+  - **`Invalid_Number_Detected` names the number.** All four such cases in
+    the corpus were correct stops reported unhelpfully. The audit covers
+    `x`, `f`, `grad f`, `g` and the Jacobian, names the index (and column),
+    and reports an infinity's sign. One corpus model ships a starting point
+    that is literally `[nan, nan, nan, nan, 0, …]`.
+  - **A local-infeasibility verdict reached from a rank-deficient point
+    says so**, and says that LICQ failing there makes the verdict as much a
+    statement about the start as about the problem. POUNCE reports
+    identically zero Jacobian rows and columns, not a rank estimate — an
+    SVD is not affordable to run speculatively — so absence of the finding
+    is not a clean bill of health. Structural absence is never reported;
+    only a column the model declared and then evaluated to zero. The
+    advice is gated on the verdict it explains: a presolve-certified
+    infeasibility is a statement about the model's structure that no
+    starting point bears on, and gets the non-finite audit without a
+    paragraph about LICQ.
+  - **`start_point_conditioner=adam`** (off by default) runs KRONOS's
+    stage-0 Adam warm-up on `f(x) + ρ‖violation(x)‖²`, generalised from
+    that paper's equality-only form to two-sided bounds so it applies to an
+    arbitrary NLP. It is an option and not a default on measurement: over
+    40 problems POUNCE already solves it broke none and cut 22 (`rk23`
+    82 → 11, `bt5` 45 → 9), median 0.83×, but the **total rose 1.62×**
+    (3030 → 4900) on `palmer1c` 71 → 1023 and `biggs6` 1906 → 2938 —
+    a fixed, unscaled ρ against a badly-scaled model. Guarded: if the
+    warm-up does not reduce the merit it hands back the original point —
+    the *sanitised* one, since a non-finite component is replaced before
+    the warm-up runs and handing the raw `NaN` back on the revert path
+    would undo the only thing that had helped
+    (`a_sanitised_start_survives_a_warm_up_that_does_not_help`). Which
+    bounds count as infinite is read from the application's own
+    `nlp_lower_bound_inf` / `nlp_upper_bound_inf`, so a model that narrows
+    them is not silently widened back to POUNCE's default. And the
+    conditioned point is computed once per incoming start and cached: the
+    warm-start path asks for the starting point a second time
+    (`fetch_warm_start_snapshot`), so `warm_start_init_point=yes` was paying
+    for two complete Adam warm-ups and using one. The cache is keyed on the
+    raw point rather than on "have I run yet", because a `Problem` can be
+    re-solved from a start the caller has since changed.
+
+  New options: `infeasibility_perturbed_start_retry`,
+  `start_point_perturbation`, `start_point_perturbation_seed`,
+  `start_point_conditioner`, `adam_warmup_iters`,
+  `adam_warmup_learning_rate`, `adam_warmup_penalty`. The displacement is
+  SplitMix64-seeded and reads no clock, address or thread identity, so a
+  promoted retry is reproducible and a failed one is reportable.
+
+  The diagnosis runs on the user's own TNLP — before presolve,
+  elimination, scaling and the counting wrapper — so its indices are the
+  ones in the user's file; naming `x[3]` of a presolved model would point
+  at a neighbouring variable's answer (the gh#450 failure mode).
+
+  Re-run end-to-end against the built branch, the same 244 problems from
+  the same starting points go from **223 solved / 189 at the global
+  optimum to 239 / 199** — ahead of KRONOS's 225 / 175 — for 34 extra
+  solves and **+2.0 s** across the whole corpus, spent only on runs that
+  had already failed. Twelve of the sixteen recoveries are rung 3's, and
+  every promoted answer is feasible to 1.0e-8 or better. The fifteen
+  losses are down to three (`a10_perm`, `a29_rump`, `hong`).
+
+  `scripts/sweep-fixtures.sh` against a `f6231f40` baseline is an **empty
+  diff** across both legs, 142 fixture-legs each. That is evidence rather
+  than a skipped check: 22 of those legs end `Infeasible_Problem_Detected`,
+  so rung 3 ran on all 22 and promoted none — the fixtures that assert
+  infeasibility are genuinely infeasible.
+
+  On the *existing* benchmark corpus, which is not degenerate, the new rung
+  costs **+0.28 s of 16.14 s (+1.8 %) across the six re-measurable models
+  that reach it, with no promotions and no verdict changed** — every one of
+  those six was already failing, and the whole delta disappears under
+  `infeasibility_perturbed_start_retry=no`. Two of the six never reach the
+  ladder at all: `model8` is presolve-certified infeasible, and `iprob`
+  routes to the convex LP interior point, which never enters
+  `optimize_tnlp` where the ladder lives — the ladder is an NLP-arm
+  feature. The seventh candidate, `gaslib40_dynamic`, could not be
+  regenerated (its generator's `gas_net` editable install is dangling), so
+  it is unmeasured. Table in `dev-notes/degenerate-starts.md`.
+
+- **A second opinion that is not promoted no longer replaces the solution
+  it rejected.** Each rung of the ladder is a full `optimize_tnlp` through
+  the same TNLP, so each one overwrote the captured `(x, lambda)`.
+  `resolve_scaling_retry_outcome` restored `status` and the statistics when
+  nothing promoted, but never had a handle on the solution vectors — so the
+  `.sol` shipped the original verdict over the *last non-promoted rung's*
+  iterate, a point the solver had just decided not to believe. The status
+  line was identical either way, so nothing downstream that checks status
+  could see it. Found while measuring the benchmark models above:
+  `cresc100`, `discs` and `launch` reproduce it on the pre-branch binary
+  for rungs 1–2, and rung 3 extended it to the `Invalid_Number_Detected`
+  class (`himmelbj`). Both captures are now snapshotted before the ladder
+  and restored when no rung promotes; on promotion the promoted rung's
+  capture is kept. Pinned, and mutation-checked against the pre-fix binary,
+  by `a_non_promoted_second_opinion_does_not_replace_the_solution_it_rejected`.
+
+  Now fixed one level lower, and so for every caller rather than the CLI
+  only: the ladder solves through a `SecondOpinionTnlp` decorator that
+  forwards `finalize_solution` only for a solve that converged. Since the
+  ladder stops at the first promotion, at most one rung ever reaches the
+  caller's TNLP and it is by construction the winner. That closes the leak
+  in solution state this crate cannot reach — `PyTnlp`'s `final_x`, the C
+  interface's `LastSolve` — where a per-caller snapshot could not.
+
+- **The second-opinion ladder is no longer a CLI feature.** It now runs, on
+  by default and honouring the same three `*_retry` options, from the
+  Python `Problem.solve`, the C `IpoptSolve`, and the `pounce-rs` builder
+  as well as the CLI. The asymmetry was backwards: a caller reaching POUNCE
+  from a modelling layer is the one most likely to hand over an
+  uninitialized starting point, an uninitialized decision variable arrives
+  as a zero, and the origin is exactly where a squared slack or a
+  homogeneous quadratic loses rank — the failure the ladder's third rung
+  exists for. The KRONOS measurement that motivated rung 3 had to
+  re-implement the ladder in Python, option for option, to score the corpus
+  against what a CLI user actually received. That reimplementation is now
+  redundant, and measurably so: run through a plain `Problem.solve` with no
+  ladder code in the harness at all, the corpus comes back **identical
+  problem for problem** — same status, same global-optimum verdict, the same
+  34 rungs spent and the same rung promoting each of the sixteen recoveries,
+  zero differences over 243 problems (238 solved / 198 global on that
+  subset). The 244th, `lch`, has no library-leg result to compare: the
+  harness's 300 s per-problem cap expires inside its 221 s *Python model
+  construction*, before any solve. Its CLI-leg result stands, which is what
+  makes the full-corpus figures above 239 / 199 rather than 238 / 198.
+
+  The policy — which rungs a failure opens, what each changes, how the
+  outcome resolves — moved verbatim to
+  `pounce_algorithm::second_opinion`, with its tests. The driver is
+  `pounce_restoration::second_opinion_driver::run_second_opinion_ladder`,
+  one crate further out because each rung has to rebuild the restoration
+  sub-IPM's factory provider and that provider is defined there. `pounce-rs`
+  gains `pounce-restoration` as its one new default dependency.
+
+  Two things the inlined CLI version did not have to get right, and a
+  library one does. **Options are restored**: each rung writes
+  `feral_scaling`, `mu_strategy` and `start_point_perturbation` into the
+  live options list, which the CLI could leave there because the process
+  was about to exit — a `Problem` that is solved twice cannot, or the
+  second solve silently inherits rung 3's displaced start. They are
+  restored to *set-ness*, not to a value, because writing back a resolved
+  `feral_scaling=auto` that an env-configured run never set would override
+  `POUNCE_FERAL_SCALING` on every later solve. And **narration does not go
+  to stderr** for the Rust and Python callers: Python collects it into
+  `info["second_opinion"]["log"]` alongside `tried` and `promoted_by`
+  (`None` when the ladder never ran, which is the overwhelmingly common
+  path), and `pounce-rs` returns the same three fields on
+  `Solution::second_opinion`. On the two surfaces that *do* print — the CLI
+  and the C interface — the narration is gated on `print_level >= 1`
+  through one shared predicate
+  (`pounce_algorithm::second_opinion::narration_is_wanted`, not a branch
+  copied into each). `print_level=0 sb=yes` is the documented way to ask
+  Ipopt for a quiet solve, and the eight-to-ten unexpected `pounce:` lines
+  a failing one produced is what that asks not to happen. The ladder still runs; only
+  the console is quiet.
+
+  The ladder's decorator forwards `is_presolve_wrapper` and
+  `scaling_factors` to the TNLP underneath rather than falling through to
+  the trait defaults. The defaults answer `false` / `None` — "there is no
+  presolve wrapper and no scaling below me" — which is a claim a
+  transparent decorator is in no position to make, and it is read: the
+  answer decides whether a caller above sees the model in its own units.
+
+  **What it costs.** On a converged solve, nothing: the ladder reads the
+  status and returns before any work. On a failing solve it is one extra
+  solve per rung, and that is the whole cost — measured through
+  `Problem.solve` on a small model that fails and is not recovered, 30
+  solves averaged over four repeats, **5.5 ms → 21.4 ms (3.9×)**, which is
+  the three rungs and no overhead beyond them. An independent measurement
+  on a different failing model came back 14.5 ms → 61.5 ms (4.2×) — the
+  absolute numbers are the model's, the ~4× is the ladder's. A model that recovers
+  pays less (the ladder stops at the first promotion) and buys an answer it
+  did not have. The three `*_retry` options —
+  `feral_infeasibility_scaling_retry`, `infeasibility_mu_strategy_retry`,
+  `infeasibility_perturbed_start_retry` — each turn one rung off, and all
+  three off restores the previous behaviour exactly on every surface.
+
+  The multi-start paths — `solve_nlp_batch` and the CLI's `minima` global
+  search — deliberately do **not** run it. A failed start is routine in a
+  multi-start search, and up to three extra solves per failed start
+  multiplies the cost of a search for no benefit. Neither does
+  `Problem.solve_with_sens`: a sensitivity result is about a *particular*
+  solution, built from the factorization the solve ended on, and rung 3
+  displaces the caller's starting point — laddering there would answer a
+  different question quietly. It sets `info["second_opinion"]` to `None`
+  rather than omitting the key, so `info` keeps the same shape as
+  `solve`'s. The three exclusions are named in
+  `docs/src/troubleshooting.md`, with the composition that gets you both:
+  `solve` first, then feed its `x` back as `x0` to `solve_with_sens`.
+
+  `scripts/sweep-fixtures.sh` across the move is an **empty diff**, both
+  legs, 142 fixture-legs each: the CLI's trajectory is unchanged.
+
+- **Each rung of the ladder now really does start from the baseline — it
+  did not, and rung 3 was quietly switching off POUNCE's own stall retry.**
+  The ladder's contract is that a rung varies exactly one knob from the
+  original solve, never two stacked; gh#524's `cresc4` is the case where
+  stacking rungs 1 and 2 threw the fix away. That was implemented by having
+  each later rung write the earlier rungs' knobs back to their *resolved*
+  values — `mu_strategy monotone`, `feral_scaling` as `auto` had picked it
+  — which is a no-op by value and not by set-ness. Things branch on
+  set-ness: `is_mu_strategy_fallback_enabled` is default-on exactly while
+  `mu_strategy` is unset, so rung 3 handing back a resolved `mu_strategy
+  monotone` disabled `run_with_mu_strategy_fallback`, the
+  `Maximum_Iterations_Exceeded` stall retry — on the solve most likely to
+  need it. Mutation-checked on KRONOS's `a18_ackley1`, which is
+  `Solve_Succeeded` in 237 iterations with the fix and
+  `Maximum_Iterations_Exceeded` at 3000 without it.
+
+  This is a pre-existing defect, inherited verbatim from the CLI's inlined
+  ladder rather than introduced by the move — it simply could not be *seen*
+  while every rung ran in a process that was about to exit. The rung table
+  no longer emits write-backs at all
+  (`no_rung_writes_back_a_knob_it_does_not_vary` asserts each assignment's
+  tag equals its own rung's label); the driver re-applies the baseline
+  `OptionSnapshot` before each rung instead, which restores set-ness and so
+  reconstructs the caller's real starting options.
+  `each_rung_starts_from_the_baseline` pins the resulting per-rung
+  set-ness. `scripts/sweep-fixtures.sh` across the fix is an empty diff,
+  both legs.
+
 - **`jacobianstructure` is optional again on the Python `Problem`, as
   cyipopt documents it** (#765). A constrained `problem_obj` that omits the
   callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and
@@ -86,6 +331,73 @@ changes.
   It is an added field, which the schema documents as non-breaking, so
   `pounce.solve-report/v1` is unchanged; reports written by pounce ≤ 0.10.0
   do not carry it.
+- **The convex arm now escalates the primal `(x,x)` regularization when the
+  factorization reports wrong inertia**, which is what Ipopt's Algorithm IC
+  does and what POUNCE was missing. LP+QP corpus (509 problems, no NLP
+  fallback): **1261.3 s -> 605.7 s (-52.0%), 4 verdicts gained, 0 lost, 0
+  objective moves above 1e-6 relative.** `gen` and `gen1` go from 174 s at the
+  199-iteration cap (`Solved to acceptable level`) to 2.8 s in 18 iterations
+  (`Optimal`); `df2177` from 78 s at the cap to 0.66 s in 9; `dsbmip` from the
+  cap to `Optimal`.
+
+  `KktStructure::build` wrote `P + reg*I` into the `(x,x)` block once and
+  nothing ever rewrote it — `update_blocks` touches only the cone blocks,
+  `update_eq_reg` only the `y` diagonal. For an LP `P = 0`, so that block *is*
+  the regularization, frozen at the 1e-10 static default for the life of the
+  solve. Against a Jacobian with entries O(1) that leaves the x-pivots on the
+  roundoff floor and LDL^T loses their signs. The driver read the result back
+  as a wrong-inertia deficit and escalated `delta_c` and the `(z,z)`
+  regularization — neither of which can repair a defect living in `(x,x)` — so
+  it refactored, saw the same deficit, and escalated again until the try budget
+  was gone. On `gen`: 4.19 refactorizations per iteration, a mean first-try
+  deficit of 134.8 eigenvalues, 376 of 400 iterations starting wrong. Pinning
+  `(x,x)` alone at 1e-6 takes that solve from 176.04 s to 1.69 s; moving only
+  `delta_c` and `(z,z)` gets 113.02 s.
+
+  Escalated, not raised statically. A static 1e-6 fixes `gen` and looks
+  spectacular in isolation, but costs 48 verdicts across the corpus and shifts
+  `pilot.we`'s objective by 12% while still certifying `Optimal` — the
+  regularized problem is a different problem. And `delta_w` is staged *ahead
+  of* `delta_c`/`(z,z)` rather than raised alongside them: bumping all three
+  together drags `delta_c` up on iterates that never needed it, which is the
+  #218 ratchet (`delta_c*||dy||` biases the equality residual and floors
+  `pres` permanently) and cost `cq5` and `maros` their `Optimal` verdict in a
+  first draft. Problems without the defect pay nothing — `pilot.we`, `forplan`,
+  `greenbea` and `pilot87` return bit-identical objectives.
+
+  `scripts/sweep-fixtures.sh` moves exactly one line, identically on both legs:
+  `lp_degen2`, the corpus's one degenerate LP on this arm, 20 -> 18 iterations
+  with the objective agreeing to 10 significant figures (-1435.178018 ->
+  -1435.178017, relative 2.1e-10). It crosses the termination threshold two
+  iterations earlier rather than settling to a worse point; both exits are
+  `Optimal`. The ~20 other LP/QP/QCQP fixtures on the same arm are
+  byte-identical.
+
+- **The gh #293 equilibrated retry is capped at half the budget for a pure LP
+  whose first solve merely failed to converge.** The retry re-solves with Ruiz
+  equilibration and re-runs the full `max_iter`; for an LP that is almost
+  always wasted, since every accepted LP retry in the corpus converged by
+  iteration 78 while every one that ran to the 199-iteration cap was
+  discarded.
+
+  Two gates, both load-bearing. `P = 0`, because equilibration exists to
+  surface curvature the NT scaling cannot see and a QP retry genuinely needs
+  the room — `QSCFXM1/2/3` and `Q25FV47` are accepted at 131-168 iterations and
+  a flat cap would demote four clean `Optimal` results. And
+  `IterationLimit | OptimalInaccurate` rather than `NumericalFailure`, because a
+  `NumericalFailure` first solve accepts a retry on status alone, so a cap
+  there could *manufacture* an `IterationLimit` and have it accepted —
+  reporting "Maximum iterations exceeded" where the honest answer is "Numerical
+  failure". `issue_535_lp_falls_back_to_nlp` pins that.
+
+  Measured on its own against the previous behaviour this was worth 124.6 s,
+  concentrated in `gen` -47.9, `gen1` -47.5, `df2177` -19.8, `complex` -9.6.
+  **Stacked on the `(x,x)` regularization fix above it is worth -0.4 s (-0.1%),
+  which is the noise floor**: `gen`, `gen1` and `df2177` now converge on the
+  first solve and never reach the retry at all. What survives is `complex`
+  -9.2 s and `pilot.ja` -1.1 s, the two LPs that still hit the cap on the first
+  solve and still pay for a rejected retry. It is kept for those and for the
+  correctness of the two gates, not for the original headline number.
 
 - **The default-on `mu_strategy_fallback` retry now takes
   `Solved_To_Acceptable_Level`, when the caller left the convergence

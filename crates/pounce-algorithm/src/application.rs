@@ -783,6 +783,99 @@ impl IpoptApplication {
         self.variable_scaling.borrow().clone()
     }
 
+    /// Install a starting-point conditioner, if one is asked for.
+    ///
+    /// Returns the TNLP unchanged when neither `start_point_perturbation` nor
+    /// `start_point_conditioner` is set, which is the default — so an ordinary
+    /// solve pays nothing and its trajectory is untouched.
+    ///
+    /// Sits *above* the presolve wrapper and *below* the variable-scaling one,
+    /// so the point it conditions is the point the algorithm will actually
+    /// start from, in the coordinates the algorithm will see. Both
+    /// conditioners override only `get_starting_point`; every other callback
+    /// forwards, so the solve that follows is the solve pounce would have run
+    /// had the conditioned point been submitted directly.
+    ///
+    /// The two are mutually exclusive by construction rather than by refusal:
+    /// the displacement is the failure-recovery rung and the Adam warm-up is a
+    /// user opt-in, and stacking them would put random noise on top of a point
+    /// the warm-up just spent 200 evaluations choosing. The displacement wins
+    /// when both are set, because the only thing that sets it is a solve that
+    /// has already failed.
+    fn install_start_conditioner(&self, tnlp: Rc<RefCell<dyn TNLP>>) -> Rc<RefCell<dyn TNLP>> {
+        use pounce_nlp::start_conditioner::{AdamConfig, ConditionedStartTnlp, StartConditioner};
+        // Each option is read with its literal tag rather than through a
+        // `|name, fallback|` helper. A helper reads better and costs the
+        // wiring guard in `tests/init_options_wiring.rs` its evidence: that
+        // test scans the source for `get_*_value("<tag>"` to prove every
+        // registered Initialization option is actually consumed, and a tag
+        // passed as a variable is invisible to it. A registered knob nothing
+        // reads validates, accepts a value, and lies.
+        let perturbation = self
+            .options
+            .get_numeric_value("start_point_perturbation", "")
+            .map(|(v, _found)| v)
+            .unwrap_or(0.0);
+        let conditioner = if perturbation > 0.0 {
+            let seed = self
+                .options
+                .get_integer_value("start_point_perturbation_seed", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(0);
+            StartConditioner::Jitter {
+                // `Index` is signed and the option is lower-bounded at 0, so
+                // this cast cannot lose a set bit for any accepted value.
+                seed: seed.max(0) as u64,
+                scale: perturbation,
+            }
+        } else {
+            let which = self
+                .options
+                .get_string_value("start_point_conditioner", "")
+                .map(|(v, _found)| v)
+                .unwrap_or_else(|_| "none".to_string());
+            if which != "adam" {
+                return tnlp;
+            }
+            let d = AdamConfig::default();
+            StartConditioner::Adam(AdamConfig {
+                iters: self
+                    .options
+                    .get_integer_value("adam_warmup_iters", "")
+                    .map(|(v, _found)| v.max(0) as usize)
+                    .unwrap_or(d.iters),
+                lr: self
+                    .options
+                    .get_numeric_value("adam_warmup_learning_rate", "")
+                    .map(|(v, _found)| v)
+                    .unwrap_or(d.lr),
+                rho: self
+                    .options
+                    .get_numeric_value("adam_warmup_penalty", "")
+                    .map(|(v, _found)| v)
+                    .unwrap_or(d.rho),
+                ..d
+            })
+        };
+        // The sentinels have to come from the options, not from the
+        // conditioner's own default: a caller who moved `nlp_lower_bound_inf`
+        // would otherwise have a bound the algorithm treats as absent clipped
+        // against as if it were real.
+        //
+        // Passed through unclamped. These were once `lower.min(-DEFAULT)` /
+        // `upper.max(DEFAULT)`, which honours only a *loosened* sentinel and
+        // leaves the failure above intact for a tightened one: at
+        // `nlp_lower_bound_inf=-1e10` the conditioner still used `-1e19`, so a
+        // `-1e15` bound was absent to the algorithm and present to the
+        // clipper — the exact case the comment exists to rule out. The
+        // sentinel means "absent"; there is only one right answer for what it
+        // is, and it is the caller's.
+        let lower = self.nlp_lower_bound_inf();
+        let upper = self.nlp_upper_bound_inf();
+        let wrapped = ConditionedStartTnlp::new(tnlp, conditioner).with_bound_inf(lower, upper);
+        Rc::new(RefCell::new(wrapped))
+    }
+
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
@@ -802,6 +895,12 @@ impl IpoptApplication {
                 return ApplicationReturnStatus::InvalidOption;
             }
         };
+
+        // Starting-point conditioning (`start_point_perturbation`,
+        // `start_point_conditioner`). A no-op unless one is set, and set by
+        // nothing automatic except the local-infeasibility ladder's third
+        // rung, which only runs after a solve has already failed.
+        let tnlp = self.install_start_conditioner(tnlp);
 
         if let Some(value) = self.unsupported_library_solver_selection() {
             use pounce_common::journalist::JournalCategory;

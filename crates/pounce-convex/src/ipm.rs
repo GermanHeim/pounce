@@ -463,7 +463,51 @@ where
         if crate::deadline::expired() {
             return mark_timed_out(sol);
         }
-        let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, &mut make_backend);
+        // Budget the retry on a *pure LP*, where its premise does not apply.
+        //
+        // Everything above justifies this retry by Hessian curvature that NT
+        // scaling cannot see: `P = diag(1e-12)` with the optimum at `‖x*‖ ~
+        // 1e12`, where Ruiz lifts `P̂` to O(1) and the same driver then
+        // converges. That is a QP story. A pure LP has `P = 0` — there is no
+        // curvature term for equilibration to surface — so an LP retry is only
+        // ever fixing row/column scaling, and when that works, it works fast.
+        //
+        // Measured over the LP, QP and lpopt corpora (513 problems, 24 retries):
+        // every *accepted* LP retry converged by iteration 78 (24, 30, 32, 32,
+        // 33, 34, 34, 34, 46, 78), while every LP retry that ran to the cap was
+        // discarded — `gen`, `gen1`, `complex`, `df2177`, `dsbmip`, `pilot.ja`,
+        // `de063155`, `irish-electricity`, all 199 iterations, all rejected, all
+        // paying a second full budget to learn nothing. `gen` and `gen1` alone
+        // are 347 s of that corpus and end up on the NLP arm regardless, which
+        // solves them in ~1 s. The `P = 0` gate is why this is not applied
+        // globally: `QSCFXM1/2/3` and `Q25FV47` are accepted at 131–168
+        // iterations, and a flat cap would demote four clean `Optimal` results.
+        //
+        // Half the first solve's budget clears the longest observed LP success
+        // by 22 iterations and scales with a user-set `max_iter`. If an unseen
+        // LP needs more, the failure mode is soft: the retry is rejected, the
+        // first solve's honest non-converged status stands, and under
+        // `solver_selection=auto` gh #535 routes it to the NLP arm — where
+        // these LPs were already going.
+        //
+        // Gated to the two statuses whose acceptance below demands a *certified*
+        // `Optimal`. That restriction is load-bearing, not tidiness: a
+        // first-solve `NumericalFailure` accepts any non-failing retry status as
+        // an improvement on a breakdown, so capping the budget there lets the
+        // cap *manufacture* an `IterationLimit` and have it accepted — reporting
+        // "Maximum iterations exceeded", with the capped retry's iterate, where
+        // the honest answer is "Numerical failure". `lp_afiro` at `qp_tau=0.99`
+        // does exactly this; `issue_535_lp_falls_back_to_nlp` pins it. Under
+        // `IterationLimit`/`OptimalInaccurate` a capped retry can only fail to
+        // certify and be discarded — which is the outcome the cap wants sooner.
+        let mut retry_opts = opts.clone();
+        retry_opts.max_iter = equilibrated_retry_budget(prob, sol.status, opts.max_iter);
+        let retry = equilibrated_solve(
+            prob,
+            &retry_opts,
+            /* use_hsde */ true,
+            &mut make_backend,
+        );
         // An `Optimal` from this retry has to earn the same way the one in
         // [`verify_or_repair_optimum`] does (gh #712). This retry runs *inside*
         // the equilibrated metric, so its own absolute convergence test is
@@ -578,6 +622,23 @@ where
         return sol;
     }
     sol
+}
+
+/// Iteration budget for the gh #293 equilibrated retry — `max_iter` in
+/// general, half that for a pure LP whose first solve merely failed to
+/// converge. See the call site in [`solve_qp_ipm_core`] for the full rationale
+/// and the corpus measurements behind the halving.
+fn equilibrated_retry_budget(prob: &QpProblem, first: QpStatus, max_iter: usize) -> usize {
+    let is_lp = prob.p_lower.iter().all(|t| t.val == 0.0);
+    let certify_or_reject = matches!(
+        first,
+        QpStatus::IterationLimit | QpStatus::OptimalInaccurate
+    );
+    if is_lp && certify_or_reject {
+        max_iter / 2
+    } else {
+        max_iter
+    }
 }
 
 /// Run an equilibrated solve: Ruiz-scale `prob`, solve the scaled problem with
@@ -3518,6 +3579,19 @@ pub(crate) struct KktStructure {
     /// converge below `tol` instead of flooring the primal residual at
     /// `δ·‖dy‖`. Empty when there are no equality rows.
     y_diag_pos: Vec<usize>,
+    /// Value-array positions of the `(x, x)` diagonal, one per column, and
+    /// the `P` diagonal that sits under the regularization. Seeded with
+    /// `P + reg` in [`Self::build`] and overwritten each iteration with
+    /// `P + δ_w` by [`Self::update_primal_reg`].
+    ///
+    /// For an LP `P = 0`, so this block *is* the regularization: at the
+    /// 1e-10 static default the x-pivots sit at the roundoff floor and LDLᵀ
+    /// loses their signs, which reads out as a wrong-inertia deficit that no
+    /// amount of `δ_c` / `(z, z)` escalation can repair — those bumps are on
+    /// the wrong blocks. Ipopt's Algorithm IC escalates exactly this δ_w for
+    /// wrong inertia; `δ_c` answers a rank-deficient equality Jacobian.
+    x_diag_pos: Vec<usize>,
+    x_diag_base: Vec<f64>,
 }
 
 impl KktStructure {
@@ -3536,9 +3610,15 @@ impl KktStructure {
             *entries.entry((r, c)).or_insert(0.0) += v;
         };
 
-        // (x,x): P + δI.
+        // (x,x): P + δ_w I. The P diagonal is captured before the
+        // regularization is folded in so `update_primal_reg` can rewrite δ_w
+        // each iteration without losing P.
+        let mut x_diag_base = vec![0.0f64; n];
         for t in &prob.p_lower {
             add(t.row, t.col, t.val);
+            if t.row == t.col {
+                x_diag_base[t.row] += t.val;
+            }
         }
         for i in 0..n {
             add(i, i, reg);
@@ -3644,6 +3724,7 @@ impl KktStructure {
         // per-iteration adaptive regularization. Built unconditionally; the
         // `-reg` seed is already in `values` from the loop above.
         let y_diag_pos: Vec<usize> = (0..m_eq).map(|i| coord_to_pos[&(n + i, n + i)]).collect();
+        let x_diag_pos: Vec<usize> = (0..n).map(|i| coord_to_pos[&(i, i)]).collect();
 
         KktStructure {
             airn,
@@ -3652,6 +3733,8 @@ impl KktStructure {
             dim,
             z_blocks,
             y_diag_pos,
+            x_diag_pos,
+            x_diag_base,
         }
     }
 
@@ -3717,6 +3800,15 @@ impl KktStructure {
     pub(crate) fn update_eq_reg(&self, delta_c: f64, out: &mut [Number]) {
         for &p in &self.y_diag_pos {
             out[p] = -delta_c;
+        }
+    }
+
+    /// Overwrite the `(x, x)` diagonal with `P + δ_w` for the current primal
+    /// regularization. Call once per iteration, on the same `out` buffer as
+    /// [`Self::update_blocks`] / [`Self::update_eq_reg`].
+    pub(crate) fn update_primal_reg(&self, delta_w: f64, out: &mut [Number]) {
+        for (&p, &base) in self.x_diag_pos.iter().zip(&self.x_diag_base) {
+            out[p] = base + delta_w;
         }
     }
 }
@@ -4806,6 +4898,80 @@ mod objective_constant_metric_tests {
         assert!(slack_is_resolvable(1e-3, 1.0));
         // An exact zero never counts, at any magnitude.
         assert!(!slack_is_resolvable(0.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+/// gh #293 retry budget. The halving is gated on two conditions and both
+/// are load-bearing, so both are pinned here rather than left to the corpus.
+mod equilibrated_retry_budget_tests {
+    use super::equilibrated_retry_budget;
+    use crate::qp::{QpProblem, QpStatus, Triplet};
+
+    fn lp() -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![1.0],
+        }
+    }
+
+    fn qp() -> QpProblem {
+        QpProblem {
+            p_lower: vec![Triplet::new(0, 0, 2.0)],
+            ..lp()
+        }
+    }
+
+    /// An LP retry that has not converged is only ever accepted as a
+    /// certified `Optimal`, so half a budget is all it can usefully spend.
+    #[test]
+    fn a_stalled_lp_retry_gets_half_the_budget() {
+        for first in [QpStatus::IterationLimit, QpStatus::OptimalInaccurate] {
+            assert_eq!(equilibrated_retry_budget(&lp(), first, 200), 100);
+        }
+    }
+
+    /// The retry exists for Hessian curvature that NT scaling cannot see,
+    /// which a QP can legitimately spend most of a budget recovering from —
+    /// `QSCFXM1/2/3` and `Q25FV47` are accepted at 131–168 iterations, and a
+    /// blanket cap would demote all four to `OptimalInaccurate`.
+    #[test]
+    fn a_qp_retry_keeps_the_full_budget() {
+        for first in [QpStatus::IterationLimit, QpStatus::OptimalInaccurate] {
+            assert_eq!(equilibrated_retry_budget(&qp(), first, 200), 200);
+        }
+    }
+
+    /// A `NumericalFailure` first solve accepts *any* non-failing retry
+    /// status as an improvement on a breakdown. Capping the budget there
+    /// would let the cap manufacture an `IterationLimit` and have it
+    /// accepted — returning the capped iterate and reporting "Maximum
+    /// iterations exceeded" where the honest answer is "Numerical failure".
+    /// `issue_535_lp_falls_back_to_nlp` catches the end-to-end symptom on
+    /// `lp_afiro` at `qp_tau=0.99`; this pins the cause.
+    #[test]
+    fn a_broken_down_lp_retry_keeps_the_full_budget() {
+        assert_eq!(
+            equilibrated_retry_budget(&lp(), QpStatus::NumericalFailure, 200),
+            200
+        );
+    }
+
+    /// The budget is a fraction of the caller's, not a constant, so a
+    /// user-set `max_iter` carries through instead of being overridden.
+    #[test]
+    fn the_budget_scales_with_a_user_set_max_iter() {
+        assert_eq!(
+            equilibrated_retry_budget(&lp(), QpStatus::IterationLimit, 40),
+            20
+        );
     }
 }
 
