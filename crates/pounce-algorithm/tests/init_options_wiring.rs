@@ -41,6 +41,36 @@ const COLD_START_OPTIONS: &[&str] = &[
     "least_square_init_primal",
 ];
 
+/// The starting-point conditioning options, which register under the
+/// same upstream category. They are not cold-start defaults — nothing
+/// reads them unless a user or the local-infeasibility ladder's third
+/// rung sets one — but they are Initialization options and the exact
+/// count below has to know about them.
+const START_CONDITIONING_OPTIONS: &[&str] = &[
+    "infeasibility_perturbed_start_retry",
+    "start_point_perturbation",
+    "start_point_perturbation_seed",
+    "start_point_conditioner",
+    "adam_warmup_iters",
+    "adam_warmup_learning_rate",
+    "adam_warmup_penalty",
+];
+
+#[test]
+fn every_start_conditioning_option_is_registered() {
+    let app = IpoptApplication::new();
+    let reg = app.registered_options();
+    for name in START_CONDITIONING_OPTIONS {
+        let opt = reg
+            .get_option(name)
+            .unwrap_or_else(|| panic!("`{name}` is read but not registered"));
+        assert_eq!(
+            opt.category, "Initialization",
+            "`{name}` should register under upstream's Initialization category"
+        );
+    }
+}
+
 #[test]
 fn every_cold_start_option_is_registered() {
     let app = IpoptApplication::new();
@@ -426,7 +456,10 @@ fn every_registered_initialization_option_is_consumed_or_refused() {
         .count();
     assert_eq!(
         n,
-        COLD_START_OPTIONS.len() + 1,
-        "expected the eight cold-start options plus least_square_init_duals"
+        COLD_START_OPTIONS.len() + START_CONDITIONING_OPTIONS.len() + 1,
+        "expected the eight cold-start options, the seven starting-point \
+         conditioning options, and least_square_init_duals — if you added \
+         an Initialization option, add it to one of those lists so this \
+         count keeps meaning something"
     );
 }

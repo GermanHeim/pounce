@@ -15,6 +15,13 @@ pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-observability.workspace = true
+# The second-opinion ladder's driver (`solve()` runs it on a failing verdict,
+# as the CLI and the Python / C frontends do). It lives in pounce-restoration
+# rather than pounce-algorithm because each rung has to rebuild the
+# restoration sub-IPM's factory provider, and that provider is defined there.
+# This is the one crate the lean default build gains over the pre-ladder
+# facade.
+pounce-restoration.workspace = true
 
 # Feature-gated facets (gh #561). Every one of these is already in the
 # dependency graph of the default build — pounce-algorithm pulls

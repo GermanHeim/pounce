@@ -45,6 +45,7 @@ pub mod line_search;
 pub mod mu;
 pub mod output;
 pub mod restoration;
+pub mod second_opinion;
 pub mod sqp;
 pub mod strategy;
 pub mod timing_stats;
