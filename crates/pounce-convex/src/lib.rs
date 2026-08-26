@@ -20,6 +20,12 @@
 //! Entry points:
 //! - [`solve_qp_ipm`] — solve a [`qp::QpProblem`] (covers LP via an empty
 //!   `P`).
+//! - [`solve_qp_active_set`] — the same problem class through the
+//!   [`pounce_qp`] parametric active-set engine.
+//! - [`ActiveSetSession`] — a *persistent* handle over that driver, for a
+//!   family of QPs rather than one: it owns the convex → `pounce-qp`
+//!   translation ([`ActiveSetQp`]) and the presolve/postsolve wrapper, and
+//!   reuses the previous solve parametrically when that is valid (gh #769).
 //! - [`certify_psd_lower_triangle`] — conservatively certify a sparse
 //!   symmetric matrix from a caller-supplied inertia-reporting backend;
 //!   malformed input is returned as [`PsdCertificateError`].
@@ -27,6 +33,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod active_set;
+pub mod active_set_session;
 pub(crate) mod aggregate;
 pub mod batch;
 pub mod cones;
@@ -46,7 +53,11 @@ pub mod sensitivity;
 pub(crate) mod simplex;
 pub mod sos;
 
-pub use active_set::solve_qp_active_set;
+pub use active_set::{
+    ActiveSetQp, back_translate, back_translate_verified, engine_options, solve_qp_active_set,
+    verify_status,
+};
+pub use active_set_session::{ActiveSetSession, PresolveNote, Reuse, SessionStats};
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,
@@ -62,7 +73,10 @@ pub use options::ConvexPresolveOptions;
 // unchanged for callers who reach it through this crate.
 pub use pounce_qp::ActiveSetOverrides;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
-pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
+pub use qp::{
+    BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,
+    screen_variable_box,
+};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};
 pub use sos::{
     PolyProblem, Polynomial, SosBound, SosSolution, sos_constrained_lower_bound,

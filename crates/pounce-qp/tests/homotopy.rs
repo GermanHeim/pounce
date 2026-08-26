@@ -18,7 +18,8 @@
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_qp::{
-    HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolver, QpStatus,
+    HessianInertia, ParametricActiveSetSolver, ParametricSource, QpOptions, QpProblem, QpSolution,
+    QpSolver, QpStats, QpStatus, WorkingSet,
 };
 use std::rc::Rc;
 
@@ -388,6 +389,12 @@ fn ineligible_parametric_reuses_the_working_set() {
         .expect("cold solve");
 
     assert_eq!(warm.status, QpStatus::Optimal, "declined parametric status");
+    assert_eq!(
+        warm.stats.parametric_source,
+        Some(ParametricSource::WorkingSet),
+        "a declined path must say so: reporting this as the homotopy is what \
+         made a caller's reuse counter unfalsifiable (gh #769)"
+    );
     for i in 0..case.n {
         assert!(
             (warm.x[i] - cold.x[i]).abs() < 1e-7,
@@ -805,4 +812,106 @@ fn fully_bound_active_start_agrees_with_conventional() {
             x_c[j]
         );
     }
+}
+
+/// `solve_parametric` has three exits and only one of them is the homotopy.
+/// Each must name itself.
+///
+/// Without this the three are indistinguishable in the returned solution — all
+/// `Ok`, all conclusive, all carrying the same fields — so a driver counting
+/// warm hits counts declines and cold solves among them, and "is the warm path
+/// engaging?" has no answer that can be checked. Found in review of gh #769 by
+/// @GermanHeim, who reproduced the mislabel with exactly the `H` change the
+/// second leg makes.
+#[test]
+fn parametric_source_names_the_route_actually_taken() {
+    let case = warm_hint_case();
+    let h_space = SymTMatrixSpace::new(case.n as i32, case.h.0.clone(), case.h.1.clone());
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&case.h.2);
+    let mut h_doubled = SymTMatrix::new(Rc::clone(&h_space));
+    h_doubled.set_values(&case.h.2.iter().map(|v| v * 2.0).collect::<Vec<_>>());
+
+    let a_space = GenTMatrixSpace::new(
+        case.m as i32,
+        case.n as i32,
+        case.a.0.clone(),
+        case.a.1.clone(),
+    );
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&case.a.2);
+
+    let opts = QpOptions {
+        use_homotopy: true,
+        ..QpOptions::default()
+    };
+    let g_moved: Vec<f64> = case.g.iter().map(|v| v * 1.02).collect();
+    macro_rules! mk {
+        ($h:expr, $g:expr) => {
+            QpProblem {
+                n: case.n,
+                m: case.m,
+                h: $h,
+                g: $g,
+                a: &a,
+                bl: &case.bl,
+                bu: &case.bu,
+                xl: &case.xl,
+                xu: &case.xu,
+                hessian_inertia: HessianInertia::Psd,
+            }
+        };
+    }
+
+    let mut s = new_solver();
+    let prev = s.solve(&mk!(&h, &case.g), None, &opts).expect("previous");
+    assert_eq!(prev.status, QpStatus::Optimal, "previous solve");
+
+    // 1. Same `H`, same topology, `g` moved: the path is traceable.
+    let traced = s
+        .solve_parametric(&mk!(&h, &case.g), &prev, &mk!(&h, &g_moved), &opts)
+        .expect("traced");
+    assert_eq!(
+        traced.stats.parametric_source,
+        Some(ParametricSource::Homotopy),
+        "a genuine parametric step must report the homotopy"
+    );
+
+    // 2. `H` doubled: `same_h` fails, so the homotopy is declined and only the
+    //    working set carries over.
+    let declined = s
+        .solve_parametric(&mk!(&h, &case.g), &prev, &mk!(&h_doubled, &case.g), &opts)
+        .expect("declined");
+    assert_eq!(
+        declined.stats.parametric_source,
+        Some(ParametricSource::WorkingSet),
+        "a changed Hessian declines the path — the hint is all that survives"
+    );
+
+    // 3. A previous solve that never reached `Optimal` carries no usable state,
+    //    so nothing is reused at all.
+    let unusable = QpSolution {
+        status: QpStatus::MaxIter,
+        working: WorkingSet::cold(case.n, case.m),
+        stats: QpStats::default(),
+        ..prev.clone()
+    };
+    let cold = s
+        .solve_parametric(&mk!(&h, &case.g), &unusable, &mk!(&h, &g_moved), &opts)
+        .expect("cold");
+    assert_eq!(
+        cold.stats.parametric_source,
+        Some(ParametricSource::Cold),
+        "nothing was reusable — reporting reuse here is the worst of the three"
+    );
+
+    // The field is about `solve_parametric` specifically: a plain solve has no
+    // pair to reuse and must not claim a route.
+    let plain = new_solver()
+        .solve(&mk!(&h, &case.g), None, &opts)
+        .expect("plain");
+    assert_eq!(
+        plain.stats.parametric_source, None,
+        "`None` means `this did not come from solve_parametric`"
+    );
 }

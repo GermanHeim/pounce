@@ -60,6 +60,15 @@
 //! * Every terminal status is mapped, not just `Optimal` — this is the primary
 //!   driver, so it must report `MaxIter` / `NumericalError` / `Infeasible` /
 //!   `Unbounded` honestly rather than falling back to a previous solution.
+//!
+//! The translation itself is [`ActiveSetQp`], owned rather than built in
+//! locals, and the read-back is `back_translate`. Both are shared with
+//! [`ActiveSetSession`](crate::active_set_session::ActiveSetSession), the
+//! persistent form of this driver: it keeps the `(problem, solution)` pair in
+//! the engine's coordinates so a *family* of QPs can be traced parametrically
+//! instead of solved cold one at a time (gh #769). Everything below is reached
+//! by that session rather than restated in it, so a session solve that reuses
+//! nothing is this driver, unchanged.
 
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
@@ -99,7 +108,7 @@ fn to_qp_upper(ub: f64) -> f64 {
 /// A solution carrying no information, returned when the engine reports a
 /// status for which no iterate is meaningful. `x` is zero-filled rather than
 /// left empty so downstream residual/objective code has the right lengths.
-fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpSolution {
+pub(crate) fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpSolution {
     QpSolution {
         status,
         x: vec![0.0; n],
@@ -128,24 +137,80 @@ pub fn solve_qp_active_set<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    solve_qp_active_set_attempt(prob, opts, engine, make_backend).sol
+}
+
+/// [`solve_qp_active_set`], keeping the `pounce-qp`-side pair the winning
+/// attempt produced.
+///
+/// Exists for [`ActiveSetSession`](crate::active_set_session::ActiveSetSession),
+/// which needs `(qp_prev, sol_prev)` in the engine's own coordinates to trace
+/// the next problem parametrically from this one (gh #769). The free function
+/// above discards it, so a caller that does not warm-start pays nothing beyond
+/// the translated problem it was going to build anyway.
+pub(crate) fn solve_qp_active_set_attempt<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> Attempt
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     crate::deadline::with_deadline(opts.time_limit, || {
         if crate::deadline::expired() {
-            return empty_solution(prob.n, prob.m_eq(), prob.m_ineq(), QpStatus::TimeLimit);
+            return Attempt::opaque(empty_solution(
+                prob.n,
+                prob.m_eq(),
+                prob.m_ineq(),
+                QpStatus::TimeLimit,
+            ));
         }
+        let mut att = solve_qp_active_set_inner(prob, opts, engine, make_backend);
         // One gate over every exit of the body below — see [`finite_or_failed`].
-        let sol = finite_or_failed(
-            prob,
-            solve_qp_active_set_inner(prob, opts, engine, make_backend),
-        );
+        att.sol = finite_or_failed(prob, att.sol);
         if crate::deadline::expired() {
             // Shared policy with the IPM path: a deadline crossing observed
             // *after* the inner solve returned relabels a give-up status, but
             // never overwrites a verdict. See [`crate::ipm::mark_timed_out`].
-            crate::ipm::mark_timed_out(sol)
-        } else {
-            sol
+            att.sol = crate::ipm::mark_timed_out(att.sol);
         }
+        att
     })
+}
+
+/// One trip through the engine: the convex-space answer, and — when the caller
+/// is a session that may warm-start from it — the `pounce-qp`-space pair it
+/// came from.
+///
+/// `native` is `None` whenever the pair would be a *lie* about the reported
+/// answer: a hard engine error (there is no solution), and the equilibrated
+/// retry (whose pair describes the scaled problem, not the one the caller
+/// posed). It is deliberately **not** cleared when the solve merely failed —
+/// deciding which verdicts are worth tracing from belongs to the session, and
+/// it applies that rule in one place
+/// ([`ActiveSetSession::remember`](crate::active_set_session::ActiveSetSession)),
+/// where the *reported* status is also in hand. The `finite_or_failed` gate
+/// above can replace `sol` outright without touching `native`; that same rule
+/// is what keeps the mismatch from ever being warm-started from, because a
+/// replaced solution never carries a solved status.
+pub(crate) struct Attempt {
+    pub(crate) sol: QpSolution,
+    pub(crate) native: Option<NativeSolve>,
+}
+
+impl Attempt {
+    /// An answer with no engine pair behind it.
+    pub(crate) fn opaque(sol: QpSolution) -> Self {
+        Attempt { sol, native: None }
+    }
+}
+
+/// A `pounce-qp` problem and the solution the engine returned for it — the two
+/// arguments [`QpSolver::solve_parametric`] takes as `(qp_prev, sol_prev)`.
+pub(crate) struct NativeSolve {
+    pub(crate) qp: ActiveSetQp,
+    pub(crate) sol: pounce_qp::QpSolution,
 }
 
 fn solve_qp_active_set_inner<F>(
@@ -153,7 +218,7 @@ fn solve_qp_active_set_inner<F>(
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
     make_backend: &mut F,
-) -> QpSolution
+) -> Attempt
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -167,12 +232,12 @@ where
     let prob = match screen_variable_box(prob) {
         BoxScreen::Feasible => prob,
         BoxScreen::Empty => {
-            return empty_solution(
+            return Attempt::opaque(empty_solution(
                 prob.n,
                 prob.m_eq(),
                 prob.m_ineq(),
                 QpStatus::PrimalInfeasible,
-            );
+            ));
         }
         BoxScreen::Snapped(p) => {
             snapped = p;
@@ -201,21 +266,21 @@ where
         equilibrate: false,
         ..*opts
     };
-    let sol = solve_translated(
+    let att = solve_translated(
         prob,
         &unscaled_opts,
         engine,
         make_backend,
         FeasibilityProbe::Allowed,
     );
-    if is_conclusive(sol.status) {
-        return sol;
+    if is_conclusive(att.sol.status) {
+        return att;
     }
     if crate::deadline::expired() {
-        return crate::ipm::mark_timed_out(sol);
+        return timed_out(att);
     }
 
-    let mut best = sol;
+    let mut best = att;
     if opts.equilibrate {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
         let mut retry = solve_translated(
@@ -225,26 +290,30 @@ where
             make_backend,
             FeasibilityProbe::Allowed,
         );
-        scaling.unscale_solution(prob, &mut retry);
+        // The pair belongs to the *scaled* problem, so it is not a `(qp_prev,
+        // sol_prev)` for anything the caller will pose next; drop it rather
+        // than let a session trace a path from coordinates it never asked for.
+        retry.native = None;
+        scaling.unscale_solution(prob, &mut retry.sol);
         // Re-verify against the ORIGINAL problem: the verdict reached inside the
         // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
         // moves the residuals, so it has to be re-earned here rather than carried
         // over on the strength of the wrong problem's numbers.
-        retry.status = reverify_after_unscale(retry.status, &retry, prob, opts);
+        retry.sol.status = reverify_after_unscale(retry.sol.status, &retry.sol, prob, opts);
         // Keep the original failure when the retry also fails, so the reported
         // status describes the attempt made on the problem as the user posed it.
         // `PrimalInfeasible` counts as a win here because `reverify_after_unscale`
         // just re-earned its Farkas certificate against the *original* problem;
         // `DualInfeasible` does not, because its witness (the engine's ray) is not
         // available out here to re-check.
-        if is_solved(retry.status) || retry.status == QpStatus::PrimalInfeasible {
+        if is_solved(retry.sol.status) || retry.sol.status == QpStatus::PrimalInfeasible {
             best = retry;
         }
-        if is_conclusive(best.status) {
+        if is_conclusive(best.sol.status) {
             return best;
         }
         if crate::deadline::expired() {
-            return crate::ipm::mark_timed_out(best);
+            return timed_out(best);
         }
     }
 
@@ -274,7 +343,7 @@ where
     // attempt was seeded and there is nothing new to try.
     if engine.use_homotopy != Some(false) {
         if crate::deadline::expired() {
-            return crate::ipm::mark_timed_out(best);
+            return timed_out(best);
         }
         let seeded_engine = ActiveSetOverrides {
             use_homotopy: Some(false),
@@ -287,7 +356,7 @@ where
             make_backend,
             FeasibilityProbe::Allowed,
         );
-        if is_solved(seeded.status) || seeded.status == QpStatus::PrimalInfeasible {
+        if is_solved(seeded.sol.status) || seeded.sol.status == QpStatus::PrimalInfeasible {
             return seeded;
         }
     }
@@ -295,8 +364,14 @@ where
     best
 }
 
+/// [`crate::ipm::mark_timed_out`] over an [`Attempt`].
+fn timed_out(mut att: Attempt) -> Attempt {
+    att.sol = crate::ipm::mark_timed_out(att.sol);
+    att
+}
+
 /// Did the solve produce a usable, verified KKT point?
-fn is_solved(s: QpStatus) -> bool {
+pub(crate) fn is_solved(s: QpStatus) -> bool {
     matches!(s, QpStatus::Optimal | QpStatus::OptimalInaccurate)
 }
 
@@ -313,7 +388,7 @@ fn is_solved(s: QpStatus) -> bool {
 /// this test (see the call site): the unboundedness certificate is re-derived
 /// from a ray that only exists inside `solve_translated`, so a retry's claim
 /// has no witness left to re-check after unscaling.
-fn is_conclusive(s: QpStatus) -> bool {
+pub(crate) fn is_conclusive(s: QpStatus) -> bool {
     is_solved(s)
         || matches!(
             s,
@@ -333,99 +408,210 @@ enum FeasibilityProbe {
     Forbidden,
 }
 
-/// Translate to `pounce-qp` form, solve, and verify — one attempt, no scaling
-/// decisions. `opts.equilibrate` is ignored here; the caller owns that choice.
-fn solve_translated<F>(
-    prob: &QpProblem,
+/// The `pounce-qp` form of a convex [`QpProblem`], owning its storage.
+///
+/// [`pounce_qp::QpProblem`] borrows every array it is handed — the engine
+/// never copies a matrix — so a translation cannot simply *return* one:
+/// something has to hold the Hessian, the Jacobian and the four bound vectors
+/// for as long as the solve runs. That something used to be a run of locals
+/// inside `solve_translated`, which is why the translation was unreachable
+/// from outside this module and every frontend wanting the active-set engine
+/// over a convex `QpProblem` had to restate it (gh #769). It is also what a
+/// *parametric* reuse needs to keep: [`QpSolver::solve_parametric`] takes the
+/// previous problem as well as the previous solution, and the previous problem
+/// is exactly this.
+///
+/// The map itself is documented in this module's header — the `+1` on both
+/// index arrays with no triangle fixup, the `[A_eq ; G]` row stacking, and the
+/// `±1e19` free-bound convention. [`ActiveSetSession`] is the supported way to
+/// reach the engine; this type is public so that a caller doing something the
+/// session does not cover translates rather than re-derives.
+///
+/// Translating is only half of it, and shipping only that half was the first
+/// review finding on gh #769: a caller who can build the native problem but
+/// cannot read its answer back still restates the dual sign transform, the
+/// objective reconstruction and the verification gate — the three parts of
+/// this that go wrong silently. So the return leg is public too:
+/// [`engine_options`] for the settings this path was measured under, and
+/// [`back_translate_verified`] (or [`back_translate`] plus [`verify_status`])
+/// for the answer.
+///
+/// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
+pub struct ActiveSetQp {
+    n: usize,
+    m: usize,
+    h: SymTMatrix,
+    g: Vec<f64>,
+    a: GenTMatrix,
+    bl: Vec<f64>,
+    bu: Vec<f64>,
+    xl: Vec<f64>,
+    xu: Vec<f64>,
+}
+
+impl ActiveSetQp {
+    /// Translate a convex QP into the engine's form.
+    ///
+    /// Total: every convex problem has a `pounce-qp` image, so this cannot
+    /// fail. What it does *not* do is screen the problem — see
+    /// [`screen_variable_box`], which the drivers run first because an empty
+    /// variable box panicked the engine (gh #295).
+    ///
+    /// **An external caller runs it too.** The full recipe, which is what
+    /// [`solve_qp_active_set`] and [`ActiveSetSession`] do internally:
+    ///
+    /// 1. [`screen_variable_box`] — `Empty` is a certified `PrimalInfeasible`
+    ///    with no solve; `Snapped` replaces the problem with the repaired copy;
+    ///    `Feasible` passes through. Skipping this turns an empty box into a
+    ///    hard `Err`, and an *impossible* bound into a wrong `Optimal`.
+    /// 2. `from_convex` on whatever step 1 handed back, then
+    ///    [`engine_options`] and a solve of [`Self::problem`].
+    /// 3. [`back_translate_verified`] for the answer.
+    ///
+    /// [`screen_variable_box`]: crate::screen_variable_box
+    /// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
+    pub fn from_convex(prob: &QpProblem) -> Self {
+        let n = prob.n;
+        let m_eq = prob.m_eq();
+        let m_ineq = prob.m_ineq();
+        let m = m_eq + m_ineq;
+
+        // ---- Hessian: lower triangle, 0-based -> 1-based (no triangle fixup) ----
+        let mut h_irow = Vec::with_capacity(prob.p_lower.len());
+        let mut h_jcol = Vec::with_capacity(prob.p_lower.len());
+        let mut h_val = Vec::with_capacity(prob.p_lower.len());
+        for t in &prob.p_lower {
+            // Defensive: the convex form documents `row >= col`, but a caller
+            // that supplied the upper triangle would otherwise be silently
+            // transposed into a different matrix. Normalizing costs nothing and
+            // makes the translation total.
+            let (r, c) = if t.row >= t.col {
+                (t.row, t.col)
+            } else {
+                (t.col, t.row)
+            };
+            h_irow.push((r + 1) as i32);
+            h_jcol.push((c + 1) as i32);
+            h_val.push(t.val);
+        }
+        let h_space = SymTMatrixSpace::new(n as i32, h_irow, h_jcol);
+        let mut h = SymTMatrix::new(h_space);
+        h.set_values(&h_val);
+
+        // ---- Jacobian A_qp = [A_eq ; G], 1-based ----
+        let nnz = prob.a.len() + prob.g.len();
+        let mut irows = Vec::with_capacity(nnz);
+        let mut jcols = Vec::with_capacity(nnz);
+        let mut vals = Vec::with_capacity(nnz);
+        for t in &prob.a {
+            irows.push((t.row + 1) as i32);
+            jcols.push((t.col + 1) as i32);
+            vals.push(t.val);
+        }
+        for t in &prob.g {
+            irows.push((m_eq + t.row + 1) as i32);
+            jcols.push((t.col + 1) as i32);
+            vals.push(t.val);
+        }
+        let mut a_qp = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, irows, jcols));
+        a_qp.set_values(&vals);
+
+        // ---- Row bounds: eq rows bl=bu=b; ineq rows bl=-inf, bu=h ----
+        let mut bl = Vec::with_capacity(m);
+        let mut bu = Vec::with_capacity(m);
+        for &bk in &prob.b {
+            bl.push(bk);
+            bu.push(bk);
+        }
+        for &hi in &prob.h {
+            bl.push(NLP_LOWER_BOUND_INF);
+            bu.push(to_qp_upper(hi));
+        }
+
+        // ---- Variable bounds ----
+        let mut xl = Vec::with_capacity(n);
+        let mut xu = Vec::with_capacity(n);
+        for i in 0..n {
+            xl.push(to_qp_lower(prob.lb_of(i)));
+            xu.push(to_qp_upper(prob.ub_of(i)));
+        }
+
+        Self {
+            n,
+            m,
+            h,
+            g: prob.c.clone(),
+            a: a_qp,
+            bl,
+            bu,
+            xl,
+            xu,
+        }
+    }
+
+    /// Borrow the translated data as the engine's problem type.
+    ///
+    /// Cheap — no copying — so a caller re-borrows per solve rather than
+    /// holding one of these across calls and fighting the lifetime.
+    pub fn problem(&self) -> ActiveSetProblem<'_> {
+        ActiveSetProblem {
+            n: self.n,
+            m: self.m,
+            h: &self.h,
+            g: &self.g,
+            a: &self.a,
+            bl: &self.bl,
+            bu: &self.bu,
+            xl: &self.xl,
+            xu: &self.xu,
+            // The convex path only accepts problems the class detector has
+            // already ruled convex, so the Hessian is PSD by construction.
+            hessian_inertia: HessianInertia::Psd,
+        }
+    }
+
+    /// Variables in the translated problem.
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Rows in the translated problem — `m_eq + m_ineq` of the convex form,
+    /// stacked in that order.
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    /// The translated variable bounds, in `pounce-qp`'s `±1e19` convention.
+    ///
+    /// Crate-visible only: a public caller reads the same two slices off
+    /// [`Self::problem`], and one accessor for a thing is enough.
+    pub(crate) fn xl(&self) -> &[f64] {
+        &self.xl
+    }
+
+    /// See [`Self::xl`].
+    pub(crate) fn xu(&self) -> &[f64] {
+        &self.xu
+    }
+}
+
+/// The engine settings this driver runs under, before and after the caller's
+/// own `sqp_qp_*` overrides.
+///
+/// Split out of `solve_translated` so the warm parametric path in
+/// [`ActiveSetSession`](crate::active_set_session::ActiveSetSession) runs on
+/// the *same* configuration as the cold one (gh #769) — a session whose warm
+/// and cold legs disagreed about `max_iter` or the Schur updates would be
+/// reporting on two different solvers. Public for the third caller the issue
+/// is about: an external driver solving [`ActiveSetQp::problem`] directly gets
+/// the iteration budget, the Schur-update choice and the homotopy setting this
+/// path was measured under, rather than `ActiveSetOptions::default()`.
+pub fn engine_options(
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
-    make_backend: &mut F,
-    probe: FeasibilityProbe,
-) -> QpSolution
-where
-    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
-{
-    let n = prob.n;
-    let m_eq = prob.m_eq();
-    let m_ineq = prob.m_ineq();
-    let m = m_eq + m_ineq;
-
-    // ---- Hessian: lower triangle, 0-based -> 1-based (no triangle fixup) ----
-    let mut h_irow = Vec::with_capacity(prob.p_lower.len());
-    let mut h_jcol = Vec::with_capacity(prob.p_lower.len());
-    let mut h_val = Vec::with_capacity(prob.p_lower.len());
-    for t in &prob.p_lower {
-        // Defensive: the convex form documents `row >= col`, but a caller
-        // that supplied the upper triangle would otherwise be silently
-        // transposed into a different matrix. Normalizing costs nothing and
-        // makes the translation total.
-        let (r, c) = if t.row >= t.col {
-            (t.row, t.col)
-        } else {
-            (t.col, t.row)
-        };
-        h_irow.push((r + 1) as i32);
-        h_jcol.push((c + 1) as i32);
-        h_val.push(t.val);
-    }
-    let h_space = SymTMatrixSpace::new(n as i32, h_irow, h_jcol);
-    let mut h = SymTMatrix::new(h_space);
-    h.set_values(&h_val);
-
-    // ---- Jacobian A_qp = [A_eq ; G], 1-based ----
-    let nnz = prob.a.len() + prob.g.len();
-    let mut irows = Vec::with_capacity(nnz);
-    let mut jcols = Vec::with_capacity(nnz);
-    let mut vals = Vec::with_capacity(nnz);
-    for t in &prob.a {
-        irows.push((t.row + 1) as i32);
-        jcols.push((t.col + 1) as i32);
-        vals.push(t.val);
-    }
-    for t in &prob.g {
-        irows.push((m_eq + t.row + 1) as i32);
-        jcols.push((t.col + 1) as i32);
-        vals.push(t.val);
-    }
-    let mut a_qp = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, irows, jcols));
-    a_qp.set_values(&vals);
-
-    // ---- Row bounds: eq rows bl=bu=b; ineq rows bl=-inf, bu=h ----
-    let mut bl = Vec::with_capacity(m);
-    let mut bu = Vec::with_capacity(m);
-    for &bk in &prob.b {
-        bl.push(bk);
-        bu.push(bk);
-    }
-    for &hi in &prob.h {
-        bl.push(NLP_LOWER_BOUND_INF);
-        bu.push(to_qp_upper(hi));
-    }
-
-    // ---- Variable bounds ----
-    let mut xl = Vec::with_capacity(n);
-    let mut xu = Vec::with_capacity(n);
-    for i in 0..n {
-        xl.push(to_qp_lower(prob.lb_of(i)));
-        xu.push(to_qp_upper(prob.ub_of(i)));
-    }
-
-    let g_lin = prob.c.clone();
-    let qp = ActiveSetProblem {
-        n,
-        m,
-        h: &h,
-        g: &g_lin,
-        a: &a_qp,
-        bl: &bl,
-        bu: &bu,
-        xl: &xl,
-        xu: &xu,
-        // The convex path only accepts problems the class detector has already
-        // ruled convex, so the Hessian is PSD by construction.
-        hessian_inertia: HessianInertia::Psd,
-    };
-
+    n: usize,
+    m: usize,
+) -> ActiveSetOptions {
     let qopts = ActiveSetOptions {
         time_limit: crate::deadline::remaining(),
         max_iter: active_set_iter_budget(opts, n, m),
@@ -462,11 +648,30 @@ where
     // Applied last: the two settings this driver picks for itself (the
     // size-scaled `max_iter` and `use_schur_updates`) are defaults, not
     // mandates, so an explicit user request overrides them.
-    let qopts = {
-        let mut q = qopts;
-        engine.apply(&mut q);
-        q
-    };
+    let mut qopts = qopts;
+    engine.apply(&mut qopts);
+    qopts
+}
+
+/// Translate to `pounce-qp` form, solve, and verify — one attempt, no scaling
+/// decisions. `opts.equilibrate` is ignored here; the caller owns that choice.
+fn solve_translated<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+    probe: FeasibilityProbe,
+) -> Attempt
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    let m = m_eq + m_ineq;
+
+    let native = ActiveSetQp::from_convex(prob);
+    let qopts = engine_options(opts, engine, n, m);
 
     // Seed from a simplex phase-1 feasible **vertex**, when one is available.
     //
@@ -503,7 +708,7 @@ where
             for (i, st) in working.bounds.iter_mut().enumerate() {
                 // A variable fixed by equal bounds is `Fixed` regardless of which
                 // side the basis parked it on.
-                let (l, u) = (xl[i], xu[i]);
+                let (l, u) = (native.xl()[i], native.xu()[i]);
                 let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
                 *st = match (fixed, v.struct_at[i]) {
                     (true, _) => BoundStatus::Fixed,
@@ -569,7 +774,7 @@ where
         )
     });
     let mut solver = ParametricActiveSetSolver::new(make_backend());
-    let qsol = match solver.solve(&qp, seed.as_ref(), &qopts) {
+    let qsol = match solver.solve(&native.problem(), seed.as_ref(), &qopts) {
         Ok(q) => q,
         // A hard `QpError` (singular factor, dimension mismatch) is a
         // numerical failure, not an infeasibility claim — never assert
@@ -584,13 +789,77 @@ where
         // `KKT inertia mismatch`, which was a rank-deficient seed working set.
         Err(e) => {
             debug_trace(|| format!("solver.solve HARD ERROR: {e}"));
-            return empty_solution(n, m_eq, m_ineq, QpStatus::NumericalFailure);
+            return Attempt::opaque(empty_solution(n, m_eq, m_ineq, QpStatus::NumericalFailure));
         }
     };
 
-    let engine_status = qsol.status;
-    // Kept for the `Unbounded` certificate re-check in `verify_status`.
-    let engine_ray = qsol.unbounded_ray.clone();
+    let mut sol = back_translate(prob, &qsol);
+    sol.status = verify_status(qsol.status, qsol.unbounded_ray.as_deref(), &sol, prob, opts);
+    // The engine says infeasible and its own multipliers could not prove it.
+    // Before demoting that to "the solver broke", spend one more solve on the
+    // objective-free twin, whose multipliers *can* — see [`feasibility_probe`].
+    if qsol.status == ActiveSetStatus::Infeasible
+        && sol.status == QpStatus::NumericalFailure
+        && probe == FeasibilityProbe::Allowed
+        && let Some((y, z)) = feasibility_probe(prob, opts, engine, make_backend)
+    {
+        // Carry the *certifying* multipliers out, replacing the
+        // objective-carrying ones that proved nothing. This keeps the invariant
+        // every consumer of a `PrimalInfeasible` here relies on — the returned
+        // `(y, z)` verify the status attached to them — which is what lets
+        // `reverify_after_unscale` re-earn the verdict against the original
+        // problem after an equilibrated retry. Without it that re-check tested
+        // the wrong vectors and threw away a proof the driver had just made.
+        // The bound duals are dropped rather than left mismatched: the
+        // certificate is a statement about `(y, z)` and the box, and stale
+        // `z_lb`/`z_ub` from a different multiplier set say nothing about it.
+        sol.y = y;
+        sol.z = z;
+        sol.z_lb = vec![0.0; n];
+        sol.z_ub = vec![0.0; n];
+        sol.status = QpStatus::PrimalInfeasible;
+    }
+    debug_trace(|| {
+        format!(
+            "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
+            qsol.status,
+            sol.status,
+            sol.kkt_residuals(prob).kkt_error(),
+            sol.obj,
+        )
+    });
+    Attempt {
+        sol,
+        native: Some(NativeSolve {
+            qp: native,
+            sol: qsol,
+        }),
+    }
+}
+
+/// Read a `pounce-qp` solution back into convex coordinates — the **dual sign
+/// transform** included.
+///
+/// Split out of `solve_translated` so the warm parametric path reads its
+/// answer with the identical code (gh #769), and public for the same reason
+/// the forward translation is: the sign transform is the part of this
+/// translation that is easy to get subtly wrong and impossible to see
+/// afterwards, since a flipped multiplier still looks like a multiplier. An
+/// external caller that can build [`ActiveSetQp`] but not read its answer back
+/// has to restate exactly that (raised in review of gh #769 by @GermanHeim).
+///
+/// The returned status is a placeholder — [`verify_status`] decides the
+/// verdict, and no caller of this function may skip it.
+/// [`back_translate_verified`] is the composition that cannot be
+/// half-applied, and is what most callers want.
+///
+/// The engine's own `obj` is deliberately **not** carried over: the objective
+/// is recomputed here in convex coordinates (`½xᵀPx + cᵀx`) so the two forms
+/// cannot silently drift apart.
+pub fn back_translate(prob: &QpProblem, qsol: &pounce_qp::QpSolution) -> QpSolution {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
 
     // ---- Back-translate (sign transform — see crate::crossover docs) ----
     let mut y = vec![0.0; m_eq];
@@ -618,10 +887,10 @@ where
     prob.p_mul(&qsol.x, &mut px);
     let obj = (0..n).map(|i| (0.5 * px[i] + prob.c[i]) * qsol.x[i]).sum();
 
-    let mut sol = QpSolution {
-        // Provisional — `verify_status` below decides the final verdict.
+    QpSolution {
+        // Provisional — `verify_status` decides the final verdict.
         status: QpStatus::Optimal,
-        x: qsol.x,
+        x: qsol.x.clone(),
         y,
         z,
         z_lb,
@@ -632,42 +901,48 @@ where
         // and the quantity a user tuning `max_iter` is actually spending.
         iters: qsol.stats.n_working_set_changes as usize,
         iterates: Vec::new(),
-    };
-    sol.status = verify_status(engine_status, engine_ray.as_deref(), &sol, prob, opts);
-    // The engine says infeasible and its own multipliers could not prove it.
-    // Before demoting that to "the solver broke", spend one more solve on the
-    // objective-free twin, whose multipliers *can* — see [`feasibility_probe`].
-    if engine_status == ActiveSetStatus::Infeasible
-        && sol.status == QpStatus::NumericalFailure
-        && probe == FeasibilityProbe::Allowed
-        && let Some((y, z)) = feasibility_probe(prob, opts, engine, make_backend)
-    {
-        // Carry the *certifying* multipliers out, replacing the
-        // objective-carrying ones that proved nothing. This keeps the invariant
-        // every consumer of a `PrimalInfeasible` here relies on — the returned
-        // `(y, z)` verify the status attached to them — which is what lets
-        // `reverify_after_unscale` re-earn the verdict against the original
-        // problem after an equilibrated retry. Without it that re-check tested
-        // the wrong vectors and threw away a proof the driver had just made.
-        // The bound duals are dropped rather than left mismatched: the
-        // certificate is a statement about `(y, z)` and the box, and stale
-        // `z_lb`/`z_ub` from a different multiplier set say nothing about it.
-        sol.y = y;
-        sol.z = z;
-        sol.z_lb = vec![0.0; n];
-        sol.z_ub = vec![0.0; n];
-        sol.status = QpStatus::PrimalInfeasible;
     }
-    debug_trace(|| {
-        format!(
-            "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
-            engine_status,
-            sol.status,
-            sol.kkt_residuals(prob).kkt_error(),
-            sol.obj,
-        )
-    });
-    sol
+}
+
+/// Read a `pounce-qp` solution back into convex coordinates **and decide the
+/// verdict** — [`back_translate`] followed by [`verify_status`], plus the two
+/// gates every driver here applies afterwards.
+///
+/// This is the whole of what a caller outside this crate needs after solving
+/// [`ActiveSetQp::problem`] itself, and the reason it exists as one call is
+/// that the ordering is not optional. `back_translate` returns a *provisional*
+/// `Optimal`; a caller who stops there has propagated the engine's claim
+/// unchecked, which is the failure `verify_status` documents at length
+/// (`QSC205` returns `Optimal` at the wrong objective, `DUALC1` certifies a
+/// feasible QP infeasible). Two composed calls with a rule about their order
+/// is an API that reads as complete when it is half-applied — so the composition
+/// is the supported entry point and the pieces are exported for callers doing
+/// something in between.
+///
+/// The two gates after verification are the driver's, not the engine's:
+/// non-finite fields are replaced by an honest failure rather than shipped as
+/// numbers, and a deadline crossing observed after the solve returned relabels
+/// a give-up status (never a verdict).
+///
+/// What this does **not** include is the cold driver's second rung on a
+/// rejected infeasibility claim — the objective-free `feasibility_probe`, which
+/// needs a backend and another solve. A caller wanting that behaviour wants
+/// [`solve_qp_active_set`] or [`ActiveSetSession`], which run it.
+///
+/// [`ActiveSetSession`]: crate::active_set_session::ActiveSetSession
+pub fn back_translate_verified(
+    prob: &QpProblem,
+    qsol: &pounce_qp::QpSolution,
+    opts: &QpOptions,
+) -> QpSolution {
+    let mut sol = back_translate(prob, qsol);
+    sol.status = verify_status(qsol.status, qsol.unbounded_ray.as_deref(), &sol, prob, opts);
+    let sol = finite_or_failed(prob, sol);
+    if crate::deadline::expired() {
+        crate::ipm::mark_timed_out(sol)
+    } else {
+        sol
+    }
 }
 
 /// Re-solve the **objective-free twin** of `prob` — same `A, b, G, h` and the
@@ -715,7 +990,8 @@ where
         engine,
         make_backend,
         FeasibilityProbe::Forbidden,
-    );
+    )
+    .sol;
     certifies_primal_infeasible(prob, &sol.y, &sol.z, opts).then_some((sol.y, sol.z))
 }
 
@@ -924,7 +1200,7 @@ fn adjudicated_kkt_error(prob: &QpProblem, sol: &QpSolution, tol: f64, obj_const
 /// [`adjudicated_kkt_error`] rather than the raw `kkt_error()` — see there for
 /// why an unnormalized residual cannot be compared to an absolute `tol` on a
 /// large-data QP (gh #641).
-fn verify_status(
+pub fn verify_status(
     engine: ActiveSetStatus,
     ray: Option<&[f64]>,
     sol: &QpSolution,
