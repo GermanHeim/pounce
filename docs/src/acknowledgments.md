@@ -76,9 +76,13 @@ written up in
 [`dev-notes/degenerate-starts.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/degenerate-starts.md).
 The short version: on identical starting points POUNCE solved 223 of
 244 to KRONOS's 225, found the global optimum on 189 to KRONOS's 175,
-and was about 11× faster end-to-end on the 208 both solved. Solving the
+and was about 12× faster end-to-end on the 208 both solved. Solving the
 models *as KRONOS states them*, with the squared slacks, POUNCE manages
 only 191 — which is the reformulation point above, measured.
+
+With the third rung in place those become **239 solved and 199 global**,
+for 34 extra solves and two seconds across the whole corpus. The
+remaining three are `a10_perm`, `a29_rump` and `hong`.
 
 ## Contributors
 

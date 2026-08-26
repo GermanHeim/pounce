@@ -66,6 +66,66 @@ corpus:
   perturbation is identically zero at the origin, which is the case it
   most needs to fix.
 
+## The whole corpus, re-run against the built branch
+
+The table above is a per-remedy probe. This is the end-to-end number:
+all 244 problems, one start each (`K=1`), identical starting points,
+re-run after the branch was built.
+
+| Leg | solved | global optimum | solve time |
+|---|---|---|---|
+| KRONOS | 225/244 | 175/244 | 42.9 s |
+| POUNCE, models as KRONOS states them (squared slacks) | 191/244 | 155/244 | 14.6 s |
+| POUNCE, natural inequality form | 223/244 | 189/244 | 7.4 s |
+| **POUNCE, natural form + the second-opinion ladder** | **239/244** | **199/244** | **9.4 s** |
+
+The first three rows reproduce the pre-branch run to the problem. That
+is the point of including them: the diagnosis changes nothing an
+embedder can observe, so the library legs *must* not move, and they do
+not. The fourth row is the new one.
+
+Sixteen problems move, and every promoted answer is genuinely feasible
+(worst residual 1.0e-8, on `hs020`):
+
+| rung | promotions |
+|---|---|
+| `feral_scaling=mc64` | 1 |
+| `mu_strategy=adaptive` | 3 |
+| `start_point_perturbation=1e-2` | 12 |
+
+Twelve of the sixteen are rung 3's. Four of the sixteen were
+`Invalid_Number_Detected`, not `Infeasible_Problem_Detected` — those
+are the ones no earlier rung would have been offered, since rungs 1 and
+2 do not fire on an invalid number.
+
+Cost of the ladder over the whole corpus: **34 extra solves, +2.00 s**,
+spread over 244 problems, spent only on runs that had already failed.
+
+Set difference against KRONOS: 17 problems the ladder solves and KRONOS
+does not; **3** the other way (`a10_perm`, `a29_rump`, `hong`, down from
+fifteen); 2 neither solves (`bt13`, `lewispol`).
+
+On the 222 both solve, KRONOS spends 37.6 s to POUNCE's 5.6 s — 6.7x.
+That ratio is *worse* than the 12x on the 208 both solved before the
+ladder, and it should be: the fourteen problems added to the
+intersection are exactly the hard ones, and POUNCE now pays two or
+three failed solves on each before it gets them.
+
+One caveat on how this was measured. **The second-opinion ladder is
+CLI-only.** `grep -rn "second_opinion\|scaling_retry" crates/pounce-py/src/
+python/` returns nothing: the conditioner options themselves are
+reachable from Python, but the retry logic that drives them is in
+`crates/pounce-cli/src/main.rs`. The harness therefore reproduces the
+ladder option-for-option rather than measuring it through the library —
+including its non-cumulativeness, which is load-bearing (gh#524). A
+Python embedder does not get rung 3 today, and that is a real gap
+between the two frontends rather than an artifact of the benchmark.
+
+`lch` needed its 300 s harness timeout lifted, for a reason that is not
+POUNCE's: it is n=600, and JAX takes 3m30s to compile its Lagrangian
+Hessian. The third leg pushed the total past the cap. Given the room it
+solves, in 1.14 s and 27 iterations.
+
 ## Why Adam is an option and not a default
 
 KRONOS's stage 0 is Adam on `f(x) + ρ‖h(x)‖²` (200 iters, lr 5e-2,

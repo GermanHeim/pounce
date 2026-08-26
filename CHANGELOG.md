@@ -71,6 +71,17 @@ changes.
   ones in the user's file; naming `x[3]` of a presolved model would point
   at a neighbouring variable's answer (the gh#450 failure mode).
 
+  Re-run end-to-end against the built branch, the same 244 problems from
+  the same starting points go from **223 solved / 189 at the global
+  optimum to 239 / 199** — ahead of KRONOS's 225 / 175 — for 34 extra
+  solves and **+2.0 s** across the whole corpus, spent only on runs that
+  had already failed. Twelve of the sixteen recoveries are rung 3's, and
+  every promoted answer is feasible to 1.0e-8 or better. The fifteen
+  losses are down to three (`a10_perm`, `a29_rump`, `hong`). Note the
+  ladder is CLI-only: the conditioner options are reachable from Python
+  but the retry logic that drives them is not, so an embedder does not get
+  rung 3 today.
+
   `scripts/sweep-fixtures.sh` against a `f6231f40` baseline is an **empty
   diff** across both legs, 142 fixture-legs each. That is evidence rather
   than a skipped check: 22 of those legs end `Infeasible_Problem_Detected`,
