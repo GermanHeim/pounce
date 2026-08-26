@@ -101,6 +101,16 @@ def test_activity_zones_require_an_equal_volume_partition():
         refine_solution(solution, valid, nodes=10)
 
 
+def test_default_design_configuration_converges():
+    """The public no-argument design route must have a convergent seed."""
+
+    result = solve_design()
+
+    assert result.success, result.status
+    # POUNCE reports the maximum scaled constraint violation [-].
+    assert result.max_constraint_violation < 1.0e-8
+
+
 def test_implicit_design_gradient_matches_perturb_and_resolve():
     config = PelletConfig(nodes=6, zones=3)
     activity = np.full(config.zones, config.activity_inventory)

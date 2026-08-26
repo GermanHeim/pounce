@@ -10,7 +10,7 @@ changes.
 ## [Unreleased]
 
 - **A new flagship Python tutorial performs uncertainty-aware inverse design
-  of a nonisothermal CO2-methanation catalyst pellet** (#3). The reusable
+  of a nonisothermal CO2-methanation catalyst pellet** (#775). The reusable
   conservative finite-volume model includes published four-species kinetics,
   finite films, exact JAX derivatives, nested and simultaneous design routes,
   bounded/inventory/regularized activity profiles, refined-mesh physical

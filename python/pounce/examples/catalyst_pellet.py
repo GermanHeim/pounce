@@ -112,7 +112,7 @@ class PelletConfig:
     activity_inventory: float = 0.16  # volume-average activity [-]
     activity_upper: float = 1.0  # Koschany catalyst basis [-]
     regularization_weight: float = 0.5  # objective weight [-]
-    nodes: int = 12
+    nodes: int = 8
     zones: int = 4
     kinetics: KoschanyKinetics = KoschanyKinetics()
 
