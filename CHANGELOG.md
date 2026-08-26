@@ -15,7 +15,10 @@ changes.
   campaigns; records control quality, safety, fallback, solver
   failure/recovery, and stamped latency metrics; and demonstrates directional
   sensitivity at a degenerate control bound.  The reusable driver and CI
-  regression tests exercise the same model.
+  regression tests exercise the same model.  The guard now judges the applied
+  corrector residual rather than the pre-corrector predictor, timing excludes
+  the separately replayed event ledger, warm recovery handles Pyomo application
+  failures, and the notebook environment consistently pins `pyomo-cvp` 0.7.2.
 - **A failed solve now reports what was wrong with the starting point, and
   tries one displaced start before believing itself.** Inspired by KRONOS
   (Ahmed, M. G. T. & Hasan, M. M. F., *Computers & Chemical Engineering*

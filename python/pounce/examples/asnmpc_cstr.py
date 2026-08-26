@@ -22,6 +22,7 @@ from typing import Literal, Sequence
 
 import numpy as np
 import pyomo.environ as pyo
+from pyomo.common.errors import ApplicationError
 from pyomo.core.base.var import VarData
 from pyomo.dae import ContinuousSet, DerivativeVar
 from pyomo.opt import TerminationCondition
@@ -553,7 +554,7 @@ def _solve_with_recovery(
     started = time.perf_counter()
     try:
         solved = solve_controller(initial_state, config, warm_start)
-    except RuntimeError:
+    except (RuntimeError, ApplicationError):
         if warm_start is None:
             raise
         solved = solve_controller(initial_state, config)
@@ -654,9 +655,9 @@ def _corrected_update(
         "guarded_path": "path",
     }[policy]
     corrector_iter = 0 if policy == "clamped_linear" else config.corrector_iter
-    started = time.perf_counter()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        started = time.perf_counter()
         report = estimate_report(
             background,
             perturbation,
@@ -676,6 +677,13 @@ def _corrected_update(
             degeneracy_iter=config.degeneracy_iter,
             corrector_iter=corrector_iter,
         )
+        latency_s = time.perf_counter() - started
+
+        # The public report and estimate APIs each replay the predictor and
+        # corrector, so the timed region deliberately includes both.  The
+        # event ledger is a third replay used for diagnostics and the
+        # illustrative path-budget check.  Keep it outside the published
+        # update timer and document that an end-to-end guard must add its cost.
         events = ()
         if policy in ("path", "guarded_path"):
             events = tuple(
@@ -688,7 +696,6 @@ def _corrected_update(
                     degeneracy_iter=config.degeneracy_iter,
                 )
             )
-    latency_s = time.perf_counter() - started
     return trajectory(background, values), report, events, latency_s, values
 
 
@@ -736,11 +743,10 @@ def _guard_reasons(
     )
     if displacement > config.measurement_trust_radius:
         reasons.append("measurement_displacement")
-    if float(report.violation) > config.feasibility_tol:
-        reasons.append("primal_feasibility")
-
     corrector = report.corrector
     if corrector is None:
+        if float(report.violation) > config.feasibility_tol:
+            reasons.append("primal_feasibility")
         reasons.append("missing_full_point_residual")
     else:
         if float(corrector["feasibility"]) > config.feasibility_tol:
@@ -751,7 +757,12 @@ def _guard_reasons(
             reasons.append("complementarity")
         initial = float(corrector["initial_residual"])
         final = float(corrector["residual"])
-        if final > 0.5 * initial:
+        residual_floor = max(
+            config.feasibility_tol,
+            config.stationarity_tol,
+            config.complementarity_tol,
+        )
+        if final > 0.5 * initial and final > residual_floor:
             reasons.append("corrector_no_progress")
 
     if len(events) >= config.predictor_iter:
@@ -911,6 +922,9 @@ def make_campaigns(steps: int = 30, seed: int = 19) -> tuple[Campaign, ...]:
             name="stress_model_mismatch",
             feed_temperature_shift=tuple(float(v) for v in stress_feed),
             measurement_noise=noise_tuple(stress_noise),
+            # The concentration bias is 4.5 times the local trust scale.  This
+            # campaign deliberately forces an out-of-validity fallback; it is
+            # not evidence that the guard detects subtle model mismatch.
             measurement_bias=(0.180, 0.016),
             reaction_rate_scale=1.08,
             heat_transfer_scale=0.92,
@@ -952,7 +966,14 @@ def _measure_state(
     sample: int,
     config: CstrConfig,
 ) -> tuple[float, float]:
-    """Apply deterministic sensor bias/noise and physical-domain clipping."""
+    """Apply deterministic sensor bias/noise and admissible-domain clipping.
+
+    Temperature is capped at the controller's own upper bound because the
+    direct-transcription model pins the measured initial state to a variable
+    with that bound and otherwise rejects the model before a solve.  A plant
+    interlock must handle a real measurement above that limit; this example
+    does not treat clipping as a safety decision.
+    """
     noise = campaign.measurement_noise[sample]
     measured = (
         float(plant_state[0]) + campaign.measurement_bias[0] + noise[0],

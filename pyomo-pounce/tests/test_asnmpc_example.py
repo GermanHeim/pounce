@@ -1,9 +1,11 @@
 """End-to-end checks for the active-set-aware NMPC tutorial."""
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pyomo.common.errors import ApplicationError
 
 import pounce.examples.asnmpc_cstr as asnmpc
 from pounce.examples.asnmpc_cstr import (
@@ -23,6 +25,12 @@ from pounce.examples.asnmpc_cstr import (
 def smoke_config():
     """Small but structurally identical controller for CI."""
     return CstrConfig(horizon_intervals=8, collocation_points=2, deadline_s=1.0)
+
+
+@pytest.fixture(scope="module")
+def event_config():
+    """Small discretization with several deterministic active-set events."""
+    return CstrConfig(horizon_intervals=20, collocation_points=2, deadline_s=2.0)
 
 
 def test_controller_solution_exposes_state_and_held_control_grids(smoke_config):
@@ -72,28 +80,41 @@ def test_guard_accepts_nominal_updates_and_falls_back_under_stress(smoke_config)
     )
 
 
-def test_switching_campaign_records_active_set_events():
-    config = CstrConfig(deadline_s=2.0)
+def test_switching_campaign_records_active_set_events(event_config):
     switching = make_campaigns(steps=12, seed=19)[1]
 
-    result = run_closed_loop("path", switching, config)
+    result = run_closed_loop("path", switching, event_config)
     event_rows = result.event_timeline()
 
-    assert result.metrics.active_set_changes > 0
+    assert result.metrics.active_set_changes > 0, (
+        "the deterministic switching campaign no longer crosses an active-set bound"
+    )
     assert sum(row["path_length"] for row in event_rows) == (
         result.metrics.active_set_changes
     )
-    assert any(row["active_set_changes"] for row in event_rows)
+    assert any(row["active_set_changes"] for row in event_rows), (
+        "the event timeline no longer identifies the switching sample"
+    )
 
 
-def test_directional_degeneracy_experiment_reaches_the_control_kink():
-    result = directional_degeneracy_experiment()
+def test_directional_degeneracy_experiment_reaches_the_control_kink(event_config):
+    result = directional_degeneracy_experiment(event_config)
 
-    assert result.breakpoint_variable.startswith("v1[")
-    assert result.breakpoint_bound == "lower"
-    assert 0.0 < result.breakpoint_fraction < 0.1
-    assert result.steps[0].directional_events
-    assert all(step.guard_reasons for step in result.steps)
+    assert result.breakpoint_variable.startswith("v1["), (
+        "the deterministic probe no longer reaches a coolant-control kink"
+    )
+    assert result.breakpoint_bound == "lower", (
+        "the deterministic coolant kink is no longer on its lower bound"
+    )
+    assert 0.0 < result.breakpoint_fraction < 0.1, (
+        "the configured perturbation no longer reaches its first kink early"
+    )
+    assert result.steps[0].directional_events, (
+        "the forward directional probe no longer records a path event"
+    )
+    assert all(step.guard_reasons for step in result.steps), (
+        "the guard no longer rejects both ambiguous directional probes"
+    )
     assert any(
         not np.allclose(
             step.one_sided_probe_control,
@@ -119,7 +140,10 @@ def test_plant_mismatch_is_independent_of_the_controller_model(smoke_config):
     assert not np.allclose(nominal, mismatched, rtol=0.0, atol=1.0e-6)
 
 
-def test_failed_warm_start_is_retried_cold_and_counted(monkeypatch, smoke_config):
+@pytest.mark.parametrize("failure_type", (RuntimeError, ApplicationError))
+def test_failed_warm_start_is_retried_cold_and_counted(
+    monkeypatch, smoke_config, failure_type
+):
     warm_start = object()
     recovered_model = object()
     attempted_warm_starts = []
@@ -127,7 +151,7 @@ def test_failed_warm_start_is_retried_cold_and_counted(monkeypatch, smoke_config
     def fake_solve(initial_state, config=None, warm_start=None):
         attempted_warm_starts.append(warm_start)
         if warm_start is not None:
-            raise RuntimeError("injected warm-start failure")
+            raise failure_type("injected warm-start failure")
         return asnmpc.SolveRecord(model=recovered_model, latency_s=0.01)
 
     monkeypatch.setattr(asnmpc, "solve_controller", fake_solve)
@@ -140,6 +164,82 @@ def test_failed_warm_start_is_retried_cold_and_counted(monkeypatch, smoke_config
     assert solved.solver_failures == 1
     assert solved.solver_recoveries == 1
     assert solved.latency_s > 0.0
+
+
+def test_guard_uses_corrected_feasibility_and_an_absolute_progress_floor(
+    smoke_config,
+):
+    """The guard must judge the applied corrector point, not its predictor."""
+    corrected = SimpleNamespace(temperature=np.asarray([0.5]))
+    report = SimpleNamespace(
+        violation=1.0,
+        corrector={
+            "feasibility": 0.0,
+            "stationarity": 0.0,
+            "complementarity": 0.0,
+            "initial_residual": 1.0e-12,
+            "residual": 9.0e-13,
+        },
+        activity={},
+    )
+
+    reasons = asnmpc._guard_reasons(
+        report,
+        corrected,
+        BASE_STATE,
+        BASE_STATE,
+        (),
+        smoke_config,
+    )
+
+    assert "primal_feasibility" not in reasons
+    assert "corrector_no_progress" not in reasons
+
+
+def test_update_latency_excludes_the_replayed_event_ledger(monkeypatch, smoke_config):
+    """The path ledger is collected after the timed report/estimate pair."""
+    calls = []
+    ticks = iter((10.0, 12.5))
+    background = SimpleNamespace(zc0=object(), zt0=object())
+    report = object()
+    values = object()
+    corrected = object()
+
+    def fake_clock():
+        calls.append("clock")
+        return next(ticks)
+
+    def fake_report(*args, **kwargs):
+        calls.append("report")
+        return report
+
+    def fake_estimate(*args, **kwargs):
+        calls.append("estimate")
+        return values
+
+    def fake_events(*args, **kwargs):
+        calls.append("events")
+        return ()
+
+    def fake_trajectory(*args, **kwargs):
+        calls.append("trajectory")
+        return corrected
+
+    monkeypatch.setattr(asnmpc.time, "perf_counter", fake_clock)
+    monkeypatch.setattr(asnmpc, "estimate_report", fake_report)
+    monkeypatch.setattr(asnmpc, "estimate", fake_estimate)
+    monkeypatch.setattr(asnmpc, "active_set_changes", fake_events)
+    monkeypatch.setattr(asnmpc, "trajectory", fake_trajectory)
+
+    got = asnmpc._corrected_update(
+        background,
+        BASE_STATE,
+        "path",
+        smoke_config,
+    )
+
+    assert calls == ["clock", "report", "estimate", "clock", "events", "trajectory"]
+    assert got == (corrected, report, (), 2.5, values)
 
 
 def test_accepted_correction_populates_the_next_warm_start(monkeypatch, smoke_config):

@@ -414,7 +414,7 @@ jobs:
           # them the redundancy guard of gh #444 never executes here.
           # The locally-built pounce-solver wheel provides the `pounce`
           # Python package + CLI.
-          python -m pip install pyomo pyomo-cvp numpy pandas networkx scipy
+          python -m pip install pyomo pyomo-cvp==0.7.2 numpy pandas networkx scipy
           python -m pip install python/dist/*.whl
           # pyomo-pounce itself installed without deps: its declared
           # pounce-solver dep is satisfied by the wheel installed just above.
