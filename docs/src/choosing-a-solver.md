@@ -21,7 +21,7 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 | **NLP active-set SQP** | general smooth NLP | local | `pounce-algorithm` (subproblems via `pounce-qp`) | `algorithm=active-set-sqp` |
 | **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `solver_selection=lp-ipm`/`qp-ipm` |
 | **Convex IPM (conic)** | SOCP, exp/power/PSD cones, convex QCQP | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `minimize` (convex QCQP); `solver_selection=socp`; `pounce <file>.cbf` |
-| **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `solver_selection=qp-active-set` — opt-in only; `auto` never picks it (see note) |
+| **Active-set QP** | QP (linear rows), convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `pounce.qp.solve_qp(method="active-set")`; `solver_selection=qp-active-set` — opt-in only; `auto` never picks it (see note) |
 | **SOS / Lasserre** | polynomial (nonconvex) | **global** | `pounce-convex` | `sos_minimize`; `pounce.sos_minimize` |
 
 > **When to reach for the active-set QP.** `auto` never selects it: a cold,
@@ -132,6 +132,28 @@ active-set SQP path, and is the right choice for MPC-style problems or any
 setting where you re-solve a slowly-changing QP many times. Use the convex
 IPM instead when `P ⪰ 0` and you want a single robust solve with
 infeasibility certificates.
+
+It is the **only** entry point here that will take an indefinite `P`; both the
+convex IPM and the conic solver refuse one, because without a PSD Hessian the
+IPM's optimality test accepts a saddle point and reports it as `optimal`
+(issue #112). Ask for the engine by name:
+
+```python
+from pounce.qp import solve_qp
+r = solve_qp(P=P_indefinite, c=c, lb=lb, ub=ub, method="active-set")
+```
+
+```sh
+pounce model.nl solver_selection=qp-active-set   # class: nonconvex QP
+```
+
+Two things to hold onto about the answer. It is **local**: a nonconvex QP can
+have many KKT points, and what you get is the one the active set walked to,
+the same guarantee `minimize` gives on a nonconvex NLP. And the constraints
+must be **linear** — the curvature this engine controls is the objective's, so
+an indefinite objective over any quadratic *row*, convex row or not, is a
+nonconvex QCQP and goes to the NLP filter-IPM instead (see
+[LP/QP routing](lp-qp-routing.md)).
 
 ## How to override the automatic routing
 

@@ -37,6 +37,14 @@ feasible set is nonconvex — falls back to the general NLP solver, which
 always produces a correct (locally optimal) answer. You never get a wrong
 "optimum" from a misclassification.
 
+The **nonconvex QP** class is narrower than "any quadratic that is not
+convex": it means an indefinite objective Hessian over **linear** rows. A
+model that is also curved in its *constraints* is a nonconvex QCQP and
+classifies **NLP**, because the QP extractor behind the convex path keeps only
+the linear part of each row — calling such a model a QP would hand an engine a
+problem with its curved constraints deleted. `POUNCE_DBG_CLASSIFY=1` names
+which of the two a model landed in.
+
 > **Note on QP detection.** The AMPL `.nl` format has no dedicated
 > quadratic section: a QP's quadratic terms are written into the
 > nonlinear expression tree. POUNCE walks that tree to recover the
@@ -63,7 +71,7 @@ file, or through Pyomo's `solver.options`.
 | `lp-ipm`        | Force the convex IPM; **errors** if the problem is not an LP.                   |
 | `qp-ipm`        | Force the convex IPM; **errors** if the problem is not LP/convex-QP.            |
 | `socp`          | Force the conic IPM; **errors** if the problem is not a convex QCQP.            |
-| `qp-active-set` | Force the active-set SQP engine; **errors** if the problem is not LP/convex-QP. |
+| `qp-active-set` | Force the active-set QP engine; accepts an LP or a QP with linear constraints, **convex or indefinite**; **errors** on anything else. |
 
 ```sh
 # Let POUNCE decide (default):
@@ -93,6 +101,25 @@ so it inherits presolve, postsolve, dual recovery, `.sol` writing, timing
 and the convex status vocabulary. It is **not** the same route as
 `algorithm=active-set-sqp`, which wraps the QP in the full SQP outer loop;
 that option still exists and is the right one for a genuine NLP.
+
+**It is the one forced selection that takes a nonconvex problem.**
+`pounce-qp` handles an indefinite Hessian by construction — inertia control
+shifts the H block until the reduced KKT factor has the right inertia — so
+`solver_selection=qp-active-set` on a **nonconvex QP** solves it rather than
+refusing it. What comes back is then a *local* optimum, exactly as
+`Optimal Solution Found` means locally optimal on the NLP path, and the status
+line names the class so the reader can tell:
+
+```text
+Problem class: nonconvex QP. Selected solver: active-set QP (pounce-qp) [solver_selection=qp-active-set].
+POUNCE (nonconvex QP active-set, pounce-qp): Optimal Solution Found.  obj=...
+```
+
+`auto` still sends that class to the NLP filter-IPM. The class is POUNCE's
+inference, and for a nonconvex model the general path is the safer default —
+so the active-set route is reachable only by naming the engine. A nonconvex
+**QCQP** is refused on this route for the reason given under *How routing
+works* above: it does not classify as a QP at all.
 
 **Choose it deliberately.** For a *cold, one-shot* convex QP the
 interior-point path (`qp-ipm`, and what `auto` selects) is materially more

@@ -635,7 +635,7 @@ choice — mirroring the CLI option of the same name:
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
-| `"qp-active-set"` | Run the `pounce-qp` active-set engine on a detected LP/convex QP — the **same engine and route the CLI uses**. Raises `ValueError` if the problem is not a convex LP/QP; for the active-set *SQP outer loop* on a general NLP, pass `algorithm="active-set-sqp"`. |
+| `"qp-active-set"` | Run the `pounce-qp` active-set engine on a detected LP/QP — the **same engine and route the CLI uses**. Alone among these, it accepts an **indefinite** objective Hessian (a nonconvex QP), for a *local* solution. Raises `ValueError` if the problem is not a detected LP/QP with linear constraints; for the active-set *SQP outer loop* on a general NLP, pass `algorithm="active-set-sqp"`. |
 
 Any other value raises `ValueError`. These are the same six selectors the CLI
 accepts, and matching is case-insensitive, as on the CLI.
@@ -644,13 +644,23 @@ Two differences from the CLI are worth knowing, both because `minimize` is a
 *library* consumer with no `.nl` file to classify:
 
 * `"qp-active-set"` *is* class-validated here, unlike the other library-side
-  differences below — it takes the same Python-side convex extraction as
-  `"qp-ipm"` and dispatches to the same engine the CLI uses, so a given problem
-  gets the same algorithm from either surface. It previously forwarded to the
-  backend and ran the SQP outer loop, which meant one selector named two
-  different solvers depending on how you called POUNCE; that is fixed, and the
-  SQP outer loop is now reached only by its own name,
-  `algorithm="active-set-sqp"`.
+  differences below — it takes the same Python-side extraction as `"qp-ipm"`
+  and dispatches to the same engine the CLI uses, so a given problem gets the
+  same algorithm from either surface. It previously forwarded to the backend
+  and ran the SQP outer loop, which meant one selector named two different
+  solvers depending on how you called POUNCE; that is fixed, and the SQP outer
+  loop is now reached only by its own name, `algorithm="active-set-sqp"`.
+
+  Its class test is the *looser* one: `pounce-qp` controls the inertia of the
+  reduced Hessian, so an **indefinite** objective is admitted where `"qp-ipm"`
+  refuses it, and `res.info["problem_class"]` reads `"nonconvex_qp"`. The
+  answer is then a **local** optimum. The constraints must still be linear —
+  that is the half of the detection this engine does not relax — and `"auto"`
+  keeps routing a nonconvex QP to the NLP solver, since the detection is an
+  inference and the general path is the safer default for one. The same
+  capability on the direct QP surface is
+  `pounce.qp.solve_qp(..., method="active-set")`, whose `check_psd` guard is
+  likewise scoped to `method="ipm"`.
 * The convex selectors (`"lp-ipm"`, `"qp-ipm"`, `"socp"`) work because
   `minimize` does its own Python-side structure detection. The equivalent Rust
   library API rejects them with `Invalid_Option`.

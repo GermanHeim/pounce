@@ -20,9 +20,10 @@
 //!    the objective offset the reduction moved carried back too.
 
 use pounce_convex::{
-    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, PresolveNote, QpOptions,
-    QpProblem, QpSolution, QpStatus, Reuse, Triplet, back_translate, back_translate_verified,
-    engine_options, screen_variable_box, solve_qp_active_set, verify_status,
+    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, HessianInertia, PresolveNote,
+    QpOptions, QpProblem, QpSolution, QpStatus, Reuse, Triplet, back_translate,
+    back_translate_verified, engine_options, screen_variable_box, solve_qp_active_set,
+    verify_status,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -480,6 +481,10 @@ fn an_external_caller_can_translate_solve_and_read_back() {
         &ActiveSetOverrides::default(),
         native.n(),
         native.m(),
+        // The convex claim, which `from_convex` also attaches by default. The
+        // two must agree: `engine_options` reads it for the Schur-update
+        // choice and `problem()` hands it to the engine (gh #786).
+        HessianInertia::Psd,
     );
     let qsol = ParametricActiveSetSolver::new(backend())
         .solve(&native.problem(), None, &qopts)

@@ -81,6 +81,31 @@
 //!   equality (`tests/presolve_forcing.rs`). Forcing rows are required to
 //!   have disjoint column sets so the recovery stays independent.
 //!
+//! # Why the catalog survives a nonconvex `P`
+//!
+//! The header says "convex QP and LP" because that is the population this was
+//! written for, and it is still the only one `auto` sends here. Since gh #786
+//! an explicit `solver_selection=qp-active-set` can route a **nonconvex QP**
+//! through this same driver, so it is worth saying why none of the above
+//! depends on `P ⪰ 0`:
+//!
+//! - every reduction that *reasons about the objective* first requires the
+//!   column to be **absent from `P`** (empty/free columns, dominated columns,
+//!   free column singletons), which makes the objective linear in it — the
+//!   sign argument is then exact whatever the rest of `P` looks like;
+//! - the reductions that touch `P` at all (fixed-variable elimination, and
+//!   [`crate::aggregate`]'s doubleton substitution `P' = MᵀPM`) are exact
+//!   changes of variable, not relaxations. A congruence preserves convexity —
+//!   which is what `aggregate`'s header claims — but it does not *require* it;
+//! - everything else (empty, parallel and forcing rows, activity-based
+//!   redundancy, bound tightening) reasons about the **feasible set** alone.
+//!
+//! And the contract is a correct KKT point of the original problem, which is
+//! exactly the guarantee a nonconvex QP solve makes in the first place. What
+//! does **not** carry over is any claim about *global* optimality — the
+//! reductions preserve the KKT point the engine reaches, not the fact that
+//! there is only one.
+//!
 //! # Relationship to PaPILO
 //!
 //! [PaPILO](https://github.com/scipopt/papilo) (Gleixner, Gottwald &
