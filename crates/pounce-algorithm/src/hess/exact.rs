@@ -27,4 +27,8 @@ impl HessianUpdater for ExactHessianUpdater {
         data.borrow_mut().w = Some(w);
         true
     }
+
+    fn provides_exact_hessian(&self) -> bool {
+        true
+    }
 }
