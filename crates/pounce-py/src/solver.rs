@@ -978,7 +978,8 @@ impl PySolver {
     ///
     /// The intended call is over the ambiguous entries of a report,
     /// not over every bounded variable — the cost is a back-solve
-    /// each:
+    /// each. Pass them in one call rather than looping: the
+    /// back-solves batch, and the per-call fixed cost is paid once.
     ///
     /// ```python
     /// rep = solver.classify_activity()

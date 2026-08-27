@@ -812,6 +812,10 @@ pub(crate) enum ReducedActivityError {
 /// over the [`AMBIGUOUS`] entries of a report, which is a handful on
 /// the models where the question arises.
 ///
+/// Pass those indices in ONE call: the back-solves batch, and the
+/// per-call fixed cost — one pass over the Hessian for the shared
+/// identification floor — is paid once rather than per index.
+///
 /// # Edge cases
 ///
 /// * A [`FIXED`] variable has no column in the factor: status
