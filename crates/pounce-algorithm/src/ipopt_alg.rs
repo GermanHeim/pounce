@@ -75,6 +75,39 @@ const DECLINE_CONTINUATION_BUDGET: Index = 10;
 /// does not); more entries would mostly re-bet on a point the first bet already
 /// failed to improve.
 const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
+/// gh #797 — default for `neg_curv_escapes`. One is enough for the reported
+/// shape: the escape lands on a point whose reduced Hessian *is* positive
+/// definite, so the probe declines there and a second escape would have nothing
+/// to spend itself on. It is also the conservative default — each escape is a
+/// separate bet, and while none of them can return a worse point than the
+/// certificate it left, each costs its own continuation budget.
+const DEFAULT_NEG_CURV_ESCAPES: usize = 1;
+/// gh #797 — outer iterations a negative-curvature escape gets to produce a
+/// certificate of its own before it is cut and the stationary point reported.
+/// Generous relative to gh #534's ten, because the escape deliberately lands
+/// far from the point it left (a full fraction-to-the-boundary step) and the
+/// continuation is a fresh endgame rather than the tail of one already in
+/// progress.
+const NEG_CURV_CONTINUATION_BUDGET: Index = 30;
+/// gh #797 — cap on the escape step as a multiple of `1 + ‖(x, s)‖∞`. The
+/// probe's direction has unit infinity-norm, so this bounds the escape by the
+/// iterate's own scale; an absolute cap would mean different things on
+/// differently scaled models. Only binds when the fraction-to-the-boundary rule
+/// does not, i.e. when nothing in the direction runs into a bound.
+const NEG_CURV_MAX_STEP_FACTOR: Number = 10.0;
+/// gh #797 — backtracking steps available to the escape, and the ratio between
+/// them. `0.5^12 ≈ 2.4e-4` of the boundary step, past which a direction that
+/// still fails the decrease test is not one worth taking.
+const NEG_CURV_BACKTRACKS: usize = 12;
+const NEG_CURV_BACKTRACK_FACTOR: Number = 0.5;
+/// gh #797 — Armijo factor on the escape's *second-order* decrease model. The
+/// gradient is (near) zero at a stationary point, so the model is
+/// `½α²dᵀ(W + Σ)d` and this is the fraction of it the trial must actually
+/// realise. Mirrors the line search's `eta_phi` in role, not in value: the
+/// quantity being tested is curvature, and a nonlinear objective gives back
+/// less of a quadratic model's prediction than a linear one gives of a
+/// first-order model's.
+const NEG_CURV_ARMIJO: Number = 0.1;
 
 pub struct IpoptAlgorithm {
     pub data: IpoptDataHandle,
@@ -308,6 +341,25 @@ pub struct IpoptAlgorithm {
     /// produced a strict certificate. Past it the continuation is cut and the
     /// floor is reported, so the bet costs a bounded number of iterations.
     decline_deadline_iter: Option<Index>,
+    /// `neg_curv_escapes` (gh #797) — how many times a certified stationary
+    /// point whose reduced Hessian is not positive semidefinite may be *left*
+    /// along a direction of negative curvature instead of reported. `0` restores
+    /// the pre-#797 behaviour (report the first-order certificate, whatever its
+    /// curvature).
+    ///
+    /// See [`Self::try_neg_curv_escape`] for the test and the step, and
+    /// [`Self::honour_neg_curv_floor`] for what makes a lost bet harmless.
+    pub neg_curv_escapes: usize,
+    /// gh #797 — escapes spent so far this solve.
+    neg_curv_escapes_used: usize,
+    /// gh #797 — the certified stationary point the escape left. It is a strict
+    /// certificate, so it is the floor the continuation must beat *with a
+    /// certificate of its own* to be preferred.
+    neg_curv_floor: Option<VetoSnapshot>,
+    /// gh #797 — outer iteration by which the escape's continuation must have
+    /// produced a certificate. Past it the continuation is cut and the floor
+    /// reported, so the bet costs a bounded number of iterations.
+    neg_curv_deadline_iter: Option<Index>,
     /// Count of consecutive restoration entries on which the outer
     /// constraint violation at entry was already below `tol` (the
     /// outer optimality tolerance). Matches the *intent* of upstream
@@ -466,6 +518,10 @@ impl IpoptAlgorithm {
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
+            neg_curv_escapes: DEFAULT_NEG_CURV_ESCAPES,
+            neg_curv_escapes_used: 0,
+            neg_curv_floor: None,
+            neg_curv_deadline_iter: None,
             resto_decline_progress_ratio: DEFAULT_DECLINE_PROGRESS_RATIO,
             nlp_err_recent: [Number::NAN; DECLINE_PROGRESS_SAMPLES],
             nlp_err_recent_len: 0,
@@ -1542,6 +1598,293 @@ impl IpoptAlgorithm {
         }
         !self.ranks_better(floor.obj, floor.constr_viol, curr_f, curr_viol)
     }
+    /// Try to leave a first-order-stationary point that is not a local minimum
+    /// (gh #797). Returns `true` when the current iterate has been replaced and
+    /// the solve should continue instead of terminating.
+    ///
+    /// # What this is for
+    ///
+    /// The convergence check is a *first-order* test, and on a nonconvex model
+    /// that is strictly weaker than "local minimum". `nonconvex_qp.nl` is the
+    /// reported case: `min x₀x₁ s.t. x₀ + x₁ = 2, 0 ≤ x ≤ 4` restricted to its
+    /// feasible segment is the concave `f(x₀) = x₀(2 - x₀)`, *maximized* at
+    /// `(1,1)` and minimized at the two endpoints. From the bound-pushed start
+    /// `(0.01, 0.01)` the first Newton step lands exactly on `(1,1)`, every KKT
+    /// residual there is zero, and the solve reports `Solve_Succeeded` at
+    /// `obj = 1` — the constrained maximum.
+    ///
+    /// Inertia correction does not save this. It engages (the iteration log
+    /// shows `lg(rg)` from the second iteration on) and cannot help: `δ_x I` is
+    /// symmetric, the model and the iterate are symmetric under `x₀ ↔ x₁`, and
+    /// a symmetric correction applied to a zero gradient gives a zero step
+    /// however indefinite the reduced Hessian is. The regularization makes the
+    /// *step* well-posed; nothing in the algorithm asks whether the point it
+    /// has converged to is a minimum.
+    ///
+    /// # What it does
+    ///
+    /// [`PdFullSpaceSolver::negative_curvature_direction`] answers that
+    /// question with the KKT factorization already in hand, and hands back a
+    /// measured direction `d` with `J_c d_x = 0` and `dᵀ(W + Σ)d < 0`. Since
+    /// the gradient is (near) zero the barrier objective along `±d` is
+    /// `φ(α) ≈ φ(0) + ½α²dᵀ(W + Σ)d`, decreasing on *both* sides, so both signs
+    /// are tried and the better trial wins. The step is capped by the ordinary
+    /// fraction-to-the-boundary rule and by [`NEG_CURV_MAX_STEP_FACTOR`] times
+    /// the iterate's own scale, then backtracked until it satisfies that
+    /// second-order decrease model with an Armijo factor — the same shape as
+    /// the line search, on the curvature term rather than the gradient term.
+    /// A trial whose constraint violation exceeds what the convergence check
+    /// itself calls feasible is refused outright.
+    ///
+    /// # Why it cannot make an answer worse
+    ///
+    /// The point being left is a *strict certificate* — the solve was about to
+    /// report `Solve_Succeeded` at it — so it is snapshotted as a floor before
+    /// the step, exactly as gh #534's deferred restoration decline does with
+    /// the point its guard would have returned. The continuation gets
+    /// [`NEG_CURV_CONTINUATION_BUDGET`] outer iterations; past that, and at
+    /// every other exit of the driver loop, [`Self::honour_neg_curv_floor`]
+    /// hands the floor back unless the continuation is standing somewhere that
+    /// both outranks it and carries a certificate of its own. So the escape
+    /// costs a bounded number of iterations and can only trade the stationary
+    /// point for a strictly better one.
+    fn try_neg_curv_escape(&mut self, iter_count: Index) -> bool {
+        if self.neg_curv_escapes_used >= self.neg_curv_escapes {
+            return false;
+        }
+        // No room to continue: the deadline below would fire on the very next
+        // iteration, so the escape would buy nothing and cost a factorization.
+        if iter_count.saturating_add(1) >= self.max_iter {
+            return false;
+        }
+        if self.nlp.is_none() || self.search_dir.is_none() {
+            return false;
+        }
+        // `data.w` still holds `W(curr_{N-1})` — step 3 of `iterate()` runs
+        // *after* the convergence check — and curvature at the previous iterate
+        // is not the question being asked. Re-evaluate it here rather than
+        // running the Hessian updater a second time at this iterate: that would
+        // hand the limited-memory updater a zero-length curvature pair to skip
+        // and count against `limited_memory_max_skipping`, and it would leave
+        // `data.w` describing a different iterate than it did before, which the
+        // post-optimal sensitivity hook reads.
+        //
+        // With a quasi-Newton `B` there is nothing to re-evaluate and the stale
+        // one is used. That is not a gap being papered over: BFGS maintains `B`
+        // positive definite by construction, so under
+        // `hessian_approximation=limited-memory` the probe's inertia test
+        // passes at δ_x = 0 and the escape declines — correctly, since the only
+        // curvature information the solve has says the point is a minimum.
+        let w_at_curr = self
+            .bundle
+            .hess
+            .provides_exact_hessian()
+            .then(|| self.cq.borrow().curr_exact_hessian());
+
+        let probe = {
+            let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) else {
+                return false;
+            };
+            let mut pd = sd.pd_solver_mut();
+            pd.negative_curvature_direction(&self.data, &self.cq, nlp, w_at_curr)
+        };
+        let Some(probe) = probe else {
+            return false;
+        };
+
+        let Some(floor) = self.snapshot_current(iter_count) else {
+            // Nothing to fall back to, and a bet with no floor is exactly what
+            // must not be placed (the gh #534 rule, for the same reason).
+            return false;
+        };
+        let curr = floor.iterate.clone();
+        let (tau, curr_barr, curr_theta) = {
+            let d = self.data.borrow();
+            let cq = self.cq.borrow();
+            (
+                d.curr_tau,
+                cq.curr_barrier_obj(),
+                cq.curr_constraint_violation(),
+            )
+        };
+        if !curr_barr.is_finite() {
+            return false;
+        }
+        // A trial may raise the violation up to what this solve's own
+        // convergence check calls feasible, and no further.
+        let theta_cap = curr_theta.max(self.bundle.conv_check.constr_viol_tol_or_default());
+        // The direction has unit infinity-norm, so this caps the escape at a
+        // multiple of the iterate's own scale rather than at an absolute
+        // distance, which would mean different things on differently scaled
+        // models.
+        let step_cap = NEG_CURV_MAX_STEP_FACTOR * (1.0 + curr.x.amax().max(curr.s.amax()));
+
+        let mut accepted: Option<(crate::iterates_vector::IteratesVector, Number, Number)> = None;
+        for sign in [1.0, -1.0] {
+            let mut dir = probe.delta.deep_copy();
+            dir.scal(sign);
+            let dir = dir.freeze();
+            let alpha_max = self.cq.borrow().aff_step_alpha_primal_max(&dir, tau);
+            if !(alpha_max > 0.0) {
+                continue;
+            }
+            let mut alpha = alpha_max.min(step_cap);
+            for _ in 0..NEG_CURV_BACKTRACKS {
+                if !(alpha > 0.0) || !alpha.is_finite() {
+                    break;
+                }
+                let mut trial = curr.deep_copy();
+                trial.x.axpy(alpha, &*dir.x);
+                trial.s.axpy(alpha, &*dir.s);
+                let trial = trial.freeze();
+                self.data.borrow_mut().set_trial(trial.clone());
+                let (barr, theta) = {
+                    let cq = self.cq.borrow();
+                    (cq.trial_barrier_obj(), cq.trial_constraint_violation())
+                };
+                self.data.borrow_mut().trial = None;
+                // Second-order sufficient decrease. `probe.curvature` is
+                // negative, so this asks the trial to realise at least
+                // `NEG_CURV_ARMIJO` of the decrease the curvature model
+                // predicts — the guard against a direction that is only
+                // downhill in the quadratic model and uphill in the function.
+                let predicted = 0.5 * alpha * alpha * probe.curvature;
+                if barr.is_finite()
+                    && theta.is_finite()
+                    && theta <= theta_cap
+                    && barr <= curr_barr + NEG_CURV_ARMIJO * predicted
+                {
+                    let better = match accepted.as_ref() {
+                        Some((_, best, _)) => barr < *best,
+                        None => true,
+                    };
+                    if better {
+                        accepted = Some((trial, barr, alpha));
+                    }
+                    break;
+                }
+                alpha *= NEG_CURV_BACKTRACK_FACTOR;
+            }
+        }
+
+        let Some((trial, barr, alpha)) = accepted else {
+            return false;
+        };
+
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] iter {}: certified point has negative reduced curvature \
+             (dᵀ(W+Σ)d = {:.3e}); escaping along it with α = {:.3e} \
+             (barrier obj {:.10e} -> {:.10e}) and continuing (gh#797).",
+            iter_count, probe.curvature, alpha, curr_barr, barr,
+        );
+
+        self.neg_curv_escapes_used += 1;
+        self.neg_curv_floor = Some(floor);
+        self.neg_curv_deadline_iter = Some(
+            iter_count
+                .saturating_add(NEG_CURV_CONTINUATION_BUDGET)
+                .min(self.max_iter.saturating_sub(1)),
+        );
+        {
+            let mut d = self.data.borrow_mut();
+            d.set_trial(trial);
+            d.accept_trial_point();
+            // Iteration-log marker. `n` is not one of upstream's codes and is
+            // unused elsewhere in POUNCE; it is what tells a reader of the
+            // table that the jump between two iterates was an escape and not a
+            // line-search step.
+            d.append_info_string("n");
+        }
+        // The filter's entries were computed at, and around, a point the
+        // algorithm has just left discontinuously — the same situation a
+        // successful restoration leaves behind, and handled the same way.
+        self.bundle.line_search.reset();
+        self.bundle.line_search.reset_after_restoration();
+        true
+    }
+
+    /// Make a negative-curvature escape non-destructive (gh #797).
+    ///
+    /// The escape is a bet placed *from a strict certificate*, which is what
+    /// makes its accounting stricter than gh #534's: the floor is a point the
+    /// solve was about to report `Solve_Succeeded` at, so the continuation has
+    /// to come back with a certificate of its own at a better point to be
+    /// preferred. Anything else — a worse point, an acceptable-level stall, a
+    /// spent iteration budget, a restoration failure — restores the floor and
+    /// reports it under the status it always had.
+    ///
+    /// Restoring reports `Success` even over a budget or user-stop exit, which
+    /// is the opposite of what [`Self::honour_decline_floor`] and
+    /// [`Self::honour_best_acceptable_after_dual_guard`] do — and deliberately
+    /// so. Those two hold an *acceptable-level* point and must not let it erase
+    /// why the solve stopped. Here a pre-#797 build returns `Solve_Succeeded`
+    /// at this exact point, and returns it *before* the continuation that spent
+    /// the budget ever runs: the budget was spent by the bet, not by the
+    /// caller's problem. Reproducing the baseline outcome — point and status
+    /// both — is the guarantee, and it is the reading gh #200's hook already
+    /// takes of a refused certificate.
+    fn honour_neg_curv_floor(&mut self, result: SolverReturn) -> SolverReturn {
+        let Some(floor) = self.neg_curv_floor.clone() else {
+            return result;
+        };
+        self.assert_comparable_scale(&floor);
+        // Rank by the status each point will actually be *reported* under, and
+        // only then by objective — the status-dominant order gh #200 arrived at
+        // the hard way. `apply_kkt_fidelity_gate` re-grades a `Success` on the
+        // unscaled KKT error after the driver loop returns, so with
+        // `kkt_fidelity_tol` set a lower objective at a coarser point is a
+        // status regression dressed up as a win.
+        let (_, curr_kkt) = self.curr_obj_and_unscaled_kkt();
+        let continued_success =
+            matches!(result, SolverReturn::Success) && self.survives_fidelity_gate(curr_kkt);
+        let floor_success = self.survives_fidelity_gate(floor.unscaled_kkt);
+        let keep_continuation = match (continued_success, floor_success) {
+            (true, true) => self.continuation_outranks(&floor),
+            // The continuation reports `Solve_Succeeded` where the floor would
+            // be re-graded down. A better status wins outright.
+            (true, false) => true,
+            // No certificate of its own — the escape was a bet placed *from*
+            // one, so anything short of that loses it.
+            (false, _) => false,
+        };
+        if keep_continuation {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] the negative-curvature escape paid off: the continuation \
+                 certified a better point than the stationary one it left \
+                 (obj {:.10e} -> {:.10e}, gh#797).",
+                floor.obj, self.curr_obj_and_unscaled_kkt().0,
+            );
+            return result;
+        }
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] the negative-curvature escape did not pay off; restoring the \
+             certified stationary point from iter {} (obj {:.10e} viol {:.3e}) \
+             and reporting it (gh#797).",
+            floor.iter, floor.obj, floor.constr_viol,
+        );
+        self.restore_snapshot(&floor);
+        SolverReturn::Success
+    }
+
+    /// The escape's continuation ran out of budget without a certificate of its
+    /// own (gh #797). Restore the stationary point the escape left and report
+    /// it — that point is what a pre-#797 build returns, and it is a genuine
+    /// strict certificate, so `Success` is the honest status for it.
+    ///
+    /// Takes the floor rather than cloning it, so
+    /// [`Self::honour_neg_curv_floor`] is a no-op on the way out.
+    fn terminate_at_neg_curv_floor(&mut self) -> IterateOutcome {
+        if let Some(floor) = self.neg_curv_floor.take() {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] the negative-curvature escape spent its {} iterations \
+                 without a new certificate; restoring the stationary point from \
+                 iter {} (obj {:.10e}) and reporting it (gh#797).",
+                NEG_CURV_CONTINUATION_BUDGET, floor.iter, floor.obj,
+            );
+            self.restore_snapshot(&floor);
+        }
+        IterateOutcome::Terminate(SolverReturn::Success)
+    }
 
     /// Make a deferred restoration decline non-destructive (gh #534).
     ///
@@ -2137,6 +2480,14 @@ impl IpoptAlgorithm {
             ConvergenceStatus::Continue => {}
             ConvergenceStatus::Converged => {
                 timing.check_convergence.end();
+                // gh #797: first-order stationarity is not a local minimum on a
+                // nonconvex model. If the reduced Hessian here is indefinite,
+                // leave along a direction of negative curvature instead of
+                // certifying a constrained maximum — bounded in cost, and
+                // floored at this very point.
+                if self.try_neg_curv_escape(iter_count) {
+                    return IterateOutcome::Continue;
+                }
                 return IterateOutcome::Terminate(SolverReturn::Success);
             }
             ConvergenceStatus::ConvergedToAcceptable => {
@@ -2234,6 +2585,14 @@ impl IpoptAlgorithm {
         // floor comparison reads it.
         if self.decline_deadline_iter.is_some_and(|d| iter_count > d) {
             return self.terminate_at_decline_floor();
+        }
+
+        // gh #797: the negative-curvature escape is the same kind of bet, and
+        // its deadline is checked in the same place and for the same reason —
+        // after the convergence check, so a certificate the continuation
+        // reached wins rather than being pre-empted by its own expiry.
+        if self.neg_curv_deadline_iter.is_some_and(|d| iter_count > d) {
+            return self.terminate_at_neg_curv_floor();
         }
 
         // 3. Hessian update. Must run BEFORE `update_barrier_parameter`
@@ -3931,6 +4290,13 @@ impl IpoptAlgorithm {
         // the point the guard would have returned hands that point back. Last of
         // the three, so it compares against whatever the hooks above settled on.
         let result = self.honour_decline_floor(result);
+
+        // gh #797: leaving a certified stationary point along a direction of
+        // negative curvature is a bet placed *from* a certificate, so it is
+        // settled last — whatever the hooks above arrived at, the escape either
+        // beat the point it left with a certificate of its own or that point is
+        // handed back.
+        let result = self.honour_neg_curv_floor(result);
 
         // Terminal post-mortem checkpoint. Skipped when the user already
         // asked to stop (they were just at a prompt); otherwise the

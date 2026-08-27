@@ -347,6 +347,11 @@ pub struct AlgorithmBuilder {
     /// contraction of the NLP error before a decline is deferred. Default
     /// `0.5`; at or above `1` the progress requirement is dropped entirely.
     pub resto_decline_progress_ratio: Number,
+    /// `neg_curv_escapes` (gh #797) — how many times a certified stationary
+    /// point with an indefinite reduced Hessian may be left along a direction
+    /// of negative curvature instead of reported. Default `1`; `0` restores the
+    /// pre-#797 behaviour. See `upstream_options.rs`.
+    pub neg_curv_escapes: Index,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
     /// candidate points by the status each will be *reported* under. Default
@@ -1068,6 +1073,7 @@ impl Default for AlgorithmBuilder {
             dual_diverging_streak: 0,
             resto_decline_deferrals: 1,
             resto_decline_progress_ratio: 0.5,
+            neg_curv_escapes: 1,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1561,6 +1567,7 @@ mod tests {
                             dual_diverging_streak: 0,
                             resto_decline_deferrals: 1,
                             resto_decline_progress_ratio: 0.5,
+                            neg_curv_escapes: 1,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),

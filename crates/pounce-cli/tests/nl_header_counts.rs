@@ -9,7 +9,7 @@
 //!
 //! | claim | holds on |
 //! |---|---|
-//! | the header carries a parseable census | 65 of 68 fixtures |
+//! | the header carries a parseable census | 65 of 69 fixtures |
 //! | variables that appear nonlinearly are inside the `nlvc + nlvo − nlvb` prefix | **65 of 65** |
 //! | rows that are nonlinear are inside the `nlc` prefix | 61 of 65 |
 //!
@@ -37,9 +37,16 @@ use std::path::{Path, PathBuf};
 use pounce_cli::nl_reader::{NlProblem, read_nl_file};
 
 /// Fixtures whose header line 5 (`nlvc nlvo nlvb`) carries fewer than the
-/// three documented fields, so no census is recorded. All three are
+/// three documented fields, so no census is recorded. All four are
 /// hand-written `.nl` text; AMPL emits all three fields.
-const NO_CENSUS: &[&str] = &["convex_qp.nl", "infeasible_qp.nl", "nonconvex_qp.nl"];
+const NO_CENSUS: &[&str] = &[
+    "convex_qp.nl",
+    "infeasible_qp.nl",
+    "nonconvex_qp.nl",
+    // `nonconvex_qp.nl` with its row relaxed to `>=` (gh #797), so it
+    // inherits the same two-field line 5.
+    "nonconvex_qp_ineq.nl",
+];
 
 /// Fixtures whose `nlc` does not bound the nonlinear rows, with what is
 /// wrong. Pinned in both directions: a fixture here that starts conforming
