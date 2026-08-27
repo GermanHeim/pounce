@@ -208,16 +208,24 @@ jobs:
       # step-size-convergence pair and sharing the fold's compiled graph
       # across compositions, but what is left is still minutes: two XLA
       # compilations of a third derivative of the Peng--Robinson residual,
-      # both load bearing.
+      # both load bearing. gh#798 added a second `slow` test to that file,
+      # `test_traced_fold_is_invariant_to_the_continuation_step`, which
+      # asserts at the trace level the step-size claim gh#788 dropped. It
+      # pays no fold compile, but it is two envelope traces, and a trace is
+      # length-blind — ~25s of JIT and anchor solve whether it takes 5 steps
+      # or 145 — so ~50s is the floor for any two-trace comparison and it
+      # belongs here rather than on every PR.
       #
-      # What it asserts is a published thermodynamic value and an inverse
-      # design: claims about the *example*, which only the example, the JAX
-      # frontend it drives, or the solver underneath can move. So a PR that
-      # touches none of those deselects it, every push to `main` runs it in
-      # full, and a solver change is covered after merge rather than before —
-      # the same trade `coverage.yml` documents for the same reason. The
-      # unmarked tests in that file still run on every PR, including the one
-      # pinning the invariant the fold cache's key depends on.
+      # What they assert is a published thermodynamic value, an inverse
+      # design, and the sampling-independence of both: claims about the
+      # *example*, which only the example, the JAX frontend it drives, or the
+      # solver underneath can move. So a PR that touches none of those
+      # deselects them, every push to `main` runs them in full, and a solver
+      # change is covered after merge rather than before — the same trade
+      # `coverage.yml` documents for the same reason. The unmarked tests in
+      # that file still run on every PR, including the one pinning the
+      # invariant the fold cache's key depends on and the one pinning the
+      # extremum stencil the step-size test rests on.
       - name: Decide whether the slow tests run
         id: select
         run: |
