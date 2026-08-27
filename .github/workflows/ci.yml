@@ -202,16 +202,22 @@ jobs:
           # `.lst` just says the wrong thing.
           python -m pip install "gamsapi[core]"
       # `test_published_binary_fold_and_inverse_design_regression` is marked
-      # `slow` and costs ~9 minutes here on its own — it was the whole of this
-      # job's 8m23s -> 22m12s jump when the phase-envelope example landed, and
-      # this job is the long pole gating every PR. What it asserts is a
-      # published thermodynamic value and a continuation step-size invariance:
-      # claims about the *example*, which only the example, the JAX frontend
-      # it drives, or the solver underneath can move. So a PR that touches
-      # none of those deselects it, every push to `main` runs it in full, and
-      # a solver change is covered after merge rather than before — the same
-      # trade `coverage.yml` documents for the same reason. The three unmarked
-      # tests in that file still run on every PR.
+      # `slow` — it was the whole of this job's 8m23s -> 22m12s jump when the
+      # phase-envelope example landed, on the job that is the long pole gating
+      # every PR. gh#788 halved it (759s -> 372s locally) by dropping the
+      # step-size-convergence pair and sharing the fold's compiled graph
+      # across compositions, but what is left is still minutes: two XLA
+      # compilations of a third derivative of the Peng--Robinson residual,
+      # both load bearing.
+      #
+      # What it asserts is a published thermodynamic value and an inverse
+      # design: claims about the *example*, which only the example, the JAX
+      # frontend it drives, or the solver underneath can move. So a PR that
+      # touches none of those deselects it, every push to `main` runs it in
+      # full, and a solver change is covered after merge rather than before —
+      # the same trade `coverage.yml` documents for the same reason. The
+      # unmarked tests in that file still run on every PR, including the one
+      # pinning the invariant the fold cache's key depends on.
       - name: Decide whether the slow tests run
         id: select
         run: |

@@ -6,6 +6,7 @@ import pytest
 from pounce.examples.phase_envelope import (
     DEITERS_BELL_METHANE_PROPANE,
     NATURAL_GAS,
+    _fold_equations,
     composition_from_coordinates,
     design_composition_for_extremum,
     design_parameters,
@@ -19,6 +20,7 @@ from pounce.examples.phase_envelope import (
     trace_envelope,
     vapor_pressure,
 )
+from pounce.jax import PathTrace
 
 
 def test_simplex_log_ratio_coordinates_round_trip():
@@ -104,24 +106,122 @@ def test_fixed_pressure_sensitivity_matches_fresh_phase_boundary_solves():
     np.testing.assert_allclose(recovered.state, point.state, rtol=1e-9, atol=1e-9)
 
 
+def test_fold_equations_ignore_the_mixture_composition():
+    """Pin the invariant ``_fold_problem``'s cache key rests on (gh#788).
+
+    ``refine_fold`` always supplies a design vector, and ``_decode_design``
+    reads the composition from *that*, ignoring ``mixture.composition``.
+    ``_fold_problem`` therefore leaves the composition out of its cache key,
+    so the inverse design's verification fold reuses the compiled graph
+    instead of paying a second ~2-minute XLA compile of the augmented
+    system's third derivative.
+
+    That invariant lives in a different function, so it is checked here
+    rather than trusted.  This test is unmarked and cheap: it evaluates the
+    fold equations, never their Lagrangian Hessian, so it runs on every
+    pull request and goes red the moment the residual starts reading the
+    mixture's own composition.
+    """
+
+    mixture = DEITERS_BELL_METHANE_PROPANE
+    kij_pair = (0, 1)
+    design = design_parameters(mixture, kij_pair)
+    n_fold = 2 * (mixture.n_components + 1) + 1
+    fold_state = np.linspace(0.1, 0.9, n_fold)
+
+    other = mixture.with_composition(np.array([0.35, 0.65]))
+    assert not np.allclose(other.composition, mixture.composition)
+
+    baseline = np.asarray(
+        _fold_equations(fold_state, design, mixture, 0.0, "temperature", kij_pair)
+    )
+    shifted = np.asarray(
+        _fold_equations(fold_state, design, other, 0.0, "temperature", kij_pair)
+    )
+    np.testing.assert_array_equal(baseline, shifted)
+
+
+def test_reparameterize_trace_swaps_the_parameter_and_its_state_slot():
+    """Reparameterization rearranges converged coordinates, and only those.
+
+    This ran only inside the slow published-value test until gh#788 dropped
+    the pressure-mode fold it fed.  The function is pure array
+    rearrangement, so a synthetic trace covers it exactly and costs no
+    continuation run.
+    """
+
+    n = DEITERS_BELL_METHANE_PROPANE.n_components
+    theta = np.array([0.0, 1.0, 2.0, 1.5, 0.5])  # [ln K], with one reversal
+    state = np.column_stack(
+        [np.arange(5.0), np.arange(5.0) + 10.0, np.array([7.0, 8.0, 9.0, 8.5, 7.5])]
+    )  # [ln K_1, ln K_2, ln P]
+    trace = PathTrace(
+        s=np.arange(5.0),
+        theta=theta,
+        x=state,
+        lam=np.zeros((5, n + 1)),
+        n_steps=5,
+        n_correctors=5,
+        n_accepts=5,
+        turning_points=[2.0],
+    )
+
+    swapped = reparameterize_trace(
+        trace, DEITERS_BELL_METHANE_PROPANE, from_mode="temperature", to_mode="pressure"
+    )
+
+    # The old state slot n becomes the parameter; the old parameter takes it.
+    np.testing.assert_array_equal(swapped.theta, state[:, n])
+    np.testing.assert_array_equal(swapped.x[:, :n], state[:, :n])
+    np.testing.assert_array_equal(swapped.x[:, n], theta)
+    # Turning points are re-detected in the new parameter, not carried over.
+    assert swapped.turning_points == [9.0]
+    assert swapped.active_set_changes == []
+
+    # Same mode is a copy, not a rearrangement.
+    same = reparameterize_trace(
+        trace, DEITERS_BELL_METHANE_PROPANE, from_mode="pressure", to_mode="pressure"
+    )
+    np.testing.assert_array_equal(same.theta, theta)
+    np.testing.assert_array_equal(same.x, state)
+
+    with pytest.raises(ValueError, match="from_mode"):
+        reparameterize_trace(
+            trace, DEITERS_BELL_METHANE_PROPANE, from_mode="bogus", to_mode="pressure"
+        )
+
+
 @pytest.mark.slow
 def test_published_binary_fold_and_inverse_design_regression():
     """Reproduce a published maxcondentherm and solve an inverse design.
 
     Marked slow because it is the most expensive test in the suite by an
-    order of magnitude: ~150 s locally and ~9 min on a CI runner, nearly
-    all of it XLA compiling the Lagrangian Hessian of the augmented fold
-    equations, which is a third derivative of the Peng--Robinson residual.
-    ``_fold_problem`` already caches that compilation across the folds
-    that share a mixture and mode; the three that remain are irreducible.
+    order of magnitude, nearly all of it XLA compiling the Lagrangian
+    Hessian of the augmented fold equations, which is a third derivative
+    of the Peng--Robinson residual.  Two such compiles remain -- the
+    temperature fold and the inverse-design NLP -- and both are load
+    bearing: they are the published benchmark and the design solve.
 
-    What it asserts is a *published-value* and *step-size-invariance*
-    claim about the example, not a claim about the solver's arithmetic,
-    and it can only move when the example, the JAX frontend, or the solver
-    itself moves.  So it is deselected on pull requests that touch none of
-    those, and runs in full on every push to `main`.  The three unmarked
-    tests in this file still cover the cubic root branches, the simplex
-    coordinates, and the implicit derivatives on every PR.
+    gh#788 cut the other two.  ``_fold_problem``'s cache is keyed
+    blind to composition, so the verification retrace's fold reuses the
+    temperature graph instead of recompiling it.  And the ds=0.10/ds=0.08
+    step-size-convergence pair is gone, taking the pressure-mode fold with
+    it -- that fold existed only as one side of that comparison.  Notebook
+    34 cell 38 still publishes the coarse/fine agreement (8.41e-12), and
+    the properties the #777 review established all survive here: the fold
+    is still reached by a real continuation from a real low-pressure
+    anchor, the published Deiters--Bell value is still checked, and the
+    inverse design is still verified by a fresh trace rather than by
+    re-reading the NLP's own answer.
+
+    What it asserts is a *published-value* and *inverse-design* claim about
+    the example, not a claim about the solver's arithmetic, and it can only
+    move when the example, the JAX frontend, or the solver itself moves.
+    So it is deselected on pull requests that touch none of those, and runs
+    in full on every push to `main`.  The unmarked tests in this file still
+    cover the cubic root branches, the simplex coordinates, the implicit
+    derivatives, trace reparameterization, and the composition invariant
+    the fold cache depends on, on every PR.
     """
 
     mixture = DEITERS_BELL_METHANE_PROPANE
@@ -137,18 +237,6 @@ def test_published_binary_fold_and_inverse_design_regression():
         mixture,
         beta=0.0,
         mode="temperature",
-        kij_pair=(0, 1),
-    )
-    pressure_fold = refine_fold(
-        reparameterize_trace(
-            trace,
-            mixture,
-            from_mode="temperature",
-            to_mode="pressure",
-        ),
-        mixture,
-        beta=0.0,
-        mode="pressure",
         kij_pair=(0, 1),
     )
     diagnostics = diagnose_phase_point(
@@ -168,51 +256,6 @@ def test_published_binary_fold_and_inverse_design_regression():
     assert diagnostics.roots_are_admissible
     assert np.isclose(diagnostics.liquid_sum, 1.0, atol=1e-10)
     assert np.isclose(diagnostics.vapor_sum, 1.0, atol=1e-10)
-
-    # The augmented folds should be insensitive to the continuation sampling
-    # once each run brackets the same two extrema.
-    fine_trace = trace_envelope(
-        mixture,
-        beta=0.0,
-        mode="temperature",
-        ds=0.08,
-        n_steps=180,
-    )
-    fine_temperature_fold = refine_fold(
-        fine_trace,
-        mixture,
-        beta=0.0,
-        mode="temperature",
-        kij_pair=(0, 1),
-    )
-    fine_pressure_fold = refine_fold(
-        reparameterize_trace(
-            fine_trace,
-            mixture,
-            from_mode="temperature",
-            to_mode="pressure",
-        ),
-        mixture,
-        beta=0.0,
-        mode="pressure",
-        kij_pair=(0, 1),
-    )
-    np.testing.assert_allclose(
-        [
-            pressure_fold.pressure_pa,
-            pressure_fold.temperature_k,
-            fold.temperature_k,
-            fold.pressure_pa,
-        ],
-        [
-            fine_pressure_fold.pressure_pa,
-            fine_pressure_fold.temperature_k,
-            fine_temperature_fold.temperature_k,
-            fine_temperature_fold.pressure_pa,
-        ],
-        rtol=1e-8,
-        atol=1e-6,
-    )
 
     design = design_composition_for_extremum(
         fold,
