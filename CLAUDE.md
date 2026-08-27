@@ -195,6 +195,72 @@ coupled, because the ratio is `reduced/diagonal` (gh#763). Never use the
 activity class as a proxy for kink-ness — that inference is exactly what
 produced the gh#756 defect.
 
+## The re-solve oracle: the only guard that reads an outside number
+
+`crates/pounce-sensitivity/tests/sens_resolve_oracle.rs` (gh#764 item 1)
+checks the step against a **warm re-solve at the perturbed parameter**,
+tolerance two orders tighter than the base solve, started from the base
+iterate. Every other guard in the crate — the invariance legs included —
+compares a number the sensitivity layer produced against another number
+it produced, or against a derivative someone worked out by hand. Those
+catch a rule that is not invariant. They cannot catch a step that is
+*self-consistently* wrong, which is the class with the worst blast
+radius and the one `205bb67` named: "turn an essentially exact step into
+a wrong one while reporting `improved()` and converged … the residual
+halved so nothing warned."
+
+**The oracle owns steps above the barrier width, and nothing below it.**
+Below `sqrt(mu)` the warm re-solve and the directional-derivative
+contract genuinely diverge, by an amount of order the row's slack, and
+*both are correct*: the converged base point sits `O(sqrt(mu))` off the
+exact solution, because at a kink `s · z = mu` with both factors
+vanishing. So an oracle arm placed below the width **fails on correct
+code**. The invariance legs own that region instead, comparing slopes,
+which cancels the base offset exactly. Measured on the kink fixture:
+`mu` 9.1e-10, width 3.0e-5, base-to-oracle offset 5.4e-5, and `err/delta` runs
+6.4e-3 at `delta = 1e-2` to 5.4e5 at `1e-10` — the same absolute error
+throughout, swamping the first-order content as the step shrinks. The
+crossover is a band, not a point, and the band is deliberately left
+unasserted.
+
+Two fixtures, chosen to reach **different branches**, per the rule
+above:
+
+- a weakly active kink (gh#762's model, with the pin's RHS lifted to a
+  field), which reaches the directional decision;
+- a **strongly** active bound with multiplier 0.6 that a large enough
+  perturbation drives negative — upstream's equation 18, the *release*
+  half of fix-relax, which no fixture in `sens_invariance_legs.rs`
+  reaches at all.
+
+Measured on those two: the plain step is the **two-sided average** at a
+kink, off by `A/2 · delta` — the directional mode exists to repair
+exactly that, and the oracle is what turns the claim into a number.
+Across a strongly active release, `linear` *and* `directional` are both
+wrong by the full released distance (`directional` is a no-op with no
+weak rows); only `fix_relax` reproduces the re-solve.
+
+**What a falling residual does not tell you.** Across a release the
+corrector reports `improved()` and drops its residual by 3e-8 while the
+point stays 0.1333 from the truth — the whole distance the variable
+should have travelled off its bound. That is not a defect: the held
+barrier diagonal cannot represent a bound leaving the active set, and
+`correct_step` says so. It is the gh#764 thesis as a number —
+`improved()` plus a converged residual does **not** imply the answer is
+close, and no internal guard can tell you that. It is pinned, so a
+corrector that learns to cross a release fails the test deliberately
+rather than silently.
+
+The file carries its own mutation table and, in the same breath, the
+list of what it is **not** evidence about: index spaces (both fixtures
+have `m = 1`, so g index and KKT row coincide — `cd_split_pin_mapping.rs`
+owns that), scaling (both run unit-scaled — leg 1 and
+`variable_scaling_sensitivity.rs` own it), the `improved() == false`
+branch (unexercised by this corpus), and anything that only appears at
+62k. Add a row to the oracle for a change that reroutes which
+correction a mode reaches for; check first which branch the fixture you
+are leaning on actually takes.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
