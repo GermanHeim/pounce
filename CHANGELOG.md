@@ -9,6 +9,62 @@ changes.
 
 ## [Unreleased]
 
+- **A constraint row's activity ratio is not normalized by a reduced
+  curvature either, and now there is an accessor for rows too** (#804).
+  #763 fixed the variable path and left the row path with a docs note.
+  `classify_activity` divides a row's geometric barrier weight `Σ‖∇d‖²` by
+  `|∇dᵀH∇d|/‖∇d‖²`, the curvature along the row's own gradient. That IS a
+  genuine directional curvature — strictly better than the variable path's
+  bare `H_ii`, which is why it was not the one #763 fixed, and exactly the
+  argument that would have left it wrong. It is still not a *reduced*
+  curvature: it does not account for the other free coordinates
+  re-optimizing, and what is left after they do is what generates the row's
+  multiplier. So a row's ratio is `reduced/directional`, equal to 1 only
+  where the row's direction is decoupled from the remaining free space, and
+  a coupled row kink falls out of the `[1e-1, 1e1]` band and reads
+  `ambiguous` — at any tolerance, because that ratio is `μ`-independent.
+
+  New `Solver::reduced_row_activity(&[j, …])` (Rust) /
+  `solver.reduced_row_activity([j, …])` (Python) re-measures the same rule
+  against the reduced curvature. The row's own value is a coordinate of the
+  KKT system — the slack the barrier acts on, tied to the model by
+  `dⱼ(x) = sⱼ` — so the back-solve is the variable accessor's, one block
+  over: a unit right-hand side in the `s` block gives
+  `qⱼ = (1/(K⁻¹)_{sⱼsⱼ} − Σⱼ)·‖∇dⱼ‖²`, the `‖∇dⱼ‖²` putting the answer
+  along the unit normal where `classify_activity`'s `q` lives. Driving the
+  `x` block with `∇dⱼ` gives the identical number
+  (`∇dⱼᵀK⁻¹∇dⱼ = (K⁻¹)_{sⱼsⱼ}` for every `j`), so the slack unit vector is
+  used: nothing to assemble into the right-hand side. Equality rows report
+  `equality` as the report does; indices are user-space full-g, so an
+  equality ahead of an inequality shifts nothing.
+
+  As with #763 the default classification is **unchanged** and nothing in
+  the step path moves — `weakly_active_bounds()` already counts `ambiguous`
+  as weak. What was wrong was the public *answer*, and the same inference
+  that shipped #756's first-order wrong derivative reads just as naturally
+  off a row. `classify_activity`'s docs, `row_status`, `row_ratio`, the
+  `AMBIGUOUS` constant, `CLAUDE.md` and `docs/src/sensitivity.md` now all
+  say so for rows as well.
+
+  Tests: `tests/reduced_row_activity.rs` runs both branches the rule can
+  take, per the `CLAUDE.md` branch rule. A decoupled fixture where the two
+  normalizers must *agree* — two regimes at once, including the
+  strongly-active row where the `1/(K⁻¹)_ss − Σ` cancellation is hardest —
+  and a coupled row kink where they must *disagree* by exactly the
+  coupling, over four couplings, which is the test rather than a duplicate
+  of the first. Both fixtures carry an equality ahead of the inequalities
+  and rows whose gradients are not unit length, so the full-g→d-block map
+  and every `‖∇d‖²` conversion have somewhere to go wrong. A row-scaling
+  leg sweeps six decades of `dg`: unlike the variable accessor's row-scale
+  invariance, which holds by construction, this one has three `dg` factors
+  meeting in one ratio (`Σ` exported with `dg²`, `(K⁻¹)_ss` conjugated with
+  `dg⁻²`, `‖∇d‖²` gathered with `dg²`), and each is mutation-checked to
+  trip its own leg and only its own. The equivalence of the two
+  back-solve routes is checked numerically rather than left as prose:
+  `the_slack_unit_vector_and_the_row_gradient_give_the_same_back_solve`
+  drives the `x` block with the row's gradient, the way the issue
+  proposed, and gets the same number.
+
 - **Step-size invariance for the phase-envelope example is asserted again,
   at the trace level** (#798). #793 halved
   `test_published_binary_fold_and_inverse_design_regression` partly by
