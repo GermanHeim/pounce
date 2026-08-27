@@ -595,10 +595,19 @@ impl LowRankAugSystemSolver {
         // `W` on a KKT this size, so the split throws away one `F` per
         // SMW update. The same bit-identity gate as the warm batch
         // below applies, at the wider `n_cols_us`.
+        //
+        // Note there is deliberately no `dim == inner.system_dim()`
+        // precondition here, unlike the warm batch below. Cold, the
+        // inner solver has not assembled yet, so its `system_dim()` is
+        // still 0 and that check would reject every first factorization
+        // — silently, leaving the merged path unexercised by any mock
+        // whose `system_dim()` is 0 when cold. `try_solve_many_flat`
+        // assembles first and then declines if the packed length
+        // disagrees, which is the same guard applied where the answer
+        // is actually known.
         if !self.inner_has_factor
             && n_cols_us > 1
             && dim > 0
-            && dim == self.inner.system_dim() as usize
             && self.inner.multi_solve_matches_single_solve(n_cols_us)
         {
             let mut packed = vec![0.0; dim * n_cols_us];
@@ -1296,6 +1305,11 @@ mod tests {
         backsolves: Cell<usize>,
         batched_calls: Cell<usize>,
         batched_cols: Cell<usize>,
+        /// Calls to the *factorizing* multi-RHS path, and the columns
+        /// they carried. Separate from `batched_calls` so a test can
+        /// tell "one merged call" from "a factorization plus a batch".
+        factor_batched_calls: Cell<usize>,
+        factor_batched_cols: Cell<usize>,
         factored_diag: RefCell<Vec<Number>>,
         factored_delta_x: Cell<Number>,
     }
@@ -1417,6 +1431,53 @@ mod tests {
         /// shows up as a wrong answer rather than a wrong count.
         fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
             self.packed
+        }
+
+        /// The factorizing counterpart: captures the factor like
+        /// `solve` does, then applies it to every packed column. One
+        /// call, one factorization, all columns — which is the whole
+        /// point of the path.
+        fn try_solve_many_flat(
+            &mut self,
+            coeffs: &AugSysCoeffs<'_>,
+            packed_rhs: &mut [Number],
+            nrhs: usize,
+            _check_neg_evals: bool,
+            _num_neg_evals: Index,
+        ) -> Option<ESymSolverStatus> {
+            if !self.packed {
+                return None;
+            }
+            let wdiag = coeffs
+                .w
+                .expect("CountingInner requires W")
+                .as_any()
+                .downcast_ref::<DiagMatrix>()
+                .expect("CountingInner requires W to be a DiagMatrix");
+            let diag_rc = wdiag.get_diag().expect("Wdiag has no diag set").clone();
+            let diag = downcast_dense(diag_rc.as_ref()).expanded_values();
+            let dim = diag.len();
+            if packed_rhs.len() != dim * nrhs {
+                return None;
+            }
+            *self.stats.factored_diag.borrow_mut() = diag.clone();
+            self.stats.factored_delta_x.set(coeffs.delta_x);
+            self.stats
+                .factorizations
+                .set(self.stats.factorizations.get() + 1);
+            self.stats
+                .factor_batched_calls
+                .set(self.stats.factor_batched_calls.get() + 1);
+            self.stats
+                .factor_batched_cols
+                .set(self.stats.factor_batched_cols.get() + nrhs);
+            let delta_x = coeffs.delta_x;
+            for col in packed_rhs.chunks_mut(dim) {
+                for (i, x) in col.iter_mut().enumerate() {
+                    *x /= diag[i] + delta_x;
+                }
+            }
+            Some(ESymSolverStatus::Success)
         }
 
         fn try_resolve_many_flat(
@@ -1969,13 +2030,10 @@ mod tests {
             "a mock without the packed path must take the per-column arm"
         );
         assert!(
-            stats_batch.batched_calls.get() >= 1,
-            "the packed mock must actually reach the batched arm"
-        );
-        assert_eq!(
-            stats_batch.batched_cols.get(),
-            2,
-            "3 V columns: column 0 pays the factorization, 2 are batched"
+            stats_batch.factor_batched_calls.get() >= 1,
+            "the packed mock must actually reach the merged arm — a mock \
+             whose `system_dim()` is 0 when cold silently would not, and \
+             then this test would be green about code it never ran"
         );
         assert_eq!(
             stats_batch.factorizations.get(),
@@ -1985,6 +2043,38 @@ mod tests {
         assert_eq!(
             sol_loop, sol_batch,
             "batched and per-column arms must agree bit-for-bit"
+        );
+
+        // All three V columns ride along with the factorization in a
+        // single backend call. Before the merge this read
+        // `factor_batched_calls == 0`, `batched_cols == 2` — column 0
+        // through the single-RHS `solve`, then a second call carrying
+        // the other two. That second call streams the whole factor
+        // again, which is the cost this removes.
+        assert_eq!(
+            stats_batch.factor_batched_calls.get(),
+            1,
+            "the cold SMW block must be ONE factorizing multi-RHS call"
+        );
+        assert_eq!(
+            stats_batch.factor_batched_cols.get(),
+            3,
+            "all 3 V columns must ride along with the factorization"
+        );
+        assert_eq!(
+            stats_batch.batched_calls.get(),
+            0,
+            "no separate back-solve pass may remain over the same factor"
+        );
+        // One `resolve` remains, and must: it is the actual RHS being
+        // solved against the same factor after the V columns have built
+        // the SMW correction. Upstream pays it too. What the merge
+        // removes is the second pass over the factor that used to carry
+        // the V columns.
+        assert_eq!(
+            stats_batch.backsolves.get(),
+            1,
+            "only the main RHS solve may remain over the cached factor"
         );
     }
 

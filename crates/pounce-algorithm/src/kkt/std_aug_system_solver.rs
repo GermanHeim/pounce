@@ -694,8 +694,13 @@ impl AugSystemSolver for StdAugSystemSolver {
             self.last_status = Some(s);
             return Some(s);
         }
+        // Decline rather than fail: the caller cannot know `dim` before
+        // this call assembles, so a disagreement here means "this
+        // backend's layout is not what you packed", and the split path
+        // is a correct answer to that. Assembling and then declining is
+        // safe — `assemble` is idempotent and no factorization ran.
         if packed_rhs.len() != (self.dim as usize) * nrhs {
-            return Some(ESymSolverStatus::FatalError);
+            return None;
         }
 
         // `new_matrix = true`: this is the factorizing call, so it is
