@@ -9,6 +9,61 @@ changes.
 
 ## [Unreleased]
 
+- **Step-size invariance for the phase-envelope example is asserted again,
+  at the trace level** (#798). #793 halved
+  `test_published_binary_fold_and_inverse_design_regression` partly by
+  dropping the ds=0.10/ds=0.08 pair, and that pair carried the only
+  automated assertion that the example's maxcondentherm does not depend on
+  how finely the envelope was traced. The replacement offered in its place
+  was notebook 34 cell 38, but no workflow executes notebooks — `grep -rn
+  "nbconvert\|nbclient\|papermill\|\.ipynb" .github/workflows/*.yml`
+  returns nothing — so the published 8.41e-12 agreement is an artifact, not
+  a check, and could have degraded silently.
+
+  The new `test_traced_fold_is_invariant_to_the_continuation_step` restores
+  the claim without restoring its cost. Both legs stop at the *trace*:
+  neither calls `refine_fold`, so neither pays the ~196 s XLA compile of the
+  augmented fold system's Lagrangian Hessian that made the dropped pair
+  expensive. It costs ~50 s against that pair's ~196 s plus a trace.
+
+  Measured while writing it, and the reason the test is shaped the way it
+  is: a trace is **length-blind**. 145 steps cost what 5 do — 24.5 s
+  against 24.0 s — because essentially all of it is one JIT compilation of
+  the residual and its Jacobian plus one low-pressure anchor solve, at
+  ~0.003 s a step after that. So ~50 s is the floor for any two-trace
+  comparison, and the test carries the `slow` marker the rest of this
+  claim's evidence carries rather than adding ~50 s to the job gating every
+  PR.
+
+  The fine leg halves `ds` instead of taking the historical 0.08, so every
+  coarse point has an exact arclength twin — `trace_arclength` stamps
+  `s = arange(K) * ds` — and the comparison carries no interpolation error
+  of its own. It checks both the state at matched arclength (7.7e-5 [ln K],
+  9.1e-4 [mixed]) and the parabolically interpolated maxcondentherm
+  (7.5e-4 K apart), because two traces can agree pointwise while
+  disagreeing about the extremum they bracket, and can agree about the
+  extremum while having taken different paths to it. Both are also required
+  to bracket the published Deiters--Bell value, since agreement on the
+  wrong branch is not invariance.
+
+  The plain sample maximum would **not** have worked: halving `ds` keeps
+  every coarse sample, so both traces peak at the same point and agree for a
+  reason that has nothing to do with convergence. Hence the parabolic
+  stencil, and hence the unmarked
+  `test_parabolic_extremum_is_exact_on_a_quadratic` that pins it — without
+  it the comparison could be measuring the stencil rather than the
+  continuation and still pass.
+
+  Both are mutation-checked. Degrading the stencil to the sample maximum
+  turns the unmarked test red. Biasing the predictor to
+  `ds * (1 + 0.02 * ds)` — which leaves every point converged on the same
+  curve with the same extremum, status `ok` — moves the matched-arclength
+  leg to 1.5e-3 [ln K] and 1.2e-2 [mixed], 3x and 2x their thresholds, and
+  moves the extremum's arclength to 1.3e-2, 6x its threshold. Under that
+  same mutation the extremum's *temperature* stays green at 4.9e-4 K,
+  because a fitted vertex value is blind to a uniform rescaling of the
+  abscissa — which is why the arclength is asserted beside it rather than
+  the temperature being trusted alone.
 - **The NLP arm no longer certifies a constrained maximum as
   `Solve_Succeeded` (gh #797).** On the CLI fixture `nonconvex_qp.nl` —
   `min x₀·x₁ s.t. x₀ + x₁ = 2, 0 ≤ x ≤ 4`, whose restriction to the feasible
