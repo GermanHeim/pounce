@@ -268,6 +268,23 @@ branch (unexercised by this corpus), and anything that only appears at
 correction a mode reaches for; check first which branch the fixture you
 are leaning on actually takes.
 
+## Reviewing a sensitivity change: `/sens-review`
+
+`.claude/commands/sens-review.md` (gh#764 item 2) is the checklist form of
+everything above, plus the classes that do not have a leg of their own. It is a
+companion to `/adversary`: that one hunts wrong answers from the outside, this
+one reads a diff. Eight entries, ordered by how *silently* the class fails —
+index space, frame and scaling, absolute thresholds on scale-dependent
+quantities, doc drift, silently-wrong-while-reporting-success, which branch the
+fixture takes, naming the measured populations behind a new threshold, and
+which binary the harness loaded.
+
+Every entry carries a worked example from this repo with a file and symbol,
+never a maxim, because a checklist whose examples cannot be checked rots into a
+ritual — which is entry 4's own subject. It approves nothing: it emits
+PASS/RISK/N-A per entry with the evidence attached, and a RISK is a question
+for the author.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
