@@ -1012,18 +1012,34 @@ def _fold_problem(
 
     Constructing a fresh problem per call therefore paid that cost once
     per fold rather than once per *kind* of fold — five times over in
-    ``test_published_binary_fold_and_inverse_design_regression`` alone,
-    and once per refined extremum in notebook 34.
+    ``test_published_binary_fold_and_inverse_design_regression`` as it
+    stood when this cache landed, and once per refined extremum in
+    notebook 34.  That test now refines two folds, and with the key below
+    they share one compilation.
 
-    The key is the complete mixture, not just the parts the traced graph
-    reads.  ``refine_fold`` always supplies the design vector, and
-    ``_decode_design`` takes the composition from *that* and ignores
-    ``mixture.composition``, so keying on everything but the composition
-    would hit more often and still be correct today.  It is deliberately
-    not done: that correctness rests on an invariant inside a different
-    function, and if a later edit makes the residual read the mixture's
-    own composition, a composition-blind key returns a stale graph and the
-    answer is wrong rather than merely slow.
+    The key deliberately omits ``mixture.composition``.  ``refine_fold``
+    always supplies the design vector, and ``_decode_design`` takes the
+    composition from *that* and ignores ``mixture.composition``, so two
+    mixtures differing only in composition trace the same graph.  Keying
+    on the composition anyway cost a full recompile for the inverse
+    design's verification fold, which is the same mixture at a designed
+    composition -- 143 s of the 759 s
+    ``test_published_binary_fold_and_inverse_design_regression`` used to
+    take (gh#788).
+
+    That the composition is unread is an invariant of a *different*
+    function, so it is pinned by a test rather than by this comment:
+    ``test_fold_equations_ignore_the_mixture_composition`` evaluates
+    ``_fold_equations`` against two mixtures that differ only in
+    composition and requires the outputs to be identical.  It is one of
+    the unmarked tests, so it runs on every pull request.  If a later
+    edit makes the residual read ``mixture.composition``, that test goes
+    red rather than this cache quietly returning a stale graph -- which
+    is the failure mode a composition-blind key would otherwise have.
+
+    ``p_example`` is likewise composition-dependent and likewise safe to
+    share: ``JaxProblem`` reads only its shape and dtype, and probes the
+    sparsity pattern at random ``(x, p)`` draws of its own.
     """
 
     key = (
@@ -1031,7 +1047,6 @@ def _fold_problem(
         mixture.critical_temperature.tobytes(),
         mixture.critical_pressure.tobytes(),
         mixture.acentric_factor.tobytes(),
-        mixture.composition.tobytes(),
         mixture.binary_interaction.tobytes(),
         float(beta),
         mode,
