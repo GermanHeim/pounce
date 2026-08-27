@@ -131,6 +131,100 @@ impl TNLP for RegimeTnlp {
     fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
+/// [`RegimeTnlp`] with the objective negated, so that under
+/// `obj_scaling_factor = -1` the IPM re-negates it and the INTERNAL
+/// problem — iterate, `Sigma`, factor — is identical to the `df = +1`
+/// solve. Anything that moves between the two is the objective scale
+/// being mishandled, not a different model.
+struct NegatedRegimeTnlp;
+
+impl TNLP for NegatedRegimeTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 4,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 4,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_scaling_parameters(&mut self, _r: ScalingRequest<'_>) -> bool {
+        false
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l[0] = 0.0;
+        b.x_u[0] = 1.0;
+        b.x_l[1] = 0.0;
+        b.x_u[1] = 1.0;
+        b.x_l[2] = -1.0e19;
+        b.x_u[2] = 1.0e19;
+        b.x_l[3] = 0.0;
+        b.x_u[3] = 10.0;
+        b.g_l[0] = 2.0;
+        b.g_u[0] = 2.0;
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = 0.5;
+        sp.x[1] = 0.5;
+        sp.x[2] = 0.0;
+        sp.x[3] = 2.0;
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(
+            -(0.5 * (x[0] - 5.0).powi(2)
+                + 0.5 * (x[1] - 0.5).powi(2)
+                + 0.5 * x[2] * x[2]
+                + 0.5 * (x[3] - 9.0).powi(2)),
+        )
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = -(x[0] - 5.0);
+        g[1] = -(x[1] - 0.5);
+        g[2] = -x[2];
+        g[3] = -(x[3] - 9.0);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = x[3];
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow[0] = 0;
+                jcol[0] = 3;
+            }
+            SparsityRequest::Values { values } => values[0] = 1.0,
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _n: bool,
+        obj: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0 as Index, 1, 2, 3]);
+                jcol.copy_from_slice(&[0 as Index, 1, 2, 3]);
+            }
+            SparsityRequest::Values { values } => {
+                for v in values.iter_mut() {
+                    *v = -obj;
+                }
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
 fn solved() -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -295,4 +389,122 @@ fn no_indices_is_an_empty_report() {
     let red = s.reduced_activity(&[]).expect("reduced activity");
     assert!(red.status.is_empty() && red.q_reduced.is_empty() && red.var.is_empty());
     assert!(red.mu > 0.0, "mu is still the converged one: {:e}", red.mu);
+}
+
+/// `max -[...]` via `obj_scaling_factor = -1`, the documented way to
+/// maximize (see `scaling_invariance.rs`).
+fn solved_maximizing() -> Solver {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-8, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("obj_scaling_factor", -1.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(NegatedRegimeTnlp));
+    let mut s = Solver::new(app, tnlp);
+    let st = s.solve();
+    assert!(
+        matches!(
+            st,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "{st:?}"
+    );
+    s
+}
+
+/// The classification must not depend on the sign of the objective
+/// scale, and the reported quantities must keep the sign the
+/// natural-units contract gives them.
+///
+/// `compute` runs the rule on the df-in `Sigma` — the internal `z/s`,
+/// which is non-negative whatever `df` is — and divides the objective
+/// scale out only on export. A refinement that classified the
+/// *natural* `Sigma` instead would hand the rule a negative ratio
+/// under `obj_scaling_factor < 0` and read `x0`, pinned hard at its
+/// upper bound, as INACTIVE.
+///
+/// This is the decoupled fixture, so as in
+/// [`the_reduced_normalizer_agrees_with_the_diagonal_on_a_decoupled_model`]
+/// the refinement must agree with the report — and here it must agree
+/// under a negative `df` too, against a `+1` solve whose internal
+/// problem is the same one.
+#[test]
+fn the_classification_is_unmoved_by_a_negative_objective_scale() {
+    let plus = solved();
+    let minus = solved_maximizing();
+
+    let rep_p = plus.classify_activity().expect("activity report");
+    let rep_m = minus.classify_activity().expect("activity report");
+    let red_p = plus.reduced_activity(&[0, 1]).expect("reduced activity");
+    let red_m = minus.reduced_activity(&[0, 1]).expect("reduced activity");
+
+    for (k, i) in [0usize, 1].into_iter().enumerate() {
+        // the report is the reference: it already classifies in the
+        // objective-scale-positive frame, so a negative df moves
+        // nothing in it
+        assert_eq!(
+            rep_p.var_status[i], rep_m.var_status[i],
+            "report status for x{i} moved with the objective sign",
+        );
+
+        // the refinement must reach the same verdict as the report,
+        // at BOTH signs -- this is the decoupled model
+        assert_eq!(
+            red_m.status[k], rep_m.var_status[i],
+            "x{i}: reduced status {} disagrees with the report's {} under \
+             obj_scaling_factor = -1",
+            red_m.status[k], rep_m.var_status[i],
+        );
+        assert_eq!(
+            red_m.status[k], red_p.status[k],
+            "x{i}: reduced status moved with the objective sign",
+        );
+        assert_rel(
+            &format!("x{i} reduced ratio under negative df"),
+            red_m.ratio[k],
+            red_p.ratio[k],
+            1e-6,
+        );
+
+        // ...while the REPORTED quantities keep the natural-units
+        // sign, as `var_sigma` does. Asserting this pins the fix to
+        // the classification input and stops it being "take an abs
+        // somewhere", which would corrupt the curvature the caller
+        // reads.
+        assert!(
+            red_m.sigma[k] < 0.0 && red_p.sigma[k] > 0.0,
+            "x{i}: sigma must carry the natural-units sign (got {} at df=-1, {} at df=+1)",
+            red_m.sigma[k],
+            red_p.sigma[k],
+        );
+        assert_rel(
+            &format!("x{i} sigma magnitude under negative df"),
+            red_m.sigma[k].abs(),
+            red_p.sigma[k].abs(),
+            1e-6,
+        );
+        assert_rel(
+            &format!("x{i} q_reduced under negative df"),
+            red_m.q_reduced[k],
+            -red_p.q_reduced[k],
+            1e-6,
+        );
+        assert_eq!(
+            red_m.q_sign[k], -red_p.q_sign[k],
+            "x{i}: q_sign must flip with the declared problem's curvature",
+        );
+    }
 }

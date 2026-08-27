@@ -55,6 +55,14 @@ changes.
   the same one-sided derivatives, over four couplings. The accessor also
   takes a row in invariance legs 1 and 3 (`sens_invariance_legs.rs`), since
   it converts frames and maps full-x to var-x.
+  A third fixture pins the objective scale: `compute` classifies on the
+  df-in `Σ` — the internal `z/s`, non-negative whatever `df` is — and
+  divides the objective scale out only on export, so the refinement
+  classifies in that same orientation. Reading the *natural* `Σ` instead
+  would hand the rule a negative ratio under `obj_scaling_factor < 0`, the
+  documented way to maximize, and report a bound pinned hard at its limit as
+  `inactive`. The reported `sigma` and `q_reduced` still carry the
+  natural-units sign, as `var_sigma` does.
 - **`pounce.jax.solve_qp`: jnp `lb`/`ub` no longer break under `jax.jit`**
   (#795). `_expand_bounds` decided which bound rows to fold into `G`/`h` with
   `np.isfinite(float(ub[i]))`. Indexing is a `jnp` op, and inside a `jit`

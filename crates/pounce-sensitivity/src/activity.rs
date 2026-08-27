@@ -832,6 +832,12 @@ pub(crate) enum ReducedActivityError {
 ///   curvature and ratio.
 /// * `|q_i^red|` below the same identification floor [`compute`] uses
 ///   reports [`UNIDENTIFIED`], as there.
+/// * Under `obj_scaling_factor < 0` — the documented way to maximize —
+///   `Sigma` and `q_i^red` are both reported with the sign the
+///   natural-units contract gives them (negative, as
+///   [`ActivityReport::var_sigma`] is), but the CLASSIFICATION runs on
+///   the objective-scale-positive orientation [`compute`] classifies
+///   in, so a status here means the same thing at either sign of `df`.
 ///
 /// Variable bounds only. The row path normalizes by a directional
 /// curvature `∇dᵀH∇d / ‖∇d‖²`, which carries the same un-reduced
@@ -946,7 +952,14 @@ pub(crate) fn reduced_activity(
         // is modest in magnitude and reports through `q_sign`, exactly
         // as an indefinite `H_ii` does in the report.
         let q = 1.0 / d - sigma;
-        let e = classify_entry(sigma, q, floor, mu);
+        // classify in the same orientation `compute` does: it runs the
+        // rule on the df-in `Sigma` (internal `z/s`, non-negative),
+        // dividing the objective scale out only on export. Here both
+        // sides are already natural, so a NEGATIVE df -- the
+        // documented way to maximize -- would otherwise hand the rule
+        // a negative ratio and read a pinned bound as INACTIVE.
+        let sgn = if obj_scale < 0.0 { -1.0 } else { 1.0 };
+        let e = classify_entry(sigma * sgn, q * sgn, floor, mu);
         // no finite bound: the curvature is still an answer, the
         // activity question is not
         let bounded = has_l[row] || has_u[row];
