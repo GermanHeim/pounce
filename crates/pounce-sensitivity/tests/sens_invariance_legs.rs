@@ -785,6 +785,10 @@ fn cross(rho: Number) -> Number {
 /// toward `0` drives `c^2/(h*m)` toward `1`.
 struct CoupledKinkTnlp {
     rho: Number,
+    /// `g_scaling[0]` under `nlp_scaling_method=user-scaling`; `None`
+    /// declines scaling entirely, as every other use of this fixture
+    /// does.
+    g_scale: Option<Number>,
 }
 
 impl TNLP for CoupledKinkTnlp {
@@ -798,8 +802,15 @@ impl TNLP for CoupledKinkTnlp {
         })
     }
 
-    fn get_scaling_parameters(&mut self, _req: ScalingRequest<'_>) -> bool {
-        false
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(dg) = self.g_scale else {
+            return false;
+        };
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = false;
+        *req.use_g_scaling = true;
+        req.g_scaling[0] = dg;
+        true
     }
 
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
@@ -884,6 +895,12 @@ fn solved_coupled() -> Solver {
 
 /// [`solved_coupled`] at a chosen coupling strength.
 fn solved_coupled_at(rho: Number) -> Solver {
+    solved_coupled_scaled(rho, None)
+}
+
+/// [`solved_coupled_at`] with an optional `user-scaling` row factor on
+/// the single constraint row.
+fn solved_coupled_scaled(rho: Number, g_scale: Option<Number>) -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -897,9 +914,14 @@ fn solved_coupled_at(rho: Number) -> Solver {
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
+    if g_scale.is_some() {
+        app.options_mut()
+            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
 
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CoupledKinkTnlp { rho }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CoupledKinkTnlp { rho, g_scale }));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
     assert!(
@@ -1077,4 +1099,125 @@ fn leg_magnitude_an_ambiguous_kink_decides_the_same_way_at_every_step_size() {
             1e-6,
         );
     }
+}
+
+/// Leg 1, row-scaling arm (gh#763 follow-up). The change of variables
+/// is not the only scaling axis a `user-scaling` solve moves: the
+/// constraint rows carry their own factors, and every fixture in this
+/// file pins that axis at the identity — [`KinkTnlp`] sets
+/// `use_g_scaling = false` outright, and the coupled fixture declined
+/// scaling entirely until this test.
+///
+/// The row scale is safe by construction: the natural-units
+/// conjugation carries no `dg` into the `x` block, so `Sigma`, the
+/// reduced curvature and the classification are all unmoved by it.
+/// That is a property worth *pinning* rather than re-deriving —
+/// gh#763's own defect was an untested scaling axis (`obj_scaling`),
+/// measured safe by the same kind of argument and wrong.
+///
+/// What "unmoved" means here, measured rather than assumed: the
+/// statuses and curvature signs are bit-identical across three decades
+/// of `dg`, and the magnitudes agree to 7–27 ULP (relative ~5e-15) —
+/// the solver takes a slightly different path in scaled space, so this
+/// is solver precision, not bit-equality. The tolerance below is three
+/// decades looser than that and still eleven decades tighter than any
+/// `dg` leak could hide in: a factor of `dg` or `dg²` reaching the `x`
+/// block would move these by `1e3` or `1e6`.
+#[test]
+fn leg_scaling_the_reduced_curvature_is_unmoved_by_a_row_scaling() {
+    const DG: Number = 1.0e3;
+    /// Three decades above the 5e-15 actually observed, eleven below a
+    /// one-factor-of-`dg` leak.
+    const RTOL: Number = 1.0e-12;
+
+    let base = solved_coupled_scaled(RHO, Some(1.0));
+    let scaled = solved_coupled_scaled(RHO, Some(DG));
+
+    let vars = [0usize, 1, 2];
+    let rb = base.reduced_activity(&vars).expect("reduced activity");
+    let rs = scaled.reduced_activity(&vars).expect("reduced activity");
+    let pb = base.classify_activity().expect("activity report");
+    let ps = scaled.classify_activity().expect("activity report");
+
+    // the kink really is the coupled one this file is about, so the
+    // test cannot pass by classifying nothing
+    assert_eq!(
+        rb.status[0], WEAKLY_ACTIVE,
+        "fixture drifted: k should certify as a kink on the reduced normalizer",
+    );
+    assert_eq!(
+        pb.var_status[0], AMBIGUOUS,
+        "fixture drifted: the report should still read the coupled kink as ambiguous",
+    );
+
+    for (k, &i) in vars.iter().enumerate() {
+        // classification and curvature SIGN are exact
+        assert_eq!(
+            rb.status[k], rs.status[k],
+            "x{i}: reduced status moved under a row scaling of {DG:e}",
+        );
+        assert_eq!(
+            rb.q_sign[k], rs.q_sign[k],
+            "x{i}: reduced curvature sign moved under a row scaling of {DG:e}",
+        );
+        assert_eq!(
+            pb.var_status[i], ps.var_status[i],
+            "x{i}: report status moved under a row scaling of {DG:e}",
+        );
+
+        // magnitudes to solver precision
+        assert_close_scaled(
+            &format!("x{i} reduced ratio"),
+            rb.ratio[k],
+            rs.ratio[k],
+            RTOL,
+        );
+        assert_close_scaled(
+            &format!("x{i} reduced curvature"),
+            rb.q_reduced[k],
+            rs.q_reduced[k],
+            RTOL,
+        );
+        assert_close_scaled(&format!("x{i} sigma"), rb.sigma[k], rs.sigma[k], RTOL);
+        assert_close_scaled(
+            &format!("x{i} report ratio"),
+            pb.var_ratio[i],
+            ps.var_ratio[i],
+            RTOL,
+        );
+    }
+}
+
+/// Relative comparison that treats the non-finite entries this fixture
+/// genuinely produces as values to match rather than as failures: an
+/// unbounded variable's ratio is `NaN` and the equality-pinned
+/// coordinate's reduced curvature is `+inf`, and a leak that moved
+/// either INTO or OUT OF those states must fail.
+fn assert_close_scaled(what: &str, base: Number, scaled: Number, rtol: Number) {
+    assert_eq!(
+        base.is_nan(),
+        scaled.is_nan(),
+        "{what}: NaN-ness moved with the row scaling ({base:e} vs {scaled:e})",
+    );
+    if base.is_nan() {
+        return;
+    }
+    assert_eq!(
+        base.is_infinite(),
+        scaled.is_infinite(),
+        "{what}: infiniteness moved with the row scaling ({base:e} vs {scaled:e})",
+    );
+    if base.is_infinite() {
+        assert_eq!(
+            base.signum(),
+            scaled.signum(),
+            "{what}: sign of the infinity moved ({base:e} vs {scaled:e})",
+        );
+        return;
+    }
+    let err = (base - scaled).abs() / base.abs().max(1.0);
+    assert!(
+        err <= rtol,
+        "{what}: moved with the row scaling -- {base:.17e} vs {scaled:.17e} (rel {err:e} > {rtol:e})",
+    );
 }
