@@ -39,6 +39,15 @@ changes.
   this route keeps only the linear part of each row, so the old label would
   have handed the engine a model with its curved constraints deleted.
 
+  Rust API: `pounce_convex::solve_qp_active_set_inertia` is the new entry
+  point, and `solve_qp_active_set` is it under a standing PSD claim.
+  `ActiveSetQp::with_hessian_inertia` carries the claim on the translated
+  problem, and `engine_options` now **takes** it — a signature change to a
+  function added earlier in this same unreleased cycle, made rather than
+  defaulted because the Schur-update choice turns on it and an external driver
+  that got it wrong would get no diagnostic. `ActiveSetSession` stays
+  convex-only: its homotopy is a predictor built for that case.
+
   The guard's message was wrong on this path in three ways and is rewritten:
   it named "the convex QP solver" when the caller had asked for the
   active-set one, asserted the problem "is unbounded below in the indefinite
@@ -48,6 +57,28 @@ changes.
   names `method='ipm'` as the engine that requires PSD and points at
   `method='active-set'` as the one that does not.
 
+- **The directional degeneracy QP decides a bound only when it is at
+  a kink.** The QP (gh#708) treats an engaged row as sitting at its
+  bound, and the weak set can hold coordinates far from their bounds,
+  since low curvature widens the activity classifier's ambiguous
+  class. The QP then pinned interior coordinates a fifth of their
+  range from bounds they could never reach, returning a direction
+  wrong at first order. Each engaged row's kink test is now read off
+  the QP's own reduced matrix: the barrier weight times the row's own
+  diagonal equals 1 at an exact kink, at any curvature, coupling, or
+  scaling, and falls as the squared ratio of kink width to slack away
+  from one. A row far below one is dropped and its plain movement
+  stands. The error of not deciding such a row is bounded by its own
+  slack, and nothing in the decision reads the perturbation's size,
+  so the answer stays linear in the step.
+
+  **A row an equality pins is the limiting case, dropped by the same
+  test.** The pin of a perturbed parameter moves its own coordinate,
+  which engages the row, and its diagonal of the reduced matrix is
+  exactly zero, which would make the QP unbounded. The row is
+  dropped and the coordinate follows its pin wherever the parameter
+  sends it, inside the bound or infeasible, which is the parameter's
+  business rather than the QP's.
 - **Refining more than one phase-envelope fold no longer recompiles the same
   problem each time.** `pounce.examples.phase_envelope.refine_fold` built a
   fresh `JaxProblem` per call, and a `JaxProblem` compiles its callbacks once
@@ -382,6 +413,89 @@ changes.
   in a bare `Invalid_Number_Detected`. With the dense default that is a
   realistic user error — returning only the structural nonzeros while
   declaring no pattern.
+- **`ActiveSetSession`: the convex active-set driver as a persistent handle,
+  so a parametric family is solved parametrically** (#769).
+  `pounce_convex::ActiveSetSession` owns the convex → `pounce-qp` translation
+  (`ActiveSetQp`), the presolve/postsolve wrapper, and the previous solve, and
+  traces `QpSolver::solve_parametric` from it when the next problem is
+  eligible. Reachable from `pounce-rs` as `convex::ActiveSetSession`.
+
+  Two things were dropped on the floor at every call to `solve_qp_active_set`.
+  The **translation** — the `+1` index shift, the `[A_eq ; G]` row stacking,
+  the `±1e19` free-bound convention and the dual sign transform on the way
+  back — lived in locals inside the driver, so a frontend wanting the
+  active-set engine over a convex `QpProblem` had to restate it, and a
+  restatement that gets the sign transform wrong still returns something that
+  looks like a multiplier. The **previous solve** went with it, so every
+  convex-path solve was cold even when the caller was sweeping one parameter:
+  `pounce-qp`'s headline capability is parametric reuse, and the convex path
+  could not reach it at all.
+
+  Reuse changes the cost, not the verdict. A warm answer is verified against
+  the problem as posed by the same `verify_status` the cold path runs — the
+  engine's `Optimal` is re-derived, not propagated — and is reported only if
+  it stands up; otherwise the full cold ladder (screen → unscaled → Ruiz retry
+  → simplex-seeded retry) runs and owns the answer. Eligibility beyond a shape
+  match is left to `solve_parametric`'s own guards — including the deliberate
+  *absence* of the `A` / variable-box guard that gh #602 measured and declined.
+
+  `last_reuse()` and `stats()` report **which route the engine took**, not
+  whether an attempt was made. `solve_parametric` declines the homotopy on a
+  changed `P` or a changed equality/fixed topology and answers from the
+  previous working set instead (`Reuse::WorkingSet` — warm, but not the traced
+  path), and solves cold internally when the previous solve is not a usable
+  base (`Reuse::EngineCold`). All three return an ordinary conclusive `Ok`, so
+  the first version of this session counted declines as parametric hits: a
+  family that never traced a single path would have reported perfect reuse.
+  Found in review by @GermanHeim, who reproduced it with a Hessian changing
+  from 2 to 4.
+
+  Measured on `examples/active_set_session` (8-step path, `n = 40`, one
+  parameter moving, release build, 4-core VM): 104.4 ms of wall clock cold
+  against 19.3 ms through a session — a repeat run gave 111.4 against 24.2 —
+  with all 7 reusing steps tracing the homotopy (asserted, not assumed), i.e.
+  ~13 ms per solve becoming ~1 ms once warm. Both arms report the same status
+  and objective on every step, which the example asserts.
+
+  No behaviour change for existing callers: `solve_qp_active_set` is the same
+  function with its internals hoisted, and a session with nothing to reuse is
+  bit-identical to it (`session_cold_matches_free_function`). Both legs of
+  `scripts/sweep-fixtures.sh` are unchanged, at `solver_selection=auto` and at
+  `solver_selection=qp-active-set`.
+
+- **The `pounce-qp` return leg of the convex active-set translation is public**
+  (#769). `ActiveSetQp` shipped with the forward translation public and the
+  read-back crate-private, which left an external driver — the case in the
+  issue is oximo — able to build and solve the native problem and then obliged
+  to restate the dual sign transform, the objective reconstruction and the
+  status verification: the three parts of this that are wrong *silently*. Also
+  found in review by @GermanHeim.
+
+  `pounce_convex::back_translate_verified` is the whole return leg in one call
+  (read back, re-derive the verdict, reject non-finite fields, relabel a
+  deadline crossing), with `back_translate`, `verify_status` and
+  `engine_options` exported for callers that need the pieces. Re-exported from
+  `pounce-rs` as `convex::*`.
+
+  `screen_variable_box` and `BoxScreen` are public for the same reason, one
+  step earlier: the screen's own documentation says *every solve entry point
+  runs this*, and a caller translating and solving the native problem is now
+  one of them. It is not an optimization — an empty box reaches the engine as
+  an `InvertedBounds` error where the driver reports a certified
+  `PrimalInfeasible`, and a *present* `+∞` lower bound is dropped as if absent
+  and comes back `Optimal` at a point violating it (gh #295, gh #491). The
+  four-step recipe is documented on `ActiveSetQp::from_convex` and in
+  `docs/src/rust.md`; what it deliberately does not reproduce is the cold
+  driver's retry ladder, which is what `solve_qp_active_set` and
+  `ActiveSetSession` are for.
+
+- **`QpSolution::stats.parametric_source` names what a `solve_parametric` call
+  actually reused** — `Homotopy`, `WorkingSet` or `Cold`, and `None` on every
+  other entry point (#769). The three internal outcomes of that call were
+  previously indistinguishable in its result, so no caller could tell a traced
+  path from a declined one, and "is the warm path engaging?" had no checkable
+  answer. Adding the field is a breaking change for anyone constructing
+  `QpStats` with an exhaustive struct literal.
 - **The convex path now presents the same end-of-run contract as the NLP
   path**: timing statistics when asked for, an `EXIT:` banner, and a
   machine-readable `Status:` line (#767).

@@ -228,7 +228,15 @@ impl QpProblem {
 }
 
 /// Verdict on the variable box, decided before any solve is attempted.
-pub(crate) enum BoxScreen {
+///
+/// Public because [`ActiveSetQp`] is: a caller translating and solving the
+/// native problem itself is a solve entry point, and this is the one step
+/// ahead of the translation that is not optional (gh #769). See
+/// [`screen_variable_box`].
+///
+/// [`ActiveSetQp`]: crate::ActiveSetQp
+#[derive(Debug, Clone)]
+pub enum BoxScreen {
     /// Every `[lb, ub]` is a non-empty interval; solve the problem as posed.
     Feasible,
     /// Some variable's box is empty by inspection — report `PrimalInfeasible`.
@@ -299,7 +307,24 @@ pub(crate) const CROSSED_BOX_TOL: f64 = 1e-9;
 /// whichever engine happens to be selected. Screening in the core rather than in
 /// the Python `_validate` pass also keeps the answer the same on the raw
 /// `_pounce` bindings, the CLI, and direct Rust callers.
-pub(crate) fn screen_variable_box(prob: &QpProblem) -> BoxScreen {
+///
+/// "Every solve entry point runs this" now includes one outside this crate.
+/// [`ActiveSetQp::from_convex`] translates the problem *as posed* — it is a
+/// translation, not a repair, and a `from_convex` that quietly snapped a
+/// crossed box would hide the decision — so an external caller driving the
+/// engine directly runs this first, exactly as
+/// [`solve_qp_active_set`](crate::solve_qp_active_set) and
+/// [`ActiveSetSession`] do. Skipping it is not a missing optimization: an
+/// `Empty` box reaches `pounce_qp`'s `validate` as `InvertedBounds` — a hard
+/// `Err` where the driver reports a certified `PrimalInfeasible` — and the
+/// *impossible* class, a present `+∞` lower bound, is dropped as if absent and
+/// comes back `Optimal` at a point violating it. That is the wrong answer,
+/// silently, which is why this is not left for callers to rediscover
+/// (gh #295, gh #491).
+///
+/// [`ActiveSetQp::from_convex`]: crate::ActiveSetQp::from_convex
+/// [`ActiveSetSession`]: crate::ActiveSetSession
+pub fn screen_variable_box(prob: &QpProblem) -> BoxScreen {
     if prob.bounds_admit_no_point() {
         return BoxScreen::Empty;
     }

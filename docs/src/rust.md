@@ -211,6 +211,95 @@ runs one per rayon worker, and `QpFactorization` reuses the AMD ordering and
 symbolic analysis across instances that share a sparsity pattern. See
 [Convex Solver](convex-solver.md).
 
+A *family* of convex QPs — one parameter moving, the structure fixed — is what
+`ActiveSetSession` is for. It is a persistent handle over the **active-set**
+driver (`solver_selection=qp-active-set`'s engine) that owns the convex →
+`pounce-qp` translation and the presolve/postsolve wrapper, keeps the previous
+solve, and traces a parametric homotopy to the next problem instead of solving
+it cold. Reuse is a cost claim only: a warm answer passes through the same
+verification a cold one does, and anything that does not stand up falls back to
+the full cold driver.
+
+```rust
+use pounce_rs::convex::{ActiveSetSession, QpProblem, QpStatus, Reuse, Triplet};
+use pounce_rs::linsol::backend;
+
+let qp = |t: f64| QpProblem {
+    n: 2,
+    p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+    c: vec![-2.0 * t, -2.0 * t],
+    a: vec![],
+    b: vec![],
+    g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+    h: vec![1.0],
+    lb: vec![0.0, 0.0],
+    ub: vec![5.0, 5.0],
+};
+
+let mut session = ActiveSetSession::new(backend);
+for t in [0.2, 0.3, 0.4, 0.9] {
+    let sol = session.solve(&qp(t));
+    assert_eq!(sol.status, QpStatus::Optimal);
+}
+assert_eq!(session.last_reuse(), Reuse::Homotopy);
+```
+
+`last_reuse` names the route the **engine** took, which is not the same as
+whether reuse was attempted. `solve_parametric` declines the homotopy when the
+Hessian changes or a row's equality/fixed status changes, and answers from the
+previous working set instead — still warm, but not the traced path
+(`Reuse::WorkingSet`); if the previous solve is not a usable base it solves
+cold internally (`Reuse::EngineCold`). `Reuse::is_warm()` is the coarse
+question, and `stats()` breaks the counts out the same way
+(`homotopy_accepted`, `working_set_accepted`, `engine_cold_accepted`, plus
+`warm_accepted()`). A family whose reuse count is high but whose
+`homotopy_accepted` is zero is not being traced — usually because something in
+`P` moves between members.
+
+`solve_cold` forces a cold solve and `reset` drops the reuse state.
+`with_presolve(false)` turns the reduction off when the reported iterate has to
+be in the coordinates of the problem exactly as posed. `cargo run -p
+pounce-convex --example active_set_session` is the measurement: on an 8-step
+path at `n = 40`, ~104-111 ms of wall clock cold against ~19-24 ms through a
+session, with all 7 reusing steps tracing the path.
+
+If you are driving the engine yourself rather than through a session — a
+frontend doing something the session does not cover — the recipe is four steps,
+and the first and last are the ones that are easy to skip and wrong to:
+
+1. `screen_variable_box`. `BoxScreen::Empty` is a certified `PrimalInfeasible`
+   with no solve behind it; `Snapped` hands back a repaired copy to solve
+   instead. Skip it and a reversed box reaches the engine as an
+   `InvertedBounds` error, while a *present* `+∞` lower bound is dropped as if
+   absent and the solve returns `Optimal` at a point that violates it.
+2. `ActiveSetQp::from_convex` on whatever step 1 handed back. For an
+   indefinite Hessian, add `.with_hessian_inertia(HessianInertia::Indefinite)`.
+3. `engine_options` for the settings this path was measured under, then solve
+   `ActiveSetQp::problem` with `pounce_qp`. It takes the *same* inertia value
+   as step 2 — one of the settings turns on it — so pass whatever you passed
+   there, and `HessianInertia::Psd` for a convex QP.
+4. `back_translate_verified`. It applies the dual sign transform, recomputes
+   the objective in convex coordinates and re-derives the verdict — the
+   engine's `Optimal` is a claim, not a verdict (see `verify_status`).
+   `back_translate` and `verify_status` are exported separately for callers
+   that need to do something between them.
+
+What the recipe does *not* reproduce is the cold driver's retry ladder (Ruiz
+equilibration, the simplex-seeded retry, the objective-free feasibility probe).
+Those are `solve_qp_active_set`'s and `ActiveSetSession`'s job; if you want
+them, call one of those instead.
+
+For a **nonconvex** QP with the whole ladder, that call is
+`solve_qp_active_set_inertia(prob, opts, engine, HessianInertia::Indefinite,
+backend)` — `solve_qp_active_set` is the same driver under a standing PSD
+claim. The convex IPM has no such entry point: without a PSD Hessian its
+optimality test accepts a saddle point and reports it as `Optimal`. What comes
+back for an indefinite `P` is a *local* solution, and the constraints must be
+linear — the curvature this engine controls is the objective's.
+`ActiveSetSession` stays convex-only: its homotopy is a predictor built for
+that case, so a nonconvex sequence goes through the free function one solve at
+a time.
+
 ### Active-set QP and SQP warm starts
 
 `pounce_rs::qp` is the parametric active-set engine — a different solver
