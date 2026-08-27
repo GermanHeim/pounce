@@ -557,23 +557,100 @@ impl LowRankAugSystemSolver {
 
         // Every column here shares one matrix, so only the first one
         // needs a factorization; the rest are back-substitutions
-        // against it. Upstream gets that from a single `MultiSolve`
-        // over all `nrhs` columns (`IpLowRankAugSystemSolver.cpp:487`),
-        // which reaches `StdAugSystemSolver::MultiSolve` and factorizes
-        // once. We reproduce it in two steps: pay the factorization on
-        // column 0 through the single-RHS path when the inner solver is
-        // cold, then hand every remaining column to the inner solver's
-        // packed multi-RHS back-substitution in one call. That is the
-        // only way `nrhs > 1` reaches the backend — both FERAL
-        // (`solve_many_into`) and MA57 (`ma57cd_` with `nrhs`) block the
-        // triangular solves, and neither can do so one column at a time
-        // (gh#729).
+        // against it. Batching is the only way `nrhs > 1` reaches the
+        // backend at all — both FERAL (`solve_many_into`) and MA57
+        // (`ma57cd_` with `nrhs`) block the triangular solves, and
+        // neither can do so one column at a time (gh#729).
         //
-        // Whether the batch is *taken* is a separate question, asked
-        // below. FERAL answers it from a measured width ceiling; MA57
-        // blocks at every width, so it declines unless
-        // `ma57_batched_backsolve` says otherwise, and by default the
-        // loop further down solves these columns one at a time.
+        // Three paths, in preference order:
+        //
+        //  1. cold inner solver, backend affirms bit-identity at
+        //     `n_cols`: one `try_solve_many_flat` — factorize and
+        //     substitute every column together, which is upstream's
+        //     single `MultiSolve` (`IpLowRankAugSystemSolver.cpp:487`);
+        //  2. otherwise: factorize on column 0 through the single-RHS
+        //     path, then batch the remaining columns. Correct, but it
+        //     streams the factor twice;
+        //  3. backend declines the packed path entirely: one
+        //     single-RHS solve per column.
+        //
+        // Who answers the bit-identity gate matters as much as where it
+        // is asked. FERAL answers from a measured width ceiling. MA57
+        // blocks at every width and so declines by default; it takes
+        // paths 1 and 2 only when `ma57_batched_backsolve` is on, which
+        // is a permission the user grants and not a measurement anyone
+        // has made — see `dev-notes/ma57-batched-backsolve.md`.
+        let n_x = space_x.dim() as usize;
+        let n_s = space_s.dim() as usize;
+        let n_c = space_c.dim() as usize;
+        let n_d = space_d.dim() as usize;
+        let dim = n_x + n_s + n_c + n_d;
+
+        // Cold inner solver: factorize and back-substitute every column
+        // in ONE backend call, which is what upstream's single
+        // `MultiSolve` does (`IpLowRankAugSystemSolver.cpp:487`).
+        // Paying the factorization through the single-RHS path and then
+        // batching the rest streams the factor twice — a sparse
+        // triangular solve costs `F + nrhs*W` with `F` several times
+        // `W` on a KKT this size, so the split throws away one `F` per
+        // SMW update. The same bit-identity gate as the warm batch
+        // below applies, at the wider `n_cols_us`.
+        if !self.inner_has_factor
+            && n_cols_us > 1
+            && dim > 0
+            && dim == self.inner.system_dim() as usize
+            && self.inner.multi_solve_matches_single_solve(n_cols_us)
+        {
+            let mut packed = vec![0.0; dim * n_cols_us];
+            let mut packed_ok = true;
+            for k in 0..n_cols_us {
+                let col = &mut packed[k * dim..k * dim + n_x];
+                if !copy_dense_into(v_x.get_vector(k as Index).as_ref(), col) {
+                    packed_ok = false;
+                    break;
+                }
+                // s/c/d blocks are zero by construction; `packed`
+                // starts zeroed.
+            }
+            if packed_ok {
+                let ic = inner_coeffs(&self.factor, coeffs);
+                if let Some(status) = self.inner.try_solve_many_flat(
+                    &ic,
+                    &mut packed,
+                    n_cols_us,
+                    check_neg_evals,
+                    num_neg_evals,
+                ) {
+                    if self.inner.provides_inertia() {
+                        self.num_neg_evals = self.inner.number_of_neg_evals();
+                    }
+                    if status != ESymSolverStatus::Success {
+                        self.inner_has_factor = false;
+                        self.inner_factor_neg_evals = None;
+                        return (Err(status), out_s, out_c, out_d);
+                    }
+                    self.inner_has_factor = true;
+                    self.inner_factor_neg_evals = check_neg_evals.then_some(num_neg_evals);
+                    for k in 0..n_cols_us {
+                        let col = &packed[k * dim..(k + 1) * dim];
+                        let mut sol_x = space_x.make_new_dense();
+                        let mut sol_s = space_s.make_new_dense();
+                        let mut sol_c = space_c.make_new_dense();
+                        let mut sol_d = space_d.make_new_dense();
+                        sol_x.set_values(&col[..n_x]);
+                        sol_s.set_values(&col[n_x..n_x + n_s]);
+                        sol_c.set_values(&col[n_x + n_s..n_x + n_s + n_c]);
+                        sol_d.set_values(&col[n_x + n_s + n_c..]);
+                        out_x.set_vector(k as Index, Rc::new(sol_x) as Rc<dyn Vector>);
+                        out_s.set_vector(k as Index, Rc::new(sol_s) as Rc<dyn Vector>);
+                        out_c.set_vector(k as Index, Rc::new(sol_c) as Rc<dyn Vector>);
+                        out_d.set_vector(k as Index, Rc::new(sol_d) as Rc<dyn Vector>);
+                    }
+                    return (Ok(out_x), out_s, out_c, out_d);
+                }
+            }
+        }
+
         let mut k0 = 0usize;
         if !self.inner_has_factor && n_cols_us > 0 {
             let rhs_x_dyn: &dyn Vector = v_x.get_vector(0).as_ref();
@@ -607,11 +684,6 @@ impl LowRankAugSystemSolver {
         // dimension, or hands us a column we cannot read as a dense
         // slice.
         if k0 < n_cols_us {
-            let n_x = space_x.dim() as usize;
-            let n_s = space_s.dim() as usize;
-            let n_c = space_c.dim() as usize;
-            let n_d = space_d.dim() as usize;
-            let dim = n_x + n_s + n_c + n_d;
             let nrhs = n_cols_us - k0;
             // The batch is a pure time optimization: these columns feed
             // the SMW correction of an iterate whose trajectory must not
