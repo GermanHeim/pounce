@@ -58,6 +58,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use crate::PdSensBacksolver;
 use crate::activity::{ActivityReport, ReducedActivityReport};
 use crate::backsolver::SensBacksolver;
+use crate::index::{FullXSlice, VarToFull, VarX};
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
 use crate::vec_util::dense_to_vec;
@@ -85,6 +86,19 @@ struct BoundContext {
     /// Bound multipliers at the base point, in the solve's own
     /// coordinates, with the compound row each occupies.
     mults: Vec<crate::boundcheck::BoundMultiplier>,
+}
+
+impl BoundContext {
+    /// Distance from the base point to each bound, for one var-x row.
+    ///
+    /// Typed because the callers read a full-x `ActivityReport` in the
+    /// same scope: `lo`, `hi` and `x_curr` are all primal-block length,
+    /// and indexing them with a full-x value is the swap `crate::index`
+    /// exists to prevent.
+    fn slacks_at(&self, row: VarX) -> (Number, Number) {
+        let i = row.get();
+        (self.x_curr[i] - self.lo[i], self.hi[i] - self.x_curr[i])
+    }
 }
 
 /// Errors returned by post-convergence operations on [`Solver`].
@@ -1173,14 +1187,23 @@ impl Solver {
         // return, so `kappa` below is frame-invariant. The classifier
         // succeeded inside `weakly_active_bounds`, so a nonempty weak
         // set implies this call succeeds too.
+        // `var_sigma` is a FULL-x array read from a VAR-x row, and the
+        // `unwrap_or(0.0)` below turns a miss into a zero that silently
+        // drops the row from the engaged set rather than raising. That
+        // is the shape gh#672 finding 1 shipped, so the index is typed:
+        // `sigma.at` takes a `FullX` and a bare `w.var_row` will not
+        // compile. See `crate::index`.
         let nat_sigma: Vec<Number> = {
             let report = self.classify_activity()?;
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
+            let sigma = FullXSlice::new(&report.var_sigma);
+            let map = VarToFull::build(ctx.n_x, |r| nl.var_x_to_full_x(r.as_index()) as usize);
             weak.iter()
                 .map(|w| {
-                    let full = nl.var_x_to_full_x(w.var_row as Index) as usize;
-                    report.var_sigma.get(full).copied().unwrap_or(0.0)
+                    map.full_of(VarX::new(w.var_row))
+                        .and_then(|full| sigma.at(full))
+                        .unwrap_or(0.0)
                 })
                 .collect()
         };
@@ -1442,24 +1465,35 @@ impl Solver {
         let Some(rows) = state.backsolver.bound_rows() else {
             return Ok(Vec::new());
         };
-        let full_of: Vec<usize> = {
+        // Three index spaces are live in the loop below: `report` is
+        // FULL-x, `ctx` is VAR-x, and `br.row` is a bound row. The
+        // first two coincide until the first `make_parameter`-removed
+        // variable and diverge after it, so a swap reads a NEIGHBOURING
+        // variable's status -- in range, plausible, wrong (gh#450, then
+        // gh#672 finding 1). The typed indices make that a compile
+        // error; `sens_invariance_legs.rs` leg 3 is what covers the
+        // site already written. See `crate::index`.
+        let map = {
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
-            (0..ctx.n_x)
-                .map(|r| nl.var_x_to_full_x(r as Index) as usize)
-                .collect()
+            VarToFull::build(ctx.n_x, |r| nl.var_x_to_full_x(r.as_index()) as usize)
         };
+        let status = FullXSlice::new(&report.var_status);
         let mut out = Vec::new();
-        for var_row in 0..ctx.n_x {
-            let Some(&st) = report.var_status.get(full_of[var_row]) else {
+        for row in map.rows() {
+            let Some(full) = map.full_of(row) else {
+                continue;
+            };
+            let Some(st) = status.at(full) else {
                 continue;
             };
             if st != WEAKLY_ACTIVE && st != AMBIGUOUS {
                 continue;
             }
-            let s_lo = ctx.x_curr[var_row] - ctx.lo[var_row];
-            let s_hi = ctx.hi[var_row] - ctx.x_curr[var_row];
+            let (s_lo, s_hi) = ctx.slacks_at(row);
             let lower = s_lo <= s_hi;
+            // a table lookup, so a space-swap here would fail loudly
+            let var_row = row.get();
             if let Some(br) = rows
                 .iter()
                 .find(|b| b.var_row == var_row && b.lower == lower)

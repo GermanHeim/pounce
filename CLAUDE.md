@@ -268,6 +268,32 @@ branch (unexercised by this corpus), and anything that only appears at
 correction a mode reaches for; check first which branch the fixture you
 are leaning on actually takes.
 
+## Index spaces: the newtype covers the typed path, leg 3 the rest
+
+`crates/pounce-sensitivity/src/index.rs` (gh#764 item 3) is `VarX` /
+`FullX` / `VarToFull` / `FullXSlice`, and it is deliberately **not** the
+342-site sweep the issue costed out — that would break `SensBacksolver`
+(re-exported from the crate root) and reach 31 `pounce-py` sites where
+indices cross into Python as `i64`. What survived the measurement is the
+rule **table lookup fails loudly; direct array indexing fails silently**,
+and the newtype earns its cost at one shape only: a conversion feeding a
+direct array index in a scope where the other space is also live. Across
+the crate that is two sites, both in `solver.rs` — the kappa `var_sigma`
+read and `weakly_active_bounds`. The other nine conversions are scatter
+loops, checked `get_mut`s, or index *producers*, and are left alone.
+
+`FullX` has **no public constructor**: it is obtainable only by putting a
+`VarX` through `VarToFull`, so "this number is in full-x" is asserted
+once per map instead of once per read. That is load-bearing — the first
+draft made it `pub` and `FullX::new(var_row.get())` typechecked, which
+the module's own mutation table now records.
+
+The type covers the typed path; it does **not** close the public `Vec`
+fields on `ActivityReport`, which must stay. `report.var_status.get(row.get())`
+still compiles, and `sens_invariance_legs.rs` leg 3 is what catches it —
+three legs go red. Neither guard alone covers the site, so do not retire
+leg 3 on the strength of the newtype.
+
 ## Reviewing a sensitivity change: `/sens-review`
 
 `.claude/commands/sens-review.md` (gh#764 item 2) is the checklist form of

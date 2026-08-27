@@ -92,6 +92,17 @@ A direct index *and* an `unwrap_or(0.0)` — a miss does not error, it returns
 zero, which zeroes that row's kappa and silently drops the row from the engaged
 set.
 
+**The typed path.** `crate::index` (gh#764 item 3) gives `VarX`, `FullX`,
+`VarToFull` and `FullXSlice` for exactly the shape above. `FullX` has no
+public constructor — it comes only from putting a `VarX` through the map — so
+at the two sites that use it, a swap is `E0624` rather than a neighbouring
+row's answer. If the diff adds a *third* such site, the question is why it is
+not using them.
+
+It covers the typed path and no more: `ActivityReport`'s `Vec` fields are
+public and `report.var_status.get(row.get())` still compiles. So a green
+compile is not a discharge on its own.
+
 **Discharge.** Point at a leg whose fixture puts a fixed variable **ahead of**
 the row under test, so the spaces actually diverge —
 `leg_fixed_the_index_spaces_actually_diverge` in
