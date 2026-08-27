@@ -9,6 +9,27 @@ changes.
 
 ## [Unreleased]
 
+- **`pounce.jax.solve_qp`: jnp `lb`/`ub` no longer break under `jax.jit`**
+  (#795). `_expand_bounds` decided which bound rows to fold into `G`/`h` with
+  `np.isfinite(float(ub[i]))`. Indexing is a `jnp` op, and inside a `jit`
+  trace every `jnp` op is staged into the jaxpr — so `ub[i]` came back a
+  tracer and `float()` raised `ConcretizationTypeError`. A numpy array, a
+  Python list, or the same bounds routed through `G`/`h` were all indexed
+  eagerly and survived, as did the jnp form when called eagerly or under
+  `vmap`; only `jit` + jnp-`lb`/`ub` failed, which is the idiomatic call for
+  a layer whose whole purpose is to sit inside a jitted model. The bounds are
+  now read once as concrete host values (`np.asarray`) before the finiteness
+  test, which is where that decision belongs: how many rows get folded is
+  structural, and the folded rows are constants that carry no gradient.
+  Covers `solve_qp`, `solve_qp_batch` and `QpLayer`.
+
+  A bound *built inside* the trace still cannot be read — its value does not
+  exist at trace time — but that case now raises a `ValueError` naming the
+  fix (hoist the construction out, or pass differentiable bound levels
+  through `G`/`h`) instead of jax's bare conversion error. This is distinct
+  from #740, whose defect was in the NLP path (`_diff.py`,
+  `UnexpectedTracerError`) and whose hoisting workaround did *not* help here.
+
 - **The phase-envelope regression test costs half what it did, and the half
   that went was not where the issue expected** (#788).
   `test_published_binary_fold_and_inverse_design_regression` measured 759s

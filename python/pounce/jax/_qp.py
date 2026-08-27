@@ -29,7 +29,10 @@ Bounds ``lb ≤ x ≤ ub`` are supported in the *forward* solve by folding
 them into ``G``/``h`` before differentiation, so the IFT sees a single
 inequality block. The folded bound rows are constants, so they carry no
 gradient back to ``lb``/``ub`` (differentiate bound *levels* by passing
-them through ``G``/``h`` explicitly instead).
+them through ``G``/``h`` explicitly instead). ``lb``/``ub`` may be numpy,
+a list, or a jnp array, but they are read on the host at trace time —
+which entries are finite fixes how many rows get folded — so they cannot
+be *built inside* a jitted function (hoist the construction out).
 
 Batching. :func:`solve_qp` is usable under ``jax.vmap`` (each instance is
 an independent, sequential host solve). For a *parallel* batch over many
@@ -90,28 +93,55 @@ from .._ad_common import (
 )  # single source of truth (DiffHandoff contract)
 
 
+def _concrete_bounds(bnd, name):
+    """Read a bound vector as concrete host values (issue #795).
+
+    Which bound rows exist is a *structural* decision — it fixes the shape
+    of the folded ``G``/``h`` — so it has to be made at trace time, off a
+    concrete array. Reading ``bnd[i]`` element-by-element instead stages
+    each read into the jaxpr under ``jax.jit`` (every ``jnp`` op inside a
+    jit trace is staged, even on a closed-over constant), and ``float()``
+    on the resulting tracer raises ``ConcretizationTypeError`` — which is
+    why a jnp ``lb``/``ub`` failed under ``jit`` while the identical numpy
+    array, which is indexed eagerly, worked. One ``np.asarray`` of the
+    whole vector happens before any tracing and covers both.
+
+    A genuinely traced bound (built inside the trace, or differentiated)
+    cannot be read this way at all; raise the documented alternative
+    rather than jax's bare conversion error."""
+    try:
+        return np.asarray(bnd, dtype=float)
+    except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
+        raise ValueError(
+            f"pounce.jax QP layer: `{name}` must be a concrete array (numpy, a "
+            "list, or a jnp array built outside the trace) — its finite entries "
+            "decide which constant rows are folded into G/h, so they are read at "
+            "trace time and carry no gradient. Pass traced or differentiable "
+            "bound levels through `G`/`h` instead."
+        ) from None
+
+
 def _expand_bounds(G, h, lb, ub, n):
     """Fold finite variable bounds into G/h as extra rows.
 
     Returns ``(G_full, h_full)`` as dense jnp arrays. ``x_i ≤ ub_i`` and
-    ``−x_i ≤ −lb_i``."""
+    ``−x_i ≤ −lb_i``. The folded rows are constants — see
+    :func:`_concrete_bounds` for why the levels are read on the host."""
     rows = []
     rhs = []
     if G is not None and G.shape[0] > 0:
         rows.append(G)
         rhs.append(h)
-    if ub is not None:
+    # ub first, then lb, so the folded block order is stable.
+    for bnd, name, sign in ((ub, "ub", 1.0), (lb, "lb", -1.0)):
+        if bnd is None:
+            continue
+        vals = _concrete_bounds(bnd, name)
         for i in range(n):
-            if np.isfinite(float(ub[i])):
-                e = jnp.zeros(n).at[i].set(1.0)
+            if np.isfinite(vals[i]):
+                e = jnp.zeros(n).at[i].set(sign)
                 rows.append(e[None, :])
-                rhs.append(jnp.asarray(ub[i]).reshape(1))
-    if lb is not None:
-        for i in range(n):
-            if np.isfinite(float(lb[i])):
-                e = jnp.zeros(n).at[i].set(-1.0)
-                rows.append(e[None, :])
-                rhs.append((-jnp.asarray(lb[i])).reshape(1))
+                rhs.append(jnp.asarray(sign * vals[i]).reshape(1))
     if not rows:
         return jnp.zeros((0, n)), jnp.zeros((0,))
     return jnp.concatenate(rows, axis=0), jnp.concatenate(rhs, axis=0)
@@ -467,7 +497,11 @@ def solve_qp(
 
     All array args are dense jnp/np arrays. Bounds are folded into the
     inequality block as constant rows (no gradient flows to ``lb``/``ub``;
-    pass differentiable bound levels through ``G``/``h`` instead).
+    pass differentiable bound levels through ``G``/``h`` instead). Because
+    the finite entries decide *how many* rows are folded, ``lb``/``ub`` are
+    read concretely at trace time: a numpy array, a list, or a jnp array
+    built outside the trace all work; a bound built inside a jitted
+    function does not.
 
     ``warm_start`` (optional) supplies a previous primal ``x`` (an array, or
     anything with an ``x`` attribute/key — e.g. a prior result) to seed the
