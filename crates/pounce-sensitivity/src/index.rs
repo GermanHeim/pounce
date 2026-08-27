@@ -48,12 +48,17 @@
 //!
 //! # What this does and does not buy
 //!
-//! It makes the correct path the easy one and the wrong path require a
-//! named unwrapping act ([`VarX::get`] / [`FullX::get`]). It does
-//! **not** make the swap unrepresentable: `ActivityReport`'s `Vec`
-//! fields are public and must stay so, and nothing stops a caller
-//! writing `report.var_status[v.get()]`. A newtype narrows a surface;
-//! it does not close one whose public API is a bare `Vec`.
+//! On the typed path the swap is not merely discouraged, it is
+//! **unrepresentable**: [`FullX`] has no public constructor, so the
+//! only way to obtain one is to put a [`VarX`] through [`VarToFull`],
+//! and `FullXSlice::at` accepts nothing else.
+//!
+//! It does **not** follow that the swap is gone. `ActivityReport`'s
+//! `Vec` fields are public and must stay so, and nothing stops a
+//! caller writing `report.var_status[row.get()]` — which compiles, and
+//! is caught by leg 3 rather than by the compiler. A newtype closes
+//! the path that goes through it; it cannot close one whose public API
+//! is a bare `Vec`.
 //!
 //! The guard that closes the known site is still
 //! `sens_invariance_legs.rs` leg 3, whose fixture puts a fixed variable
@@ -168,9 +173,10 @@ impl FullX {
 /// The var-x → full-x map, materialized once so a loop does not
 /// re-borrow the NLP per row.
 ///
-/// Built by [`Solver::var_to_full`](crate::solver::Solver::var_to_full).
-/// Lookups are bounds-checked and return [`None`] rather than a
-/// neighbouring row's index — the whole point of the exercise.
+/// Built with [`VarToFull::build`] at the point of use, from the
+/// NLP's own `var_x_to_full_x`. Lookups are bounds-checked and return
+/// [`None`] rather than a neighbouring row's index — the whole point
+/// of the exercise.
 #[derive(Clone, Debug)]
 pub struct VarToFull {
     full_of: Vec<FullX>,
