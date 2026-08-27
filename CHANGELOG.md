@@ -63,6 +63,17 @@ changes.
   documented way to maximize, and report a bound pinned hard at its limit as
   `inactive`. The reported `sigma` and `q_reduced` still carry the
   natural-units sign, as `var_sigma` does.
+
+  The other `user-scaling` axis — the **row** factors — is now pinned too,
+  by `leg_scaling_the_reduced_curvature_is_unmoved_by_a_row_scaling`. It is
+  safe by construction (the natural-units conjugation carries no `dg` into
+  the `x` block) and measurement agrees: across three decades of `dg` the
+  statuses and curvature signs are bit-identical and the magnitudes agree to
+  7–27 ULP. It is pinned rather than argued because the objective-scale
+  defect above was an untested scaling axis justified by the same kind of
+  argument. The two legs are independent: a scaled-space back-solve trips
+  only the objective-scale test, and a `dg²` factor copied from the row path
+  — which really does need one — trips only the row leg.
 - **`pounce.jax.solve_qp`: jnp `lb`/`ub` no longer break under `jax.jit`**
   (#795). `_expand_bounds` decided which bound rows to fold into `G`/`h` with
   `np.isfinite(float(ub[i]))`. Indexing is a `jnp` op, and inside a `jit`
