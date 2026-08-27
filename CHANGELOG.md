@@ -49,6 +49,28 @@ changes.
   Every other `.nl` in the repository, all of them writer-generated, already
   agreed.
 
+- **The directional degeneracy QP decides a bound only when it is at
+  a kink.** The QP (gh#708) treats an engaged row as sitting at its
+  bound, and the weak set can hold coordinates far from their bounds,
+  since low curvature widens the activity classifier's ambiguous
+  class. The QP then pinned interior coordinates a fifth of their
+  range from bounds they could never reach, returning a direction
+  wrong at first order. Each engaged row's kink test is now read off
+  the QP's own reduced matrix: the barrier weight times the row's own
+  diagonal equals 1 at an exact kink, at any curvature, coupling, or
+  scaling, and falls as the squared ratio of kink width to slack away
+  from one. A row far below one is dropped and its plain movement
+  stands. The error of not deciding such a row is bounded by its own
+  slack, and nothing in the decision reads the perturbation's size,
+  so the answer stays linear in the step.
+
+  **A row an equality pins is the limiting case, dropped by the same
+  test.** The pin of a perturbed parameter moves its own coordinate,
+  which engages the row, and its diagonal of the reduced matrix is
+  exactly zero, which would make the QP unbounded. The row is
+  dropped and the coordinate follows its pin wherever the parameter
+  sends it, inside the bound or infeasible, which is the parameter's
+  business rather than the QP's.
 - **Refining more than one phase-envelope fold no longer recompiles the same
   problem each time.** `pounce.examples.phase_envelope.refine_fold` built a
   fresh `JaxProblem` per call, and a `JaxProblem` compiles its callbacks once
