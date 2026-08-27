@@ -95,11 +95,29 @@ fn neg_curv_escapes_zero_reproduces_the_reported_defect() {
 ///
 /// `max_iter = 8` is one iteration past the escape (which happens at iter 6),
 /// so the continuation is guaranteed to run out of budget. Without the floor
-/// this run would report `Maximum_Iterations_Exceeded` at whatever point the
-/// escape last touched; with it, `Solve_Succeeded` at `obj = 1`.
+/// this run reports `Maximum_Iterations_Exceeded` at whatever point the escape
+/// last touched; with it, `Solve_Succeeded` at `obj = 1`.
+///
+/// `mu_strategy_fallback=no` is what makes that an actual test of the floor,
+/// and it was added because the first version of this test was not one.
+/// pounce#748 turned the retry on by default and it triggers on exactly this
+/// status: with the floor deleted the run still came back `Optimal Solution
+/// Found` at `obj = 1`, because the retry re-solved under the other μ schedule
+/// and *that* run converged to the stationary point in seven iterations. The
+/// assertions below were satisfied by a mechanism that has nothing to do with
+/// gh #797. Pinning the retry off leaves the floor as the only thing that can
+/// produce this outcome — verified by deleting the floor and watching this
+/// test, and only this test, go red.
 #[test]
 fn a_lost_bet_hands_back_the_certified_stationary_point() {
-    let report = solve("lost_bet", &["solver_selection=nlp", "max_iter=8"]);
+    let report = solve(
+        "lost_bet",
+        &[
+            "solver_selection=nlp",
+            "max_iter=8",
+            "mu_strategy_fallback=no",
+        ],
+    );
     assert_eq!(
         report.solution.solve_result_num, 0,
         "the floor is a strict certificate, so the status stays Solve_Succeeded"
