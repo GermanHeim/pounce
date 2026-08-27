@@ -387,3 +387,134 @@ def test_check_psd_true_on_psd_p_solves_normally():
     x_default = solve_qp(P=P, c=c, G=G, h=h)
     x_forced = solve_qp(P=P, c=c, G=G, h=h, check_psd=True)
     np.testing.assert_allclose(np.asarray(x_forced), np.asarray(x_default), atol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# jnp lb/ub under jax.jit (issue #795)
+#
+# `_expand_bounds` used to test each bound with ``float(ub[i])``. Under jit
+# every jnp op is staged, so indexing a jnp bound produced a tracer and
+# ``float()`` raised ConcretizationTypeError -- while the identical numpy
+# array, indexed eagerly, worked. The bounds decide *which* constant rows
+# are folded into G/h, so they are read on the host with one np.asarray.
+#
+# The inactive-bounds case alone cannot see the folded rows at all (drop
+# every bound row and it still passes), so each case below either puts a
+# bound on the solution or asserts the row count.
+# --------------------------------------------------------------------------
+
+_B_P = np.eye(2) * 2.0
+_B_C = jnp.array([-1.0, 2.0])
+_B_UNCONSTRAINED = np.array([0.5, -1.0])  # x* = -P^-1 c, bounds inactive
+
+
+def _solve_bounded(lb, ub, c=_B_C):
+    return solve_qp(P=_B_P, c=c, lb=lb, ub=ub)
+
+
+# Built outside any trace, as the issue's repro does -- a jnp array
+# constructed *inside* a jit is a tracer with no recoverable value (jax
+# stages even a tracer-free op), which is the separate, still-unsupported
+# case pinned by test_traced_bounds_raise_actionable_error below.
+_B_LB_WIDE, _B_UB_WIDE = jnp.full(2, -10.0), jnp.full(2, 10.0)
+_B_LB, _B_UB = jnp.array([-0.5, -0.5]), jnp.array([0.25, 0.25])
+_B_BOUNDED = np.array([0.25, -0.5])  # both bounds bind
+
+
+def test_jit_jnp_bounds_inactive_matches_closed_form():
+    x = jax.jit(lambda cc: _solve_bounded(_B_LB_WIDE, _B_UB_WIDE, cc))(_B_C)
+    np.testing.assert_allclose(np.asarray(x), _B_UNCONSTRAINED, atol=1e-8)
+
+
+def test_jit_jnp_bounds_active_matches_numpy_bounds():
+    # Both bounds bind, so a fix that quietly dropped the folded rows fails
+    # here even though it would pass the inactive case above.
+    x_jnp = jax.jit(lambda cc: _solve_bounded(_B_LB, _B_UB, cc))(_B_C)
+    x_np = jax.jit(
+        lambda cc: _solve_bounded(np.asarray(_B_LB), np.asarray(_B_UB), cc)
+    )(_B_C)
+    np.testing.assert_allclose(np.asarray(x_jnp), np.asarray(x_np), atol=1e-8)
+    np.testing.assert_allclose(np.asarray(x_jnp), _B_BOUNDED, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "lb, ub",
+    [
+        (jnp.array([-0.5, -0.5]), np.array([0.25, 0.25])),  # only lb is jnp
+        (np.array([-0.5, -0.5]), jnp.array([0.25, 0.25])),  # only ub is jnp
+        ([-0.5, -0.5], [0.25, 0.25]),  # python lists
+    ],
+)
+def test_jit_mixed_bound_containers(lb, ub):
+    # Either side alone triggered the defect.
+    x = jax.jit(lambda cc: _solve_bounded(lb, ub, cc))(_B_C)
+    np.testing.assert_allclose(np.asarray(x), [0.25, -0.5], atol=1e-6)
+
+
+_B_LB_INF = jnp.array([-jnp.inf, -0.5])
+_B_UB_INF = jnp.array([0.25, jnp.inf])
+
+
+def test_jit_jnp_bounds_infinite_entries_fold_only_finite_rows():
+    # Structural selection has to survive the host read: only x0's upper
+    # bound and x1's lower bound are finite, and both bind.
+    x = jax.jit(lambda cc: _solve_bounded(_B_LB_INF, _B_UB_INF, cc))(_B_C)
+    np.testing.assert_allclose(np.asarray(x), [0.25, -0.5], atol=1e-6)
+
+    from pounce.jax._qp import _expand_bounds
+
+    G_full, h_full = _expand_bounds(
+        jnp.zeros((0, 2)), jnp.zeros((0,)), _B_LB_INF, _B_UB_INF, 2
+    )
+    assert G_full.shape == (2, 2) and h_full.shape == (2,)
+    np.testing.assert_allclose(np.asarray(G_full), [[1.0, 0.0], [0.0, -1.0]])
+    np.testing.assert_allclose(np.asarray(h_full), [0.25, 0.5])
+
+
+def test_jnp_bounds_eager_and_vmap_still_work():
+    np.testing.assert_allclose(
+        np.asarray(_solve_bounded(_B_LB, _B_UB)), _B_BOUNDED, atol=1e-6
+    )
+    cs = jnp.stack([_B_C, _B_C * 0.5])
+    xs = jax.vmap(lambda cc: _solve_bounded(_B_LB, _B_UB, cc))(cs)
+    assert xs.shape == (2, 2)
+    np.testing.assert_allclose(np.asarray(xs[0]), _B_BOUNDED, atol=1e-6)
+
+
+def test_jit_jnp_bounds_still_differentiates_c():
+    g = jax.jit(jax.grad(lambda cc: _solve_bounded(_B_LB_WIDE, _B_UB_WIDE, cc).sum()))(
+        _B_C
+    )
+    # x = -P^-1 c with the bounds inactive, so dx_sum/dc = -diag(1/2).
+    np.testing.assert_allclose(np.asarray(g), [-0.5, -0.5], atol=1e-6)
+
+
+def test_jit_jnp_bounds_batch_and_layer():
+    cs = jnp.stack([_B_C, _B_C])
+    xs = jax.jit(lambda cc: solve_qp_batch(P=_B_P, c=cc, lb=_B_LB, ub=_B_UB))(cs)
+    np.testing.assert_allclose(np.asarray(xs[0]), _B_BOUNDED, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(xs[1]), _B_BOUNDED, atol=1e-6)
+
+    layer = QpLayer(P=_B_P, lb=_B_LB, ub=_B_UB)
+    x = jax.jit(layer)(_B_C)
+    np.testing.assert_allclose(np.asarray(x), _B_BOUNDED, atol=1e-6)
+
+
+def test_traced_bounds_raise_actionable_error():
+    # A bound built *in* the trace cannot be read on the host at all -- the
+    # row structure depends on it, and jax stages the construction whether
+    # or not it depends on an argument. Point at hoisting and at the
+    # documented G/h route rather than letting jax's bare conversion error
+    # out. (This is #740's workaround territory, not #795's defect.)
+    def f(scale):
+        return solve_qp(P=_B_P, c=_B_C, lb=-scale * jnp.ones(2), ub=scale * jnp.ones(2))
+
+    with pytest.raises(ValueError, match=r"`(lb|ub)` must be a concrete array"):
+        jax.jit(f)(jnp.float64(0.25))
+
+    def g(cc):
+        # No dependence on the argument at all -- still staged, still caught.
+        return solve_qp(P=_B_P, c=cc, ub=jnp.full(2, 0.25))
+
+    with pytest.raises(ValueError, match=r"built outside the trace"):
+        jax.jit(g)(_B_C)
