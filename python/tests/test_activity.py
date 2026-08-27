@@ -472,3 +472,146 @@ def test_primal_rows_before_solve_raises():
     ))
     with pytest.raises(RuntimeError, match="no converged factor"):
         pounce.Solver(prob).primal_rows([0])
+
+
+# ---------------------------------------------------------------
+# `reduced_activity`: the class the diagonal normalizer cannot call
+# ---------------------------------------------------------------
+
+
+class CoupledKink:
+    """min ½k² + c·k·y + ½y² − A·p·k  s.t. p = 0, 0 ≤ k ≤ 10, y free.
+
+    At p = 0 the reduced gradient at k = 0 vanishes and so does the
+    multiplier: a kink by construction, at every `rho`. `rho` is the
+    curvature reduced along `k` after `y` re-optimizes, `1 − c²`, so
+    `rho = 1` is decoupled and smaller values are more strongly
+    coupled. `classify_activity` divides Σ by the Hessian DIAGONAL, so
+    its ratio is exactly `rho` and the kink drops out of the
+    [1e-1, 1e1] band once `rho < 1e-1` — gh #763.
+    """
+
+    A = 1.10
+
+    def __init__(self, rho):
+        self.rho = rho
+        self.c = np.sqrt(1.0 - rho)
+
+    def objective(self, x):
+        k, y, p = x
+        return 0.5 * k * k + self.c * k * y + 0.5 * y * y - self.A * p * k
+
+    def gradient(self, x):
+        k, y, p = x
+        return np.array([k + self.c * y - self.A * p, self.c * k + y, -self.A * k])
+
+    def constraints(self, x):
+        return np.array([x[2]])
+
+    def jacobianstructure(self):
+        return np.array([0], dtype=np.int64), np.array([2], dtype=np.int64)
+
+    def jacobian(self, x):
+        return np.array([1.0])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 1, 2], dtype=np.int64),
+                np.array([0, 0, 1, 0], dtype=np.int64))
+
+    def hessian(self, x, lagrange, obj_factor):
+        return obj_factor * np.array([1.0, self.c, 1.0, -self.A])
+
+
+def _solve_coupled(rho):
+    prob = _options(pounce.Problem(
+        n=3, m=1, problem_obj=CoupledKink(rho),
+        lb=[0.0, -1e19, -1e19], ub=[10.0, 1e19, 1e19],
+        cl=[0.0], cu=[0.0],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.3, 0.0, 0.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    return solver
+
+
+@pytest.mark.parametrize("rho, diagonal_class", [
+    (1.0, "weakly_active"),
+    (1e-1, "weakly_active"),
+    (1e-2, "ambiguous"),
+    (1e-3, "ambiguous"),
+])
+def test_reduced_activity_certifies_a_coupled_kink(rho, diagonal_class):
+    # The issue's own table. All four rows are the SAME kink; only how
+    # strongly `k` couples to `y` changes. The diagonal normalizer's
+    # ratio is `reduced/diagonal`, so it tracks the coupling and the
+    # bottom two fall out of the band — at any tolerance, since that
+    # ratio does not move with μ. The reduced normalizer's ratio is 1
+    # at every coupling.
+    solver = _solve_coupled(rho)
+    rep = solver.classify_activity()
+    assert rep["var_ratio"][0] == pytest.approx(rho, rel=1e-3)
+    assert rep["var_status"][0] == diagonal_class
+
+    red = solver.reduced_activity([0])
+    assert red["status"] == ["weakly_active"]
+    assert red["ratio"][0] == pytest.approx(1.0, rel=1e-3)
+    assert red["q_reduced"][0] == pytest.approx(rho, rel=1e-3)
+    assert red["q_sign"][0] == 1
+    assert red["var"][0] == 0
+    assert red["sigma"][0] == pytest.approx(rep["var_sigma"][0], rel=1e-12)
+    assert red["mu"] == pytest.approx(rep["mu"], rel=1e-12)
+
+
+def test_reduced_activity_agrees_where_the_coordinate_is_decoupled():
+    # The refinement must not move a verdict it has no reason to move.
+    # MixedModel is diagonal, so every reduced curvature IS the
+    # diagonal one and every class has to come back unchanged —
+    # including the entries with no bound geometry at all.
+    solver = _mixed_solver()
+    rep = solver.classify_activity()
+    n = len(rep["var_status"])
+    red = solver.reduced_activity(list(range(n)))
+
+    assert red["status"] == rep["var_status"]
+    assert list(red["var"]) == list(range(n))
+    for i in range(n):
+        if np.isnan(rep["var_ratio"][i]):
+            assert np.isnan(red["ratio"][i])
+        else:
+            assert red["ratio"][i] == pytest.approx(rep["var_ratio"][i], rel=1e-5)
+
+
+def test_reduced_activity_rejects_indices_outside_the_users_variables():
+    solver = _mixed_solver()
+    with pytest.raises(ValueError, match="out of range"):
+        solver.reduced_activity([4])
+    with pytest.raises(ValueError, match="out of range"):
+        solver.reduced_activity([-1])
+    empty = solver.reduced_activity([])
+    assert empty["status"] == [] and len(empty["ratio"]) == 0
+
+
+def test_reduced_activity_before_solve_raises():
+    prob = _options(pounce.Problem(
+        n=1, m=0, problem_obj=ScalarBound(1.0),
+        lb=[0.0], ub=[1e19], cl=[], cu=[],
+    ))
+    with pytest.raises(RuntimeError, match="no converged factor"):
+        pounce.Solver(prob).reduced_activity([0])
+
+
+def test_reduced_activity_refuses_a_relaxed_solve():
+    # Same guard as classify_activity, for the same reason: relaxed
+    # bounds shift the slacks Σ is read from.
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=ScalarBound(0.0),
+        lb=[0.0], ub=[1e19], cl=[], cu=[],
+    )
+    prob.add_option("tol", 1e-10)
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    with pytest.raises(ValueError, match="bound_relax_factor"):
+        solver.reduced_activity([0])
