@@ -58,6 +58,117 @@ changes.
   defect was latent, and the fix keeps both orders correct rather than only
   the one a fixture can reach.
 
+- **A constraint row's activity ratio is not normalized by a reduced
+  curvature either, and now there is an accessor for rows too** (#804).
+  #763 fixed the variable path and left the row path with a docs note.
+  `classify_activity` divides a row's geometric barrier weight `Σ‖∇d‖²` by
+  `|∇dᵀH∇d|/‖∇d‖²`, the curvature along the row's own gradient. That IS a
+  genuine directional curvature — strictly better than the variable path's
+  bare `H_ii`, which is why it was not the one #763 fixed, and exactly the
+  argument that would have left it wrong. It is still not a *reduced*
+  curvature: it does not account for the other free coordinates
+  re-optimizing, and what is left after they do is what generates the row's
+  multiplier. So a row's ratio is `reduced/directional`, equal to 1 only
+  where the row's direction is decoupled from the remaining free space, and
+  a coupled row kink falls out of the `[1e-1, 1e1]` band and reads
+  `ambiguous` — at any tolerance, because that ratio is `μ`-independent.
+
+  New `Solver::reduced_row_activity(&[j, …])` (Rust) /
+  `solver.reduced_row_activity([j, …])` (Python) re-measures the same rule
+  against the reduced curvature. The row's own value is a coordinate of the
+  KKT system — the slack the barrier acts on, tied to the model by
+  `dⱼ(x) = sⱼ` — so the back-solve is the variable accessor's, one block
+  over: a unit right-hand side in the `s` block gives
+  `qⱼ = (1/(K⁻¹)_{sⱼsⱼ} − Σⱼ)·‖∇dⱼ‖²`, the `‖∇dⱼ‖²` putting the answer
+  along the unit normal where `classify_activity`'s `q` lives. Driving the
+  `x` block with `∇dⱼ` gives the identical number
+  (`∇dⱼᵀK⁻¹∇dⱼ = (K⁻¹)_{sⱼsⱼ}` for every `j`), so the slack unit vector is
+  used: nothing to assemble into the right-hand side. Equality rows report
+  `equality` as the report does; indices are user-space full-g, so an
+  equality ahead of an inequality shifts nothing.
+
+  As with #763 the default classification is **unchanged** and nothing in
+  the step path moves — `weakly_active_bounds()` already counts `ambiguous`
+  as weak. What was wrong was the public *answer*, and the same inference
+  that shipped #756's first-order wrong derivative reads just as naturally
+  off a row. `classify_activity`'s docs, `row_status`, `row_ratio`, the
+  `AMBIGUOUS` constant, `CLAUDE.md` and `docs/src/sensitivity.md` now all
+  say so for rows as well.
+
+  Tests: `tests/reduced_row_activity.rs` runs both branches the rule can
+  take, per the `CLAUDE.md` branch rule. A decoupled fixture where the two
+  normalizers must *agree* — two regimes at once, including the
+  strongly-active row where the `1/(K⁻¹)_ss − Σ` cancellation is hardest —
+  and a coupled row kink where they must *disagree* by exactly the
+  coupling, over four couplings, which is the test rather than a duplicate
+  of the first. Both fixtures carry an equality ahead of the inequalities
+  and rows whose gradients are not unit length, so the full-g→d-block map
+  and every `‖∇d‖²` conversion have somewhere to go wrong. A row-scaling
+  leg sweeps six decades of `dg`: unlike the variable accessor's row-scale
+  invariance, which holds by construction, this one has three `dg` factors
+  meeting in one ratio (`Σ` exported with `dg²`, `(K⁻¹)_ss` conjugated with
+  `dg⁻²`, `‖∇d‖²` gathered with `dg²`), and each is mutation-checked to
+  trip its own leg and only its own. The equivalence of the two
+  back-solve routes is checked numerically rather than left as prose:
+  `the_slack_unit_vector_and_the_row_gradient_give_the_same_back_solve`
+  drives the `x` block with the row's gradient, the way the issue
+  proposed, and gets the same number.
+
+- **Step-size invariance for the phase-envelope example is asserted again,
+  at the trace level** (#798). #793 halved
+  `test_published_binary_fold_and_inverse_design_regression` partly by
+  dropping the ds=0.10/ds=0.08 pair, and that pair carried the only
+  automated assertion that the example's maxcondentherm does not depend on
+  how finely the envelope was traced. The replacement offered in its place
+  was notebook 34 cell 38, but no workflow executes notebooks — `grep -rn
+  "nbconvert\|nbclient\|papermill\|\.ipynb" .github/workflows/*.yml`
+  returns nothing — so the published 8.41e-12 agreement is an artifact, not
+  a check, and could have degraded silently.
+
+  The new `test_traced_fold_is_invariant_to_the_continuation_step` restores
+  the claim without restoring its cost. Both legs stop at the *trace*:
+  neither calls `refine_fold`, so neither pays the ~196 s XLA compile of the
+  augmented fold system's Lagrangian Hessian that made the dropped pair
+  expensive. It costs ~50 s against that pair's ~196 s plus a trace.
+
+  Measured while writing it, and the reason the test is shaped the way it
+  is: a trace is **length-blind**. 145 steps cost what 5 do — 24.5 s
+  against 24.0 s — because essentially all of it is one JIT compilation of
+  the residual and its Jacobian plus one low-pressure anchor solve, at
+  ~0.003 s a step after that. So ~50 s is the floor for any two-trace
+  comparison, and the test carries the `slow` marker the rest of this
+  claim's evidence carries rather than adding ~50 s to the job gating every
+  PR.
+
+  The fine leg halves `ds` instead of taking the historical 0.08, so every
+  coarse point has an exact arclength twin — `trace_arclength` stamps
+  `s = arange(K) * ds` — and the comparison carries no interpolation error
+  of its own. It checks both the state at matched arclength (7.7e-5 [ln K],
+  9.1e-4 [mixed]) and the parabolically interpolated maxcondentherm
+  (7.5e-4 K apart), because two traces can agree pointwise while
+  disagreeing about the extremum they bracket, and can agree about the
+  extremum while having taken different paths to it. Both are also required
+  to bracket the published Deiters--Bell value, since agreement on the
+  wrong branch is not invariance.
+
+  The plain sample maximum would **not** have worked: halving `ds` keeps
+  every coarse sample, so both traces peak at the same point and agree for a
+  reason that has nothing to do with convergence. Hence the parabolic
+  stencil, and hence the unmarked
+  `test_parabolic_extremum_is_exact_on_a_quadratic` that pins it — without
+  it the comparison could be measuring the stencil rather than the
+  continuation and still pass.
+
+  Both are mutation-checked. Degrading the stencil to the sample maximum
+  turns the unmarked test red. Biasing the predictor to
+  `ds * (1 + 0.02 * ds)` — which leaves every point converged on the same
+  curve with the same extremum, status `ok` — moves the matched-arclength
+  leg to 1.5e-3 [ln K] and 1.2e-2 [mixed], 3x and 2x their thresholds, and
+  moves the extremum's arclength to 1.3e-2, 6x its threshold. Under that
+  same mutation the extremum's *temperature* stays green at 4.9e-4 K,
+  because a fitted vertex value is blind to a uniform rescaling of the
+  abscissa — which is why the arclength is asserted beside it rather than
+  the temperature being trusted alone.
 - **The NLP arm no longer certifies a constrained maximum as
   `Solve_Succeeded` (gh #797).** On the CLI fixture `nonconvex_qp.nl` —
   `min x₀·x₁ s.t. x₀ + x₁ = 2, 0 ≤ x ≤ 4`, whose restriction to the feasible
