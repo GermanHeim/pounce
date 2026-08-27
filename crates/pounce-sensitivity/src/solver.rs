@@ -958,9 +958,22 @@ impl Solver {
     /// row moves to its feasible side (the QP gradient `Sλ + m ≥ 0`)
     /// and a held row's pin force is nonnegative. Rows outside the
     /// engaged set are verified against the decided direction and the
-    /// set expands until no new row violates, so rows the equalities
-    /// already pin (movement exactly zero under every candidate)
-    /// never enter and never make anything singular.
+    /// set expands until no new row violates. Nothing reads the
+    /// perturbation's size, so the decision is linear in the step.
+    ///
+    /// An engaged row is decided only when its bound is at a kink,
+    /// read off `kappa = sigma * S_kk`, the barrier weight times the
+    /// row's own diagonal of the reduced matrix. `sigma` equals the
+    /// curvature reduced along the coordinate at an exact kink, and
+    /// `S_kk` is that reduced curvature's inverse, so `kappa` is 1
+    /// there at any curvature, coupling, or scaling, and it falls as
+    /// the squared ratio of kink width to slack away from one. A row
+    /// below `KAPPA_MIN` is dropped from the engaged set and its
+    /// plain movement stands: its bound is too far from a kink for a
+    /// pin force to decide, and the error of leaving it undecided is
+    /// bounded by its own slack, order `sqrt(mu)` at the threshold.
+    /// A coordinate an equality pins is the limiting case, `S_kk`
+    /// exactly zero, dropped by the same test.
     ///
     /// `max_iter` is the total back-solve budget: the all-released
     /// solve, every basis column, and the combined solve that recovers
@@ -985,6 +998,16 @@ impl Solver {
         use pounce_qp::solver::{ParametricActiveSetSolver, QpSolver};
 
         const EPS_REL: Number = 1e-9;
+        /// A row whose `kappa = sigma * S_kk` is below this is not at
+        /// a kink and is dropped from the QP. `kappa` is 1 at an
+        /// exact kink and equals the squared ratio of kink width to
+        /// slack, so a row at the threshold sits about 30 widths from
+        /// its bound and the cost of deciding it either way is
+        /// bounded by that slack. Measured populations: exact fixture
+        /// kinks 1.0, held solves near a release 4e-2 and 6e-3,
+        /// genuinely interior rows 3e-8 and below, pin-owned rows at
+        /// or below zero.
+        const KAPPA_MIN: Number = 1e-3;
 
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
         let weak = self.weakly_active_bounds()?;
@@ -1073,6 +1096,22 @@ impl Solver {
         // feasible side for that row's bound
         let sign = |k: usize| if weak[k].lower { 1.0 } else { -1.0 };
         let movement = |k: usize, d: &[Number]| -> Number { sign(k) * d[weak[k].var_row] };
+        // The barrier weight of each weak row's variable, in natural
+        // units to match the natural-units response the back-solves
+        // return, so `kappa` below is frame-invariant. The classifier
+        // succeeded inside `weakly_active_bounds`, so a nonempty weak
+        // set implies this call succeeds too.
+        let nat_sigma: Vec<Number> = {
+            let report = self.classify_activity()?;
+            let (_, _, nlp) = state.backsolver.activity_handles();
+            let nl = nlp.borrow();
+            weak.iter()
+                .map(|w| {
+                    let full = nl.var_x_to_full_x(w.var_row as Index) as usize;
+                    report.var_sigma.get(full).copied().unwrap_or(0.0)
+                })
+                .collect()
+        };
         let scale_of = |d: &[Number]| -> Number {
             d[..n_x]
                 .iter()
@@ -1097,6 +1136,20 @@ impl Solver {
         let mut proj: Vec<Option<Vec<Number>>> = vec![None; nw];
         let mut d = d0.clone();
         let held: Vec<usize>;
+        // A weak row is decided only when its bound is at a kink,
+        // and `kappa = sigma * S_kk` measures exactly that: 1 at an
+        // exact kink, falling as the squared ratio of kink width to
+        // slack away from one. A row below the threshold is dropped
+        // and its plain movement stands, since a pin force there
+        // holds the coordinate a full slack from where the bound
+        // actually is, and the error of not deciding is bounded by
+        // that same slack. The limiting cases fall out of the one
+        // test: a coordinate an equality owns has `S_kk` exactly
+        // zero (its pin absorbs any bound force, and admitting it
+        // puts a zero diagonal beside a nonzero gradient, an
+        // unbounded QP), and a negative diagonal, which the QP could
+        // not bound either, is likewise below the threshold.
+        let mut inert: Vec<usize> = Vec::new();
         loop {
             for &k in &engaged {
                 if proj[k].is_some() {
@@ -1113,7 +1166,16 @@ impl Solver {
                     return Err(SolverError::BacksolveFailed);
                 }
                 work += 1;
-                proj[k] = Some(weak.iter().map(|w| xk[w.var_row]).collect());
+                let col: Vec<Number> = weak.iter().map(|w| xk[w.var_row]).collect();
+                let own = sign(k) * col[k];
+                if nat_sigma[k] * own < KAPPA_MIN {
+                    inert.push(k);
+                }
+                proj[k] = Some(col);
+            }
+            engaged.retain(|k| !inert.contains(k));
+            if engaged.is_empty() {
+                return Ok((d[..n_x].to_vec(), Vec::new(), work));
             }
 
             // dense reduced data over the engaged rows, upper triangle
@@ -1238,7 +1300,7 @@ impl Solver {
             let tol = band * scale_of(&d);
             let mut grew = false;
             for k in 0..nw {
-                if engaged.contains(&k) {
+                if engaged.contains(&k) || inert.contains(&k) {
                     continue;
                 }
                 if movement(k, &d) < -tol {
