@@ -55,7 +55,7 @@ pub mod sos;
 
 pub use active_set::{
     ActiveSetQp, back_translate, back_translate_verified, engine_options, solve_qp_active_set,
-    verify_status,
+    solve_qp_active_set_inertia, verify_status,
 };
 pub use active_set_session::{ActiveSetSession, PresolveNote, Reuse, SessionStats};
 pub use batch::{
@@ -72,6 +72,11 @@ pub use options::ConvexPresolveOptions;
 // with the SQP subproblem reader there; re-exported so the public path is
 // unchanged for callers who reach it through this crate.
 pub use pounce_qp::ActiveSetOverrides;
+// The caller's claim about the inertia of `P`, for
+// [`solve_qp_active_set_inertia`]. Defined in `pounce-qp` next to the
+// `QpProblem` field it fills; re-exported so a caller reaching the active-set
+// driver through this crate does not have to depend on `pounce-qp` directly.
+pub use pounce_qp::HessianInertia;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{
     BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,

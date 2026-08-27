@@ -1256,7 +1256,15 @@ def minimize(
             )
 
     if selection in ("auto", "lp-ipm", "qp-ipm", "qp-active-set"):
-        extract = classify_and_extract(**route_kw)
+        # `qp-active-set` is the one selector with an engine for a nonconvex
+        # QP: `pounce-qp` controls the inertia of the reduced Hessian and
+        # returns a local solution (gh #786). Every other route here requires a
+        # PSD Hessian, and `auto` deliberately keeps sending a nonconvex QP to
+        # the NLP solver — the detection is our inference, so the general path
+        # is the safer default for it.
+        extract = classify_and_extract(
+            **route_kw, allow_indefinite=selection == "qp-active-set"
+        )
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
             raise ValueError(
                 "solver_selection='lp-ipm' but the problem was not detected as "
@@ -1268,18 +1276,21 @@ def minimize(
                 "a convex LP/QP (convex-quadratic objective + linear constraints)"
             )
         if selection == "qp-active-set" and extract is None:
-            # Matches the CLI, which refuses the selector on a non-convex-QP
-            # class rather than quietly running a different algorithm. Callers
-            # who genuinely want the SQP outer loop on an arbitrary NLP should
-            # ask for it by name.
+            # Matches the CLI, which refuses the selector on a class the QP
+            # extractor cannot represent rather than quietly running a
+            # different algorithm. Callers who genuinely want the SQP outer
+            # loop on an arbitrary NLP should ask for it by name.
             raise ValueError(
                 "solver_selection='qp-active-set' but the problem was not "
-                "detected as a convex LP/QP (convex-quadratic objective + "
-                "linear constraints). For the active-set SQP outer loop on a "
-                "general NLP, pass algorithm='active-set-sqp' instead."
+                "detected as an LP/QP with linear constraints (the Hessian may "
+                "be indefinite; the constraints may not be). For the active-set "
+                "SQP outer loop on a general NLP, pass "
+                "algorithm='active-set-sqp' instead."
             )
         if extract is not None:
-            _warn_convex_dropped_opts("convex LP/QP")
+            _warn_convex_dropped_opts(
+                "nonconvex QP" if extract.kind == "nonconvex_qp" else "convex LP/QP"
+            )
             return _solve_via_convex(
                 extract,
                 options,

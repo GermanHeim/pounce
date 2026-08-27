@@ -44,9 +44,11 @@ _H_HESS = _EPS ** (1.0 / 3.0)
 
 @dataclass
 class QpExtract:
-    """A convex LP/QP recovered from the callable problem.
+    """An LP/QP recovered from the callable problem.
 
-    ``kind`` is ``"lp"`` (``P is None``) or ``"convex_qp"``. The objective is
+    ``kind`` is ``"lp"`` (``P is None``), ``"convex_qp"``, or —
+    only when the caller passed ``allow_indefinite=`` and so holds an engine
+    for it — ``"nonconvex_qp"`` (gh #786). The objective is
     ``½ xᵀP x + cᵀx + obj_const``; ``obj_const`` is the degree-0 term that the
     QP solver does not see and must be added back to the reported value.
     Equality block is ``A x = b``, inequality block ``G x ≤ h``, with box
@@ -235,15 +237,21 @@ def _objective_model(fun, grad, hess, probes):
     return P, c, d
 
 
-def _fit_objective(fun, grad, hess, probes, rtol):
+def _fit_objective(fun, grad, hess, probes, rtol, allow_indefinite: bool = False):
     """Fit + validate + convexity-check the objective, shared by the LP/QP and
     QCQP routers.
 
-    Returns ``(P_or_None, c, d)`` for ``½xᵀPx + cᵀx + d`` (``P is None`` ⇔
-    linear). Raises :class:`_NotConvex` if the objective does not match its
-    fitted linear/quadratic model at the held-out probes, or if the quadratic's
+    Returns ``(P_or_None, c, d, psd)`` for ``½xᵀPx + cᵀx + d`` (``P is None`` ⇔
+    linear, and then ``psd`` is trivially ``True``). Raises :class:`_NotConvex`
+    if the objective does not match its fitted linear/quadratic model at the
+    held-out probes, or — unless ``allow_indefinite`` — if the quadratic's
     Hessian is indefinite (a nonconvex QP).
-    """
+
+    ``allow_indefinite`` is for the one caller that has an engine for a
+    nonconvex QP: `pounce-qp`'s active-set method controls the inertia of the
+    reduced Hessian and returns a local solution (gh #786). It relaxes *only*
+    the curvature test — the model-fit validation above it is what proves the
+    problem is a QP at all, and no caller may skip that."""
     P, c, d = _objective_model(fun, grad, hess, probes)
     for p in probes[1:]:
         quad = 0.5 * float(p @ P @ p) if P is not None else 0.0
@@ -251,11 +259,13 @@ def _fit_objective(fun, grad, hess, probes, rtol):
         fv = float(fun(p))
         if abs(model - fv) > rtol * (1.0 + abs(fv)):
             raise _NotConvex("objective does not match its linear/quadratic model")
+    psd = True
     if P is not None:
         eig = np.linalg.eigvalsh(P)
-        if float(eig.min()) < -1e-8 * max(1.0, abs(float(eig.max()))):
+        psd = float(eig.min()) >= -1e-8 * max(1.0, abs(float(eig.max())))
+        if not psd and not allow_indefinite:
             raise _NotConvex("indefinite Hessian — nonconvex QP")
-    return P, c, d
+    return P, c, d, psd
 
 
 def _linear_constraints(g_combined, jac_combined, cl, cu, probes, m):
@@ -333,20 +343,30 @@ def classify_and_extract(
     x0,
     rtol: float = 1e-5,
     seed: int = 0,
+    allow_indefinite: bool = False,
 ) -> Optional[QpExtract]:
-    """Detect a convex LP/QP behind the callable problem and extract its data.
+    """Detect an LP/QP behind the callable problem and extract its data.
 
     Returns a :class:`QpExtract` if the objective is linear or convex-quadratic
     *and* every constraint is linear (validated at held-out probe points),
     otherwise ``None`` (route to the NLP solver). Any evaluation error during
     probing — a domain error, a NaN, a shape surprise — also yields ``None``:
     we never let a probe failure turn into a wrong solver choice.
+
+    ``allow_indefinite`` additionally admits a quadratic objective whose
+    Hessian is indefinite, tagging it ``kind="nonconvex_qp"``. Only a caller
+    holding an engine for one may ask — today that is
+    ``solver_selection="qp-active-set"`` (gh #786). Everything else about the
+    detection is unchanged, the linear-constraint requirement included: the
+    active-set engine controls the *objective's* curvature, not a row's.
     """
     rng = np.random.default_rng(seed)
     grad = _grad_fn(fun, jac)
     try:
         probes = _probe_points(x0, lb, ub, rng)
-        P, c, d = _fit_objective(fun, grad, hess, probes, rtol)
+        P, c, d, psd = _fit_objective(
+            fun, grad, hess, probes, rtol, allow_indefinite=allow_indefinite
+        )
         A, b, G, h = _linear_constraints(g_combined, jac_combined, cl, cu, probes, m)
     except _NotConvex:
         return None
@@ -355,8 +375,12 @@ def classify_and_extract(
         return None
 
     lb_c, ub_c = _clean_bounds(lb, ub)
+    if P is None:
+        kind = "lp"
+    else:
+        kind = "convex_qp" if psd else "nonconvex_qp"
     return QpExtract(
-        kind="lp" if P is None else "convex_qp",
+        kind=kind,
         P=P,
         c=np.asarray(c, dtype=np.float64).ravel(),
         obj_const=float(d),
@@ -463,7 +487,7 @@ def classify_and_extract_socp(
     grad = _grad_fn(fun, jac)
     try:
         probes = _probe_points(x0, lb, ub, rng)
-        P, c, d = _fit_objective(fun, grad, hess, probes, rtol)
+        P, c, d, _psd = _fit_objective(fun, grad, hess, probes, rtol)
         anchor = probes[0]
 
         # Per-constraint models. Each row is linear (Q = 0) or convex-quadratic.

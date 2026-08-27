@@ -334,6 +334,64 @@ def test_qp_active_set_reaches_the_sqp_engine():
     assert np.allclose(sel.x, nlp.x, atol=1e-6), "both engines must still solve it"
 
 
+def test_qp_active_set_solves_an_indefinite_qp(recwarn):
+    """gh #786: `qp-active-set` is the one selector with an engine for a
+    nonconvex QP, so `minimize` must route one there instead of refusing.
+
+    `min ½xᵀPx + cᵀx` over `[−1, 1]²` with `P = diag(−2, 1)`,
+    `c = (0.5, −0.5)` is separable: the concave `x₀` coordinate bottoms out at
+    the endpoint `x₀ = −1` (`−1.5`, against `−0.5` at `x₀ = +1`) and the convex
+    `x₁` one at `x₁ = 0.5` (`−0.125`), so `f* = −1.625` at `(−1, 0.5)`.
+
+    `nfev == 0` is the tell that the convex driver ran: it consumes the
+    extracted quadratic form and never calls back into Python.
+    """
+    P = np.diag([-2.0, 1.0])
+    c = np.array([0.5, -0.5])
+
+    def fun(x):
+        return 0.5 * float(x @ P @ x) + float(c @ x)
+
+    def jac(x):
+        return P @ x + c
+
+    bounds = [(-1.0, 1.0), (-1.0, 1.0)]
+    res = minimize(
+        fun,
+        np.zeros(2),
+        jac=jac,
+        bounds=bounds,
+        options={"solver_selection": "qp-active-set"},
+    )
+    assert res.success
+    assert res.nfev == 0, "must route to the convex driver, not a callback path"
+    assert res.fun == pytest.approx(-1.625, abs=1e-6)
+    assert np.allclose(res.x, [-1.0, 0.5], atol=1e-6)
+    assert res.info["problem_class"] == "nonconvex_qp"
+
+    # `auto` must NOT take that route: the detection is an inference, and the
+    # general NLP path is the safer default for a nonconvex model.
+    auto = minimize(fun, np.zeros(2), jac=jac, bounds=bounds,
+                    options={"solver_selection": "auto"})
+    assert auto.nfev > 0, "auto must leave a nonconvex QP on the NLP path"
+
+
+def test_qp_active_set_still_refuses_a_nonlinear_constraint():
+    """The lift is about the *objective's* curvature. A curved constraint is
+    not something this engine controls, and the extractor would drop it — so
+    the selector must still refuse, and say which half failed."""
+    def fun(x):
+        return float(x[0] * x[1])
+
+    def jac(x):
+        return np.array([x[1], x[0]])
+
+    con = [{"type": "ineq", "fun": lambda x: 1.0 - float(x @ x)}]
+    with pytest.raises(ValueError, match="linear constraints"):
+        minimize(fun, np.zeros(2), jac=jac, constraints=con,
+                 options={"solver_selection": "qp-active-set"})
+
+
 def test_solver_selection_is_case_insensitive():
     """The Rust side compares with `eq_ignore_ascii_case`; match it, so a
     selector that works on the CLI is not rejected here on casing alone."""

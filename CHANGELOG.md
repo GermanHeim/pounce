@@ -30,6 +30,91 @@ changes.
   from #740, whose defect was in the NLP path (`_diff.py`,
   `UnexpectedTracerError`) and whose hoisting workaround did *not* help here.
 
+- **The phase-envelope regression test costs half what it did, and the half
+  that went was not where the issue expected** (#788).
+  `test_published_binary_fold_and_inverse_design_regression` measured 759s
+  end to end; it now measures 372s. Profiling it phase by phase put 84% of
+  the runtime in four XLA compilations of the augmented fold system's
+  Lagrangian Hessian — a third derivative of the Peng--Robinson residual, at
+  ~195s, ~196s, ~143s and ~106s — and only 13% in the three continuation
+  traces the issue proposed trimming. Shortening the traces alone would have
+  returned about 6%.
+
+  Two of the four compilations are gone. `_fold_problem`'s cache key drops
+  the composition, so the inverse design's verification fold reuses the
+  temperature graph instead of recompiling it (~143s): `refine_fold` always
+  supplies a design vector and `_decode_design` takes the composition from
+  *that*, ignoring the mixture's own. #789 identified that key but declined
+  it, because the invariant lives in a different function and a later edit
+  could silently hand back a stale graph — "wrong rather than merely slow".
+  The new unmarked `test_fold_equations_ignore_the_mixture_composition`
+  removes that objection by checking the invariant directly, on every PR;
+  it is mutation-checked, and goes red alone when `_decode_design` is made
+  to read `mixture.composition`.
+
+  The other (~196s) is the coarse pressure-mode fold, which existed only as
+  one side of the ds=0.10/ds=0.08 step-size-convergence comparison. Dropping
+  that pair, as the issue proposed, therefore removed a full compilation
+  rather than just the ds=0.08 trace. Notebook 34 cell 38 still publishes
+  the coarse/fine agreement (8.41e-12). The properties the #777 review
+  established all survive: the fold is still reached by a real continuation
+  from a real low-pressure anchor, the published Deiters--Bell 282.53 K
+  maxcondentherm is still checked, and the inverse design is still verified
+  by a fresh retrace rather than by re-reading the NLP's own answer.
+
+  What remains is two compilations, both load bearing — the temperature fold
+  (the published benchmark) and the inverse-design NLP (the design solve) —
+  so the test stays marked `slow`. `reparameterize_trace` lost its only
+  caller when the pressure fold went, and rather than lose its coverage it
+  gains a direct test against a synthetic trace, which costs no continuation
+  run and checks the reversal re-detection the incidental coverage never did.
+- **An indefinite QP now reaches the one engine documented to solve it
+  (gh #786).** `docs/src/choosing-a-solver.md` has always listed the
+  active-set QP as handling a Hessian that is "convex *or* indefinite" —
+  `pounce-qp` controls the inertia of the reduced Hessian by construction —
+  but every route to it refused one. `pounce.qp.solve_qp` ran the
+  issue-#112 `check_psd` guard before it looked at `method=` at all (that
+  parameter arrived later and the guard's scope was never revisited), so
+  `method="active-set"` raised on the exact problems it solves; on the CLI,
+  `solver_selection=qp-active-set` rejected the `nonconvex QP` class; and
+  `minimize(solver_selection="qp-active-set")` rejected it too. All three now
+  solve it and report a **local** optimum, the same guarantee the NLP
+  filter-IPM gives on a nonconvex NLP. `auto` is unchanged — it still sends a
+  nonconvex QP to the filter-IPM, so this is reachable only by naming the
+  engine — and the convex IPM still refuses an indefinite `P`, which is what
+  issue #112 is about.
+
+  Three things had to move with it. The engine is no longer *told* its
+  Hessian is PSD when it is not, and on the indefinite path the driver stops
+  absorbing working-set changes as Schur updates: that update does not
+  re-check inertia, so a DROP could expose negative curvature the cached
+  factor would not regularize until the next reset — a gap `pounce-qp`
+  documented as latent for indefinite inputs, latent because nothing fed this
+  driver one. The unboundedness certificate now accepts a feasible recession
+  direction of **negative curvature**, which is how a nonconvex QP actually
+  runs off to `−∞`; it is unreachable for a PSD Hessian, so no convex solve
+  moves. And the `nonconvex QP` class now excludes a model with *quadratic
+  rows*, which classifies `NLP` as a nonconvex QCQP: the QP extractor behind
+  this route keeps only the linear part of each row, so the old label would
+  have handed the engine a model with its curved constraints deleted.
+
+  Rust API: `pounce_convex::solve_qp_active_set_inertia` is the new entry
+  point, and `solve_qp_active_set` is it under a standing PSD claim.
+  `ActiveSetQp::with_hessian_inertia` carries the claim on the translated
+  problem, and `engine_options` now **takes** it — a signature change to a
+  function added earlier in this same unreleased cycle, made rather than
+  defaulted because the Schur-update choice turns on it and an external driver
+  that got it wrong would get no diagnostic. `ActiveSetSession` stays
+  convex-only: its homotopy is a predictor built for that case.
+
+  The guard's message was wrong on this path in three ways and is rewritten:
+  it named "the convex QP solver" when the caller had asked for the
+  active-set one, asserted the problem "is unbounded below in the indefinite
+  directions and has no convex optimum" — false for a bounded box, which has
+  a perfectly good global minimum — and offered `check_psd=False` "if you
+  know P is PSD" when the reason to reach for it here is the opposite. It now
+  names `method='ipm'` as the engine that requires PSD and points at
+  `method='active-set'` as the one that does not.
 - **Catalyst-pellet tutorial: the nested route's thermal limit is a
   constraint, not a state bound** (#787). `solve_nested_design` defines a
   `thermal_margin` inequality, but the inner `solve_forward` root solve used
@@ -156,24 +241,24 @@ changes.
   problem, which is worth ~55 s to the regression test and one compilation
   per *kind* of fold rather than per fold to notebook 34.
 
-  The cache key is the complete mixture. Keying on everything except the
-  composition would hit more often and be correct today, because
-  `_decode_design` reads the composition from the supplied design vector and
-  ignores the mixture's own — but that invariant lives in a different
-  function, and if it ever changes, a composition-blind key hands back a
-  stale graph and the answer is wrong rather than slow.
+  The cache key omits the composition (#788, below): `_decode_design` reads
+  the composition from the supplied design vector and ignores the mixture's
+  own, so mixtures differing only in composition share one graph. That
+  invariant lives in a different function, so it is pinned by a test rather
+  than asserted in a comment.
 
 - **The published phase-envelope reproduction no longer runs on every pull
   request.** `test_published_binary_fold_and_inverse_design_regression` is
   marked `slow`: it costs ~9 minutes on a CI runner by itself, and it was the
   whole of `Python tests (jax)` going from 8m23s to 22m12s when the example
   landed — on the job that is the long pole gating every PR. It asserts a
-  published thermodynamic value and a continuation step-size invariance,
-  claims only the example, the JAX frontend it drives, or the solver can
-  move. A PR touching none of those deselects it; every push to `main` runs
-  it in full, so a solver change is still covered, after merge rather than
-  before. The three unmarked tests in that file — cubic root branches,
-  simplex coordinates, implicit derivatives — still run on every PR.
+  published thermodynamic value and an inverse design, claims only the
+  example, the JAX frontend it drives, or the solver can move. A PR touching
+  none of those deselects it; every push to `main` runs it in full, so a
+  solver change is still covered, after merge rather than before. The
+  unmarked tests in that file — cubic root branches, simplex coordinates,
+  implicit derivatives, trace reparameterization, and the fold cache's
+  composition invariant — still run on every PR.
 
 - **A new flagship Python tutorial performs uncertainty-aware inverse design
   of a nonisothermal CO2-methanation catalyst pellet** (#775). The reusable

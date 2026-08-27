@@ -206,6 +206,80 @@ def test_solve_socp_rejects_indefinite_p():
         solve_socp(P=_P_INDEF, c=_C2, G=-np.eye(2), h=np.ones(2), cones=[("nonneg", 2)])
 
 
+# --------------------------------------------------------------------------
+# gh #786 — the issue-#112 guard is scoped to the engine that needs it. It
+# was applied before `solve_qp` had even looked at `method=`, so
+# `method="active-set"` — the one engine documented to handle an indefinite
+# Hessian, and which solves these exactly — was the one entry point that
+# could not be handed one.
+# --------------------------------------------------------------------------
+
+
+def _indefinite_box_qp():
+    """`min ½xᵀPx + cᵀx` over `[−1, 1]²`, `P = diag(−2, 1)`, `c = (0.5, −0.5)`.
+
+    Separable, so the answer is arithmetic: `−x₀² + 0.5x₀` is concave and
+    bottoms out at the endpoint `x₀ = −1` (`−1.5`, against `−0.5` at `x₀ = +1`),
+    while `0.5x₁² − 0.5x₁` is convex with an interior minimum `−0.125` at
+    `x₁ = 0.5`. So `f* = −1.625` at `(−1, 0.5)`.
+
+    Every wrong answer this problem admits is a *different number*: the other
+    local minimum is `−0.625`, and the concave coordinate's interior stationary
+    point gives `−0.1875`.
+    """
+    P = np.diag([-2.0, 1.0])
+    c = np.array([0.5, -0.5])
+    return P, c, -np.ones(2), np.ones(2)
+
+
+@pytest.mark.parametrize("check_psd", [None, True, False])
+def test_active_set_solves_an_indefinite_qp(check_psd):
+    # All three settings of the guard must reach the same solve. `None` (the
+    # default, which checks at this size) and `True` are the cases that used to
+    # raise; `False` already worked and must not have moved.
+    P, c, lb, ub = _indefinite_box_qp()
+    r = solve_qp(P=P, c=c, lb=lb, ub=ub, method="active-set", check_psd=check_psd)
+    assert r.status == "optimal"
+    assert r.obj == pytest.approx(-1.625, abs=1e-8)
+    np.testing.assert_allclose(r.x, [-1.0, 0.5], atol=1e-8)
+
+
+def test_ipm_still_refuses_an_indefinite_qp_and_names_the_alternative():
+    # The guard's whole point (issue #112) is unchanged for the convex engine:
+    # without it the IPM reports a silently-wrong "optimal" at a saddle point.
+    # What changed is that the message stops describing the *problem* as having
+    # no optimum — this one has a perfectly good global minimum — and points at
+    # the engine that can reach it.
+    P, c, lb, ub = _indefinite_box_qp()
+    for kwargs in ({}, {"method": "ipm"}):
+        with pytest.raises(ValueError, match="positive semidefinite") as excinfo:
+            solve_qp(P=P, c=c, lb=lb, ub=ub, **kwargs)
+        message = str(excinfo.value)
+        assert "method='active-set'" in message
+        assert "unbounded below" not in message
+
+
+def test_a_psd_p_never_claims_indefinite_on_the_active_set_path():
+    # The inertia the frontend reports is a finding, not a default: a convex
+    # QP must still be solved as one, guard on or off.
+    P = np.diag([2.0, 2.0])
+    c = np.array([-3.0, -4.0])
+    for check_psd in (None, True, False):
+        r = solve_qp(
+            P=P, c=c, lb=[0, 0], ub=[1, 1], method="active-set", check_psd=check_psd
+        )
+        assert r.status == "optimal"
+        np.testing.assert_allclose(r.x, [1.0, 1.0], atol=1e-8)
+
+
+def test_indefinite_p_does_not_mask_an_invalid_method():
+    # An unknown engine is the error worth reporting; the Hessian of a problem
+    # nothing was going to solve is not.
+    P, c, lb, ub = _indefinite_box_qp()
+    with pytest.raises(ValueError, match="method must be"):
+        solve_qp(P=P, c=c, lb=lb, ub=ub, method="simplex")
+
+
 def test_check_psd_false_bypasses_guard_everywhere():
     # check_psd=False must skip the guard on every entry point — the escape
     # hatch for a caller who knows P is PSD (or wants the nonconvex behavior)
