@@ -272,9 +272,12 @@ and the first and last are the ones that are easy to skip and wrong to:
    instead. Skip it and a reversed box reaches the engine as an
    `InvertedBounds` error, while a *present* `+∞` lower bound is dropped as if
    absent and the solve returns `Optimal` at a point that violates it.
-2. `ActiveSetQp::from_convex` on whatever step 1 handed back.
+2. `ActiveSetQp::from_convex` on whatever step 1 handed back. For an
+   indefinite Hessian, add `.with_hessian_inertia(HessianInertia::Indefinite)`.
 3. `engine_options` for the settings this path was measured under, then solve
-   `ActiveSetQp::problem` with `pounce_qp`.
+   `ActiveSetQp::problem` with `pounce_qp`. It takes the *same* inertia value
+   as step 2 — one of the settings turns on it — so pass whatever you passed
+   there, and `HessianInertia::Psd` for a convex QP.
 4. `back_translate_verified`. It applies the dual sign transform, recomputes
    the objective in convex coordinates and re-derives the verdict — the
    engine's `Optimal` is a claim, not a verdict (see `verify_status`).
@@ -285,6 +288,17 @@ What the recipe does *not* reproduce is the cold driver's retry ladder (Ruiz
 equilibration, the simplex-seeded retry, the objective-free feasibility probe).
 Those are `solve_qp_active_set`'s and `ActiveSetSession`'s job; if you want
 them, call one of those instead.
+
+For a **nonconvex** QP with the whole ladder, that call is
+`solve_qp_active_set_inertia(prob, opts, engine, HessianInertia::Indefinite,
+backend)` — `solve_qp_active_set` is the same driver under a standing PSD
+claim. The convex IPM has no such entry point: without a PSD Hessian its
+optimality test accepts a saddle point and reports it as `Optimal`. What comes
+back for an indefinite `P` is a *local* solution, and the constraints must be
+linear — the curvature this engine controls is the objective's.
+`ActiveSetSession` stays convex-only: its homotopy is a predictor built for
+that case, so a nonconvex sequence goes through the free function one solve at
+a time.
 
 ### Active-set QP and SQP warm starts
 

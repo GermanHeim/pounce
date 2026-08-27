@@ -2478,9 +2478,21 @@ fn run_convex_qp(
     console: ConvexConsole,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
-    use pounce_convex::active_set::solve_qp_active_set;
+    use pounce_convex::HessianInertia;
+    use pounce_convex::active_set::solve_qp_active_set_inertia;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
+
+    // What the classifier found out about `P`, handed to the engine rather than
+    // assumed by it. `NonconvexQp` reaches this driver only through an explicit
+    // `solver_selection=qp-active-set` (gh #786); every other class here was
+    // certified convex by `hessian_is_psd`, and claiming PSD for them is what
+    // keeps their solve bit-identical to what it was.
+    let inertia = if class == pounce_cli::dispatch::ProblemClass::NonconvexQp {
+        HessianInertia::Indefinite
+    } else {
+        HessianInertia::Psd
+    };
 
     // gh #767: per-phase wall clock for the convex path. The struct is always
     // built (it costs nothing when the detailed timers are off) and the sink
@@ -2650,10 +2662,11 @@ fn run_convex_qp(
                     let _t = timing.solve.guard();
                     if use_active_set {
                         let mut mk = backend;
-                        solve_qp_active_set(
+                        solve_qp_active_set_inertia(
                             &ps.reduced,
                             &solve_opts_offset(ps.obj_offset()),
                             &engine_overrides,
+                            inertia,
                             &mut mk,
                         )
                     } else {
@@ -2677,7 +2690,7 @@ fn run_convex_qp(
     } else if use_active_set {
         let mut mk = backend;
         let _t = timing.solve.guard();
-        solve_qp_active_set(&qp, &solve_opts(), &engine_overrides, &mut mk)
+        solve_qp_active_set_inertia(&qp, &solve_opts(), &engine_overrides, inertia, &mut mk)
     } else {
         let _t = timing.solve.guard();
         solve_qp_ipm(&qp, &solve_opts(), backend)

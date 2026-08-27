@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+- **An indefinite QP now reaches the one engine documented to solve it
+  (gh #786).** `docs/src/choosing-a-solver.md` has always listed the
+  active-set QP as handling a Hessian that is "convex *or* indefinite" —
+  `pounce-qp` controls the inertia of the reduced Hessian by construction —
+  but every route to it refused one. `pounce.qp.solve_qp` ran the
+  issue-#112 `check_psd` guard before it looked at `method=` at all (that
+  parameter arrived later and the guard's scope was never revisited), so
+  `method="active-set"` raised on the exact problems it solves; on the CLI,
+  `solver_selection=qp-active-set` rejected the `nonconvex QP` class; and
+  `minimize(solver_selection="qp-active-set")` rejected it too. All three now
+  solve it and report a **local** optimum, the same guarantee the NLP
+  filter-IPM gives on a nonconvex NLP. `auto` is unchanged — it still sends a
+  nonconvex QP to the filter-IPM, so this is reachable only by naming the
+  engine — and the convex IPM still refuses an indefinite `P`, which is what
+  issue #112 is about.
+
+  Three things had to move with it. The engine is no longer *told* its
+  Hessian is PSD when it is not, and on the indefinite path the driver stops
+  absorbing working-set changes as Schur updates: that update does not
+  re-check inertia, so a DROP could expose negative curvature the cached
+  factor would not regularize until the next reset — a gap `pounce-qp`
+  documented as latent for indefinite inputs, latent because nothing fed this
+  driver one. The unboundedness certificate now accepts a feasible recession
+  direction of **negative curvature**, which is how a nonconvex QP actually
+  runs off to `−∞`; it is unreachable for a PSD Hessian, so no convex solve
+  moves. And the `nonconvex QP` class now excludes a model with *quadratic
+  rows*, which classifies `NLP` as a nonconvex QCQP: the QP extractor behind
+  this route keeps only the linear part of each row, so the old label would
+  have handed the engine a model with its curved constraints deleted.
+
+  Rust API: `pounce_convex::solve_qp_active_set_inertia` is the new entry
+  point, and `solve_qp_active_set` is it under a standing PSD claim.
+  `ActiveSetQp::with_hessian_inertia` carries the claim on the translated
+  problem, and `engine_options` now **takes** it — a signature change to a
+  function added earlier in this same unreleased cycle, made rather than
+  defaulted because the Schur-update choice turns on it and an external driver
+  that got it wrong would get no diagnostic. `ActiveSetSession` stays
+  convex-only: its homotopy is a predictor built for that case.
+
+  The guard's message was wrong on this path in three ways and is rewritten:
+  it named "the convex QP solver" when the caller had asked for the
+  active-set one, asserted the problem "is unbounded below in the indefinite
+  directions and has no convex optimum" — false for a bounded box, which has
+  a perfectly good global minimum — and offered `check_psd=False` "if you
+  know P is PSD" when the reason to reach for it here is the opposite. It now
+  names `method='ipm'` as the engine that requires PSD and points at
+  `method='active-set'` as the one that does not.
 - **Catalyst-pellet tutorial: the nested route's thermal limit is a
   constraint, not a state bound** (#787). `solve_nested_design` defines a
   `thermal_margin` inequality, but the inner `solve_forward` root solve used

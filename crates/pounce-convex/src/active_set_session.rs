@@ -81,7 +81,7 @@
 
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
-    ActiveSetOverrides, ParametricActiveSetSolver, ParametricSource, QpSolver,
+    ActiveSetOverrides, HessianInertia, ParametricActiveSetSolver, ParametricSource, QpSolver,
     QpStatus as ActiveSetStatus,
 };
 
@@ -415,7 +415,11 @@ impl ActiveSetSession {
         let engine = self.engine;
         let mut mk: &mut dyn FnMut() -> Box<dyn SparseSymLinearSolverInterface> =
             &mut *self.make_backend;
-        let att = solve_qp_active_set_attempt(prob, &opts, &engine, &mut mk);
+        // A session is a convex surface: its homotopy is a predictor built for
+        // the convex case, so the claim it makes is the standing one
+        // `solve_qp_active_set` makes (gh #786). A nonconvex sequence reaches
+        // the engine through `solve_qp_active_set_inertia`, one solve at a time.
+        let att = solve_qp_active_set_attempt(prob, &opts, &engine, HessianInertia::Psd, &mut mk);
         self.remember(att.native, att.sol.status);
         att.sol
     }
@@ -461,7 +465,15 @@ impl ActiveSetSession {
         }
 
         self.stats.parametric_attempts += 1;
-        let qopts = engine_options(opts, &self.engine, native.n(), native.m());
+        // Same standing convex claim as the cold leg above — the warm and cold
+        // legs of one session must run on the same configuration (gh #769).
+        let qopts = engine_options(
+            opts,
+            &self.engine,
+            native.n(),
+            native.m(),
+            HessianInertia::Psd,
+        );
         let mut solver = ParametricActiveSetSolver::new((self.make_backend)());
         let qsol =
             match solver.solve_parametric(&prev.qp.problem(), &prev.sol, &native.problem(), &qopts)
