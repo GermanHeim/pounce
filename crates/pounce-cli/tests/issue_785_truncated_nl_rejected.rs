@@ -30,6 +30,14 @@
 //!
 //! The last one is the check the issue asked for, and the only one that fires
 //! when the bounds are all present and only the coefficients are gone.
+//!
+//! Measured on the parent commit (`895ba96`), only the cut at `r` returned
+//! exit 0; the `b` and `k` cuts already exited 1 with `Problem is primal
+//! infeasible` / `obj=13.0`, because the row survived without its
+//! coefficients and reduced to `0 = 6`. So two of the four assertions below
+//! tighten an exit 1 into an exit 2 rather than rescuing a wrong answer —
+//! still the right verdict, since an infeasibility claim is a claim about
+//! the *model*, and this one came from a corrupt file.
 
 use std::path::PathBuf;
 use std::process::Command;

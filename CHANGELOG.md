@@ -30,13 +30,15 @@ changes.
   separately: the nonzero cross-check is the only one that fires when the
   bounds all survived and only the coefficients are gone.
 
-  One behaviour change beyond the truncation case: a file whose `J` segment
-  is missing while its header still declares the nonzeros is now a parse
-  error (exit 2) rather than `InfeasibleProblemDetected` (exit 1). The row
-  reduced to `0 = 6`, so the old answer was a claim about the *model* made
-  from a corrupt file. A hand-written `.nl` with a loose header is rejected
-  for the same reason — the same trade the `k`-segment count check already
-  makes, and the error names the exact mismatch.
+  Only a cut landing at or before `r` returned a confident wrong answer;
+  cuts landing later, and a file with only its `J` segment missing, already
+  exited 1 with `Problem is primal infeasible` and `obj=13.0` on the same
+  model. Those now exit 2 as well. That is still a behaviour change worth
+  stating: an infeasibility verdict is a claim about the *model*, and these
+  were derived from a corrupt file — the row had reduced to `0 = 6`. A
+  hand-written `.nl` with a loose header is now rejected for the same
+  reason, the same trade the `k`-segment count check already makes, and the
+  error names the exact mismatch.
 
   The check found four stale headers on its way in. Three CLI fixtures
   (`convex_qp.nl`, `infeasible_qp.nl`, `nonconvex_qp.nl`) and the reader's
