@@ -47,6 +47,56 @@ changes.
   caller when the pressure fold went, and rather than lose its coverage it
   gains a direct test against a synthetic trace, which costs no continuation
   run and checks the reversal re-detection the incidental coverage never did.
+- **Catalyst-pellet tutorial: the nested route's thermal limit is a
+  constraint, not a state bound** (#787). `solve_nested_design` defines a
+  `thermal_margin` inequality, but the inner `solve_forward` root solve used
+  `temperature_limit_k` as the temperature *state* bound. A converged inner
+  solution could therefore never report a negative margin: a thermally
+  difficult candidate stalled against the bound with an unclosed energy
+  balance, and the outer SLSQP was handed a failed state solve instead of the
+  constraint violation it exists to respond to. It could not tell "this design
+  is too hot" from "the physics did not converge", and aborted on the first
+  such candidate.
+
+  `PelletConfig` now separates the two: `temperature_limit_k` stays the design
+  constraint, while `state_temperature_floor_k` and
+  `state_temperature_ceiling_k` (400 K to 900 K) are the root solve's own
+  numerical bracket, deliberately straddling the design ceiling. The bracket
+  is loose enough that the design constraint binds first and tight enough to
+  keep the solve off the ignited branch — for the nominal parameters the
+  low-temperature branch turns back just above a 613 K peak as the external
+  heat-transfer coefficient is lowered (converging at 612.7 K for
+  `h = 171.5 W m^-2 K^-1`, not at all by `h = 170`), and past that fold the
+  only remaining steady state is a mass-transfer-limited runaway of order
+  `10^3 K` hot and far outside the Koschany fit. `solve_design` is unchanged:
+  the simultaneous route still carries the design ceiling directly as a state
+  bound, which is the point of that transcription.
+
+  `PelletSolution` gained `thermal_margin_k` and `thermally_feasible`, so a
+  hot-but-converged solution is distinguishable from a failed one at the API
+  level; `success` remains a statement about the state solve alone. The
+  bracket is not a kinetic-validity claim — a converged state above
+  `temperature_limit_k` is reported infeasible and never returned as a design.
+
+  Regression: with the ceiling moved to 570 K, under the 572.5 K peak of the
+  equal-inventory uniform eight-cell pellet, the uniform candidate converges
+  to residual 1.4e-13 with a -2.51 K margin, while collapsing the bracket back
+  onto the ceiling reproduces the old failure (pinned at 570.000 K, residual
+  1.8e-03); both design routes then drive the constraint active and agree on
+  the same profile to 1e-5. Nominal eight-cell results are unchanged to
+  1e-13 — the designs reported in #779 remain near 579 K with the ceiling
+  slack.
+
+  One clarification on the report's own configuration: the eight-cell mesh at
+  `heat_transfer_coefficient_w_m2_k=80` still fails, and correctly so. That
+  film coefficient is past the fold — the low-temperature branch no longer
+  exists there, so there is no steady state for the root solve to find and
+  `success=False` is the honest answer, not a bound artifact (the peak
+  temperature stalls at 555 K, nowhere near the 613 K ceiling). Both routes now
+  say so with a message that names the failed state solve rather than
+  re-raising a bare solver string. The constraint-handling gap the report
+  identified is real and is fixed; it is reproduced above at a film coefficient
+  where a solution does exist.
 
 - **A truncated `.nl` file is rejected instead of solved** (#785). A `.nl`
   cut short before its trailing segments — an interrupted write, a full disk,

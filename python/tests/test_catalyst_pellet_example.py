@@ -264,6 +264,108 @@ def test_simultaneous_and_nested_design_agree_and_refine():
     assert refined.max_temperature_k < config.temperature_limit_k
 
 
+def test_thermal_ceiling_is_a_constraint_not_a_failed_state_solve():
+    """gh#787: the design ceiling and the root-solve bracket are separate.
+
+    The nested route can only respond to ``temperature_limit_k`` if a candidate
+    that violates it still converges, so that the outer optimizer is handed a
+    negative margin rather than an exception.  The configuration below puts the
+    ceiling at 570 K, below the 572.5 K peak of the uniform pellet, which makes
+    the constraint bind at the nominal eight-cell operating point.
+    """
+
+    config = replace(PelletConfig(nodes=8, zones=4), temperature_limit_k=570.0)
+    uniform = np.full(config.zones, config.activity_inventory)
+
+    # Converged *and* thermally infeasible. The root solve reaches a genuine
+    # root -- residual and energy closure at solver tolerance -- whose peak
+    # temperature nonetheless violates the design ceiling.
+    hot = solve_forward(uniform, config)
+    assert hot.success, hot.message
+    assert hot.max_scaled_residual < 1e-10
+    assert hot.energy_balance_relative < 1e-10
+    assert hot.max_temperature_k > config.temperature_limit_k
+    assert hot.thermal_margin_k < 0.0
+    assert not hot.thermally_feasible
+
+    # The pre-fix formulation, recovered by collapsing the numerical bracket
+    # onto the design ceiling: the identical candidate now fails the bounded
+    # least-squares solve, its peak temperature pinned at the bound instead of
+    # sitting at a root. That is the state this issue is about -- a failed
+    # state solve where the honest answer is "converged, but too hot".
+    coupled = replace(config, state_temperature_ceiling_k=config.temperature_limit_k)
+    pinned = solve_forward(uniform, coupled)
+    assert not pinned.success
+    assert pinned.max_scaled_residual > 1e-4
+    assert pinned.energy_balance_relative > 1e-3
+    assert pinned.max_temperature_k == pytest.approx(
+        config.temperature_limit_k, abs=1e-9
+    )
+
+    # With the two separated, SLSQP sees the constraint and moves off it. Both
+    # routes drive the ceiling active and land on the same design, even though
+    # the nested route enforces it as an explicit inequality on the converged
+    # inner solve and the simultaneous route as a state variable bound.
+    nested = solve_nested_design(config)
+    simultaneous = solve_design(config)
+
+    assert nested.success, nested.status
+    assert simultaneous.success, simultaneous.status
+    assert nested.max_constraint_violation < 1e-7
+    assert simultaneous.max_constraint_violation < 1e-8
+    assert nested.nominal.thermal_margin_k == pytest.approx(0.0, abs=1e-6)
+    assert simultaneous.nominal.thermal_margin_k == pytest.approx(0.0, abs=1e-6)
+    np.testing.assert_allclose(
+        nested.activity, simultaneous.activity, rtol=1e-5, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        nested.nominal.production_mol_s,
+        simultaneous.nominal.production_mol_s,
+        rtol=1e-6,
+    )
+    # The ceiling is load-bearing here: honouring it costs production against
+    # the equal-inventory uniform pellet that violates it.
+    assert nested.nominal.production_mol_s < hot.production_mol_s
+
+
+def test_root_solve_bracket_must_contain_the_design_ceiling():
+    with pytest.raises(ValueError, match="state_temperature_ceiling_k"):
+        PelletConfig(temperature_limit_k=613.0, state_temperature_ceiling_k=600.0)
+    with pytest.raises(ValueError, match="state_temperature_floor_k"):
+        PelletConfig(temperature_limit_k=613.0, state_temperature_floor_k=620.0)
+
+
+def test_eight_cell_routes_agree_when_the_thermal_ceiling_is_slack():
+    """The nominal validated mesh is unaffected by the gh#787 separation."""
+
+    config = PelletConfig(nodes=8, zones=4)
+    nested = solve_nested_design(config)
+    simultaneous = solve_design(config)
+
+    assert nested.success, nested.status
+    assert simultaneous.success, simultaneous.status
+    # Both reported designs sit near 579 K, well under the 613 K ceiling, so
+    # the thermal constraint is inactive and the two routes are comparing only
+    # the balances and the inventory.
+    assert nested.nominal.thermal_margin_k > 30.0
+    assert simultaneous.nominal.thermal_margin_k > 30.0
+    assert nested.nominal.thermally_feasible
+    assert simultaneous.nominal.thermally_feasible
+    np.testing.assert_allclose(
+        nested.activity, simultaneous.activity, rtol=8e-4, atol=3e-6
+    )
+    np.testing.assert_allclose(
+        nested.nominal.production_mol_s,
+        simultaneous.nominal.production_mol_s,
+        rtol=2e-6,
+    )
+    np.testing.assert_allclose(
+        nested.nominal.max_temperature_k,
+        simultaneous.nominal.max_temperature_k,
+        rtol=2e-8,
+    )
+
+
 def test_covariance_drives_robust_design_and_sampled_resolves():
     config = PelletConfig(nodes=6, zones=3)
     fit = fit_effective_parameters(config=config)

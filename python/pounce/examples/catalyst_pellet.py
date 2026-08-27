@@ -85,6 +85,17 @@ class PelletConfig:
     they must be replaced when a particular support is being modeled.
     ``nodes`` must be divisible by ``zones`` so each activity coefficient owns
     the same physical volume on every solve and refinement mesh.
+
+    ``temperature_limit_k`` is the *design* constraint.
+    ``state_temperature_floor_k`` and ``state_temperature_ceiling_k`` are a
+    separate *numerical* bracket that keeps the fixed-activity root solve on a
+    physical branch, and they deliberately straddle the design ceiling: the
+    forward solve must be able to converge on a candidate that is hot enough to
+    violate the design constraint, so that the constraint is what rejects it
+    rather than a failed state solve (gh#787).  The bracket is not a kinetic
+    validity claim -- a converged state above ``temperature_limit_k`` is
+    extrapolating the Koschany fit and is reported as thermally infeasible,
+    never as a design.
     """
 
     radius_m: float = 1.25e-3  # [m], 2.5 mm diameter
@@ -109,12 +120,26 @@ class PelletConfig:
     pellet_porosity: float = 0.35  # [-], explicit tutorial assumption
     reaction_enthalpy_j_mol: float = -164_000.0  # [J mol_CO2^-1]
     temperature_limit_k: float = 613.0  # [K], kinetic validity ceiling
+    state_temperature_floor_k: float = 400.0  # [K], root-solve safety bracket
+    state_temperature_ceiling_k: float = 900.0  # [K], root-solve safety bracket
     activity_inventory: float = 0.16  # volume-average activity [-]
     activity_upper: float = 1.0  # Koschany catalyst basis [-]
     regularization_weight: float = 0.5  # objective weight [-]
     nodes: int = 8
     zones: int = 4
     kinetics: KoschanyKinetics = KoschanyKinetics()
+
+    def __post_init__(self) -> None:
+        if not self.state_temperature_floor_k < self.temperature_limit_k:
+            raise ValueError(
+                "state_temperature_floor_k must be below temperature_limit_k"
+            )
+        if not self.temperature_limit_k <= self.state_temperature_ceiling_k:
+            raise ValueError(
+                "state_temperature_ceiling_k must not be below "
+                "temperature_limit_k; the root-solve bracket has to contain "
+                "the design-feasible temperature range"
+            )
 
     @property
     def bulk_total_concentration_mol_m3(self) -> float:
@@ -165,12 +190,31 @@ class PelletSolution:
     message: str
     state_scaled: np.ndarray
     scenario: Scenario
+    temperature_limit_k: float
 
     @property
     def max_temperature_k(self) -> float:
         """Maximum cell-center temperature [K]."""
 
         return float(np.max(self.temperature_k))
+
+    @property
+    def thermal_margin_k(self) -> float:
+        """Design thermal margin ``T_limit - max(T)`` [K].
+
+        Negative on a converged solution means the candidate is thermally
+        infeasible, which is a different fact from ``success=False`` (the state
+        solve itself did not converge).  Keeping the two distinguishable is why
+        the root solve carries its own temperature bracket (gh#787).
+        """
+
+        return self.temperature_limit_k - self.max_temperature_k
+
+    @property
+    def thermally_feasible(self) -> bool:
+        """True when this solution respects the design temperature ceiling."""
+
+        return self.thermal_margin_k >= 0.0
 
     @property
     def effectiveness(self) -> float:
@@ -366,14 +410,27 @@ def _effective_diffusivities_backend(config, log_diffusivity_scale, xp):
     return xp.asarray(config.effective_diffusivities_m2_s) * scale
 
 
-def _state_bounds(config: PelletConfig, nodes: int):
+def _state_bounds(config: PelletConfig, nodes: int, *, temperature_ceiling_k: float):
+    """Scaled box bounds for the state vector.
+
+    ``temperature_ceiling_k`` is required rather than defaulted because the two
+    design routes deliberately carry different ceilings.  The simultaneous NLP
+    passes ``config.temperature_limit_k``: there the thermal constraint *is* a
+    variable bound, and POUNCE sees it directly.  The fixed-activity root solve
+    passes ``config.state_temperature_ceiling_k``, the loose numerical bracket,
+    so that a thermally infeasible candidate converges and reports a negative
+    margin instead of failing the bounded least-squares solve (gh#787).
+    """
+
     lower = np.empty((5, nodes), dtype=float)
     upper = np.empty((5, nodes), dtype=float)
     lower[:4] = 1.0e-12
     upper[:4] = 2.0
-    lower[4] = (400.0 - config.bulk_temperature_k) / TEMPERATURE_SCALE_K
+    lower[4] = (
+        config.state_temperature_floor_k - config.bulk_temperature_k
+    ) / TEMPERATURE_SCALE_K
     upper[4] = (
-        config.temperature_limit_k - config.bulk_temperature_k
+        float(temperature_ceiling_k) - config.bulk_temperature_k
     ) / TEMPERATURE_SCALE_K
     return lower.ravel(), upper.ravel()
 
@@ -645,6 +702,7 @@ def _solution_from_state(
         message=str(message),
         state_scaled=np.asarray(state_scaled, dtype=float),
         scenario=scenario,
+        temperature_limit_k=config.temperature_limit_k,
     )
     solution._intrinsic_production_mol_s = intrinsic
     return solution
@@ -664,6 +722,12 @@ def solve_forward(
     resolve gradients, mesh refinement, and uncertainty sampling.  The primary
     design route is :func:`solve_design`, which puts these same state balances
     and the activity variables into one simultaneous POUNCE NLP.
+
+    The temperature box here is ``state_temperature_floor_k`` to
+    ``state_temperature_ceiling_k``, not ``temperature_limit_k``.  A hot
+    candidate therefore converges and reports a negative
+    :attr:`PelletSolution.thermal_margin_k`; ``success`` stays a statement
+    about the state solve alone.
     """
 
     activity = np.asarray(activity, dtype=float)
@@ -682,7 +746,12 @@ def solve_forward(
         if initial_state is None
         else np.asarray(initial_state, dtype=float)
     )
-    lower, upper = _state_bounds(config, nodes)
+    # The root solve carries the loose numerical bracket, never the design
+    # ceiling: a candidate that violates temperature_limit_k must converge here
+    # so the outer route can see its negative thermal margin (gh#787).
+    lower, upper = _state_bounds(
+        config, nodes, temperature_ceiling_k=config.state_temperature_ceiling_k
+    )
 
     def fun(state):
         return np.asarray(residual_jit(state, activity, parameters), dtype=float)
@@ -1002,7 +1071,11 @@ def solve_design(
             np.asarray([0.99 * min(seed_productions) / production_reference])
         )
     x0 = np.concatenate(x0_parts)
-    state_lower, state_upper = _state_bounds(config, nodes)
+    # The simultaneous route keeps the design ceiling as an explicit variable
+    # bound; POUNCE enforces it directly on every scenario state.
+    state_lower, state_upper = _state_bounds(
+        config, nodes, temperature_ceiling_k=config.temperature_limit_k
+    )
     lb_parts = [*([state_lower] * len(scenarios)), np.zeros(zones)]
     ub_parts = [
         *([state_upper] * len(scenarios)),
@@ -1013,6 +1086,11 @@ def solve_design(
         ub_parts.append(np.asarray([10.0]))
     lb = np.concatenate(lb_parts)
     ub = np.concatenate(ub_parts)
+    # The seed comes from the root solve, whose temperature bracket is looser
+    # than this NLP's design ceiling, so a hot seed can sit above ``ub``.  Clip
+    # it back into the box; this is exactly a no-op for a seed that already
+    # respects the ceiling, which is every nominal configuration.
+    x0 = np.clip(x0, lb, ub)
     n_variables = x0.size
     equality_constraints = len(scenarios) * state_size + 1
     n_constraints = equality_constraints + (len(scenarios) if robust else 0)
@@ -1102,6 +1180,14 @@ def solve_nested_design(
     exact implicit derivative from :func:`implicit_observable_jacobian`.  It is
     retained as a cross-check; the simultaneous POUNCE transcription remains
     the primary route because it exposes every balance and bound directly.
+
+    The two routes enforce the same thermal ceiling by different mechanisms.
+    :func:`solve_design` carries ``temperature_limit_k`` as a state variable
+    bound.  Here it is an explicit SLSQP inequality on the converged inner
+    solution, which only means anything because the inner solve uses the looser
+    ``state_temperature_ceiling_k`` bracket: a thermally infeasible candidate
+    has to be able to converge before the outer optimizer can be told to move
+    away from it (gh#787).
     """
 
     from scipy.optimize import minimize
@@ -1123,7 +1209,13 @@ def solve_nested_design(
         np.full(zones, config.activity_inventory), config, nodes=nodes
     )
     if not reference.success:
-        raise RuntimeError(reference.message)
+        # No production normalization is available without this solve. A
+        # failure here is the state solve, not the thermal ceiling: the inner
+        # bracket is looser than temperature_limit_k, so a merely hot uniform
+        # pellet converges and is normalized against normally.
+        raise RuntimeError(
+            f"uniform-inventory reference state solve failed: {reference.message}"
+        )
     production_reference = max(reference.production_mol_s, 1.0e-12)
     cached_activity = None
     cached_solution = None
@@ -1136,7 +1228,11 @@ def solve_nested_design(
             seed = None if cached_solution is None else cached_solution.state_scaled
             solution = solve_forward(candidate, config, nodes=nodes, initial_state=seed)
             if not solution.success:
-                raise RuntimeError(solution.message)
+                # A genuine state-solve failure, not a thermal violation: the
+                # inner bracket is deliberately looser than the design ceiling,
+                # so a hot-but-converged candidate reaches ``thermal_margin``
+                # below instead of aborting the outer solve here.
+                raise RuntimeError(f"inner state solve failed: {solution.message}")
             cached_activity = candidate.copy()
             cached_solution = solution
             cached_jacobian = implicit_observable_jacobian(solution, config)
@@ -1158,8 +1254,9 @@ def solve_nested_design(
         return gradient
 
     def thermal_margin(activity):
+        # The design constraint, enforced on the converged inner state.
         solution, _ = evaluate(activity)
-        return config.temperature_limit_k - solution.max_temperature_k
+        return solution.thermal_margin_k
 
     def thermal_jacobian(activity):
         _, jacobian = evaluate(activity)
@@ -1362,7 +1459,7 @@ def validate_uncertainty(
         activity, config, nodes=nodes, scenario=nominal_scenario
     )
     if not nominal_solution.success:
-        raise RuntimeError(nominal_solution.message)
+        raise RuntimeError(f"nominal state solve failed: {nominal_solution.message}")
     jacobian = implicit_observable_jacobian(
         nominal_solution, config, with_respect_to="scenario"
     )
