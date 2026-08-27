@@ -46,7 +46,7 @@ pub mod sensitivity;
 pub(crate) mod simplex;
 pub mod sos;
 
-pub use active_set::solve_qp_active_set;
+pub use active_set::{solve_qp_active_set, solve_qp_active_set_inertia};
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,
@@ -61,6 +61,11 @@ pub use options::ConvexPresolveOptions;
 // with the SQP subproblem reader there; re-exported so the public path is
 // unchanged for callers who reach it through this crate.
 pub use pounce_qp::ActiveSetOverrides;
+// The caller's claim about the inertia of `P`, for
+// [`solve_qp_active_set_inertia`]. Defined in `pounce-qp` next to the
+// `QpProblem` field it fills; re-exported so a caller reaching the active-set
+// driver through this crate does not have to depend on `pounce-qp` directly.
+pub use pounce_qp::HessianInertia;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};

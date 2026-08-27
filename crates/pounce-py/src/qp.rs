@@ -17,7 +17,7 @@
 //! data; `P` is the **lower triangle** of the symmetric Hessian.
 
 use numpy::IntoPyArray;
-use pounce_convex::{ActiveSetOverrides, solve_qp_active_set};
+use pounce_convex::{ActiveSetOverrides, HessianInertia, solve_qp_active_set_inertia};
 use pounce_convex::{
     ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution, QpStatus,
     QpWarmStart, SensError, Triplet, solve_qp_batch_parallel, solve_qp_batch_parallel_warm,
@@ -411,6 +411,25 @@ fn check_tau(value: Option<f64>, name: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Parse the `hessian_inertia` claim the frontend attaches to a `solve_qp`
+/// call into the enum `pounce-qp` carries on its problem.
+///
+/// The frontend spells it, not the user: `python/pounce/qp.py` runs the
+/// `check_psd` guard and reports what it found. `"psd"` is the default because
+/// it is what every caller claimed implicitly before `method=` existed, so an
+/// old call site keeps its exact behaviour.
+fn parse_hessian_inertia(value: &str) -> PyResult<HessianInertia> {
+    match value {
+        "psd" => Ok(HessianInertia::Psd),
+        "indefinite" => Ok(HessianInertia::Indefinite),
+        "unknown" => Ok(HessianInertia::Unknown),
+        other => Err(PyValueError::new_err(format!(
+            "solve_qp: `hessian_inertia` must be 'psd', 'indefinite', or 'unknown', \
+             got {other:?}"
+        ))),
+    }
+}
+
 /// Convert a `time_limit` given in **seconds** into the `Duration` the convex
 /// options carry. `None` means unbounded (the solver default).
 ///
@@ -457,8 +476,16 @@ fn time_limit_duration(secs: Option<f64>, func: &str) -> PyResult<Option<Duratio
 /// `time_limit` (seconds, default `None` = unbounded) caps the wall clock for
 /// this solve; a solve that gives up at the budget reports status
 /// `"time_limit"`, while one that reaches a verdict keeps it.
+///
+/// `hessian_inertia` is the frontend's finding about `P`, not a user knob:
+/// `"psd"` (the default) is the claim every caller made implicitly before
+/// `method=` existed, `"indefinite"` says the frontend's `check_psd` guard ran
+/// and found a negative eigenvalue, and `"unknown"` offers no claim. Only
+/// `method="active-set"` can act on it — the convex IPM requires a PSD
+/// Hessian and returns a silently-wrong `"optimal"` at a saddle point without
+/// one (gh #112), so `"indefinite"` is refused there rather than ignored.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None, hessian_inertia="psd"))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_qp<'py>(
     py: Python<'py>,
@@ -471,9 +498,11 @@ pub fn solve_qp<'py>(
     tau: Option<f64>,
     tau_max: Option<f64>,
     time_limit: Option<f64>,
+    hessian_inertia: &str,
 ) -> PyResult<Bound<'py, PyDict>> {
     check_tau(tau, "tau")?;
     check_tau(tau_max, "tau_max")?;
+    let inertia = parse_hessian_inertia(hessian_inertia)?;
     let limit = time_limit_duration(time_limit, "solve_qp")?;
     let o = opts_tau(tol, max_iter, collect_iterates, tau, tau_max, limit);
     let warm = warm_start.map(warm_from_dict).transpose()?;
@@ -484,6 +513,14 @@ pub fn solve_qp<'py>(
     // `minimize` — one selector naming two different algorithms, silently.
     match method {
         "ipm" => {
+            if inertia == HessianInertia::Indefinite {
+                return Err(PyValueError::new_err(
+                    "solve_qp: the convex interior-point engine (method='ipm') requires a \
+                     positive-semidefinite P and reports a silently-wrong 'optimal' at a \
+                     saddle point without one; pass method='active-set' to solve an \
+                     indefinite QP",
+                ));
+            }
             let sol = py.allow_threads(|| match &warm {
                 Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
                 None => solve_qp_ipm(&prob.inner, &o, backend),
@@ -500,7 +537,9 @@ pub fn solve_qp<'py>(
                 ));
             }
             let ov = ActiveSetOverrides::default();
-            let sol = py.allow_threads(|| solve_qp_active_set(&prob.inner, &o, &ov, &mut backend));
+            let sol = py.allow_threads(|| {
+                solve_qp_active_set_inertia(&prob.inner, &o, &ov, inertia, &mut backend)
+            });
             solution_dict(py, sol, Some(&prob.inner), &[])
         }
         other => Err(PyValueError::new_err(format!(

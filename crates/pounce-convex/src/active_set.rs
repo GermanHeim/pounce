@@ -113,16 +113,66 @@ fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpS
     }
 }
 
-/// Solve a convex QP with the [`pounce_qp`] parametric active-set engine.
+/// Solve a **convex** QP with the [`pounce_qp`] parametric active-set engine.
 ///
 /// Signature-compatible with [`crate::ipm::solve_qp_ipm`] so the CLI driver
 /// can select between them without restructuring, including the
 /// `make_backend` factory (the active-set engine may need more than one
 /// backend instance over a solve).
+///
+/// The caller vouches that `prob.p_lower` is positive semidefinite — that is
+/// what [`HessianInertia::Psd`] *claims* to the engine. Use
+/// [`solve_qp_active_set_inertia`] for a Hessian that is (or may be)
+/// indefinite; passing one here understates the curvature the engine has to
+/// control, and the settings this driver picks for the convex case are chosen
+/// on that claim (see [`solve_qp_active_set_inertia`] for which).
 pub fn solve_qp_active_set<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    solve_qp_active_set_inertia(prob, opts, engine, HessianInertia::Psd, make_backend)
+}
+
+/// [`solve_qp_active_set`], with the caller's claim about the inertia of `P`
+/// made explicit — the entry point for a **nonconvex** (indefinite-Hessian) QP.
+///
+/// The active-set engine handles indefinite Hessians by construction: §4.5
+/// inertia control shifts the H block until the reduced KKT factor has the
+/// right inertia, so phase-2 descends on a locally convex model and the point
+/// it reaches satisfies the first-order conditions of the *original* QP. What
+/// it returns for an indefinite `P` is therefore a **local** solution, exactly
+/// as the NLP filter-IPM's `optimal` is local on a nonconvex NLP.
+///
+/// Two things this driver does for the convex case have to change when the
+/// claim is [`HessianInertia::Indefinite`]:
+///
+/// * **Schur updates are turned off** (as a default — an explicit
+///   `sqp_qp_use_schur_updates=yes` still wins). The rank-2 SMW update in
+///   `SchurState::apply_change` does not re-check inertia, so a DROP can
+///   enlarge the active-set null space and expose negative curvature that the
+///   cached factor will not regularize until the next reset. That gap is
+///   documented on `pounce_qp::solver` as latent *for indefinite inputs*, and
+///   it is latent precisely because nothing had ever fed this driver one. The
+///   refactor path runs `factorize_with_inertia_control` every iteration and
+///   has no such window.
+/// * **`hessian_inertia` stops claiming PSD**, so the l1-elastic
+///   reformulation marks its augmented problem indefinite rather than
+///   collapsing it to PSD.
+///
+/// The unboundedness certificate ([`ray_certifies_unbounded`]) needed no
+/// switch: it now accepts a feasible recession direction of *negative
+/// curvature*, which is unreachable for a PSD `P` and is the way a nonconvex
+/// QP runs off to `−∞`.
+pub fn solve_qp_active_set_inertia<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    inertia: HessianInertia,
     make_backend: &mut F,
 ) -> QpSolution
 where
@@ -135,7 +185,7 @@ where
         // One gate over every exit of the body below — see [`finite_or_failed`].
         let sol = finite_or_failed(
             prob,
-            solve_qp_active_set_inner(prob, opts, engine, make_backend),
+            solve_qp_active_set_inner(prob, opts, engine, inertia, make_backend),
         );
         if crate::deadline::expired() {
             // Shared policy with the IPM path: a deadline crossing observed
@@ -152,6 +202,7 @@ fn solve_qp_active_set_inner<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
+    inertia: HessianInertia,
     make_backend: &mut F,
 ) -> QpSolution
 where
@@ -205,6 +256,7 @@ where
         prob,
         &unscaled_opts,
         engine,
+        inertia,
         make_backend,
         FeasibilityProbe::Allowed,
     );
@@ -222,6 +274,7 @@ where
             &scaled,
             &unscaled_opts,
             engine,
+            inertia,
             make_backend,
             FeasibilityProbe::Allowed,
         );
@@ -284,6 +337,7 @@ where
             prob,
             &unscaled_opts,
             &seeded_engine,
+            inertia,
             make_backend,
             FeasibilityProbe::Allowed,
         );
@@ -339,6 +393,7 @@ fn solve_translated<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
+    inertia: HessianInertia,
     make_backend: &mut F,
     probe: FeasibilityProbe,
 ) -> QpSolution
@@ -421,9 +476,14 @@ where
         bu: &bu,
         xl: &xl,
         xu: &xu,
-        // The convex path only accepts problems the class detector has already
-        // ruled convex, so the Hessian is PSD by construction.
-        hessian_inertia: HessianInertia::Psd,
+        // The caller's claim, passed through rather than asserted here. It used
+        // to be a hard-coded `Psd` on the reasoning that "the convex path only
+        // accepts problems the class detector has already ruled convex" — true
+        // until `solve_qp_active_set_inertia` gave a nonconvex QP a way in
+        // (gh #786), and a false PSD claim is exactly the kind of thing that
+        // makes the elastic reformulation solve a differently-shaped problem
+        // than the one it was handed.
+        hessian_inertia: inertia,
     };
 
     let qopts = ActiveSetOptions {
@@ -441,7 +501,14 @@ where
         // `SchurState::solve`); before those it silently lost ~1e-6 of
         // accuracy and aborted outright on singular Schur blocks. See
         // `pounce-qp/tests/schur_vs_refactor.rs`.
-        use_schur_updates: true,
+        // Off for an indefinite Hessian: `SchurState::apply_change`'s rank-2
+        // SMW update does not re-check inertia, so a DROP can enlarge the
+        // active-set null space and expose negative curvature the cached factor
+        // does not regularize until the next reset. `pounce_qp::solver`
+        // documents that gap as latent for indefinite inputs; it was latent
+        // because nothing fed this driver one. The refactor path runs
+        // `factorize_with_inertia_control` every iteration and has no window.
+        use_schur_updates: inertia != HessianInertia::Indefinite,
         // Trace the §4.2 parametric homotopy rather than the conventional
         // phase-1/phase-2 scheme. Measured on the full Maros-Mészáros set at a
         // 120 s cap, same binary: 71/138 correct against 58/138 for the
@@ -709,10 +776,14 @@ where
         c: vec![0.0; prob.n],
         ..prob.clone()
     };
+    // The twin drops `P` entirely, so its Hessian is the empty (trivially PSD)
+    // one whatever the caller claimed about the original's — `Psd` here is a
+    // fact about the problem being solved, not a claim carried over.
     let sol = solve_translated(
         &twin,
         opts,
         engine,
+        HessianInertia::Psd,
         make_backend,
         FeasibilityProbe::Forbidden,
     );
@@ -984,20 +1055,30 @@ fn verify_status(
 
 /// Does `d` actually certify that `prob` is unbounded below?
 ///
-/// A recession direction of a convex QP must satisfy all four of:
+/// `d` must first be a direction the feasible set recedes along — all three of:
 ///
-/// * **zero curvature**, `Pd ≈ 0` — otherwise `½(x+td)ᵀP(x+td)` grows like `t²`
-///   and the objective turns back up;
 /// * **equalities preserved**, `Ad ≈ 0`;
 /// * **inequalities non-increasing**, `Gd ≤ 0`, so no row is eventually violated;
 /// * **box respected directionally** — a component may only move toward an
 ///   *infinite* bound;
 ///
-/// and then **strict descent**, `(Px + c)ᵀd < 0`, which with `Pd ≈ 0` is `cᵀd`.
-/// Together these mean `x + td` stays feasible for every `t ≥ 0` while the
-/// objective decreases without bound. Anything less is not a certificate.
+/// so that `x + td` stays feasible for every `t ≥ 0`. Along such a `d`,
+/// `f(x + td) = f(x) + t·(Px + c)ᵀd + ½t²·dᵀPd`, and the objective decreases
+/// without bound in exactly two cases:
 ///
-/// Tolerances are relative to `‖d‖∞` because the ray is not normalized.
+/// * **negative curvature**, `dᵀPd < 0` — the `t²` term dominates whatever the
+///   slope is. Unreachable for a PSD `P`, so this branch belongs to the
+///   indefinite Hessians [`solve_qp_active_set_inertia`] admits;
+/// * **zero curvature and strict descent**, `Pd ≈ 0` with `(Px + c)ᵀd < 0`,
+///   which reduces to `cᵀd < 0` independently of `x`. Zero curvature is a
+///   requirement of *this* branch, not of the test as a whole: a direction the
+///   objective curves up along turns back up however steep its slope.
+///
+/// Anything less is not a certificate.
+///
+/// Tolerances are relative to `‖d‖∞` because the ray is not normalized; the
+/// curvature test normalizes by `‖d‖∞²` instead, so it can be compared against
+/// the scale of `P`.
 fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     if d.len() != prob.n {
         return false;
@@ -1013,9 +1094,6 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
 
     let mut pd = vec![0.0; prob.n];
     prob.p_mul(d, &mut pd);
-    if pd.iter().any(|v| v.abs() > slack) {
-        return false;
-    }
 
     let mut ad = vec![0.0; prob.m_eq()];
     for t in &prob.a {
@@ -1042,8 +1120,37 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
         }
     }
 
-    // Strict descent. `Pd ≈ 0` was just established, so the directional
-    // derivative `(Px + c)ᵀd` reduces to `cᵀd` independently of `x`.
+    // `d` is a feasible recession direction. Along it,
+    // `f(x + td) = f(x) + t·(Px + c)ᵀd + ½t²·dᵀPd`, so it certifies
+    // unboundedness in exactly two ways.
+    //
+    // **Negative curvature** — `dᵀPd < 0` — sends the `t²` term to `−∞` on its
+    // own, whatever the slope does. This is unreachable for a PSD `P` (and the
+    // threshold below is far above the rounding floor of one), so it fires only
+    // on the indefinite Hessians `solve_qp_active_set_inertia` admits; it is
+    // how a nonconvex QP runs off to `−∞`, and the branch is why that entry
+    // point needed no separate certificate. Measured on the *normalized* `u =
+    // d/‖d‖∞` so the quantity carries the units of `P` and can be compared
+    // against `P`'s own scale — the same shape as the frontend's `check_psd`
+    // tolerance.
+    let curvature: f64 = (0..prob.n).map(|i| d[i] * pd[i]).sum::<f64>() / (dn * dn);
+    let p_scale = prob
+        .p_lower
+        .iter()
+        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
+        .max(1.0);
+    if curvature < -1e-8 * p_scale {
+        return true;
+    }
+
+    // **Strict descent along a zero-curvature direction.** Here the `t²` term
+    // must vanish — a direction the objective curves *up* along turns back up
+    // however steep its slope — so `Pd ≈ 0` is a requirement of this branch,
+    // not a precondition of the whole test. With it, the directional derivative
+    // `(Px + c)ᵀd` reduces to `cᵀd` independently of `x`.
+    if pd.iter().any(|v| v.abs() > slack) {
+        return false;
+    }
     let slope: f64 = (0..prob.n).map(|i| prob.c[i] * d[i]).sum();
     slope < -slack
 }
@@ -1184,7 +1291,7 @@ mod tests {
     use super::*;
     use crate::ipm::solve_qp_ipm;
     use crate::qp::CROSSED_BOX_TOL;
-    use crate::qp::Triplet;
+    use crate::qp::{POS_INF, Triplet};
     use pounce_feral::FeralSolverInterface;
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
@@ -1211,6 +1318,142 @@ mod tests {
             lb: vec![],
             ub: vec![],
         }
+    }
+
+    // ---- gh #786: indefinite Hessians on `solve_qp_active_set_inertia` ----
+
+    /// `min ½xᵀPx + cᵀx` over `[−1, 1]²` with `P = diag(−2, 1)`,
+    /// `c = (0.5, −0.5)` — separable, so the exact answer is arithmetic.
+    ///
+    /// * `x₀`: `−x₀² + 0.5x₀` is **concave**, so its minimum over `[−1, 1]` is
+    ///   at an endpoint — `−1.5` at `x₀ = −1`, against `−0.5` at `x₀ = +1`.
+    ///   Both are local minima; only the first is global.
+    /// * `x₁`: `0.5x₁² − 0.5x₁` is convex with an interior minimum
+    ///   `−0.125` at `x₁ = 0.5`.
+    ///
+    /// So `f* = −1.625` at `(−1, 0.5)`, and the *other* local minimum is
+    /// `−0.625` at `(1, 0.5)`. Asserting the global value is what makes this a
+    /// test rather than a smoke check: a solver that treats the concave
+    /// coordinate's interior stationary point `x₀ = 0.25` as an answer reports
+    /// `−0.0625 − 0.125`, and one that simply lands on the nearer bound
+    /// reports `−0.625`.
+    fn indefinite_box_qp() -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, -2.0), Triplet::new(1, 1, 1.0)],
+            c: vec![0.5, -0.5],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![-1.0, -1.0],
+            ub: vec![1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn indefinite_hessian_solves_on_the_inertia_entry_point() {
+        let prob = indefinite_box_qp();
+        let mut mk = backend;
+        let sol = solve_qp_active_set_inertia(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            HessianInertia::Indefinite,
+            &mut mk,
+        );
+        assert_eq!(sol.status, QpStatus::Optimal, "x = {:?}", sol.x);
+        assert!(
+            (sol.obj - (-1.625)).abs() < 1e-8,
+            "expected the global optimum −1.625, got {} at {:?}",
+            sol.obj,
+            sol.x
+        );
+        assert!((sol.x[0] - (-1.0)).abs() < 1e-8, "x = {:?}", sol.x);
+        assert!((sol.x[1] - 0.5).abs() < 1e-8, "x = {:?}", sol.x);
+    }
+
+    /// The claim the caller makes is the *only* difference between the two
+    /// entry points on the same data, and `solve_qp_active_set` is documented
+    /// to be the convex one. Pinned so the delegation cannot quietly become a
+    /// pass-through of something else.
+    #[test]
+    fn the_plain_entry_point_is_the_psd_claim() {
+        let prob = projection_qp();
+        let (mut mk_a, mut mk_b) = (backend, backend);
+        let plain = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk_a,
+        );
+        let claimed = solve_qp_active_set_inertia(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            HessianInertia::Psd,
+            &mut mk_b,
+        );
+        assert_eq!(plain.status, claimed.status);
+        assert_eq!(plain.iters, claimed.iters);
+        assert_eq!(plain.x, claimed.x);
+    }
+
+    /// A nonconvex QP that really is unbounded below, and the *only* reason it
+    /// is: `min −x₀²` over `x₀ ≥ 0` has no descent at the origin (`c = 0`, so
+    /// `cᵀd = 0`), it has negative curvature. The pre-gh#786 certificate
+    /// required `Pd ≈ 0` before it would look at anything else, so this ray was
+    /// rejected and the verdict fell back to the point.
+    #[test]
+    fn negative_curvature_certifies_unboundedness() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, -2.0)],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![POS_INF],
+        };
+        assert!(
+            ray_certifies_unbounded(&prob, &[1.0]),
+            "a feasible recession direction of negative curvature is a proof"
+        );
+        // …and the branch does not fire without the recession half: `d = −1`
+        // walks straight out of the box.
+        assert!(!ray_certifies_unbounded(&prob, &[-1.0]));
+    }
+
+    /// The negative-curvature branch must stay unreachable on a PSD `P`, or it
+    /// would hand a *convex* QP a false unboundedness verdict — the failure
+    /// mode `verify_status` re-derives every certificate to avoid. `d = (1, 0)`
+    /// here is a genuine recession direction of the feasible set (`x₀` is
+    /// unbounded above) with zero slope and **positive** curvature: the
+    /// objective turns back up along it.
+    #[test]
+    fn positive_curvature_along_a_recession_direction_is_not_a_proof() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![POS_INF, POS_INF],
+        };
+        assert!(!ray_certifies_unbounded(&prob, &[1.0, 0.0]));
+        // The zero-curvature/strict-descent branch is untouched: drop the
+        // curvature in `x₀` and give the objective a downhill slope there.
+        let flat = QpProblem {
+            p_lower: vec![Triplet::new(1, 1, 2.0)],
+            c: vec![-1.0, 0.0],
+            ..prob.clone()
+        };
+        assert!(ray_certifies_unbounded(&flat, &[1.0, 0.0]));
     }
 
     #[test]

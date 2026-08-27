@@ -85,6 +85,19 @@
 //! assert!((sols[2].x[0] - 1.0).abs() < 1e-6);      // clamped by the box
 //! ```
 //!
+//! ## Indefinite (nonconvex) QPs
+//!
+//! [`solve_qp_ipm`] requires `P ⪰ 0` — without it the interior-point method's
+//! optimality test accepts a saddle point and reports it as
+//! [`QpStatus::Optimal`]. The active-set engine does not:
+//! [`solve_qp_active_set_inertia`] takes the caller's
+//! [`HessianInertia`] claim, and under
+//! [`HessianInertia::Indefinite`] it drives `pounce-qp`'s §4.5 inertia control
+//! and returns a **local** solution. [`solve_qp_active_set`] is the same
+//! engine under a standing [`HessianInertia::Psd`] claim, for the convex case.
+//! The constraints must be linear either way — the curvature this controls is
+//! the objective's.
+//!
 //! ## Sensitivity
 //!
 //! [`QpSensitivity`] differentiates a solved QP with respect to its data and
@@ -99,10 +112,11 @@
 //! without adding a dependency.
 
 pub use pounce_convex::{
-    ActiveSetOverrides, ConeSpec, NEG_INF, POS_INF, PolyProblem, Polynomial, PsdCertificateError,
-    QpFactorization, QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution,
-    QpStatus, QpWarmStart, ReducedHessian, SensError, SosBound, SosSolution, Triplet,
-    certify_psd_lower_triangle, solve_qp_active_set, solve_qp_batch, solve_qp_batch_parallel,
+    ActiveSetOverrides, ConeSpec, HessianInertia, NEG_INF, POS_INF, PolyProblem, Polynomial,
+    PsdCertificateError, QpFactorization, QpIterate, QpOptions, QpProblem, QpResiduals,
+    QpSensitivity, QpSolution, QpStatus, QpWarmStart, ReducedHessian, SensError, SosBound,
+    SosSolution, Triplet, certify_psd_lower_triangle, solve_qp_active_set,
+    solve_qp_active_set_inertia, solve_qp_batch, solve_qp_batch_parallel,
     solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
     solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug,
     solve_socp_ipm_warm, sos_constrained_lower_bound, sos_constrained_lower_bound_opts,
