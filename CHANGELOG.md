@@ -65,6 +65,129 @@ changes.
   drives the `x` block with the row's gradient, the way the issue
   proposed, and gets the same number.
 
+- **Step-size invariance for the phase-envelope example is asserted again,
+  at the trace level** (#798). #793 halved
+  `test_published_binary_fold_and_inverse_design_regression` partly by
+  dropping the ds=0.10/ds=0.08 pair, and that pair carried the only
+  automated assertion that the example's maxcondentherm does not depend on
+  how finely the envelope was traced. The replacement offered in its place
+  was notebook 34 cell 38, but no workflow executes notebooks — `grep -rn
+  "nbconvert\|nbclient\|papermill\|\.ipynb" .github/workflows/*.yml`
+  returns nothing — so the published 8.41e-12 agreement is an artifact, not
+  a check, and could have degraded silently.
+
+  The new `test_traced_fold_is_invariant_to_the_continuation_step` restores
+  the claim without restoring its cost. Both legs stop at the *trace*:
+  neither calls `refine_fold`, so neither pays the ~196 s XLA compile of the
+  augmented fold system's Lagrangian Hessian that made the dropped pair
+  expensive. It costs ~50 s against that pair's ~196 s plus a trace.
+
+  Measured while writing it, and the reason the test is shaped the way it
+  is: a trace is **length-blind**. 145 steps cost what 5 do — 24.5 s
+  against 24.0 s — because essentially all of it is one JIT compilation of
+  the residual and its Jacobian plus one low-pressure anchor solve, at
+  ~0.003 s a step after that. So ~50 s is the floor for any two-trace
+  comparison, and the test carries the `slow` marker the rest of this
+  claim's evidence carries rather than adding ~50 s to the job gating every
+  PR.
+
+  The fine leg halves `ds` instead of taking the historical 0.08, so every
+  coarse point has an exact arclength twin — `trace_arclength` stamps
+  `s = arange(K) * ds` — and the comparison carries no interpolation error
+  of its own. It checks both the state at matched arclength (7.7e-5 [ln K],
+  9.1e-4 [mixed]) and the parabolically interpolated maxcondentherm
+  (7.5e-4 K apart), because two traces can agree pointwise while
+  disagreeing about the extremum they bracket, and can agree about the
+  extremum while having taken different paths to it. Both are also required
+  to bracket the published Deiters--Bell value, since agreement on the
+  wrong branch is not invariance.
+
+  The plain sample maximum would **not** have worked: halving `ds` keeps
+  every coarse sample, so both traces peak at the same point and agree for a
+  reason that has nothing to do with convergence. Hence the parabolic
+  stencil, and hence the unmarked
+  `test_parabolic_extremum_is_exact_on_a_quadratic` that pins it — without
+  it the comparison could be measuring the stencil rather than the
+  continuation and still pass.
+
+  Both are mutation-checked. Degrading the stencil to the sample maximum
+  turns the unmarked test red. Biasing the predictor to
+  `ds * (1 + 0.02 * ds)` — which leaves every point converged on the same
+  curve with the same extremum, status `ok` — moves the matched-arclength
+  leg to 1.5e-3 [ln K] and 1.2e-2 [mixed], 3x and 2x their thresholds, and
+  moves the extremum's arclength to 1.3e-2, 6x its threshold. Under that
+  same mutation the extremum's *temperature* stays green at 4.9e-4 K,
+  because a fitted vertex value is blind to a uniform rescaling of the
+  abscissa — which is why the arclength is asserted beside it rather than
+  the temperature being trusted alone.
+- **The NLP arm no longer certifies a constrained maximum as
+  `Solve_Succeeded` (gh #797).** On the CLI fixture `nonconvex_qp.nl` —
+  `min x₀·x₁ s.t. x₀ + x₁ = 2, 0 ≤ x ≤ 4`, whose restriction to the feasible
+  segment is the *concave* `x₀(2 − x₀)` — the filter line-search
+  interior-point solver returned the interior stationary point `(1, 1)`,
+  `obj = 1`, which is the **maximum** along the feasible set. The minima are
+  the endpoints `(0, 2)` and `(2, 0)` at `obj = 0`, and the active-set QP arm
+  finds them on the same model.
+
+  `(1, 1)` is a genuine KKT point, so this was not a violated contract — a
+  local NLP solver certifies first-order stationarity, not global optimality.
+  It was a *missing question*. The reduced Hessian on `null(A)` there is
+  negative definite, so the point fails the second-order **necessary**
+  condition: it is not a local minimum by any reading, and the solver had the
+  information to know that and never asked. The issue's hypothesis was that
+  the inertia machinery was not engaging; it engages (the iteration log shows
+  `lg(rg)` from the second iteration on) and could not have helped. `δ_x I` is
+  symmetric, the model and the iterate are symmetric under `x₀ ↔ x₁`, and a
+  symmetric correction applied to a zero gradient gives a zero step however
+  indefinite the reduced Hessian is. Regularization makes the *step*
+  well-posed; nothing was asking about the *point*.
+
+  A point about to be certified is now tested for second-order necessity
+  first, using the factorization machinery already in place: one factorization
+  of the augmented system with the inertia check on and no perturbation, whose
+  correct inertia is exactly the statement that `W + Σ` is positive definite
+  on `null(A)`. A point that passes costs that one factorization and nothing
+  else — which is every converged solve in the corpus but this one. A point
+  that fails gets `δ_x` escalated until the inertia is right, and a few
+  inverse-iteration back-solves against that factor recover the
+  most-negative-curvature direction. That direction is **measured**
+  (`dᵀ(W + Σ)d`), not trusted on the strength of the argument for it, and the
+  step along it is capped by the ordinary fraction-to-the-boundary rule,
+  backtracked against the second-order decrease model, and refused outright if
+  it raises the constraint violation past `constr_viol_tol`.
+
+  The seed for the inverse iteration is a deterministic hash of the index
+  rather than anything structured, and that is not incidental: this fixture's
+  negative-curvature direction is `(1, −1)`, which the obvious all-ones seed is
+  orthogonal to. A symmetric model is the case the escape exists for, so the
+  seed has to break symmetry by construction.
+
+  **The escape cannot return a worse answer than reporting the stationary
+  point would have.** It is a bet placed *from* a strict certificate, so the
+  certificate is snapshotted as a floor first and is restored and reported
+  unless the continuation comes back with a certificate of its own at a better
+  point; the continuation is cut after 30 iterations either way. This is the
+  same floor-and-deadline accounting gh #534 uses for the deferred restoration
+  decline, with a stricter settlement because the floor here is a strict
+  certificate rather than an acceptable-level one.
+
+  New option `neg_curv_escapes` (default `1`, `0` restores the pre-#797
+  behaviour) — see `docs/src/options.md`, "Escaping a stationary point that is
+  not a minimum". A second fixture ships with it, `nonconvex_qp_ineq.nl`: the
+  same model with its row relaxed to `x₀ + x₁ ≥ 2`, so the shape reaches the
+  probe with a real slack block and a `Σ_s` diagonal rather than two
+  zero-length vectors. It reproduces the defect independently (13 iterations to
+  `obj = 1`) and is fixed by the same mechanism. The full fixture sweep
+  (`scripts/sweep-fixtures.sh`, both legs, 152 fixture-legs) moves exactly those
+  two lines and nothing else: `exact nonconvex_qp` `SolveSucceeded`/6/`obj=1` →
+  `/10/obj=-1.7e-08`, and `exact nonconvex_qp_ineq` `SolveSucceeded`/13/`obj=1`
+  → `/19/obj=-3.7e-08`. Two limits
+  are recorded rather than papered over: this is still a local method, and
+  under `hessian_approximation=limited-memory` the escape declines, because
+  BFGS keeps `B` positive definite by construction and there is no negative
+  curvature for it to read — the L-BFGS leg of the sweep is unmoved, and still
+  reports `obj = 1` on this fixture. The escape is also off inside the
+  restoration inner IPM, whose stationary points are the outer loop's business.
 - **`AMBIGUOUS` is not "probably not a kink", and there is now an accessor
   that answers the question the class does not** (#763).
   `classify_activity` normalizes a variable's barrier diagonal `Σ` by the
@@ -119,6 +242,17 @@ changes.
   documented way to maximize, and report a bound pinned hard at its limit as
   `inactive`. The reported `sigma` and `q_reduced` still carry the
   natural-units sign, as `var_sigma` does.
+
+  The other `user-scaling` axis — the **row** factors — is now pinned too,
+  by `leg_scaling_the_reduced_curvature_is_unmoved_by_a_row_scaling`. It is
+  safe by construction (the natural-units conjugation carries no `dg` into
+  the `x` block) and measurement agrees: across three decades of `dg` the
+  statuses and curvature signs are bit-identical and the magnitudes agree to
+  7–27 ULP. It is pinned rather than argued because the objective-scale
+  defect above was an untested scaling axis justified by the same kind of
+  argument. The two legs are independent: a scaled-space back-solve trips
+  only the objective-scale test, and a `dg²` factor copied from the row path
+  — which really does need one — trips only the row leg.
 - **`pounce.jax.solve_qp`: jnp `lb`/`ub` no longer break under `jax.jit`**
   (#795). `_expand_bounds` decided which bound rows to fold into `G`/`h` with
   `np.isfinite(float(ub[i]))`. Indexing is a `jnp` op, and inside a `jit`

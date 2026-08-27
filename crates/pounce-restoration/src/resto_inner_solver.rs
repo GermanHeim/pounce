@@ -750,6 +750,15 @@ pub fn run_inner_resto(
     // answer, and nothing here was measured in that regime. Off, so the inner
     // solve behaves exactly as it did pre-#534.
     alg.resto_decline_deferrals = 0;
+    // gh #797 for the same reason, and one more of its own. The escape is a
+    // statement about the *user's* objective at a point the outer solve is
+    // about to report; the inner solve minimizes the ℓ₁ feasibility objective,
+    // whose stationary points are the outer loop's business to accept or
+    // reject, not this one's. It would also be inert if left on — the inner
+    // iterate is a `CompoundVector` over `(x_orig, n, p)`, which the probe
+    // declines to seed — so this makes the intent explicit rather than leaving
+    // it to a representation detail.
+    alg.neg_curv_escapes = 0;
     let status = alg.optimize();
 
     // ---- 7. Map status & extract orig_x/orig_s. ---------------------
