@@ -9,6 +9,46 @@ changes.
 
 ## [Unreleased]
 
+- **A truncated `.nl` file is rejected instead of solved** (#785). A `.nl`
+  cut short before its trailing segments — an interrupted write, a full disk,
+  a partial copy, a killed AMPL/Pyomo writer — parsed without complaint:
+  every segment the truncation ate silently reverted to its default, so the
+  rows became unconstrained, the variables free and the linear parts empty,
+  and POUNCE reported `Optimal Solution Found` / `SolveSucceeded` with exit
+  code 0 on a model it had quietly replaced. The reporter's two-variable
+  model returned `obj=0.0` against a closed-form optimum of `12.5`. That made
+  truncation the one malformed input that answers confidently instead of
+  failing: an empty file, non-UTF-8 bytes and a missing file each already
+  exit 2.
+
+  The header carries enough to tell a truncated file from a legitimately
+  short one, and the parser now reads it: `r` and `b` are required whenever
+  the model declares rows or columns (both are unconditional in the format —
+  a free row or variable gets the `3` "no bounds" code, not an omitted line),
+  and the `J` segments must supply exactly the `nzc` Jacobian nonzeros header
+  line 8 declares. The three cut points fail differently and are checked
+  separately: the nonzero cross-check is the only one that fires when the
+  bounds all survived and only the coefficients are gone.
+
+  Only a cut landing at or before `r` returned a confident wrong answer;
+  cuts landing later, and a file with only its `J` segment missing, already
+  exited 1 with `Problem is primal infeasible` and `obj=13.0` on the same
+  model. Those now exit 2 as well. That is still a behaviour change worth
+  stating: an infeasibility verdict is a claim about the *model*, and these
+  were derived from a corrupt file — the row had reduced to `0 = 6`. A
+  hand-written `.nl` with a loose header is now rejected for the same
+  reason, the same trade the `k`-segment count check already makes, and the
+  error names the exact mismatch.
+
+  The check found four stale headers on its way in. Three CLI fixtures
+  (`convex_qp.nl`, `infeasible_qp.nl`, `nonconvex_qp.nl`) and the reader's
+  own `WITH_CON_SUFFIX` declared a Jacobian nonzero count their `J` segments
+  contradicted; the field had never been read, so nothing caught the drift.
+  Headers corrected — the parse and the solutions are unchanged, since the
+  count the solver uses was always derived from the segments themselves.
+  Every other `.nl` in the repository, all of them writer-generated, already
+  agreed.
+
 - **The directional degeneracy QP decides a bound only when it is at
   a kink.** The QP (gh#708) treats an engaged row as sitting at its
   bound, and the weak set can hold coordinates far from their bounds,

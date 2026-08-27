@@ -1185,6 +1185,9 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
     let mut lambda0 = vec![0.0; m];
     let mut suffixes = NlSuffixes::default();
     let mut imported_funcs: Vec<ImportedFunc> = Vec::new();
+    // Segment presence, for the truncation check after the loop (gh#785).
+    let mut saw_r = false;
+    let mut saw_b = false;
 
     while let Some(line) = p.peek_segment_line() {
         let tag = line
@@ -1220,6 +1223,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
             }
             'r' => {
                 p.eat_segment_header()?;
+                saw_r = true;
                 for i in 0..m {
                     let line = p.next_data_line()?;
                     let (lo, hi) = parse_bound_line(line)?;
@@ -1229,6 +1233,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
             }
             'b' => {
                 p.eat_segment_header()?;
+                saw_b = true;
                 for i in 0..n {
                     let line = p.next_data_line()?;
                     let (lo, hi) = parse_bound_line(line)?;
@@ -1379,6 +1384,49 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
                 });
             }
             other => return Err(format!("unknown .nl segment tag '{other}'")),
+        }
+    }
+
+    // A `.nl` file that ends early is not a smaller model — it is a corrupt
+    // one, and every segment the truncation ate is a piece of the problem
+    // that silently reverts to a default: a dropped `r` leaves every row at
+    // ±1e19 (i.e. unconstrained), a dropped `b` leaves every variable free,
+    // a dropped `J` leaves every row's linear part empty. The segment loop
+    // cannot tell those defaults from a legitimately absent segment, so the
+    // truncated model solves, and reports `SolveSucceeded` with a
+    // confidently wrong objective — which is strictly worse than the parse
+    // error every other malformed input already gets (gh#785). The header
+    // declares enough to tell the two apart; check it here, once, against
+    // what the segments actually delivered.
+    //
+    // `r` and `b` are unconditional in the format: AMPL writes both whenever
+    // the model has rows / columns at all, free rows and free variables
+    // included — those get the `3` ("no bounds") code, not an omitted line.
+    if m > 0 && !saw_r {
+        return Err(format!(
+            "missing `r` (constraint-bounds) segment for a model declaring {m} \
+             constraint(s): the .nl file is truncated or corrupt"
+        ));
+    }
+    if n > 0 && !saw_b {
+        return Err(format!(
+            "missing `b` (variable-bounds) segment for a model declaring {n} \
+             variable(s): the .nl file is truncated or corrupt"
+        ));
+    }
+    // The `J` segments must deliver exactly the Jacobian nonzero count the
+    // header declares — `nzc` is the sum of their lengths by construction,
+    // nonlinear-only columns included (they are written with a zero
+    // coefficient, not omitted). This is the check that catches a truncation
+    // landing *after* `r` and `b`, where the bounds are all present and only
+    // the coefficients are gone.
+    if let Some(declared) = p.declared_jac_nnz {
+        let parsed: usize = con_linear.iter().map(Vec::len).sum();
+        if parsed != declared {
+            return Err(format!(
+                "header declares {declared} Jacobian nonzero(s) but the J \
+                 segments supply {parsed}: the .nl file is truncated or corrupt"
+            ));
         }
     }
 
@@ -1718,6 +1766,12 @@ struct Parser<'a> {
     n_funcs: usize,
     /// Header lines 3 and 5, when both parsed. See [`NlCounts`].
     nl_counts: Option<NlCounts>,
+    /// `nzc` from header line 8: the number of Jacobian nonzeros the file
+    /// *declares*. [`parse_nl_string`] cross-checks it against the number the
+    /// `J` segments actually deliver, which is how a file truncated before
+    /// them is told from a model that genuinely has none (gh#785). `None`
+    /// when the header does not carry it in the documented shape.
+    declared_jac_nnz: Option<usize>,
     ampl_options: Vec<i64>,
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
@@ -1782,6 +1836,7 @@ impl<'a> Parser<'a> {
             num_obj: 0,
             n_funcs: 0,
             nl_counts: None,
+            declared_jac_nnz: None,
             ampl_options: Vec::new(),
             cses: Vec::new(),
             quad_enabled,
@@ -1888,10 +1943,20 @@ impl<'a> Parser<'a> {
         let l6 = self.next_data_line()?;
         let nums5: Vec<&str> = l6.split_whitespace().collect();
         self.n_funcs = nums5.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        // Lines 6..10 are metadata we don't need — skip 4 more lines.
-        for _ in 0..4 {
-            self.next_data_line()?;
-        }
+        // Lines 6..10 are metadata we mostly don't need. Line 7 is the
+        // discrete-variable census; line 8 is `nzc nzo` — the Jacobian and
+        // objective-gradient nonzero counts, kept because `nzc` is what
+        // catches a file truncated before its `J` segments (gh#785); lines
+        // 9 and 10 are the maximum name lengths and the common-expression
+        // census.
+        let _l7_discrete = self.next_data_line()?;
+        let l8 = self.next_data_line()?;
+        // Tolerant like the `nfunc` read above: a header that does not
+        // carry the count in the documented shape leaves it `None`, and
+        // the cross-check that reads it is skipped rather than fabricated.
+        self.declared_jac_nnz = l8.split_whitespace().next().and_then(|s| s.parse().ok());
+        let _l9_name_lens = self.next_data_line()?;
+        let _l10_common_exprs = self.next_data_line()?;
         Ok(())
     }
 
@@ -7558,7 +7623,7 @@ S4 1 sens_state_value_1
 0 2 0
 0 0 0 1
 0 0 0 0 0
-2 0
+4 0
 0 0
 0 0 0 0 0 0
 C0
@@ -7592,6 +7657,70 @@ S1 2 sens_init_constr
         let s = p.suffixes.con_int.get("sens_init_constr").expect("con_int");
         // Sparse {0:1, 1:2} → dense [1, 2] at length m=2.
         assert_eq!(s.as_slice(), &[1, 2]);
+    }
+
+    // ---- gh#785: a truncated file is rejected, not silently defaulted ----
+    //
+    // `WITH_CON_SUFFIX` is a complete, well-formed file, so cutting it at a
+    // segment boundary is exactly the failure the issue reports: an
+    // interrupted write. Each cut loses a different first segment and each
+    // is caught by a different check, so all three are asserted — and the
+    // untruncated text parsing cleanly (`parses_con_int_suffix` above) is
+    // what keeps these from passing against a parser that rejects
+    // everything.
+
+    /// Everything from `at` (a segment header line) onward is gone.
+    fn truncate_before(txt: &str, at: &str) -> String {
+        let cut = txt
+            .find(at)
+            .unwrap_or_else(|| panic!("fixture has no {at:?} segment"));
+        txt[..cut].to_string()
+    }
+
+    #[test]
+    fn truncation_before_the_row_bounds_is_a_parse_error() {
+        let err = parse_nl_text(&truncate_before(WITH_CON_SUFFIX, "\nr\n"))
+            .expect_err("truncated file must not parse");
+        assert!(
+            err.contains("`r` (constraint-bounds) segment"),
+            "error should name the missing segment: {err}"
+        );
+    }
+
+    #[test]
+    fn truncation_before_the_variable_bounds_is_a_parse_error() {
+        let err = parse_nl_text(&truncate_before(WITH_CON_SUFFIX, "\nb\n"))
+            .expect_err("truncated file must not parse");
+        assert!(
+            err.contains("`b` (variable-bounds) segment"),
+            "error should name the missing segment: {err}"
+        );
+    }
+
+    /// The cut that leaves every bound in place and takes only the
+    /// coefficients. Neither presence check can see it; the declared-vs-
+    /// parsed nonzero count is the whole of the evidence.
+    #[test]
+    fn truncation_before_the_jacobian_is_a_parse_error() {
+        let err = parse_nl_text(&truncate_before(WITH_CON_SUFFIX, "\nk1\n"))
+            .expect_err("truncated file must not parse");
+        assert!(
+            err.contains("declares 4 Jacobian nonzero(s) but the J segments supply 0"),
+            "error should report the mismatch: {err}"
+        );
+    }
+
+    /// The mismatch is an equality, not a floor: a file supplying *more*
+    /// entries than it declares is as corrupt as one supplying fewer, and a
+    /// `>=` check would wave it through.
+    #[test]
+    fn more_jacobian_entries_than_declared_is_also_a_parse_error() {
+        let extra = WITH_CON_SUFFIX.replace("J1 2\n0 1\n1 -1\n", "J1 2\n0 1\n1 -1\nJ0 1\n0 5\n");
+        let err = parse_nl_text(&extra).expect_err("over-full file must not parse");
+        assert!(
+            err.contains("declares 4 Jacobian nonzero(s) but the J segments supply 5"),
+            "error should report the mismatch: {err}"
+        );
     }
 
     /// Fill a `ScalingRequest` from `tnlp` sized for this fixture
