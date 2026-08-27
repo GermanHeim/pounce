@@ -402,6 +402,73 @@ It is off by default (`neg_curv_test_tol=0` keeps the inertia check),
 and nothing above happens to a solve that leaves it alone. If you turn
 it on, measure your own model.
 
+### Escaping a stationary point that is not a minimum (`neg_curv_escapes`)
+
+The convergence test is a **first-order** test. On a nonconvex model that
+is strictly weaker than "local minimum": at a point where the reduced
+Hessian on `null(A)` is negative definite every KKT residual is zero, so
+the test has nothing to object to, and the point reported as
+`Solve_Succeeded` can be a constrained **maximum**.
+
+The CLI fixture `nonconvex_qp.nl` is that case in three lines:
+
+```
+min x₀·x₁   s.t.   x₀ + x₁ = 2,   0 ≤ x ≤ 4
+```
+
+On the feasible segment the objective is `f(x₀) = x₀(2 − x₀)`, which is
+*concave* — maximized at `(1, 1)` with `f = 1`, minimized at the endpoints
+`(0, 2)` and `(2, 0)` with `f = 0`. From the bound-pushed start
+`(0.01, 0.01)` the first Newton step lands exactly on `(1, 1)`, and every
+iteration after it takes a step of size `1e-14`.
+
+Inertia correction does not prevent this and never could. It *engages* —
+the iteration log shows `lg(rg)` from the second iteration on — but `δ_x I`
+is symmetric, the model and the iterate are symmetric under `x₀ ↔ x₁`, and
+a symmetric correction applied to a zero gradient gives a zero step however
+indefinite the reduced Hessian is. Regularization makes the **step**
+well-posed; nothing else in the algorithm asks whether the point it
+converged to is a minimum.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `neg_curv_escapes` | `1` | How many times a certified stationary point with an indefinite reduced Hessian may be *left* along a direction of negative curvature instead of reported. `0` reports the first-order certificate whatever its curvature. |
+
+With this on, a point about to be certified is first tested for
+second-order necessity: one extra factorization of the augmented system
+with the inertia check on and **no** perturbation, whose correct inertia is
+exactly the statement that `W + Σ` is positive definite on `null(A)`. A
+point that passes costs that one factorization and nothing else. A point
+that fails gets `δ_x` escalated until the inertia is right, and a few
+inverse-iteration back-solves against that factor recover the
+most-negative-curvature direction — which is then *measured*, not trusted.
+The solve steps along it (capped by the fraction-to-the-boundary rule,
+backtracked against the second-order decrease model, refused outright if it
+raises the constraint violation past `constr_viol_tol`) and continues.
+
+**It cannot return a worse answer than leaving it off would have.** The
+stationary point is snapshotted before the step and is restored and
+reported unless the continuation comes back with a certificate of its own
+at a better point — the same floor-and-deadline accounting as
+`resto_decline_deferrals`, and the continuation is cut after 30 iterations
+either way. On `nonconvex_qp.nl` — and on `nonconvex_qp_ineq.nl`, the same
+model with its row relaxed to `x₀ + x₁ ≥ 2` — it turns `Solve_Succeeded` at
+`obj = 1` into `Solve_Succeeded` at `obj = 0`; across the rest of the
+fixture corpus (`scripts/sweep-fixtures.sh`, both legs, 152 fixture-legs) it
+moves nothing.
+
+Two limits are worth knowing:
+
+* **It is still a local method.** An escape finds a point that is
+  second-order suspect and leaves it; it does not certify global
+  optimality, and a stationary point whose reduced Hessian is positive
+  definite is never touched.
+* **Under `hessian_approximation=limited-memory` it does nothing.** The
+  curvature it reads is `B`, and BFGS maintains `B` positive definite by
+  construction, so the inertia test passes at `δ_x = 0` and the escape
+  declines. The L-BFGS leg of the fixture sweep still reports `obj = 1` on
+  both nonconvex-QP fixtures.
+
 ## Bound relaxation and `honor_original_bounds`
 
 Before the solve, POUNCE widens every variable and constraint bound by

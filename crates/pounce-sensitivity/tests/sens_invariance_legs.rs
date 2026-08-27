@@ -36,6 +36,14 @@
 //!    wrong. The leg puts a fixed variable in front of the kink and
 //!    requires every var-x answer to be unmoved by it.
 //!
+//! Every public accessor the sensitivity layer grows gets a row in
+//! each leg it has a dimension in. `reduced_activity` (gh#763) is in
+//! legs 1 and 3 -- it converts frames and it maps full-x to var-x --
+//! and its own contract, including the class disagreement that
+//! motivates it, is in
+//! [`the_reduced_normalizer_certifies_a_coupled_kink_at_every_coupling`]
+//! and in `reduced_activity.rs`.
+//!
 //! # What the legs compare
 //!
 //! Not `dx / delta`. The parametric step is affine in `delta`, not
@@ -61,6 +69,7 @@ use pounce_nlp::tnlp::{
     StartingPoint,
 };
 use pounce_sensitivity::Solver;
+use pounce_sensitivity::activity::{AMBIGUOUS, FIXED, INACTIVE, WEAKLY_ACTIVE};
 
 /// Coupling between the pin and the kink variable. The one-sided
 /// derivative on the leaving side is exactly this.
@@ -288,6 +297,14 @@ fn weak_set(s: &Solver) -> Vec<(usize, bool)> {
     v
 }
 
+/// The reduced-normalizer verdict for one **user-space** variable, as
+/// `(status, ratio, q_reduced)` (gh#763). The index is full-x, like
+/// every other report index; the accessor maps it to its factor row.
+fn reduced(s: &Solver, full_x: usize) -> (i8, Number, Number) {
+    let r = s.reduced_activity(&[full_x]).expect("reduced activity");
+    (r.status[0], r.ratio[0], r.q_reduced[0])
+}
+
 /// `parametric_step_directional` over the single pin, at `delta`.
 fn step(s: &Solver, delta: Number) -> Vec<Number> {
     let (d, _held, _work) = s
@@ -447,6 +464,44 @@ fn leg_scaling_the_weak_set_is_unmoved_by_the_change_of_variables() {
     );
 }
 
+/// Leg 1 for `reduced_activity` (gh#763). The reduced curvature is a
+/// natural-units quantity, like `var_sigma`: it is a fact about the
+/// model, not about the coordinates the solve ran in. Under
+/// `x̃ = d ⊙ x` the factor's own `(K⁻¹)_ii` carries `d²` and `Sigma`
+/// carries `d²` as well, so a refinement that forgot either -- or
+/// subtracted one frame's `Sigma` from the other frame's reciprocal --
+/// moves here and nowhere else.
+#[test]
+fn leg_scaling_the_reduced_curvature_is_unmoved_by_the_change_of_variables() {
+    let plain = solved(None, false);
+    let scaled = solved(Some(D_PLAIN.to_vec()), false);
+
+    for (i, want_status) in [(0usize, WEAKLY_ACTIVE), (1, INACTIVE)] {
+        let (sp, rp, qp) = reduced(&plain, i);
+        let (ss, rs, qs) = reduced(&scaled, i);
+        // `k`'s only Hessian coupling is to the pin `p`, which the
+        // equality holds fixed so nothing re-optimizes along it, and
+        // `w` is decoupled outright: both reduced curvatures are the
+        // model's own 1.0. Checked against that exact value as well,
+        // so a shared error cannot pass the pair off as agreement.
+        assert!(
+            (qp - 1.0).abs() < 1e-6 && (qs - 1.0).abs() < 1e-6,
+            "var {i}: the reduced curvature is 1 in both arms, got \
+             plain {qp:e} scaled {qs:e}"
+        );
+        assert!(
+            (rp - rs).abs() <= 1e-6 * rp.abs().max(1.0),
+            "var {i}: the reduced ratio is unmoved by the change of \
+             variables, got plain {rp:e} scaled {rs:e}"
+        );
+        assert_eq!(
+            (sp, ss),
+            (want_status, want_status),
+            "var {i}: reduced class in both arms"
+        );
+    }
+}
+
 #[test]
 fn leg_scaling_the_directional_derivative_is_unmoved_by_the_change_of_variables() {
     let plain = solved(None, false);
@@ -570,6 +625,44 @@ fn leg_fixed_the_weak_set_is_unmoved_by_a_fixed_variable_ahead_of_the_kink() {
     );
 }
 
+/// Leg 3 for `reduced_activity` (gh#763). The accessor takes full-x
+/// indices and back-solves against a var-x factor, so it is exactly
+/// the shape gh#450 bites: read the user index as a factor row and the
+/// kink's answer becomes the interior variable's, plausible and wrong.
+/// The two are one class and ten orders of ratio apart here, so the
+/// mix-up cannot pass.
+#[test]
+fn leg_fixed_the_reduced_curvature_is_unmoved_by_a_fixed_variable_ahead_of_the_kink() {
+    let plain = solved(None, false);
+    let fixed = solved(None, true);
+
+    // full-x 0 in the plain arm is full-x 1 in the fixed one; both are
+    // var-x row 0.
+    for (p_idx, f_idx, want) in [(0usize, 1usize, WEAKLY_ACTIVE), (1, 2, INACTIVE)] {
+        let (sp, rp, qp) = reduced(&plain, p_idx);
+        let (sf, rf, qf) = reduced(&fixed, f_idx);
+        assert_eq!(
+            (sp, sf),
+            (want, want),
+            "full-x {p_idx}/{f_idx}: removing a column ahead of the kink \
+             must not move the class (ratios {rp:e} / {rf:e})"
+        );
+        assert!(
+            (rp - rf).abs() <= 1e-6 * rp.abs().max(1.0) && (qp - qf).abs() < 1e-6,
+            "full-x {p_idx}/{f_idx}: ratio {rp:e} vs {rf:e}, curvature \
+             {qp:e} vs {qf:e}"
+        );
+    }
+    // The removed column itself has no factor row to back-solve
+    // against, and says so instead of answering about its neighbour.
+    let (st, ratio, q) = reduced(&fixed, 0);
+    assert_eq!(st, FIXED, "the make_parameter-removed variable");
+    assert!(
+        ratio.is_nan() && q.is_nan(),
+        "a removed column carries no curvature: ratio {ratio:e}, q {q:e}"
+    );
+}
+
 #[test]
 fn leg_fixed_the_directional_derivative_is_unmoved_by_a_fixed_variable_ahead_of_the_kink() {
     let plain = solved(None, false);
@@ -623,6 +716,20 @@ fn the_legs_compose_at_the_fixed_and_scaled_corner() {
         );
     }
     magnitude_sweep(&both, "fixed+scaled");
+
+    // The reduced normalizer at the same corner: full-x 1 in the
+    // fixed+scaled arm is full-x 0 in the plain one, and neither the
+    // removed column nor the change of variables may move the answer.
+    for (p_idx, b_idx, want) in [(0usize, 1usize, WEAKLY_ACTIVE), (1, 2, INACTIVE)] {
+        let (sp, rp, qp) = reduced(&plain, p_idx);
+        let (sb, rb, qb) = reduced(&both, b_idx);
+        assert_eq!((sp, sb), (want, want), "reduced class at the corner");
+        assert!(
+            (rp - rb).abs() <= 1e-6 * rp.abs().max(1.0) && (qp - qb).abs() < 1e-6,
+            "full-x {p_idx}/{b_idx} at the corner: ratio {rp:e} vs {rb:e}, \
+             curvature {qp:e} vs {qb:e}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------
@@ -657,9 +764,9 @@ const RHO: Number = 1.0e-2;
 const H_DIAG: Number = 1.0;
 const M_DIAG: Number = 1.0;
 
-/// Cross term giving reduced curvature [`RHO`]: `h - c^2/m = rho`.
-fn cross() -> Number {
-    (M_DIAG * (H_DIAG - RHO)).sqrt()
+/// Cross term giving reduced curvature `rho`: `h - c^2/m = rho`.
+fn cross(rho: Number) -> Number {
+    (M_DIAG * (H_DIAG - rho)).sqrt()
 }
 
 /// ```text
@@ -672,7 +779,17 @@ fn cross() -> Number {
 /// in [`KinkTnlp`], but coupled. Moving the pin up lets `k` follow at
 /// `A/RHO`; moving it down would drive `k` through its bound, so `k`
 /// holds and the derivative is `0` -- at EVERY step size.
-struct CoupledKinkTnlp;
+///
+/// `rho` is the reduced curvature along `k`, i.e. how strongly the
+/// coordinate is coupled: `rho = H_DIAG` is decoupled, and driving it
+/// toward `0` drives `c^2/(h*m)` toward `1`.
+struct CoupledKinkTnlp {
+    rho: Number,
+    /// `g_scaling[0]` under `nlp_scaling_method=user-scaling`; `None`
+    /// declines scaling entirely, as every other use of this fixture
+    /// does.
+    g_scale: Option<Number>,
+}
 
 impl TNLP for CoupledKinkTnlp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
@@ -685,8 +802,15 @@ impl TNLP for CoupledKinkTnlp {
         })
     }
 
-    fn get_scaling_parameters(&mut self, _req: ScalingRequest<'_>) -> bool {
-        false
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(dg) = self.g_scale else {
+            return false;
+        };
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = false;
+        *req.use_g_scaling = true;
+        req.g_scaling[0] = dg;
+        true
     }
 
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
@@ -710,13 +834,13 @@ impl TNLP for CoupledKinkTnlp {
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
         let (k, y, p) = (x[0], x[1], x[2]);
-        Some(0.5 * H_DIAG * k * k + cross() * k * y + 0.5 * M_DIAG * y * y - A * p * k)
+        Some(0.5 * H_DIAG * k * k + cross(self.rho) * k * y + 0.5 * M_DIAG * y * y - A * p * k)
     }
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         let (k, y, p) = (x[0], x[1], x[2]);
-        g[0] = H_DIAG * k + cross() * y - A * p;
-        g[1] = cross() * k + M_DIAG * y;
+        g[0] = H_DIAG * k + cross(self.rho) * y - A * p;
+        g[1] = cross(self.rho) * k + M_DIAG * y;
         g[2] = -A * k;
         true
     }
@@ -754,7 +878,7 @@ impl TNLP for CoupledKinkTnlp {
             }
             SparsityRequest::Values { values } => {
                 values[0] = obj_factor * H_DIAG;
-                values[1] = obj_factor * cross();
+                values[1] = obj_factor * cross(self.rho);
                 values[2] = obj_factor * M_DIAG;
                 values[3] = -obj_factor * A;
             }
@@ -766,6 +890,17 @@ impl TNLP for CoupledKinkTnlp {
 }
 
 fn solved_coupled() -> Solver {
+    solved_coupled_at(RHO)
+}
+
+/// [`solved_coupled`] at a chosen coupling strength.
+fn solved_coupled_at(rho: Number) -> Solver {
+    solved_coupled_scaled(rho, None)
+}
+
+/// [`solved_coupled_at`] with an optional `user-scaling` row factor on
+/// the single constraint row.
+fn solved_coupled_scaled(rho: Number, g_scale: Option<Number>) -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -779,9 +914,14 @@ fn solved_coupled() -> Solver {
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
+    if g_scale.is_some() {
+        app.options_mut()
+            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
 
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CoupledKinkTnlp));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CoupledKinkTnlp { rho, g_scale }));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
     assert!(
@@ -800,7 +940,7 @@ fn solved_coupled() -> Solver {
 fn exact_coupled(sign: Number) -> [Number; 3] {
     if sign > 0.0 {
         let dk = A / RHO;
-        [dk, -(cross() / M_DIAG) * dk, 1.0]
+        [dk, -(cross(RHO) / M_DIAG) * dk, 1.0]
     } else {
         [0.0, 0.0, 1.0]
     }
@@ -811,10 +951,13 @@ fn exact_coupled(sign: Number) -> [Number; 3] {
 /// really is in the AMBIGUOUS class rather than the certified one. If
 /// a classifier change ever moves it, this fails rather than letting
 /// the leg pass vacuously against the wrong branch.
+///
+/// AMBIGUOUS here is `classify_activity`'s verdict, i.e. the DIAGONAL
+/// normalizer's, and it is a mislabeling of a genuine kink (gh#763) --
+/// pinned, not endorsed. `reduced_activity` certifies the same kink;
+/// see [`the_reduced_normalizer_certifies_a_coupled_kink_at_every_coupling`].
 #[test]
 fn the_coupled_fixture_carries_an_ambiguous_kink() {
-    use pounce_sensitivity::activity::{AMBIGUOUS, WEAKLY_ACTIVE};
-
     let s = solved_coupled();
     let report = s.classify_activity().expect("activity report");
 
@@ -844,6 +987,84 @@ fn the_coupled_fixture_carries_an_ambiguous_kink() {
         &exact_coupled(1.0),
         1e-6,
     );
+}
+
+/// The headline of gh#763, as the issue's own table: four solves that
+/// are the SAME kink -- same one-sided derivatives, `A/reduced`
+/// leaving and `0` holding -- differing only in how strongly the kink
+/// coordinate is coupled to its free partner.
+///
+/// `classify_activity` divides `Sigma` by the Hessian diagonal, so its
+/// ratio is `reduced/diagonal` and tracks the coupling: the bottom two
+/// rows fall out of the `[1e-1, 1e1]` band and read AMBIGUOUS. No
+/// tolerance recovers them -- the ratio is `mu`-independent, so a
+/// tighter solve reports the same thing. `reduced_activity` divides by
+/// the curvature that generates the multiplier, so its ratio is `1` at
+/// every coupling and all four certify.
+///
+/// This is the test the guard above anticipates: whichever way the
+/// default normalizer is decided, one of the two halves has to be
+/// updated deliberately.
+#[test]
+fn the_reduced_normalizer_certifies_a_coupled_kink_at_every_coupling() {
+    for rho in [1.0, 1.0e-1, 1.0e-2, 1.0e-3] {
+        let s = solved_coupled_at(rho);
+        let report = s.classify_activity().expect("activity report");
+        let (status, ratio, q) = reduced(&s, 0);
+
+        // What the diagonal normalizer says: the ratio IS the coupling.
+        assert!(
+            (report.var_ratio[0] - rho).abs() < 1e-3 * rho,
+            "rho {rho:e}: the diagonal ratio is reduced/diagonal, got {:e}",
+            report.var_ratio[0]
+        );
+        let diagonal_class = if rho >= 1.0e-1 {
+            WEAKLY_ACTIVE
+        } else {
+            AMBIGUOUS
+        };
+        assert_eq!(
+            report.var_status[0], diagonal_class,
+            "rho {rho:e}: the diagonal class follows the band edge at 1e-1, \
+             not the geometry (ratio {:e})",
+            report.var_ratio[0]
+        );
+
+        // What the reduced normalizer says: the same kink, every time.
+        assert!(
+            (q - rho).abs() < 1e-3 * rho,
+            "rho {rho:e}: the reduced curvature is rho itself, got {q:e}"
+        );
+        assert!(
+            (ratio - 1.0).abs() < 1e-3,
+            "rho {rho:e}: Sigma at a kink IS the reduced curvature, so the \
+             reduced ratio is 1, got {ratio:e}"
+        );
+        assert_eq!(
+            status, WEAKLY_ACTIVE,
+            "rho {rho:e}: a kink is a kink at every coupling (reduced ratio \
+             {ratio:e}, diagonal ratio {:e})",
+            report.var_ratio[0]
+        );
+
+        // It really is the same kink at every row: the one-sided
+        // derivatives are what they are for a kink, not for a bound
+        // that merely looks like one.
+        let dk = A / rho;
+        let exact_up = [dk, -(cross(rho) / M_DIAG) * dk, 1.0];
+        assert_close(
+            &format!("rho {rho:e}: derivative up"),
+            &slope(&s, 1.0e-3, 1.0e-6),
+            &exact_up,
+            1e-6 * dk.max(1.0),
+        );
+        assert_close(
+            &format!("rho {rho:e}: derivative down"),
+            &slope(&s, -1.0e-3, -1.0e-6),
+            &[0.0, 0.0, 1.0],
+            1e-6,
+        );
+    }
 }
 
 /// Leg 2 over the ambiguous class. The holding side's derivative is
@@ -878,4 +1099,125 @@ fn leg_magnitude_an_ambiguous_kink_decides_the_same_way_at_every_step_size() {
             1e-6,
         );
     }
+}
+
+/// Leg 1, row-scaling arm (gh#763 follow-up). The change of variables
+/// is not the only scaling axis a `user-scaling` solve moves: the
+/// constraint rows carry their own factors, and every fixture in this
+/// file pins that axis at the identity — [`KinkTnlp`] sets
+/// `use_g_scaling = false` outright, and the coupled fixture declined
+/// scaling entirely until this test.
+///
+/// The row scale is safe by construction: the natural-units
+/// conjugation carries no `dg` into the `x` block, so `Sigma`, the
+/// reduced curvature and the classification are all unmoved by it.
+/// That is a property worth *pinning* rather than re-deriving —
+/// gh#763's own defect was an untested scaling axis (`obj_scaling`),
+/// measured safe by the same kind of argument and wrong.
+///
+/// What "unmoved" means here, measured rather than assumed: the
+/// statuses and curvature signs are bit-identical across three decades
+/// of `dg`, and the magnitudes agree to 7–27 ULP (relative ~5e-15) —
+/// the solver takes a slightly different path in scaled space, so this
+/// is solver precision, not bit-equality. The tolerance below is three
+/// decades looser than that and still eleven decades tighter than any
+/// `dg` leak could hide in: a factor of `dg` or `dg²` reaching the `x`
+/// block would move these by `1e3` or `1e6`.
+#[test]
+fn leg_scaling_the_reduced_curvature_is_unmoved_by_a_row_scaling() {
+    const DG: Number = 1.0e3;
+    /// Three decades above the 5e-15 actually observed, eleven below a
+    /// one-factor-of-`dg` leak.
+    const RTOL: Number = 1.0e-12;
+
+    let base = solved_coupled_scaled(RHO, Some(1.0));
+    let scaled = solved_coupled_scaled(RHO, Some(DG));
+
+    let vars = [0usize, 1, 2];
+    let rb = base.reduced_activity(&vars).expect("reduced activity");
+    let rs = scaled.reduced_activity(&vars).expect("reduced activity");
+    let pb = base.classify_activity().expect("activity report");
+    let ps = scaled.classify_activity().expect("activity report");
+
+    // the kink really is the coupled one this file is about, so the
+    // test cannot pass by classifying nothing
+    assert_eq!(
+        rb.status[0], WEAKLY_ACTIVE,
+        "fixture drifted: k should certify as a kink on the reduced normalizer",
+    );
+    assert_eq!(
+        pb.var_status[0], AMBIGUOUS,
+        "fixture drifted: the report should still read the coupled kink as ambiguous",
+    );
+
+    for (k, &i) in vars.iter().enumerate() {
+        // classification and curvature SIGN are exact
+        assert_eq!(
+            rb.status[k], rs.status[k],
+            "x{i}: reduced status moved under a row scaling of {DG:e}",
+        );
+        assert_eq!(
+            rb.q_sign[k], rs.q_sign[k],
+            "x{i}: reduced curvature sign moved under a row scaling of {DG:e}",
+        );
+        assert_eq!(
+            pb.var_status[i], ps.var_status[i],
+            "x{i}: report status moved under a row scaling of {DG:e}",
+        );
+
+        // magnitudes to solver precision
+        assert_close_scaled(
+            &format!("x{i} reduced ratio"),
+            rb.ratio[k],
+            rs.ratio[k],
+            RTOL,
+        );
+        assert_close_scaled(
+            &format!("x{i} reduced curvature"),
+            rb.q_reduced[k],
+            rs.q_reduced[k],
+            RTOL,
+        );
+        assert_close_scaled(&format!("x{i} sigma"), rb.sigma[k], rs.sigma[k], RTOL);
+        assert_close_scaled(
+            &format!("x{i} report ratio"),
+            pb.var_ratio[i],
+            ps.var_ratio[i],
+            RTOL,
+        );
+    }
+}
+
+/// Relative comparison that treats the non-finite entries this fixture
+/// genuinely produces as values to match rather than as failures: an
+/// unbounded variable's ratio is `NaN` and the equality-pinned
+/// coordinate's reduced curvature is `+inf`, and a leak that moved
+/// either INTO or OUT OF those states must fail.
+fn assert_close_scaled(what: &str, base: Number, scaled: Number, rtol: Number) {
+    assert_eq!(
+        base.is_nan(),
+        scaled.is_nan(),
+        "{what}: NaN-ness moved with the row scaling ({base:e} vs {scaled:e})",
+    );
+    if base.is_nan() {
+        return;
+    }
+    assert_eq!(
+        base.is_infinite(),
+        scaled.is_infinite(),
+        "{what}: infiniteness moved with the row scaling ({base:e} vs {scaled:e})",
+    );
+    if base.is_infinite() {
+        assert_eq!(
+            base.signum(),
+            scaled.signum(),
+            "{what}: sign of the infinity moved ({base:e} vs {scaled:e})",
+        );
+        return;
+    }
+    let err = (base - scaled).abs() / base.abs().max(1.0);
+    assert!(
+        err <= rtol,
+        "{what}: moved with the row scaling -- {base:.17e} vs {scaled:.17e} (rel {err:e} > {rtol:e})",
+    );
 }

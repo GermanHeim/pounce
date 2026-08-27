@@ -334,40 +334,87 @@ def _min_eig_lower_coo(pr, pc, pv, n: int) -> float:
     return float(np.linalg.eigvalsh(M)[0]) if n else 0.0
 
 
-def _check_psd(pr, pc, pv, n: int) -> None:
-    """Raise ``ValueError`` if the Hessian ``P`` is not positive semidefinite.
+def _psd_verdict_coo(pr, pc, pv, n: int):
+    """``(is_psd, lam_min)`` for the Hessian in lower-triangle COO form.
 
-    The convex IPM and its unboundedness detection assume a PSD ``P``; an
-    indefinite ``P`` otherwise returns a silently-wrong ``status="optimal"``
-    (issue #112). The tolerance is relative to the spectral scale so genuine
-    PSD matrices with round-off-level negative eigenvalues pass."""
+    An empty ``P`` is an LP — trivially PSD, and reported as ``(True, 0.0)``
+    without an eigenvalue solve. The tolerance is relative to the spectral
+    scale so genuine PSD matrices with round-off-level negative eigenvalues
+    pass."""
     if not pr:  # no Hessian entries → LP, trivially PSD
-        return
+        return True, 0.0
     lam_min = _min_eig_lower_coo(pr, pc, pv, n)
     scale = max(abs(v) for v in pv)
-    if lam_min < -1e-8 * max(scale, 1.0):
-        raise ValueError(
-            f"P is not positive semidefinite (min eigenvalue {lam_min:.3e}); "
-            "the convex QP solver requires a PSD Hessian. A nonconvex QP is "
-            "unbounded below in the indefinite directions and has no convex "
-            "optimum. Pass check_psd=False to skip this check (e.g. if you "
-            "know P is PSD and want to avoid the O(n^3) eigenvalue cost)."
-        )
+    return lam_min >= -1e-8 * max(scale, 1.0), lam_min
+
+
+def _indefinite_error(lam_min: float) -> ValueError:
+    """The error the issue-#112 guard raises on the **convex** engines.
+
+    Scoped to the engine that cannot take an indefinite ``P``, and says so:
+    the IPM's optimality and unboundedness detection both assume PSD, and
+    without the guard it returns a silently-wrong ``status="optimal"`` at a
+    saddle point. It does **not** claim the problem has no optimum — a
+    nonconvex QP over a bounded box has a perfectly good global minimum, it
+    is just not one a convex method can find (gh #786). The actionable
+    alternative comes first; ``check_psd=False`` is the escape hatch for a
+    caller who wants the check's O(n^3) cost gone, not a way to make the IPM
+    handle nonconvexity."""
+    return ValueError(
+        f"P is not positive semidefinite (min eigenvalue {lam_min:.3e}); the "
+        "convex QP interior-point engine (method='ipm') requires a PSD "
+        "Hessian and reports a silently-wrong 'optimal' at a saddle point "
+        "without one. To solve an indefinite QP, pass method='active-set' — "
+        "the pounce-qp parametric active-set engine handles indefinite "
+        "Hessians and returns a local solution. Pass check_psd=False to skip "
+        "this check (e.g. if you know P is PSD and want to avoid the O(n^3) "
+        "eigenvalue cost)."
+    )
+
+
+def _check_psd(pr, pc, pv, n: int) -> None:
+    """Raise the issue-#112 error if the Hessian in COO form is not PSD.
+
+    The raise-or-pass spelling of :func:`_psd_verdict_coo`, for the callers
+    that have already built the COO and have only the convex IPM behind them —
+    the per-forward guards in :mod:`pounce.jax` and :mod:`pounce.torch`, whose
+    layers are IPM-only by construction (a non-KKT iterate makes the
+    implicit-function gradient meaningless)."""
+    is_psd, lam_min = _psd_verdict_coo(pr, pc, pv, n)
+    if not is_psd:
+        raise _indefinite_error(lam_min)
+
+
+def _psd_verdict(P, c, check_psd):
+    """``(is_psd, lam_min)`` when the issue-#112 guard runs, else ``None``.
+
+    ``check_psd=False`` skips it; ``True`` forces it; ``None`` (the default)
+    runs it only when ``n <= _PSD_CHECK_AUTO_MAX_N`` so a large QP is not
+    slowed by the O(n^3) eigenvalue solve. ``c`` fixes ``n``.
+
+    Separated from :func:`_maybe_check_psd` because the *verdict* and what to
+    do about it are two different questions once ``method=`` exists: the
+    convex IPM must refuse an indefinite ``P``, while the active-set engine
+    wants to be told about one and solve it anyway."""
+    if check_psd is False:
+        return None
+    n = np.asarray(c, dtype=np.float64).ravel().shape[0]
+    if not (check_psd or n <= _PSD_CHECK_AUTO_MAX_N):
+        return None
+    return _psd_verdict_coo(*_lower_triangle_coo(P, n), n)
 
 
 def _maybe_check_psd(P, c, check_psd) -> None:
     """Run the issue-#112 PSD guard on ``P`` unless explicitly disabled.
 
-    Shared by *every* QP entry point so an indefinite (nonconvex) Hessian is
-    rejected uniformly — not only by :func:`solve_qp`. ``check_psd=False``
-    skips it; ``True`` forces it; ``None`` (the default) runs it only when
-    ``n <= _PSD_CHECK_AUTO_MAX_N`` so a large QP is not slowed by the O(n^3)
-    eigenvalue solve. ``c`` fixes ``n``."""
-    if check_psd is False:
-        return
-    n = np.asarray(c, dtype=np.float64).ravel().shape[0]
-    if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
-        _check_psd(*_lower_triangle_coo(P, n), n)
+    Shared by every **convex-IPM-only** QP entry point so an indefinite
+    (nonconvex) Hessian is rejected uniformly — not only by :func:`solve_qp`.
+    :func:`solve_qp` does not use it: it dispatches on ``method=``, and the
+    active-set engine it can select solves an indefinite ``P`` rather than
+    refusing it (gh #786)."""
+    verdict = _psd_verdict(P, c, check_psd)
+    if verdict is not None and not verdict[0]:
+        raise _indefinite_error(verdict[1])
 
 
 def _mat_shape(mat):
@@ -658,8 +705,10 @@ def solve_qp(
     IPM is materially more robust — on the 138-problem Maros-Mészáros set it
     solves 137, against substantially fewer for a cold active-set solve, whose
     iteration count is combinatorial in the size of the active set. Choose
-    ``"active-set"`` when you want an exact vertex, or for a *sequence* of
-    similar QPs. ``warm_start=`` is not supported with ``"active-set"``.
+    ``"active-set"`` when you want an exact vertex, for a *sequence* of
+    similar QPs, or when ``P`` is **indefinite** — it is the only engine here
+    that accepts one, and what it returns is then a local solution.
+    ``warm_start=`` is not supported with ``"active-set"``.
 
     ``warm_start`` (optional) is a previous :class:`QpResult` (or a mapping
     with ``x``/``y``/``z``/``z_lb``/``z_ub``) for a *nearby* problem. It
@@ -667,11 +716,22 @@ def solve_qp(
     does not change the solution, and a dimension mismatch is ignored.
 
     ``check_psd`` guards against an indefinite (nonconvex) ``P``, which the
-    convex solver would otherwise accept and report a silently-wrong
+    convex IPM would otherwise accept and report a silently-wrong
     ``"optimal"`` for (issue #112). ``None`` (the default) runs the check
     only when ``n <= 1500`` so a large sparse QP is not slowed by the
     O(n^3) eigenvalue solve; pass ``True`` to always check or ``False`` to
     never check.
+
+    The guard is scoped to ``method="ipm"``. Under ``method="active-set"`` an
+    indefinite ``P`` is **solved**, not refused — the active-set engine
+    controls the inertia of the reduced Hessian and returns a *local*
+    solution, the same guarantee the NLP filter-IPM gives on a nonconvex NLP
+    (gh #786). The check still runs there when enabled, and its finding is
+    what tells the engine to drive an indefinite Hessian; it just does not
+    raise. Where it does *not* run — ``check_psd=False``, or the default
+    ``None`` above the ``n <= 1500`` cap — the engine is driven exactly as it
+    was before, so pass ``check_psd=True`` on a large QP you know to be
+    indefinite.
 
     ``tau`` and ``tau_max`` (``method="ipm"`` only) bound the
     fraction-to-boundary parameter: an interior-point step covers at most that
@@ -701,7 +761,39 @@ def solve_qp(
         raise ValueError("solve_qp: `c` is required")
     _validate_solver_opts(tol, max_iter, "solve_qp")
     _validate_time_limit(time_limit, "solve_qp")
-    _maybe_check_psd(P, c, check_psd)
+    # The guard is scoped to the engine that needs it (gh #786). It ran
+    # unconditionally when `solve_qp` *was* the IPM; `method=` arrived later and
+    # its scope was not revisited, so the one engine documented to handle an
+    # indefinite Hessian was the one entry point that could not be handed one.
+    # The check still runs on both paths — its verdict is worth having either
+    # way — but on `method="active-set"` an indefinite finding is passed to the
+    # engine as a fact about `P` instead of raised.
+    verdict = _psd_verdict(P, c, check_psd)
+    if verdict is None:
+        # The guard did not run (``check_psd=False``, or ``None`` above the
+        # auto cap), so nothing here knows the inertia of ``P``. Say so rather
+        # than assert PSD. ``"unknown"`` and ``"psd"`` drive the engine
+        # identically today — ``pounce-qp`` reads the claim only to decide how
+        # its l1-elastic reformulation marks the augmented Hessian, and
+        # collapses the two there — so this changes no solve; it just stops the
+        # frontend making a claim it cannot back.
+        #
+        # The consequence worth knowing: it is the *check* that tells the
+        # active-set engine ``P`` is indefinite, so ``check_psd=False`` keeps
+        # the pre-gh#786 behaviour on this path exactly. A caller who knows
+        # ``P`` is indefinite and wants the engine driven for it should let the
+        # check run.
+        hessian_inertia = "unknown"
+    elif verdict[0]:
+        hessian_inertia = "psd"
+    elif method == "active-set":
+        hessian_inertia = "indefinite"
+    elif method == "ipm":
+        raise _indefinite_error(verdict[1])
+    else:
+        # Any other `method` is invalid; let the binding say so, rather than
+        # reporting the Hessian of a problem no engine was going to solve.
+        hessian_inertia = "unknown"
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
         _pounce.solve_qp(
@@ -714,6 +806,7 @@ def solve_qp(
             tau=tau,
             tau_max=tau_max,
             time_limit=None if time_limit is None else float(time_limit),
+            hessian_inertia=hessian_inertia,
         )
     )
 

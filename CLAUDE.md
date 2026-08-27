@@ -193,7 +193,14 @@ Corollary for the classifier specifically: `AMBIGUOUS` is not "probably
 not a kink". A genuine kink lands there whenever its coordinate is
 coupled, because the ratio is `reduced/diagonal` (gh#763). Never use the
 activity class as a proxy for kink-ness — that inference is exactly what
-produced the gh#756 defect.
+produced the gh#756 defect. The question has an accessor now:
+`Solver::reduced_activity` / `solver.reduced_activity` normalizes by the
+reduced curvature `1/(K⁻¹)_ii − Σ_i`, one back-solve per index, and a
+coupled kink reads `WEAKLY_ACTIVE` there. `classify_activity` keeps the
+diagonal by design — the reduced normalizer is the reciprocal diagonal
+of an *inverse*, so classifying every bounded variable that way is `n`
+back-solves — so the refinement is on demand, over the ambiguous entries,
+never the default.
 
 ## The re-solve oracle: the only guard that reads an outside number
 

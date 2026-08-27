@@ -136,12 +136,55 @@ fn forced_qp_ipm_on_nonconvex_qp_errors() {
     );
 }
 
-/// Same nonconvex QP forced to the active-set QP solver: also a mismatch,
-/// also must error rather than mis-solve.
+/// The same nonconvex QP forced to the **active-set** QP solver is *not* a
+/// mismatch (gh #786): `pounce-qp` controls the inertia of the reduced Hessian
+/// and takes an indefinite `H` by construction, which is what
+/// `docs/src/choosing-a-solver.md` has always advertised for this engine. It
+/// must solve, name the engine that ran, and reach the right answer.
+///
+/// The fixture is `min x0·x1  s.t.  x0 + x1 = 2, 0 ≤ x ≤ 4`. On the feasible
+/// segment `f(x0) = x0(2 − x0)` is **concave**, so its minimum over
+/// `x0 ∈ [0, 2]` sits at an endpoint and the global optimum is `0` — twice
+/// over, at `(0, 2)` and `(2, 0)`. A method that mistook the interior
+/// stationary point `(1, 1)` for the answer would report `1`, so the objective
+/// is a real discriminator here and not just a smoke check.
 #[test]
-fn forced_qp_active_set_on_nonconvex_qp_errors() {
+fn forced_qp_active_set_solves_a_nonconvex_qp() {
     let out = Command::new(pounce_exe())
         .arg(fixture_named("nonconvex_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=qp-active-set")
+        .output()
+        .expect("spawn pounce");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "must solve:\n{combined}");
+    assert!(
+        combined.contains("Problem class: nonconvex QP")
+            && combined.contains("active-set QP (pounce-qp)"),
+        "the banner must name the class and the engine that ran:\n{combined}"
+    );
+    assert!(combined.contains("Optimal Solution Found"), "{combined}");
+    let obj = objective_from(&combined);
+    assert!(
+        obj.abs() < 1e-6,
+        "expected the global optimum 0 (not the interior stationary point 1), \
+         got {obj}:\n{combined}"
+    );
+}
+
+/// A nonconvex **QCQP** is still refused: the QP extractor behind this route
+/// keeps only the degree-≤1 part of every row, so a curved constraint would be
+/// silently deleted and the engine would report an optimum outside the
+/// feasible set. The classifier keeps such a model out of the `nonconvex QP`
+/// class for exactly this reason (gh #786).
+#[test]
+fn forced_qp_active_set_on_nonconvex_qcqp_errors() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("nonconvex_qcqp.nl"))
         .arg("--no-sol")
         .arg("solver_selection=qp-active-set")
         .output()
@@ -153,10 +196,21 @@ fn forced_qp_active_set_on_nonconvex_qp_errors() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        combined.contains("nonconvex QP") && combined.contains("qp-active-set"),
+        combined.contains("NLP") && combined.contains("qp-active-set"),
         "error must name detected class and forced solver:\n{combined}"
     );
     assert!(!combined.contains("Optimal Solution Found"), "{combined}");
+}
+
+/// Read the `obj=` field off the convex driver's verdict line.
+fn objective_from(output: &str) -> f64 {
+    output
+        .split("obj=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no `obj=` in output:\n{output}"))
+        .parse()
+        .expect("objective parses as a float")
 }
 
 /// Forcing the LP IPM onto a convex *QP* (not an LP): the QP IPM accepts a

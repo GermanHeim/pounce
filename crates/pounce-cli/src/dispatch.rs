@@ -115,8 +115,18 @@ pub enum ProblemClass {
     /// Convex quadratic objective and/or convex quadratic constraints.
     /// SOCP-representable; routes to the conic (SOCP) interior-point solver.
     ConvexQcqp,
-    /// Quadratic but with an indefinite Hessian somewhere. Falls through
-    /// to the NLP solver for a local minimum.
+    /// Quadratic objective with an indefinite (sense-adjusted) Hessian and
+    /// **linear** constraints. `auto` falls through to the NLP solver for a
+    /// local minimum; `solver_selection=qp-active-set` solves it directly with
+    /// the `pounce-qp` active-set engine, which controls the inertia of the
+    /// reduced Hessian and is documented to take an indefinite `H` (gh #786).
+    ///
+    /// The linear-constraints half of that is load-bearing, not descriptive:
+    /// both consumers reach the model through
+    /// [`crate::qp_extract::extract_qp_with_map`], which keeps only the
+    /// degree-≤1 part of every row. A quadratic row here would be silently
+    /// dropped, so a model carrying one classifies [`Self::Nlp`] instead —
+    /// see [`ClassReason::NonconvexQcqp`].
     NonconvexQp,
     /// General nonlinear (transcendental terms, higher-degree
     /// polynomials, or anything the classifier cannot prove quadratic).
@@ -166,8 +176,13 @@ pub enum ClassReason {
     /// "Lost", not merely "dropped": a term that cancels exactly is not
     /// missing from the form, so those rows keep the fast path (gh #687).
     ConstraintTermsDropped { row: usize },
-    /// The sense-adjusted objective Hessian has a negative eigenvalue.
+    /// The sense-adjusted objective Hessian has a negative eigenvalue, and
+    /// every constraint row is linear — a nonconvex **QP**.
     ObjectiveHessianIndefinite,
+    /// The sense-adjusted objective Hessian has a negative eigenvalue *and*
+    /// some row carries curvature — a nonconvex **QCQP**, which is not a QP
+    /// and must not be classified as one (see [`ProblemClass::NonconvexQp`]).
+    NonconvexQcqp { row: usize },
     /// Row `row` is quadratic with a PSD Hessian, but its bound sense
     /// (`>=`, `=`, or two-sided) carves a nonconvex feasible set.
     ConstraintSenseNonconvex { row: usize },
@@ -213,8 +228,15 @@ impl ClassReason {
                  not the whole row"
             ),
             ClassReason::ObjectiveHessianIndefinite => {
-                "the objective Hessian (sense-adjusted for minimization) is not PSD".to_string()
+                "the objective Hessian (sense-adjusted for minimization) is not PSD, \
+                 and every row is linear"
+                    .to_string()
             }
+            ClassReason::NonconvexQcqp { row } => format!(
+                "the objective Hessian (sense-adjusted for minimization) is not PSD \
+                 and row {row} is quadratic, so this is a nonconvex QCQP rather than \
+                 a nonconvex QP"
+            ),
             ClassReason::ConstraintSenseNonconvex { row } => format!(
                 "row {row} is a convex quadratic but its bound sense (>=, =, or \
                  two-sided) makes the feasible set nonconvex"
@@ -420,6 +442,7 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
     // Constraint curvature. A quadratic constraint makes this a QCQP;
     // any non-quadratic constraint term makes the whole problem NLP.
     let mut any_quadratic_constraint = false;
+    let mut first_quadratic_row = 0usize;
     for (row, c) in prob.con_nonlinear.iter().enumerate() {
         if c.is_trivially_zero() {
             continue;
@@ -432,7 +455,12 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
             // coefficients cancelled arrived here empty, classified linear,
             // and then vanished out of the extracted LP entirely.
             Some(q) if q.is_empty() => {}
-            Some(_) => any_quadratic_constraint = true,
+            Some(_) => {
+                if !any_quadratic_constraint {
+                    first_quadratic_row = row;
+                }
+                any_quadratic_constraint = true;
+            }
             None if c.quad_terms_dropped() => {
                 return (
                     ProblemClass::Nlp,
@@ -460,6 +488,21 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
             obj_quad.iter().map(|(k, v)| (*k, -v)).collect()
         };
         if !hessian_is_psd(&effective, prob.n) {
+            // A nonconvex objective over *quadratic* rows is a nonconvex QCQP,
+            // not a nonconvex QP, and the distinction is a correctness one now
+            // that `ProblemClass::NonconvexQp` has a consumer: the QP extractor
+            // keeps only the degree-≤1 part of each row, so calling this a QP
+            // would hand `qp-active-set` a model with its curved constraints
+            // quietly deleted. NLP solves it soundly either way, which is where
+            // both used to go.
+            if any_quadratic_constraint {
+                return (
+                    ProblemClass::Nlp,
+                    ClassReason::NonconvexQcqp {
+                        row: first_quadratic_row,
+                    },
+                );
+            }
             return (
                 ProblemClass::NonconvexQp,
                 ClassReason::ObjectiveHessianIndefinite,
@@ -611,8 +654,15 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
 /// `auto` routes LP / convex QP to the convex IPM (`QpIpm`) and convex
 /// QCQP to the conic IPM (`SocpIpm`); nonconvex QP and general NLP resolve
 /// to `Nlp`. A forced selection that does not match the detected class is
-/// rejected with a clear message. (`QpActiveSet` is accepted for LP / convex
-/// QP and dispatched to the active-set SQP engine — see `main.rs`.)
+/// rejected with a clear message.
+///
+/// `QpActiveSet` is the one forced selection that is **not** restricted to the
+/// convex classes: `pounce-qp` handles an indefinite Hessian by construction
+/// (§4.5 inertia control), which is what `docs/src/choosing-a-solver.md` has
+/// always advertised, so a `NonconvexQp` is accepted here and dispatched to it
+/// for a *local* solution (gh #786). `auto` still sends that class to the NLP
+/// filter-IPM — the class is our inference, and the general path is the safer
+/// default for it — so this is reachable only by asking for the engine by name.
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,
@@ -661,10 +711,14 @@ pub fn resolve_solver(
             }
         }
         S::QpActiveSet => {
-            if is_convex_qp {
+            if is_convex_qp || class == P::NonconvexQp {
                 Ok(SolverChoice::QpActiveSet)
             } else {
-                Err(mismatch_msg(class, "qp-active-set", "an LP or convex QP"))
+                Err(mismatch_msg(
+                    class,
+                    "qp-active-set",
+                    "an LP or a QP with linear constraints, convex or indefinite",
+                ))
             }
         }
     }
@@ -864,6 +918,42 @@ mod tests {
         assert_eq!(
             resolve_solver(ProblemClass::Lp, SolverSelection::LpIpm),
             Ok(SolverChoice::LpIpm)
+        );
+    }
+
+    /// gh #786: `qp-active-set` is the one forced selection that takes an
+    /// indefinite Hessian — `pounce-qp` controls the inertia of the reduced
+    /// Hessian by construction, which is what `choosing-a-solver.md` has always
+    /// advertised. It still refuses a class it cannot *extract*: a QCQP carries
+    /// curvature in its rows, and the QP extractor would drop it.
+    #[test]
+    fn forced_qp_active_set_accepts_indefinite_qp_but_not_a_qcqp() {
+        for class in [
+            ProblemClass::Lp,
+            ProblemClass::ConvexQp,
+            ProblemClass::NonconvexQp,
+        ] {
+            assert_eq!(
+                resolve_solver(class, SolverSelection::QpActiveSet),
+                Ok(SolverChoice::QpActiveSet),
+                "qp-active-set should accept {class:?}"
+            );
+        }
+        for class in [ProblemClass::ConvexQcqp, ProblemClass::Nlp] {
+            let err = resolve_solver(class, SolverSelection::QpActiveSet).unwrap_err();
+            assert!(err.contains("qp-active-set"), "{err}");
+            assert!(err.contains(class.name()), "{err}");
+        }
+    }
+
+    /// The lift above is scoped to the *named* engine. `auto` keeps sending a
+    /// nonconvex QP to the NLP filter-IPM: the class is our inference, and the
+    /// general path is the safer default for it.
+    #[test]
+    fn auto_still_routes_a_nonconvex_qp_to_nlp() {
+        assert_eq!(
+            resolve_solver(ProblemClass::NonconvexQp, SolverSelection::Auto),
+            Ok(SolverChoice::Nlp)
         );
     }
 
@@ -1202,6 +1292,43 @@ mod tests {
         let obj = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
         let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
         assert_eq!(classify_problem(&prob), ProblemClass::NonconvexQp);
+    }
+
+    /// gh #786: an indefinite objective over a *quadratic* row is a nonconvex
+    /// QCQP, and must not be handed the `NonconvexQp` label.
+    ///
+    /// This is not a naming preference. `NonconvexQp` now has a consumer —
+    /// `solver_selection=qp-active-set` reaches the QP extractor through it —
+    /// and that extractor keeps only the degree-≤1 part of every row. Labelling
+    /// this a QP would send the engine a model with `x0² + x1² ≤ 1` deleted,
+    /// and it would report an "optimal" outside the ball.
+    #[test]
+    fn classify_indefinite_objective_with_quadratic_row_is_not_a_qp() {
+        let obj = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        let ball = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let mut prob = qp_stub(obj, vec![ball]);
+        prob.g_l = vec![f64::NEG_INFINITY];
+        prob.g_u = vec![1.0];
+        let (class, reason) = classify_problem_explained(&prob);
+        assert_eq!(class, ProblemClass::Nlp);
+        assert_eq!(reason, ClassReason::NonconvexQcqp { row: 0 });
+        // And the label it must not get, stated as the routing consequence.
+        assert!(
+            resolve_solver(class, SolverSelection::QpActiveSet).is_err(),
+            "a nonconvex QCQP must not reach the active-set QP engine"
+        );
     }
 
     #[test]
