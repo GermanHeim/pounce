@@ -9,6 +9,55 @@ changes.
 
 ## [Unreleased]
 
+- **`neg_curv_escapes` above `1` could report a worse answer than turning it
+  off (gh #805).** The option's help text and `docs/src/options.md` both state
+  the guarantee without qualification — the escape "cannot return a worse
+  answer than leaving it off would have", because the certified stationary
+  point is snapshotted as a floor before the step and handed back unless the
+  continuation comes back with a certificate of its own at a better point.
+  That was enforced at the default `neg_curv_escapes = 1` and nowhere above
+  it: `try_neg_curv_escape` *replaced* `neg_curv_floor` on every escape, so a
+  second escape dropped the point the first one had floored, and no code path
+  held a reference to it any more. If the continuation's own certificate `B`
+  was worse than the certificate `A` the first bet was placed from, a lost
+  second bet restored and reported `B` — worse than `neg_curv_escapes = 0`
+  returns, with nothing left to compare it against. The IPM is a filter method
+  and the barrier objective is not monotone across μ updates, so the escape's
+  own accounting did not exclude that ordering.
+
+  The floor now holds the **best** certificate the escapes have left rather
+  than the most recent one, ranked by the same status-dominant order
+  `honour_neg_curv_floor` already used on the way out (the fidelity gate
+  first, then objective-against-violation) and shared with it, so the two
+  sites cannot drift apart. Both points are strict certificates — the escape
+  only fires on `ConvergenceStatus::Converged` — so the comparison is
+  well-posed. Ranking rather than simply *keeping the first* floor matters in
+  the reachable direction: the continuation descends, so `f(B) < f(A)` on
+  every case a fixture can construct, and keeping `A` would have made
+  `neg_curv_escapes = 2` come back worse than `= 1` — measured, on the new
+  fixture below, `obj = 0` where `= 1` returns `-0.225`. The deadline is
+  unchanged: each escape still buys its continuation its own 30 iterations, as
+  the `DEFAULT_NEG_CURV_ESCAPES` doc comment already said it does, so the
+  *cost* scales with the option and the guarantee does not.
+
+  This is a provable no-op at the default — the new branch is only reachable
+  with a floor already held, which takes a second escape — and the fixture
+  sweep (`scripts/sweep-fixtures.sh`, both legs) is unmoved.
+
+  New fixture `nonconvex_two_escapes.nl` (generator committed beside it), the
+  first in the corpus that places **two** escapes and so the first that
+  reaches any of the multi-escape accounting at all:
+  `min 0.225x₀⁴ − 0.45x₀² + (1000 − 1000.45x₀²)x₁²` over a box, whose evenness
+  in `x₁` holds the solve on the ridge `x₁ = 0` long enough to certify two
+  points on it. It walks `obj = 0` (the maximum along `x₀`) → `−0.225` (a
+  saddle whose negative direction is the *other* coordinate) → `−6752.25` (the
+  global minimum) as the budget goes `0 → 1 → 2`, and a third escape is
+  declined. What it cannot do is discriminate the fix from the defect: that
+  needs `f(B) > f(A)`, which within one solve takes something non-monotone in
+  `f`, and gh #805 records that no such witness could be constructed. The
+  defect was latent, and the fix keeps both orders correct rather than only
+  the one a fixture can reach.
+
 - **A constraint row's activity ratio is not normalized by a reduced
   curvature either, and now there is an accessor for rows too** (#804).
   #763 fixed the variable path and left the row path with a docs note.
