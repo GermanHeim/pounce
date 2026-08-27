@@ -160,6 +160,291 @@ impl PdFullSpaceSolver {
         self.aug_solver = wrap(inner);
     }
 
+    /// Look for a direction of negative curvature in the null space of the
+    /// constraint Jacobian at the current iterate (gh #797).
+    ///
+    /// The filter line-search IPM certifies *first-order* stationarity. On a
+    /// nonconvex model that is not the same as a local minimum: a point where
+    /// the reduced Hessian on `null(A)` is negative definite is a constrained
+    /// *maximum*, and every first-order residual at it is zero, so the
+    /// convergence check has nothing to object to and the Newton step is
+    /// exactly zero — inertia correction included, since `δ_x I` is symmetric
+    /// and cannot break a symmetry the iterates already have. `nonconvex_qp.nl`
+    /// (`min x₀x₁ s.t. x₀+x₁ = 2, 0 ≤ x ≤ 4`) is the reported case: from the
+    /// symmetric bound-pushed start the first Newton step lands on `(1,1)`,
+    /// `f = 1`, the maximum of the concave `x₀(2-x₀)` along the feasible
+    /// segment, and the solve reports `Solve_Succeeded` there.
+    ///
+    /// This is the second-order information the step computation throws away.
+    /// It runs only where a stationary point is about to be certified, and it
+    /// answers two questions with the machinery already in place:
+    ///
+    /// 1. **Is the point second-order suspect?** Factor the augmented system
+    ///    *unperturbed* with the inertia check on. Correct inertia is exactly
+    ///    the statement that `W + Σ` is positive definite on `null(A)`, so a
+    ///    `Success` at `δ_x = 0` ends the probe with `None` and costs one
+    ///    factorization. Only a `WrongInertia` continues.
+    /// 2. **Which way is down?** Escalate `δ_x` on the ladder below until the
+    ///    inertia *is* correct. The `δ_x` that first works is within a factor
+    ///    of [`NEG_CURV_DELTA_FACTOR`] of `-λ_min` of the reduced Hessian, so
+    ///    `(W + Σ + δ_x I)⁻¹` restricted to `null(A)` has its largest
+    ///    amplification precisely along the eigenvector of `λ_min`. A few
+    ///    inverse-iteration back-solves against that factor therefore converge
+    ///    to the most-negative-curvature direction, and each one is a
+    ///    back-solve against the cached factor rather than a refactorization.
+    ///
+    /// The returned direction is never trusted on the strength of that
+    /// argument: `dᵀ(W + Σ)d` is *measured* for each candidate and the probe
+    /// returns `None` unless the best one is strictly negative. It also
+    /// satisfies `J_c d_x = 0` and `J_d d_x - d_s = 0` to the accuracy of the
+    /// factorization (both dual perturbations are held at zero), so stepping
+    /// along it does not move the linearised constraints.
+    ///
+    /// Returns `None` — never an error — for every shape it cannot answer for:
+    /// a backend that reports no inertia, a non-dense iterate (the restoration
+    /// inner IPM's `CompoundVector`), a singular or breaking-down
+    /// factorization, or a ladder that reaches [`NEG_CURV_DELTA_MAX`] without
+    /// fixing the inertia. Declining is always safe here: the caller's
+    /// fallback is the pre-#797 behaviour of reporting the stationary point.
+    ///
+    /// The augmented-system cache is invalidated on every exit, because the
+    /// factor left behind describes a perturbed matrix that no ordinary solve
+    /// asked for.
+    pub fn negative_curvature_direction(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        w_at_curr: Option<Rc<dyn SymMatrix>>,
+    ) -> Option<NegativeCurvature> {
+        if !self.aug_solver.provides_inertia() {
+            return None;
+        }
+
+        // Same thirteen blocks `solve_with_sigma` assembles, with no sigma
+        // substitution — this is the system the *step* was computed from,
+        // except that the caller may hand in a Hessian for the *current*
+        // iterate. `data.w` is one iterate behind wherever this is called
+        // from, and re-running the Hessian updater to catch it up is not
+        // free of consequence for the limited-memory updater; see
+        // `HessianUpdater::provides_exact_hessian`.
+        let w = match w_at_curr {
+            Some(w) => w,
+            None => data.borrow().w.clone()?,
+        };
+        let cq_ref = cq.borrow();
+        let j_c = cq_ref.curr_jac_c();
+        let j_d = cq_ref.curr_jac_d();
+        let sigma_x = cq_ref.curr_sigma_x();
+        let sigma_s = cq_ref.curr_sigma_s();
+        let slack_x_l = cq_ref.curr_slack_x_l();
+        let slack_x_u = cq_ref.curr_slack_x_u();
+        let slack_s_l = cq_ref.curr_slack_s_l();
+        let slack_s_u = cq_ref.curr_slack_s_u();
+        drop(cq_ref);
+
+        let nlp_ref = nlp.borrow();
+        let px_l = nlp_ref.px_l();
+        let px_u = nlp_ref.px_u();
+        let pd_l = nlp_ref.pd_l();
+        let pd_u = nlp_ref.pd_u();
+        drop(nlp_ref);
+
+        let curr = data.borrow().curr.clone()?;
+
+        let b = SolveBlocks {
+            w: &*w,
+            j_c: &*j_c,
+            j_d: &*j_d,
+            px_l: &*px_l,
+            px_u: &*px_u,
+            pd_l: &*pd_l,
+            pd_u: &*pd_u,
+            z_l: &*curr.z_l,
+            z_u: &*curr.z_u,
+            v_l: &*curr.v_l,
+            v_u: &*curr.v_u,
+            slack_x_l: &*slack_x_l,
+            slack_x_u: &*slack_x_u,
+            slack_s_l: &*slack_s_l,
+            slack_s_u: &*slack_s_u,
+            sigma_x: &*sigma_x,
+            sigma_s: &*sigma_s,
+        };
+
+        let num_neg_evals = curr.y_c.dim() + curr.y_d.dim();
+
+        let mut seed = curr.make_new_zeroed();
+        let n_x = seed.x.dim() as usize;
+        if !fill_probe_seed(&mut *seed.x, 0) || !fill_probe_seed(&mut *seed.s, n_x) {
+            return None;
+        }
+        let seed_scale = seed.x.amax().max(seed.s.amax());
+        if !(seed_scale > 0.0) {
+            return None;
+        }
+        seed.x.scal(1.0 / seed_scale);
+        seed.s.scal(1.0 / seed_scale);
+
+        // `make_new` leaves a `DenseVector` *uninitialized* — neither
+        // materialized nor homogeneous — which reads as a zero-length slice
+        // when the backend packs it. That is invisible for a solution slot
+        // (only ever written) but not for a right-hand side, so the two
+        // constraint blocks are set explicitly.
+        let mut zero_c = curr.y_c.make_new();
+        zero_c.set(0.0);
+        let mut zero_d = curr.y_d.make_new();
+        zero_d.set(0.0);
+        let mut sol = curr.make_new_zeroed();
+
+        // Step 1 + 2: the smallest ladder rung whose inertia is correct.
+        let mut delta_x = 0.0;
+        let mut have_factor = false;
+        for _ in 0..NEG_CURV_MAX_FACTORIZATIONS {
+            if deadline_exceeded(data) {
+                break;
+            }
+            let coeffs = neg_curv_coeffs(&b, delta_x);
+            let rhs = AugSysRhs {
+                rhs_x: &*seed.x,
+                rhs_s: &*seed.s,
+                rhs_c: &*zero_c,
+                rhs_d: &*zero_d,
+            };
+            let mut aug_sol = AugSysSol {
+                sol_x: &mut *sol.x,
+                sol_s: &mut *sol.s,
+                sol_c: &mut *sol.y_c,
+                sol_d: &mut *sol.y_d,
+            };
+            let status = self
+                .aug_solver
+                .solve(&coeffs, &rhs, &mut aug_sol, true, num_neg_evals);
+            match status {
+                ESymSolverStatus::Success => {
+                    if delta_x == 0.0 {
+                        // `W + Σ` is positive definite on `null(A)`: the point
+                        // satisfies the second-order *sufficient* condition for
+                        // the barrier subproblem and there is nothing to escape.
+                        tracing::debug!(target: "pounce::kkt",
+                            "negative-curvature probe: correct inertia unperturbed, \
+                             the reduced Hessian is positive definite here (gh#797)");
+                        self.invalidate_aug_cache();
+                        return None;
+                    }
+                    have_factor = true;
+                    break;
+                }
+                ESymSolverStatus::WrongInertia | ESymSolverStatus::Singular => {
+                    delta_x = if delta_x == 0.0 {
+                        NEG_CURV_DELTA_MIN
+                    } else {
+                        delta_x * NEG_CURV_DELTA_FACTOR
+                    };
+                    if delta_x > NEG_CURV_DELTA_MAX {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        if !have_factor {
+            self.invalidate_aug_cache();
+            return None;
+        }
+
+        // Step 3: inverse iteration against that factor. Every candidate is
+        // measured; the best Rayleigh quotient wins.
+        // `make_new_zeroed` allocates but does not initialize (see the note on
+        // the zero right-hand sides above), and the caller reads this as an
+        // ordinary direction — dual blocks included, which the probe never
+        // writes — so every block is zeroed explicitly.
+        let mut best = curr.make_new_zeroed();
+        best.x.set(0.0);
+        best.s.set(0.0);
+        best.y_c.set(0.0);
+        best.y_d.set(0.0);
+        best.z_l.set(0.0);
+        best.z_u.set(0.0);
+        best.v_l.set(0.0);
+        best.v_u.set(0.0);
+        let mut best_quotient = 0.0;
+        let mut best_curvature = 0.0;
+        for step in 0..NEG_CURV_INVERSE_ITERS {
+            let scale = sol.x.amax().max(sol.s.amax());
+            if !(scale > 0.0) || !scale.is_finite() {
+                break;
+            }
+            sol.x.scal(1.0 / scale);
+            sol.s.scal(1.0 / scale);
+            let nrmsq = sol.x.nrm2().powi(2) + sol.s.nrm2().powi(2);
+            if !(nrmsq > 0.0) || !nrmsq.is_finite() {
+                break;
+            }
+            let curvature = Self::curvature_measure(&b, &sol, false, 0.0, 0.0);
+            if !curvature.is_finite() {
+                break;
+            }
+            let quotient = curvature / nrmsq;
+            if quotient < best_quotient {
+                best_quotient = quotient;
+                best_curvature = curvature;
+                best.x.copy(&*sol.x);
+                best.s.copy(&*sol.s);
+            }
+            if step + 1 == NEG_CURV_INVERSE_ITERS {
+                break;
+            }
+            seed.x.copy(&*sol.x);
+            seed.s.copy(&*sol.s);
+            let coeffs = neg_curv_coeffs(&b, delta_x);
+            let rhs = AugSysRhs {
+                rhs_x: &*seed.x,
+                rhs_s: &*seed.s,
+                rhs_c: &*zero_c,
+                rhs_d: &*zero_d,
+            };
+            let mut aug_sol = AugSysSol {
+                sol_x: &mut *sol.x,
+                sol_s: &mut *sol.s,
+                sol_c: &mut *sol.y_c,
+                sol_d: &mut *sol.y_d,
+            };
+            if self.aug_solver.resolve(&coeffs, &rhs, &mut aug_sol) != ESymSolverStatus::Success {
+                break;
+            }
+        }
+        self.invalidate_aug_cache();
+
+        if !(best_curvature < 0.0) {
+            return None;
+        }
+        // Rescale to unit inf-norm so the caller's step length is expressed in
+        // the iterate's own units, and rescale the curvature with it.
+        let scale = best.x.amax().max(best.s.amax());
+        if !(scale > 0.0) || !scale.is_finite() {
+            return None;
+        }
+        best.x.scal(1.0 / scale);
+        best.s.scal(1.0 / scale);
+        tracing::debug!(target: "pounce::kkt",
+            "negative-curvature probe: delta_x = {:e}, dᵀ(W+Σ)d = {:e} (gh#797)",
+            delta_x, best_curvature / (scale * scale));
+        Some(NegativeCurvature {
+            curvature: best_curvature / (scale * scale),
+            delta: best.freeze(),
+        })
+    }
+
+    /// Drop the augmented-system factorization cache. The probe leaves a factor
+    /// of a matrix nobody asked for behind it, so the next ordinary solve must
+    /// miss the `dummy_cache_` lookup and re-consider the system from scratch.
+    fn invalidate_aug_cache(&mut self) {
+        self.matrix_considered = false;
+        self.last_dep_tags = None;
+        self.augsys_improved = false;
+    }
+
     /// Solve the full PD system. `res = α · M⁻¹ · rhs + β · res_in`,
     /// matching `IpPDFullSpaceSolver::Solve`. Returns `true` on
     /// success. The iterate fields used to assemble the system are
@@ -1559,6 +1844,104 @@ fn factor_overshoot_predicted(
         && max_factor_cpu >= FACTOR_OVERSHOOT_BUDGET_FRACTION * deadline.max_cpu()
         && deadline.remaining_cpu() < max_factor_cpu;
     wall_gate || cpu_gate
+}
+
+/// A direction of negative curvature at the current iterate, as returned by
+/// [`PdFullSpaceSolver::negative_curvature_direction`] (gh #797).
+pub struct NegativeCurvature {
+    /// The direction. Only the `x` and `s` blocks are populated — every dual
+    /// block is zero — and the primal part has unit infinity-norm, so a step
+    /// length multiplying it is in the iterate's own units.
+    pub delta: crate::iterates_vector::IteratesVector,
+    /// The measured `dᵀ(W + Σ)d` for [`Self::delta`]. Strictly negative
+    /// whenever a value is returned: it is what makes the direction one the
+    /// barrier objective *decreases* along to second order, and the caller
+    /// sizes its sufficient-decrease test from it.
+    pub curvature: Number,
+}
+
+/// First rung of the probe's `δ_x` ladder (gh #797). Deliberately below the
+/// perturbation handler's own first trial (`delta_xs_init`, `1e-4`): the
+/// ladder's *first successful* rung is what brackets `-λ_min` of the reduced
+/// Hessian, and a coarser start brackets it more loosely and weakens the
+/// inverse iteration that follows. It does not go all the way down to
+/// `delta_xs_min` (`1e-20`) for the mirror-image reason — twelve more rungs
+/// buys a sharper bracket only on a model whose reduced Hessian is barely
+/// indefinite, and every rung is a factorization.
+const NEG_CURV_DELTA_MIN: Number = 1e-8;
+/// Ceiling of that ladder. Matches the perturbation handler's own
+/// `delta_xs_max` (`max_hessian_perturbation`, `1e20`): past it the shifted
+/// matrix no longer describes the model, and a reduced Hessian that indefinite
+/// is not something one escape step is going to fix.
+const NEG_CURV_DELTA_MAX: Number = 1e20;
+/// Ladder ratio. The rung that first fixes the inertia then brackets `-λ_min`
+/// of the reduced Hessian within this factor, which is what makes the
+/// subsequent inverse iteration converge quickly.
+const NEG_CURV_DELTA_FACTOR: Number = 10.0;
+/// Hard cap on factorizations the probe may spend. The ladder from
+/// [`NEG_CURV_DELTA_MIN`] to [`NEG_CURV_DELTA_MAX`] is 29 rungs plus the
+/// unperturbed one it starts at, so the cap does not truncate it; it is the
+/// backstop that bounds the cost if the ladder is ever widened, and it is
+/// spent at most `neg_curv_escapes` times per solve. Every converged solve
+/// whose reduced Hessian is positive definite — which is all of them but the
+/// gh #797 shape — pays exactly one factorization and stops.
+const NEG_CURV_MAX_FACTORIZATIONS: usize = 30;
+/// Inverse-iteration steps (the first is the factorization's own solve, the
+/// rest are back-solves against the cached factor). Three is enough to
+/// separate `λ_min` from `λ_2` at the ladder's resolution, and every
+/// candidate is measured anyway, so an extra step can only improve the
+/// answer, never invalidate it.
+const NEG_CURV_INVERSE_ITERS: usize = 3;
+
+/// Write a deterministic, index-dependent seed into `v`, returning `false`
+/// when the vector is not dense (the restoration inner IPM's compound
+/// iterate, which this probe declines to answer for).
+///
+/// The values come from SplitMix64 on the *global* index — `offset` is the
+/// count of entries already written into earlier blocks — so the `x` and `s`
+/// blocks of one seed never repeat each other, and the same model always
+/// probes with the same vector on every platform.
+///
+/// A structured seed is what does not work here. The all-ones vector is the
+/// obvious choice and it is orthogonal to the negative-curvature direction of
+/// the gh #797 reproducer: `nonconvex_qp`'s reduced Hessian is negative along
+/// `(1,-1)`, which is exactly the direction a symmetric seed cannot see. A
+/// symmetric model is the case this probe exists for, so the seed has to
+/// break symmetry by construction.
+fn fill_probe_seed(v: &mut dyn Vector, offset: usize) -> bool {
+    let Some(dense) = v.as_any_mut().downcast_mut::<DenseVector>() else {
+        return false;
+    };
+    for (i, slot) in dense.values_mut().iter_mut().enumerate() {
+        let mut z = ((offset + i) as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // Uniform on [-1, 1) from the top 53 bits.
+        *slot = ((z >> 11) as Number) / ((1u64 << 53) as Number) * 2.0 - 1.0;
+    }
+    true
+}
+
+/// The augmented system the probe factors: the step computation's own
+/// matrix with both primal blocks shifted by `delta` and **both dual
+/// perturbations pinned to zero**, so the direction it produces stays in
+/// `null(J_c)` and on `J_d d_x = d_s`.
+fn neg_curv_coeffs<'a>(b: &SolveBlocks<'a>, delta: Number) -> AugSysCoeffs<'a> {
+    AugSysCoeffs {
+        w: Some(b.w),
+        w_factor: 1.0,
+        d_x: Some(b.sigma_x),
+        delta_x: delta,
+        d_s: Some(b.sigma_s),
+        delta_s: delta,
+        j_c: b.j_c,
+        d_c: None,
+        delta_c: 0.0,
+        j_d: b.j_d,
+        d_d: None,
+        delta_d: 0.0,
+    }
 }
 
 /// Bag of borrowed blocks used by both `solve_once` and
