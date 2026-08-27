@@ -111,10 +111,56 @@ The tutorial does not optimize until these checks pass:
    algorithms. Agreement supplies an independent route check; the simultaneous
    form is retained because all balance equations, state bounds, the inventory,
    and the thermal ceiling remain explicit to POUNCE.
+5. The two routes are re-compared with the thermal ceiling **active**, not
+   merely slack, because they enforce it by different mechanisms (see below).
 
 The optimized profile is always re-solved after interpolating its state to a
 finer finite-volume mesh. That forward refinement is outside the optimization
 NLP and catches basis/mesh artifacts.
+
+### Two routes, one thermal ceiling, two mechanisms
+
+`temperature_limit_k` is a *design* constraint, and both routes enforce it,
+but not in the same place:
+
+* `solve_design` (simultaneous) carries it as an **upper bound on the
+  temperature state variables**. POUNCE sees the constraint directly and the
+  states never leave the feasible box.
+* `solve_nested_design` carries it as an **explicit SLSQP inequality**
+  evaluated on the converged inner solution,
+  `temperature_limit_k - max(T) >= 0`.
+
+That difference forces a third number into `PelletConfig`. The nested inner
+solve is a *bounded* least-squares root solve, so if its temperature box were
+also `temperature_limit_k`, a candidate hot enough to violate the ceiling
+could not converge: it would stall against the bound with a nonzero energy
+residual, and the outer optimizer would be handed a failed state solve instead
+of a negative margin. It could then never distinguish "this design is too hot"
+from "the physics did not converge", and would abort on the first thermally
+difficult candidate rather than steering away from it (gh#787).
+
+The inner solve therefore gets its own **numerical bracket**,
+`state_temperature_floor_k` to `state_temperature_ceiling_k` (400 K to 900 K by
+default), which deliberately straddles the 613 K design ceiling. The bracket is
+chosen loose enough that the design constraint always binds first, and tight
+enough to keep the root solve off the ignited branch. That branch is close: for
+the nominal parameters, lowering the external heat-transfer coefficient turns
+the low-temperature branch back just above a 613 K peak — it still converges at
+`h = 171.5 W m^-2 K^-1` (612.7 K) and no longer converges at
+`h = 170 W m^-2 K^-1`. Past that fold the only remaining steady state is the
+mass-transfer-limited runaway, whose external Prater temperature rise
+`(-Delta H) k_m c_bulk / h` is of order `10^3 K` here — far outside the 453 to
+613 K Koschany range, and not a state the tutorial should ever return.
+
+The bracket is not a kinetic-validity claim. A converged state above
+`temperature_limit_k` is extrapolating the fit; it is reported as thermally
+infeasible (`PelletSolution.thermal_margin_k < 0`,
+`thermally_feasible is False`) and is never returned as a design.
+`PelletSolution.success` stays a statement about the state solve alone, so the
+two failure modes remain separable at the API level. Below the turning point
+the distinction is real and the routes agree: with the ceiling moved to 570 K,
+under the 572.5 K peak of the equal-inventory uniform pellet, both routes drive
+the constraint active and return the same design.
 
 ## Nominal design problem
 
@@ -131,6 +177,9 @@ subject to 0 <= a[j] <= 1
            sum_j volume_fraction[j] a[j] = 0.16
            species balances, energy balance, c_i >= 0, T <= 613 K.
 ```
+
+The `T <= 613 K` row is the design ceiling in both routes; only the mechanism
+that enforces it differs, as described above.
 
 `lambda=0.5` is fixed before the solve. The notebook compares equal-inventory
 uniform, ideal step egg-shell, and regularized optimized profiles. The
@@ -186,6 +235,13 @@ jupyter nbconvert --to notebook --execute --inplace \
 - Every design is a local NLP solution. Two documented initializations agree
   in the short case, but neither that check nor POUNCE certifies a global
   optimum for this nonlinear model.
+- The low-temperature steady state is not the only one, and it does not always
+  exist. At the nominal operating point it folds once the external
+  heat-transfer coefficient drops below roughly `171 W m^-2 K^-1`; past that
+  the forward solve reports `success=False` rather than jumping to the ignited
+  branch. That is a statement about the model's steady states, not about the
+  thermal design constraint, and `thermal_margin_k` is what distinguishes the
+  two.
 - Effective diffusivities, porosity, films, and reaction enthalpy are tutorial
   assumptions. Model-form uncertainty is not in the two-parameter covariance.
 - Independent Fick diffusion omits Stefan-Maxwell coupling and pressure-driven

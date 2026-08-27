@@ -56,6 +56,96 @@ changes.
   know P is PSD" when the reason to reach for it here is the opposite. It now
   names `method='ipm'` as the engine that requires PSD and points at
   `method='active-set'` as the one that does not.
+- **Catalyst-pellet tutorial: the nested route's thermal limit is a
+  constraint, not a state bound** (#787). `solve_nested_design` defines a
+  `thermal_margin` inequality, but the inner `solve_forward` root solve used
+  `temperature_limit_k` as the temperature *state* bound. A converged inner
+  solution could therefore never report a negative margin: a thermally
+  difficult candidate stalled against the bound with an unclosed energy
+  balance, and the outer SLSQP was handed a failed state solve instead of the
+  constraint violation it exists to respond to. It could not tell "this design
+  is too hot" from "the physics did not converge", and aborted on the first
+  such candidate.
+
+  `PelletConfig` now separates the two: `temperature_limit_k` stays the design
+  constraint, while `state_temperature_floor_k` and
+  `state_temperature_ceiling_k` (400 K to 900 K) are the root solve's own
+  numerical bracket, deliberately straddling the design ceiling. The bracket
+  is loose enough that the design constraint binds first and tight enough to
+  keep the solve off the ignited branch — for the nominal parameters the
+  low-temperature branch turns back just above a 613 K peak as the external
+  heat-transfer coefficient is lowered (converging at 612.7 K for
+  `h = 171.5 W m^-2 K^-1`, not at all by `h = 170`), and past that fold the
+  only remaining steady state is a mass-transfer-limited runaway of order
+  `10^3 K` hot and far outside the Koschany fit. `solve_design` is unchanged:
+  the simultaneous route still carries the design ceiling directly as a state
+  bound, which is the point of that transcription.
+
+  `PelletSolution` gained `thermal_margin_k` and `thermally_feasible`, so a
+  hot-but-converged solution is distinguishable from a failed one at the API
+  level; `success` remains a statement about the state solve alone. The
+  bracket is not a kinetic-validity claim — a converged state above
+  `temperature_limit_k` is reported infeasible and never returned as a design.
+
+  Regression: with the ceiling moved to 570 K, under the 572.5 K peak of the
+  equal-inventory uniform eight-cell pellet, the uniform candidate converges
+  to residual 1.4e-13 with a -2.51 K margin, while collapsing the bracket back
+  onto the ceiling reproduces the old failure (pinned at 570.000 K, residual
+  1.8e-03); both design routes then drive the constraint active and agree on
+  the same profile to 1e-5. Nominal eight-cell results are unchanged to
+  1e-13 — the designs reported in #779 remain near 579 K with the ceiling
+  slack.
+
+  One clarification on the report's own configuration: the eight-cell mesh at
+  `heat_transfer_coefficient_w_m2_k=80` still fails, and correctly so. That
+  film coefficient is past the fold — the low-temperature branch no longer
+  exists there, so there is no steady state for the root solve to find and
+  `success=False` is the honest answer, not a bound artifact (the peak
+  temperature stalls at 555 K, nowhere near the 613 K ceiling). Both routes now
+  say so with a message that names the failed state solve rather than
+  re-raising a bare solver string. The constraint-handling gap the report
+  identified is real and is fixed; it is reproduced above at a film coefficient
+  where a solution does exist.
+
+- **A truncated `.nl` file is rejected instead of solved** (#785). A `.nl`
+  cut short before its trailing segments — an interrupted write, a full disk,
+  a partial copy, a killed AMPL/Pyomo writer — parsed without complaint:
+  every segment the truncation ate silently reverted to its default, so the
+  rows became unconstrained, the variables free and the linear parts empty,
+  and POUNCE reported `Optimal Solution Found` / `SolveSucceeded` with exit
+  code 0 on a model it had quietly replaced. The reporter's two-variable
+  model returned `obj=0.0` against a closed-form optimum of `12.5`. That made
+  truncation the one malformed input that answers confidently instead of
+  failing: an empty file, non-UTF-8 bytes and a missing file each already
+  exit 2.
+
+  The header carries enough to tell a truncated file from a legitimately
+  short one, and the parser now reads it: `r` and `b` are required whenever
+  the model declares rows or columns (both are unconditional in the format —
+  a free row or variable gets the `3` "no bounds" code, not an omitted line),
+  and the `J` segments must supply exactly the `nzc` Jacobian nonzeros header
+  line 8 declares. The three cut points fail differently and are checked
+  separately: the nonzero cross-check is the only one that fires when the
+  bounds all survived and only the coefficients are gone.
+
+  Only a cut landing at or before `r` returned a confident wrong answer;
+  cuts landing later, and a file with only its `J` segment missing, already
+  exited 1 with `Problem is primal infeasible` and `obj=13.0` on the same
+  model. Those now exit 2 as well. That is still a behaviour change worth
+  stating: an infeasibility verdict is a claim about the *model*, and these
+  were derived from a corrupt file — the row had reduced to `0 = 6`. A
+  hand-written `.nl` with a loose header is now rejected for the same
+  reason, the same trade the `k`-segment count check already makes, and the
+  error names the exact mismatch.
+
+  The check found four stale headers on its way in. Three CLI fixtures
+  (`convex_qp.nl`, `infeasible_qp.nl`, `nonconvex_qp.nl`) and the reader's
+  own `WITH_CON_SUFFIX` declared a Jacobian nonzero count their `J` segments
+  contradicted; the field had never been read, so nothing caught the drift.
+  Headers corrected — the parse and the solutions are unchanged, since the
+  count the solver uses was always derived from the segments themselves.
+  Every other `.nl` in the repository, all of them writer-generated, already
+  agreed.
 
 - **The directional degeneracy QP decides a bound only when it is at
   a kink.** The QP (gh#708) treats an engaged row as sitting at its
