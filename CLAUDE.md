@@ -202,6 +202,23 @@ of an *inverse*, so classifying every bounded variable that way is `n`
 back-solves — so the refinement is on demand, over the ambiguous entries,
 never the default.
 
+**This holds for constraint rows too, and the row denominator being
+better is not the same as it being right** (gh#804). A row's `q` is
+`|∇dᵀH∇d|/‖∇d‖²`, a genuine curvature along the row's own gradient
+rather than a bare diagonal — which is exactly why gh#763 left it
+alone, and exactly the reasoning that would have left it wrong. It is
+still un-reduced: the other free coordinates re-optimize, so a row's
+ratio is `reduced/directional` and a coupled row kink reads `AMBIGUOUS`
+at any tolerance, same as a variable's. `Solver::reduced_row_activity` /
+`solver.reduced_row_activity` answers it, one back-solve per row against
+a unit right-hand side in the `s` block — the row's own value IS a KKT
+coordinate, the slack tied to the model by `dⱼ(x) = sⱼ`, so it is the
+variable accessor one block over. Unlike the variable path, the row
+frame conversion has real arithmetic in it (three `dg` factors meet in
+one ratio), which is what
+`leg_scaling_the_reduced_row_curvature_is_unmoved_by_a_row_scaling`
+exists to pin.
+
 ## Working GitHub issues
 
 When opening a PR that fixes a filed issue, the PR **body** (not just the
