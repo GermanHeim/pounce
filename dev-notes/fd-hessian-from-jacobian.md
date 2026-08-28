@@ -68,7 +68,7 @@ model before assuming this mode is affordable on it.
 | N=320 | exact | Optimal | 57 | 17.5 s | 65.3269077801929 |
 | N=320 | lbfgs | **MaxIter** | 1200 | 728.3 s | 65.3265568888976 |
 | N=320 | **fd-declared** | **Optimal** | **57** | **22.5 s** | 65.3269077802016 |
-| N=320 | **fd-jacobian** † | **Optimal** | **62** | 429.9 s | 65.3269077801958 |
+| N=320 | **fd-jacobian** | **Optimal** | **62** | 386.2 s | 65.3269077801958 |
 
 `fd-declared` reproduces the exact path's iteration count exactly at both
 meshes and its objective to 14 significant figures, for 1.3–2.4× the wall
@@ -93,14 +93,6 @@ which is safe — a superset costs extra probe groups, never a wrong answer
 There is deliberately no mode that guesses a *subset*: that would silently
 drop curvature.
 
-† Measured after the objective-clique fix but before the two gh#823 review
-fixes (`b0eff6c`). Those cannot change this leg's iteration count —
-`laptime` states its objective linearity, so the widened-clique fallback
-never fires here — but the wall figure is expected to rise by roughly one
-Hessian build, as it did at N=160 (38.7 s → 42.3 s). Being re-measured;
-the row is flagged rather than quietly carried forward, which is the
-failure mode the next section is about.
-
 ### The table above used to disprove the paragraph above it
 
 Worth recording, because the contradiction sat here unread through a
@@ -124,6 +116,11 @@ implication was available the whole time.
 
 With the objective clique in place both legs agree with exact to fourteen
 digits and take the exact path's own iteration count.
+
+Every row above is measured on `b0eff6c` or later. The N=320 `fd-jacobian`
+row is unaffected by the restoration changes merged after it, and that is
+checked rather than assumed: the leg reports `restoration_calls: 0`, so it
+never enters the code those commits touch.
 
 **For a CasADi/FMU model this is the decision point.** If the frontend can
 state a Hessian sparsity pattern — which is much weaker than evaluating
