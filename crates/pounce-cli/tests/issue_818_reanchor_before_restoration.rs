@@ -93,6 +93,34 @@ fn iters(r: &SolveReport) -> i32 {
     r.statistics.iteration_count
 }
 
+/// Run `fixture` and return `(how many times the rung fired, the status line)`.
+///
+/// The re-anchor is not in the JSON report — it is one `tracing` line at debug
+/// level, which is the only place the *decision* is observable rather than its
+/// downstream effect on a trajectory. `issue_438_resto_layer2_verdict.rs` reads
+/// the restoration layer's verdict the same way.
+fn solve_counting_reanchors(fixture: &str, tag: &str, restarts: u32) -> (usize, String) {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named(fixture))
+        .arg("--no-sol")
+        .arg("hessian_approximation=limited-memory")
+        .arg(format!("limited_memory_ls_failure_restarts={restarts}"))
+        .env("RUST_LOG", "pounce::algorithm=debug")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap_or_else(|e| panic!("spawn pounce for {fixture} ({tag}): {e}"));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fires = combined
+        .lines()
+        .filter(|l| l.contains("re-anchoring the limited-memory Hessian"))
+        .count();
+    (fires, combined)
+}
+
 /// `issue_508_infeasible_gap_1em4` is the cheap, unambiguous win: the rung
 /// fires, the solve reaches the *same* verdict — the problem really is
 /// infeasible — and gets there in fewer iterations (79 -> 76).
@@ -126,26 +154,52 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
     );
 }
 
-/// `deb7` is the stall the rung exists for, and the reason it stays in the
-/// tree: the solve fails on this arm whichever way the option is set, so the
-/// only thing that can move is how long it spends failing. Measured 715
-/// iterations without the rung and 610 with — the difference is a restoration
-/// phase entered at a point feasible to 8e-13, with nothing to reduce.
+/// `deb7` is the stall the rung was designed from, and the reason the code
+/// stays in the tree. What is pinned here is that the rung **fires** on it,
+/// and that firing does not manufacture a success.
 ///
-/// Asserted as a strict inequality rather than a pinned count: the number is
-/// a property of a stalling solve and will drift, but "re-anchoring is not
-/// worse than walking into a restoration that has nothing to reduce" is the
-/// claim, and it is falsifiable.
+/// **The iteration count is deliberately not asserted, because it is not
+/// portable.** An earlier revision of this test asserted that the rung
+/// shortens `deb7` (measured 715 without / 610 with). That ordering does not
+/// reproduce: on Linux, at this commit, `deb7` runs 455 iterations without
+/// the rung and 729 with — identical under `--release` and under the
+/// unoptimised profile CI actually builds, so it is not an optimisation
+/// artefact, and CI reported exactly those two numbers. A stalling solve's
+/// trajectory depends on the host's linear algebra, so any strict inequality
+/// on its length is a test that passes where it was measured and fails
+/// elsewhere.
+///
+/// What survives that is the mechanism: the re-anchor either happens or it
+/// does not, and that is a property of the code rather than of the arithmetic
+/// it runs on. `limited_memory_ls_failure_restarts` bounds it at one per
+/// solve, so "fires exactly once with the budget, never without it" is exact.
+///
+/// The second assertion is the safety half. `deb7` does not solve on this arm
+/// under any setting measured, so a `Solve_Succeeded` appearing here would be
+/// the rung turning a stall into a spurious success — a wrong answer, and the
+/// one outcome that would matter more than any iteration count.
 #[test]
-fn reanchor_shortens_a_stall_that_ends_in_restoration() {
-    let off = solve("deb7.nl", "deb7_off", 0);
-    let on = solve("deb7.nl", "deb7_on", 1);
-    assert!(
-        iters(&on) < iters(&off),
-        "expected the rung to shorten the stall; {} with, {} without",
-        iters(&on),
-        iters(&off)
+fn the_rung_fires_on_the_model_it_was_designed_from() {
+    let (off_fires, off_status) = solve_counting_reanchors("deb7.nl", "deb7_off", 0);
+    let (on_fires, on_status) = solve_counting_reanchors("deb7.nl", "deb7_on", 1);
+
+    assert_eq!(
+        off_fires, 0,
+        "the default budget is 0, so nothing may re-anchor; saw {off_fires}"
     );
+    assert_eq!(
+        on_fires, 1,
+        "a budget of 1 must be spent exactly once on deb7 — the model the rung \
+         was designed from; saw {on_fires}"
+    );
+
+    for (label, status) in [("off", &off_status), ("on", &on_status)] {
+        assert!(
+            !status.contains("Solve_Succeeded"),
+            "deb7 does not solve on the limited-memory arm; a success with the \
+             rung {label} means the rung manufactured one ({status})"
+        );
+    }
 }
 
 /// The other half of the measurement, and the one that decided the default.
