@@ -10,7 +10,7 @@
 //! about one half, and the predicted-operator rate is under a tenth,
 //! so only the predicted operator reaches the tolerance below.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
@@ -32,7 +32,12 @@ use pounce_sensitivity::Solver;
 /// predictor is the tangent `dx = delta`, and everything the corrector
 /// closes is genuine curvature: at `delta = 0.5` the predictor is off
 /// by `0.5 - ln 1.5 = 9.45e-2`.
-struct ExpCurvature;
+struct ExpCurvature {
+    /// Exact-Hessian evaluations served, for the limited-memory test
+    /// below: a `limited-memory` solve and its correction must never
+    /// ask for one.
+    h_evals: Rc<Cell<usize>>,
+}
 
 impl TNLP for ExpCurvature {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
@@ -103,6 +108,7 @@ impl TNLP for ExpCurvature {
                 jcol.copy_from_slice(&[0, 0]);
             }
             SparsityRequest::Values { values } => {
+                self.h_evals.set(self.h_evals.get() + 1);
                 let xv = x.expect("hessian point")[0];
                 values[0] = obj_factor * xv.exp();
                 values[1] = -obj_factor;
@@ -114,7 +120,7 @@ impl TNLP for ExpCurvature {
     fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
-fn solved() -> Solver {
+fn solved_with(limited_memory: bool) -> (Solver, Rc<Cell<usize>>) {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -128,14 +134,27 @@ fn solved() -> Solver {
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
+    if limited_memory {
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
-    let mut solver = Solver::new(app, Rc::new(RefCell::new(ExpCurvature)));
+    let h_evals = Rc::new(Cell::new(0_usize));
+    let tnlp = ExpCurvature {
+        h_evals: Rc::clone(&h_evals),
+    };
+    let mut solver = Solver::new(app, Rc::new(RefCell::new(tnlp)));
     let status = solver.solve();
     assert!(
         matches!(status, ApplicationReturnStatus::SolveSucceeded),
-        "base solve failed: {status:?}",
+        "base solve failed (limited_memory={limited_memory}): {status:?}",
     );
-    solver
+    (solver, h_evals)
+}
+
+fn solved() -> Solver {
+    solved_with(false).0
 }
 
 /// Six iterations must close the curvature gap. The base-point
@@ -173,5 +192,47 @@ fn the_corrector_closes_curvature_the_base_operator_cannot() {
         "six iterations on the predicted point's operator close the \
          curvature gap: |corrected - ln(1+delta)| = {err:e}, predictor \
          error {predictor_err:e}",
+    );
+}
+
+/// A `limited-memory` solve keeps its quasi-Newton matrix through the
+/// correction: `ConvergedState` captures the option, the corrector
+/// skips the exact-Hessian re-evaluation, and the exact Hessian is
+/// never requested, which the fixture's own counter proves. The
+/// correction still acts, against the L-BFGS matrix held while the
+/// Jacobians and the barrier diagonal move to the predicted point: on
+/// this fixture the quasi-Newton matrix sits near `e^0 = 1` against a
+/// true `W* = 1.5`, so the contraction is near one half per iteration
+/// rather than the exact-Hessian operator's tenth, and eight
+/// iterations take the predictor's `9.45e-2` curvature error to
+/// `4.0e-4`.
+#[test]
+fn a_limited_memory_solve_corrects_without_an_exact_hessian() {
+    let (solver, h_evals) = solved_with(true);
+    assert_eq!(
+        h_evals.get(),
+        0,
+        "a limited-memory solve never asks for the exact Hessian",
+    );
+    let base_x = solver.converged().expect("converged").x[0];
+    let delta = 0.5;
+    let exact = (1.0_f64 + delta).ln();
+    let step = solver
+        .parametric_step_full(&[0], &[delta])
+        .expect("full step");
+    let predictor_err = (base_x + step[0] - exact).abs();
+    let (refined, report) = solver
+        .correct_step(&[0], &[delta], &step, 8)
+        .expect("corrector");
+    assert_eq!(
+        h_evals.get(),
+        0,
+        "the correction must not evaluate one either: the quasi-Newton          matrix is all there is",
+    );
+    assert!(report.improved(), "the corrector must report improvement");
+    let err = (base_x + refined[0] - exact).abs();
+    assert!(
+        err < predictor_err / 100.0,
+        "eight iterations against the held quasi-Newton matrix still          close two orders of the curvature gap: {err:e} from a          predictor error of {predictor_err:e}",
     );
 }
