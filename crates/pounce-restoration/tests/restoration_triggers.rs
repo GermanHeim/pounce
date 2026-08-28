@@ -23,7 +23,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
-use pounce_restoration::min_c_1nrm::{MinC1NormRestoration, RestoInnerSolver};
+use pounce_restoration::min_c_1nrm::{MinC1NormRestoration, RestoInnerReturn, RestoInnerSolver};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory,
@@ -139,11 +139,16 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
         // solver never runs an IPM, so it has nothing to fire.
         let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _, _, _| {
             *count.borrow_mut() += 1;
-            // Returning `None` makes `MinC1NormRestoration` surface
+            // A `None` result makes `MinC1NormRestoration` surface
             // `RestorationOutcome::Failed`, so the outer algorithm
             // terminates with `RestorationFailure`. That's what we
-            // want for a wiring smoke test.
-            None
+            // want for a wiring smoke test. `inner_iter_count: 0` says
+            // no nested IPM ran, so gh #819's roll-forward stays inert
+            // here — this hook never printed an `r` row to account for.
+            RestoInnerReturn {
+                inner_iter_count: 0,
+                result: None,
+            }
         });
         let driver = MinC1NormRestoration::new().with_inner_solver(hook);
         Box::new(driver) as Box<dyn RestorationPhase>

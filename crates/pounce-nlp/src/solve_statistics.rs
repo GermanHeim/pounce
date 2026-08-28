@@ -99,15 +99,25 @@ pub struct SolveStatistics {
     /// Number of times `IpoptAlgorithm::invoke_restoration` was
     /// entered during this solve.
     pub restoration_calls: Index,
-    /// Cumulative inner-IPM iteration count across every restoration
-    /// call (sum of `RestoSolveResult::iter_count`). Each restoration
-    /// call's inner IPM runs to its own convergence; this is the
-    /// total work the inner solver did.
+    /// Cumulative inner-IPM iterations across every restoration call —
+    /// the number of `r`-suffix rows a `print_level=5` log would show.
+    ///
+    /// Each call contributes its sub-solve's own *length*: the inner
+    /// counter is seeded from the outer's at entry (upstream
+    /// `IpRestoMinC_1Nrm.cpp:181`), so the length is the terminating value
+    /// minus the outer count at entry. Before gh #819 this summed the
+    /// terminating values themselves — absolute positions in a shared
+    /// numbering, not lengths — and recorded `0` for any call that failed,
+    /// which is the case a reader is looking at this field to understand.
     pub restoration_inner_iters: Index,
-    /// Number of outer iterations that ran in restoration mode (the
-    /// `r`-suffix iter lines visible in `print_level=5` output).
-    /// Counts outer iters where the IPM was driving a restoration
-    /// trial step rather than a normal Newton step.
+    /// Number of *outer* iterations consumed by restoration: one per call,
+    /// so this always equals `restoration_calls`.
+    ///
+    /// It is not the count of `r`-suffix rows — that is
+    /// `restoration_inner_iters`, and reading this field as those rows is
+    /// what the doc comment here said until gh #819. Restoration in POUNCE
+    /// is a nested solve entered from a single outer iteration, not a mode
+    /// the outer loop runs in, so there is no third number here to report.
     pub restoration_outer_iters: Index,
     /// Cumulative wall-clock seconds spent inside `perform_restoration`
     /// across all restoration calls. Useful for "what fraction of the

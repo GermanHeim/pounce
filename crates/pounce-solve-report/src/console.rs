@@ -557,6 +557,25 @@ pub fn print_summary(
         "Number of Lagrangian Hessian evaluations             = {}",
         counters.n_h
     );
+    // gh #819. `Number of Iterations` above is the index of the last row the
+    // iteration table printed, `r` rows included — Ipopt's rule, and now
+    // POUNCE's on every exit path. That total is the right headline, but it
+    // hides the split, and the split is what tells a reader whether an
+    // eleven-second solve was eleven seconds of Newton steps or a restoration
+    // grind. Printed only when restoration actually ran, so a summary from a
+    // solve that never entered it stays byte-identical to upstream's.
+    if stats.restoration_inner_iters > 0 || stats.restoration_calls > 0 {
+        println!(
+            "Number of restoration iterations                     = {} (in {} call{})",
+            stats.restoration_inner_iters,
+            stats.restoration_calls,
+            if stats.restoration_calls == 1 {
+                ""
+            } else {
+                "s"
+            },
+        );
+    }
     println!(
         "Total seconds in POUNCE                              = {:.3}",
         stats.total_wallclock_time_secs

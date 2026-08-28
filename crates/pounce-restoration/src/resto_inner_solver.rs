@@ -385,6 +385,12 @@ where
 /// Single-shot inner-solve driver. Wraps the construction of the
 /// nested `IpoptAlgorithm` and the extraction of the recovered
 /// `(orig_x, orig_s)` from the inner-final iterate.
+///
+/// Returns the sub-solve's terminating `iter_count` alongside the recovered
+/// iterate, so the count survives every failure path (gh #819). The work of
+/// carrying it is done by the thin wrapper: [`run_inner_resto_impl`] keeps
+/// the `?`-heavy body and writes the count through `spent` as soon as the
+/// nested IPM returns, before any of the extractions that can bail.
 pub fn run_inner_resto(
     outer_data: &IpoptDataHandle,
     outer_cq: &IpoptCqHandle,
@@ -396,6 +402,42 @@ pub fn run_inner_resto(
     print_iter_output: bool,
     debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
     intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
+) -> crate::min_c_1nrm::RestoInnerReturn {
+    let mut spent: Index = 0;
+    let result = run_inner_resto_impl(
+        outer_data,
+        outer_cq,
+        outer_nlp,
+        resto_builder,
+        inner_alg_builder,
+        backend_factory,
+        orig_progress_cb,
+        print_iter_output,
+        debug_hook,
+        intermediate_tnlp,
+        &mut spent,
+    );
+    crate::min_c_1nrm::RestoInnerReturn {
+        inner_iter_count: spent,
+        result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner_resto_impl(
+    outer_data: &IpoptDataHandle,
+    outer_cq: &IpoptCqHandle,
+    outer_nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    resto_builder: &RestoAlgorithmBuilder,
+    inner_alg_builder: &AlgorithmBuilder,
+    backend_factory: LinearBackendFactory,
+    orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    print_iter_output: bool,
+    debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
+    // Out-param: the nested IPM's terminating `iter_count`, written as soon
+    // as it is known so every `?` below can bail without losing it.
+    spent: &mut Index,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -787,15 +829,19 @@ pub fn run_inner_resto(
     // resto NLP itself reached stationarity at a point of large
     // orig-NLP `inf_pr`). Hoist the extraction so it runs before the
     // status branch.
-    let final_iv = alg.data.borrow().curr.clone()?;
-    let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
-    let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
-    let trial_s = clone_to_dense(&*final_iv.s);
-
+    // Read the counters *before* the extractions below: each of those can
+    // bail with `?`, and gh #819 is what happens when the number the whole
+    // summary hangs on is only recorded on the paths that succeed.
     let (inner_iter_count, iters_since_header, last_output) = {
         let d = alg.data.borrow();
         (d.iter_count, d.info_iters_since_header, d.info_last_output)
     };
+    *spent = inner_iter_count;
+
+    let final_iv = alg.data.borrow().curr.clone()?;
+    let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
+    let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
+    let trial_s = clone_to_dense(&*final_iv.s);
 
     // gh#645: the user's callback returned `false` from a restoration
     // fire. Return before the locally-infeasible adjudication below
@@ -933,11 +979,13 @@ pub fn run_inner_resto(
     } else {
         eval_orig_rel_c_inf_pr_at_inner_curr(&*final_iv.x, outer_nlp)
     };
-    let feasible_point_found = is_square_problem
-        && matches!(status, SolverReturn::StopAtAcceptablePoint)
-        && orig_inf_pr_at_final.is_finite()
-        && orig_inf_pr_at_final < outer_constr_viol_tol
-        && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD;
+    let feasible_point_found = square_feasible_point_found(
+        is_square_problem,
+        status,
+        orig_inf_pr_at_final,
+        outer_constr_viol_tol,
+        orig_rel_inf_pr_at_final,
+    );
 
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
@@ -1308,6 +1356,39 @@ fn eval_orig_inf_pr_at_inner_curr(
 /// the outer side: one band, so a model cannot be judged feasible by one of
 /// the three and infeasible by another.
 const SQUARE_FEASIBLE_REL_VIOL_THRESHOLD: f64 = 1e-2;
+
+/// The square-problem arm's gate: may this recovered point be reported as
+/// `FeasiblePointFound`?
+///
+/// Extracted from the caller so the first conjunct can be held by a test.
+/// `is_square_problem` is not one condition among five — it is what the
+/// status *means*, and two things downstream are built on it:
+///
+/// * `pounce_solve_report::status_to_solve_result_num` writes AMPL code
+///   `2` for `FeasiblePointFound`, in the `0..=99` solved band, because on
+///   a square problem the objective is constant and a feasible point is
+///   the solution. That reasoning is void for a non-square problem, where
+///   a feasible point says nothing about optimality.
+/// * `pyomo_pounce.v2._V2_STATUS` and `pyomo_pounce.sens._STATUS_RESULT`
+///   report the status as a success for the same reason.
+///
+/// This is the crate's only producer of the status, so widening this gate
+/// past square problems would silently turn those three surfaces into
+/// wrong answers rather than merely optimistic ones (gh #815 is what the
+/// opposite error cost: the band said failure and the answer was right).
+fn square_feasible_point_found(
+    is_square_problem: bool,
+    status: SolverReturn,
+    orig_inf_pr_at_final: f64,
+    outer_constr_viol_tol: f64,
+    orig_rel_inf_pr_at_final: f64,
+) -> bool {
+    is_square_problem
+        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && orig_inf_pr_at_final.is_finite()
+        && orig_inf_pr_at_final < outer_constr_viol_tol
+        && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD
+}
 
 /// The orig NLP's equality-block violation at the inner IPM's converged
 /// iterate, as a fraction of each row's **declared** right-hand side:
@@ -1750,6 +1831,85 @@ mod tests {
             ConvergenceStatus::MaxIterExceeded,
             "`max_resto_iter=2` must stop the restoration sub-solve at 2",
         );
+    }
+
+    /// The conjunct the reported status *means*, held here because three
+    /// surfaces outside this crate are built on it — see
+    /// `square_feasible_point_found`'s doc comment. Every other input is
+    /// held at a value that would pass, so this asserts squareness alone
+    /// decides, not that some other guard happens to also refuse.
+    #[test]
+    fn only_a_square_problem_yields_a_feasible_point_verdict() {
+        let pass = |sq| {
+            square_feasible_point_found(
+                sq,
+                SolverReturn::StopAtAcceptablePoint,
+                1.0e-6, // orig violation, under the tol below
+                1.0e-4, // outer constr_viol_tol
+                1.0e-4, // relative violation, under the 1e-2 band
+            )
+        };
+        assert!(
+            pass(true),
+            "a square problem at these residuals is the verdict"
+        );
+        assert!(
+            !pass(false),
+            "a non-square problem must never reach FeasiblePointFound: the \
+             solved-band `.sol` code and both pyomo_pounce success rows are \
+             justified only by squareness",
+        );
+    }
+
+    /// The remaining conjuncts, each refused on its own from the same
+    /// passing baseline — so a future rewrite cannot drop one silently and
+    /// still be caught only by the squareness test above.
+    #[test]
+    fn each_residual_guard_refuses_on_its_own() {
+        let g =
+            |status, inf_pr, tol, rel| square_feasible_point_found(true, status, inf_pr, tol, rel);
+        assert!(g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.0e-4
+        ));
+        // Not an acceptable-point stop.
+        assert!(!g(SolverReturn::Success, 1.0e-6, 1.0e-4, 1.0e-4));
+        assert!(!g(SolverReturn::MaxiterExceeded, 1.0e-6, 1.0e-4, 1.0e-4));
+        // Violation not finite, or not under the outer tolerance.
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            f64::NAN,
+            1.0e-4,
+            1.0e-4
+        ));
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            f64::INFINITY,
+            1.0e-4,
+            1.0e-4
+        ));
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-3,
+            1.0e-4,
+            1.0e-4
+        ));
+        // Absolutely tiny but large against the row's own magnitude — the
+        // scale-free companion guard, at 101% of the 1e-2 band.
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.01e-2
+        ));
+        assert!(g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.0e-2
+        ));
     }
 
     #[test]
