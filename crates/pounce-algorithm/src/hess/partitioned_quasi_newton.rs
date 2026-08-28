@@ -1,0 +1,1170 @@
+//! Partitioned quasi-Newton Hessian — a **per-constraint element**
+//! updater (Griewank & Toint partitioned updating; Asprion, Chinellato &
+//! Guzzella, *J. Appl. Math.* 2014, doi:10.1155/2014/341716, applied it to
+//! direct-collocation trajectory optimization).
+//!
+//! # Why this exists
+//!
+//! [`crate::hess::lim_mem_quasi_newton::LimMemQuasiNewtonUpdater`]
+//! approximates the whole Lagrangian Hessian with `m` curvature pairs and
+//! publishes it as a [`pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrix`],
+//! which [`crate::kkt::low_rank_aug_system_solver::LowRankAugSystemSolver`]
+//! applies by Sherman-Morrison-Woodbury. Two consequences:
+//!
+//! * the `(1,1)` block the sparse factorization sees is **diagonal**, so
+//!   whatever block structure the model's Hessian has is invisible to the
+//!   linear solver's ordering — and the Schur path
+//!   ([`crate::kkt::SchurAugSystemSolver`]) is bypassed entirely
+//!   (`alg_builder.rs`, the `is_lbfgs` branch);
+//! * `m` pairs cannot represent the curvature of a 60 000-variable
+//!   collocation model, and the iteration count shows it.
+//!
+//! This updater takes the other route. The Lagrangian is a sum of
+//! *element functions* with small support,
+//!
+//! ```text
+//!     L(x, y) = f(x) + Σ_j (y_c)_j c_j(x) + Σ_j (y_d)_j d_j(x)
+//! ```
+//!
+//! so its Hessian is the assembly of the elements' own Hessians:
+//!
+//! ```text
+//!     ∇²L = ∇²f + Σ_j (y_c)_j ∇²c_j + Σ_j (y_d)_j ∇²d_j
+//! ```
+//!
+//! We keep one small dense symmetric `B_e` per element, update each from
+//! that element's **own** curvature pair, and scatter-add the weighted
+//! blocks into a [`SymTMatrix`] — the same type the exact-Hessian path
+//! publishes, so the whole downstream KKT machinery is unchanged and the
+//! factorization sees the true block-banded pattern.
+//!
+//! # Why per-constraint, and not per-primal-block
+//!
+//! Asprion et al. partition the *Lagrangian* by primal stage blocks.
+//! That is fewer, larger elements, but each element's target moves as the
+//! multipliers move. Splitting per constraint row instead gives each
+//! `B_e` a **multiplier-independent** target — `∇²c_j` is a property of
+//! the model, not of the iterate — so the approximation converges instead
+//! of chasing `y`. It also needs no new user-facing structure hook: an
+//! element's support is a row of the constraint Jacobian, whose pattern
+//! every TNLP already declares.
+//!
+//! # Why SR1 is the default here
+//!
+//! An individual constraint is not convex, so `sᵀy > 0` fails routinely
+//! and Powell-damped BFGS would force each `∇²c_j` model positive
+//! semidefinite — then multiply it by a multiplier of either sign. SR1
+//! carries the sign, and the indefiniteness reaches the IPM's inertia
+//! check, which is exactly what
+//! `dev-notes/issue-131-monotone-lbfgs-stall.md` records the damped path
+//! hiding. [`UpdateType::Bfgs`] is accepted for comparison.
+//!
+//! # Bounded element size
+//!
+//! An element with `k` nonzeros costs `k(k+1)/2` stored reals. A row that
+//! touches most of `x` — a global resource constraint, or an objective
+//! that sums over every stage — would blow that up, so elements wider
+//! than `max_element` degrade to a **diagonal** approximation
+//! (Dennis-Wolkowicz weak secant, `sᵀBs = sᵀy`) rather than being
+//! dropped: a separable objective is then still represented exactly, and
+//! a coupled one is represented approximately instead of not at all.
+
+use crate::hess::lim_mem_quasi_newton::UpdateType;
+use crate::hess::r#trait::HessianUpdater;
+use crate::ipopt_cq::IpoptCqHandle;
+use crate::ipopt_data::IpoptDataHandle;
+use pounce_common::types::{Index, Number};
+use pounce_linalg::Vector;
+use pounce_linalg::compound_vector::CompoundVector;
+use pounce_linalg::dense_vector::DenseVector;
+use pounce_linalg::triplet::{GenTMatrix, SymTMatrix, SymTMatrixSpace};
+use std::rc::Rc;
+
+/// Relative safeguard on the SR1 denominator: the update is skipped when
+/// `|wᵀs| ≤ SR1_SAFEGUARD · ‖s‖ · ‖w‖` (Nocedal & Wright §6.2, eq. 6.26,
+/// which suggests `r ∈ [1e-8, 1e-4]`).
+///
+/// This is a *direction* test only — it rejects a pair carrying no usable
+/// curvature along `s`. It is deliberately **not** the magnitude control,
+/// and trying to make it one was measured to fail from both ends. The
+/// rank-1 term `w wᵀ / wᵀs` is bounded only by `‖w‖ / (r ‖s‖)`, so at
+/// `r = 1e-8` it permits a correction `1e8` times the curvature the data
+/// implies — on `benchmarks/large_scale` `laptime` the implied element
+/// curvature `‖y_e‖/‖s_e‖` stayed a healthy 9–33 every iteration while
+/// single-update block changes reached `1.7e8` and the assembled `W` ran
+/// four orders of magnitude over the exact Lagrangian Hessian. But
+/// tightening it to `1e-4` overshoots just as badly in the other
+/// direction: element supports are small (`k ≈ 9` here) and `w` is
+/// routinely near-orthogonal to `s`, so the test then rejected 9 949 of
+/// 9 950 updates, the blocks never learned anything, and `W` read `0.14`
+/// where the exact Hessian read `2.1e3`. [`DEFAULT_CURVATURE_CAP`] is
+/// where the magnitude is bounded, in the units of the thing being
+/// modelled; this stays loose so that pairs still reach it.
+const SR1_SAFEGUARD: Number = 1e-8;
+
+/// Powell damping threshold for [`UpdateType::Bfgs`], matching the
+/// hard-coded `0.2` of the limited-memory path.
+const POWELL_THETA: Number = 0.2;
+
+/// Relative floor on the BFGS denominators `sᵀr` and `sᵀBs`. The
+/// limited-memory path tests only `> 0`, which is safe there because its
+/// `s` is a whole primal step; restricted to one element's support the
+/// same quantity goes arbitrarily small, and `r rᵀ / sᵀr` then blows up
+/// exactly as the SR1 term does. Same measurement as
+/// [`SR1_SAFEGUARD`]: unfloored, damped BFGS reached block changes of
+/// `2.9e8` — worse than SR1, because `> 0` is no floor at all.
+const BFGS_DENOM_FLOOR: Number = 1e-8;
+
+/// Cap on a single update's magnitude, as a multiple of the curvature the
+/// element's own secant pair implies (`‖y_e‖ / ‖s_e‖`). This is the
+/// backstop the relative denominator floors do not provide on their own:
+/// they bound the *ratio* that produced the term, this bounds the term in
+/// the units of the quantity being modelled. An element Hessian has no
+/// business moving by orders of magnitude more than the curvature its own
+/// data implies, and rejecting such a step costs only a stale block for
+/// one iteration.
+///
+/// `1e1` is the measured best of `{1e1, 1e2, 1e3, 1e4}` on
+/// `benchmarks/large_scale` `laptime` at `N = 80` — objective after 400
+/// iterations 65.46 / 68.83 / 83.46 / diverged against a true optimum of
+/// 65.37, and oracle `rel_fro` 0.999 / 1.01 / 2.45 / 30.6. Read the two
+/// rows together before trusting the default: the setting that behaves
+/// best is also the one where the assembled `W` is *closest to zero*
+/// (`rel_fro ≈ 1` means "the model contributes nothing"), so what this
+/// default buys is a solver that degrades gracefully toward a
+/// regularized gradient method, not one whose curvature model is right.
+/// See the measurement note for what that implies about the
+/// per-constraint decomposition.
+const DEFAULT_CURVATURE_CAP: Number = 1e1;
+
+/// Which gradient an element reads to form its curvature pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElementSource {
+    /// The objective: gradient entries come from `grad_f` directly.
+    Objective,
+    /// A row of `J_c`; entries come from the equality Jacobian's values.
+    EqRow,
+    /// A row of `J_d`; entries come from the inequality Jacobian's values.
+    IneqRow,
+}
+
+/// One element function's quasi-Newton state.
+#[derive(Debug)]
+struct Element {
+    source: ElementSource,
+    /// 0-based row index within the element's source block, i.e. the
+    /// position in `y_c` / `y_d` whose multiplier weights this element.
+    /// Stored rather than inferred from the element's position in the
+    /// table: a constraint row with no Jacobian entries produces no
+    /// element, so counting elements and counting multipliers diverge
+    /// the moment a model has one.
+    row: u32,
+    /// 0-based var-x columns this element touches, ascending and
+    /// deduplicated. `k = support.len()`.
+    support: Vec<Index>,
+    /// `true` when `b` holds the packed lower triangle (`k(k+1)/2`
+    /// reals); `false` when the element degraded to a diagonal
+    /// approximation (`k` reals).
+    dense: bool,
+    /// `B_e`. Packed lower triangle in local coordinates — entry
+    /// `(a, c)` with `a >= c` at `a(a+1)/2 + c` — or the diagonal alone
+    /// when `!dense`.
+    b: Vec<Number>,
+    /// This element's gradient at the previous iterate, local coords.
+    prev_g: Vec<Number>,
+    /// Whether `prev_g` has been written at least once.
+    has_prev: bool,
+    /// Whether `b` has taken an accepted curvature pair (drives the
+    /// one-time scalar seeding).
+    seeded: bool,
+    /// `(position in the source Jacobian's triplet arrays, local index)`
+    /// for every triplet belonging to this element's row. Empty for
+    /// [`ElementSource::Objective`], which reads `grad_f` by support
+    /// index. Duplicated `(row, col)` triplets are summed, matching the
+    /// triplet contract.
+    entries: Vec<(u32, u32)>,
+    /// Position in the assembled matrix's value array for each entry of
+    /// `b`, in the same packing.
+    map: Vec<u32>,
+}
+
+impl Element {
+    fn k(&self) -> usize {
+        self.support.len()
+    }
+}
+
+/// One-time structural census, for the measurement write-up and for
+/// `POUNCE_PARTITIONED_DEBUG`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PartitionStats {
+    pub elements: usize,
+    pub dense_elements: usize,
+    pub diagonal_elements: usize,
+    pub max_support: usize,
+    pub total_support: usize,
+    /// Nonzeros in the assembled lower triangle, diagonal included.
+    pub assembled_nnz: usize,
+    /// Reals held across all `B_e`.
+    pub stored_reals: usize,
+}
+
+pub struct PartitionedQuasiNewtonUpdater {
+    pub update_type: UpdateType,
+    /// Widest element that keeps a dense block; wider ones degrade to a
+    /// diagonal approximation. Option `partitioned_max_element`.
+    pub max_element: usize,
+    /// Floor placed on assembled diagonal entries no active element
+    /// covers, so the `(1, 1)` block never presents a structurally empty
+    /// row to the factorization. Shares
+    /// `limited_memory_init_val_min`'s default and its rationale — see
+    /// the gh#624 discussion in
+    /// [`crate::hess::lim_mem_quasi_newton`].
+    pub init_val_min: Number,
+    /// Clamp on the magnitude of the per-element scalar seeding.
+    pub init_val_max: Number,
+    /// Multiple of the identity published on the **first** iteration,
+    /// before any element has seen a curvature pair. Mirrors
+    /// `limited_memory_init_val` and the empty-history branch of the
+    /// limited-memory updater: publishing the honest all-zero `W` there
+    /// instead hands the very first KKT solve a `(1,1)` block with no
+    /// curvature at all, and the whole trajectory is set by whatever
+    /// `delta_x` the inertia correction then has to invent.
+    pub init_val: Number,
+    /// Support of the objective element, in the compressed `x_var`
+    /// space, when the TNLP could state it
+    /// (`TNLPAdapter::objective_nonlinear_vars`). `None` falls back to
+    /// the first `∇f`'s nonzeros — see `build_structure`.
+    pub objective_vars: Option<Vec<Index>>,
+    /// Multiple of the implied curvature `‖y_e‖/‖s_e‖` that a single
+    /// update to an element block may reach
+    /// (`partitioned_curvature_cap`). See [`DEFAULT_CURVATURE_CAP`].
+    pub curvature_cap: Number,
+
+    /// Element table, built on the first call and fixed thereafter.
+    elements: Vec<Element>,
+    /// Assembled pattern, built with the element table.
+    space: Option<Rc<SymTMatrixSpace>>,
+    /// Assembled positions of the `n` diagonal entries.
+    diag_pos: Vec<u32>,
+    /// Coordinates no active element covers, which take `init_val_min`.
+    uncovered: Vec<Index>,
+    /// `x` at the previous call.
+    prev_x: Option<Vec<Number>>,
+    stats: PartitionStats,
+    /// Curvature pairs accepted / skipped, cumulative — a cheap health
+    /// signal for the write-up.
+    pub accepted_updates: u64,
+    pub skipped_updates: u64,
+    /// Per-call diagnostics for `POUNCE_PARTITIONED_ORACLE`: the element
+    /// with the largest implied curvature `‖y_e‖ / ‖s_e‖`, and the
+    /// largest single-update change to any block.
+    dbg: DebugPeaks,
+}
+
+impl PartitionedQuasiNewtonUpdater {
+    pub fn new(update_type: UpdateType) -> Self {
+        Self {
+            update_type,
+            max_element: 64,
+            init_val_min: 1e-8,
+            init_val_max: 1e8,
+            init_val: 1.0,
+            objective_vars: None,
+            curvature_cap: DEFAULT_CURVATURE_CAP,
+            elements: Vec::new(),
+            space: None,
+            diag_pos: Vec::new(),
+            uncovered: Vec::new(),
+            prev_x: None,
+            stats: PartitionStats::default(),
+            accepted_updates: 0,
+            skipped_updates: 0,
+            dbg: DebugPeaks::default(),
+        }
+    }
+
+    pub fn stats(&self) -> PartitionStats {
+        self.stats
+    }
+
+    /// Build the element table and the assembled sparsity pattern. Runs
+    /// once; both are structural and every later call reuses them, so
+    /// the backend's symbolic factorization is done a single time.
+    fn build_structure(&mut self, n: usize, grad_f: &[Number], jac_c: &GenTMatrix, jac_d: &GenTMatrix) {
+        let mut elements: Vec<Element> = Vec::new();
+
+        // ---- objective element -------------------------------------
+        //
+        // Every constraint element takes its support from a row of the
+        // Jacobian, whose pattern the TNLP is obliged to declare. The
+        // objective has no such declaration, so the support comes from
+        // `get_objective_variables_linearity` via
+        // `TNLPAdapter::objective_nonlinear_vars` — the variables the
+        // objective is *nonlinear* in, which is exactly the rows `∇²f`
+        // can occupy.
+        //
+        // When the TNLP declines, the fallback is the first `∇f`'s
+        // nonzeros, and that pattern is *value-derived*: a coordinate
+        // whose `∂f/∂x_i` happens to vanish at the starting point is
+        // excluded for the whole solve. On `laptime`, which declares 321
+        // objective gradient nonzeros, the fallback captures 161 — so
+        // this is the live case, not a corner. Widening to all of `x` is
+        // not the alternative: that is an `n × n` element.
+        let obj_support: Vec<Index> = match self.objective_vars.clone() {
+            Some(v) => v,
+            None => (0..n)
+                .filter(|&i| grad_f[i] != 0.0)
+                .map(|i| i as Index)
+                .collect(),
+        };
+        if !obj_support.is_empty() {
+            elements.push(Self::make_element(
+                ElementSource::Objective,
+                0,
+                obj_support,
+                Vec::new(),
+                self.max_element,
+            ));
+        }
+
+        // ---- one element per constraint row -------------------------
+        for (source, jac) in [
+            (ElementSource::EqRow, jac_c),
+            (ElementSource::IneqRow, jac_d),
+        ] {
+            let n_rows = jac.space().n_rows() as usize;
+            let irows = jac.irows();
+            let jcols = jac.jcols();
+            // Bucket triplet positions by row. `irows` is 1-based.
+            let mut row_counts = vec![0u32; n_rows + 1];
+            for &i in irows {
+                row_counts[i as usize] += 1;
+            }
+            let mut row_start = vec![0u32; n_rows + 2];
+            for r in 0..=n_rows {
+                row_start[r + 1] = row_start[r] + row_counts[r];
+            }
+            let mut cursor = row_start.clone();
+            let mut by_row = vec![0u32; irows.len()];
+            for (pos, &i) in irows.iter().enumerate() {
+                let r = i as usize;
+                by_row[cursor[r] as usize] = pos as u32;
+                cursor[r] += 1;
+            }
+
+            for r in 1..=n_rows {
+                let slice = &by_row[row_start[r] as usize..row_start[r + 1] as usize];
+                if slice.is_empty() {
+                    continue;
+                }
+                // Support = sorted unique columns of this row (0-based).
+                let mut cols: Vec<Index> =
+                    slice.iter().map(|&p| jcols[p as usize] - 1).collect();
+                cols.sort_unstable();
+                cols.dedup();
+                // Local index of every triplet position in the row.
+                // Duplicated `(row, col)` triplets land on the same local
+                // index and are summed when the gradient is read.
+                let entries: Vec<(u32, u32)> = slice
+                    .iter()
+                    .map(|&p| {
+                        let c = jcols[p as usize] - 1;
+                        let local = cols.partition_point(|&x| x < c) as u32;
+                        (p, local)
+                    })
+                    .collect();
+                elements.push(Self::make_element(
+                    source,
+                    (r - 1) as u32,
+                    cols,
+                    entries,
+                    self.max_element,
+                ));
+            }
+        }
+
+        // ---- assembled pattern --------------------------------------
+        //
+        // Union of each active element's own lower triangle, plus the
+        // full diagonal so no primal row of the `(1,1)` block is
+        // structurally empty.
+        let mut pairs: Vec<(Index, Index)> = Vec::new();
+        for i in 0..n {
+            pairs.push((i as Index, i as Index));
+        }
+        for e in &elements {
+            if e.dense {
+                for a in 0..e.k() {
+                    for c in 0..=a {
+                        pairs.push((e.support[a], e.support[c]));
+                    }
+                }
+            } else {
+                for a in 0..e.k() {
+                    pairs.push((e.support[a], e.support[a]));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        // Lookup from (row, col) to assembled position, by binary search
+        // over the sorted pair list.
+        let find = |row: Index, col: Index| -> u32 {
+            pairs.partition_point(|&p| p < (row, col)) as u32
+        };
+        for e in &mut elements {
+            if e.dense {
+                let mut map = Vec::with_capacity(e.k() * (e.k() + 1) / 2);
+                for a in 0..e.k() {
+                    for c in 0..=a {
+                        map.push(find(e.support[a], e.support[c]));
+                    }
+                }
+                e.map = map;
+            } else {
+                e.map = (0..e.k())
+                    .map(|a| find(e.support[a], e.support[a]))
+                    .collect();
+            }
+        }
+        self.diag_pos = (0..n).map(|i| find(i as Index, i as Index)).collect();
+
+        let mut covered = vec![false; n];
+        for e in &elements {
+            for &i in &e.support {
+                covered[i as usize] = true;
+            }
+        }
+        self.uncovered = (0..n)
+            .filter(|&i| !covered[i])
+            .map(|i| i as Index)
+            .collect();
+
+        // 1-based triplets, lower triangle, matching the exact-Hessian
+        // path's convention (`orig_ipopt_nlp.rs` pushes `i_var + 1`).
+        let irows: Vec<Index> = pairs.iter().map(|&(r, _)| r + 1).collect();
+        let jcols: Vec<Index> = pairs.iter().map(|&(_, c)| c + 1).collect();
+
+        self.stats = PartitionStats {
+            elements: elements.len(),
+            dense_elements: elements.iter().filter(|e| e.dense).count(),
+            diagonal_elements: elements.iter().filter(|e| !e.dense).count(),
+            max_support: elements.iter().map(|e| e.k()).max().unwrap_or(0),
+            total_support: elements.iter().map(|e| e.k()).sum(),
+            assembled_nnz: pairs.len(),
+            stored_reals: elements.iter().map(|e| e.b.len()).sum(),
+        };
+        self.space = Some(SymTMatrixSpace::new(n as Index, irows, jcols));
+        self.elements = elements;
+
+        if std::env::var("POUNCE_PARTITIONED_DEBUG").is_ok() {
+            eprintln!("partitioned-qn: {:?}", self.stats);
+        }
+    }
+
+    fn make_element(
+        source: ElementSource,
+        row: u32,
+        support: Vec<Index>,
+        entries: Vec<(u32, u32)>,
+        max_element: usize,
+    ) -> Element {
+        let k = support.len();
+        let dense = k <= max_element;
+        let b_len = if dense { k * (k + 1) / 2 } else { k };
+        Element {
+            source,
+            row,
+            support,
+            dense,
+            b: vec![0.0; b_len],
+            prev_g: vec![0.0; k],
+            has_prev: false,
+            seeded: false,
+            entries,
+            map: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DebugPeaks {
+    ratio: Number,
+    ratio_s: Number,
+    ratio_y: Number,
+    ratio_k: usize,
+    delta: Number,
+    step_norm: Number,
+}
+
+/// `out = B s` for a packed lower triangle.
+fn packed_mult(b: &[Number], s: &[Number], out: &mut [Number]) {
+    out.iter_mut().for_each(|v| *v = 0.0);
+    let mut p = 0usize;
+    for a in 0..s.len() {
+        for c in 0..=a {
+            let v = b[p];
+            p += 1;
+            if v == 0.0 {
+                continue;
+            }
+            out[a] += v * s[c];
+            if c != a {
+                out[c] += v * s[a];
+            }
+        }
+    }
+}
+
+fn dot(a: &[Number], b: &[Number]) -> Number {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Apply one curvature pair to a single element. Returns `true` when the
+/// update was accepted.
+fn update_element(
+    e: &mut Element,
+    s: &[Number],
+    y: &[Number],
+    update_type: UpdateType,
+    init_val_min: Number,
+    init_val_max: Number,
+    curvature_cap: Number,
+) -> bool {
+    let sts = dot(s, s);
+    if !(sts > 0.0) || !sts.is_finite() {
+        return false;
+    }
+    let sty = dot(s, y);
+    if !sty.is_finite() {
+        return false;
+    }
+    // The curvature this pair actually implies, and the ceiling any
+    // single update to this block is allowed to reach.
+    let s_norm = sts.sqrt();
+    let implied = dot(y, y).sqrt() / s_norm;
+    let max_delta = curvature_cap * implied;
+
+    // One-time scalar seeding: `B_e ← γ I` with γ the `scalar1` ratio of
+    // this element's own first pair, so the block starts at the right
+    // order of magnitude instead of at zero. BFGS needs γ > 0 to have a
+    // positive-definite base; SR1 takes either sign, which is the point
+    // of using it here.
+    if !e.seeded {
+        let mut gamma = sty / sts;
+        if !gamma.is_finite() || gamma == 0.0 {
+            gamma = if update_type == UpdateType::Bfgs {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        if update_type == UpdateType::Bfgs && gamma <= 0.0 {
+            gamma = 1.0;
+        }
+        if gamma != 0.0 {
+            let mag = gamma.abs().clamp(init_val_min, init_val_max);
+            gamma = gamma.signum() * mag;
+        }
+        if e.dense {
+            for a in 0..e.k() {
+                e.b[a * (a + 1) / 2 + a] = gamma;
+            }
+        } else {
+            e.b.iter_mut().for_each(|v| *v = gamma);
+        }
+        e.seeded = true;
+    }
+
+    if !e.dense {
+        // Diagonal element: Dennis-Wolkowicz weak secant update, the
+        // minimum-Frobenius diagonal correction satisfying `sᵀBs = sᵀy`.
+        let s_bs: Number = (0..e.k()).map(|a| e.b[a] * s[a] * s[a]).sum();
+        let denom: Number = s.iter().map(|v| v * v * v * v).sum();
+        if !(denom > 0.0) || !denom.is_finite() {
+            return false;
+        }
+        let scale = (sty - s_bs) / denom;
+        if !scale.is_finite() {
+            return false;
+        }
+        for a in 0..e.k() {
+            e.b[a] += scale * s[a] * s[a];
+        }
+        return true;
+    }
+
+    let mut bs = vec![0.0; e.k()];
+    packed_mult(&e.b, s, &mut bs);
+
+    match update_type {
+        UpdateType::Sr1 => {
+            // w = y − Bs;  B += w wᵀ / (wᵀ s)
+            let w: Vec<Number> = y.iter().zip(bs.iter()).map(|(a, b)| a - b).collect();
+            let den = dot(&w, s);
+            let w_norm = dot(&w, &w).sqrt();
+            let s_norm = sts.sqrt();
+            // `<=`, not `<`. When the element's model already reproduces
+            // its own curvature — a linear constraint, whose `y` is
+            // identically zero, or a block the previous pair already
+            // matched — `w` is exactly zero and both sides are zero. A
+            // strict comparison lets that through and the rank-1 term
+            // divides 0 by 0, publishing a NaN Hessian; the IPM then
+            // reports a converged-looking restoration failure rather than
+            // anything that names the cause. A linear element is the
+            // common case, not a corner: every linear constraint row in
+            // the model hits this on its first pair.
+            if !den.is_finite() || w_norm == 0.0 || den.abs() <= SR1_SAFEGUARD * s_norm * w_norm {
+                return false;
+            }
+            // `‖w wᵀ/den‖_max = max|w|² / |den|`; reject before writing.
+            let w_max = w.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            if w_max * w_max / den.abs() > max_delta {
+                return false;
+            }
+            let mut p = 0usize;
+            for a in 0..e.k() {
+                for c in 0..=a {
+                    e.b[p] += w[a] * w[c] / den;
+                    p += 1;
+                }
+            }
+            true
+        }
+        UpdateType::Bfgs => {
+            // Powell-damped BFGS on the element block.
+            let s_bs = dot(s, &bs);
+            let bs_norm = dot(&bs, &bs).sqrt();
+            if !(s_bs > 0.0)
+                || !s_bs.is_finite()
+                || s_bs <= BFGS_DENOM_FLOOR * s_norm * bs_norm
+            {
+                return false;
+            }
+            let theta = if sty >= POWELL_THETA * s_bs {
+                1.0
+            } else {
+                (1.0 - POWELL_THETA) * s_bs / (s_bs - sty)
+            };
+            if !theta.is_finite() {
+                return false;
+            }
+            let r: Vec<Number> = y
+                .iter()
+                .zip(bs.iter())
+                .map(|(yy, bb)| theta * yy + (1.0 - theta) * bb)
+                .collect();
+            let sr = dot(s, &r);
+            let r_norm = dot(&r, &r).sqrt();
+            if !(sr > 0.0) || !sr.is_finite() || sr <= BFGS_DENOM_FLOOR * s_norm * r_norm {
+                return false;
+            }
+            let r_max = r.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let bs_max = bs.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            if r_max * r_max / sr + bs_max * bs_max / s_bs > max_delta {
+                return false;
+            }
+            let mut p = 0usize;
+            for a in 0..e.k() {
+                for c in 0..=a {
+                    e.b[p] += r[a] * r[c] / sr - bs[a] * bs[c] / s_bs;
+                    p += 1;
+                }
+            }
+            true
+        }
+    }
+}
+
+impl HessianUpdater for PartitionedQuasiNewtonUpdater {
+    fn update_hessian(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) -> bool {
+        let (curr_x, curr_y_c, curr_y_d) = match data.borrow().curr.as_ref() {
+            Some(c) => (c.x.clone(), c.y_c.clone(), c.y_d.clone()),
+            None => return true,
+        };
+        let curr_grad_f = cq.borrow().curr_grad_f();
+        let curr_jac_c = cq.borrow().curr_jac_c();
+        let curr_jac_d = cq.borrow().curr_jac_d();
+
+        let (Some(jac_c), Some(jac_d)) = (
+            curr_jac_c.as_any().downcast_ref::<GenTMatrix>(),
+            curr_jac_d.as_any().downcast_ref::<GenTMatrix>(),
+        ) else {
+            // Not the plain NLP path (the restoration sub-IPM carries a
+            // different Jacobian shape). The builder downgrades
+            // restoration to the limited-memory updater, so this is a
+            // guard, not a live branch.
+            return false;
+        };
+
+        let x = flat(&*curr_x);
+        let grad_f = flat(&*curr_grad_f);
+        let n = x.len();
+
+        if self.space.is_none() {
+            self.build_structure(n, &grad_f, jac_c, jac_d);
+        }
+
+        // ---- curvature pairs, one per element -----------------------
+        //
+        // `s` is shared (the primal step); each element gets its own `y`
+        // from its own gradient's change, so no element's pair is
+        // contaminated by another's curvature — the property the
+        // monolithic L-BFGS `y` cannot have.
+        let s_full: Option<Vec<Number>> = self
+            .prev_x
+            .as_ref()
+            .map(|p| x.iter().zip(p.iter()).map(|(a, b)| a - b).collect());
+
+        let oracle = std::env::var("POUNCE_PARTITIONED_ORACLE").is_ok();
+        if oracle {
+            self.dbg = DebugPeaks {
+                step_norm: s_full
+                    .as_ref()
+                    .map(|v| dot(v, v).sqrt())
+                    .unwrap_or(0.0),
+                ..DebugPeaks::default()
+            };
+        }
+        let mut s_loc: Vec<Number> = Vec::new();
+        let mut y_loc: Vec<Number> = Vec::new();
+        let mut g_loc: Vec<Number> = Vec::new();
+        for e in &mut self.elements {
+            let k = e.k();
+            g_loc.clear();
+            g_loc.resize(k, 0.0);
+            match e.source {
+                ElementSource::Objective => {
+                    for (a, &i) in e.support.iter().enumerate() {
+                        g_loc[a] = grad_f[i as usize];
+                    }
+                }
+                ElementSource::EqRow => {
+                    let v = jac_c.values();
+                    for &(pos, local) in &e.entries {
+                        g_loc[local as usize] += v[pos as usize];
+                    }
+                }
+                ElementSource::IneqRow => {
+                    let v = jac_d.values();
+                    for &(pos, local) in &e.entries {
+                        g_loc[local as usize] += v[pos as usize];
+                    }
+                }
+            }
+
+            if let (Some(s_full), true) = (s_full.as_ref(), e.has_prev) {
+                s_loc.clear();
+                y_loc.clear();
+                for (a, &i) in e.support.iter().enumerate() {
+                    s_loc.push(s_full[i as usize]);
+                    y_loc.push(g_loc[a] - e.prev_g[a]);
+                }
+                let before = e.b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                if update_element(
+                    e,
+                    &s_loc,
+                    &y_loc,
+                    self.update_type,
+                    self.init_val_min,
+                    self.init_val_max,
+                    self.curvature_cap,
+                ) {
+                    self.accepted_updates += 1;
+                } else {
+                    self.skipped_updates += 1;
+                }
+                if oracle {
+                    let sn = dot(&s_loc, &s_loc).sqrt();
+                    let yn = dot(&y_loc, &y_loc).sqrt();
+                    let r = if sn > 0.0 { yn / sn } else { 0.0 };
+                    if r > self.dbg.ratio {
+                        self.dbg = DebugPeaks {
+                            ratio: r,
+                            ratio_s: sn,
+                            ratio_y: yn,
+                            ratio_k: e.k(),
+                            ..self.dbg
+                        };
+                    }
+                    let after = e.b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                    self.dbg.delta = self.dbg.delta.max((after - before).abs());
+                }
+            }
+
+            e.prev_g.copy_from_slice(&g_loc);
+            e.has_prev = true;
+        }
+        self.prev_x = Some(x);
+
+        // ---- assemble ------------------------------------------------
+        //
+        //   W = ∇²f + Σ_j (y_c)_j ∇²c_j + Σ_j (y_d)_j ∇²d_j
+        //
+        // with `obj_factor = 1`, matching
+        // `IpoptCalculatedQuantities::curr_exact_hessian`.
+        let y_c = flat(&*curr_y_c);
+        let y_d = flat(&*curr_y_d);
+        let space = Rc::clone(self.space.as_ref().expect("structure built above"));
+        let mut w = SymTMatrix::new(Rc::clone(&space));
+        // Before any element has taken a pair there is no curvature
+        // information anywhere, and `init_val · I` is the same opening
+        // model the limited-memory path's empty-history branch uses.
+        // Publishing the honest all-zero `W` instead hands the first KKT
+        // solve a `(1,1)` block with no curvature at all and lets the
+        // inertia correction invent the scale.
+        let any_seeded = self.elements.iter().any(|e| e.seeded);
+        {
+            let vals = w.values_mut();
+            vals.iter_mut().for_each(|v| *v = 0.0);
+            if !any_seeded {
+                for &p in &self.diag_pos {
+                    vals[p as usize] = self.init_val;
+                }
+            }
+            for e in self.elements.iter().filter(|_| any_seeded) {
+                let weight = match e.source {
+                    ElementSource::Objective => 1.0,
+                    ElementSource::EqRow => y_c[e.row as usize],
+                    ElementSource::IneqRow => y_d[e.row as usize],
+                };
+                if weight == 0.0 || !weight.is_finite() {
+                    continue;
+                }
+                for (p, &m) in e.map.iter().enumerate() {
+                    vals[m as usize] += weight * e.b[p];
+                }
+            }
+            // Coordinates no element covers get the same nonzero floor
+            // the masked limited-memory diagonal uses, for the same
+            // reason: a structurally empty `(1,1)` row is carried by
+            // `Σ_x` alone and costs the factorization a near-singular
+            // pivot on every one of them.
+            if any_seeded {
+                for &i in &self.uncovered {
+                    vals[self.diag_pos[i as usize] as usize] = self.init_val_min;
+                }
+            }
+        }
+        // Direct correctness oracle (`POUNCE_PARTITIONED_ORACLE`). On a
+        // model that *does* supply second derivatives — every `.nl`, for
+        // instance — the exact Lagrangian Hessian at this very iterate,
+        // with this very `obj_factor` and these very multipliers, is one
+        // call away. Comparing against it is the only check in this
+        // module that reads a number the updater did not produce: the
+        // unit tests pin the update formulas against themselves, and a
+        // self-consistently wrong assembly would pass all of them.
+        //
+        // Never on by default: it evaluates `eval_h` every iteration,
+        // which is precisely the cost the updater exists to avoid.
+        if std::env::var("POUNCE_PARTITIONED_ORACLE").is_ok() {
+            let exact = cq.borrow().curr_exact_hessian();
+            if let Some(t) = exact.as_any().downcast_ref::<SymTMatrix>() {
+                use std::collections::HashMap;
+                let mut mine: HashMap<(Index, Index), Number> = HashMap::new();
+                for ((&i, &j), &v) in space
+                    .irows()
+                    .iter()
+                    .zip(space.jcols().iter())
+                    .zip(w.values().iter())
+                {
+                    *mine.entry((i, j)).or_insert(0.0) += v;
+                }
+                let (mut max_exact, mut max_err) = (0.0_f64, 0.0_f64);
+                let (mut num, mut den) = (0.0_f64, 0.0_f64);
+                let mut worst = ((0, 0), 0.0, 0.0);
+                let mut seen: HashMap<(Index, Index), bool> = HashMap::new();
+                for ((&i, &j), &v) in t
+                    .irows()
+                    .iter()
+                    .zip(t.jcols().iter())
+                    .zip(t.values().iter())
+                {
+                    seen.insert((i, j), true);
+                    let m = mine.get(&(i, j)).copied().unwrap_or(0.0);
+                    let e = (m - v).abs();
+                    max_exact = max_exact.max(v.abs());
+                    if e > max_err {
+                        max_err = e;
+                        worst = ((i, j), v, m);
+                    }
+                    num += e * e;
+                    den += v * v;
+                }
+                // Entries this updater carries that the true Hessian does
+                // not: the per-constraint pattern is `supp ⊗ supp`, an
+                // over-estimate, and those entries must be ~0.
+                let mut extra = 0.0_f64;
+                for (&k, &v) in mine.iter() {
+                    if !seen.contains_key(&k) {
+                        extra = extra.max(v.abs());
+                    }
+                }
+                eprintln!(
+                    "partitioned-qn oracle: rel_fro={:.3e} max_abs_err={:.3e}                      max|exact|={:.3e} worst={:?} exact={:.6e} mine={:.6e}                      max|extra-pattern|={:.3e}",
+                    (num / den.max(1e-300)).sqrt(),
+                    max_err,
+                    max_exact,
+                    worst.0,
+                    worst.1,
+                    worst.2,
+                    extra
+                );
+                eprintln!(
+                    "  peaks: max|y_e|/|s_e|={:.3e} (|s_e|={:.3e} |y_e|={:.3e} k={}) \
+                     max_block_delta={:.3e} |s|={:.3e} accepted={} skipped={}",
+                    self.dbg.ratio,
+                    self.dbg.ratio_s,
+                    self.dbg.ratio_y,
+                    self.dbg.ratio_k,
+                    self.dbg.delta,
+                    self.dbg.step_norm,
+                    self.accepted_updates,
+                    self.skipped_updates
+                );
+            }
+        }
+        if std::env::var("POUNCE_PARTITIONED_DUMP").is_ok() && space.nonzeros() <= 32 {
+            eprintln!(
+                "partitioned-qn W: seeded={any_seeded} irows={:?} jcols={:?} vals={:?}",
+                space.irows(),
+                space.jcols(),
+                w.values()
+            );
+            eprintln!("  y_c={y_c:?} y_d={y_d:?}");
+        }
+        data.borrow_mut().w = Some(Rc::new(w));
+        true
+    }
+}
+
+/// Read a primal-space vector's values as a flat slice. Mirrors
+/// `lim_mem_quasi_newton::expanded_of`; kept local so the two updaters do
+/// not share mutable helper state.
+fn flat(v: &dyn Vector) -> Vec<Number> {
+    if let Some(dv) = v.as_any().downcast_ref::<DenseVector>() {
+        return dv.expanded_values();
+    }
+    if let Some(cv) = v.as_any().downcast_ref::<CompoundVector>() {
+        let mut out = Vec::with_capacity(cv.dim() as usize);
+        for i in 0..cv.n_comps() {
+            out.extend(flat(cv.comp(i)));
+        }
+        return out;
+    }
+    panic!("PartitionedQuasiNewtonUpdater: unsupported primal vector type");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `packed_mult` agrees with a dense symmetric product, off-diagonal
+    /// fan-out included.
+    #[test]
+    fn packed_mult_matches_dense() {
+        // B = [[1, 2, 3], [2, 4, 5], [3, 5, 6]]
+        let b = vec![1.0, 2.0, 4.0, 3.0, 5.0, 6.0];
+        let s = vec![1.0, -2.0, 0.5];
+        let mut out = vec![0.0; 3];
+        packed_mult(&b, &s, &mut out);
+        let dense = [[1.0, 2.0, 3.0], [2.0, 4.0, 5.0], [3.0, 5.0, 6.0]];
+        for a in 0..3 {
+            let want: Number = (0..3).map(|c| dense[a][c] * s[c]).sum();
+            assert!((out[a] - want).abs() < 1e-12, "row {a}: {} vs {want}", out[a]);
+        }
+    }
+
+    /// SR1 satisfies the secant equation `B_+ s = y` exactly in one step
+    /// when the denominator is safe — the property that makes it the
+    /// right per-element update for a nonconvex constraint.
+    #[test]
+    fn sr1_satisfies_the_secant_equation() {
+        let mut e = Element {
+            source: ElementSource::EqRow,
+            row: 0,
+            support: vec![0, 1, 2],
+            dense: true,
+            b: vec![0.0; 6],
+            prev_g: vec![0.0; 3],
+            has_prev: true,
+            seeded: true,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let s = vec![1.0, 0.5, -0.25];
+        // A deliberately indefinite target: SR1 must not sanitize it.
+        let y = vec![-2.0, 1.0, 3.0];
+        assert!(update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        let mut bs = vec![0.0; 3];
+        packed_mult(&e.b, &s, &mut bs);
+        for a in 0..3 {
+            assert!((bs[a] - y[a]).abs() < 1e-10, "component {a}: {} vs {}", bs[a], y[a]);
+        }
+    }
+
+    /// An element whose curvature is genuinely negative keeps a negative
+    /// block under SR1. Damped BFGS does not, which is why SR1 is the
+    /// default — see the module docs and issue #131.
+    ///
+    /// Note what carries the sign on a **one-dimensional** element: the
+    /// scalar seeding `gamma = sᵀy/sᵀs` already satisfies the secant
+    /// equation exactly, so the rank-1 term has nothing to add and
+    /// `update_element` correctly declines. The property under test is
+    /// the resulting curvature, not the return value.
+    #[test]
+    fn sr1_preserves_negative_curvature_where_bfgs_would_not() {
+        let make = || Element {
+            source: ElementSource::EqRow,
+            row: 0,
+            support: vec![0],
+            dense: true,
+            b: vec![0.0],
+            prev_g: vec![0.0],
+            has_prev: true,
+            seeded: false,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let s = vec![1.0];
+        let y = vec![-3.0];
+
+        let mut sr1 = make();
+        update_element(&mut sr1, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12);
+        assert!(sr1.b[0] < 0.0, "SR1 kept curvature {}", sr1.b[0]);
+        // and it is the exact secant value, not merely the right sign
+        assert!((sr1.b[0] + 3.0).abs() < 1e-12, "{}", sr1.b[0]);
+
+        let mut bfgs = make();
+        update_element(&mut bfgs, &s, &y, UpdateType::Bfgs, 1e-8, 1e8, 1e12);
+        assert!(bfgs.b[0] > 0.0, "damped BFGS kept curvature {}", bfgs.b[0]);
+    }
+
+    /// **The scalar seeding always annihilates the first SR1 update**,
+    /// for every element and every dimension. Seeding sets `B = γI` with
+    /// `γ = sᵀy/sᵀs`, so `Bs = γs` and the SR1 denominator is
+    /// `wᵀs = sᵀy − γ·sᵀs ≡ 0`. That is not a defect — the seeded block
+    /// already satisfies the secant equation along `s` — but it means an
+    /// element's *first* pair contributes only a multiple of the
+    /// identity and no directional information whatsoever. With ~5 000
+    /// elements each receiving one direction per iteration, that costs a
+    /// full iteration of information per element; see
+    /// `dev-notes/partitioned-quasi-newton-prototype.md`.
+    #[test]
+    fn scalar_seeding_leaves_the_first_sr1_update_with_nothing_to_do() {
+        let mut e = Element {
+            source: ElementSource::EqRow,
+            row: 0,
+            support: vec![0, 1],
+            dense: true,
+            b: vec![0.0; 3],
+            prev_g: vec![0.0; 2],
+            has_prev: true,
+            seeded: false,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let s = vec![1.0, 0.5];
+        let y = vec![2.0, -4.0];
+        // Skipped, and what is left behind is exactly the seeded scalar.
+        assert!(!update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(e.seeded);
+        assert_eq!(e.b[1], 0.0, "off-diagonal must still be zero");
+        assert!((e.b[0] - e.b[2]).abs() < 1e-15, "block must be a multiple of I");
+    }
+
+    /// The SR1-vs-BFGS contrast on a **two-dimensional** element, driven
+    /// through the path the solver actually takes: a first pair to seed,
+    /// then a second that the rank-1 term can act on. SR1 reproduces the
+    /// second pair exactly and leaves the block indefinite; damped BFGS
+    /// returns a positive definite block that does not.
+    #[test]
+    fn sr1_reaches_an_indefinite_block_where_bfgs_stays_definite() {
+        let make = || Element {
+            source: ElementSource::EqRow,
+            row: 0,
+            support: vec![0, 1],
+            dense: true,
+            b: vec![0.0; 3],
+            prev_g: vec![0.0; 2],
+            has_prev: true,
+            seeded: false,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let (s1, y1) = (vec![1.0, 0.0], vec![2.0, 0.0]);
+        let (s2, y2) = (vec![0.0, 1.0], vec![0.0, -4.0]);
+
+        let mut sr1 = make();
+        update_element(&mut sr1, &s1, &y1, UpdateType::Sr1, 1e-8, 1e8, 1e12);
+        assert!(update_element(&mut sr1, &s2, &y2, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        let mut bs = vec![0.0; 2];
+        packed_mult(&sr1.b, &s2, &mut bs);
+        for a in 0..2 {
+            assert!((bs[a] - y2[a]).abs() < 1e-10, "component {a}: {} vs {}", bs[a], y2[a]);
+        }
+        // det < 0 ⇒ one eigenvalue of each sign: the indefiniteness the
+        // inertia correction is supposed to see.
+        let det = sr1.b[0] * sr1.b[2] - sr1.b[1] * sr1.b[1];
+        assert!(det < 0.0, "SR1 block determinant {det}");
+
+        let mut bfgs = make();
+        update_element(&mut bfgs, &s1, &y1, UpdateType::Bfgs, 1e-8, 1e8, 1e12);
+        assert!(update_element(&mut bfgs, &s2, &y2, UpdateType::Bfgs, 1e-8, 1e8, 1e12));
+        let det_b = bfgs.b[0] * bfgs.b[2] - bfgs.b[1] * bfgs.b[1];
+        assert!(
+            bfgs.b[0] > 0.0 && det_b > 0.0,
+            "damped BFGS block is positive definite: diag {} det {det_b}",
+            bfgs.b[0]
+        );
+    }
+
+    /// The diagonal fallback satisfies the weak secant condition
+    /// `sᵀBs = sᵀy`, which is the whole contract it is asked for.
+    #[test]
+    fn diagonal_element_satisfies_the_weak_secant_condition() {
+        let mut e = Element {
+            source: ElementSource::Objective,
+            row: 0,
+            support: vec![0, 1, 2],
+            dense: false,
+            b: vec![0.0; 3],
+            prev_g: vec![0.0; 3],
+            has_prev: true,
+            seeded: true,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let s = vec![1.0, -2.0, 0.5];
+        let y = vec![0.5, 1.0, -3.0];
+        assert!(update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        let s_bs: Number = (0..3).map(|a| e.b[a] * s[a] * s[a]).sum();
+        assert!((s_bs - dot(&s, &y)).abs() < 1e-10, "{s_bs} vs {}", dot(&s, &y));
+    }
+
+    /// A parallel `y` that carries no new information leaves the block
+    /// untouched rather than producing an unbounded rank-1 term.
+    #[test]
+    fn sr1_skips_a_degenerate_denominator() {
+        let mut e = Element {
+            source: ElementSource::EqRow,
+            row: 0,
+            support: vec![0, 1],
+            dense: true,
+            b: vec![2.0, 0.0, 2.0],
+            prev_g: vec![0.0; 2],
+            has_prev: true,
+            seeded: true,
+            entries: Vec::new(),
+            map: Vec::new(),
+        };
+        let before = e.b.clone();
+        let s = vec![1.0, 1.0];
+        // y = B s exactly, so w = 0 and the denominator vanishes.
+        let y = vec![2.0, 2.0];
+        assert!(!update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert_eq!(e.b, before);
+    }
+}

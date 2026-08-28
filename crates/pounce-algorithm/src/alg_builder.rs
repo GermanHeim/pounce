@@ -104,6 +104,11 @@ pub enum MuStrategyChoice {
 pub enum HessianApproxChoice {
     Exact,
     LimitedMemory,
+    /// Partitioned quasi-Newton: one small dense block per element
+    /// function (the objective and each constraint row), assembled into
+    /// a genuine sparse `SymTMatrix`. See
+    /// [`crate::hess::partitioned_quasi_newton`].
+    Partitioned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +230,27 @@ pub struct AlgorithmBuilder {
     /// `QualityFunction` per upstream's `RegisterOptions` default.
     pub mu_oracle: MuOracleKind,
     pub hessian_approximation: HessianApproxChoice,
+
+    /// Element update formula for
+    /// [`HessianApproxChoice::Partitioned`] (`partitioned_update_type`).
+    /// SR1 by default: a single constraint is not convex, so damped
+    /// BFGS would force every `∇²c_j` model PSD and then scale it by a
+    /// multiplier of either sign.
+    pub partitioned_update_type: UpdateType,
+    /// Widest element that keeps a dense block under
+    /// [`HessianApproxChoice::Partitioned`]; wider elements degrade to a
+    /// diagonal approximation (`partitioned_max_element`).
+    pub partitioned_max_element: usize,
+    /// Support of the objective element under
+    /// [`HessianApproxChoice::Partitioned`], in the compressed `x_var`
+    /// space — `TNLPAdapter::objective_nonlinear_vars`. `None` leaves
+    /// the updater to fall back on the first `∇f`'s nonzeros, which is
+    /// value-derived; see that method for what it costs.
+    pub partitioned_objective_vars: Option<Vec<Index>>,
+    /// `partitioned_curvature_cap` — multiple of an element's implied
+    /// curvature that one update may reach. See
+    /// [`crate::hess::partitioned_quasi_newton`].
+    pub partitioned_curvature_cap: Number,
     pub limited_memory_update_type: UpdateType,
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
@@ -1050,6 +1076,10 @@ impl Default for AlgorithmBuilder {
             mu_strategy: MuStrategyChoice::Monotone,
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
+            partitioned_update_type: UpdateType::Sr1,
+            partitioned_max_element: 64,
+            partitioned_objective_vars: None,
+            partitioned_curvature_cap: 1e1,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
@@ -1438,6 +1468,16 @@ impl AlgorithmBuilder {
                 nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
                 ..LimMemQuasiNewtonUpdater::default()
             }),
+            HessianApproxChoice::Partitioned => {
+                let mut u = crate::hess::partitioned_quasi_newton::
+                    PartitionedQuasiNewtonUpdater::new(self.partitioned_update_type);
+                u.max_element = self.partitioned_max_element;
+                u.objective_vars = self.partitioned_objective_vars.clone();
+                u.curvature_cap = self.partitioned_curvature_cap;
+                u.init_val_min = self.limited_memory_init_val_min;
+                u.init_val_max = self.limited_memory_init_val_max;
+                Box::new(u)
+            }
         };
 
         let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
@@ -1544,6 +1584,10 @@ mod tests {
                             mu_strategy,
                             mu_oracle: MuOracleKind::QualityFunction,
                             hessian_approximation,
+                            partitioned_update_type: UpdateType::Sr1,
+                            partitioned_max_element: 64,
+                            partitioned_objective_vars: None,
+                            partitioned_curvature_cap: 1e1,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,

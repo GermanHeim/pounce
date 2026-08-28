@@ -3053,6 +3053,16 @@ impl IpoptApplication {
         // HS71-class problems.
         let mut builder = self.algorithm_builder_from_options();
 
+        // The objective element's support for the partitioned Hessian.
+        // Every constraint element reads its support off a Jacobian row;
+        // only the objective has none declared, so without this the
+        // updater falls back to the first `∇f`'s nonzeros — a
+        // value-derived pattern. See
+        // `TNLPAdapter::objective_nonlinear_vars`.
+        if builder.hessian_approximation == HessianApproxChoice::Partitioned {
+            builder.partitioned_objective_vars = adapter.borrow().objective_nonlinear_vars();
+        }
+
         // Which variables the limited-memory Hessian should span (gh#624).
         // Upstream's precedence: a TNLP that implements
         // `get_number_of_nonlinear_variables` wins, and
@@ -3696,6 +3706,7 @@ impl IpoptApplication {
             if found {
                 builder.hessian_approximation = match v.as_str() {
                     "limited-memory" => HessianApproxChoice::LimitedMemory,
+                    "partitioned" => HessianApproxChoice::Partitioned,
                     _ => HessianApproxChoice::Exact,
                 };
             }
@@ -3735,6 +3746,37 @@ impl IpoptApplication {
         // until now read nowhere on the IPM path — the updater was hard-wired
         // to Powell-damped BFGS. SR1 is honored too (the updater and the
         // low-rank/inertia path already handle its indefinite models).
+        // Partitioned quasi-Newton knobs. `partitioned_update_type`
+        // defaults to SR1 rather than BFGS — see
+        // `crates::hess::partitioned_quasi_newton` for why damping is
+        // the wrong choice on a per-constraint element.
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("partitioned_update_type", "")
+        {
+            if found {
+                builder.partitioned_update_type = match v.as_str() {
+                    "bfgs" => UpdateType::Bfgs,
+                    _ => UpdateType::Sr1,
+                };
+            }
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_integer_value("partitioned_max_element", "")
+        {
+            if found && v > 0 {
+                builder.partitioned_max_element = v as usize;
+            }
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_numeric_value("partitioned_curvature_cap", "")
+        {
+            if found && v > 0.0 {
+                builder.partitioned_curvature_cap = v;
+            }
+        }
         if let Ok((v, found)) = self
             .options
             .get_string_value("limited_memory_update_type", "")

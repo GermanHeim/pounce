@@ -4,6 +4,7 @@
 
 pub mod exact;
 pub mod lim_mem_quasi_newton;
+pub mod partitioned_quasi_newton;
 pub mod r#trait;
 
 pub use r#trait::HessianUpdater;

@@ -476,8 +476,26 @@ pub fn run_inner_resto(
     // indices mean something else entirely, so the mask never crosses
     // into the inner solve: restoration approximates over its whole
     // space, exactly as it did before the mask existed.
+    //
+    // The partitioned Hessian (`hessian_approximation=partitioned`) is
+    // scoped out of restoration for the same reason and one more. Its
+    // element table is built from the *original* NLP's constraint
+    // Jacobian, whose row and column spaces the restoration sub-NLP does
+    // not share: the resto primal carries the four slack blocks and the
+    // resto Jacobian carries their columns, so an element's support
+    // would name the wrong variables. `RestoIpoptNlp::eval_h` also wants
+    // the *orig* Hessian as a `SymTMatrix` from the original NLP's
+    // `eval_h`, which is exactly what a model without second derivatives
+    // cannot supply. Restoration therefore runs the limited-memory
+    // updater, which owns the compound-primal case already (gh#102).
     let mut inner_alg_builder = inner_alg_builder.clone();
     inner_alg_builder.limited_memory_nonlinear_vars = None;
+    if inner_alg_builder.hessian_approximation
+        == pounce_algorithm::alg_builder::HessianApproxChoice::Partitioned
+    {
+        inner_alg_builder.hessian_approximation =
+            pounce_algorithm::alg_builder::HessianApproxChoice::LimitedMemory;
+    }
     let inner_alg_builder = &inner_alg_builder;
 
     let mut alg_bundle = inner_alg_builder.build_with_backend(backend_factory);

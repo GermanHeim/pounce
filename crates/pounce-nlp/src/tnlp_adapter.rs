@@ -14,7 +14,7 @@
 //! treatment, scaling) lands with Phase 5 when `IpoptNLP` and
 //! `ExpansionMatrix` are wired up.
 
-use crate::tnlp::{BoundsInfo, IndexStyle, NlpInfo, TNLP};
+use crate::tnlp::{BoundsInfo, IndexStyle, Linearity, NlpInfo, TNLP};
 use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::types::{Index, Number};
 use std::cell::RefCell;
@@ -406,6 +406,49 @@ impl TNLPAdapter {
             return Ok(None);
         }
         Ok(Some(small))
+    }
+
+    /// Which variables the **objective's** second derivatives can reach,
+    /// in the compressed `x_var` space, sorted and deduplicated.
+    ///
+    /// This is the objective element's support for the partitioned
+    /// quasi-Newton Hessian
+    /// ([`pounce_algorithm::hess::partitioned_quasi_newton`]). Every
+    /// constraint element takes its support from a row of the Jacobian,
+    /// whose pattern the TNLP must declare — but nothing in the TNLP
+    /// contract declares the objective's. Reading it off the nonzeros of
+    /// the first `∇f` instead makes the pattern *value-derived*: a
+    /// coordinate whose `∂f/∂x_i` happens to vanish at the starting
+    /// point is excluded for the whole solve. Measured on
+    /// `benchmarks/large_scale` `laptime`, which declares 321 objective
+    /// gradient nonzeros, that heuristic captured 161.
+    ///
+    /// `get_objective_variables_linearity` is the structural answer and
+    /// is a pounce extension that already exists for exactly this class
+    /// of question (`pounce-nl` implements it). `None` means the TNLP
+    /// declines, and the caller falls back to the gradient nonzeros.
+    pub fn objective_nonlinear_vars(&self) -> Option<Vec<Index>> {
+        let n_full_x = self.classification.n_full_x;
+        let mut types = vec![Linearity::Linear; n_full_x as usize];
+        if !self
+            .tnlp
+            .borrow_mut()
+            .get_objective_variables_linearity(&mut types)
+        {
+            return None;
+        }
+        let mut small: Vec<Index> = types
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == Linearity::NonLinear)
+            .filter_map(|(i, _)| {
+                let v = self.classification.full_to_var[i];
+                (v >= 0).then_some(v)
+            })
+            .collect();
+        small.sort_unstable();
+        small.dedup();
+        Some(small)
     }
 }
 
