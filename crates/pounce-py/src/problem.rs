@@ -1616,6 +1616,13 @@ fn decode_bounds(
 /// caller's `feral_*` overrides. The python wrapper always uses FERAL —
 /// the optional MA57 backend would require linking against
 /// `pounce-hsl`, which we deliberately keep out of the wheel.
+///
+/// Hence no `Ma57Config` parameter here, unlike the two factories it
+/// mirrors (gh#825): there is no MA57 arm for one to reach. If the wheel
+/// ever links pounce-hsl, this function gains the parameter and the
+/// `"resto."`-prefixed snapshot at its call site, or the `ma57_*`
+/// options go silently missing on the Python path the way they did
+/// everywhere else.
 fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
     Box::new(
         move |_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {

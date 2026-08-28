@@ -34,7 +34,7 @@ fn configure_openblas_threads_once() {
 
 /// Settings drawn from `OptionsList` at `InitializeImpl` time
 /// (`IpMa57TSolverInterface.cpp:287-421`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
     print_level: Index,
     pivtol: Number,
@@ -126,6 +126,56 @@ impl Options {
             node_amalgamation: 16,
             small_pivot_flag: 0,
         }
+    }
+
+    // Read-only accessors. These exist so a caller can see which
+    // settings a live backend was actually built with — the thing
+    // gh#825 had no way to observe, and the thing
+    // `pounce-algorithm/tests/ma57_options_reach_the_backend.rs`
+    // asserts. Construction stays through `from_options_list` /
+    // `defaults` so the `pivtolmax >= pivtol` clamp cannot be bypassed.
+
+    /// `ma57_print_level` → `ICNTL(5)`.
+    pub fn print_level(&self) -> Index {
+        self.print_level
+    }
+    /// `ma57_pivtol` → `CNTL(1)`.
+    pub fn pivtol(&self) -> Number {
+        self.pivtol
+    }
+    /// `ma57_pivtolmax` — ceiling for the `increase_quality` escalation.
+    pub fn pivtolmax(&self) -> Number {
+        self.pivtolmax
+    }
+    /// `ma57_pre_alloc` — factor-workspace safety factor.
+    pub fn pre_alloc(&self) -> Number {
+        self.pre_alloc
+    }
+    /// `ma57_pivot_order` → `ICNTL(6)`.
+    pub fn pivot_order(&self) -> Index {
+        self.pivot_order
+    }
+    /// `ma57_automatic_scaling` → `ICNTL(15)`.
+    pub fn automatic_scaling(&self) -> bool {
+        self.automatic_scaling
+    }
+    /// `ma57_block_size` → `ICNTL(11)`.
+    pub fn block_size(&self) -> Index {
+        self.block_size
+    }
+    /// `ma57_node_amalgamation` → `ICNTL(12)`.
+    pub fn node_amalgamation(&self) -> Index {
+        self.node_amalgamation
+    }
+    /// `ma57_small_pivot_flag` → `ICNTL(16)`.
+    pub fn small_pivot_flag(&self) -> Index {
+        self.small_pivot_flag
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self::defaults()
     }
 }
 
@@ -224,8 +274,15 @@ impl Ma57SolverInterface {
         me
     }
 
-    /// Default-options factory — primarily for unit tests that
-    /// construct an MA57 backend without an `OptionsList`.
+    /// Default-options factory, for tests and for callers that have no
+    /// `OptionsList` at hand.
+    ///
+    /// **Not for production wiring.** It discards user configuration by
+    /// construction, and being the only path production code took is
+    /// exactly gh#825: every `ma57_*` option was registered, documented,
+    /// accepted, and then dropped on the floor with no warning. A code
+    /// path that has an `OptionsList` must use [`Self::from_options_list`]
+    /// (or [`Self::with_options`] with a snapshot taken from one).
     pub fn new() -> Self {
         Self::with_options(Options::defaults())
     }
@@ -236,9 +293,21 @@ impl Ma57SolverInterface {
         Self::with_options(Options::from_options_list(opts, prefix))
     }
 
-    /// Maximum pivot tolerance; useful in tests.
+    /// The *current* pivot tolerance (`CNTL(1)`), which
+    /// [`SparseSymLinearSolverInterface::increase_quality`] raises
+    /// towards `pivtolmax`. Useful in tests. (The doc formerly read
+    /// "maximum pivot tolerance"; that is `options().pivtolmax()`.)
     pub fn pivtol(&self) -> Number {
         self.options.pivtol
+    }
+
+    /// The settings this backend was constructed with. The only way to
+    /// see, from outside, that an `OptionsList` actually reached MA57 —
+    /// gh#825 was nine registered options silently discarded by a
+    /// factory that called [`Self::new`], with no observable difference
+    /// in any solve.
+    pub fn options(&self) -> &Options {
+        &self.options
     }
 
     /// Initialise `icntl` / `cntl` from MA57ID and overlay the Ipopt
@@ -525,6 +594,12 @@ impl Default for Ma57SolverInterface {
 }
 
 impl SparseSymLinearSolverInterface for Ma57SolverInterface {
+    /// Opted in so a test can assert that an `OptionsList` reached this
+    /// backend — see [`Self::options`] and gh#825.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn initialize_structure(
         &mut self,
         dim: Index,
