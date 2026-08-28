@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+- **The corrector's operator is assembled at the predicted point.**
+  `corrector_iter`'s iterations used to run against the factorization
+  the solve left behind, evaluated at the base point. They now pay one
+  factorization at the predicted point, with the Hessian and
+  constraint Jacobians evaluated at the stepped iterate and the step's
+  own multipliers, and the barrier diagonal carried from the held
+  solve with the predictor's active set applied. A chord iteration
+  contracts at the rate the distance between its operator and the true
+  Jacobian sets, so the correction converges an order faster where the
+  Hessian bends over the step, reaches a bound the step carries a
+  coordinate onto instead of achieving nothing there, and on the
+  holding side of a kink lands on the re-solve itself. Under a
+  `limited-memory` solve the quasi-Newton matrix is kept, since no
+  exact Hessian exists to evaluate elsewhere.
+
+  Across a strongly active release the corrector still cannot follow,
+  and it now reports `improved()` false there instead of claiming the
+  few-percent residual shave the base-point operator produced while
+  the answer stayed the whole released distance from the truth. The
+  no-improvement warning and the returned step are unchanged in that
+  case.
+
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
   caches in `ipopt_cq.rs`, so every read reassembled

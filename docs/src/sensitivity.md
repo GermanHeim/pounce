@@ -485,11 +485,18 @@ direction-aware answer is `estimate()`'s.
 
 Every mode returns a step, and that step leaves a residual in the
 barrier KKT system at the perturbed parameter values. Newton iterations
-against the held factorization drive that residual down, one back-solve
-each and no factorization. `corrector_iter` is how many to run, on
-`estimate()` and `estimate_report()`, and it stops early when an
-iteration fails to improve the residual, so it is a budget rather than
-a count. It defaults to zero.
+drive that residual down against an operator assembled at the
+predicted point: the Hessian and constraint Jacobians are evaluated at
+the stepped iterate with the step's own multipliers, one factorization
+is paid there, and each iteration afterwards costs one back-solve. A
+chord iteration contracts at the rate the distance between its
+operator and the true Jacobian sets, and the predicted point is where
+the truth is. Under a `limited-memory` solve the quasi-Newton matrix
+is kept, since no exact Hessian exists to evaluate elsewhere.
+`corrector_iter` is how many iterations to run, on `estimate()` and
+`estimate_report()`, and it stops early when an iteration fails to
+improve the residual, so it is a budget rather than a count. It
+defaults to zero.
 
 The correction aims at the barrier solution at the `mu` the solve
 finished on, not at a re-solve, so the accuracy it can reach is bounded
@@ -502,8 +509,10 @@ once before iterating. A bound the step takes off its minimum comes out
 of the operator, its multiplier held at zero and its complementarity
 row gone. A bound the step brings onto its minimum has its diagonal
 raised to the stiffness the barrier assigns there. Every other row
-keeps the base point's term. Both directions are the same change to one
-diagonal, so a single factorization serves the whole correction.
+keeps the held solve's term, never one recomputed from the predicted
+slacks. Both directions are the same change to one diagonal, so the
+single factorization at the predicted point serves the whole
+correction.
 
 That decision is where the modes start from different places.
 `fix_relax` and `path` compute an active set and hand it over.
