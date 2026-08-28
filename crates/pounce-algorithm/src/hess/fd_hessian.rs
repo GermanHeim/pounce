@@ -177,6 +177,14 @@ pub enum FdPatternSource {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FdStats {
+    /// The pattern source actually **used**, which is not always the one
+    /// requested: `Declared` falls back to `Jacobian` whenever the TNLP
+    /// declares no Hessian structure. Reporting the request rather than
+    /// the outcome would hide exactly the case a reader is checking for —
+    /// the 17-against-341 probe-group gap on `laptime` is the difference
+    /// between the two. `None` until the first `update_hessian` builds
+    /// the structure.
+    pub pattern_used: Option<FdPatternSource>,
     pub n: usize,
     pub nnz: usize,
     pub groups: usize,
@@ -395,6 +403,10 @@ impl FdHessianUpdater {
     ) {
         // ---- lower-triangle pattern ---------------------------------
         let mut pairs: Vec<(Index, Index)> = Vec::new();
+        let pattern_used = match (self.pattern_source, declared) {
+            (FdPatternSource::Declared, Some(_)) => FdPatternSource::Declared,
+            _ => FdPatternSource::Jacobian,
+        };
         match (self.pattern_source, declared) {
             (FdPatternSource::Declared, Some((ir, jc))) => {
                 for (&i, &j) in ir.iter().zip(jc.iter()) {
@@ -593,6 +605,7 @@ impl FdHessianUpdater {
         }
 
         self.stats = FdStats {
+            pattern_used: Some(pattern_used),
             n,
             nnz: pairs.len(),
             groups: groups.len(),
@@ -613,6 +626,12 @@ impl FdHessianUpdater {
 }
 
 impl HessianUpdater for FdHessianUpdater {
+    fn fd_hessian_stats(&self) -> Option<FdStats> {
+        // `None` until the structure is built, so a caller can tell "the
+        // mode never ran" from "it ran and the pattern was empty".
+        self.stats.pattern_used.map(|_| self.stats)
+    }
+
     fn update_hessian(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) -> bool {
         let (curr_x, curr_y_c, curr_y_d) = match data.borrow().curr.as_ref() {
             Some(c) => (c.x.clone(), c.y_c.clone(), c.y_d.clone()),

@@ -55,4 +55,16 @@ pub trait HessianUpdater {
     ) -> Option<Rc<dyn pounce_linalg::SymMatrix>> {
         None
     }
+
+    /// The finite-difference Hessian's pattern and probe census, for the
+    /// updater that has one. `None` for every other updater.
+    ///
+    /// Exposed because the two things that decide whether the mode is
+    /// affordable on a given model — which pattern it ended up with, and
+    /// how many probe groups that cost — were reachable only through the
+    /// `POUNCE_FD_HESSIAN_DEBUG` environment variable, i.e. not from an
+    /// embedder at all. Asked for by @srikanth-gm on gh#823.
+    fn fd_hessian_stats(&self) -> Option<crate::hess::fd_hessian::FdStats> {
+        None
+    }
 }

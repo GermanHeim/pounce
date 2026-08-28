@@ -670,6 +670,21 @@ same nonlinear-variable set the L-BFGS path uses, which you can pass with
 `f` and `g` linearly has structurally zero off-diagonal Hessian entries,
 so its columns need never be probed.
 
+**What pattern did I actually get?** `stats()["fd_hessian"]` says, and it
+is present only when the mode ran:
+
+```python
+r = solver(x0=..., lbg=..., ubg=...)
+solver.stats()["fd_hessian"]
+# {'pattern': 'declared', 'nnz': 34094, 'groups': 17,
+#  'rho_max': 15, 'coloring_fell_back': False}
+```
+
+`pattern` is the source the solve **ended up with**, not the one you
+asked for — `declared` falls back silently, and `groups` is what that
+fallback costs you, one gradient-and-Jacobian evaluation per group per
+Hessian rebuild. On `laptime` the two patterns are 17 groups against 341.
+
 **Restoration runs limited-memory regardless.** The restoration sub-NLP's
 primal is a five-block compound the model's Hessian pattern does not
 describe, so the feasibility phase uses the limited-memory updater — the

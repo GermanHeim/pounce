@@ -98,6 +98,29 @@ pub struct SolveStatistics {
     //
     /// Number of times `IpoptAlgorithm::invoke_restoration` was
     /// entered during this solve.
+    /// Finite-difference Hessian census, when
+    /// `hessian_approximation=finite-difference` actually built a pattern.
+    /// All zero / `-1` on every other Hessian mode, which is how a caller
+    /// tells "the mode did not run" from "it ran with an empty pattern".
+    ///
+    /// `fd_hessian_pattern_used` is the source the run **ended up with**,
+    /// not the one requested: `0` declared, `1` jacobian, `-1` not run.
+    /// `declared` silently falls back to `jacobian` when the TNLP declares
+    /// no Hessian structure, and that fallback is the difference between
+    /// 17 probe groups and 341 on `benchmarks/large_scale` `laptime`, so
+    /// reporting the request would hide the number a reader is here for.
+    pub fd_hessian_pattern_used: Index,
+    /// Hessian nonzeros in the pattern that was coloured (lower triangle).
+    pub fd_hessian_nnz: Index,
+    /// Probe groups per Hessian — the count of extra gradient/Jacobian
+    /// evaluations each rebuild costs.
+    pub fd_hessian_groups: Index,
+    /// Widest row of the pattern; the quantity that decides whether the
+    /// colouring can stay narrow under mesh refinement.
+    pub fd_hessian_rho_max: Index,
+    /// Whether a requested star colouring failed validation and CPR was
+    /// substituted.
+    pub fd_hessian_coloring_fell_back: bool,
     pub restoration_calls: Index,
     /// Cumulative inner-IPM iterations across every restoration call —
     /// the number of `r`-suffix rows a `print_level=5` log would show.
@@ -206,6 +229,14 @@ impl Default for SolveStatistics {
             final_unscaled_kkt_error: Number::NAN,
             final_kkt_error_above_noise: Number::NAN,
             final_mu: 0.0,
+            // -1 = the finite-difference updater never built a pattern,
+            // which is every run that is not `hessian_approximation=
+            // finite-difference`. Distinct from 0, a real pattern source.
+            fd_hessian_pattern_used: -1,
+            fd_hessian_nnz: 0,
+            fd_hessian_groups: 0,
+            fd_hessian_rho_max: 0,
+            fd_hessian_coloring_fell_back: false,
             restoration_calls: 0,
             restoration_inner_iters: 0,
             restoration_outer_iters: 0,

@@ -1465,6 +1465,79 @@ def test_codegen_reproduces_the_finite_difference_hessian():
                   f"f={float(got['f']):.12g}")
 
 
+def test_fd_hessian_stats_are_reported():
+    """`stats()["fd_hessian"]` — which pattern the run ended up with and
+    what it cost.
+
+    Before this the two numbers that decide whether the mode is
+    affordable on a model — the pattern source and the probe-group count —
+    were reachable only through the `POUNCE_FD_HESSIAN_DEBUG` environment
+    variable, i.e. not from an embedder at all. Asked for by
+    @srikanth-gm (gh#823).
+
+    The key property is that `pattern` reports the source actually
+    **used**, not the one requested: `declared` falls back to `jacobian`
+    whenever the model declares no Hessian structure, and that fallback
+    is the whole reason to look.
+    """
+    x = ca.MX.sym("x", 3)
+    nlp = {"x": x,
+           "f": ca.exp(x[0] * x[1]) + x[2] ** 4 + (x[0] - 1) ** 2,
+           "g": ca.vertcat(x[0] ** 2 + x[1] ** 2 + x[2] ** 2 - 1.0)}
+    kw = dict(x0=[0.5, 0.5, 0.5], lbg=0, ubg=0)
+
+    def run(popts):
+        s = ca.nlpsol("s", "pounce", nlp,
+                      {"print_time": False, "pounce": dict(popts, print_level=0)})
+        s(**kw)
+        return s.stats().get("fd_hessian")
+
+    # Absent on every mode that is not finite-difference: a zero probe
+    # count would read as "free" rather than "not this mode".
+    check("fd_hessian absent under exact",
+          run({"hessian_approximation": "exact"}) is None)
+    check("fd_hessian absent under limited-memory",
+          run({"hessian_approximation": "limited-memory"}) is None)
+
+    dec = run({"hessian_approximation": "finite-difference",
+               "fd_hessian_pattern": "declared"})
+    jac = run({"hessian_approximation": "finite-difference",
+               "fd_hessian_pattern": "jacobian"})
+    check("fd_hessian present under finite-difference", dec is not None)
+    check("fd_hessian names the declared pattern", dec["pattern"] == "declared",
+          str(dec))
+    check("fd_hessian names the jacobian pattern", jac["pattern"] == "jacobian",
+          str(jac))
+    # The declared pattern is the true one; the Jacobian derivation is a
+    # superset, so it can only be wider and cost at least as many probes.
+    check("the declared pattern is tighter than the Jacobian superset",
+          dec["nnz"] < jac["nnz"] and dec["groups"] <= jac["groups"],
+          f'declared {dec["nnz"]}nnz/{dec["groups"]}groups vs '
+          f'jacobian {jac["nnz"]}nnz/{jac["groups"]}groups')
+    for k in ("nnz", "groups", "rho_max"):
+        check(f"fd_hessian.{k} is a positive count", dec[k] > 0, f"{k}={dec[k]}")
+    check("fd_hessian reports the colouring fallback",
+          dec["coloring_fell_back"] is False)
+
+    # The property that makes the field worth reading: asking for
+    # `declared` on a model with no Hessian at all reports what actually
+    # ran, not what was asked for.
+    FCB = _hessian_free_objective()
+    fcb = FCB("fcb_stats")
+    y = ca.MX.sym("y", 3)
+    nohess = {"x": y, "f": fcb(y),
+              "g": ca.vertcat(y[0] ** 2 + y[1] ** 2 + y[2] ** 2 - 1.0)}
+    s = ca.nlpsol("s", "pounce", nohess,
+                  {"print_time": False,
+                   "pounce": {"print_level": 0,
+                              "hessian_approximation": "finite-difference",
+                              "fd_hessian_pattern": "declared"}})
+    s(x0=[0.5, 0.5, 0.5], lbg=0, ubg=0)
+    got = s.stats().get("fd_hessian")
+    check("a declared request that fell back reports 'jacobian'",
+          got is not None and got["pattern"] == "jacobian", str(got))
+
+
 def main():
     probe_x = ca.MX.sym("x")
     try:
@@ -1510,6 +1583,7 @@ def main():
         test_finite_difference_takes_structure_without_values,
         test_finite_difference_survives_restoration,
         test_codegen_reproduces_the_finite_difference_hessian,
+        test_fd_hessian_stats_are_reported,
     ):
         t()
     print()

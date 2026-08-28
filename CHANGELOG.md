@@ -71,6 +71,33 @@ changes.
   serves the pattern as a literal and refuses values. Found in review by
   @srikanth-gm (gh#823).
 
+- **The finite-difference Hessian's pattern and probe count are readable
+  from an embedder.** `GetPounceFdHessianStats` in the C API, and
+  `stats()["fd_hessian"]` through the CasADi plugin, report the pattern
+  source, its nonzero count, the probe groups per Hessian, `rho_max`, and
+  whether a requested star colouring fell back to Curtis-Powell-Reid.
+  Previously reachable only through the `POUNCE_FD_HESSIAN_DEBUG`
+  environment variable. The reported source is the one the run **ended up
+  with**, not the one requested: `fd_hessian_pattern=declared` falls back
+  to the Jacobian derivation whenever the model declares no Hessian
+  structure, and that fallback is worth 17 probe groups against 341 on
+  `benchmarks/large_scale` `laptime` — so reporting the request would hide
+  the number a reader is there for. Absent, rather than zero, on every
+  other Hessian mode. Asked for by @srikanth-gm (gh#823).
+
+- **`start_with_resto` does something.** The option was threaded from the
+  `OptionsList` into `AlgorithmBuilder::resto`, from there into
+  `RestoAlgorithmBuilder`, and from there into `MinC1NrmDriver` — a field
+  on the *inner* restoration solver, which has no first outer iteration to
+  force. Every layer set it and no layer read it, so `start_with_resto
+  yes` was a silent no-op. It is an outer-loop behaviour and the outer
+  loop consumes it now, riding the same `request_resto` flag the
+  probing-oracle guard uses. `unimplemented_options.rs`'s
+  `the_restoration_switches_reach_the_builder` could not catch this: it
+  asserts the value *reaches the builder*, which is exactly the "read site
+  populating a field nobody consumes" its own comment names as the defect
+  to avoid. Default is unchanged (`no`), so no default run moves.
+
 - **`hessian_approximation=partitioned` (negative result, opt-in).** Two
   partitioned quasi-Newton decompositions, built and measured against the same
   benchmark and kept for the record rather than proposed for use: per-constraint

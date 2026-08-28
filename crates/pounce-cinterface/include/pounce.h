@@ -353,6 +353,37 @@ void GetPounceRestorationStats(
     ipindex*     outer_iters,
     ipnumber*    wall_secs);
 
+/**
+ * Finite-difference Hessian census for the most recent solve. Any
+ * pointer may be NULL to skip that component.
+ *
+ * Only `hessian_approximation=finite-difference` populates these. Every
+ * other mode leaves `pattern_used` at -1 and the counts at 0, so -1 is
+ * how you tell "the mode did not run" from "it ran and the pattern was
+ * empty".
+ *
+ * `pattern_used` is 0 for the TNLP's declared Hessian structure and 1
+ * for the pattern derived from the Jacobian. It reports what the solve
+ * ENDED UP with, not what was requested: `fd_hessian_pattern=declared`
+ * falls back to the Jacobian derivation whenever the TNLP declares no
+ * Hessian structure, and that fallback is the difference between 17 and
+ * 341 probe groups on benchmarks/large_scale laptime -- which is the
+ * question this call exists to answer.
+ *
+ * `nnz` is the coloured pattern's lower-triangle nonzero count, `groups`
+ * the probe groups per Hessian (each one extra gradient and Jacobian
+ * evaluation per rebuild), and `rho_max` the pattern's widest row.
+ * `coloring_fell_back` is 1 when a requested star colouring failed
+ * validation and Curtis-Powell-Reid was substituted.
+ */
+void GetPounceFdHessianStats(
+    IpoptProblem ipopt_problem,
+    ipindex*     pattern_used,
+    ipindex*     nnz,
+    ipindex*     groups,
+    ipindex*     rho_max,
+    ipindex*     coloring_fell_back);
+
 /* -----------------------------------------------------------------
  * Pounce extensions — linear-solver post-mortem
  *

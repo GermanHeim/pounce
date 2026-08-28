@@ -65,6 +65,12 @@ namespace casadi {
     /// Restoration-phase activity, likewise.
     ipindex resto_calls = 0, resto_inner = 0, resto_outer = 0;
     double resto_secs = 0;
+    /// Finite-difference Hessian census. `fd_pattern` stays -1 on every
+    /// solve that was not `hessian_approximation=finite-difference`,
+    /// which is what keeps `stats()["fd_hessian"]` absent rather than
+    /// present-and-zero for the modes it does not describe.
+    ipindex fd_pattern = -1, fd_nnz = 0, fd_groups = 0, fd_rho_max = 0,
+            fd_fell_back = 0;
     /// Working set carried from this memory object's previous solve
     /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
     /// variable / row numbering. Empty until a solve produces one.
@@ -827,6 +833,8 @@ namespace casadi {
     m->report_written = false;
     m->linsol_valid = false;
     m->resto_calls = m->resto_inner = m->resto_outer = 0;
+    m->fd_pattern = -1;
+    m->fd_nnz = m->fd_groups = m->fd_rho_max = m->fd_fell_back = 0;
     m->resto_secs = 0;
 
     m->xl.assign(d_nlp->lbz, d_nlp->lbz + n);
@@ -1002,6 +1010,8 @@ namespace casadi {
     m->linsol_valid = GetPounceLinearSolverStats(prob, &m->linsol);
     GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
                               &m->resto_outer, &m->resto_secs);
+    GetPounceFdHessianStats(prob, &m->fd_pattern, &m->fd_nnz, &m->fd_groups,
+                            &m->fd_rho_max, &m->fd_fell_back);
     // Same window as the harvest above, and for the same reason: the
     // report is built from the solve retained on `prob`, which the free
     // below takes with it.
@@ -1194,6 +1204,25 @@ namespace casadi {
       resto["outer_iters"] = static_cast<casadi_int>(m->resto_outer);
       resto["wall_secs"] = m->resto_secs;
       stats["restoration"] = resto;
+
+      // Only present when the finite-difference Hessian actually built a
+      // pattern. Absent rather than zero on every other mode: a zero
+      // probe count would read as "free", not as "not this mode".
+      //
+      // `pattern` is what the solve ENDED UP with. Asking for
+      // `declared` on a model that declares no Hessian structure
+      // silently yields the Jacobian derivation, and that is the whole
+      // reason to read this -- on `laptime` the two differ by 17 probe
+      // groups against 341.
+      if (m->fd_pattern >= 0) {
+        Dict fd;
+        fd["pattern"] = std::string(m->fd_pattern == 0 ? "declared" : "jacobian");
+        fd["nnz"] = static_cast<casadi_int>(m->fd_nnz);
+        fd["groups"] = static_cast<casadi_int>(m->fd_groups);
+        fd["rho_max"] = static_cast<casadi_int>(m->fd_rho_max);
+        fd["coloring_fell_back"] = m->fd_fell_back != 0;
+        stats["fd_hessian"] = fd;
+      }
     }
 
     // What the KKT linear solver did. `solver_name` is the backend that
