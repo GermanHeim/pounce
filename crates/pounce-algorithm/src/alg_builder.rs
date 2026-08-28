@@ -109,6 +109,10 @@ pub enum HessianApproxChoice {
     /// a genuine sparse `SymTMatrix`. See
     /// [`crate::hess::partitioned_quasi_newton`].
     Partitioned,
+    /// Sparse finite-difference Lagrangian Hessian, recovered by graph
+    /// coloring from the analytic Jacobian. See
+    /// [`crate::hess::fd_hessian`].
+    FiniteDifference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +264,9 @@ pub struct AlgorithmBuilder {
     /// Target primal-block width when `partitioned_elements` is
     /// `blocks` (`partitioned_block_size`).
     pub partitioned_block_size: usize,
+    /// Where [`HessianApproxChoice::FiniteDifference`] takes its
+    /// sparsity pattern from (`fd_hessian_pattern`).
+    pub fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource,
     pub limited_memory_update_type: UpdateType,
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
@@ -1093,6 +1100,7 @@ impl Default for AlgorithmBuilder {
             partitioned_elements:
                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
+            fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
@@ -1505,6 +1513,9 @@ impl AlgorithmBuilder {
                 u.init_val_max = self.limited_memory_init_val_max;
                 Box::new(u)
             }
+            HessianApproxChoice::FiniteDifference => Box::new(
+                crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern),
+            ),
         };
 
         let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
@@ -1619,6 +1630,8 @@ mod tests {
                             partitioned_elements:
                                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
                             partitioned_block_size: 64,
+                            fd_hessian_pattern:
+                                crate::hess::fd_hessian::FdPatternSource::Declared,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,

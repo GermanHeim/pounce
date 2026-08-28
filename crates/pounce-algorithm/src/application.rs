@@ -3707,6 +3707,7 @@ impl IpoptApplication {
                 builder.hessian_approximation = match v.as_str() {
                     "limited-memory" => HessianApproxChoice::LimitedMemory,
                     "partitioned" => HessianApproxChoice::Partitioned,
+                    "finite-difference" => HessianApproxChoice::FiniteDifference,
                     _ => HessianApproxChoice::Exact,
                 };
             }
@@ -3768,6 +3769,14 @@ impl IpoptApplication {
         {
             if found && v > 0 {
                 builder.partitioned_max_element = v as usize;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("fd_hessian_pattern", "") {
+            if found {
+                builder.fd_hessian_pattern = match v.as_str() {
+                    "jacobian" => crate::hess::fd_hessian::FdPatternSource::Jacobian,
+                    _ => crate::hess::fd_hessian::FdPatternSource::Declared,
+                };
             }
         }
         if let Ok((v, found)) = self.options.get_string_value("partitioned_elements", "") {
