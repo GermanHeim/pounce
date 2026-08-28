@@ -10,6 +10,10 @@ description = "Algorithm-side core for POUNCE (port of Ipopt's src/Algorithm/): 
 keywords = ["ipopt", "interior-point", "nlp", "optimization", "solver"]
 categories = ["mathematics", "algorithms", "science"]
 
+# Re-emits the CoinHSL `-rpath` onto this package's test binaries under
+# `--features ma57`; see build.rs and gh#811. No-op without the feature.
+build = "build.rs"
+
 [dependencies]
 pounce-common.workspace = true
 pounce-linalg.workspace = true

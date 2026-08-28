@@ -633,9 +633,15 @@ and a μ-reset spiral
 ([issue #58](https://github.com/jkitchin/pounce/issues/58),
 [issue #64](https://github.com/jkitchin/pounce/issues/64)).
 
-Pair with `ma57_automatic_scaling=yes` (default in HSL builds) and
-leave `linear_system_scaling=none` — MA57's internal scaling and a
-pounce-level Ruiz pass should not be stacked.
+Consider pairing with `ma57_automatic_scaling=yes` and leaving
+`linear_system_scaling=none` — MA57's internal scaling and a
+pounce-level Ruiz pass should not be stacked. Note that
+`ma57_automatic_scaling` defaults to `no`, matching upstream Ipopt;
+turning it on is a deliberate step. (This page previously called it
+"default in HSL builds", which was never true — and until the fix for
+[issue #825](https://github.com/jkitchin/pounce/issues/825) setting it
+either way had no effect, because no `ma57_*` option reached the
+backend.)
 
 ### FERAL ordering: when the adaptive dispatcher guesses wrong
 
