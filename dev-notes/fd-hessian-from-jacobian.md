@@ -197,3 +197,58 @@ fallback to CPR, and `FdStats::coloring_fell_back` reports when that fires.
 On `laptime` the star colouring **passes** that validation and is still
 numerically wrong, which is the point worth carrying forward: the predicate
 is about algebraic recoverability and cannot see the differencing error.
+
+
+---
+
+## Measured on a model that genuinely has no Hessian
+
+Every number above this section was produced by setting an option on a
+model that *does* carry a Hessian — `laptime.nl` gets one from AMPL's AD —
+so it simulated the constraint rather than reproducing it. That caveat is
+now removed.
+
+`POUNCE_DROP_HESSIAN=1` installs `pounce-cli`'s `NoHessianTnlp`, a wrapper
+that reports `nnz_h_lag = 0` and declines `eval_h`. That is exactly what
+`pounce-py` presents for a Python problem object with no `hessian` method,
+which is the real shape of an FMU- or CasADi-backed model. Verified:
+`Number of nonzeros in Lagrangian Hessian` reads 28 000 without it and
+**0** with it.
+
+| mesh | leg | status | iters | wall | objective |
+|---|---|---|---|---|---|
+| N=160 | *ref:* `exact`, Hessian available | Optimal | 30 | 2.8 s | 65.3711067940 |
+| N=160 | no-Hessian, `limited-memory` | Acceptable | 207 | 53.7 s | 65.3704926894 |
+| N=160 | no-Hessian, `finite-difference` | **Optimal** | **38** | **12.6 s** | 65.3711063753 |
+| N=160 | no-Hessian, `finite-difference` + reuse | Optimal | 38 | 11.7 s | 65.3711063753 |
+| N=320 | *ref:* `exact`, Hessian available | Optimal | 57 | 14.5 s | 65.3269077802 |
+| N=320 | no-Hessian, `limited-memory` | **MaxIter** | 1210 | 706 s | **65.3951930783** |
+| N=320 | no-Hessian, `finite-difference` | Acceptable | **106** | 430 s | 65.3269077802 |
+
+**4.6× wall and 5.4× iterations at N=160.** At N=320 limited-memory spends
+1210 iterations to reach an objective of 65.395 against a true optimum of
+65.326908 — not merely unconverged but visibly wrong — while the
+finite-difference path reaches twelve correct digits.
+
+### Why building the wrapper was worth it rather than reasoning about it
+
+The simulated and genuine conditions do not agree, so the earlier numbers
+were not a stand-in for these:
+
+* limited-memory moved from 246 iterations / `Optimal` (simulated) to 207 /
+  `Solved To Acceptable Level` (genuine) at N=160, and at N=320 from
+  "unconverged" to "unconverged at a visibly wrong objective".
+* The claim that the default `fd_hessian_pattern=declared` falls back to
+  the Jacobian derivation when a model declares no Hessian was, until now,
+  a reading of the match arm. It is now observed: the run reports the
+  Jacobian-derived census (146 267 nonzeros, 76 groups) with no option set.
+
+A model with no Hessian differs in more than which updater runs —
+`nnz_h_lag` is 0, `h_space` is `None`, and `uninitialized_h()` returns an
+empty pattern, so the augmented-system solver sees `W`'s nonzero count
+change from 0 to the assembled pattern rather than staying put. None of
+that was exercised by forcing the option.
+
+The wrapper is an environment variable and not a registered option
+deliberately: no real solve should ever want to discard information the
+model was willing to provide.
