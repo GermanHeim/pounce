@@ -252,3 +252,61 @@ that was exercised by forcing the option.
 The wrapper is an environment variable and not a registered option
 deliberately: no real solve should ever want to discard information the
 model was willing to provide.
+
+---
+
+## Mesh continuation on `laptime`: primal-only warm starting makes it worse
+
+A trajectory refinement path is the textbook case for warm starting — each
+solve should be close to the last. It is not POUNCE's to exploit: the solver
+sees a flat vector and cannot know which entry is which stage's state, so
+mapping a coarse solution onto a fine mesh is transcription knowledge and
+belongs to the frontend. `benchmarks/large_scale/mesh_continuation.py` is
+that frontend for this family, mapping by arc length through the `.col`
+names (`X[k,st]`, `Xc[k,j,st]`, `U[k,c]` on a uniform mesh).
+
+`hessian_approximation=finite-difference`, every entry transferred:
+
+| step | cold | warm (interpolated) | |
+|---|---|---|---|
+| N=80 → 160 | 30 it / 3.6 s | **93 it / 15.3 s** | **3.1× worse** |
+| N=160 → 320 | 57 it / 18.5 s | **74 it / 24.7 s** | **1.3× worse** |
+
+### The interpolation is not the problem
+
+Evaluated at the N=160 mesh:
+
+| start point | objective | max constraint violation | min relative slack | vars at bound |
+|---|---|---|---|---|
+| `.nl` cold | 88.889 | 6.397 | 0.0 | 641 |
+| interpolated from N=80 | 65.458 | 0.814 | 7.5e-56 | 673 |
+
+The transferred point is far better by every optimization measure — its
+objective is already within 1e-1 of the converged 65.371107 and its
+constraint violation is 8× smaller — and it still costs 3.1× the iterations.
+
+The mechanism is **centrality**, not quality. A converged coarse solution
+sits on its active set, with slacks down at `7.5e-56`. A barrier method
+wants a well-centred interior point, and "already at the boundary" is the
+worst case: the early iterations are spent restoring centrality, which costs
+more than the better point saves. This is the documented
+warm-start-hurts regime — `benchmarks/warmstart/README.md` cites *Not All
+Warm Starts Help* (arXiv:2606.08984) for exactly this, which is why that
+suite reports regressions as a first-class column rather than averaging them
+away.
+
+### What this does and does not rule out
+
+Only the **primal** point was transferred. That is the warm-start suite's
+`values-ipm` arm — no multipliers, no `mu` — and is the weakest arm it
+measures, chosen here because it needs nothing but `x`. The `warm-ipm` arm,
+which carries the duals and the barrier parameter so the solver resumes from
+a *consistent* primal-dual-barrier state, scored 1.96× on `nmpc_vanderpol`
+(the closest-shaped family) and 4.42×/9.12× on the other two. It is
+untested on `laptime` and is the thing that could still work; it needs the
+constraint multipliers mapped through the `.row` names as well, plus
+`warm_start_init_point=yes` and `warm_start_target_mu`.
+
+So: mesh continuation is not free, the obvious cheap version of it is a
+regression on this family, and the reason is a property of interior-point
+methods rather than of the transfer.
