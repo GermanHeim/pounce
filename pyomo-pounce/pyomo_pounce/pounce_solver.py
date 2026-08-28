@@ -7,9 +7,15 @@ interface exactly as it drives IPOPT.
 The `pounce` binary is provided by the `pounce-solver` dependency,
 which ships a per-platform wheel that drops the executable into the
 active environment under `<venv>/bin/pounce`. The plugin resolves that
-**bundled** binary deterministically (independent of PATH). Only when no
-bundled binary is present (a source/dev checkout without the wheel) does
-it fall back to whatever `pounce` is first on `PATH`.
+**bundled** binary deterministically (independent of PATH). Failing that
+it takes the cargo build of the source checkout the `pounce` package is
+imported out of (`target/release/pounce` or `target/debug/pounce`), and
+only if there is no checkout either does it fall back to whatever
+`pounce` is first on `PATH`. The middle rung exists because
+`maturin develop` builds the extension module and nothing else: without
+it a source install fell through to PATH and found its own
+console-script shim there, pointing at a binary nobody had built
+(gh #816).
 
 **You must** ``import pyomo_pounce`` before ``SolverFactory('pounce')``:
 without it Pyomo does not know the solver and raises a clear
@@ -48,6 +54,26 @@ def _bundled_path():
 
         b = _bundled_binary()
         return str(b) if b.is_file() else None
+    except Exception:
+        return None
+
+
+def _checkout_path():
+    """Path to the cargo-built `pounce` of the surrounding source checkout,
+    or None when this is not a checkout / nothing has been built.
+
+    `maturin develop` builds the extension module and nothing else, so a
+    source install has no bundled binary at all (gh #816). Without this the
+    plugin fell through to PATH, where the *console-script shim* of that same
+    install is what it found -- a shim that then failed to find the binary it
+    was supposed to exec. Resolving cargo's own output directly skips both
+    the failure and the per-solve Python interpreter the shim costs.
+    """
+    try:
+        from pounce._cli import _checkout_binary
+
+        b = _checkout_binary()
+        return str(b) if b is not None else None
     except Exception:
         return None
 
@@ -161,6 +187,65 @@ def _warn_path_fallback(resolved):
     )
 
 
+_checkout_warned = False
+
+
+def _warn_checkout_fallback(resolved):
+    """One-time warning that the plugin resolved the source checkout's cargo
+    build because the install carries no bundled binary (gh #816).
+
+    Quieter than the PATH warning by one notch and for one reason: the binary
+    is at least provably this checkout's own build, not an arbitrary `pounce`
+    that happened to be first on PATH. It is still not the wheel's binary, and
+    it can still be a stale `target/release` from before the change under
+    test, so it is still named out loud."""
+    global _checkout_warned
+    if _checkout_warned:
+        return
+    _checkout_warned = True
+    bid = _build_id(resolved)
+    warnings.warn(
+        f"pyomo-pounce: no wheel-bundled `pounce` binary in this install; "
+        f"using the source checkout's cargo build {resolved!r} "
+        f"(build {bid or 'unknown'}). `make dev` from the repo root stages it "
+        f"into the package the way a wheel ships it; "
+        f"`pyomo_pounce.check_binary()` reports what will run.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+_unavailable_warned = set()
+
+
+def _warn_unavailable(reason):
+    """Warn once per distinct reason. ``available(exception_flag=False)`` is
+    called in loops (test skips, preflight helpers); the reason is worth
+    exactly one line however many times it is asked."""
+    if reason in _unavailable_warned:
+        return
+    _unavailable_warned.add(reason)
+    warnings.warn(reason, UserWarning, stacklevel=3)
+
+
+def _version_probe(exe):
+    """`(returncode, merged output)` from ``<exe> -v`` -- the exact call
+    Pyomo's ASL layer makes to decide whether a solver is available
+    (`ASL._get_version`). Returns `(None, str(exc))` if it cannot be run."""
+    try:
+        r = subprocess.run(
+            [exe, "-v"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            errors="ignore",
+        )
+    except Exception as exc:  # OSError, TimeoutExpired, ...
+        return None, f"{type(exc).__name__}: {exc}"
+    return r.returncode, r.stdout.strip()
+
+
 @SolverFactory.register("pounce", doc="The POUNCE interior-point NLP solver")
 class POUNCE(ASL):
     """Pyomo solver interface for POUNCE via the AMPL Solver Library protocol."""
@@ -235,18 +320,86 @@ class POUNCE(ASL):
         # package) and independent of PATH. ``shutil.which("pounce")`` alone
         # finds only the ``<venv>/bin/pounce`` console-script shim, which is
         # invisible to non-activated-environment runs (cron, IDE runners,
-        # Jupyter kernels) and can be shadowed by a stale system binary. Fall
-        # back to PATH for system installs and local cargo dev builds where
-        # ``pounce-solver`` is not installed — and WARN when we do, since a
-        # PATH binary may be stale/unrelated and version strings cannot tell
-        # builds apart (gh #315).
+        # Jupyter kernels) and can be shadowed by a stale system binary.
+        #
+        # Second choice is the cargo build of the source checkout the
+        # ``pounce`` package is being imported out of. A ``maturin develop``
+        # install has no bundled binary, so this used to fall straight to
+        # PATH — and what it found there was that install's own console-script
+        # shim, pointing at the binary nobody built (gh #816). Resolving
+        # cargo's output directly is both correct and cheaper than routing
+        # every ASL call through a Python shim.
+        #
+        # PATH is the last resort, for system installs where ``pounce-solver``
+        # is not installed at all — and WARN when we get there, since a PATH
+        # binary may be stale/unrelated and version strings cannot tell builds
+        # apart (gh #315).
         bundled = _bundled_path()
         if bundled is not None:
             return bundled
+        checkout = _checkout_path()
+        if checkout is not None:
+            _warn_checkout_fallback(checkout)
+            return checkout
         resolved = shutil.which("pounce")
         if resolved is not None:
             _warn_path_fallback(resolved)
         return resolved
+
+    def available(self, exception_flag=True):
+        """True when a `pounce` executable is resolvable *and* runs.
+
+        Same verdict as ``ASL.available`` — an executable plus a parseable
+        ``pounce -v`` — but never a bare ``False``. Pyomo's version reports
+        no reason, and the reason is the whole content of the answer: gh #816
+        is a report of ``available()`` returning False while ``solve()``
+        returned ``optimal``, which is what it looks like when the two take
+        different routes to a binary (``solve()`` through the bundled path,
+        ``available()`` through a PATH console-script shim that could not
+        find one). A False that names the executable and quotes what running
+        it printed is diagnosable in one line; a bare False sent that report
+        looking at the model.
+
+        With ``exception_flag`` (Pyomo's default) the reason is raised as
+        ``ApplicationError``; without it, it is warned once and False
+        returned, so ``available(exception_flag=False)`` stays a predicate.
+        """
+        if super().available(exception_flag=False):
+            return True
+        reason = self._unavailable_reason()
+        if exception_flag:
+            from pyomo.common.errors import ApplicationError
+
+            raise ApplicationError(reason)
+        _warn_unavailable(reason)
+        return False
+
+    def _unavailable_reason(self):
+        """Why :meth:`available` said no, as a sentence a user can act on."""
+        try:
+            exe = self.executable()
+        except NotImplementedError:
+            exe = None
+        if exe is None:
+            return (
+                "pyomo-pounce: no `pounce` executable found. Looked for the "
+                "binary bundled in an installed `pounce-solver` wheel, then "
+                "for a cargo build in a surrounding source checkout "
+                "(target/release or target/debug), then on PATH. Install the "
+                "wheel (`pip install -U pounce-solver`), or in a checkout run "
+                "`make dev` from the repo root."
+            )
+        rc, out = _version_probe(exe)
+        shown = out.splitlines()[0] if out else "(no output)"
+        return (
+            f"pyomo-pounce: the `pounce` executable {exe!r} did not report a "
+            f"version, so Pyomo treats the solver as unavailable. "
+            f"`pounce -v` exited {rc} and printed: {shown!r}. If that is the "
+            f"console-script shim of a `maturin develop` install, no CLI "
+            f"binary was ever built — run `make dev` from the repo root "
+            f"(gh #816). `pyomo_pounce.check_binary()` reports the full "
+            f"picture."
+        )
 
 
 def _all_path_pounce():
@@ -288,6 +441,7 @@ def check_binary(verbose=True):
     """
     resolved = SolverFactory("pounce")._default_executable()
     bundled = _bundled_path()
+    checkout = _checkout_path()
     resolved_id = _build_id(resolved)
     bundled_id = _build_id(bundled)
 
@@ -313,7 +467,9 @@ def check_binary(verbose=True):
         "resolved_build_id": resolved_id,
         "bundled_executable": bundled,
         "bundled_build_id": bundled_id,
+        "checkout_executable": checkout,
         "using_bundled": bool(bundled) and resolved == bundled,
+        "using_checkout": bool(checkout) and resolved == checkout,
         "matches_bundled": (
             bundled_id is not None and resolved_id == bundled_id
         ),
@@ -331,6 +487,13 @@ def check_binary(verbose=True):
         else:
             print("  bundled  : none found (source/dev install without the "
                   "pounce-solver wheel)")
+        if checkout:
+            note = ("  [this is what will run]" if info["using_checkout"]
+                    else "")
+            print(f"  checkout : {checkout}{note}")
+        elif bundled is None:
+            print("  checkout : none built (run `make dev` from the repo "
+                  "root, or `cargo build --release --bin pounce`)")
         if shadowing:
             print("  WARNING  : a different `pounce` is earlier on PATH; "
                   "without `import pyomo_pounce` (or on the ASL fallback "
