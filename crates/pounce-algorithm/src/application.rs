@@ -1216,6 +1216,7 @@ impl IpoptApplication {
         "resto_decline_deferrals",
         "resto_decline_progress_ratio",
         "neg_curv_escapes",
+        "limited_memory_ls_failure_restarts",
     ];
 
     /// Did the caller set any option from
@@ -3277,6 +3278,7 @@ impl IpoptApplication {
         alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
         alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.neg_curv_escapes = builder.neg_curv_escapes.max(0) as usize;
+        alg.lbfgs_ls_failure_restarts = builder.limited_memory_ls_failure_restarts.max(0) as usize;
         alg.kkt_fidelity_tol = builder.kkt_fidelity_tol;
         // Honor `print_level == 0`: silence the algorithm's direct-to-stdout
         // output — the per-iteration table and, new in #206, the
@@ -4096,6 +4098,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("neg_curv_escapes") {
             builder.neg_curv_escapes = v;
+        }
+        if let Some(v) = read_int("limited_memory_ls_failure_restarts") {
+            builder.limited_memory_ls_failure_restarts = v;
         }
 
         // Barrier-parameter (μ) options — consumers in

@@ -81,6 +81,19 @@ const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
 /// to spend itself on. It is also the conservative default — each escape is a
 /// separate bet, and while none of them can return a worse point than the
 /// certificate it left, each costs its own continuation budget.
+/// Default `limited_memory_ls_failure_restarts` (gh #818): one re-anchor
+/// per solve.
+///
+/// One, because the rung is a hypothesis test — "the model, not the point,
+/// is why no step was acceptable" — and a second re-anchor at the same
+/// stall would be testing a hypothesis the first one already answered.
+/// `reanchor` is structurally self-limiting within a stall (it gives up
+/// once the history is down to one pair), so this counter exists to bound
+/// the *number of stalls* a solve may spend a retry on, and one is what
+/// the corpus needed: on `deb7` the single restart is taken at the first
+/// stall, and no fixture in the sweep asks for a second.
+const DEFAULT_LBFGS_LS_FAILURE_RESTARTS: usize = 1;
+
 const DEFAULT_NEG_CURV_ESCAPES: usize = 1;
 /// gh #797 — outer iterations a negative-curvature escape gets to produce a
 /// certificate of its own before it is cut and the stationary point reported.
@@ -350,6 +363,17 @@ pub struct IpoptAlgorithm {
     /// See [`Self::try_neg_curv_escape`] for the test and the step, and
     /// [`Self::honour_neg_curv_floor`] for what makes a lost bet harmless.
     pub neg_curv_escapes: usize,
+    /// `limited_memory_ls_failure_restarts` (gh #818) — how many times a
+    /// line-search failure at an *already feasible* point may re-anchor
+    /// the quasi-Newton model and retry, instead of handing off to a
+    /// restoration phase that has no constraint violation to reduce.
+    /// `0` restores the pre-#818 behaviour (always hand off).
+    ///
+    /// See [`Self::try_reanchor_before_restoration`] for the rung and
+    /// what bounds it.
+    pub lbfgs_ls_failure_restarts: usize,
+    /// gh #818 — re-anchors spent so far this solve.
+    lbfgs_ls_restarts_used: usize,
     /// gh #797 — escapes spent so far this solve.
     neg_curv_escapes_used: usize,
     /// gh #797 — the certified stationary point the escape left. It is a strict
@@ -526,6 +550,8 @@ impl IpoptAlgorithm {
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
             neg_curv_escapes: DEFAULT_NEG_CURV_ESCAPES,
             neg_curv_escapes_used: 0,
+            lbfgs_ls_failure_restarts: DEFAULT_LBFGS_LS_FAILURE_RESTARTS,
+            lbfgs_ls_restarts_used: 0,
             neg_curv_floor: None,
             neg_curv_deadline_iter: None,
             resto_decline_progress_ratio: DEFAULT_DECLINE_PROGRESS_RATIO,
@@ -3196,6 +3222,12 @@ impl IpoptAlgorithm {
                         if let Some(o) = self.debug_stop(crate::debug::Checkpoint::StepRejected) {
                             return o;
                         }
+                        // gh#818 — one rung before the restoration
+                        // hand-off: re-anchor the quasi-Newton model and
+                        // retry this iterate.
+                        if self.try_reanchor_before_restoration() {
+                            return IterateOutcome::Continue;
+                        }
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
                         // `LINE_SEARCH_FAILED` when α drops below
                         // `alpha_min` or all retries reject, which in
@@ -3335,6 +3367,90 @@ impl IpoptAlgorithm {
     /// Mirrors upstream's
     /// `IpBacktrackingLineSearch::ActivateLineSearch` → `PerformRestoration`
     /// chain.
+    /// Re-anchor the quasi-Newton model instead of handing off to
+    /// restoration, when the line search has failed at a point
+    /// restoration cannot improve (gh#818). Returns `true` if the model
+    /// was re-anchored, in which case the caller retries this iterate.
+    ///
+    /// **The two failures the line search cannot tell apart.** When no
+    /// trial step is acceptable, either the *point* is bad — infeasible,
+    /// and restoration is exactly the right tool — or the *direction* is,
+    /// because `W` is a quasi-Newton model carrying curvature the iterate
+    /// has left behind. Upstream has one answer for both, because
+    /// restoration is the only fallback it has. At an already-feasible
+    /// point that answer is a no-op: the restoration NLP minimizes the
+    /// constraint violation, and there is none to minimize, so it wanders
+    /// at `theta ~ 1e-13` and reports `Restoration_Failed`.
+    ///
+    /// Measured on the `deb7` fixture under `limited-memory`: the solve
+    /// stalls with `inf_pr ~ 1e-12` and `inf_du ~ 1e5`, enters
+    /// restoration at a point feasible to 8e-13, and spends 340 of its
+    /// 1242 iterations there before failing. On the unconstrained
+    /// gh#818 quadratic under `alpha_red_factor 0.8` it is starker
+    /// still — `theta` is identically zero, so restoration cannot move
+    /// at all, and the solve dies at **iteration 1** with
+    /// `Error_In_Step_Computation` and the objective still at its
+    /// starting value.
+    ///
+    /// So this is a rung, not a refusal: it fires only where restoration
+    /// has nothing to reduce, it is bounded, and every path that reached
+    /// restoration before still reaches it once the rung is spent.
+    ///
+    /// **Deliberately *after* the acceptable-point decline** in
+    /// [`Self::invoke_restoration`], which stays the first thing tried —
+    /// `eigena2` and `csfi2` reach here at feasible points that already
+    /// pass the acceptable tolerances, and those must go on being
+    /// reported rather than re-anchored and continued.
+    ///
+    /// **And deliberately not a feasibility gate on restoration itself.**
+    /// That was tried and rejected before (see the `constr_viol_tol`
+    /// paragraph in [`Self::invoke_restoration`]): feasible entries are
+    /// ordinary, and nothing observable at the doorway separates a
+    /// restoration that recovers from one that does not. This rung does
+    /// not decide that question — it spends one cheap retry on the
+    /// hypothesis that the model, not the point, is at fault, and hands
+    /// over unchanged if the retry fails too.
+    ///
+    /// The bound is structural as well as counted. `reanchor` returns
+    /// `false` once the history is down to its newest pair, so a second
+    /// failure at the same iterate finds nothing to give up and falls
+    /// through; refilling the history takes accepted steps, so the
+    /// counter only advances once per genuine stall.
+    /// `limited_memory_ls_failure_restarts` caps the total.
+    fn try_reanchor_before_restoration(&mut self) -> bool {
+        if self.lbfgs_ls_failure_restarts == 0
+            || self.lbfgs_ls_restarts_used >= self.lbfgs_ls_failure_restarts
+        {
+            return false;
+        }
+        // Restoration's objective is the constraint violation. Only
+        // stand in front of it where that objective is already at its
+        // floor, so the rung can never pre-empt a restoration that had
+        // real work to do. `constr_viol_tol` is the same tolerance the
+        // convergence check calls feasible.
+        let theta = self.cq.borrow().curr_constraint_violation();
+        if !(theta <= self.bundle.conv_check.constr_viol_tol_or_default()) {
+            return false;
+        }
+        if !self.bundle.hess.reanchor() {
+            return false;
+        }
+        self.lbfgs_ls_restarts_used += 1;
+        // 'Wa' alongside the updater's own 'Wr' (the
+        // `limited_memory_max_skipping` reset), so the two re-anchorings
+        // are distinguishable in the iteration table rather than both
+        // reading as "the Hessian did something".
+        self.data.borrow_mut().append_info_string("Wa");
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] line search failed at a feasible point (theta {:.3e}); re-anchoring \
+             the limited-memory Hessian on its newest curvature pair and retrying instead \
+             of entering restoration, which has nothing to reduce here (gh#818). \
+             Restart {} of {}.",
+            theta, self.lbfgs_ls_restarts_used, self.lbfgs_ls_failure_restarts,
+        );
+        true
+    }
+
     fn invoke_restoration(&mut self) -> IterateOutcome {
         // Snapshot the outer reference iterate's `(theta, barr)` and
         // build the orig-progress callback the inner IPM will consult

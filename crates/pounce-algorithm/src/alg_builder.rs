@@ -352,6 +352,12 @@ pub struct AlgorithmBuilder {
     /// of negative curvature instead of reported. Default `1`; `0` restores the
     /// pre-#797 behaviour. See `upstream_options.rs`.
     pub neg_curv_escapes: Index,
+    /// `limited_memory_ls_failure_restarts` (gh #818) — how many times a
+    /// line-search failure at an already-feasible point may re-anchor the
+    /// quasi-Newton model and retry instead of entering restoration.
+    /// Default `1`; `0` restores the pre-#818 hand-off. See
+    /// `upstream_options.rs`.
+    pub limited_memory_ls_failure_restarts: Index,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
     /// candidate points by the status each will be *reported* under. Default
@@ -1109,6 +1115,7 @@ impl Default for AlgorithmBuilder {
             resto_decline_deferrals: 1,
             resto_decline_progress_ratio: 0.5,
             neg_curv_escapes: 1,
+            limited_memory_ls_failure_restarts: 1,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1614,6 +1621,7 @@ mod tests {
                             resto_decline_deferrals: 1,
                             resto_decline_progress_ratio: 0.5,
                             neg_curv_escapes: 1,
+                            limited_memory_ls_failure_restarts: 1,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),

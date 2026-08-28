@@ -1111,6 +1111,42 @@ halvings of 1, so interpolation buys nothing — and because enabling it
 there was measured to move 21 of the 154 fixture-legs in
 `scripts/sweep-fixtures.sh`, two of them from solved to not solved.
 
+### When the line search fails anyway: `limited_memory_ls_failure_restarts`
+
+When no trial step is acceptable, either the **point** is bad —
+infeasible, and the restoration phase is exactly the right tool — or the
+**direction** is, because `W` is a quasi-Newton model carrying curvature
+the iterate has left behind. Upstream has one answer for both, because
+restoration is the only fallback it has.
+
+At an already-feasible point that answer is a no-op. The restoration NLP
+minimizes the constraint violation and there is none to minimize, so it
+wanders at `θ ≈ 1e-13` and reports `Restoration_Failed`. On the `deb7`
+fixture under `limited-memory` the solve stalls at `inf_pr ≈ 1e-12` with
+`inf_du ≈ 1e5`, enters restoration at a point feasible to 8e-13, and
+spends 340 of its 1242 iterations there. On an unconstrained model `θ`
+is identically zero, so restoration cannot move at all.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `limited_memory_ls_failure_restarts` | `1` | How many times a line-search failure at a feasible point may drop every curvature pair but the newest and retry, before handing off to restoration. `0` restores the unconditional hand-off. |
+
+The newest pair is kept rather than the history cleared, because `σ` is
+read off the history and an empty one falls back to
+`limited_memory_init_val` — a bare `1.0`, which throws the model back to
+its first-iteration state on a problem whose curvature the solver has by
+now measured. This is L-BFGS-B's `col = 0` restart, adapted.
+
+It is a rung and not a refusal: it fires only where restoration has
+nothing to reduce, it runs *after* the acceptable-point decline (so a
+point that already passes the acceptable tolerances is still reported
+rather than re-anchored and continued), and every path that reached
+restoration before still reaches it once the rung is spent. The bound is
+structural as well as counted — the re-anchor gives up once the history
+is down to one pair, so a second failure at the same iterate falls
+straight through. It has no effect under an exact Hessian, which has no
+curvature history to re-anchor.
+
 ## ℓ₁ penalty-barrier wrapper options
 
 These tune the degenerate-NLP wrapper described in

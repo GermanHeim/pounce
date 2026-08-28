@@ -80,21 +80,77 @@ changes.
   faster infeasible detections. A Newton step's length is meaningful,
   which is the reason the interpolation has nothing to add there.
 
-  **Fixture sweep: the exact leg is byte-identical; 11 lbfgs-leg lines
-  move**, all explainable. Gains: `cresc4` `RestorationFailed`/195 →
-  **`SolveSucceeded`/241 at the exact-Hessian optimum** (0.87189752
-  against the exact leg's 0.87189754); `eigenb2`
-  `SolvedToAcceptableLevel`/41 → **`SolveSucceeded`/39**; `eigena2`
-  `ErrorInStepComputation` at 252 → 131 iterations; `pooling_rt2stp`
-  716 → 347 to the same objective to five digits. Cost: **`deb7` on the
-  lbfgs leg goes from `ErrorInStepComputation`/1242/15.1 s to
-  `RestorationFailed`/2295/22.3 s** — failing either way, and the new
-  run lands at 97.5851 against the true 97.5599 where the old one landed
-  at 101.097, so it is closer to the answer and takes half again as long
-  to not certify it. That is an accepted cost with an owner, filed as
-  its own issue rather than left in a commit message (see gh #544 for
-  what that costs). The remaining six lines are ±4 iterations or a digit
-  of objective.
+  Fixture sweep, with the re-anchor rung below: **the exact leg is
+  byte-identical; 12 lbfgs-leg lines move**, all explainable. Gains:
+  `cresc4` `RestorationFailed`/195 → **`SolveSucceeded`/241 at the
+  exact-Hessian optimum** (0.87189752 against the exact leg's
+  0.87189754); `eigenb2` `SolvedToAcceptableLevel`/41 →
+  **`SolveSucceeded`/39**; `eigena2` `ErrorInStepComputation` at 252 →
+  93 iterations; `pooling_rt2stp` 716 → 347 to the same objective to
+  five digits; `infeasible_square_scaled_1em4` 24 → 19 to the same
+  certificate. Cost: **`deb7` on the lbfgs leg, 1242 → 1695
+  iterations** — `ErrorInStepComputation` either way, at 14.8 s against
+  15.1 s. `deb7` on this arm is a *dual* stall (`inf_pr ~ 1e-12` with
+  `inf_du ~ 1e5` for a thousand iterations), which is the `recalc_y`
+  territory the option help already documents and which pounce
+  deliberately does not auto-enable for L-BFGS; the restart budget was
+  swept at 0/1/2/3/6 and none of them rescues it. The remaining six
+  lines are ±4 iterations or a digit of objective.
+
+- **A line-search failure at an already-feasible point no longer walks
+  into a restoration phase that has nothing to reduce (gh #818).** When
+  the backtracking line search cannot accept any trial step, either the
+  *point* is bad — infeasible, and the restoration phase is exactly the
+  right tool — or the *direction* is, because `W` is a quasi-Newton
+  model carrying curvature the iterate has left behind. Upstream has one
+  answer for both, because restoration is the only fallback it has.
+
+  At a feasible point that answer is a no-op: the restoration NLP
+  minimizes the constraint violation and there is none to minimize, so
+  it wanders at `theta ~ 1e-13` and reports `Restoration_Failed`. On
+  `deb7` under `limited-memory` the solve stalls at `inf_pr ~ 1e-12`
+  with `inf_du ~ 1e5`, enters restoration at a point feasible to 8e-13,
+  and spends **340 of its 1242 iterations** there before failing. On an
+  unconstrained model `theta` is identically zero, so restoration cannot
+  move at all — under `alpha_red_factor 0.8` with interpolation off, the
+  gh #818 quadratic dies at **iteration 1** with
+  `Error_In_Step_Computation` and the objective still at its starting
+  value.
+
+  `IpoptAlgorithm::try_reanchor_before_restoration` puts one rung in
+  front of the hand-off: drop every curvature pair but the newest — the
+  `col = 0` restart L-BFGS-B does on a line-search failure — and retry
+  the iterate. The newest pair is kept rather than the history cleared
+  because `compute_sigma_bfgs` reads `σ` off the history, and an empty
+  one returns `limited_memory_init_val`, a bare `1.0`; re-anchoring to
+  that throws the model back to its first-iteration state, which is
+  precisely where the badly-scaled step comes from.
+
+  **A rung, not a refusal.** It fires only where restoration has nothing
+  to reduce, it runs *after* the acceptable-point decline (so `eigena2`
+  and `csfi2`, which reach feasible points that already pass the
+  acceptable tolerances, go on being reported), and every path that
+  reached restoration before still reaches it once the rung is spent.
+  It is deliberately **not** a feasibility gate on restoration itself —
+  that was tried and rejected before, because feasible entries are
+  ordinary and nothing observable at the doorway separates a restoration
+  that recovers from one that does not. The rung does not decide that
+  question; it spends one cheap retry on the hypothesis that the model
+  is at fault and hands over unchanged if the retry fails too.
+
+  The bound is structural as well as counted: `reanchor` returns `false`
+  once the history is down to its newest pair, so a second failure at
+  the same iterate finds nothing to give up and falls through.
+  `limited_memory_ls_failure_restarts` (default `1`, `0` restores the
+  unconditional hand-off) caps the number of stalls that may spend one.
+  No effect under an exact Hessian, which has no history to re-anchor.
+
+  Over the interpolation change alone this moves five lbfgs-leg lines,
+  every one of them down: `deb7` `RestorationFailed`/2295/22.3 s →
+  `ErrorInStepComputation`/1695/14.8 s, `eigena2` 131 → 93,
+  `infeasible_square_scaled_1em4` 28 → 19 (below the 24 of the
+  pre-#818 baseline), `issue_508_infeasible_gap_1em4` 79 → 76, and one
+  objective digit on `infeasible_equalities`.
 
 - **`limited_memory_initialization=history-max` (gh #818).** Every
   upstream rule reads the newest curvature pair; this one applies the

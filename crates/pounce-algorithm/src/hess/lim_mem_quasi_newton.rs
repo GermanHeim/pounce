@@ -434,6 +434,43 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         data.borrow_mut().w = Some(Rc::new(lr));
         true
     }
+
+    /// Drop every curvature pair but the newest, so `B` falls back to
+    /// `σI` plus the single rank-2 update carrying the freshest
+    /// measured curvature (gh#818).
+    ///
+    /// **Why keep one pair rather than clear the history outright.**
+    /// `compute_sigma_bfgs` reads σ off the history, and an *empty*
+    /// history returns `limited_memory_init_val` — a bare `1.0`, which
+    /// is a curvature scale only by coincidence. Re-anchoring to that
+    /// throws the model back to its first-iteration state on a problem
+    /// whose curvature the solver has by now measured, and the first
+    /// iteration is precisely where the badly-scaled step comes from:
+    /// on gh#818's quadratic, iteration 1 is the one that needs 20
+    /// backtracks. Keeping the newest pair keeps σ a real Rayleigh
+    /// quotient and keeps the secant condition `B s = y` on the step
+    /// the solver just took, while discarding the older corrections
+    /// that made the direction unusable.
+    ///
+    /// Returns `false` when there is nothing to discard — an empty
+    /// history, or a history already down to its newest pair — which is
+    /// what makes one re-anchor per stall the natural bound: the second
+    /// failure at the same iterate finds nothing to give up and the
+    /// caller falls through.
+    fn reanchor(&mut self) -> bool {
+        if self.history.len() <= 1 {
+            return false;
+        }
+        let newest = self.history.pop().expect("len > 1");
+        self.history.clear();
+        self.history.push(newest);
+        // The skip counter measures consecutive *rejected* pairs and
+        // drives `limited_memory_max_skipping`; a deliberate re-anchor
+        // is not a rejection, and leaving the count standing would make
+        // the next skipped pair discard the pair we just chose to keep.
+        self.skipped_iter = 0;
+        true
+    }
 }
 
 impl LimMemQuasiNewtonUpdater {
@@ -1259,5 +1296,62 @@ mod tests {
                 initial_hessian_scalar(InitialApprox::Scalar1, ss, sy, yy, 1.0, 1e-8, 1e8),
             );
         }
+    }
+
+    // ------------------------------------------------ gh#818: reanchor
+
+    /// A re-anchor keeps the newest pair and drops the rest. Keeping the
+    /// *newest* is the whole point: `compute_sigma_bfgs` reads sigma off
+    /// the history, so clearing it outright would fall back to
+    /// `limited_memory_init_val` -- a bare 1.0, the first-iteration model
+    /// -- on a problem whose curvature the solver has by now measured.
+    #[test]
+    fn reanchor_keeps_only_the_newest_pair() {
+        let mut u = updater_with_curvatures(&[3.0, 400.0, 7.0]);
+        assert_eq!(u.history.len(), 3);
+        assert!(u.reanchor(), "there were three pairs to give up");
+        assert_eq!(u.history.len(), 1);
+        u.initial_approx = InitialApprox::Scalar1;
+        assert!(
+            (u.compute_sigma_bfgs() - 7.0).abs() < 1e-12,
+            "the surviving pair must be the NEWEST (curvature 7), got sigma {}",
+            u.compute_sigma_bfgs()
+        );
+    }
+
+    /// The bound is structural, not just counted: once the history is
+    /// down to one pair there is nothing left to give up, so a second
+    /// failure at the same iterate falls through to the caller's
+    /// existing hand-off instead of retrying forever.
+    #[test]
+    fn reanchor_declines_when_there_is_nothing_left_to_discard() {
+        let mut u = updater_with_curvatures(&[3.0, 400.0, 7.0]);
+        assert!(u.reanchor());
+        assert!(!u.reanchor(), "a one-pair history has nothing to re-anchor");
+        assert!(!LimMemQuasiNewtonUpdater::new().reanchor(), "empty history");
+    }
+
+    /// A deliberate re-anchor is not a rejected pair. Leaving
+    /// `skipped_iter` standing would let the next skipped pair trip
+    /// `limited_memory_max_skipping` and discard the very pair the
+    /// re-anchor just chose to keep -- turning the careful sigma into
+    /// `limited_memory_init_val` one iteration later, which is exactly
+    /// what keeping a pair was for.
+    #[test]
+    fn reanchor_clears_the_skip_counter() {
+        let mut u = updater_with_curvatures(&[3.0, 400.0, 7.0]);
+        u.skipped_iter = 1;
+        assert!(u.reanchor());
+        assert_eq!(u.skipped_iter, 0);
+    }
+
+    /// The exact-Hessian updater has no curvature history, so it must
+    /// decline and let the caller hand off as before. If this ever
+    /// returns `true` the rung would fire on the exact path, where the
+    /// fixture sweep is byte-identical by design.
+    #[test]
+    fn exact_hessian_updater_never_reanchors() {
+        use crate::hess::exact::ExactHessianUpdater;
+        assert!(!ExactHessianUpdater::new().reanchor());
     }
 }
