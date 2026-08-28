@@ -62,13 +62,47 @@ impl Options {
             .ok()
             .map(|(v, _)| v)
             .unwrap_or(1e-8);
-        let pivtolmax_default = pivtol.max(1e-4);
-        let pivtolmax = opts
+        // `ma57_pivtolmax` has two branches upstream
+        // (`IpMa57TSolverInterface.cpp:311-320`), and which one runs
+        // turns on whether the user set the option *explicitly*:
+        //
+        // ```cpp
+        // if( options.GetNumericValue("ma57_pivtolmax", pivtolmax_, prefix) )
+        //    ASSERT_EXCEPTION(pivtolmax_ >= pivtol_, OPTION_INVALID, ...);
+        // else
+        //    pivtolmax_ = Max(pivtolmax_, pivtol_);
+        // ```
+        //
+        // So the `max` is the *default's* accommodation of a raised
+        // `ma57_pivtol`, not a clamp on the user. An explicitly set
+        // value is taken verbatim, and a value below `ma57_pivtol` is
+        // an error rather than something quietly adjusted upward.
+        //
+        // pounce used to apply the `max` unconditionally, which silently
+        // rewrote an explicit `ma57_pivtolmax` that sat below
+        // `ma57_pivtol` into `ma57_pivtol` — accepting a
+        // self-contradictory pair and reporting nothing. That was
+        // unreachable while gh#825 was live (no `ma57_*` value reached
+        // this backend at all), and became reachable the moment it was
+        // fixed.
+        //
+        // The refusal lives in `IpoptApplication::optimize_tnlp`
+        // (`ma57_pivtol_bracket_refusal`), which is where pounce reports
+        // an invalid option pair and is reached by every solve entry
+        // point. This reader is one level below that and has no error
+        // channel, so it does what upstream's assignment does and leaves
+        // the verdict to the layer that can deliver one.
+        let (pivtolmax_raw, pivtolmax_was_set) = opts
             .get_numeric_value("ma57_pivtolmax", prefix)
             .ok()
-            .map(|(v, _)| v)
-            .unwrap_or(pivtolmax_default)
-            .max(pivtol);
+            // No registry attached and the option unset: the registered
+            // default is unavailable, so stand in with upstream's.
+            .unwrap_or((1e-4, false));
+        let pivtolmax = if pivtolmax_was_set {
+            pivtolmax_raw
+        } else {
+            pivtolmax_raw.max(pivtol)
+        };
         let pre_alloc = opts
             .get_numeric_value("ma57_pre_alloc", prefix)
             .ok()
@@ -132,8 +166,9 @@ impl Options {
     // settings a live backend was actually built with — the thing
     // gh#825 had no way to observe, and the thing
     // `pounce-algorithm/tests/ma57_options_reach_the_backend.rs`
-    // asserts. Construction stays through `from_options_list` /
-    // `defaults` so the `pivtolmax >= pivtol` clamp cannot be bypassed.
+    // asserts. Read-only, not `pub` fields, so the two-branch
+    // `pivtolmax` rule in `from_options_list` stays the only way these
+    // are populated from an `OptionsList`.
 
     /// `ma57_print_level` → `ICNTL(5)`.
     pub fn print_level(&self) -> Index {

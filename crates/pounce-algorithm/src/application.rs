@@ -957,6 +957,26 @@ impl IpoptApplication {
             );
             return ApplicationReturnStatus::InvalidOption;
         }
+        // A `ma57_pivtolmax` the user set *below* `ma57_pivtol` is a
+        // contradiction — the escalation ceiling under its floor — and
+        // upstream refuses it outright
+        // (`IpMa57TSolverInterface.cpp:313`, `OPTION_INVALID`). pounce
+        // used to silently rewrite it to `ma57_pivtol`. That was
+        // unreachable while gh#825 was live, since no `ma57_*` value
+        // reached the backend at all, and became reachable the moment
+        // that was fixed — so it is refused here rather than shipped as
+        // a new way to be quietly ignored.
+        if let Some(msg) = self.ma57_pivtol_bracket_refusal() {
+            use pounce_common::journalist::JournalCategory;
+            eprintln!("{msg}");
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!("{msg}\n"),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
         let backend_warnings = self.take_unimplemented_backend_warnings();
         for warning in self
             .unexploited_hint_warnings()
@@ -2367,6 +2387,57 @@ impl IpoptApplication {
         apply_sqp_options(&self.options, &mut builder.sqp);
         apply_qp_subproblem_options(&self.options, &mut builder.sqp_qp);
         builder
+    }
+
+    /// Refuse an explicitly set `ma57_pivtolmax` that sits below
+    /// `ma57_pivtol`, at either option prefix.
+    ///
+    /// Upstream's `Ma57TSolverInterface::InitializeImpl` asserts
+    /// `pivtolmax >= pivtol` and raises `OPTION_INVALID`, but only when
+    /// the user set `ma57_pivtolmax` explicitly; left unset, the
+    /// registered default is lifted to `ma57_pivtol` instead. Both
+    /// halves are mirrored — the lifting in
+    /// `pounce_hsl::ma57::Options::from_options_list`, the refusal here.
+    ///
+    /// Checked at **both** prefixes because the restoration sub-IPM
+    /// configures its own MA57 backend from `"resto."`-scoped options
+    /// (gh#825), so `resto.ma57_pivtolmax` can contradict
+    /// `resto.ma57_pivtol` without the un-prefixed pair being wrong.
+    ///
+    /// Deliberately **not** gated on the `ma57` cargo feature or on
+    /// `linear_solver` resolving to MA57. It is a consistency check on
+    /// two numbers the user wrote, needs no HSL to perform, and a
+    /// verdict that changed with a build flag would be worse than a
+    /// consistent one — it would also be untestable in CI, which cannot
+    /// link CoinHSL. Only an *explicitly set* `ma57_pivtolmax` can
+    /// trigger it, so an options file that never mentions the option is
+    /// unaffected.
+    fn ma57_pivtol_bracket_refusal(&self) -> Option<String> {
+        for prefix in ["", "resto."] {
+            // `(_, true)` is the explicitly-set arm; an unset option
+            // reports the registry default with `false` and is the
+            // branch upstream lifts rather than refuses.
+            let Ok((pivtolmax, true)) = self.options.get_numeric_value("ma57_pivtolmax", prefix)
+            else {
+                continue;
+            };
+            let pivtol = self
+                .options
+                .get_numeric_value("ma57_pivtol", prefix)
+                .map(|(v, _)| v)
+                .unwrap_or(1e-8);
+            if pivtolmax < pivtol {
+                return Some(format!(
+                    "pounce: {prefix}ma57_pivtolmax ({pivtolmax:e}) is below \
+                     {prefix}ma57_pivtol ({pivtol:e}). ma57_pivtolmax is the ceiling MA57 \
+                     may raise the pivot tolerance to when it escalates for accuracy, so it \
+                     cannot sit below the tolerance it starts from. Raise \
+                     {prefix}ma57_pivtolmax to at least {pivtol:e}, or lower \
+                     {prefix}ma57_pivtol."
+                ));
+            }
+        }
+        None
     }
 
     /// Construct a LinearBackendFactory honoring the

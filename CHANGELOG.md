@@ -75,6 +75,21 @@ changes.
   Linux with `libcoinhsl.so` on the loader path never showed this, which is why
   it went unnoticed.
 
+  **`ma57_pivtolmax` below `ma57_pivtol` is now refused, not silently lifted.**
+  A pre-existing deviation from upstream that only became reachable once the
+  above landed. Upstream has two branches
+  (`IpMa57TSolverInterface.cpp:311-320`): an *explicitly set* `ma57_pivtolmax`
+  under `ma57_pivtol` raises `OPTION_INVALID`, while an *unset* one has its
+  registered default lifted to `ma57_pivtol`. pounce applied the lift
+  unconditionally, so a self-contradictory pair — an escalation ceiling below
+  the tolerance it starts from — was quietly rewritten and nothing said so.
+  `IpoptApplication::optimize_tnlp` now refuses it with `Invalid_Option`, at
+  both the main and `resto.` prefixes; the reader reports what the user wrote
+  and leaves the verdict to the layer that has an error channel. The lifting
+  branch is deliberately preserved: `ma57_pivtolmax` defaults to `1e-4`, so a
+  rule that merely compared the two numbers would reject `ma57_pivtol 0.5` on
+  its own — the most ordinary MA57 tuning there is.
+
   **Guards.** `pounce-algorithm/tests/ma57_options_reach_the_backend.rs` asserts
   that each option arrives at a live backend built by the real factory, at both
   prefixes, via a new `SparseSymLinearSolverInterface::as_any` downcast seam —
@@ -83,8 +98,11 @@ changes.
   `pounce-cli/tests/ma57_binary_starts.rs` covers gh #811 and the end-to-end
   gh #825 property. Both need CoinHSL, so neither runs in CI; the always-running
   half is `pounce-algorithm/tests/no_production_site_builds_ma57_with_defaults.rs`,
-  which fails on any `Ma57SolverInterface::new()` in production source. All are
-  mutation-checked: reintroduce either defect and the matching tests, and only
+  which fails on any `Ma57SolverInterface::new()` in production source, and
+  `pounce-algorithm/tests/ma57_pivtol_bracket.rs`, which covers both branches of
+  the `ma57_pivtolmax` rule and needs no HSL at all. All are mutation-checked:
+  reintroduce any of the defects — the discarded options, the missing rpath, the
+  unconditional lift, or a lift-blind refusal — and the matching tests, and only
   those, go red.
 
 - **A restoration failure now opens the second-opinion ladder.** (Found while

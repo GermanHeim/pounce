@@ -217,6 +217,88 @@ fn default_options_are_the_registrys() {
     assert_eq!(o, Ma57Options::defaults());
 }
 
+/// The `ma57_pivtolmax` reader has two branches, and the *value* half of
+/// each is checked here; the refusal half is
+/// `ma57_pivtol_bracket.rs`, which needs no HSL and so runs in CI.
+///
+/// Upstream (`IpMa57TSolverInterface.cpp:311-320`) lifts the registered
+/// default to `ma57_pivtol` when the option is unset, and takes an
+/// explicitly set value verbatim. pounce used to apply the lift
+/// unconditionally, which silently rewrote an explicit value that sat
+/// below `ma57_pivtol`.
+#[test]
+fn an_unset_pivtolmax_is_lifted_to_pivtol() {
+    let mut app = app();
+    set(&mut app, "ma57_pivtol 0.5");
+    let o = ma57_options_from(app.options(), "");
+    assert_eq!(o.pivtol(), 0.5);
+    assert_eq!(
+        o.pivtolmax(),
+        0.5,
+        "the 1e-4 default must be lifted to ma57_pivtol, not left under it"
+    );
+}
+
+/// The other branch: set explicitly, taken verbatim. `0.75` is above
+/// `ma57_pivtol` so the pair is legal and the lift would be a no-op —
+/// what this pins is that a *legal* explicit value is not touched.
+#[test]
+fn an_explicit_pivtolmax_is_taken_verbatim() {
+    let mut app = app();
+    set(&mut app, "ma57_pivtol 0.25");
+    set(&mut app, "ma57_pivtolmax 0.75");
+    let o = ma57_options_from(app.options(), "");
+    assert_eq!(o.pivtolmax(), 0.75);
+}
+
+/// A contradictory explicit pair reaches the reader **verbatim**, not
+/// clamped.
+///
+/// This is the test that separates the two candidate rules. Everywhere
+/// else they agree: `ma57_pivtol_bracket.rs` refuses this pair inside
+/// `optimize_tnlp`, so no solve can carry it, and every legal pair is
+/// untouched by a clamp. Without this assertion, restoring the old
+/// unconditional `max(pivtolmax, pivtol)` leaves the whole suite green.
+///
+/// Verbatim is the right answer for a layering reason. This reader has
+/// no error channel — it returns `Options`, not `Result` — so a clamp
+/// here is a silent rewrite of what the user wrote, which is the exact
+/// behaviour being removed. The refusal belongs to the layer that can
+/// deliver a verdict, and `IpoptApplication::optimize_tnlp` is reached
+/// by every solve entry point pounce has.
+///
+/// What a caller who bypasses the application and builds a backend
+/// straight from an `OptionsList` gets: a `pivtolmax` under `pivtol`,
+/// which makes `increase_quality` lower the tolerance once and then
+/// report exhausted. Useless, not dangerous — and it is the answer to
+/// the question they asked.
+#[test]
+fn a_contradictory_explicit_pivtolmax_is_not_silently_clamped() {
+    let mut app = app();
+    set(&mut app, "ma57_pivtol 0.5");
+    set(&mut app, "ma57_pivtolmax 1e-9");
+    let o = ma57_options_from(app.options(), "");
+    assert_eq!(
+        o.pivtolmax(),
+        1e-9,
+        "the reader must report what the user wrote; refusing the pair is \
+         `optimize_tnlp`'s job, and clamping it here is how the contradiction \
+         used to disappear without a diagnostic"
+    );
+    assert_eq!(o.pivtol(), 0.5);
+}
+
+/// With neither set, the lift is what produces the registry default —
+/// `max(1e-4, 1e-8)`. Pins that the two branches agree on the default
+/// path, which is what keeps an existing MA57 run bit-identical.
+#[test]
+fn the_default_pair_is_unmoved_by_the_lift() {
+    let app = app();
+    let o = ma57_options_from(app.options(), "");
+    assert_eq!(o.pivtol(), 1e-8);
+    assert_eq!(o.pivtolmax(), 1e-4);
+}
+
 /// `Ma57Config::default()` is the empty config, and a factory given one
 /// must still produce a *working* backend rather than, say, zeros in
 /// ICNTL. The two test call sites in the tree pass it (they never select
