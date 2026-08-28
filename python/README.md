@@ -10,9 +10,13 @@ pounce by changing only the import.
 
 ```sh
 # from the repo root:
+make dev                             # extension module + the bundled `pounce` CLI
+
+# or, extension module only (leaves the `pounce` console script standing in
+# with whatever cargo last built — see CONTRIBUTING.md, gh #816):
 cd python
 pip install maturin
-maturin develop --release            # builds the native extension into your venv
+maturin develop --release
 # optional extras:
 pip install -e .[jax]                # jax integration
 pip install -e .[dev]                # tests + jax + scipy

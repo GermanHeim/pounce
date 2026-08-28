@@ -17,8 +17,14 @@ These tests pin that asymmetry.
 import conftest
 
 
-def _resolve(monkeypatch, *, bundled, which, build_id, checkout_id, env=None):
-    """Drive `_resolve_pounce_exe` with the environment fully stubbed."""
+def _resolve(monkeypatch, *, bundled, which, build_id, checkout_id,
+             checkout=None, env=None):
+    """Drive `_resolve_pounce_exe` with the environment fully stubbed.
+
+    ``checkout`` is the cargo build of the surrounding source tree (the middle
+    rung of the resolution order, gh #816); it defaults to absent so every
+    test that predates it keeps describing the same two-rung situation.
+    """
     monkeypatch.delenv(conftest._EXE_ENV, raising=False)
     if env is not None:
         monkeypatch.setenv(conftest._EXE_ENV, env)
@@ -26,6 +32,7 @@ def _resolve(monkeypatch, *, bundled, which, build_id, checkout_id, env=None):
     import pyomo_pounce.pounce_solver as ps
 
     monkeypatch.setattr(ps, "_bundled_path", lambda: bundled)
+    monkeypatch.setattr(ps, "_checkout_path", lambda: checkout)
     monkeypatch.setattr(ps, "_build_id", lambda exe: build_id)
     monkeypatch.setattr(conftest.shutil, "which", lambda name: which)
     monkeypatch.setattr(conftest, "_checkout_build_id", lambda: checkout_id)
@@ -160,3 +167,49 @@ def test_same_commit_compares_the_commit_only():
     assert conftest._same_commit("e17b0279", "e17b027")
     assert not conftest._same_commit("10a6fe0c", "e17b0279")
     assert not conftest._same_commit("", "e17b0279")
+
+
+def test_the_checkout_build_is_preferred_over_path(monkeypatch):
+    """gh #816: a `maturin develop` tree has no bundled binary, and what sits
+    on PATH there is that install's own console-script shim. The cargo build
+    is both the honest answer and the one the plugin now resolves, so the
+    guard has to look at the same one."""
+    exe, reason = _resolve(
+        monkeypatch,
+        bundled=None,
+        checkout="/repo/target/release/pounce",
+        which="/venv/bin/pounce",
+        build_id="e17b0279",
+        checkout_id="e17b0279",
+    )
+    assert reason is None, reason
+    assert exe == "/repo/target/release/pounce"
+
+
+def test_the_bundled_binary_still_outranks_the_checkout(monkeypatch):
+    exe, reason = _resolve(
+        monkeypatch,
+        bundled="/repo/python/pounce/bin/pounce",
+        checkout="/repo/target/release/pounce",
+        which=None,
+        build_id="e17b0279",
+        checkout_id="e17b0279",
+    )
+    assert reason is None, reason
+    assert exe == "/repo/python/pounce/bin/pounce"
+
+
+def test_the_checkout_build_is_still_proved(monkeypatch):
+    """The new rung buys convenience, not trust: a `target/release` binary
+    from before the change under test is exactly the stale artifact this
+    guard exists for."""
+    exe, reason = _resolve(
+        monkeypatch,
+        bundled=None,
+        checkout="/repo/target/release/pounce",
+        which=None,
+        build_id="10a6fe0c",
+        checkout_id="e17b0279",
+    )
+    assert exe is None
+    assert "/repo/target/release/pounce" in reason

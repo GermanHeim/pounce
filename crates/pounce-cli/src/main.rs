@@ -14,7 +14,7 @@
 //! carried by the file's `solve_result_num`.
 
 use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
-use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::application::{IpoptApplication, Ma57Config};
 use pounce_cli::builtin;
 use pounce_cli::cli::{Args, ProblemSource};
 use pounce_cli::counting_tnlp::CountingTnlp;
@@ -314,13 +314,19 @@ pub fn main() -> ExitCode {
     // IPM. Snapshot, not borrow: the BFF outlives the option-mutation
     // window we cleanly own here.
     let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
+    // Same snapshot discipline for MA57, except that the restoration sub-IPM reads the `ma57_*` options again
+    // under the `"resto."` prefix, which is upstream's
+    // `Ma57TSolverInterface::InitializeImpl(options, prefix)` facility and was
+    // dead code until gh#825 — nothing called it.
+    let ma57_cfg = pounce_algorithm::application::ma57_config_from_options(app.options(), "resto.");
     // Use the multi-pass provider so the ℓ₁ wrapper (`l1_exact_penalty_barrier`)
     // and the auto-fallback (`l1_fallback_on_restoration_failure`) don't
     // panic with "restoration factory invoked more than once" on their
     // second inner solve — see pounce#10 Phase 3 / pounce#24.
     let bff_mint = move || -> InnerBackendFactoryFactory {
         let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
+        let ma57_cfg = ma57_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
     };
     // Hand the inner IPM a builder mirroring the outer options so its
     // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
@@ -3487,8 +3493,17 @@ fn print_about() {
 /// feature. The `feral_cfg` argument carries the `feral_*` extension
 /// options (cascade-break / FMA / iterative-refinement) captured from
 /// the application's options list, so per-problem `.opt` overrides
-/// flow into the resto sub-IPM as well.
-fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
+/// flow into the resto sub-IPM as well; `ma57_cfg` does the same for the
+/// `ma57_*` options, read under the `"resto."` prefix by the caller.
+///
+/// Both arguments are snapshots. `ma57_cfg` used to be absent, which is
+/// gh#825: this arm called `Ma57SolverInterface::new()` and every
+/// `ma57_*` option a user set was accepted and then discarded, with no
+/// warning and no observable effect on the solve.
+fn default_backend_factory(
+    feral_cfg: pounce_feral::FeralConfig,
+    ma57_cfg: Ma57Config,
+) -> LinearBackendFactory {
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
@@ -3498,10 +3513,13 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
                     {
-                        Box::new(pounce_hsl::Ma57SolverInterface::new())
+                        Box::new(pounce_hsl::Ma57SolverInterface::with_options(
+                            *ma57_cfg.options(),
+                        ))
                     }
                     #[cfg(not(feature = "ma57"))]
                     {
+                        let _ = &ma57_cfg;
                         Box::new(pounce_feral::FeralSolverInterface::with_config(
                             feral_cfg.clone(),
                         ))

@@ -403,6 +403,14 @@ pub struct AlgorithmBuilder {
     /// of negative curvature instead of reported. Default `1`; `0` restores the
     /// pre-#797 behaviour. See `upstream_options.rs`.
     pub neg_curv_escapes: Index,
+    /// `limited_memory_ls_failure_restarts` (gh #818) — how many times a
+    /// line-search failure at an already-feasible point may re-anchor the
+    /// quasi-Newton model and retry instead of entering restoration.
+    /// Default `0`, i.e. the rung is off and a line-search failure always
+    /// hands off, which is upstream's behaviour; see
+    /// `DEFAULT_LBFGS_LS_FAILURE_RESTARTS` in `ipopt_alg.rs` for the
+    /// measurement that put it there. See `upstream_options.rs`.
+    pub limited_memory_ls_failure_restarts: Index,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
     /// candidate points by the status each will be *reported* under. Default
@@ -735,6 +743,43 @@ pub struct LineSearchOptions {
     /// (`alpha *= alpha_red_factor`). Mirrors upstream's
     /// `IpBacktrackingLineSearch::alpha_red_factor_`.
     pub alpha_red_factor: Number,
+    /// `alpha_red_factor_min` — floor on one backtracking reduction,
+    /// which turns the fixed geometric trial sequence into a
+    /// safeguarded quadratic interpolation (gh#818). See
+    /// `BacktrackingLineSearch::next_alpha`.
+    ///
+    /// `None` — the default — means "let the Hessian mode decide", and
+    /// the two modes decide differently:
+    ///
+    /// * **limited-memory → `0.05`** (interpolation on). The
+    ///   quasi-Newton model's *scale* can be wrong by orders of
+    ///   magnitude in any direction its curvature pairs do not span, so
+    ///   the acceptable `alpha` can be far below 1 and the fixed factor
+    ///   spends `log(1/alpha)` objective evaluations walking to it.
+    /// * **exact → off** (`alpha_red_factor`, i.e. upstream's fixed
+    ///   sequence). A Newton step's length is meaningful, the
+    ///   acceptable `alpha` is normally within a few halvings of 1, and
+    ///   the trial sequence is not what costs.
+    ///
+    /// The split is measured, not assumed. Forcing
+    /// `alpha_red_factor_min 0.05` onto the exact path moves 3 of the
+    /// 156 fixture-legs in `scripts/sweep-fixtures.sh`, and the one
+    /// that matters is a **status loss**: `eigena2` goes from
+    /// `SolveSucceeded`/27 to `SolvedToAcceptableLevel`/32. The other
+    /// two are `issue_508_infeasible_gap_1em4` 441 → 385 to the same
+    /// certificate — a gain — and an objective digit on
+    /// `hs13_bigstart`. One fixture giving up a solve is the whole
+    /// argument; a faster infeasibility certificate does not buy it
+    /// back. Before `ALPHA_INTERP_MIN_TRIALS` gated the interpolation
+    /// the same experiment moved 9 legs and cost
+    /// `infeasible_square_scaled_1em4` its infeasibility certificate
+    /// (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12);
+    /// the gate narrowed the damage, it did not remove the reason for
+    /// the split.
+    ///
+    /// An explicit `alpha_red_factor_min` from the user is honoured on
+    /// both paths — the mode-dependence is only in the default.
+    pub alpha_red_factor_min: Option<Number>,
     pub watchdog_shortened_iter_trigger: Index,
     pub watchdog_trial_iter_max: Index,
     /// `soft_resto_pderror_reduction_factor` — required relative
@@ -854,6 +899,7 @@ impl Default for LineSearchOptions {
     fn default() -> Self {
         Self {
             alpha_red_factor: 0.5,
+            alpha_red_factor_min: None,
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
             soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
@@ -1135,6 +1181,7 @@ impl Default for AlgorithmBuilder {
             resto_decline_deferrals: 1,
             resto_decline_progress_ratio: 0.5,
             neg_curv_escapes: 1,
+            limited_memory_ls_failure_restarts: 0,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1411,6 +1458,17 @@ impl AlgorithmBuilder {
         };
         let mut line_search = BacktrackingLineSearch::new(acceptor);
         line_search.alpha_red_factor = self.line_search.alpha_red_factor;
+        // Resolve `None` against the Hessian mode; see the field's doc
+        // for the measurement behind the split (gh#818).
+        line_search.alpha_red_factor_min =
+            self.line_search
+                .alpha_red_factor_min
+                .unwrap_or(match self.hessian_approximation {
+                    HessianApproxChoice::LimitedMemory => 0.05,
+                    // Equal to `alpha_red_factor`, so the clamp in
+                    // `next_alpha` collapses and the sequence is upstream's.
+                    HessianApproxChoice::Exact => self.line_search.alpha_red_factor,
+                });
         line_search.watchdog_shortened_iter_trigger =
             self.line_search.watchdog_shortened_iter_trigger;
         line_search.watchdog_trial_iter_max = self.line_search.watchdog_trial_iter_max;
@@ -1674,6 +1732,7 @@ mod tests {
                             resto_decline_deferrals: 1,
                             resto_decline_progress_ratio: 0.5,
                             neg_curv_escapes: 1,
+                            limited_memory_ls_failure_restarts: 0,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),

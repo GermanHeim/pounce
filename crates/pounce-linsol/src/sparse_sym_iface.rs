@@ -147,6 +147,25 @@ pub trait SparseSymLinearSolverInterface {
     /// Required matrix layout. Caller marshals data into this format.
     fn matrix_format(&self) -> EMatrixFormat;
 
+    /// Downcast seam: the concrete backend behind the trait object, for
+    /// callers that need to inspect how it was configured.
+    ///
+    /// Defaults to `None`, so a backend is invisible here until it opts
+    /// in; nothing in the solve path consults this.
+    ///
+    /// It exists because gh#825 had no observable symptom. A factory
+    /// built its MA57 backend with `Ma57SolverInterface::new()` —
+    /// hard-coded defaults — so all nine `ma57_*` options were accepted
+    /// and discarded, and every arm of every solve came out identical to
+    /// all seventeen digits. Configuration reaching a backend is not
+    /// checkable through the rest of this trait: two differently
+    /// configured factorizations are both just "a solution". This gives
+    /// a test somewhere to stand. See
+    /// `pounce-algorithm/tests/ma57_options_reach_the_backend.rs`.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
     /// Whether [`Self::determine_dependent_rows`] is supported.
     fn provides_degeneracy_detection(&self) -> bool {
         false

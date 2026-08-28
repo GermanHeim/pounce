@@ -18,6 +18,7 @@
 #   make uninstall        # remove installed artifacts
 #   make docker           # container image compiled from the current tree
 #   make docker-release   # container image from the published PyPI wheels
+#   make dev              # build the CLI + extension for a source checkout
 #   make install-mcp      # build studio/mcp + register with Claude Code
 #   make uninstall-mcp    # unregister + remove the studio/mcp venv
 #   make install-skill    # build pounce + pounce-studio, drop SKILL.md into ~/.claude/skills/
@@ -76,7 +77,7 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
-        python-ext python-cli-bin python-test coverage coverage-quick \
+        dev python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
         docker docker-release
 
@@ -249,6 +250,20 @@ python-cli-bin:
 
 python-ext: python-cli-bin
 	cd python && maturin develop --release
+
+# The one command that makes a source checkout behave like an installed
+# wheel. `maturin develop` on its own builds the extension module and
+# nothing else, which leaves the `pounce` console script pointing at a
+# bundled binary that was never built — every CLI invocation fails,
+# `--version` included, and Pyomo reports the solver unavailable while an
+# in-process solve works fine (gh #816). `dev` is `python-ext` under the
+# name the error messages tell people to run.
+dev: python-ext
+	@echo
+	@echo "Source checkout ready:"
+	@echo "  CLI staged at python/pounce/bin/pounce (what the wheel ships)"
+	@echo "  extension module built in place"
+	@echo "Verify with: pounce --version"
 
 python-test: python-ext
 	cd python && python -m pytest tests -q

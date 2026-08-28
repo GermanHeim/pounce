@@ -77,13 +77,21 @@ def _resolve_pounce_exe():
 
     try:
         import pyomo_pounce
-        from pyomo_pounce.pounce_solver import _build_id, _bundled_path
+        from pyomo_pounce.pounce_solver import (
+            _build_id,
+            _bundled_path,
+            _checkout_path,
+        )
     except Exception as exc:  # noqa: BLE001 - a broken probe must not mislead
         return None, f"cannot import pyomo_pounce to resolve the binary: {exc}"
     del pyomo_pounce
 
-    # Resolution order mirrors the plugin's: bundled first, then PATH.
-    found = _bundled_path() or shutil.which("pounce")
+    # Resolution order mirrors the plugin's: bundled, then the source
+    # checkout's own cargo build, then PATH (gh #816). The middle rung is the
+    # one a working tree usually lands on, and it is also the one most likely
+    # to be *right* — but "most likely" is not "verified", so it goes through
+    # the same build-id proof below as the other two.
+    found = _bundled_path() or _checkout_path() or shutil.which("pounce")
     if found is None:
         return None, "no bundled binary and no pounce on PATH"
 
