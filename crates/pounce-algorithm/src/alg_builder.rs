@@ -709,7 +709,7 @@ pub struct LineSearchOptions {
     ///   the trial sequence is not what costs.
     ///
     /// The split is measured, not assumed. Turning interpolation on for
-    /// the exact path too moves 21 of the 154 fixture-legs in
+    /// the exact path too moves 21 of the fixture-legs in
     /// `scripts/sweep-fixtures.sh` and takes two of them from solved to
     /// not solved — `deb7` (`SolveSucceeded`/143 →
     /// `ErrorInStepComputation`/176) and `infeasible_square_scaled_1em4`

@@ -72,7 +72,7 @@ changes.
   `alpha_red_factor` (i.e. upstream's fixed sequence) under an exact
   Hessian. An explicit user value is honoured on both. The split is
   measured, not assumed — turning it on for the exact path too moves 21
-  of the 154 fixture-legs in `scripts/sweep-fixtures.sh` and takes two
+  of the fixture-legs in `scripts/sweep-fixtures.sh` and takes two
   from solved to not solved: `deb7` (`SolveSucceeded`/143 →
   `ErrorInStepComputation`/176) and `infeasible_square_scaled_1em4`
   (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12, losing
@@ -80,22 +80,31 @@ changes.
   faster infeasible detections. A Newton step's length is meaningful,
   which is the reason the interpolation has nothing to add there.
 
-  Fixture sweep, with the re-anchor rung below: **the exact leg is
-  byte-identical; 12 lbfgs-leg lines move**, all explainable. Gains:
-  `cresc4` `RestorationFailed`/195 → **`SolveSucceeded`/241 at the
-  exact-Hessian optimum** (0.87189752 against the exact leg's
-  0.87189754); `eigenb2` `SolvedToAcceptableLevel`/41 →
-  **`SolveSucceeded`/39**; `eigena2` `ErrorInStepComputation` at 252 →
-  93 iterations; `pooling_rt2stp` 716 → 347 to the same objective to
-  five digits; `infeasible_square_scaled_1em4` 24 → 19 to the same
-  certificate. Cost: **`deb7` on the lbfgs leg, 1242 → 1695
-  iterations** — `ErrorInStepComputation` either way, at 14.8 s against
-  15.1 s. `deb7` on this arm is a *dual* stall (`inf_pr ~ 1e-12` with
-  `inf_du ~ 1e5` for a thousand iterations), which is the `recalc_y`
-  territory the option help already documents and which pounce
-  deliberately does not auto-enable for L-BFGS; the restart budget was
-  swept at 0/1/2/3/6 and none of them rescues it. The remaining six
-  lines are ±4 iterations or a digit of objective.
+  Fixture sweep, with the re-anchor rung below, re-measured against
+  `a5e0a83` (`main` after gh #817, which reworks what a restoration
+  *failure* opens in the second-opinion ladder — adjacent enough that
+  carrying the pre-merge numbers over would have been a stale claim):
+  **the exact leg is byte-identical; 13 of 156 lbfgs-leg lines move**,
+  all explainable. Gains: `cresc4` `RestorationFailed`/1323 →
+  **`SolveSucceeded`/241 at the exact-Hessian optimum** (0.87189752
+  against the exact leg's 0.87189754); `square_flowsheet_resto` — a
+  fixture gh #817 brought with it —
+  `InfeasibleProblemDetected`/3000 → **`SolveSucceeded`/2393** at the
+  same objective, which is the most valuable line in the set, because a
+  square problem that is in fact solvable being certified *infeasible*
+  is the more serious verdict to get wrong; `eigenb2`
+  `SolvedToAcceptableLevel`/41 → **`SolveSucceeded`/39**; `eigena2`
+  `ErrorInStepComputation` at 252 → 93 iterations; `pooling_rt2stp`
+  716 → 347 to the same objective to five digits;
+  `infeasible_square_scaled_1em4` 24 → 19 to the same certificate.
+  Cost: **`deb7` on the lbfgs leg, 1242 → 1695 iterations** —
+  `ErrorInStepComputation` either way, at 14.8 s against 15.1 s. `deb7`
+  on this arm is a *dual* stall (`inf_pr ~ 1e-12` with `inf_du ~ 1e5`
+  for a thousand iterations), which is the `recalc_y` territory the
+  option help already documents and which pounce deliberately does not
+  auto-enable for L-BFGS; the restart budget was swept at 0/1/2/3/6 and
+  none of them rescues it. The remaining six lines are ±4 iterations or
+  a digit of objective.
 
 - **A line-search failure at an already-feasible point no longer walks
   into a restoration phase that has nothing to reduce (gh #818).** When

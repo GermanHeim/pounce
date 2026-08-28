@@ -1108,7 +1108,7 @@ honoured on both Hessian paths.
 The default is off for the exact-Hessian path because a Newton step's
 length is meaningful — the acceptable `α` is normally within a couple of
 halvings of 1, so interpolation buys nothing — and because enabling it
-there was measured to move 21 of the 154 fixture-legs in
+there was measured to move 21 of the fixture-legs in
 `scripts/sweep-fixtures.sh`, two of them from solved to not solved.
 
 ### When the line search fails anyway: `limited_memory_ls_failure_restarts`

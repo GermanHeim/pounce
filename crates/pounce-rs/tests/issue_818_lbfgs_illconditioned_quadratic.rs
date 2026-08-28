@@ -32,7 +32,7 @@
 //! restoration is never entered. It says nothing about the constrained
 //! arm — `scripts/sweep-fixtures.sh` owns that, and the change is
 //! deliberately confined to the leg it moves (exact leg byte-identical;
-//! 11 lbfgs-leg lines move, `cresc4` `RestorationFailed` →
+//! 13 of 156 lbfgs-leg lines move, `cresc4` `RestorationFailed` →
 //! `SolveSucceeded`).
 
 use pounce_rs::builder::{Nlp, Problem};
