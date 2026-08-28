@@ -3059,8 +3059,11 @@ impl IpoptApplication {
         // updater falls back to the first `∇f`'s nonzeros — a
         // value-derived pattern. See
         // `TNLPAdapter::objective_nonlinear_vars`.
-        if builder.hessian_approximation == HessianApproxChoice::Partitioned {
-            builder.partitioned_objective_vars = adapter.borrow().objective_nonlinear_vars();
+        if matches!(
+            builder.hessian_approximation,
+            HessianApproxChoice::Partitioned | HessianApproxChoice::FiniteDifference
+        ) {
+            builder.objective_nonlinear_vars = adapter.borrow().objective_nonlinear_vars();
         }
 
         // Which variables the limited-memory Hessian should span (gh#624).
@@ -3068,7 +3071,10 @@ impl IpoptApplication {
         // `get_number_of_nonlinear_variables` wins, and
         // `num_linear_variables` is only the contiguous-prefix fallback.
         // Exact-Hessian solves never consult either.
-        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory {
+        if matches!(
+            builder.hessian_approximation,
+            HessianApproxChoice::LimitedMemory | HessianApproxChoice::FiniteDifference
+        ) {
             let num_linear_variables = self
                 .options
                 .get_integer_value("num_linear_variables", "")

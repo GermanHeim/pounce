@@ -248,12 +248,15 @@ pub struct AlgorithmBuilder {
     /// [`HessianApproxChoice::Partitioned`]; wider elements degrade to a
     /// diagonal approximation (`partitioned_max_element`).
     pub partitioned_max_element: usize,
-    /// Support of the objective element under
-    /// [`HessianApproxChoice::Partitioned`], in the compressed `x_var`
-    /// space — `TNLPAdapter::objective_nonlinear_vars`. `None` leaves
-    /// the updater to fall back on the first `∇f`'s nonzeros, which is
-    /// value-derived; see that method for what it costs.
-    pub partitioned_objective_vars: Option<Vec<Index>>,
+    /// Variables the **objective** is nonlinear in, in the compressed
+    /// `x_var` space — `TNLPAdapter::objective_nonlinear_vars`. Consumed
+    /// by both the partitioned updater (as its objective element's
+    /// support) and the finite-difference updater (as the objective's
+    /// contribution to a Jacobian-derived Hessian pattern, which the
+    /// constraint Jacobian cannot supply). `None` leaves each to fall
+    /// back on the first `∇f`'s nonzeros, which is value-derived; see
+    /// that method for what it costs.
+    pub objective_nonlinear_vars: Option<Vec<Index>>,
     /// `partitioned_curvature_cap` — multiple of an element's implied
     /// curvature that one update may reach. See
     /// [`crate::hess::partitioned_quasi_newton`].
@@ -1101,7 +1104,7 @@ impl Default for AlgorithmBuilder {
             partitioned_update_type: UpdateType::Sr1,
             partitioned_update_type_was_set: false,
             partitioned_max_element: 64,
-            partitioned_objective_vars: None,
+            objective_nonlinear_vars: None,
             partitioned_curvature_cap: Number::INFINITY,
             partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
@@ -1502,7 +1505,7 @@ impl AlgorithmBuilder {
                         self.partitioned_update_type,
                     );
                 u.max_element = self.partitioned_max_element;
-                u.objective_vars = self.partitioned_objective_vars.clone();
+                u.objective_vars = self.objective_nonlinear_vars.clone();
                 u.curvature_cap = self.partitioned_curvature_cap;
                 u.mode = self.partitioned_elements;
                 u.block_size = self.partitioned_block_size;
@@ -1526,6 +1529,8 @@ impl AlgorithmBuilder {
                 let mut u = crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern);
                 u.coloring = self.fd_hessian_coloring;
                 u.reuse_tol = self.fd_hessian_reuse_tol;
+                u.objective_vars = self.objective_nonlinear_vars.clone();
+                u.nonlinear_vars = self.limited_memory_nonlinear_vars.clone();
                 Box::new(u)
             }
         };
@@ -1637,7 +1642,7 @@ mod tests {
                             partitioned_update_type: UpdateType::Sr1,
                             partitioned_update_type_was_set: false,
                             partitioned_max_element: 64,
-                            partitioned_objective_vars: None,
+                            objective_nonlinear_vars: None,
                             partitioned_curvature_cap: Number::INFINITY,
                             partitioned_elements:
                                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,

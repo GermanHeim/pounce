@@ -101,11 +101,19 @@
 //!   (every `.nl` does, through AMPL's AD). Requires no values, only the
 //!   structure call, so it is available to a model that cannot evaluate
 //!   second derivatives.
-//! * `jacobian` — derived as `⋃_j supp(∇g_j) ⊗ supp(∇g_j)`, which needs
-//!   nothing beyond the Jacobian pattern every TNLP must declare. This
-//!   is a strict **superset** of the true pattern, which is safe (a
-//!   superset costs extra groups, never a wrong answer) but not free: on
-//!   `laptime` it is 146 267 nonzeros against the true 28 000.
+//! * `jacobian` — derived as `(O ⊗ O) ∪ ⋃_j supp(∇g_j) ⊗ supp(∇g_j)`,
+//!   where `O` is the objective's nonlinear variables. It needs nothing
+//!   beyond the Jacobian pattern every TNLP must declare, plus the
+//!   objective linearity the TNLP will state. This is a strict
+//!   **superset** of the true pattern, which is safe (a superset costs
+//!   extra groups, never a wrong answer) but not free: on `laptime` it is
+//!   146 267 nonzeros against the true 28 000.
+//!
+//!   The `O ⊗ O` term is not optional. The constraint Jacobian says
+//!   nothing about `∇²f`, so without it a model whose objective couples
+//!   two variables that never share a constraint row gets a pattern that
+//!   is a *subset* of the truth, and the recovery drops that curvature
+//!   silently.
 //!
 //! A superset is always safe; a subset would silently drop curvature, so
 //! there is no fallback that guesses.
@@ -175,6 +183,30 @@ pub struct FdHessianUpdater {
     /// on the multipliers too, so a cached Hessian is stale the moment `y`
     /// moves even if `x` has not.
     pub reuse_tol: Number,
+    /// Variables the objective is nonlinear in, in the compressed `x_var`
+    /// space. The Jacobian-derived pattern **must** include
+    /// `objective_vars ⊗ objective_vars`: `⋃ⱼ supp(∇gⱼ) ⊗ supp(∇gⱼ)`
+    /// describes the constraints only, so without this a `∇²f` entry
+    /// whose two variables never co-occur in a constraint row falls
+    /// outside the pattern and is silently dropped — the pattern would be
+    /// a *subset* of the truth, not the superset this mode's safety
+    /// argument rests on. `None` falls back to the first `∇f`'s nonzeros.
+    pub objective_vars: Option<Vec<Index>>,
+    /// Variables that enter `f` or `g` **nonlinearly**, in the compressed
+    /// `x_var` space. A variable outside this set is linear everywhere,
+    /// so every off-diagonal Hessian entry touching it is structurally
+    /// zero and it can be dropped from the Jacobian-derived cliques:
+    ///
+    /// ```text
+    ///     ⋃_j supp(∇g_j) ⊗ supp(∇g_j)
+    ///  →  ⋃_j (supp(∇g_j) ∩ N) ⊗ (supp(∇g_j) ∩ N)
+    /// ```
+    ///
+    /// Still a superset of the truth, just a tighter one. The full primal
+    /// diagonal stays in the pattern regardless — the barrier and the
+    /// inertia correction need those rows present even where the model
+    /// has no curvature. Suggested in review by @srikanth-gm.
+    pub nonlinear_vars: Option<Vec<Index>>,
     /// Assembled pattern, lower triangle, 1-based (the exact-Hessian
     /// path's own convention).
     space: Option<Rc<SymTMatrixSpace>>,
@@ -207,6 +239,8 @@ impl FdHessianUpdater {
             pattern_source,
             coloring: FdColoring::Cpr,
             reuse_tol: 0.0,
+            objective_vars: None,
+            nonlinear_vars: None,
             space: None,
             groups: Vec::new(),
             recovery: Vec::new(),
@@ -333,6 +367,7 @@ impl FdHessianUpdater {
         declared: Option<&(Vec<Index>, Vec<Index>)>,
         jac_c: &GenTMatrix,
         jac_d: &GenTMatrix,
+        grad_f: &[Number],
     ) {
         // ---- lower-triangle pattern ---------------------------------
         let mut pairs: Vec<(Index, Index)> = Vec::new();
@@ -344,7 +379,42 @@ impl FdHessianUpdater {
                 }
             }
             _ => {
-                // `⋃_j supp(∇g_j) ⊗ supp(∇g_j)` over both Jacobians.
+                // The objective's own clique. `⋃_j supp(∇g_j) ⊗
+                // supp(∇g_j)` below describes the CONSTRAINTS only, and
+                // `∇²L = ∇²f + Σ yⱼ ∇²cⱼ` has a `∇²f` term whose entries
+                // need not lie in any constraint row's clique. Omitting
+                // this made the Jacobian-derived pattern a *subset* of the
+                // true Hessian rather than a superset, which is the
+                // property the whole mode's safety rests on — a subset
+                // silently drops curvature. `laptime` did not expose it
+                // because its objective is minimise-final-time, one
+                // variable, `∇²f = 0`. Found in review by @srikanth-gm.
+                let obj: Vec<Index> = match self.objective_vars.clone() {
+                    Some(v) => v,
+                    // Value-derived fallback, and weaker: a coordinate
+                    // whose `∂f/∂xᵢ` happens to vanish at the starting
+                    // point is missed. Structural information is
+                    // preferred wherever the TNLP will state it.
+                    None => (0..n)
+                        .filter(|&i| grad_f[i] != 0.0)
+                        .map(|i| i as Index)
+                        .collect(),
+                };
+                for (a, &ca) in obj.iter().enumerate() {
+                    for &cb in obj.iter().take(a + 1) {
+                        pairs.push(if ca >= cb { (ca, cb) } else { (cb, ca) });
+                    }
+                }
+                // `⋃_j (supp(∇g_j) ∩ N) ⊗ (supp(∇g_j) ∩ N)` over both
+                // Jacobians, with `N` the nonlinear-variable set when the
+                // model states one.
+                let mask: Option<Vec<bool>> = self.nonlinear_vars.as_ref().map(|v| {
+                    let mut m = vec![false; n];
+                    for &i in v {
+                        m[i as usize] = true;
+                    }
+                    m
+                });
                 for jac in [jac_c, jac_d] {
                     let n_rows = jac.space().n_rows() as usize;
                     let mut by_row: Vec<Vec<Index>> = vec![Vec::new(); n_rows + 1];
@@ -352,6 +422,9 @@ impl FdHessianUpdater {
                         by_row[i as usize].push(j - 1);
                     }
                     for row in by_row.iter_mut() {
+                        if let Some(m) = mask.as_ref() {
+                            row.retain(|&c| m[c as usize]);
+                        }
                         row.sort_unstable();
                         row.dedup();
                         for (a, &ca) in row.iter().enumerate() {
@@ -524,7 +597,10 @@ impl HessianUpdater for FdHessianUpdater {
                 .downcast_ref::<SymTMatrix>()
                 .filter(|t| t.nonzeros() > 0)
                 .map(|t| (t.irows().to_vec(), t.jcols().to_vec()));
-            self.build_structure(n, declared_pat.as_ref(), jc, jd);
+            // Only needed for the objective-clique fallback when the TNLP
+            // will not state its objective linearity.
+            let grad_f0 = flat(&*base_grad_f);
+            self.build_structure(n, declared_pat.as_ref(), jc, jd, &grad_f0);
             if !self.reported && std::env::var("POUNCE_FD_HESSIAN_DEBUG").is_ok() {
                 self.reported = true;
                 eprintln!("fd-hessian: {:?}", self.stats);
@@ -815,6 +891,57 @@ mod tests {
             let cpr = recovers_exactly(FdColoring::Cpr, 60, hb);
             assert!(star <= cpr, "half-band {hb}: star {star} > cpr {cpr}");
         }
+    }
+
+    /// **The objective's curvature must be in a Jacobian-derived
+    /// pattern, and the constraint Jacobian cannot supply it.**
+    ///
+    /// `∇²L = ∇²f + Σ yⱼ ∇²cⱼ`. A pattern built only from
+    /// `⋃ⱼ supp(∇gⱼ) ⊗ supp(∇gⱼ)` covers the second term and misses the
+    /// first, so an objective that couples two variables which never
+    /// share a constraint row produces entries outside the pattern — and
+    /// this mode's entire safety argument is that the pattern is a
+    /// *superset*, since a subset drops curvature with no diagnostic.
+    ///
+    /// This shape is what the `laptime` corpus could not expose: its
+    /// objective is minimise-final-time, one variable, `∇²f = 0`. Found
+    /// in review by @srikanth-gm.
+    #[test]
+    fn the_objective_clique_is_in_the_jacobian_derived_pattern() {
+        // Two constraints, each on a disjoint pair; an objective coupling
+        // one variable from each. No constraint row contains both 0 and 2.
+        let n = 4usize;
+        let rows = [vec![0 as Index, 1], vec![2 as Index, 3]];
+        let obj = vec![0 as Index, 2];
+
+        let mut pairs: std::collections::BTreeSet<(Index, Index)> = Default::default();
+        for i in 0..n as Index {
+            pairs.insert((i, i));
+        }
+        for r in &rows {
+            for (a, &ca) in r.iter().enumerate() {
+                for &cb in r.iter().take(a + 1) {
+                    pairs.insert(if ca >= cb { (ca, cb) } else { (cb, ca) });
+                }
+            }
+        }
+        assert!(
+            !pairs.contains(&(2, 0)),
+            "fixture is wrong: the constraint cliques already cover the objective pair"
+        );
+
+        // With the objective clique, the entry appears.
+        for (a, &ca) in obj.iter().enumerate() {
+            for &cb in obj.iter().take(a + 1) {
+                pairs.insert(if ca >= cb { (ca, cb) } else { (cb, ca) });
+            }
+        }
+        assert!(
+            pairs.contains(&(2, 0)),
+            "the objective clique must contribute (2,0) — without it the \
+             Jacobian-derived pattern is a SUBSET of the true Hessian and \
+             `∂²f/∂x₀∂x₂` is dropped with no diagnostic"
+        );
     }
 
     /// **The test that the banded ones missed.** The Jacobian-derived
