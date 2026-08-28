@@ -1,0 +1,177 @@
+//! The corrector's operator is assembled at the predicted point.
+//!
+//! A chord iteration converges at the rate the distance between its
+//! operator and the true Jacobian sets. On a problem whose Hessian
+//! changes along the step, an operator held at the base point buys a
+//! contraction of `|1 - W*/W0|` per iteration, while one assembled at
+//! the predicted point starts next to `W*` and contracts an order
+//! faster. The fixture makes that gap decisive within the iteration
+//! budget: `W = e^x` doubles over the step, the base-operator rate is
+//! about one half, and the predicted-operator rate is under a tenth,
+//! so only the predicted operator reaches the tolerance below.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use pounce_algorithm::application::IpoptApplication;
+use pounce_common::types::Number;
+use pounce_nlp::TNLP;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::tnlp::{
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
+};
+use pounce_sensitivity::Solver;
+
+/// ```text
+/// min  exp(x) - p x
+/// s.t. p = 1
+/// ```
+///
+/// Stationarity gives `x*(p) = ln p`, so the base solution is `x = 0`
+/// and the exact solution at `p = 1 + delta` is `ln(1 + delta)`. The
+/// predictor is the tangent `dx = delta`, and everything the corrector
+/// closes is genuine curvature: at `delta = 0.5` the predictor is off
+/// by `0.5 - ln 1.5 = 9.45e-2`.
+struct ExpCurvature;
+
+impl TNLP for ExpCurvature {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l[0] = -1.0e19;
+        b.x_u[0] = 1.0e19;
+        b.x_l[1] = -1.0e19;
+        b.x_u[1] = 1.0e19;
+        b.g_l[0] = 1.0;
+        b.g_u[0] = 1.0;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = 0.2;
+        sp.x[1] = 1.0;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x[0].exp() - x[1] * x[0])
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0].exp() - x[1];
+        g[1] = -x[0];
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[1];
+        true
+    }
+
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _nx: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow[0] = 0;
+                jcol[0] = 1;
+            }
+            SparsityRequest::Values { values } => values[0] = 1.0,
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                // lower triangle: (x,x), (p,x)
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 0]);
+            }
+            SparsityRequest::Values { values } => {
+                let xv = x.expect("hessian point")[0];
+                values[0] = obj_factor * xv.exp();
+                values[1] = -obj_factor;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+fn solved() -> Solver {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-10, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let mut solver = Solver::new(app, Rc::new(RefCell::new(ExpCurvature)));
+    let status = solver.solve();
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "base solve failed: {status:?}",
+    );
+    solver
+}
+
+/// Six iterations must close the curvature gap. The base-point
+/// operator's contraction rate here is `|1 - e^{ln 1.5}| = 0.5`, which
+/// leaves about `1.5e-3` of the predictor's `9.45e-2` error after six
+/// iterations, three orders short of the tolerance. The predicted
+/// point's operator contracts at under a tenth per iteration and
+/// clears it.
+#[test]
+fn the_corrector_closes_curvature_the_base_operator_cannot() {
+    let solver = solved();
+    let base_x = solver.converged().expect("converged").x[0];
+    assert!(base_x.abs() < 1e-8, "base x is ln 1 = 0, got {base_x}");
+
+    let delta = 0.5;
+    let exact = (1.0_f64 + delta).ln();
+
+    let step = solver
+        .parametric_step_full(&[0], &[delta])
+        .expect("full step");
+    let predictor_err = (base_x + step[0] - exact).abs();
+    assert!(
+        (predictor_err - 9.45e-2).abs() < 1e-3,
+        "the predictor's curvature error is the quantity under test, \
+         got {predictor_err:e}",
+    );
+
+    let (refined, report) = solver
+        .correct_step(&[0], &[delta], &step, 6)
+        .expect("corrector");
+    assert!(report.improved(), "the corrector must report improvement");
+    let err = (base_x + refined[0] - exact).abs();
+    assert!(
+        err < 1e-6,
+        "six iterations on the predicted point's operator close the \
+         curvature gap: |corrected - ln(1+delta)| = {err:e}, predictor \
+         error {predictor_err:e}",
+    );
+}

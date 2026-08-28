@@ -1139,13 +1139,16 @@ fn leg_oracle_improved_means_closer_to_the_resolve() {
                 );
             } else {
                 // Documented on `correct_step`: the step handed back is
-                // then the caller's own, so the distance cannot move.
+                // then the caller's own, put back into the box before
+                // the first iteration. The put-back clamps infeasible
+                // coordinates toward the feasible re-solve, so the
+                // distance can only shrink or hold, never grow.
                 assert!(
-                    (after - before).abs() <= before * 1e-6 + noise,
+                    after <= before + noise,
                     "{fx:?} at delta={delta:e}: improved() is false, so \
-                     correct_step must hand back the caller's own step \
-                     unchanged, but the distance to the re-solve moved \
-                     {before:e} -> {after:e}",
+                     the returned step is the caller's own put back into \
+                     the box, and the distance to the re-solve cannot \
+                     grow: {before:e} -> {after:e}",
                 );
             }
         }
@@ -1158,30 +1161,26 @@ fn leg_oracle_improved_means_closer_to_the_resolve() {
     );
 }
 
-/// A falling residual is not a converging answer, and here is the
-/// measured proof.
+/// The corrector cannot cross a strongly active release, and it now
+/// says so instead of claiming an improvement it did not make.
 ///
-/// Across a strongly active release the corrector cannot reach the
-/// re-solve: the held barrier diagonal has no way to represent a bound
-/// leaving the active set, which `correct_step`'s own doc says. What
-/// it *does* do is report `improved()` and drop the residual, because
-/// the residual it measures is the one it can still reduce. On this
-/// fixture at `delta = 0.7` that is a residual falling by `3e-8` while
-/// the point stays `0.1333` from the truth -- and `0.1333` is the
-/// entire quantity at stake, the whole distance `x1` should have
-/// travelled off its bound.
+/// The barrier diagonal has no way to represent a bound leaving the
+/// active set, which `correct_step`'s own doc says, so across the
+/// release the corrector's answer stays the whole released distance
+/// from the truth. With the operator assembled at the predicted
+/// point, the iterations find no residual to reduce there and
+/// `improved()` reports false, where the base-point operator used to
+/// shave `3e-8` off the residual and report success while wrong by
+/// `0.1333`, the gh#764 defect class this file was built to see.
+/// That gap closed from the honest side: the report and the oracle
+/// now agree.
 ///
-/// This is the gh#764 thesis stated as a number: `improved()` plus a
-/// converged residual does **not** imply the answer is close, and no
-/// internal guard can tell you that. Only the re-solve can.
-///
-/// Pinned deliberately, in the manner of gh#762's
-/// `the_coupled_fixture_carries_an_ambiguous_kink`: this asserts
-/// *current* behaviour, so a corrector that learns to cross a release
-/// makes it fail, and that failure is the signal to update it on
+/// Pinned deliberately, as before: this asserts *current* behaviour,
+/// so a corrector that learns to cross the release, flipping the
+/// distance assertion below, is the signal to update this test on
 /// purpose rather than a regression.
 #[test]
-fn the_corrector_reports_improved_without_crossing_a_release() {
+fn the_corrector_declines_the_release_it_cannot_cross() {
     let (s, seed) = base(Fx::Release);
     let base_x = s.converged().expect("converged").x.clone();
     let n_x = base_x.len();
@@ -1195,10 +1194,12 @@ fn the_corrector_reports_improved_without_crossing_a_release() {
         let after = dist(&add(&base_x, &refined[..n_x]), &want);
 
         assert!(
-            report.improved(),
-            "delta={delta:e}: the corrector is expected to report an \
-             improvement here -- that is what makes the gap below \
-             worth pinning",
+            !report.improved(),
+            "delta={delta:e}: no residual improvement exists without \
+             crossing the release, and the corrector must not claim \
+             one: residual {:e} -> {:e}",
+            report.initial_residual,
+            report.residual,
         );
         assert!(
             after > 0.5 * released,

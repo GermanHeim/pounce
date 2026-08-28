@@ -151,6 +151,12 @@ pub struct ConvergedState {
     /// depends on unrelaxed bounds must guard on this value. See
     /// [`Solver::classify_activity`].
     pub bound_relax_factor: Number,
+    /// Whether the solve computed exact Hessians, **as it ran**. A
+    /// `limited-memory` solve's `IpoptData::w` is the quasi-Newton
+    /// matrix, and there is no exact Hessian to evaluate at another
+    /// point, so the corrector keeps that matrix instead of
+    /// refreshing it at the predicted iterate.
+    pub exact_hessian: bool,
     /// Converged KKT-factor wrapper. Owns `Rc` handles to the
     /// `PdFullSpaceSolver`, the IpoptData / Cq, and the NLP, so it
     /// outlives the IPM call frame.
@@ -234,6 +240,12 @@ impl Solver {
             .get_numeric_value("bound_relax_factor", "")
             .map(|(v, _)| v)
             .expect("bound_relax_factor is a registered core option");
+        let exact_hessian = self
+            .app
+            .options()
+            .get_string_value("hessian_approximation", "")
+            .map(|(v, _)| v == "exact")
+            .expect("hessian_approximation is a registered core option");
 
         let state_cb = Rc::clone(&self.state);
         self.app
@@ -273,6 +285,7 @@ impl Solver {
                     x,
                     obj_val,
                     bound_relax_factor: brf,
+                    exact_hessian,
                     backsolver,
                 });
             }));
@@ -959,11 +972,21 @@ impl Solver {
     ///
     /// The corrector aims at the barrier solution at the μ the solve
     /// finished on, not at a re-solve, so the accuracy it can reach is
-    /// bounded by that offset. Where the perturbation needs a bound
-    /// the base point held tightly to leave the active set, the held
-    /// barrier diagonal cannot represent the change and the iterations
-    /// make no progress. `CorrectorReport::improved` reports that
-    /// case: the step handed back is then the caller's own.
+    /// bounded by that offset. Its operator is assembled at the
+    /// PREDICTED point: the iterations pay one factorization there,
+    /// with the Hessian and constraint Jacobians evaluated at the
+    /// stepped iterate and the step's own multipliers, and the barrier
+    /// diagonal carried from the held solve with the predictor's
+    /// active set applied. A chord iteration contracts at the rate the
+    /// distance between its operator and the true Jacobian sets, and
+    /// the predicted point is where the truth is. Under a
+    /// `limited-memory` solve the quasi-Newton matrix is kept as is,
+    /// since no exact Hessian exists to evaluate elsewhere. Where the
+    /// perturbation needs a bound the base point held tightly to leave
+    /// the active set, the barrier diagonal cannot represent the
+    /// change and the iterations make no progress.
+    /// `CorrectorReport::improved` reports that case: the step handed
+    /// back is then the caller's own.
     ///
     /// The returned point always satisfies the variable bounds, since
     /// the barrier residual is undefined outside them and the
@@ -1040,6 +1063,7 @@ impl Solver {
             &ctx.hi,
             mu,
             max_iter,
+            state.exact_hessian,
         )
     }
 

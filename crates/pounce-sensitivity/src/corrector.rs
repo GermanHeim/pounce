@@ -372,6 +372,7 @@ pub(crate) fn run(
     hi: &[Number],
     mu: Number,
     max_iter: usize,
+    exact_hessian: bool,
 ) -> Result<(Vec<Number>, CorrectorReport), SolverError> {
     let dim = bs.dim();
     let off = bs.offsets_public();
@@ -419,24 +420,84 @@ pub(crate) fn run(
     // bound means. Everything else keeps the base point's barrier term.
     let released = released_rows(&rows, base, &iterate, lo, hi);
     let pinned = pinned_rows(&rows, base, &iterate, lo, hi, mu);
+    for &r in &released {
+        iterate[r] = 0.0;
+    }
+    // Always a FRESH copy of the diagonal, even when the active set
+    // did not change: the factorization cache keys on this object's
+    // tag, and handing it the held solve's own vector returns the
+    // base point's cached factor with nothing re-evaluated. A fresh
+    // tag is what makes the factorization below actually happen at
+    // the predicted point. With both sets empty this is the held
+    // diagonal unchanged, copied.
     let sigma = if released.is_empty() && pinned.is_empty() {
-        None
+        bs.fresh_barrier_sigma_x()
     } else {
-        for &r in &released {
-            iterate[r] = 0.0;
+        bs.active_set_sigma_x(&released, &pinned)
+    }
+    .ok_or_else(|| {
+        SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
+    })?;
+
+    // The operator is assembled at the PREDICTED point: the current
+    // iterate is swapped to it for the duration of the correction, so
+    // the Hessian and the constraint Jacobians are evaluated there,
+    // with the step's own multipliers as clamped above, and the one
+    // factorization the correction pays is of that operator. A chord
+    // iteration contracts at the rate the distance between its
+    // operator and the true Jacobian sets, and the predicted point is
+    // where the truth is. The barrier diagonal is the exception: it
+    // stays the held solve's, with the predictor's active set applied,
+    // because a diagonal rebuilt from the predicted slacks carries
+    // entries without the held solve's cap at any coordinate the step
+    // moves onto a bound.
+    let (data_h, cq_h, _) = bs.activity_handles();
+    let predicted = bs.pack_natural(&iterate).ok_or_else(|| {
+        SolverError::SensComputationFailed("corrector: packing the predicted point failed".into())
+    })?;
+    struct RestoreCurr<'a> {
+        data: &'a pounce_algorithm::ipopt_data::IpoptDataHandle,
+        saved: Option<pounce_algorithm::iterates_vector::IteratesVector>,
+        saved_w: Option<Rc<dyn pounce_linalg::SymMatrix>>,
+        restore_w: bool,
+    }
+    impl Drop for RestoreCurr<'_> {
+        fn drop(&mut self) {
+            if let Some(c) = self.saved.take() {
+                self.data.borrow_mut().set_curr(c);
+            }
+            if self.restore_w {
+                self.data.borrow_mut().w = self.saved_w.take();
+            }
         }
-        Some(bs.active_set_sigma_x(&released, &pinned).ok_or_else(|| {
-            SolverError::SensComputationFailed("corrector: active-set sigma unavailable".into())
-        })?)
+    }
+    let mut restore = RestoreCurr {
+        data: data_h,
+        saved: data_h.borrow().curr.clone(),
+        saved_w: None,
+        restore_w: false,
     };
+    data_h.borrow_mut().set_curr(predicted);
+    // The solve below takes its Hessian from `IpoptData::w`, the
+    // matrix the algorithm last stored, so moving the iterate alone
+    // moves only the Jacobians and slacks. Under an exact-Hessian
+    // solve the matrix is re-evaluated at the predicted point, with
+    // the step's own multipliers as clamped above. A limited-memory
+    // solve keeps its quasi-Newton matrix: there is no exact Hessian
+    // to evaluate anywhere.
+    if exact_hessian {
+        restore.saved_w = data_h.borrow().w.clone();
+        restore.restore_w = true;
+        let w = cq_h.borrow().curr_exact_hessian();
+        data_h.borrow_mut().w = Some(w);
+    }
+    let _restore = restore;
+
     let solve = |rhs: &[Number], lhs: &mut [Number]| -> bool {
-        match sigma.as_ref() {
-            // The same Rc every call: the factorization cache keys on
-            // its tag, so the released operator is factored once and
-            // every later solve is a back-solve.
-            Some(s) => bs.solve_released_prebuilt(&released, Rc::clone(s), rhs, lhs, false),
-            None => bs.solve(rhs, lhs),
-        }
+        // The same Rc every call: the factorization cache keys on its
+        // tag, so the predicted point's operator is factored once and
+        // every later solve is a back-solve.
+        bs.solve_released_prebuilt(&released, Rc::clone(&sigma), rhs, lhs, false)
     };
     // A released bound has no equation left, so its row does not count
     // toward the residual the stopping rule reads.

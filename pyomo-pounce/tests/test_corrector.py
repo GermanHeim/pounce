@@ -1,6 +1,6 @@
 """Tests for estimate(corrector_iter=...): Newton iterations on the
-barrier system after the step, against the factorization the solve left
-behind."""
+barrier system after the step, against an operator assembled at the
+predicted point."""
 import warnings
 
 import pytest
@@ -128,26 +128,31 @@ def test_a_zero_budget_is_the_uncorrected_step():
     assert a == pytest.approx(b, abs=1e-12)
 
 
-def test_a_larger_budget_buys_accuracy():
-    """Each iteration is a Newton step against the held factorization,
-    so on a model whose active set does not change the error falls
-    steadily with the budget rather than levelling off after one."""
+def test_a_larger_budget_buys_accuracy_until_convergence():
+    """Each iteration is a chord step against the operator assembled at
+    the predicted point, so the error falls steadily with the budget
+    until the iterations converge, after which further budget is not
+    spent."""
     m = solved()
     target = 1.6
     tx, ty = resolve_at(target)
     budgets = (1, 2, 4, 12)
     errs = []
+    spent = []
     for it in budgets:
         cx, cy = estimated(m, target, corrector_iter=it)
         errs.append(max(abs(cx - tx), abs(cy - ty)))
         c = corrector_of(m, [(m.p, target)], corrector_iter=it)
-        assert c["iterations"] == it, (
-            f"a budget of {it} should be spent in full here, "
-            f"spent {c['iterations']}")
+        spent.append(c["iterations"])
+        assert c["iterations"] <= it, (
+            f"a budget of {it} is a ceiling, spent {c['iterations']}")
     assert all(b <= a for a, b in zip(errs, errs[1:])), (
         f"a larger budget should never lose accuracy: {errs}")
     assert errs[-1] < errs[0] * 1e-6, (
         f"the budget should buy orders, not a rounding: {errs}")
+    assert spent[-1] < budgets[-1], (
+        "the largest budget should not be spent in full, because the "
+        f"iterations converge first: spent {spent[-1]} of {budgets[-1]}")
 
 
 def test_it_applies_under_every_mode():
@@ -174,30 +179,45 @@ def test_it_applies_under_every_mode():
 
 
 def test_a_correction_that_achieves_nothing_says_so():
-    """A bound that has to leave the active set is what the held
-    factorization cannot represent, and the caller has to be told
-    rather than handed the uncorrected step as though it were
-    corrected."""
-    m = pyo.ConcreteModel()
-    m.p = pyo.Param(initialize=1.0, mutable=True)
-    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
-    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
-    declare_sens_param(m.p)
+    """A bound that has to LEAVE the active set is what the corrector's
+    operator cannot represent, whatever point it is assembled at, and
+    the caller has to be told rather than handed the uncorrected step
+    as though it were corrected."""
+    m = held()
     pyo.SolverFactory("pounce").solve(m)
-    # p goes negative, so the solution wants x below its lower bound
-    # and the bound the base point held has to take the load instead
+    # p goes to 2, so the solution wants x well off the lower bound the
+    # base point holds, and only a mode that releases can follow
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        corrected = estimate(m, [(m.p, 2.0)], corrector_iter=6)[m.x]
+        msgs = [str(x.message) for x in w]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        plain = estimate(m, [(m.p, 2.0)])[m.x]
+    assert any("corrector spent" in x for x in msgs), (
+        f"the corrector achieved nothing and should say so: {msgs}")
+    assert corrected == pytest.approx(plain, abs=1e-9), (
+        "a correction that achieves nothing should leave the estimate "
+        f"where it was: {plain} -> {corrected}")
+
+
+def test_the_corrector_reaches_a_bound_the_step_arrives_at():
+    """The other direction is now within reach: a bound the step
+    CARRIES a coordinate onto is applied to the operator's diagonal,
+    and with the operator assembled at the predicted point the
+    iterations land on the constrained answer rather than achieving
+    nothing."""
+    m = pinning()
+    # p goes to -4, so the unconstrained answer is x = -4 and the true
+    # answer is x on its lower bound at 0
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         corrected = estimate(m, [(m.p, -4.0)], corrector_iter=6)[m.x]
         msgs = [str(x.message) for x in w]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        plain = estimate(m, [(m.p, -4.0)])[m.x]
-    assert any("corrector spent" in x for x in msgs), (
-        f"the corrector achieved nothing and should say so: {msgs}")
-    assert corrected == pytest.approx(plain, abs=1e-12), (
-        "a correction that achieves nothing should leave the estimate "
-        f"where it was: {plain} -> {corrected}")
+    assert corrected == pytest.approx(0.0, abs=1e-8), (
+        f"the corrector should land on the bound, got {corrected}")
+    assert not any("corrector spent" in x for x in msgs), (
+        f"a correction that worked must not warn: {msgs}")
 
 
 def test_estimate_report_carries_what_the_corrector_did():

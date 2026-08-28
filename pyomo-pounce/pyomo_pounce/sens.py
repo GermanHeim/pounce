@@ -1285,19 +1285,17 @@ def estimate(model, perturb, clamp=True, mode="linear",
     the release before this option existed.
 
     corrector_iter runs Newton iterations on the barrier system after
-    the step, against the factorization the solve left behind, so each
-    one costs a back-solve and no factorization. It aims at the barrier
-    solution at the mu the solve finished on rather than at a re-solve,
-    so the accuracy it reaches is bounded by that offset, and it stops
-    as soon as an iteration fails to improve the residual. Where the
-    perturbation needs a bound the base point held tightly to leave the
-    active set, the held factorization cannot represent the change, the
-    iterations make no progress, and a warning says so rather than
-    letting the uncorrected step pass as corrected. Measured on a
-    100-step Hicks-Ray CSTR displaced from its setpoint, a small step
-    goes from 6.3e-6 to 5.5e-9 in nine back-solves, and a step needing a
-    bound with sigma near 3e5 to leave stops after three with nothing
-    gained. It applies under every mode, refining whatever step that
+    the step, against an operator assembled at the predicted point:
+    one factorization there with the derivatives evaluated at the
+    stepped iterate, then a back-solve per iteration. It aims at the
+    barrier solution at the mu the solve finished on rather than at a
+    re-solve, so the accuracy it reaches is bounded by that offset,
+    and it stops as soon as an iteration fails to improve the
+    residual. Where the perturbation needs a bound the base point held
+    tightly to leave the active set, the corrector's operator cannot
+    represent the change, the iterations make no progress, and a
+    warning says so rather than letting the uncorrected step pass as
+    corrected. It applies under every mode, refining whatever step that
     mode produced.
 
     bound_eps sets how far outside a variable bound a step has to end
@@ -1427,7 +1425,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 "so the estimate is close to "
                 "the uncorrected step. That happens when the perturbation "
                 "needs a bound the base point held tightly to leave the "
-                "active set, which the held factorization cannot represent.")
+                "active set, which the corrector's operator cannot represent.")
 
     dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
