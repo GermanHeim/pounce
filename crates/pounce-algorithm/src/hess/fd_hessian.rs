@@ -551,9 +551,7 @@ impl HessianUpdater for FdHessianUpdater {
         // outside a `sqrt` or `log` domain returns NaN rather than an
         // error, so each group's result is checked for finiteness and
         // retried with the step reversed.
-        let steps: Vec<Number> = (0..n)
-            .map(|j| FD_REL_STEP * x[j].abs().max(1.0))
-            .collect();
+        let steps: Vec<Number> = (0..n).map(|j| FD_REL_STEP * x[j].abs().max(1.0)).collect();
 
         // Reuse the cached Hessian when neither the iterate nor the
         // multipliers have moved. `∇²L = ∇²f + Σ yⱼ ∇²cⱼ` depends on both,
@@ -565,9 +563,11 @@ impl HessianUpdater for FdHessianUpdater {
                 .into_iter()
                 .chain(flat(&*curr_y_d))
                 .collect();
-            if let (Some(px), Some(py), Some(pw)) =
-                (self.prev_x.as_ref(), self.prev_y.as_ref(), self.prev_w.as_ref())
-            {
+            if let (Some(px), Some(py), Some(pw)) = (
+                self.prev_x.as_ref(),
+                self.prev_y.as_ref(),
+                self.prev_w.as_ref(),
+            ) {
                 let rel = |a: &[Number], b: &[Number]| -> Number {
                     let (mut d, mut m) = (0.0_f64, 1.0_f64);
                     for (u, v) in a.iter().zip(b.iter()) {
@@ -671,7 +671,9 @@ fn set_expanded(dst: &mut dyn Vector, values: &[Number]) {
         return;
     }
     if let Some(cv) = dst.as_any_mut().downcast_mut::<CompoundVector>() {
-        let dims: Vec<usize> = (0..cv.n_comps()).map(|i| cv.comp(i).dim() as usize).collect();
+        let dims: Vec<usize> = (0..cv.n_comps())
+            .map(|i| cv.comp(i).dim() as usize)
+            .collect();
         let mut off = 0usize;
         for (i, &d) in dims.iter().enumerate() {
             set_expanded(cv.comp_mut(i as Index), &values[off..off + d]);
@@ -688,7 +690,15 @@ mod tests {
 
     /// Build lower-triangle pairs for a symmetric banded pattern, plus
     /// the adjacency and row/column incidence the colourings need.
-    fn banded(n: usize, half_band: usize) -> (Vec<(Index, Index)>, Vec<Vec<Index>>, Vec<Vec<Index>>, Vec<Vec<Index>>) {
+    fn banded(
+        n: usize,
+        half_band: usize,
+    ) -> (
+        Vec<(Index, Index)>,
+        Vec<Vec<Index>>,
+        Vec<Vec<Index>>,
+        Vec<Vec<Index>>,
+    ) {
         let mut pairs = Vec::new();
         for i in 0..n {
             for j in i.saturating_sub(half_band)..=i {
@@ -747,7 +757,10 @@ mod tests {
 
         // Recovery, mirroring `build_structure` exactly.
         let count_in_color = |v: Index, c: usize| -> usize {
-            adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+            adj[v as usize]
+                .iter()
+                .filter(|&&w| color[w as usize] == c)
+                .count()
         };
         for &(i, j) in &pairs {
             let (g, read) = if i == j {
@@ -851,12 +864,13 @@ mod tests {
 
         let recoverable = |color: &[usize]| -> bool {
             let cnt = |v: Index, c: usize| {
-                adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+                adj[v as usize]
+                    .iter()
+                    .filter(|&&w| color[w as usize] == c)
+                    .count()
             };
             pairs.iter().all(|&(i, j)| {
-                i == j
-                    || cnt(i, color[j as usize]) == 1
-                    || cnt(j, color[i as usize]) == 1
+                i == j || cnt(i, color[j as usize]) == 1 || cnt(j, color[i as usize]) == 1
             })
         };
 
@@ -888,7 +902,10 @@ mod tests {
                 }
             }
             let cnt = |v: Index, c: usize| {
-                adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+                adj[v as usize]
+                    .iter()
+                    .filter(|&&w| color[w as usize] == c)
+                    .count()
             };
             for &(i, j) in &pairs {
                 let (g, read) = if i == j {

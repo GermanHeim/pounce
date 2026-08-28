@@ -3751,10 +3751,7 @@ impl IpoptApplication {
         // defaults to SR1 rather than BFGS — see
         // `crates::hess::partitioned_quasi_newton` for why damping is
         // the wrong choice on a per-constraint element.
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("partitioned_update_type", "")
-        {
+        if let Ok((v, found)) = self.options.get_string_value("partitioned_update_type", "") {
             if found {
                 builder.partitioned_update_type = match v.as_str() {
                     "bfgs" => UpdateType::Bfgs,
@@ -3795,9 +3792,7 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_string_value("partitioned_elements", "") {
             if found {
                 builder.partitioned_elements = match v.as_str() {
-                    "blocks" => {
-                        crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock
-                    }
+                    "blocks" => crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock,
                     _ => crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
                 };
             }

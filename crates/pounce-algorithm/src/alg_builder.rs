@@ -1103,8 +1103,7 @@ impl Default for AlgorithmBuilder {
             partitioned_max_element: 64,
             partitioned_objective_vars: None,
             partitioned_curvature_cap: Number::INFINITY,
-            partitioned_elements:
-                crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+            partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
             fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
             fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
@@ -1498,8 +1497,10 @@ impl AlgorithmBuilder {
                 ..LimMemQuasiNewtonUpdater::default()
             }),
             HessianApproxChoice::Partitioned => {
-                let mut u = crate::hess::partitioned_quasi_newton::
-                    PartitionedQuasiNewtonUpdater::new(self.partitioned_update_type);
+                let mut u =
+                    crate::hess::partitioned_quasi_newton::PartitionedQuasiNewtonUpdater::new(
+                        self.partitioned_update_type,
+                    );
                 u.max_element = self.partitioned_max_element;
                 u.objective_vars = self.partitioned_objective_vars.clone();
                 u.curvature_cap = self.partitioned_curvature_cap;
@@ -1522,8 +1523,7 @@ impl AlgorithmBuilder {
                 Box::new(u)
             }
             HessianApproxChoice::FiniteDifference => {
-                let mut u =
-                    crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern);
+                let mut u = crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern);
                 u.coloring = self.fd_hessian_coloring;
                 u.reuse_tol = self.fd_hessian_reuse_tol;
                 Box::new(u)
@@ -1642,8 +1642,7 @@ mod tests {
                             partitioned_elements:
                                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
                             partitioned_block_size: 64,
-                            fd_hessian_pattern:
-                                crate::hess::fd_hessian::FdPatternSource::Declared,
+                            fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
                             fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
                             fd_hessian_reuse_tol: 0.0,
                             limited_memory_update_type: UpdateType::Bfgs,

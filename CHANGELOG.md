@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+- **`hessian_approximation=finite-difference`: the exact Hessian for models
+  that have none.** A collocation model built from an FMU or CasADi supplies
+  analytic first derivatives and no second ones, and until now that left only
+  `limited-memory`, which degrades with mesh refinement until it stops
+  converging. The new mode recovers the exact Lagrangian Hessian by
+  graph-coloured finite differences of the analytic Jacobian: `∇ₓL` is closed
+  form when `J` is, so one gradient-plus-Jacobian evaluation gives a
+  directional derivative, and with a sparsity pattern one probe recovers a
+  whole group of structurally orthogonal columns. Measured on
+  `benchmarks/large_scale/laptime` against a *genuinely* Hessian-less model
+  (`POUNCE_DROP_HESSIAN=1`, which reports `nnz_h_lag = 0` and declines
+  `eval_h` exactly as a Python problem with no `hessian` method does): at
+  N=160, **38 iterations / 12.6 s and `Solve_Succeeded`** against
+  limited-memory's 207 / 53.7 s and `Solved_To_Acceptable_Level`; at N=320,
+  **106 iterations to twelve correct digits** where limited-memory spends
+  1210 iterations and lands on 65.395 against a true optimum of 65.326908.
+  Affordable because the pattern's widest row is `rho_max = 15` and is
+  *unchanged* under mesh refinement — set by the per-stage stencil, not the
+  horizon — so the probe count does not grow with the problem. This does not
+  and cannot beat `exact`: on a model that has a Hessian, reading it costs
+  less than reconstructing it. Opt-in; every default is unchanged.
+  `fd_hessian_pattern` selects the pattern source (`declared` uses the TNLP's
+  structure call only, never its values; `jacobian` derives it from the
+  Jacobian pattern alone and is the automatic fallback when nothing is
+  declared). `fd_hessian_reuse_tol` skips the rebuild when neither the iterate
+  nor the multipliers moved (~7%). `fd_hessian_coloring` defaults to
+  Curtis-Powell-Reid; star colouring needs fewer probes but is numerically
+  wrong on a dense pattern — see `dev-notes/fd-hessian-from-jacobian.md`.
+
+- **`hessian_approximation=partitioned` (negative result, opt-in).** Two
+  partitioned quasi-Newton decompositions, built and measured against the same
+  benchmark and kept for the record rather than proposed for use: per-constraint
+  elements scale the wrong way, and per-primal-block elements have near-flat
+  iteration scaling but never converge faster. Both are beaten by
+  `finite-difference` on every measure. Full measurements, including two wrong
+  inferences made along the way and how they were caught, in
+  `dev-notes/partitioned-quasi-newton-prototype.md`.
+
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
   caches in `ipopt_cq.rs`, so every read reassembled

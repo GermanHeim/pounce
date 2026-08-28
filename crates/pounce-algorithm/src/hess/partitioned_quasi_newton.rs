@@ -343,7 +343,13 @@ impl PartitionedQuasiNewtonUpdater {
     /// Build the element table and the assembled sparsity pattern. Runs
     /// once; both are structural and every later call reuses them, so
     /// the backend's symbolic factorization is done a single time.
-    fn build_structure(&mut self, n: usize, grad_f: &[Number], jac_c: &GenTMatrix, jac_d: &GenTMatrix) {
+    fn build_structure(
+        &mut self,
+        n: usize,
+        grad_f: &[Number],
+        jac_c: &GenTMatrix,
+        jac_d: &GenTMatrix,
+    ) {
         let mut elements: Vec<Element> = Vec::new();
 
         if self.mode == ElementMode::PrimalBlock {
@@ -441,8 +447,7 @@ impl PartitionedQuasiNewtonUpdater {
                     continue;
                 }
                 // Support = sorted unique columns of this row (0-based).
-                let mut cols: Vec<Index> =
-                    slice.iter().map(|&p| jcols[p as usize] - 1).collect();
+                let mut cols: Vec<Index> = slice.iter().map(|&p| jcols[p as usize] - 1).collect();
                 cols.sort_unstable();
                 cols.dedup();
                 // Local index of every triplet position in the row.
@@ -500,9 +505,8 @@ impl PartitionedQuasiNewtonUpdater {
 
         // Lookup from (row, col) to assembled position, by binary search
         // over the sorted pair list.
-        let find = |row: Index, col: Index| -> u32 {
-            pairs.partition_point(|&p| p < (row, col)) as u32
-        };
+        let find =
+            |row: Index, col: Index| -> u32 { pairs.partition_point(|&p| p < (row, col)) as u32 };
         for e in &mut elements {
             if e.dense {
                 let mut map = Vec::with_capacity(e.k() * (e.k() + 1) / 2);
@@ -726,10 +730,7 @@ fn update_element(
             // Powell-damped BFGS on the element block.
             let s_bs = dot(s, &bs);
             let bs_norm = dot(&bs, &bs).sqrt();
-            if !(s_bs > 0.0)
-                || !s_bs.is_finite()
-                || s_bs <= BFGS_DENOM_FLOOR * s_norm * bs_norm
-            {
+            if !(s_bs > 0.0) || !s_bs.is_finite() || s_bs <= BFGS_DENOM_FLOOR * s_norm * bs_norm {
                 return false;
             }
             let theta = if sty >= POWELL_THETA * s_bs {
@@ -827,10 +828,7 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                     for i in 0..n {
                         dy[i] = grad_f[i] - pg[i];
                     }
-                    for (jac, prev, mult) in [
-                        (jac_c, pc, &y_c_now),
-                        (jac_d, pd, &y_d_now),
-                    ] {
+                    for (jac, prev, mult) in [(jac_c, pc, &y_c_now), (jac_d, pd, &y_d_now)] {
                         let (ir, jc, cur) = (jac.irows(), jac.jcols(), jac.values());
                         for k in 0..ir.len() {
                             let row = (ir[k] - 1) as usize;
@@ -849,10 +847,7 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
         let oracle = std::env::var("POUNCE_PARTITIONED_ORACLE").is_ok();
         if oracle {
             self.dbg = DebugPeaks {
-                step_norm: s_full
-                    .as_ref()
-                    .map(|v| dot(v, v).sqrt())
-                    .unwrap_or(0.0),
+                step_norm: s_full.as_ref().map(|v| dot(v, v).sqrt()).unwrap_or(0.0),
                 ..DebugPeaks::default()
             };
         }
@@ -1162,7 +1157,11 @@ mod tests {
         let dense = [[1.0, 2.0, 3.0], [2.0, 4.0, 5.0], [3.0, 5.0, 6.0]];
         for a in 0..3 {
             let want: Number = (0..3).map(|c| dense[a][c] * s[c]).sum();
-            assert!((out[a] - want).abs() < 1e-12, "row {a}: {} vs {want}", out[a]);
+            assert!(
+                (out[a] - want).abs() < 1e-12,
+                "row {a}: {} vs {want}",
+                out[a]
+            );
         }
     }
 
@@ -1186,11 +1185,24 @@ mod tests {
         let s = vec![1.0, 0.5, -0.25];
         // A deliberately indefinite target: SR1 must not sanitize it.
         let y = vec![-2.0, 1.0, 3.0];
-        assert!(update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(update_element(
+            &mut e,
+            &s,
+            &y,
+            UpdateType::Sr1,
+            1e-8,
+            1e8,
+            1e12
+        ));
         let mut bs = vec![0.0; 3];
         packed_mult(&e.b, &s, &mut bs);
         for a in 0..3 {
-            assert!((bs[a] - y[a]).abs() < 1e-10, "component {a}: {} vs {}", bs[a], y[a]);
+            assert!(
+                (bs[a] - y[a]).abs() < 1e-10,
+                "component {a}: {} vs {}",
+                bs[a],
+                y[a]
+            );
         }
     }
 
@@ -1258,10 +1270,21 @@ mod tests {
         let s = vec![1.0, 0.5];
         let y = vec![2.0, -4.0];
         // Skipped, and what is left behind is exactly the seeded scalar.
-        assert!(!update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(!update_element(
+            &mut e,
+            &s,
+            &y,
+            UpdateType::Sr1,
+            1e-8,
+            1e8,
+            1e12
+        ));
         assert!(e.seeded);
         assert_eq!(e.b[1], 0.0, "off-diagonal must still be zero");
-        assert!((e.b[0] - e.b[2]).abs() < 1e-15, "block must be a multiple of I");
+        assert!(
+            (e.b[0] - e.b[2]).abs() < 1e-15,
+            "block must be a multiple of I"
+        );
     }
 
     /// The SR1-vs-BFGS contrast on a **two-dimensional** element, driven
@@ -1288,11 +1311,24 @@ mod tests {
 
         let mut sr1 = make();
         update_element(&mut sr1, &s1, &y1, UpdateType::Sr1, 1e-8, 1e8, 1e12);
-        assert!(update_element(&mut sr1, &s2, &y2, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(update_element(
+            &mut sr1,
+            &s2,
+            &y2,
+            UpdateType::Sr1,
+            1e-8,
+            1e8,
+            1e12
+        ));
         let mut bs = vec![0.0; 2];
         packed_mult(&sr1.b, &s2, &mut bs);
         for a in 0..2 {
-            assert!((bs[a] - y2[a]).abs() < 1e-10, "component {a}: {} vs {}", bs[a], y2[a]);
+            assert!(
+                (bs[a] - y2[a]).abs() < 1e-10,
+                "component {a}: {} vs {}",
+                bs[a],
+                y2[a]
+            );
         }
         // det < 0 ⇒ one eigenvalue of each sign: the indefiniteness the
         // inertia correction is supposed to see.
@@ -1301,7 +1337,15 @@ mod tests {
 
         let mut bfgs = make();
         update_element(&mut bfgs, &s1, &y1, UpdateType::Bfgs, 1e-8, 1e8, 1e12);
-        assert!(update_element(&mut bfgs, &s2, &y2, UpdateType::Bfgs, 1e-8, 1e8, 1e12));
+        assert!(update_element(
+            &mut bfgs,
+            &s2,
+            &y2,
+            UpdateType::Bfgs,
+            1e-8,
+            1e8,
+            1e12
+        ));
         let det_b = bfgs.b[0] * bfgs.b[2] - bfgs.b[1] * bfgs.b[1];
         assert!(
             bfgs.b[0] > 0.0 && det_b > 0.0,
@@ -1328,9 +1372,21 @@ mod tests {
         };
         let s = vec![1.0, -2.0, 0.5];
         let y = vec![0.5, 1.0, -3.0];
-        assert!(update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(update_element(
+            &mut e,
+            &s,
+            &y,
+            UpdateType::Sr1,
+            1e-8,
+            1e8,
+            1e12
+        ));
         let s_bs: Number = (0..3).map(|a| e.b[a] * s[a] * s[a]).sum();
-        assert!((s_bs - dot(&s, &y)).abs() < 1e-10, "{s_bs} vs {}", dot(&s, &y));
+        assert!(
+            (s_bs - dot(&s, &y)).abs() < 1e-10,
+            "{s_bs} vs {}",
+            dot(&s, &y)
+        );
     }
 
     /// A parallel `y` that carries no new information leaves the block
@@ -1353,7 +1409,15 @@ mod tests {
         let s = vec![1.0, 1.0];
         // y = B s exactly, so w = 0 and the denominator vanishes.
         let y = vec![2.0, 2.0];
-        assert!(!update_element(&mut e, &s, &y, UpdateType::Sr1, 1e-8, 1e8, 1e12));
+        assert!(!update_element(
+            &mut e,
+            &s,
+            &y,
+            UpdateType::Sr1,
+            1e-8,
+            1e8,
+            1e12
+        ));
         assert_eq!(e.b, before);
     }
 }

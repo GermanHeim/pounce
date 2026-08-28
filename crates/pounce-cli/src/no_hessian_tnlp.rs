@@ -98,12 +98,7 @@ impl TNLP for NoHessianTnlp {
     fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
         self.inner.borrow_mut().eval_g(x, new_x, g)
     }
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        new_x: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
         self.inner.borrow_mut().eval_jac_g(x, new_x, mode)
     }
     fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, cq: &IpoptCq) {
