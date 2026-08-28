@@ -81,6 +81,49 @@ const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
 /// to spend itself on. It is also the conservative default — each escape is a
 /// separate bet, and while none of them can return a worse point than the
 /// certificate it left, each costs its own continuation budget.
+/// Default `limited_memory_ls_failure_restarts` (gh #818): **off**. The
+/// rung is available, and it is not what fixes gh #818.
+///
+/// It shipped in the first draft of this work defaulted to one, on a
+/// measurement taken before `ALPHA_INTERP_MIN_TRIALS` existed: with the
+/// interpolation firing on every trial, a line search failed often
+/// enough that standing in front of the restoration hand-off was worth
+/// something. Gating the interpolation removed most of those failures,
+/// and re-measuring the rung on top of the gate turned the trade
+/// negative. `scripts/sweep-fixtures.sh` against `a5e0a837`, both with
+/// the gate, rung off against rung on:
+///
+/// | fixture | rung off | rung on |
+/// |---|---|---|
+/// | `pooling_rt2stp` | `ErrorInStepComputation`/716 — *unmoved from `main`* | `ErrorInStepComputation`/**744** |
+/// | `infeasible_square_scaled_1em4` | `InfeasibleProblemDetected`/24 — *unmoved from `main`* | **26** |
+/// | `deb7` | `ErrorInStepComputation`/1010 | **`RestorationFailed`**/460 |
+/// | `eigena2` | `ErrorInStepComputation`/201 | **`SolvedToAcceptableLevel`**/174 |
+/// | `issue_508_infeasible_gap_1em4` | `InfeasibleProblemDetected`/79 | 76 |
+///
+/// **This ledger is not the one that set the default.** At the gate of
+/// 5 an earlier revision shipped, the rung cost iterations on both
+/// `eigena2` and `infeasible_square_scaled_1em4` to the same verdict,
+/// and that pair is what kept it off. At 6, `eigena2` *gains* a
+/// reportable point. What still argues for off is narrower: the rung
+/// moves two fixtures off the numbers they have on `main` at no benefit
+/// (`pooling_rt2stp`, `infeasible_square_scaled_1em4`), and it changes
+/// `deb7`'s verdict rather than shortening it — a different answer, not
+/// a faster one. Turning it on is a trajectory change over the whole
+/// corpus and needs its own `scripts/sweep-fixtures.sh` run to justify;
+/// **that case has improved and is worth re-opening.** Every
+/// `issue_818_*` test in `pounce-rs` passes with the rung compiled out
+/// — the interpolation is the fix, not this.
+///
+/// Left in the tree rather than deleted because the reasoning behind it
+/// is sound and unaddressed elsewhere: a restoration phase entered at a
+/// feasible point has no constraint violation to minimize and cannot
+/// help. Some model will want it. Setting the option to a positive value
+/// enables it — and note that setting it *at all*, including to 0, opts
+/// out of the `Solved_To_Acceptable_Level` re-solve, because it is a
+/// [`TERMINATION_POLICY_OPTIONS`](crate::application) key.
+const DEFAULT_LBFGS_LS_FAILURE_RESTARTS: usize = 0;
+
 const DEFAULT_NEG_CURV_ESCAPES: usize = 1;
 /// gh #797 — outer iterations a negative-curvature escape gets to produce a
 /// certificate of its own before it is cut and the stationary point reported.
@@ -214,6 +257,23 @@ pub struct IpoptAlgorithm {
     /// ~2.9 at the finite optimum). Reset to zero whenever the iterate is
     /// within the threshold or is not growing.
     divergence_streak: u32,
+    /// Consecutive iterations for which the primal divergence guard has
+    /// been suppressed because the line search reported
+    /// [`crate::line_search::backtracking::BacktrackingLineSearch::in_watchdog`].
+    ///
+    /// The suppression is a *deferral*, and this is what bounds it. A
+    /// watchdog sequence is supposed to end within
+    /// `watchdog_trial_iter_max` (default 3) iterations, but the flag can
+    /// outlive one: `run_filter_line_search`'s `TinyStep` arm returns
+    /// without consulting `in_watchdog`, so a tiny step taken mid-watchdog
+    /// hands off to restoration with the flag still set, and
+    /// `reset_after_restoration` clears `watchdog_shortened_iter` but not
+    /// `in_watchdog`. Rather than change the line search's state machine
+    /// (a trajectory change, for a hole this guard need not depend on),
+    /// the guard simply stops deferring past
+    /// [`Self::WATCHDOG_DEFER_MAX`] and checks the iterate anyway. Reset
+    /// to zero on any iteration the guard actually runs.
+    watchdog_defer_streak: u32,
     /// Largest `|x|` seen in the current growth run (companion to
     /// [`Self::divergence_streak`]). Zero when no run is active.
     divergence_prev_amax: Number,
@@ -350,6 +410,17 @@ pub struct IpoptAlgorithm {
     /// See [`Self::try_neg_curv_escape`] for the test and the step, and
     /// [`Self::honour_neg_curv_floor`] for what makes a lost bet harmless.
     pub neg_curv_escapes: usize,
+    /// `limited_memory_ls_failure_restarts` (gh #818) — how many times a
+    /// line-search failure at an *already feasible* point may re-anchor
+    /// the quasi-Newton model and retry, instead of handing off to a
+    /// restoration phase that has no constraint violation to reduce.
+    /// `0` restores the pre-#818 behaviour (always hand off).
+    ///
+    /// See [`Self::try_reanchor_before_restoration`] for the rung and
+    /// what bounds it.
+    pub lbfgs_ls_failure_restarts: usize,
+    /// gh #818 — re-anchors spent so far this solve.
+    lbfgs_ls_restarts_used: usize,
     /// gh #797 — escapes spent so far this solve.
     neg_curv_escapes_used: usize,
     /// gh #797 — the certified stationary point the escape left. It is a strict
@@ -508,6 +579,7 @@ impl IpoptAlgorithm {
             tiny_step_tol: 10.0 * Number::EPSILON,
             diverging_iterates_tol: 1e20,
             divergence_streak: 0,
+            watchdog_defer_streak: 0,
             divergence_prev_amax: 0.0,
             divergence_prev_f: Number::INFINITY,
             divergence_prev_decrease: Number::NAN,
@@ -526,6 +598,8 @@ impl IpoptAlgorithm {
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
             neg_curv_escapes: DEFAULT_NEG_CURV_ESCAPES,
             neg_curv_escapes_used: 0,
+            lbfgs_ls_failure_restarts: DEFAULT_LBFGS_LS_FAILURE_RESTARTS,
+            lbfgs_ls_restarts_used: 0,
             neg_curv_floor: None,
             neg_curv_deadline_iter: None,
             resto_decline_progress_ratio: DEFAULT_DECLINE_PROGRESS_RATIO,
@@ -667,6 +741,13 @@ impl IpoptAlgorithm {
     /// instant `|x|` crosses the threshold) is preserved, while a low
     /// user threshold no longer fires on the way to a finite optimum.
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
+    /// Most consecutive iterations the primal divergence guard will defer
+    /// to a watchdog sequence before checking the iterate anyway. Upstream's
+    /// `watchdog_trial_iter_max` default is 3; one spare covers the
+    /// iteration on which the watchdog is armed. See
+    /// [`Self::watchdog_defer_streak`] for why the bound is not simply
+    /// "until `in_watchdog` clears".
+    const WATCHDOG_DEFER_MAX: u32 = 4;
 
     /// #285: magnitude floor for the checked recession-ray unboundedness path.
     /// Below this the (slightly more expensive) recession proof is not even
@@ -2383,10 +2464,46 @@ impl IpoptAlgorithm {
         //     far lower magnitude floor, that catches a genuine recession ray
         //     in `null(A_eq)` over free variables whose `|x|` grows only
         //     linearly and so never reaches `1e20` within `max_iter`.
+        //
+        // The whole block is skipped while the line search is inside a
+        // watchdog trial sequence (gh #818 review). A `'w'` iterate is
+        // provisional by construction: the acceptor *rejected* it, the
+        // filter was not augmented, and the line search is holding a
+        // snapshot it will revert to within `watchdog_trial_iter_max`
+        // (default 3) iterations. Reporting `DivergingIterates` there
+        // throws that snapshot away and calls a problem unbounded on a
+        // point the algorithm had already decided not to keep. This is
+        // the same false positive `DIVERGENCE_PERSIST_ITERS` was
+        // introduced for — a transient excursion that peaks and recedes —
+        // except that a watchdog excursion recedes *by construction*, and
+        // `DIVERGENCE_ABS_RUNAWAY` bypasses the streak, so the streak
+        // alone does not cover it. Skipping rather than resetting leaves
+        // the streak state untouched, so a watchdog gamble in the middle
+        // of a genuine ray neither accumulates nor erases evidence; a real
+        // divergence is reported at most three iterations later, from a
+        // committed iterate. The deferral is capped at
+        // `WATCHDOG_DEFER_MAX` consecutive iterations so it can never be
+        // held open by a stale `in_watchdog` — see
+        // `Self::watchdog_defer_streak` for the path that leaks one.
+        //
+        // Measured on the gh #818 quadratic at `n = 8`, cond `1e12`,
+        // `limited_memory_max_history 6`: the solve reaches iteration 352
+        // on the *third* watchdog trial of a sequence, at `|x|_inf ~ 5e22`
+        // with the objective climbing to `+2.0e45` — the opposite of the
+        // `f -> -inf` that `DivergingIterates` is supposed to mean — one
+        // iteration before `StopWatchDog` would have restored an iterate
+        // at `f = 2.26e4`.
+        let in_watchdog = self.bundle.line_search.in_watchdog()
+            && self.watchdog_defer_streak < Self::WATCHDOG_DEFER_MAX;
+        if in_watchdog {
+            self.watchdog_defer_streak += 1;
+        } else {
+            self.watchdog_defer_streak = 0;
+        }
         let (amax, structural_free, is_ray) = {
             let data = self.data.borrow();
             match data.curr.as_ref() {
-                Some(curr) => {
+                Some(curr) if !in_watchdog => {
                     let amax = curr.x.amax();
                     let structural = amax > self.diverging_iterates_tol
                         && self.divergence_is_true_unboundedness(&*curr.x);
@@ -2394,7 +2511,7 @@ impl IpoptAlgorithm {
                         && self.curr_is_recession_ray(&*curr.x, amax);
                     (Some(amax), structural, is_ray)
                 }
-                None => (None, false, false),
+                _ => (None, false, false),
             }
         };
         // Evaluate the (scaled) objective only while a structural divergence
@@ -2403,8 +2520,17 @@ impl IpoptAlgorithm {
         let curr_f = structural_free.then(|| self.cq.borrow().curr_f());
         // Evaluate both streak updates (no short-circuit) so each keeps its
         // state current, then fire if either concludes divergence.
-        let fire_magnitude = self.update_divergence_verdict(amax, structural_free, curr_f);
-        let fire_recession = self.update_recession_verdict(amax.unwrap_or(0.0), is_ray);
+        // ... but only when the streaks are actually being fed. Inside a
+        // watchdog sequence `amax` is `None`, and running the updates
+        // would reset both streaks on a point they never saw.
+        let (fire_magnitude, fire_recession) = if in_watchdog {
+            (false, false)
+        } else {
+            (
+                self.update_divergence_verdict(amax, structural_free, curr_f),
+                self.update_recession_verdict(amax.unwrap_or(0.0), is_ray),
+            )
+        };
         if fire_magnitude || fire_recession {
             if fire_recession && !fire_magnitude {
                 tracing::debug!(target: "pounce::algorithm",
@@ -3328,6 +3454,96 @@ impl IpoptAlgorithm {
         true
     }
 
+    /// Re-anchor the quasi-Newton model instead of handing off to
+    /// restoration, when the line search has failed at a point
+    /// restoration cannot improve (gh#818). Returns `true` if the model
+    /// was re-anchored, in which case the caller retries this iterate.
+    ///
+    /// **The two failures the line search cannot tell apart.** When no
+    /// trial step is acceptable, either the *point* is bad — infeasible,
+    /// and restoration is exactly the right tool — or the *direction* is,
+    /// because `W` is a quasi-Newton model carrying curvature the iterate
+    /// has left behind. Upstream has one answer for both, because
+    /// restoration is the only fallback it has. At an already-feasible
+    /// point that answer is a no-op: the restoration NLP minimizes the
+    /// constraint violation, and there is none to minimize, so it wanders
+    /// at `theta ~ 1e-13` and reports `Restoration_Failed`.
+    ///
+    /// Measured on the `deb7` fixture under `limited-memory`: the solve
+    /// stalls with `inf_pr ~ 1e-12` and `inf_du ~ 1e5`, enters
+    /// restoration at a point feasible to 8e-13, and spends 340 of its
+    /// 1242 iterations there before failing. On the unconstrained
+    /// gh#818 quadratic under `alpha_red_factor 0.8` it is starker
+    /// still — `theta` is identically zero, so restoration cannot move
+    /// at all, and the solve dies at **iteration 1** with
+    /// `Error_In_Step_Computation` and the objective still at its
+    /// starting value.
+    ///
+    /// So this is a rung, not a refusal: it fires only where restoration
+    /// has nothing to reduce, it is bounded, and every path that reached
+    /// restoration before still reaches it once the rung is spent.
+    ///
+    /// **Deliberately *after* the acceptable-point decline.** The call
+    /// site is inside [`Self::invoke_restoration`], immediately behind
+    /// that decline, and not at the `Outcome::Failed` arm in
+    /// [`Self::iterate`] where the hand-off is decided — `eigena2` and
+    /// `csfi2` reach the hand-off at feasible points that already pass
+    /// the acceptable tolerances, and those must go on being reported
+    /// rather than re-anchored and continued. Being inside
+    /// `invoke_restoration` means the `PreRestoration` debug checkpoint
+    /// fires ahead of a rung that then does not enter restoration; that
+    /// is the price of the ordering and is the checkpoint's documented
+    /// meaning ("just before entry"), not a promise that entry follows.
+    ///
+    /// **And deliberately not a feasibility gate on restoration itself.**
+    /// That was tried and rejected before (see the `constr_viol_tol`
+    /// paragraph in [`Self::invoke_restoration`]): feasible entries are
+    /// ordinary, and nothing observable at the doorway separates a
+    /// restoration that recovers from one that does not. This rung does
+    /// not decide that question — it spends one cheap retry on the
+    /// hypothesis that the model, not the point, is at fault, and hands
+    /// over unchanged if the retry fails too.
+    ///
+    /// The bound is structural as well as counted. `reanchor` returns
+    /// `false` once the history is down to its newest pair, so a second
+    /// failure at the same iterate finds nothing to give up and falls
+    /// through; refilling the history takes accepted steps, so the
+    /// counter only advances once per genuine stall.
+    /// `limited_memory_ls_failure_restarts` caps the total.
+    fn try_reanchor_before_restoration(&mut self) -> bool {
+        if self.lbfgs_ls_failure_restarts == 0
+            || self.lbfgs_ls_restarts_used >= self.lbfgs_ls_failure_restarts
+        {
+            return false;
+        }
+        // Restoration's objective is the constraint violation. Only
+        // stand in front of it where that objective is already at its
+        // floor, so the rung can never pre-empt a restoration that had
+        // real work to do. `constr_viol_tol` is the same tolerance the
+        // convergence check calls feasible.
+        let theta = self.cq.borrow().curr_constraint_violation();
+        if !(theta <= self.bundle.conv_check.constr_viol_tol_or_default()) {
+            return false;
+        }
+        if !self.bundle.hess.reanchor() {
+            return false;
+        }
+        self.lbfgs_ls_restarts_used += 1;
+        // 'Wa' alongside the updater's own 'Wr' (the
+        // `limited_memory_max_skipping` reset), so the two re-anchorings
+        // are distinguishable in the iteration table rather than both
+        // reading as "the Hessian did something".
+        self.data.borrow_mut().append_info_string("Wa");
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] line search failed at a feasible point (theta {:.3e}); re-anchoring \
+             the limited-memory Hessian on its newest curvature pair and retrying instead \
+             of entering restoration, which has nothing to reduce here (gh#818). \
+             Restart {} of {}.",
+            theta, self.lbfgs_ls_restarts_used, self.lbfgs_ls_failure_restarts,
+        );
+        true
+    }
+
     /// Drive the restoration phase after a line-search failure.
     /// Returns `IterateOutcome::Continue` if the restoration driver
     /// recovered (the algorithm carries on from the recovered iterate);
@@ -3445,6 +3661,20 @@ impl IpoptAlgorithm {
                 );
                 return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
             }
+        }
+
+        // gh#818 — one rung before the hand-off proper: re-anchor the
+        // quasi-Newton model and retry this iterate. Placed *here*, and
+        // not at the `Outcome::Failed` arm in `iterate`, because it has
+        // to run behind the acceptable-point decline above: `eigena2`
+        // and `csfi2` arrive at feasible points that already pass the
+        // acceptable tolerances, and those must go on being reported
+        // rather than re-anchored and continued. The gh#534 deferral
+        // path falls through to here, which is the right order too —
+        // the deferral has already captured its floor, so a rung taken
+        // under a live deferral is protected by it.
+        if self.try_reanchor_before_restoration() {
+            return IterateOutcome::Continue;
         }
 
         // No-progress restoration cycle detector. Two layered checks

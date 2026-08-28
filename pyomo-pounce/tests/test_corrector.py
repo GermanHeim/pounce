@@ -1,6 +1,6 @@
 """Tests for estimate(corrector_iter=...): Newton iterations on the
-barrier system after the step, against the factorization the solve left
-behind."""
+barrier system after the step, against an operator assembled at the
+predicted point."""
 import warnings
 
 import pytest
@@ -128,26 +128,31 @@ def test_a_zero_budget_is_the_uncorrected_step():
     assert a == pytest.approx(b, abs=1e-12)
 
 
-def test_a_larger_budget_buys_accuracy():
-    """Each iteration is a Newton step against the held factorization,
-    so on a model whose active set does not change the error falls
-    steadily with the budget rather than levelling off after one."""
+def test_a_larger_budget_buys_accuracy_until_convergence():
+    """Each iteration is a chord step against the operator assembled at
+    the predicted point, so the error falls steadily with the budget
+    until the iterations converge, after which further budget is not
+    spent."""
     m = solved()
     target = 1.6
     tx, ty = resolve_at(target)
     budgets = (1, 2, 4, 12)
     errs = []
+    spent = []
     for it in budgets:
         cx, cy = estimated(m, target, corrector_iter=it)
         errs.append(max(abs(cx - tx), abs(cy - ty)))
         c = corrector_of(m, [(m.p, target)], corrector_iter=it)
-        assert c["iterations"] == it, (
-            f"a budget of {it} should be spent in full here, "
-            f"spent {c['iterations']}")
+        spent.append(c["iterations"])
+        assert c["iterations"] <= it, (
+            f"a budget of {it} is a ceiling, spent {c['iterations']}")
     assert all(b <= a for a, b in zip(errs, errs[1:])), (
         f"a larger budget should never lose accuracy: {errs}")
     assert errs[-1] < errs[0] * 1e-6, (
         f"the budget should buy orders, not a rounding: {errs}")
+    assert spent[-1] < budgets[-1], (
+        "the largest budget should not be spent in full, because the "
+        f"iterations converge first: spent {spent[-1]} of {budgets[-1]}")
 
 
 def test_it_applies_under_every_mode():
@@ -173,31 +178,57 @@ def test_it_applies_under_every_mode():
             f"step, {plain:.3e} -> {corr:.3e}")
 
 
-def test_a_correction_that_achieves_nothing_says_so():
-    """A bound that has to leave the active set is what the held
-    factorization cannot represent, and the caller has to be told
-    rather than handed the uncorrected step as though it were
-    corrected."""
-    m = pyo.ConcreteModel()
-    m.p = pyo.Param(initialize=1.0, mutable=True)
-    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
-    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
-    declare_sens_param(m.p)
+def test_a_release_the_step_hides_is_corrected_partway():
+    """A bound that has to LEAVE the active set, on a step whose
+    endpoint does not show it. The operator at the predicted point
+    carries the step's clamped multiplier at that bound, a weak entry,
+    so the iterations move x partway off the bound and genuinely
+    reduce the residual: no achieves-nothing warning fires, the
+    estimate lands closer than the plain step, and it is still not
+    the re-solve. The modes that decide the release and get there
+    exactly are owned by
+    `test_the_modes_disagree_when_a_held_bound_must_be_released`.
+    Pinned deliberately: a corrector that reaches the re-solve here
+    has learned to apply the release inside its own loop, and this
+    test should then be updated on purpose."""
+    m = held()
     pyo.SolverFactory("pounce").solve(m)
-    # p goes negative, so the solution wants x below its lower bound
-    # and the bound the base point held has to take the load instead
+    tx, _ty = resolve_held(2.0)
+    # p goes to 2, so the solution wants x well off the lower bound the
+    # base point holds, and only a mode that releases can follow
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        corrected = estimate(m, [(m.p, 2.0)], corrector_iter=6)[m.x]
+        msgs = [str(x.message) for x in w]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        plain = estimate(m, [(m.p, 2.0)])[m.x]
+    assert not any("corrector spent" in x for x in msgs), (
+        f"the residual genuinely falls here, so no warning: {msgs}")
+    assert abs(corrected - tx) < abs(plain - tx) / 2, (
+        f"partway lands closer than the plain step: {plain} -> "
+        f"{corrected}, re-solve {tx}")
+    assert abs(corrected - tx) > 1e-2, (
+        f"partway is not the re-solve: {corrected}, re-solve {tx}")
+
+
+def test_the_corrector_reaches_a_bound_the_step_arrives_at():
+    """The other direction is now within reach: a bound the step
+    CARRIES a coordinate onto is applied to the operator's diagonal,
+    and with the operator assembled at the predicted point the
+    iterations land on the constrained answer rather than achieving
+    nothing."""
+    m = pinning()
+    # p goes to -4, so the unconstrained answer is x = -4 and the true
+    # answer is x on its lower bound at 0
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         corrected = estimate(m, [(m.p, -4.0)], corrector_iter=6)[m.x]
         msgs = [str(x.message) for x in w]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        plain = estimate(m, [(m.p, -4.0)])[m.x]
-    assert any("corrector spent" in x for x in msgs), (
-        f"the corrector achieved nothing and should say so: {msgs}")
-    assert corrected == pytest.approx(plain, abs=1e-12), (
-        "a correction that achieves nothing should leave the estimate "
-        f"where it was: {plain} -> {corrected}")
+    assert corrected == pytest.approx(0.0, abs=1e-8), (
+        f"the corrector should land on the bound, got {corrected}")
+    assert not any("corrector spent" in x for x in msgs), (
+        f"a correction that worked must not warn: {msgs}")
 
 
 def test_estimate_report_carries_what_the_corrector_did():
@@ -264,21 +295,25 @@ def test_it_pins_a_bound_the_step_reaches():
 def test_the_modes_disagree_when_a_held_bound_must_be_released():
     """`mode="linear"` holds the active set fixed as it builds the step,
     so its endpoint keeps `x` on the bound and there is no release for
-    the corrector to apply. The barrier term the base point carries
-    holds `x` down, and no number of iterations moves it. `fix_relax`
-    and `path` decide the release themselves and converge."""
+    the corrector to apply. The corrector moves `x` partway on the
+    weak entry the step's clamped multiplier builds and does not
+    reach the re-solve. `fix_relax` and `path` decide the release
+    themselves and converge."""
     m = held()
     solve_it(m)
     tx, _ = resolve_held(2.0)
     lin = mode_corrector(m, 2.0, "linear", 8)
     assert lin["released"] == 0, (
         f"the linear step's endpoint shows no release: {lin}")
-    assert lin["residual"] > lin["initial_residual"] * 0.99, (
-        f"with the bound still in the operator there is nothing to gain: "
+    # the weak clamped entry at the hidden release lets the iterations
+    # reduce the residual and move x partway, without the released-row
+    # elimination that would take it to the re-solve
+    assert lin["residual"] < lin["initial_residual"], (
+        f"the iterations reduce the residual they measure: "
         f"{lin['initial_residual']:.3e} -> {lin['residual']:.3e}")
     lx, _ = estimated(m, 2.0, mode="linear", corrector_iter=8)
-    assert abs(lx - tx) > 0.5, (
-        f"the linear estimate should stay on the bound, at {lx}")
+    assert abs(lx - tx) > 1e-2, (
+        f"partway is not the re-solve, at {lx} vs {tx}")
     for mode in ("fix_relax", "path"):
         c = mode_corrector(m, 2.0, mode, 8)
         assert c["released"] == 1, f"mode={mode} should release: {c}"

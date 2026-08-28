@@ -35,7 +35,7 @@ pub mod fortran;
 pub mod solver;
 
 use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options,
+    IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
@@ -736,9 +736,13 @@ pub unsafe extern "C" fn IpoptSolve(
             // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
             // second inner solve (pounce#10 Phase 3 / pounce#24).
             let feral_cfg = feral_config_from_options(info.app.options());
+            // The `ma57_*` options under the `"resto."` prefix — dead until
+            // gh#825, because nothing threaded any MA57 config into a factory.
+            let ma57_cfg = ma57_config_from_options(info.app.options(), "resto.");
             let bff_mint = move || -> InnerBackendFactoryFactory {
                 let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
+                let ma57_cfg = ma57_cfg.clone();
+                Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
             };
             let resto_provider = make_default_restoration_factory_provider(
                 RestoAlgorithmBuilder::new(),

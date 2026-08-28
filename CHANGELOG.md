@@ -50,6 +50,479 @@ changes.
   reason) otherwise. `check_binary()` gained `checkout_executable` and
   `using_checkout`.
 
+- **Backtracking now interpolates the next trial step on the
+  limited-memory path (gh #818).** `pounce.minimize(f, x0, jac=g)` — which
+  selects `hessian_approximation=limited-memory`, the mode the Python
+  frontend and the CasADi plugin pick on their own when no exact
+  Lagrangian Hessian is available — exhausted `max_iter` on a
+  **4-variable, unconstrained, strictly convex, separable quadratic**
+  with `cond(H) = 1e8`, returning `x` wrong by 3.7e-3 relative.
+  `scipy.optimize.minimize`'s L-BFGS-B solves the identical problem in 34
+  iterations **at the same memory size**, so "scipy uses more memory" was
+  not the difference, and POUNCE's own exact-Hessian arm solves it in one.
+
+  **The model was right and the linear algebra was right.** The published
+  `B = σI + VVᵀ − UUᵀ` is the textbook L-BFGS matrix, and the
+  Sherman-Morrison-Woodbury solve in `low_rank_aug_system_solver.rs`
+  reproduces `−B⁻¹∇f` to a relative residual of ~1e-12 — checked
+  directly, and worth stating because it is the hypothesis the compact
+  representation invites. An independent 40-line L-BFGS in Python,
+  sharing nothing with POUNCE but the algorithm, reproduces the same
+  stall, which is what moved the search off the implementation.
+
+  What costs is the **trial sequence**. The quasi-Newton model's *scale*
+  can be wrong by up to `cond(H)` in any direction its curvature pairs do
+  not span, so the acceptable step is `α ≈ 4e-6`; upstream's fixed
+  `alpha *= alpha_red_factor` walks there in halves, spending 19–20 trial
+  points — each a full objective evaluation — every iteration. The
+  measurement that isolates it, with nothing else changed: under
+  `alpha_red_factor 0.2` (nine trials instead of twenty) the 8-variable
+  case goes from `MaximumIterationsExceeded` at 2000 iterations to
+  converged at 1099.
+
+  `BacktrackingLineSearch::next_alpha` therefore fits the quadratic
+  through `φ(0)`, `φ'(0)` and `φ(α)` at the rejected trial and jumps to
+  its minimizer — the textbook safeguarded backtracking step (Nocedal &
+  Wright §3.5). It is a heuristic for *which* `α` to try next and nothing
+  more: the acceptor still decides, so no step it proposes can be
+  accepted that the fixed sequence would have rejected. The converse is
+  not free, and is where the one measured regression below comes from —
+  jumping from `α` to `0.05α` skips four points the fixed sequence would
+  have tried, any of which might have been acceptable. Two clamps bound
+  it — capped at `alpha_red_factor · α` so the sequence still contracts
+  at least as fast as upstream's and the `alpha_min` bail is still
+  reached in a bounded number of trials, and floored at the new
+  `alpha_red_factor_min · α` so one badly-shaped `φ` cannot drop `α` to
+  noise in a single step.
+
+  **The interpolation does not fire until the fixed sequence has already
+  spent six trial points** (`ALPHA_INTERP_MIN_TRIALS` in
+  `backtracking.rs`). The pathology it treats is a 19-20 trial line
+  search; a line search that accepts in two or three trials never had
+  the problem, and interpolating into it only swaps a step length the
+  filter was about to accept for a different one. Ungated, the change
+  moves 12 fixture-legs, three of them to a status the baseline did not
+  have. Gated at six it moves four - one of them a *gain*, `cresc4`
+  from `Restoration_Failed` at 1323 to `Solve_Succeeded` at 281 - and
+  loses no status anywhere. The constant's own doc comment carries the
+  whole sweep, every row against one baseline.
+
+  Six rather than five, which an earlier revision of this entry shipped,
+  for two measured reasons. `deb7` changes verdict at a gate of 5
+  (`Error_In_Step_Computation` to `Restoration_Failed`) and keeps it at
+  6. And one `_rastrigin_eq` line search in
+  `python/tests/test_starts_racing.py` reaches exactly 5-6 trial points,
+  so a gate of 5 interpolates into it and reroutes the whole multistart
+  race: halving-against-fixed `solver_evals` over that suite reads 1.022
+  with the interpolation off, **1.320 at gate 5**, and 1.019 / 1.022 /
+  1.022 at gates 6 / 7 / 8. Six restores that suite to its
+  interpolation-off numbers.
+
+  One correction to the record. An earlier revision of this entry said
+  that interpolating from the first trial reports `square_flowsheet_resto`
+  - a model feasible by construction - as converged to a point of local
+  infeasibility. Re-measured against `a5e0a837`, it is the *baseline*
+  that carries `Infeasible_Problem_Detected`/3000 on that fixture's
+  `lbfgs` leg, and the ungated change is what turns it into
+  `Solve_Succeeded`/2393. The original measurement predates gh #817,
+  which is in `main` now and moved that leg. Gates 5 and 6 leave the line
+  untouched either way, so this is not a lever the constant has; it is a
+  latent wrong verdict on the limited-memory arm that this entry is not
+  claiming to fix.
+
+  Measured on the issue's model at the shipped defaults, `before` being
+  `alpha_red_factor_min` set equal to `alpha_red_factor` (i.e.
+  upstream's fixed sequence, bit for bit), with scipy's L-BFGS-B for
+  scale:
+
+  | case | before | after |
+  |---|---|---|
+  | `n = 4`, cond 1e8 (the report) | 76 | **22** |
+  | `n = 4`, cond 1e12 | 44 | **13** |
+  | `n = 4`, cond 1e4 | 24 | **19** |
+  | `n = 8`, cond 1e8, `m = 10` | 73 | **61** |
+  | `n = 8`, cond 1e4, `m = 6` | 993 | **736** |
+  | `n = 8`, cond 1e12, `m = 10` | 535 | **173** |
+  | `n = 12`, cond 1e4, `m = 10` | 787 | **540** |
+  | `n = 8`, cond 1e4, `m = 10` | 188 | 580 |
+  | `n = 8`, cond 1e8, `m = 6` | 2000\*, obj 2.3e-12 | 2000\*, obj 9.0e-13 |
+
+  `* = Maximum_Iterations_Exceeded`. scipy's L-BFGS-B takes 34-37 on the
+  reported `n = 4` cond-1e8 case.
+
+  **The default-memory 8-variable case at cond 1e8 is not fixed by this
+  change**, and an earlier revision of this entry claimed it was, on a
+  single measurement at a gate of 5. Swept over both knobs that reach
+  that line search, it converges in 5 of 15 (gate,
+  `alpha_red_factor_min`) cells with no pattern in either, at counts
+  spanning 388 to 1459 - a chaotic trajectory that sometimes escapes,
+  not a property. It does not *stall*: from `f(x0) = 8` it reaches
+  `f ~ 9e-13` with `x` correct to 6e-7 relative, and exhausts `max_iter`
+  because it cannot certify what it has already found at that memory.
+  The remedy is `limited_memory_max_history 10`, where it takes 61
+  iterations. `issue_818_eight_variable_default_memory_does_not_stall`
+  carries the sweep.
+
+  Over the full 32-cell sweep this came from (`n` in {4, 8, 12, 20} x
+  cond in {1e2, 1e4, 1e8, 1e12} x `m` in {6, 10}) **no cell gains or
+  loses `Solve_Succeeded`**: the same 22 cells converge before and
+  after. Of those 22, 13 take fewer iterations, 5 are unchanged and 4
+  take more. The worst is `n = 8` cond 1e4 `m = 10`, 188 -> 580, and it
+  is the honest cost of this change - a 3.1x iteration regression on a
+  cell that was already converging, to the same answer. One
+  non-converging cell changes which failure it reports: `n = 8` cond
+  1e12 `m = 6` goes from `Maximum_Iterations_Exceeded` at 2000 to
+  `Error_In_Step_Computation` at 521, at a better objective (2.8e-10 ->
+  6.4e-11). The documented remedy for a cell that is slower is
+  `limited_memory_max_history 10`; the general escape hatch is
+  `alpha_red_factor_min 0.5`, which collapses the clamp and restores
+  upstream's sequence exactly. Tests pin both.
+
+  One cell of that grid, `n = 8` cond 1e12 `m = 6`, got there the hard
+  way and is why the entry below exists. Under review it read
+  `Diverging_Iterates` at 352 — a status regression, robust at every
+  `alpha_red_factor_min` in {0.05, 0.1, 0.2, 0.25, 0.3, 0.4} and every
+  trial gate in {5, 8, 12, 20}, which is what it looks like when the
+  constant being swept is not the variable. It was not: the
+  interpolation was reaching a pre-existing defect in the divergence
+  guard, and once that was fixed the cell stopped reporting divergence
+  and now beats the fixed sequence on objective (2.8e-10 -> 6.4e-11) in
+  a quarter of the iterations.
+
+  **On by default for the limited-memory path only**, resolved by
+  `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
+  `alpha_red_factor` (i.e. upstream's fixed sequence) under an exact
+  Hessian. An explicit user value is honoured on both. The split is
+  measured, not assumed — and re-measured under the trial gate, which
+  changed the answer: forcing `alpha_red_factor_min 0.05` onto the exact
+  path moves 3 of the 156 fixture-legs, all cost and no gain. `eigena2`
+  27 → 31, `issue_508_infeasible_gap_1em4` 441 → 580 to the same
+  certificate, and an objective digit on `hs13_bigstart`; nothing
+  improves and no status changes. (Ungated it was worse — 9 legs, and
+  `infeasible_square_scaled_1em4` lost its infeasibility certificate
+  outright, `InfeasibleProblemDetected`/17 →
+  `ErrorInStepComputation`/12. The gate removes the sharp edge but not
+  the reason for the split.) A Newton step's length is meaningful, which
+  is why the interpolation has nothing to add there.
+
+  Fixture sweep against `a5e0a837`: **the exact leg is byte-identical,
+  and 3 of the 156 fixture-legs move**, all three on the `lbfgs` leg,
+  none of them a status change and none of them a routing change.
+
+  | fixture | `a5e0a837` | with this change |
+  |---|---|---|
+  | `eigena2` | `ErrorInStepComputation`/252, obj 82.5 | `ErrorInStepComputation`/**91**, obj 82.50000002 |
+  | `deb7` | `ErrorInStepComputation`/709, obj 101.0934311 | `ErrorInStepComputation`/**715**, obj 101.0934371 |
+  | `hs13_bigstart` | `SolveSucceeded`/34, obj 0.9796495289 | `SolveSucceeded`/34, obj 0.979629334 |
+
+  `eigena2` is a 2.8x reduction to the same verdict; `deb7` costs six
+  iterations to the same verdict and the same objective to seven
+  digits; `hs13_bigstart` moves an objective digit at an unchanged
+  iteration count. `deb7` and `square_flowsheet_resto` were the two
+  models that moved badly before the trial gate was added, and both are
+  now unmoved on this leg. Both are pre-existing `lbfgs`-leg failures
+  either way, and both solve on the exact leg (147 and 54 iterations).
+
+- **A watchdog trial iterate is no longer reported as
+  `Diverging_Iterates`.** `BacktrackingLineSearch`'s `accept-anyway`
+  watchdog branch (info char `w`, upstream
+  `IpBacktrackingLineSearch.cpp:498-503`) promotes a trial point the
+  acceptor *rejected*, deliberately does not augment the filter, and
+  holds a snapshot of the pre-watchdog iterate and direction that it
+  reverts to within `watchdog_trial_iter_max` (default 3) iterations if
+  the gamble does not pay. The divergence guard in
+  `IpoptAlgorithm::iterate` was running on those provisional points, and
+  its absolute runaway backstop (`1e18`) fires without the growth and
+  descent streak `DIVERGENCE_PERSIST_ITERS` otherwise requires — so a
+  single watchdog gamble that overshot was enough to end the solve.
+
+  It is the same false positive the persistence streak was introduced
+  for in the first place (a transient excursion that peaks and recedes),
+  except that a watchdog excursion recedes *by construction* and the
+  backstop bypasses the streak. Measured on the gh #818 quadratic at
+  `n = 12`, cond 1e14, `m = 10`, on the shipped defaults: the solve
+  stops at iteration 162 on the *third* `w` row of one watchdog
+  sequence, at `|x|_inf` 3.95e20 with the objective climbing to
+  **+1.72e42** — the opposite of the `f -> -inf` that
+  `Diverging_Iterates` asserts — and iteration 163 is `StopWatchDog`
+  throwing the excursion away, back to `f = 9.89e10`. A second cell
+  (`n = 10`, cond 1e12, `m = 10`, `alpha_red_factor_min 0.1`) does the
+  same at 326 and `+7.11e44`. The guard was reporting which gamble
+  overshot furthest, not which problem was unbounded.
+
+  What it costs to be wrong here is more than a mislabelled failure.
+  `Diverging_Iterates` is terminal, so it also denies the gh #815
+  restoration ladder its retry: the second cell's first attempt fails
+  either way, and with the guard in place the ladder re-solves and
+  converges to a maximum relative error of 5.9e-9.
+
+  The guard is now skipped, not reset, while
+  `BacktrackingLineSearch::in_watchdog()` holds, so a watchdog gamble in
+  the middle of a genuine ray neither accumulates nor erases streak
+  evidence; a real divergence is reported at most three iterations
+  later, from a committed iterate, and the deferral is capped at four
+  consecutive iterations so a stale `in_watchdog` (the `TinyStep` arm of
+  `run_filter_line_search` can hand off to restoration without clearing
+  it) cannot hold the guard open. The four tests that own the true
+  positives (gh #248, #252, #285, #314) are unaffected, and the fix is
+  inert on the fixture corpus — `scripts/sweep-fixtures.sh` is
+  byte-identical across all 156 legs with and without it, because no
+  fixture reaches the divergence check inside a watchdog. New test:
+  `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`,
+  mutation-checked: replace the `in_watchdog` binding with `false` and
+  both tests fail with `Diverging_Iterates`, at 162 and 326. Note what
+  that table does *not* say. The binding gates the skip in two places —
+  the `(amax, structural_free, is_ray)` match arm and the `fire_*`
+  binding — and they are redundant rather than complementary: mutating
+  either one alone leaves both tests green, because the other still
+  suppresses the verdict. Both are kept because each answers a different
+  question, but only the pair of them is pinned.
+
+  Which cells of that family reach this branch is chaotic in
+  `ALPHA_INTERP_MIN_TRIALS`, and the two above were re-derived after the
+  gate moved from 5 to 6 — the cell the fix was originally measured on
+  (`n = 8`, cond 1e12, `m = 6`, which exited at 352 with the objective
+  at +2.0e45) stopped reaching it, leaving the test green and testing
+  nothing until it was caught. Re-run that scan if either fixture ever
+  passes under the mutation.
+
+- **A line-search failure at an already-feasible point no longer walks
+  into a restoration phase that has nothing to reduce (gh #818).** When
+  the backtracking line search cannot accept any trial step, either the
+  *point* is bad — infeasible, and the restoration phase is exactly the
+  right tool — or the *direction* is, because `W` is a quasi-Newton
+  model carrying curvature the iterate has left behind. Upstream has one
+  answer for both, because restoration is the only fallback it has.
+
+  At a feasible point that answer is a no-op: the restoration NLP
+  minimizes the constraint violation and there is none to minimize, so
+  it wanders at `theta ~ 1e-13` and reports `Restoration_Failed`. On
+  `deb7` under `limited-memory` the solve stalls at `inf_pr ~ 1e-12`
+  with `inf_du ~ 1e5`, enters restoration at a point feasible to 8e-13,
+  and spends **340 of its 1242 iterations** there before failing. On an
+  unconstrained model `theta` is identically zero, so restoration cannot
+  move at all — under `alpha_red_factor 0.8` with interpolation off, the
+  gh #818 quadratic dies at **iteration 1** with
+  `Error_In_Step_Computation` and the objective still at its starting
+  value.
+
+  `IpoptAlgorithm::try_reanchor_before_restoration` puts one rung in
+  front of the hand-off: drop every curvature pair but the newest — the
+  `col = 0` restart L-BFGS-B does on a line-search failure — and retry
+  the iterate. The newest pair is kept rather than the history cleared
+  because `compute_sigma_bfgs` reads `σ` off the history, and an empty
+  one returns `limited_memory_init_val`, a bare `1.0`; re-anchoring to
+  that throws the model back to its first-iteration state, which is
+  precisely where the badly-scaled step comes from.
+
+  **A rung, not a refusal.** It fires only where restoration has nothing
+  to reduce, it runs *after* the acceptable-point decline (so `eigena2`
+  and `csfi2`, which reach feasible points that already pass the
+  acceptable tolerances, go on being reported), and every path that
+  reached restoration before still reaches it once the rung is spent.
+  It is deliberately **not** a feasibility gate on restoration itself —
+  that was tried and rejected before, because feasible entries are
+  ordinary and nothing observable at the doorway separates a restoration
+  that recovers from one that does not. The rung does not decide that
+  question; it spends one cheap retry on the hypothesis that the model
+  is at fault and hands over unchanged if the retry fails too.
+
+  The bound is structural as well as counted: `reanchor` returns `false`
+  once the history is down to its newest pair, so a second failure at
+  the same iterate finds nothing to give up and falls through.
+  `limited_memory_ls_failure_restarts` caps the number of stalls that
+  may spend one. No effect under an exact Hessian, which has no history
+  to re-anchor.
+
+  **It ships off (`limited_memory_ls_failure_restarts` defaults to `0`,
+  upstream's unconditional hand-off), and it is not what fixes gh #818**
+  — the safeguarded interpolation above is. Measured on top of that
+  interpolation rather than on top of `main` (which is what an earlier
+  draft of this entry got wrong), turning the rung on moves six
+  `lbfgs`-leg lines and does not pay for itself: `deb7` 715 → 610 and
+  `issue_508_infeasible_gap_1em4` 79 → 76 in its favour, against
+  `eigena2` 91 → 98, `pooling_rt2stp` 295 → **307**,
+  `infeasible_square_scaled_1em4` 24 → **26**, and an objective digit on
+  `infeasible_equalities`. The last two matter more than the count: the
+  shipped configuration leaves both of those models exactly where
+  `a5e0a837` had them, so the rung would be *introducing* two
+  regressions, not inheriting them.
+
+  It stays in the tree, registered and documented, because the failure
+  mode it treats is real and reproducible and the option is the only
+  thing that reaches it: on a model that stalls at `inf_pr ~ 1e-12` with
+  `inf_du` large, `limited_memory_ls_failure_restarts 1` is worth trying
+  before concluding the solve is stuck. Setting it — to any value, `0`
+  included — opts the solve out of the automatic
+  `Solved_To_Acceptable_Level` re-solve ladder, like every other member
+  of `TERMINATION_POLICY_OPTIONS`, so leaving it unset is not the same
+  as passing `0`.
+
+- **`limited_memory_initialization=history-max` (gh #818).** Every
+  upstream rule reads the newest curvature pair; this one applies the
+  `scalar1` formula to every pair in the history window and keeps the
+  largest. `σ` is the curvature the model assigns to every direction
+  *outside* the span of the stored pairs, and `sᵀy/sᵀs` is a Rayleigh
+  quotient along one step — an arbitrary sample of the spectrum when the
+  curvature spans orders of magnitude. The two errors are not symmetric:
+  over-stating `σ` shortens the step and costs an iteration, while
+  under-stating it costs a backtracking sweep and then feeds a tiny `s`
+  back into the history, narrowing the next sample. Nothing is lost on
+  the directions the model does know — the last rank-2 update enforces
+  `B s_last = y_last` whatever `B0` was.
+
+  **Not the default**, and the population it wins on is narrower than an
+  earlier draft of this entry claimed — those numbers predate the trial
+  gate, and re-measuring across the same 32-cell sweep used above puts
+  `history-max` ahead in 9 cells and behind in 20, with 3 ties or
+  ambiguous. It wins where the window is too small for the spread and
+  the *variables* outnumber it — every cond-1e4 cell at `n >= 8`:
+  `n = 8` `m = 6` 736 → **204**, `n = 8` `m = 10` 580 → **129**,
+  `n = 12` `m = 10` 540 → **264**, `n = 20` `m = 10` 691 → **513**.
+  It loses on **every** 4-variable cell, by wide margins (cond 1e12
+  `m = 6` 13 → 59, cond 1e4 `m = 10` 15 → 28) and, notably, on the cell
+  its own rationale predicts hardest — `n = 8` cond 1e8 `m = 6`, where
+  it takes the interpolation's result back to a far worse objective
+  (9.0e-13 → 6.7e+05, both at `max_iter`). So the rule is not "keep the
+  largest whenever the window is short"; the largest sample is a safe
+  `B0` only when the history is wide enough that the maximum is a real
+  curvature rather than one stiff outlier.
+  Documented, opt-in, and worth a try on an `n >> m` model that is
+  crawling. The obvious variant — a running maximum over the whole solve
+  rather than over the window — was measured too and is worse than
+  `scalar1` at every size, because it never comes back down and keeps a
+  stiff early transient in `B0` long after the iterate has left it.
+- **The corrector's operator is assembled at the predicted point.**
+  `corrector_iter`'s iterations used to run against the factorization
+  the solve left behind, evaluated at the base point. They now pay one
+  derivative evaluation and one factorization at the predicted point,
+  with the Hessian, the constraint Jacobians, and the barrier diagonal
+  all evaluated at the stepped iterate with the step's own
+  multipliers, and the predictor's active set applied to the diagonal
+  in that frame. A chord iteration contracts at the rate the distance
+  between its operator and the true Jacobian sets, so the correction
+  converges an order faster where the Hessian bends over the step,
+  reaches a bound the step carries a coordinate onto instead of
+  achieving nothing there, on the holding side of a kink lands on the
+  re-solve itself, and on a 62k-variable collocation model reaches
+  the base solve's own solution quality in one back-solve at
+  perturbations where the held-factor chord needed three. Under a
+  `limited-memory` solve the quasi-Newton matrix is kept, since no
+  exact Hessian exists to evaluate elsewhere.
+
+  The rebuild covers the two cases that store a base-point diagonal
+  for the held factor's back-solves: a solve the sigma ceiling
+  (gh #737) touched, and one that crossed over into the declared
+  frame (gh #654). The corrector consults neither stored copy: it
+  re-derives the ceiling and the frame rule at the predicted point,
+  for both diagonal blocks. Measured on a ceiling-engaged fixture,
+  the correction went from no progress at any budget to matching the
+  no-ceiling control's first iteration.
+
+  Across a release the step's endpoint does not show, the corrector
+  still does not reach the re-solve. Just past the breakpoint the
+  iterations decline and the no-improvement warning fires as before.
+  Deeper past it, the weak diagonal entry the step's clamped
+  multiplier builds lets them move the variable partway off the bound
+  and reduce the residual they measure, without the released row
+  applied, so the answer stays short of the re-solve by a
+  delta-dependent margin. The release-deciding modes cross exactly at
+  every depth.
+- **Every `ma57_*` option now reaches the MA57 backend, and an `--features
+  ma57` build now starts.** Fixes gh #825 and gh #811.
+
+  All nine `ma57_*` options — `ma57_print_level`, `ma57_pivtol`,
+  `ma57_pivtolmax`, `ma57_pre_alloc`, `ma57_pivot_order`,
+  `ma57_automatic_scaling`, `ma57_block_size`, `ma57_node_amalgamation`,
+  `ma57_small_pivot_flag` — were registered, documented, accepted, and then
+  discarded. A correct reader (`Ma57Options::from_options_list`) existed and
+  was unit-tested, so it looked live; nothing called it. Every production
+  construction site went through `Ma57SolverInterface::new()`, which
+  hard-codes `Options::defaults()`.
+
+  The root cause was an asymmetry with FERAL. `default_backend_factory` took a
+  `FeralConfig` read off the application's `OptionsList` and had no equivalent
+  parameter for MA57, so the factory had nothing to give it. Both factories now
+  take a `Ma57Config` alongside the `FeralConfig`, built by the new
+  `ma57_config_from_options(options, prefix)`. **This is a breaking change to
+  `default_backend_factory` / `default_backend_factory_with_sink`**, and
+  deliberately so: the argument is what makes the omission a compile error
+  rather than a silent default.
+
+  The failure mode was that there was no failure mode. Two solves whose option
+  blocks differed by eight orders of magnitude in `ma57_pivtol` and swapped the
+  elimination ordering printed identical iteration logs and an objective
+  identical to all seventeen digits — no warning, no diagnostic, no journal
+  message. Measured on `deb7` after the fix, `ma57_pivtol=0.5` moves the solve
+  from 124 iterations plus a fallback retry to 165 and `Solve_Succeeded`.
+
+  **`resto.`-prefixed options work now too.** `from_options_list` always took a
+  prefix, mirroring upstream's
+  `Ma57TSolverInterface::InitializeImpl(options, prefix)`, and with no callers
+  the facility did not exist. The restoration sub-IPM builds its own backend
+  through its own `InnerBackendFactoryFactory`, so the two are genuinely
+  independent: on `deb7`, `resto.ma57_pivtol=0.5` gives 130 iterations —
+  neither the baseline's 124 nor the un-prefixed arm's 165.
+
+  **No trajectory change on any existing run.** Every registered default is
+  identical to the reader's fallback and to `Options::defaults()`
+  (`default_options_are_the_registrys` pins this, which is the gh #677 shape —
+  registered with one default, read with another). A default MA57 run is
+  bit-identical to before; FERAL is untouched, and the fixture sweep is clean.
+
+  Two consequences worth naming. Any Ipopt-vs-POUNCE MA57 comparison run with a
+  shared options file that sets `ma57_*` was not like-for-like: gh #825 reports
+  one setting `ma57_pre_alloc: 2.0`, which Ipopt honoured and POUNCE did not,
+  so POUNCE paid for a reallocation Ipopt avoided. The handicap was not in
+  POUNCE's favour, and such numbers — including the `LinearSystemFactorization`
+  comparison on gh #730 and the figures on gh #809 — should be re-measured.
+  Separately, the mechanism gh #809 needs to make
+  `multi_solve_matches_single_solve` an MA57 opt-in now exists; the gate itself
+  is not implemented here.
+
+  **gh #811, found while building MA57 binaries to review gh #809.** An
+  `--features ma57` build died at process start: `Library not loaded:
+  @rpath/libcoinhsl.dylib ... no LC_RPATH's found`. `pounce-hsl/build.rs`
+  emitted `cargo:rustc-link-arg=-Wl,-rpath,...`, which applies only to targets
+  in the emitting package — and pounce-hsl is a library with no binary, so the
+  flag reached nothing. It could not even be patched after the fact: a release
+  link leaves no header padding, so `install_name_tool -add_rpath` refuses. The
+  directory now travels as `links` metadata (`cargo:rpath=` →
+  `DEP_COINHSL_RPATH`), which `pounce-cli/build.rs` and the new
+  `pounce-algorithm/build.rs` re-emit against their own targets, together with
+  `-headerpad_max_install_names` on macOS so a packaging step can relocate it.
+  Linux with `libcoinhsl.so` on the loader path never showed this, which is why
+  it went unnoticed.
+
+  **`ma57_pivtolmax` below `ma57_pivtol` is now refused, not silently lifted.**
+  A pre-existing deviation from upstream that only became reachable once the
+  above landed. Upstream has two branches
+  (`IpMa57TSolverInterface.cpp:311-320`): an *explicitly set* `ma57_pivtolmax`
+  under `ma57_pivtol` raises `OPTION_INVALID`, while an *unset* one has its
+  registered default lifted to `ma57_pivtol`. pounce applied the lift
+  unconditionally, so a self-contradictory pair — an escalation ceiling below
+  the tolerance it starts from — was quietly rewritten and nothing said so.
+  `IpoptApplication::optimize_tnlp` now refuses it with `Invalid_Option`, at
+  both the main and `resto.` prefixes; the reader reports what the user wrote
+  and leaves the verdict to the layer that has an error channel. The lifting
+  branch is deliberately preserved: `ma57_pivtolmax` defaults to `1e-4`, so a
+  rule that merely compared the two numbers would reject `ma57_pivtol 0.5` on
+  its own — the most ordinary MA57 tuning there is.
+
+  **Guards.** `pounce-algorithm/tests/ma57_options_reach_the_backend.rs` asserts
+  that each option arrives at a live backend built by the real factory, at both
+  prefixes, via a new `SparseSymLinearSolverInterface::as_any` downcast seam —
+  configuration reaching a backend is not otherwise observable through that
+  trait, which is why the defect had no symptom.
+  `pounce-cli/tests/ma57_binary_starts.rs` covers gh #811 and the end-to-end
+  gh #825 property. Both need CoinHSL, so neither runs in CI; the always-running
+  half is `pounce-algorithm/tests/no_production_site_builds_ma57_with_defaults.rs`,
+  which fails on any `Ma57SolverInterface::new()` in production source, and
+  `pounce-algorithm/tests/ma57_pivtol_bracket.rs`, which covers both branches of
+  the `ma57_pivtolmax` rule and needs no HSL at all. All are mutation-checked:
+  reintroduce any of the defects — the discarded options, the missing rpath, the
+  unconditional lift, or a lift-blind refusal — and the matching tests, and only
+  those, go red.
 
 - **A restoration failure now opens the second-opinion ladder.** (Found while
   investigating gh #815; it is *not* a fix for that issue — see the note at the
