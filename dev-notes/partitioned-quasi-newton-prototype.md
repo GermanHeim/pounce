@@ -5,14 +5,17 @@
 > doi:10.1155/2014/341716) close the exact-vs-L-BFGS gap on
 > direct-collocation trajectory optimization?"
 >
-> **Headline: the machinery works and is validated against the exact
-> Hessian. Per-constraint SR1 converges on the smaller mesh, at 4.4× the
-> iterations and 7.5× the wall of the limited-memory path — and fails
-> outright one mesh refinement later, where limited-memory still
-> converges. It scales the wrong way, which is the disqualifying
-> property, since scaling is the whole reason the gap exists. The reason
-> is measured, not guessed, and it is a property of the decomposition
-> rather than a defect in the code.**
+> **Headline. Two decompositions were built and measured.
+> *Per-constraint* elements scale the wrong way — they converge on the
+> smaller mesh and fail one refinement later — and that is disqualifying,
+> since scaling is the whole reason the gap exists. *Per-primal-block*
+> elements, the paper's own partition, do the opposite: iteration count is
+> nearly flat across a 4× problem growth (276 → 252 → 338) where
+> limited-memory goes 126 → 246 → does-not-converge. It is not yet a win —
+> it still fails at N = 320, and never beats limited-memory on wall time
+> where both work — but it fails in restoration, on a downgrade this
+> prototype chose, rather than in the curvature model. That is a fixable
+> next step, and it is the first result here that points forward.**
 
 ## Why this was worth building
 
@@ -279,6 +282,77 @@ backwards, an argument for what the paper actually does: Asprion et al.
 partition by **primal stage blocks** — far fewer, larger blocks, each
 receiving the whole step's information every iteration, at the cost of a
 multiplier-dependent target.
+
+## The per-primal-block partition: the follow-up, measured
+
+`partitioned_elements=blocks` implements the paper's own partition — one
+element per contiguous block of primal variables, modelling the
+**Lagrangian's** restriction to that block with damped BFGS. The element
+gradient is the Lagrangian gradient (`∇f + J_cᵀy_c + J_dᵀy_d`) restricted,
+formed once per call by the same convention the limited-memory updater
+uses, and the assembly weight is 1 because the multiplier is already
+inside the modelled function.
+
+`laptime` has `n_x = 14` states, `d = 3` Radau points and `n_u = 2`
+controls, so one stage contributes `14·4 + 2 = 58` variables.
+`partitioned_block_size` sweep at N = 80 and N = 160:
+
+| block size | N=80 | N=160 |
+|---|---|---|
+| 16 | MaxIter 600 | MaxIter 600 |
+| 58 (one stage) | ErrorInStepComputation, 525 | MaxIter 662 |
+| **116 (two stages)** | **Acceptable, 276** | **Optimal, 252** |
+
+One stage per block is **not** the right width, and the reason is
+structural: a collocation defect couples stage `k` to stage `k+1`, so
+58-wide blocks capture none of the inter-stage coupling. Two stages per
+block capture half of it, and that is the difference between failing and
+converging to the exact objective to 12 digits.
+
+### Iteration scaling — the property that was actually being chased
+
+| mesh | n | exact | lbfgs | blocks-116 |
+|---|---|---|---|---|
+| N=80 | 4 654 | 29 | 126 | 276 (acceptable) |
+| N=160 | 9 294 | 30 | 246 | **252 (optimal)** |
+| N=320 | 18 574 | 57 | **1200, DNF** | 338, DNF |
+
+Over a 4× growth in problem size: exact 1.97×, **blocks 1.22×**, lbfgs
+**> 9.5×**. The block partition has the flat iteration scaling that
+limited-memory lacks, which is the entire property the exercise was after.
+At N = 320 limited-memory does not converge at all and the block partition
+gets within 1e-4 of feasibility before failing.
+
+### But it still fails at N=320, and the blocker is not the curvature model
+
+The N = 320 block run converges cleanly to `inf_pr ≈ 3e-4` around
+iteration 240, then **enters restoration and grinds there** to a
+local-infeasibility exit at 338 iterations. Restoration under
+`Partitioned` downgrades to the limited-memory updater — a scoping
+decision taken in this prototype because the element table is built from
+the original NLP's Jacobian, whose index spaces the restoration sub-NLP
+does not share. So the binding constraint at N = 320 is the *restoration*
+Hessian, not the block model that got it there. That is a fixable,
+identified next step and not a property of the method.
+
+### And the linear algebra becomes the pressure
+
+Per-iteration cost against exact: 1.5× at N = 160 (0.222 s vs 0.148 s),
+3.3× at N = 320 (0.72 s vs 0.221 s). The block pattern is ~19× denser than
+the true Hessian — 116-wide dense blocks against a Hessian that is sparse
+inside them.
+
+**This is where the original `OrderingMethod::External` premise finally
+becomes correct.** Under limited-memory there was no Hessian structure to
+exploit, because the low-rank path hands the factorization a diagonal
+`(1,1)` block; the ordering lever had only the Jacobian to work with, and
+measurement confirmed the whole exact-vs-lbfgs gap was iteration count,
+not factorization time. Under a block-partitioned Hessian the `(1,1)`
+block is genuinely block-banded, dense inside each block, and it *is* the
+growing cost. That is exactly the shape `External` orderings and the Schur
+path (`set_kkt_schur_block`, pounce#180 item 2) exist for — and the Schur
+path is reachable here, because this updater publishes a real
+`SymTMatrix` rather than a low-rank object.
 
 ## Where this leaves the idea
 

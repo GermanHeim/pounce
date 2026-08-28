@@ -3759,6 +3759,7 @@ impl IpoptApplication {
                     "bfgs" => UpdateType::Bfgs,
                     _ => UpdateType::Sr1,
                 };
+                builder.partitioned_update_type_was_set = true;
             }
         }
         if let Ok((v, found)) = self
@@ -3767,6 +3768,21 @@ impl IpoptApplication {
         {
             if found && v > 0 {
                 builder.partitioned_max_element = v as usize;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("partitioned_elements", "") {
+            if found {
+                builder.partitioned_elements = match v.as_str() {
+                    "blocks" => {
+                        crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock
+                    }
+                    _ => crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_integer_value("partitioned_block_size", "") {
+            if found && v > 0 {
+                builder.partitioned_block_size = v as usize;
             }
         }
         if let Ok((v, found)) = self

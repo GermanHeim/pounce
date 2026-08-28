@@ -153,6 +153,31 @@ enum ElementSource {
     EqRow,
     /// A row of `J_d`; entries come from the inequality Jacobian's values.
     IneqRow,
+    /// A contiguous block of primal variables under
+    /// [`ElementMode::PrimalBlock`]. The element function is the
+    /// **Lagrangian itself**, restricted to the block, so its gradient is
+    /// `∇f + J_cᵀ y_c + J_dᵀ y_d` restricted, and its assembly weight is
+    /// 1 — the multiplier is already inside the function being modelled.
+    LagrangianBlock,
+}
+
+/// How the Lagrangian is split into elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementMode {
+    /// One element per constraint row (plus the objective). Each block
+    /// has a multiplier-independent target, and needs no assumption about
+    /// how the model orders its variables — but there are as many blocks
+    /// as constraints, each approximating a `∇²c_j` with no sign
+    /// structure, and the errors accumulate through the weighted sum.
+    PerConstraint,
+    /// One element per contiguous block of primal variables, modelling
+    /// the Lagrangian's restriction to that block with damped BFGS.
+    /// This is Asprion, Chinellato & Guzzella's partition: a direct
+    /// collocation transcription orders its variables by stage, so the
+    /// Lagrangian Hessian really is close to block diagonal in this
+    /// partition, and the block count is the stage count rather than the
+    /// constraint count.
+    PrimalBlock,
 }
 
 /// One element function's quasi-Newton state.
@@ -218,6 +243,11 @@ pub struct PartitionStats {
 
 pub struct PartitionedQuasiNewtonUpdater {
     pub update_type: UpdateType,
+    /// How the Lagrangian is split. See [`ElementMode`].
+    pub mode: ElementMode,
+    /// Target width of a primal block under [`ElementMode::PrimalBlock`]
+    /// (`partitioned_block_size`).
+    pub block_size: usize,
     /// Widest element that keeps a dense block; wider ones degrade to a
     /// diagonal approximation. Option `partitioned_max_element`.
     pub max_element: usize,
@@ -258,6 +288,13 @@ pub struct PartitionedQuasiNewtonUpdater {
     uncovered: Vec<Index>,
     /// `x` at the previous call.
     prev_x: Option<Vec<Number>>,
+    /// `∇f`, and the Jacobians' triplet values, at the previous call.
+    /// [`ElementMode::PrimalBlock`] needs the change in the *Lagrangian*
+    /// gradient, which is not a per-element quantity, so it is formed
+    /// once per call from these rather than element by element.
+    prev_grad_f: Option<Vec<Number>>,
+    prev_jac_c: Option<Vec<Number>>,
+    prev_jac_d: Option<Vec<Number>>,
     stats: PartitionStats,
     /// Curvature pairs accepted / skipped, cumulative — a cheap health
     /// signal for the write-up.
@@ -273,6 +310,8 @@ impl PartitionedQuasiNewtonUpdater {
     pub fn new(update_type: UpdateType) -> Self {
         Self {
             update_type,
+            mode: ElementMode::PerConstraint,
+            block_size: 64,
             max_element: 64,
             init_val_min: 1e-8,
             init_val_max: 1e8,
@@ -284,6 +323,9 @@ impl PartitionedQuasiNewtonUpdater {
             diag_pos: Vec::new(),
             uncovered: Vec::new(),
             prev_x: None,
+            prev_grad_f: None,
+            prev_jac_c: None,
+            prev_jac_d: None,
             stats: PartitionStats::default(),
             accepted_updates: 0,
             skipped_updates: 0,
@@ -300,6 +342,36 @@ impl PartitionedQuasiNewtonUpdater {
     /// the backend's symbolic factorization is done a single time.
     fn build_structure(&mut self, n: usize, grad_f: &[Number], jac_c: &GenTMatrix, jac_d: &GenTMatrix) {
         let mut elements: Vec<Element> = Vec::new();
+
+        if self.mode == ElementMode::PrimalBlock {
+            // Contiguous blocks in the model's own variable order.
+            //
+            // The ordering assumption is load-bearing and is *checked*
+            // rather than trusted: `POUNCE_PARTITIONED_ORACLE` reports the
+            // fraction of the exact Hessian's Frobenius mass that falls
+            // inside the block-diagonal pattern. A transcription that
+            // orders by stage — which is what every direct-collocation
+            // writer does, and what `laptime` does — puts nearly all of it
+            // inside. One that does not will show a low fraction, and the
+            // partition is then simply wrong for that model rather than
+            // silently poor.
+            let bs = self.block_size.max(1);
+            let mut start = 0usize;
+            while start < n {
+                let end = (start + bs).min(n);
+                let support: Vec<Index> = (start..end).map(|i| i as Index).collect();
+                elements.push(Self::make_element(
+                    ElementSource::LagrangianBlock,
+                    0,
+                    support,
+                    Vec::new(),
+                    usize::MAX,
+                ));
+                start = end;
+            }
+            self.finish_structure(n, elements);
+            return;
+        }
 
         // ---- objective element -------------------------------------
         //
@@ -391,6 +463,13 @@ impl PartitionedQuasiNewtonUpdater {
             }
         }
 
+        self.finish_structure(n, elements);
+    }
+
+    /// Build the assembled pattern, the per-element scatter maps and the
+    /// census from a finished element table. Shared by both
+    /// [`ElementMode`]s.
+    fn finish_structure(&mut self, n: usize, mut elements: Vec<Element>) {
         // ---- assembled pattern --------------------------------------
         //
         // Union of each active element's own lower triangle, plus the
@@ -713,6 +792,8 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
         if self.space.is_none() {
             self.build_structure(n, &grad_f, jac_c, jac_d);
         }
+        let y_c_now = flat(&*curr_y_c);
+        let y_d_now = flat(&*curr_y_d);
 
         // ---- curvature pairs, one per element -----------------------
         //
@@ -724,6 +805,43 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
             .prev_x
             .as_ref()
             .map(|p| x.iter().zip(p.iter()).map(|(a, b)| a - b).collect());
+
+        // In `PrimalBlock` mode every element reads the same vector: the
+        // Lagrangian gradient's *change*. It is formed once here, using
+        // upstream's convention that BOTH Jacobians are dotted against the
+        // CURRENT multipliers, so `y` is the difference of one fixed
+        // function rather than of two different Lagrangians
+        // (`IpLimMemQuasiNewtonUpdater.cpp:284-308`, and the same reasoning
+        // the limited-memory updater records).
+        let lagrangian_dy: Option<Vec<Number>> = if self.mode == ElementMode::PrimalBlock {
+            match (
+                self.prev_grad_f.as_ref(),
+                self.prev_jac_c.as_ref(),
+                self.prev_jac_d.as_ref(),
+            ) {
+                (Some(pg), Some(pc), Some(pd)) => {
+                    let mut dy = vec![0.0; n];
+                    for i in 0..n {
+                        dy[i] = grad_f[i] - pg[i];
+                    }
+                    for (jac, prev, mult) in [
+                        (jac_c, pc, &y_c_now),
+                        (jac_d, pd, &y_d_now),
+                    ] {
+                        let (ir, jc, cur) = (jac.irows(), jac.jcols(), jac.values());
+                        for k in 0..ir.len() {
+                            let row = (ir[k] - 1) as usize;
+                            let col = (jc[k] - 1) as usize;
+                            dy[col] += (cur[k] - prev[k]) * mult[row];
+                        }
+                    }
+                    Some(dy)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let oracle = std::env::var("POUNCE_PARTITIONED_ORACLE").is_ok();
         if oracle {
@@ -760,14 +878,26 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                         g_loc[local as usize] += v[pos as usize];
                     }
                 }
+                ElementSource::LagrangianBlock => {}
             }
 
-            if let (Some(s_full), true) = (s_full.as_ref(), e.has_prev) {
+            let pair_ready = match e.source {
+                // The block's `y` comes from the shared Lagrangian
+                // difference, not from a stored per-element gradient.
+                ElementSource::LagrangianBlock => lagrangian_dy.is_some(),
+                _ => e.has_prev,
+            };
+            if let (Some(s_full), true) = (s_full.as_ref(), pair_ready) {
                 s_loc.clear();
                 y_loc.clear();
                 for (a, &i) in e.support.iter().enumerate() {
                     s_loc.push(s_full[i as usize]);
-                    y_loc.push(g_loc[a] - e.prev_g[a]);
+                    y_loc.push(match e.source {
+                        ElementSource::LagrangianBlock => {
+                            lagrangian_dy.as_ref().expect("checked above")[i as usize]
+                        }
+                        _ => g_loc[a] - e.prev_g[a],
+                    });
                 }
                 let before = e.b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
                 if update_element(
@@ -805,6 +935,11 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
             e.has_prev = true;
         }
         self.prev_x = Some(x);
+        if self.mode == ElementMode::PrimalBlock {
+            self.prev_grad_f = Some(grad_f.clone());
+            self.prev_jac_c = Some(jac_c.values().to_vec());
+            self.prev_jac_d = Some(jac_d.values().to_vec());
+        }
 
         // ---- assemble ------------------------------------------------
         //
@@ -836,6 +971,9 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                     ElementSource::Objective => 1.0,
                     ElementSource::EqRow => y_c[e.row as usize],
                     ElementSource::IneqRow => y_d[e.row as usize],
+                    // The multiplier is already inside the modelled
+                    // function; weighting again would square it.
+                    ElementSource::LagrangianBlock => 1.0,
                 };
                 if weight == 0.0 || !weight.is_finite() {
                     continue;
@@ -881,6 +1019,13 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                 }
                 let (mut max_exact, mut max_err) = (0.0_f64, 0.0_f64);
                 let (mut num, mut den) = (0.0_f64, 0.0_f64);
+                // Frobenius mass of the exact Hessian that falls INSIDE
+                // this updater's pattern. For `ElementMode::PrimalBlock`
+                // this is the direct test of the variable-ordering
+                // assumption: a transcription that orders by stage puts
+                // nearly all of it inside, one that does not shows a low
+                // fraction and the partition is wrong for that model.
+                let mut captured = 0.0_f64;
                 let mut worst = ((0, 0), 0.0, 0.0);
                 let mut seen: HashMap<(Index, Index), bool> = HashMap::new();
                 for ((&i, &j), &v) in t
@@ -891,8 +1036,12 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                 {
                     seen.insert((i, j), true);
                     let m = mine.get(&(i, j)).copied().unwrap_or(0.0);
+                    if mine.contains_key(&(i, j)) {
+                        captured += v * v;
+                    }
                     let e = (m - v).abs();
                     max_exact = max_exact.max(v.abs());
+
                     if e > max_err {
                         max_err = e;
                         worst = ((i, j), v, m);
@@ -910,14 +1059,15 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                     }
                 }
                 eprintln!(
-                    "partitioned-qn oracle: rel_fro={:.3e} max_abs_err={:.3e}                      max|exact|={:.3e} worst={:?} exact={:.6e} mine={:.6e}                      max|extra-pattern|={:.3e}",
+                    "partitioned-qn oracle: rel_fro={:.3e} max_abs_err={:.3e}                      max|exact|={:.3e} worst={:?} exact={:.6e} mine={:.6e}                      max|extra-pattern|={:.3e} pattern_captures={:.4}",
                     (num / den.max(1e-300)).sqrt(),
                     max_err,
                     max_exact,
                     worst.0,
                     worst.1,
                     worst.2,
-                    extra
+                    extra,
+                    (captured / den.max(1e-300)).sqrt()
                 );
                 eprintln!(
                     "  peaks: max|y_e|/|s_e|={:.3e} (|s_e|={:.3e} |y_e|={:.3e} k={}) \

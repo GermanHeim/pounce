@@ -237,6 +237,9 @@ pub struct AlgorithmBuilder {
     /// BFGS would force every `∇²c_j` model PSD and then scale it by a
     /// multiplier of either sign.
     pub partitioned_update_type: UpdateType,
+    /// Whether the caller named `partitioned_update_type` explicitly, so
+    /// the block mode's BFGS default does not override them.
+    pub partitioned_update_type_was_set: bool,
     /// Widest element that keeps a dense block under
     /// [`HessianApproxChoice::Partitioned`]; wider elements degrade to a
     /// diagonal approximation (`partitioned_max_element`).
@@ -251,6 +254,12 @@ pub struct AlgorithmBuilder {
     /// curvature that one update may reach. See
     /// [`crate::hess::partitioned_quasi_newton`].
     pub partitioned_curvature_cap: Number,
+    /// How the Lagrangian is split into elements under
+    /// [`HessianApproxChoice::Partitioned`] (`partitioned_elements`).
+    pub partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode,
+    /// Target primal-block width when `partitioned_elements` is
+    /// `blocks` (`partitioned_block_size`).
+    pub partitioned_block_size: usize,
     pub limited_memory_update_type: UpdateType,
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
@@ -1077,9 +1086,13 @@ impl Default for AlgorithmBuilder {
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
             partitioned_update_type: UpdateType::Sr1,
+            partitioned_update_type_was_set: false,
             partitioned_max_element: 64,
             partitioned_objective_vars: None,
             partitioned_curvature_cap: Number::INFINITY,
+            partitioned_elements:
+                crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+            partitioned_block_size: 64,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
@@ -1474,6 +1487,20 @@ impl AlgorithmBuilder {
                 u.max_element = self.partitioned_max_element;
                 u.objective_vars = self.partitioned_objective_vars.clone();
                 u.curvature_cap = self.partitioned_curvature_cap;
+                u.mode = self.partitioned_elements;
+                u.block_size = self.partitioned_block_size;
+                // Damped BFGS is the right pairing for a Lagrangian
+                // block: unlike a single constraint's Hessian, the
+                // Lagrangian's is the object the IPM wants a positive
+                // definite model of, and the sign problem that makes
+                // damping wrong per constraint does not arise. Only when
+                // the caller has not named a formula.
+                if self.partitioned_elements
+                    == crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock
+                    && !self.partitioned_update_type_was_set
+                {
+                    u.update_type = UpdateType::Bfgs;
+                }
                 u.init_val_min = self.limited_memory_init_val_min;
                 u.init_val_max = self.limited_memory_init_val_max;
                 Box::new(u)
@@ -1585,9 +1612,13 @@ mod tests {
                             mu_oracle: MuOracleKind::QualityFunction,
                             hessian_approximation,
                             partitioned_update_type: UpdateType::Sr1,
+                            partitioned_update_type_was_set: false,
                             partitioned_max_element: 64,
                             partitioned_objective_vars: None,
                             partitioned_curvature_cap: Number::INFINITY,
+                            partitioned_elements:
+                                crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+                            partitioned_block_size: 64,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,
