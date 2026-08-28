@@ -82,15 +82,19 @@ use std::rc::Rc;
 /// five is enough for the interpolation to break that cycle without
 /// touching a line search that was converging on its own.
 ///
-/// What no value of this constant rescues is `n = 8` at cond 1e12 with
-/// `m = 6`, which the interpolation takes from a 2000-iteration
-/// loose-tolerance success to `Diverging_Iterates` at 352 and which
-/// fails at every gate in {5, 8, 12, 20} and every
-/// `alpha_red_factor_min` measured. That is the floor rather than the
-/// fit: a 20x drop per trial reaches `alpha_min` in a fifth of the
-/// evaluations, so a line search that was going to fail anyway fails
-/// from a different iterate. `limited_memory_max_history 10` converges
-/// it in 345; CHANGELOG.md carries the full 32-cell sweep.
+/// One cell of the 32-cell sweep — `n = 8` at cond 1e12 with `m = 6` —
+/// exited `Diverging_Iterates` at 352 under every gate in {5, 8, 12, 20}
+/// and every `alpha_red_factor_min` measured, which is what it looks
+/// like when the constant is not the variable. It was not: the
+/// interpolation was reaching a *watchdog* trial excursion that the
+/// divergence guard in `IpoptAlgorithm::iterate` then read as
+/// unboundedness, on a point [`Self::handle_watchdog_failure`] had
+/// already rejected and was holding a snapshot for. With that guard
+/// fixed the cell converges (`SolveSucceeded`, obj 3.16e-15 against the
+/// fixed sequence's 2.53e-8 at the same iteration count) and the sweep
+/// has no status regression left. See
+/// `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`;
+/// CHANGELOG.md carries the full grid.
 ///
 /// Not a registered option. `alpha_red_factor_min = alpha_red_factor`
 /// already turns the interpolation off entirely, which is the escape
@@ -353,8 +357,22 @@ impl BacktrackingLineSearch {
         }
     }
 
-    /// Test-only accessor for the watchdog active flag.
-    #[cfg(test)]
+    /// Whether the line search is inside a watchdog trial sequence.
+    ///
+    /// While this is `true` the iterate in `data.curr` is **provisional**:
+    /// it was promoted through the `accept-anyway` branch of
+    /// [`Self::handle_watchdog_failure`] (info char `'w'`) despite the
+    /// acceptor *rejecting* it, the filter was deliberately not augmented,
+    /// and a snapshot of the pre-watchdog iterate and direction is held in
+    /// `watchdog_iterate` / `watchdog_delta`. Within
+    /// `watchdog_trial_iter_max` (default 3) further iterations the line
+    /// search either finds the gamble paid off or executes `StopWatchDog`
+    /// and reverts to that snapshot.
+    ///
+    /// The outer algorithm reads this so a *terminal* verdict is never
+    /// pronounced on a point the line search itself has already rejected
+    /// and is holding a replacement for — see the divergence guard in
+    /// [`crate::ipopt_alg::IpoptAlgorithm::iterate`].
     pub(crate) fn in_watchdog(&self) -> bool {
         self.in_watchdog
     }

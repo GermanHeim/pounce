@@ -249,6 +249,23 @@ pub struct IpoptAlgorithm {
     /// ~2.9 at the finite optimum). Reset to zero whenever the iterate is
     /// within the threshold or is not growing.
     divergence_streak: u32,
+    /// Consecutive iterations for which the primal divergence guard has
+    /// been suppressed because the line search reported
+    /// [`crate::line_search::backtracking::BacktrackingLineSearch::in_watchdog`].
+    ///
+    /// The suppression is a *deferral*, and this is what bounds it. A
+    /// watchdog sequence is supposed to end within
+    /// `watchdog_trial_iter_max` (default 3) iterations, but the flag can
+    /// outlive one: `run_filter_line_search`'s `TinyStep` arm returns
+    /// without consulting `in_watchdog`, so a tiny step taken mid-watchdog
+    /// hands off to restoration with the flag still set, and
+    /// `reset_after_restoration` clears `watchdog_shortened_iter` but not
+    /// `in_watchdog`. Rather than change the line search's state machine
+    /// (a trajectory change, for a hole this guard need not depend on),
+    /// the guard simply stops deferring past
+    /// [`Self::WATCHDOG_DEFER_MAX`] and checks the iterate anyway. Reset
+    /// to zero on any iteration the guard actually runs.
+    watchdog_defer_streak: u32,
     /// Largest `|x|` seen in the current growth run (companion to
     /// [`Self::divergence_streak`]). Zero when no run is active.
     divergence_prev_amax: Number,
@@ -554,6 +571,7 @@ impl IpoptAlgorithm {
             tiny_step_tol: 10.0 * Number::EPSILON,
             diverging_iterates_tol: 1e20,
             divergence_streak: 0,
+            watchdog_defer_streak: 0,
             divergence_prev_amax: 0.0,
             divergence_prev_f: Number::INFINITY,
             divergence_prev_decrease: Number::NAN,
@@ -715,6 +733,13 @@ impl IpoptAlgorithm {
     /// instant `|x|` crosses the threshold) is preserved, while a low
     /// user threshold no longer fires on the way to a finite optimum.
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
+    /// Most consecutive iterations the primal divergence guard will defer
+    /// to a watchdog sequence before checking the iterate anyway. Upstream's
+    /// `watchdog_trial_iter_max` default is 3; one spare covers the
+    /// iteration on which the watchdog is armed. See
+    /// [`Self::watchdog_defer_streak`] for why the bound is not simply
+    /// "until `in_watchdog` clears".
+    const WATCHDOG_DEFER_MAX: u32 = 4;
 
     /// #285: magnitude floor for the checked recession-ray unboundedness path.
     /// Below this the (slightly more expensive) recession proof is not even
@@ -2431,10 +2456,46 @@ impl IpoptAlgorithm {
         //     far lower magnitude floor, that catches a genuine recession ray
         //     in `null(A_eq)` over free variables whose `|x|` grows only
         //     linearly and so never reaches `1e20` within `max_iter`.
+        //
+        // The whole block is skipped while the line search is inside a
+        // watchdog trial sequence (gh #818 review). A `'w'` iterate is
+        // provisional by construction: the acceptor *rejected* it, the
+        // filter was not augmented, and the line search is holding a
+        // snapshot it will revert to within `watchdog_trial_iter_max`
+        // (default 3) iterations. Reporting `DivergingIterates` there
+        // throws that snapshot away and calls a problem unbounded on a
+        // point the algorithm had already decided not to keep. This is
+        // the same false positive `DIVERGENCE_PERSIST_ITERS` was
+        // introduced for — a transient excursion that peaks and recedes —
+        // except that a watchdog excursion recedes *by construction*, and
+        // `DIVERGENCE_ABS_RUNAWAY` bypasses the streak, so the streak
+        // alone does not cover it. Skipping rather than resetting leaves
+        // the streak state untouched, so a watchdog gamble in the middle
+        // of a genuine ray neither accumulates nor erases evidence; a real
+        // divergence is reported at most three iterations later, from a
+        // committed iterate. The deferral is capped at
+        // `WATCHDOG_DEFER_MAX` consecutive iterations so it can never be
+        // held open by a stale `in_watchdog` — see
+        // `Self::watchdog_defer_streak` for the path that leaks one.
+        //
+        // Measured on the gh #818 quadratic at `n = 8`, cond `1e12`,
+        // `limited_memory_max_history 6`: the solve reaches iteration 352
+        // on the *third* watchdog trial of a sequence, at `|x|_inf ~ 5e22`
+        // with the objective climbing to `+2.0e45` — the opposite of the
+        // `f -> -inf` that `DivergingIterates` is supposed to mean — one
+        // iteration before `StopWatchDog` would have restored an iterate
+        // at `f = 2.26e4`.
+        let in_watchdog = self.bundle.line_search.in_watchdog()
+            && self.watchdog_defer_streak < Self::WATCHDOG_DEFER_MAX;
+        if in_watchdog {
+            self.watchdog_defer_streak += 1;
+        } else {
+            self.watchdog_defer_streak = 0;
+        }
         let (amax, structural_free, is_ray) = {
             let data = self.data.borrow();
             match data.curr.as_ref() {
-                Some(curr) => {
+                Some(curr) if !in_watchdog => {
                     let amax = curr.x.amax();
                     let structural = amax > self.diverging_iterates_tol
                         && self.divergence_is_true_unboundedness(&*curr.x);
@@ -2442,7 +2503,7 @@ impl IpoptAlgorithm {
                         && self.curr_is_recession_ray(&*curr.x, amax);
                     (Some(amax), structural, is_ray)
                 }
-                None => (None, false, false),
+                _ => (None, false, false),
             }
         };
         // Evaluate the (scaled) objective only while a structural divergence
@@ -2451,8 +2512,17 @@ impl IpoptAlgorithm {
         let curr_f = structural_free.then(|| self.cq.borrow().curr_f());
         // Evaluate both streak updates (no short-circuit) so each keeps its
         // state current, then fire if either concludes divergence.
-        let fire_magnitude = self.update_divergence_verdict(amax, structural_free, curr_f);
-        let fire_recession = self.update_recession_verdict(amax.unwrap_or(0.0), is_ray);
+        // ... but only when the streaks are actually being fed. Inside a
+        // watchdog sequence `amax` is `None`, and running the updates
+        // would reset both streaks on a point they never saw.
+        let (fire_magnitude, fire_recession) = if in_watchdog {
+            (false, false)
+        } else {
+            (
+                self.update_divergence_verdict(amax, structural_free, curr_f),
+                self.update_recession_verdict(amax.unwrap_or(0.0), is_ray),
+            )
+        };
         if fire_magnitude || fire_recession {
             if fire_recession && !fire_magnitude {
                 tracing::debug!(target: "pounce::algorithm",
