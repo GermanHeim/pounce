@@ -179,6 +179,86 @@ the Hessian rebuild on iterations where the iterate barely moved.
 
 ---
 
+## The objective clique sets a hard floor on `rho_max`, and why it stays
+
+The Jacobian-derived pattern has to stand in for `∇²f` somehow, and with
+no second-derivative information from the model the only safe stand-in is
+a **dense clique** over every variable the objective is nonlinear in.
+Adding it was a correctness fix — without it the pattern was a *subset*
+of the truth, silently dropping curvature (found in review by
+@srikanth-gm) — and its cost is not small. Measured on `laptime` at
+N=160 (`benchmarks/large_scale`, 9294 variables), with
+`POUNCE_DROP_HESSIAN=1`:
+
+| pattern available | nnz | groups | `rho_max` |
+|---|---|---|---|
+| declared (`eval_h` structure) | 34 094 | **17** | 15 |
+| none — Jacobian + objective clique | 143 854 | **341** | 338 |
+
+**The clique is the floor, not the constraints.** `laptime`'s objective is
+a control-rate regulariser,
+
+```
+    laptime + W · Σ_k Σ_c (U[k+1,c] − U[k,c])²
+```
+
+over `n_int × n_controls = 160 × 2 = 320` controls. Its true `∇²f` is
+**banded with a row width of 3** — each `U[k,c]` couples only to
+`U[k±1,c]` — and the clique replaces that with width 320. Curtis-Powell-Reid
+needs at least `rho_max` groups, so a 320-wide clique alone puts a floor
+of 320 on the probe count: measured `rho_max` is 338 and measured groups
+341. The clique is 51 360 of the 143 854 pattern entries (36%) but it is
+100% of the reason the colouring cannot get narrow.
+
+**So the cost is not tunable — it is the price of not knowing `∇²f`.**
+Nothing in the corpus, the colouring or the mask reduces it, because any
+reduction is a *subset* of the safe pattern and the mode deliberately has
+no mode that guesses one.
+
+**What removes it is the model stating any second-derivative structure at
+all**, at which point `fd_hessian_pattern=declared` uses the true `∇²L`
+and the clique never runs — the 17-group row above. That is available to
+any model that can answer the `eval_h` *structure* call without
+evaluating a value, which is every `.nl` file (AMPL's AD declares one)
+and every CasADi model whose Lagrangian Hessian is symbolically
+constructible.
+
+Two things were tried and rejected while chasing this:
+
+- **Refining the clique from the objective's own Hessian sparsity**
+  (`∇²f ∪ ⋃ⱼ supp(∇gⱼ)⊗supp(∇gⱼ)`, passed from the CasADi plugin). Sound
+  — it is a valid superset, and on paper it replaces the 320-wide clique
+  with the true band. It was built and then removed because **its benefit
+  is unreachable on that surface**: the only way to lose the symbolic
+  `∇²L` in CasADi is an opaque `Callback`, and CasADi treats an opaque
+  callback's Jacobian as *dense* (measured: `jac(g,x)` came back
+  3480/3480 nonzeros on a model whose declared Jacobian was banded-3). A
+  dense `J` makes `JᵀJ` dense, so the constraint half of the pattern is
+  dense anyway and the objective refinement changes nothing. There is no
+  model on that surface where it pays, so it is not worth its complexity.
+- **Masking the clique by the nonlinear-variable set.** A no-op *when the
+  model states its objective linearity*: the clique is then built from
+  `get_objective_variables_linearity`, the objective's own nonlinear set,
+  which is already a subset of the global one. When the model states
+  nothing the mask is the next level down and is used — that is the
+  `N`-then-all-`n` ladder, and `FdStats::objective_clique_widened` says
+  which rung a run took.
+
+The actionable consequence is not a code change but a reachability one:
+the mitigation has to be available and visible from every frontend. Both
+were broken and are now fixed — the CasADi plugin could not reach
+`declared` at all (it failed to build `nlp_hess_l` and gave up), and
+which pattern a run ended up with was only observable through
+`POUNCE_FD_HESSIAN_DEBUG`. See `GetPounceFdHessianStats` and
+`stats()["fd_hessian"]`, which report the source actually **used**, so a
+silent fallback to the 341-group pattern is visible rather than inferred.
+`objective_clique_widened` in the same report answers the follow-up — a
+high `groups` caused by a widened clique is a different problem from one
+caused by a genuinely dense objective, and the two are indistinguishable
+from the probe count alone.
+
+---
+
 ## Star colouring and Hessian reuse: measured, and one of them shipped off
 
 Two follow-ups to the above.

@@ -3283,6 +3283,11 @@ impl IpoptApplication {
         );
         alg.recalc_y = builder.recalc_y;
         alg.recalc_y_feas_tol = builder.recalc_y_feas_tol;
+        // `start_with_resto` — the outer loop is what acts on it. It was
+        // previously copied only into the restoration sub-solver's own
+        // builder, which has no first outer iteration to force, so
+        // setting the option did nothing at all.
+        alg.start_with_resto = builder.resto.start_with_resto;
         // Tiny-step and divergence guards (#191): registered but
         // previously never read. Struct defaults match the registered
         // defaults, so default runs are unchanged.
@@ -3382,6 +3387,23 @@ impl IpoptApplication {
             // Restoration-phase audit counters (pounce#12). Zero on
             // problems where restoration never fires; populated by
             // `IpoptAlgorithm::invoke_restoration`.
+            // Finite-difference Hessian census (gh#823 review). `None` on
+            // every other updater, which leaves the `-1` sentinel in
+            // place and says "this mode did not run" rather than "it ran
+            // and found nothing".
+            if let Some(fd) = alg.bundle.hess.fd_hessian_stats() {
+                use crate::hess::fd_hessian::FdPatternSource;
+                stats.fd_hessian_pattern_used = match fd.pattern_used {
+                    Some(FdPatternSource::Declared) => 0,
+                    Some(FdPatternSource::Jacobian) => 1,
+                    None => -1,
+                };
+                stats.fd_hessian_nnz = fd.nnz as Index;
+                stats.fd_hessian_groups = fd.groups as Index;
+                stats.fd_hessian_rho_max = fd.rho_max as Index;
+                stats.fd_hessian_coloring_fell_back = fd.coloring_fell_back;
+                stats.fd_hessian_objective_clique_widened = fd.objective_clique_widened;
+            }
             stats.restoration_calls = alg.resto_calls;
             stats.restoration_inner_iters = alg.resto_inner_iters;
             stats.restoration_outer_iters = alg.resto_outer_iters;

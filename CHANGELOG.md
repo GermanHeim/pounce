@@ -43,6 +43,63 @@ changes.
   nor the multipliers moved (~7%). `fd_hessian_coloring` defaults to
   Curtis-Powell-Reid; star colouring needs fewer probes but is numerically
   wrong on a dense pattern — see `dev-notes/fd-hessian-from-jacobian.md`.
+  Feasibility restoration runs the limited-memory updater for this mode, as
+  it already did for `partitioned`: the restoration sub-NLP's primal is the
+  five-block compound, which the model's Hessian pattern and objective
+  clique do not describe. Without that scoping the mode was the only one to
+  report `Restoration_Failed` on a nonconvex fixture every other mode
+  solved, returning an answer 1.9 infeasible.
+
+- **The CasADi plugin can reach `finite-difference`, and asks CasADi only
+  for what the mode needs.** `casadi_nlpsol_pounce.cpp` carried a single
+  `exact_hessian_` flag standing for two independent capabilities — may
+  POUNCE call `cb_h` for Hessian *values*, and can the plugin declare a
+  sparsity *pattern*. The flag was cleared only for `limited-memory`, so
+  `hessian_approximation=finite-difference` still built CasADi's symbolic
+  `nlp_hess_l` and failed with `Derivatives cannot be calculated for ...` on
+  exactly the models the mode exists for: an external `Callback`, an FMU or
+  a `DaeBuilder` transcription with analytic first derivatives and nothing
+  above them. The two capabilities are now separate. `finite-difference`
+  reads CasADi's Hessian sparsity for its **structure only** — `cb_h`
+  refuses a values request outright, so a completed solve is itself proof
+  that every number was recovered by probing — and falls back to the
+  Jacobian-derived pattern when CasADi cannot build a symbolic Hessian at
+  all. `fd_hessian_pattern=jacobian` skips building it even where it is
+  available. Measured on a 3-variable model, the declared pattern is 4
+  nonzeros in 2 probe groups against the Jacobian superset's 6 in 3. The
+  same split is reproduced in the generated C, whose emitted `eval_h`
+  serves the pattern as a literal and refuses values. Found in review by
+  @srikanth-gm (gh#823).
+
+- **The finite-difference Hessian's pattern and probe count are readable
+  from an embedder.** `GetPounceFdHessianStats` in the C API, and
+  `stats()["fd_hessian"]` through the CasADi plugin, report the pattern
+  source, its nonzero count, the probe groups per Hessian, `rho_max`, and
+  whether a requested star colouring fell back to Curtis-Powell-Reid, and
+  whether the objective clique had to widen for want of a stated objective
+  linearity — the field that distinguishes a high probe count caused by a
+  widened clique from one caused by a genuinely dense objective.
+  Previously reachable only through the `POUNCE_FD_HESSIAN_DEBUG`
+  environment variable. The reported source is the one the run **ended up
+  with**, not the one requested: `fd_hessian_pattern=declared` falls back
+  to the Jacobian derivation whenever the model declares no Hessian
+  structure, and that fallback is worth 17 probe groups against 341 on
+  `benchmarks/large_scale` `laptime` — so reporting the request would hide
+  the number a reader is there for. Absent, rather than zero, on every
+  other Hessian mode. Asked for by @srikanth-gm (gh#823).
+
+- **`start_with_resto` does something.** The option was threaded from the
+  `OptionsList` into `AlgorithmBuilder::resto`, from there into
+  `RestoAlgorithmBuilder`, and from there into `MinC1NrmDriver` — a field
+  on the *inner* restoration solver, which has no first outer iteration to
+  force. Every layer set it and no layer read it, so `start_with_resto
+  yes` was a silent no-op. It is an outer-loop behaviour and the outer
+  loop consumes it now, riding the same `request_resto` flag the
+  probing-oracle guard uses. `unimplemented_options.rs`'s
+  `the_restoration_switches_reach_the_builder` could not catch this: it
+  asserts the value *reaches the builder*, which is exactly the "read site
+  populating a field nobody consumes" its own comment names as the defect
+  to avoid. Default is unchanged (`no`), so no default run moves.
 
 - **`hessian_approximation=partitioned` (negative result, opt-in).** Two
   partitioned quasi-Newton decompositions, built and measured against the same

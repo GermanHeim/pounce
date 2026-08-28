@@ -186,6 +186,20 @@ pub struct IpoptAlgorithm {
     /// which [`Self::recalc_y`] fires. Upstream default `1e-6`.
     pub recalc_y_feas_tol: Number,
     pub max_iter: Index,
+    /// `start_with_resto` — force the feasibility restoration phase in
+    /// the first iteration.
+    ///
+    /// This is an **outer**-loop behaviour, which is where it went wrong
+    /// before: the option was threaded from the `OptionsList` through
+    /// `AlgorithmBuilder::resto` into `RestoAlgorithmBuilder` and on into
+    /// `MinC1NrmDriver`, a field on the *inner* restoration solver, where
+    /// there is no first iteration of the outer algorithm to act on. It
+    /// was set by everything and read by nothing, so `start_with_resto
+    /// yes` was a silent no-op. `unimplemented_options.rs`'s
+    /// `the_restoration_switches_reach_the_builder` asserted only that the
+    /// value reached the builder — the very "read site populating a field
+    /// nobody consumes" its own comment names as the defect to avoid.
+    pub start_with_resto: bool,
     /// Initial primal step length offered to the line search at the
     /// top of each iteration. Mirrors `IpBacktrackingLineSearch`'s
     /// fraction-to-the-boundary primal step (with τ = `data.curr_tau`).
@@ -504,6 +518,7 @@ impl IpoptAlgorithm {
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             max_iter: 3000,
+            start_with_resto: false,
             alpha_init: 1.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
             diverging_iterates_tol: 1e20,
@@ -2773,7 +2788,13 @@ impl IpoptAlgorithm {
             let mut d = self.data.borrow_mut();
             let f = d.request_resto;
             d.request_resto = false;
-            f
+            // `start_with_resto` — upstream's "switch to the feasibility
+            // restoration phase in the first iteration". It rides the
+            // same request flag rather than adding a second path into
+            // restoration, and it is consumed here so it fires exactly
+            // once: `iter_count` is 0 only on the first pass, and
+            // restoration advances it.
+            f || (self.start_with_resto && d.iter_count == 0)
         };
         if request_resto {
             if self.restoration.is_some() {

@@ -65,6 +65,12 @@ namespace casadi {
     /// Restoration-phase activity, likewise.
     ipindex resto_calls = 0, resto_inner = 0, resto_outer = 0;
     double resto_secs = 0;
+    /// Finite-difference Hessian census. `fd_pattern` stays -1 on every
+    /// solve that was not `hessian_approximation=finite-difference`,
+    /// which is what keeps `stats()["fd_hessian"]` absent rather than
+    /// present-and-zero for the modes it does not describe.
+    ipindex fd_pattern = -1, fd_nnz = 0, fd_groups = 0, fd_rho_max = 0,
+            fd_fell_back = 0, fd_clique_widened = 0;
     /// Working set carried from this memory object's previous solve
     /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
     /// variable / row numbering. Empty until a solve produces one.
@@ -129,7 +135,22 @@ namespace casadi {
 
     // NLP function sparsities
     Sparsity jacg_sp_, hesslag_sp_;
+    // Two independent capabilities, deliberately not one flag.
+    //
+    // `exact_hessian_` is whether POUNCE may ask `cb_h` for Hessian
+    // *values*; `hessian_structure_` is whether the plugin can declare a
+    // sparsity *pattern* at all. They coincide for `exact` (both true)
+    // and for `limited-memory` (both false), and they differ for
+    // `finite-difference`, which is the mode that needs the pattern and
+    // must never be asked for a value.
+    //
+    // Collapsing them into one flag is what made `finite-difference`
+    // unusable on the model class it exists for: the flag stayed true, so
+    // `init` built `nlp_hess_l`, and on a model whose first derivatives
+    // are the last ones CasADi can produce that construction throws —
+    // the FD path failed with the same error as `exact` (gh#823 review).
     bool exact_hessian_ = true;
+    bool hessian_structure_ = true;
     Dict opts_;                        // forwarded to POUNCE
     bool pass_nonlinear_variables_ = false;
     std::vector<bool> nl_ex_;          // which x enter nonlinearly
@@ -464,11 +485,33 @@ namespace casadi {
                   "solve_report_detail must be 'summary' or 'full', got '"
                   + solve_report_detail_ + "'.");
 
-    // Do we have an exact Hessian?
-    exact_hessian_ = true;
+    // Which Hessian capabilities does the chosen mode need?
+    //
+    //   exact             values + structure — `nlp_hess_l` is required,
+    //                     and a model that cannot build it must say so.
+    //   limited-memory    neither; the quasi-Newton matrix is POUNCE's.
+    //   finite-difference structure only. POUNCE recovers the values by
+    //                     probing the analytic Jacobian and never calls
+    //                     `cb_h` for them, so the pattern is the whole
+    //                     contribution — and it is worth a lot: on
+    //                     `laptime` the declared pattern is 17 probe
+    //                     groups against the Jacobian-derived pattern's
+    //                     341.
+    std::string hess_mode = "exact";
     auto hess_it = opts_.find("hessian_approximation");
-    if (hess_it != opts_.end() && hess_it->second.to_string() == "limited-memory") {
-      exact_hessian_ = false;
+    if (hess_it != opts_.end()) hess_mode = hess_it->second.to_string();
+
+    exact_hessian_ = (hess_mode != "limited-memory" && hess_mode != "finite-difference");
+    hessian_structure_ = (hess_mode != "limited-memory");
+
+    // `fd_hessian_pattern=jacobian` says the pattern is to come from the
+    // Jacobian, so building CasADi's symbolic Hessian just to throw the
+    // pattern away is pure cost. Honour it here rather than paying it.
+    if (hess_mode == "finite-difference") {
+      auto pat_it = opts_.find("fd_hessian_pattern");
+      if (pat_it != opts_.end() && pat_it->second.to_string() == "jacobian") {
+        hessian_structure_ = false;
+      }
     }
 
     create_function("nlp_f", {"x", "p"}, {"f"});
@@ -486,12 +529,33 @@ namespace casadi {
                   " columns, but has " + str(jacg_sp_.size2()) + " instead.");
 
     convexify_ = false;
-    if (exact_hessian_) {
+    if (hessian_structure_) {
       if (!has_function("nlp_hess_l")) {
-        create_function("nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
-                        {"triu:hess:gamma:x:x"},
-                        {{"gamma", {"f", "g"}}});
+        try {
+          create_function("nlp_hess_l", {"x", "p", "lam:f", "lam:g"},
+                          {"triu:hess:gamma:x:x"},
+                          {{"gamma", {"f", "g"}}});
+        } catch (std::exception& e) {
+          // For `exact` this is fatal and should read exactly as it
+          // always did. For `finite-difference` the Hessian is a bonus,
+          // not a requirement — the pattern sharpens the probe colouring
+          // and the values are never read — so a model that cannot be
+          // differentiated twice degrades to the Jacobian-derived
+          // pattern rather than failing.
+          if (exact_hessian_) throw;
+          hessian_structure_ = false;
+          if (verbose_) {
+            casadi_message(std::string("POUNCE: no symbolic Lagrangian Hessian for this "
+                                       "model, so hessian_approximation='finite-difference' "
+                                       "will derive its pattern from the Jacobian. CasADi "
+                                       "said: ") + e.what());
+          }
+        }
       }
+    }
+    // Re-tested, not an `else`: the block above turns it off when CasADi
+    // could not build the Hessian after all.
+    if (hessian_structure_) {
       hesslag_sp_ = get_function("nlp_hess_l").sparsity_out(0);
       casadi_assert(hesslag_sp_.is_triu(),
                     "nlp_hess_l must be upper triangular.");
@@ -499,7 +563,12 @@ namespace casadi {
                     "nlp_hess_l must be " + str(nx_) + "-by-" + str(nx_) +
                     ", but is " + str(hesslag_sp_.size1()) + "-by-" +
                     str(hesslag_sp_.size2()) + " instead.");
-      if (convexify_strategy != "none") {
+      // Convexification rewrites Hessian *values*, so it belongs to the
+      // one mode that reads them. Under `finite-difference` the pattern
+      // is all that crosses, and running `Convexify::setup` there would
+      // widen it — a superset is still safe, but it would buy nothing and
+      // cost probe groups.
+      if (convexify_strategy != "none" && exact_hessian_) {
         convexify_ = true;
         Dict cvx_opts;
         cvx_opts["strategy"] = convexify_strategy;
@@ -511,9 +580,10 @@ namespace casadi {
         // values buffer the callback writes into.
         hesslag_sp_ = Convexify::setup(convexify_data_, hesslag_sp_, cvx_opts);
       }
-    } else if (convexify_strategy != "none") {
+    }
+    if (convexify_strategy != "none" && !convexify_) {
       casadi_warning("convexify_strategy is ignored under "
-                     "hessian_approximation='limited-memory': there is no "
+                     "hessian_approximation='" + hess_mode + "': there is no "
                      "exact Hessian to convexify.");
     }
 
@@ -607,6 +677,15 @@ namespace casadi {
                              ipindex* iRow, ipindex* jCol, ipnumber* values, UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
     const PounceInterface* self = m->self;
+    if (values && !self->exact_hessian_) {
+      // Structure-only mode (`finite-difference`). POUNCE recovers the
+      // values by probing, so this branch is unreachable by design —
+      // failing here rather than quietly answering keeps that a fact
+      // about the code instead of a claim about it. If this ever fires,
+      // the FD updater is not the one supplying the Hessian and the
+      // measurement that says FD was exercised is wrong.
+      return false;
+    }
     if (values) {
       bool ok = guarded(m, "Lagrangian Hessian", [&] {
         m->arg[0] = x;
@@ -754,6 +833,9 @@ namespace casadi {
     m->report_written = false;
     m->linsol_valid = false;
     m->resto_calls = m->resto_inner = m->resto_outer = 0;
+    m->fd_pattern = -1;
+    m->fd_nnz = m->fd_groups = m->fd_rho_max = m->fd_fell_back = 0;
+    m->fd_clique_widened = 0;
     m->resto_secs = 0;
 
     m->xl.assign(d_nlp->lbz, d_nlp->lbz + n);
@@ -771,14 +853,17 @@ namespace casadi {
     }
 
     const int nnz_jac = ng == 0 ? 0 : static_cast<int>(jacg_sp_.nnz());
-    const int nnz_h = exact_hessian_ ? static_cast<int>(hesslag_sp_.nnz()) : 0;
+    // The pattern crosses whenever we have one — under `finite-difference`
+    // that is the declared sparsity POUNCE colours its probes from, and
+    // `cb_h` serves the structure request while refusing a values one.
+    const int nnz_h = hessian_structure_ ? static_cast<int>(hesslag_sp_.nnz()) : 0;
 
     IpoptProblem prob = CreateIpoptProblem(
       n, m->xl.data(), m->xu.data(), ng, m->gl.data(), m->gu.data(),
       nnz_jac, nnz_h, 0 /* C index style */,
       &PounceInterface::cb_f, &PounceInterface::cb_g,
       &PounceInterface::cb_grad_f, &PounceInterface::cb_jac_g,
-      exact_hessian_ ? &PounceInterface::cb_h : nullptr);
+      hessian_structure_ ? &PounceInterface::cb_h : nullptr);
     casadi_assert(prob != nullptr, "POUNCE: CreateIpoptProblem failed");
 
     // Has to precede the solve: POUNCE keeps the per-iteration trajectory
@@ -789,8 +874,18 @@ namespace casadi {
     }
     m->prob = prob;
 
-    if (!exact_hessian_) {
-      AddIpoptStrOption(prob, CC("hessian_approximation"), CC("limited-memory"));
+    // Deliberately keyed on the mode, NOT on `exact_hessian_`. Both said
+    // the same thing while `limited-memory` was the only inexact mode;
+    // once `finite-difference` joined it, `!exact_hessian_` would have
+    // forced limited-memory over the mode the user actually asked for.
+    // It survives only because the forwarding loop below re-sends the
+    // user's own `hessian_approximation` afterwards — a defect masked by
+    // statement order is still a defect, so state the condition instead.
+    if (!hessian_structure_ && !exact_hessian_) {
+      auto it = opts_.find("hessian_approximation");
+      if (it == opts_.end() || it->second.to_string() == "limited-memory") {
+        AddIpoptStrOption(prob, CC("hessian_approximation"), CC("limited-memory"));
+      }
     }
     // Forward user options.
     //
@@ -916,6 +1011,9 @@ namespace casadi {
     m->linsol_valid = GetPounceLinearSolverStats(prob, &m->linsol);
     GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
                               &m->resto_outer, &m->resto_secs);
+    GetPounceFdHessianStats(prob, &m->fd_pattern, &m->fd_nnz, &m->fd_groups,
+                            &m->fd_rho_max, &m->fd_fell_back,
+                            &m->fd_clique_widened);
     // Same window as the harvest above, and for the same reason: the
     // report is built from the solve retained on `prob`, which the free
     // below takes with it.
@@ -1108,6 +1206,29 @@ namespace casadi {
       resto["outer_iters"] = static_cast<casadi_int>(m->resto_outer);
       resto["wall_secs"] = m->resto_secs;
       stats["restoration"] = resto;
+
+      // Only present when the finite-difference Hessian actually built a
+      // pattern. Absent rather than zero on every other mode: a zero
+      // probe count would read as "free", not as "not this mode".
+      //
+      // `pattern` is what the solve ENDED UP with. Asking for
+      // `declared` on a model that declares no Hessian structure
+      // silently yields the Jacobian derivation, and that is the whole
+      // reason to read this -- on `laptime` the two differ by 17 probe
+      // groups against 341.
+      if (m->fd_pattern >= 0) {
+        Dict fd;
+        fd["pattern"] = std::string(m->fd_pattern == 0 ? "declared" : "jacobian");
+        fd["nnz"] = static_cast<casadi_int>(m->fd_nnz);
+        fd["groups"] = static_cast<casadi_int>(m->fd_groups);
+        fd["rho_max"] = static_cast<casadi_int>(m->fd_rho_max);
+        fd["coloring_fell_back"] = m->fd_fell_back != 0;
+        // Why `groups` is what it is, when it surprises: with no stated
+        // objective linearity the clique widens to every nonlinear
+        // variable, or to every variable, and the probe count follows.
+        fd["objective_clique_widened"] = m->fd_clique_widened != 0;
+        stats["fd_hessian"] = fd;
+      }
     }
 
     // What the KKT linear solver did. `solver_name` is the backend that
@@ -1299,6 +1420,26 @@ namespace casadi {
       g << "return true;\n";
       g.scope_exit();
       g << "}\n";
+    } else if (hessian_structure_) {
+      // Structure-only, the generated twin of `cb_h`'s refusal above.
+      // `finite-difference` reads the pattern and recovers the values by
+      // probing, so this serves `p.sp_h` — baked in as a literal, which
+      // is why the block needs no `nlp_hess_l` dependency — and refuses
+      // a values request rather than answering one nothing should ask.
+      f = g.shorthand("pounce_hess_l_struct");
+      g << "bool " << f << "(ipindex n, ipnumber *x, bool new_x, ipnumber obj_factor, "
+        << "ipindex m, ipnumber *lambda, bool new_lambda, ipindex nele_hess, "
+        << "ipindex *iRow, ipindex *jCol, ipnumber *values, UserDataPtr user_data) {\n";
+      g.flush(g.body);
+      g.scope_enter();
+      g << "struct casadi_pounce_data* d = (struct casadi_pounce_data*) user_data;\n";
+      g << "(void)n; (void)x; (void)new_x; (void)obj_factor; (void)m;\n";
+      g << "(void)lambda; (void)new_lambda; (void)nele_hess;\n";
+      g << "if (values) return false;\n";
+      g << "casadi_pounce_sparsity_h(d->prob->sp_h, iRow, jCol);\n";
+      g << "return true;\n";
+      g.scope_exit();
+      g << "}\n";
     }
   }
 
@@ -1307,7 +1448,9 @@ namespace casadi {
     g << "d->prob = &p;\n";
     g << "p.nlp = &p_nlp;\n";
     g << "p.sp_a = " << g.sparsity(jacg_sp_) << ";\n";
-    if (exact_hessian_) {
+    // Whenever a pattern exists, including structure-only under
+    // `finite-difference` — `casadi_pounce_setup` reads `nnz_h` off it.
+    if (hessian_structure_) {
       g << "p.sp_h = " << g.sparsity(hesslag_sp_) << ";\n";
     } else {
       g << "p.sp_h = 0;\n";
@@ -1358,6 +1501,8 @@ namespace casadi {
     if (exact_hessian_) {
       g << "p.eval_h = "
         << g.shorthand(g.wrapper(get_function("nlp_hess_l"), "nlp_hess_l")) << ";\n";
+    } else if (hessian_structure_) {
+      g << "p.eval_h = " << g.shorthand("pounce_hess_l_struct") << ";\n";
     } else {
       g << "p.eval_h = casadi_pounce_hess_l_empty;\n";
     }
@@ -1376,8 +1521,14 @@ namespace casadi {
     g << "casadi_pounce_init(d, &arg, &res, &iw, &w);\n";
     g << "casadi_pounce_presolve(d);\n";
 
-    if (!exact_hessian_) {
-      g << "AddIpoptStrOption(d->pounce, \"hessian_approximation\", \"limited-memory\");\n";
+    // Mode-keyed, matching the interpreted path: `!exact_hessian_` is
+    // true for `finite-difference` too, and forcing limited-memory there
+    // would override the mode the user asked for.
+    if (!hessian_structure_ && !exact_hessian_) {
+      auto it = opts_.find("hessian_approximation");
+      if (it == opts_.end() || it->second.to_string() == "limited-memory") {
+        g << "AddIpoptStrOption(d->pounce, \"hessian_approximation\", \"limited-memory\");\n";
+      }
     }
     // The user's options, typed the same way the interpreted path types
     // them: POUNCE's registry decides, and the value's own `GenericType`
@@ -1455,10 +1606,11 @@ namespace casadi {
 
   void PounceInterface::serialize_body(SerializingStream& s) const {
     Nlpsol::serialize_body(s);
-    s.version("PounceInterface", 1);
+    s.version("PounceInterface", 2);
     s.pack("PounceInterface::jacg_sp", jacg_sp_);
     s.pack("PounceInterface::hesslag_sp", hesslag_sp_);
     s.pack("PounceInterface::exact_hessian", exact_hessian_);
+    s.pack("PounceInterface::hessian_structure", hessian_structure_);
     s.pack("PounceInterface::opts", opts_);
     s.pack("PounceInterface::pass_nonlinear_variables", pass_nonlinear_variables_);
     s.pack("PounceInterface::nl_ex", nl_ex_);
@@ -1477,10 +1629,18 @@ namespace casadi {
   }
 
   PounceInterface::PounceInterface(DeserializingStream& s) : Nlpsol(s) {
-    s.version("PounceInterface", 1);
+    // v1 predates the values/structure split, and in it the two were the
+    // same flag — so `exact_hessian_` is exactly the right value for
+    // `hessian_structure_` when reading one back.
+    int ver = s.version("PounceInterface", 1, 2);
     s.unpack("PounceInterface::jacg_sp", jacg_sp_);
     s.unpack("PounceInterface::hesslag_sp", hesslag_sp_);
     s.unpack("PounceInterface::exact_hessian", exact_hessian_);
+    if (ver >= 2) {
+      s.unpack("PounceInterface::hessian_structure", hessian_structure_);
+    } else {
+      hessian_structure_ = exact_hessian_;
+    }
     s.unpack("PounceInterface::opts", opts_);
     s.unpack("PounceInterface::pass_nonlinear_variables", pass_nonlinear_variables_);
     s.unpack("PounceInterface::nl_ex", nl_ex_);

@@ -1239,6 +1239,72 @@ pub unsafe extern "C" fn GetPounceRestorationStats(
     }
 }
 
+/// Finite-difference Hessian census from the most recent solve. Any
+/// pointer may be NULL to skip that component.
+///
+/// All outputs are left at their "did not run" values on any solve that
+/// was not `hessian_approximation=finite-difference`: `pattern_used`
+/// is `-1` and the counts are `0`. `pattern_used` is `0` for the
+/// declared pattern and `1` for the Jacobian-derived one, and it names
+/// what the run **ended up with** — `declared` falls back to `jacobian`
+/// when the TNLP declares no Hessian structure, and that fallback is
+/// what the number is worth reading for.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. Each
+/// non-NULL output pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceFdHessianStats(
+    ipopt_problem: IpoptProblem,
+    pattern_used: *mut Index,
+    nnz: *mut Index,
+    groups: *mut Index,
+    rho_max: *mut Index,
+    coloring_fell_back: *mut Index,
+    objective_clique_widened: *mut Index,
+) {
+    unsafe {
+        let stats = last_stat(ipopt_problem, |s| {
+            (
+                s.fd_hessian_pattern_used,
+                s.fd_hessian_nnz,
+                s.fd_hessian_groups,
+                s.fd_hessian_rho_max,
+                if s.fd_hessian_coloring_fell_back {
+                    1
+                } else {
+                    0
+                },
+                if s.fd_hessian_objective_clique_widened {
+                    1
+                } else {
+                    0
+                },
+            )
+        });
+        let (p, n, g, r, f, w) = stats.unwrap_or((-1, 0, 0, 0, 0, 0));
+        if !pattern_used.is_null() {
+            *pattern_used = p;
+        }
+        if !nnz.is_null() {
+            *nnz = n;
+        }
+        if !groups.is_null() {
+            *groups = g;
+        }
+        if !rho_max.is_null() {
+            *rho_max = r;
+        }
+        if !coloring_fell_back.is_null() {
+            *coloring_fell_back = f;
+        }
+        if !objective_clique_widened.is_null() {
+            *objective_clique_widened = w;
+        }
+    }
+}
+
 /// C mirror of [`pounce_linsol::summary::LinearSolverSummary`], laid
 /// out for `pounce.h`'s `PounceLinearSolverStats`. Optional fields
 /// carry sentinels rather than a discriminant, because a plain struct

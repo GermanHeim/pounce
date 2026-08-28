@@ -491,12 +491,9 @@ on the issue tracker if you want them.
 
 ## Limited-memory Hessians and nonlinear variables
 
-**You may be on this path without having asked for it.** The plugin sets
-`hessian_approximation=limited-memory` for you whenever an exact
-Lagrangian Hessian is not available — the `!exact_hessian_` branch in
-`casadi_nlpsol_pounce.cpp`. If you did not supply second derivatives,
-every solve is an L-BFGS solve, and the options in this section apply to
-it. That is worth knowing before comparing POUNCE against another
+**You may be on this path without having asked for it.** If you did not
+supply second derivatives, every solve is an L-BFGS solve by default, and
+the options in this section apply to it. That is worth knowing before comparing POUNCE against another
 solver: you are comparing quasi-Newton runs, and quasi-Newton runs are
 much more sensitive to the options below than exact-Hessian ones.
 
@@ -624,6 +621,81 @@ multipliers that were converging perfectly well. So it is opt-in. If you
 are chasing Ipopt parity on an L-BFGS model, this is one of the two
 options — with `limited_memory_initialization` — most likely to explain
 a difference.
+
+## Finite-difference Hessians for a model with no second derivatives
+
+`limited-memory` is not the only answer to a missing Hessian.
+`hessian_approximation=finite-difference` recovers the Lagrangian Hessian
+by graph-coloured finite differences of the **analytic Jacobian**, which
+CasADi already gives you, and it needs no second derivatives at all:
+
+```python
+solver = ca.nlpsol("solver", "pounce", nlp, {
+    "pounce": {"hessian_approximation": "finite-difference"},
+})
+```
+
+This works on a model CasADi genuinely cannot differentiate twice — an
+external `Callback`, an FMU, a `DaeBuilder` transcription — which is the
+case it exists for. `hessian_approximation=exact` correctly refuses such
+a model; `finite-difference` does not.
+
+**Two pattern sources, and the difference is probe groups.** POUNCE has
+to know which Hessian entries can be nonzero before it can pack columns
+into probes, and `fd_hessian_pattern` chooses where that comes from:
+
+| `fd_hessian_pattern` | where the pattern comes from | needs |
+|---|---|---|
+| `declared` (default) | CasADi's symbolic Lagrangian-Hessian sparsity — its **structure only**, never its values | CasADi able to build `nlp_hess_l` |
+| `jacobian` | `⋃ⱼ supp(∇gⱼ) ⊗ supp(∇gⱼ)`, plus the objective's own clique, pruned by the nonlinear-variable mask | nothing beyond the Jacobian |
+
+Under `declared` the plugin builds CasADi's symbolic Hessian purely to
+read its sparsity: the values callback is wired to **refuse** a value
+request, so a completed solve is itself proof that POUNCE recovered every
+number by probing. The pattern is worth paying for — it is a genuine
+sparsity rather than a superset, and on `benchmarks/large_scale/laptime`
+the declared pattern is 17 probe groups against the Jacobian-derived
+pattern's 341.
+
+`declared` **falls back to `jacobian` on its own** when CasADi cannot
+build a symbolic Hessian, so the default is safe on every model. Set
+`fd_hessian_pattern=jacobian` explicitly when you want to skip building
+the symbolic Hessian even though it is available — it is a real cost on a
+large transcription, and it buys only the pattern.
+
+The Jacobian-derived pattern is a strict **superset** of the true one, so
+it costs extra probe groups and never a wrong answer. It is pruned by the
+same nonlinear-variable set the L-BFGS path uses, which you can pass with
+`pass_nonlinear_variables` exactly as above: a variable that enters every
+`f` and `g` linearly has structurally zero off-diagonal Hessian entries,
+so its columns need never be probed.
+
+**What pattern did I actually get?** `stats()["fd_hessian"]` says, and it
+is present only when the mode ran:
+
+```python
+r = solver(x0=..., lbg=..., ubg=...)
+solver.stats()["fd_hessian"]
+# {'pattern': 'declared', 'nnz': 34094, 'groups': 17, 'rho_max': 15,
+#  'coloring_fell_back': False, 'objective_clique_widened': False}
+```
+
+`pattern` is the source the solve **ended up with**, not the one you
+asked for — `declared` falls back silently, and `groups` is what that
+fallback costs you, one gradient-and-Jacobian evaluation per group per
+Hessian rebuild. On `laptime` the two patterns are 17 groups against 341.
+
+`objective_clique_widened` is the other half of that answer. Under the
+Jacobian pattern POUNCE has to bound `∇²f` with a clique over the
+variables the objective is nonlinear in, and when the model states no
+objective linearity that clique widens to every nonlinear variable — so a
+surprising `groups` is a missing declaration, not a dense objective.
+
+**Restoration runs limited-memory regardless.** The restoration sub-NLP's
+primal is a five-block compound the model's Hessian pattern does not
+describe, so the feasibility phase uses the limited-memory updater — the
+same scoping the partitioned Hessian has. You do not need to configure
+this, and `stats()["restoration"]` reports the phase as usual.
 
 ## Examples
 
