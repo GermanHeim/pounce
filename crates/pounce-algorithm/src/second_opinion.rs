@@ -67,6 +67,11 @@ pub enum SecondOpinionTrigger {
     LocalInfeasibility,
     /// `Invalid_Number_Detected` — a NaN or infinity out of the model.
     InvalidNumber,
+    /// `Restoration_Failed` — the restoration phase could not find a point
+    /// the filter would accept. Like the two above and unlike a budget exit,
+    /// this is a statement about the trajectory the solve happened to take,
+    /// not about the model; see [`SecondOpinionTrigger::for_status`].
+    RestorationFailure,
 }
 
 /// What the baseline options already provide, so a rung that would be a no-op
@@ -126,8 +131,9 @@ pub struct SecondOpinionAvailability {
 /// 3. **`start_point_perturbation=1e-2` — a different starting point**
 ///    (`infeasibility_perturbed_start_retry`, on by default). The only rung
 ///    that moves the point rather than the path, and so the only one that is
-///    evidence about an `Invalid_Number_Detected` — see
-///    [`SecondOpinionTrigger`].
+///    evidence about an `Invalid_Number_Detected` or a `Restoration_Failed`
+///    — see [`SecondOpinionTrigger`]. Those two triggers open this rung and
+///    nothing else, so they cost exactly one extra solve.
 ///
 /// Rungs are **not** cumulative: the driver restores the baseline before each
 /// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
@@ -235,10 +241,29 @@ pub fn resolve_scaling_retry_outcome(
 impl SecondOpinionTrigger {
     /// Which ladder, if any, a finished solve's verdict opens.
     ///
-    /// Only these two statuses open one. In particular an iteration- or
+    /// Only these three statuses open one. In particular an iteration- or
     /// time-limit exit does not: the answer there is a bigger budget, and a
     /// re-solve from a different trajectory would burn the same budget again
     /// to reach the same wall.
+    ///
+    /// `Restoration_Failed` is on the list for the same reason the other two
+    /// are (gh#815): it is a report about the *path*, not about the model.
+    /// The restoration phase failing to find a filter-acceptable point says
+    /// the iterate reached somewhere the sub-problem could not work from, and
+    /// a different starting point is a different sub-problem. It is not a
+    /// budget exit — pounce stops far short of `max_iter` — so "give it more
+    /// iterations" is not the available answer, which is precisely the
+    /// distinction the paragraph above draws. Measured on the gh#815 square
+    /// flowsheet family: both failing members exit `Restoration_Failed`, no
+    /// ladder ran, and rung 3 alone recovers both to `Optimal Solution
+    /// Found` — one of them (`f100`) to an optimum Ipopt itself misses.
+    ///
+    /// Only rung 3 opens on this trigger; rungs 1 and 2 stay gated on
+    /// [`SecondOpinionTrigger::LocalInfeasibility`], so a restoration failure
+    /// costs exactly one extra solve. That is the measured ordering, not
+    /// caution for its own sake: over the KRONOS corpus the displaced start
+    /// recovered 13 of 15 where `mu_strategy=adaptive` recovered 4 (see
+    /// `start_point_retry`'s option text).
     pub fn for_status(status: ApplicationReturnStatus) -> Option<Self> {
         match status {
             ApplicationReturnStatus::InfeasibleProblemDetected => {
@@ -246,6 +271,9 @@ impl SecondOpinionTrigger {
             }
             ApplicationReturnStatus::InvalidNumberDetected => {
                 Some(SecondOpinionTrigger::InvalidNumber)
+            }
+            ApplicationReturnStatus::RestorationFailed => {
+                Some(SecondOpinionTrigger::RestorationFailure)
             }
             _ => None,
         }
@@ -256,6 +284,7 @@ impl SecondOpinionTrigger {
         match self {
             SecondOpinionTrigger::LocalInfeasibility => "local infeasibility",
             SecondOpinionTrigger::InvalidNumber => "invalid number",
+            SecondOpinionTrigger::RestorationFailure => "restoration failure",
         }
     }
 }
@@ -597,6 +626,60 @@ mod scaling_retry_tests {
             rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
             ["start_point_perturbation=1e-2"],
         );
+    }
+
+    /// gh#815. A restoration failure opens the ladder, and opens exactly the
+    /// one rung that is evidence about it. Rungs 1 and 2 vary the *path* from
+    /// the same starting point; the restoration sub-problem failed because of
+    /// where the iterate got to, and a different path can arrive somewhere
+    /// just as bad. Rung 3 moves the point, which makes it a different
+    /// sub-problem — and it is the rung the KRONOS measurement ranks first
+    /// (13 of 15 against `mu_strategy=adaptive`'s 4).
+    #[test]
+    fn a_restoration_failure_reaches_only_the_start_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::RestorationFailure,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["start_point_perturbation=1e-2"],
+        );
+    }
+
+    /// The status → trigger map is the whole opt-in surface, so pin both
+    /// halves: the three verdicts that open a ladder, and a representative
+    /// budget exit that must not. `MaximumIterationsExceeded` is the case the
+    /// doc comment argues about — a bigger budget is the answer there, and a
+    /// re-solve would burn the same budget to reach the same wall.
+    #[test]
+    fn only_path_verdicts_open_a_ladder() {
+        use ApplicationReturnStatus as A;
+        for (status, want) in [
+            (
+                A::InfeasibleProblemDetected,
+                Some(SecondOpinionTrigger::LocalInfeasibility),
+            ),
+            (
+                A::InvalidNumberDetected,
+                Some(SecondOpinionTrigger::InvalidNumber),
+            ),
+            (
+                A::RestorationFailed,
+                Some(SecondOpinionTrigger::RestorationFailure),
+            ),
+            (A::MaximumIterationsExceeded, None),
+            (A::MaximumCpuTimeExceeded, None),
+            (A::SolveSucceeded, None),
+            (A::SolvedToAcceptableLevel, None),
+            (A::ErrorInStepComputation, None),
+        ] {
+            assert_eq!(
+                SecondOpinionTrigger::for_status(status),
+                want,
+                "{status:?} opened the wrong ladder"
+            );
+        }
     }
 
     /// …and disabling that rung leaves an invalid-number run with no ladder at

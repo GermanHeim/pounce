@@ -9,6 +9,75 @@ changes.
 
 ## [Unreleased]
 
+- **A restoration failure now opens the second-opinion ladder.** (Found while
+  investigating gh #815; it is *not* a fix for that issue — see the note at the
+  end of this entry.)
+  `SecondOpinionTrigger::for_status` recognised exactly two verdicts,
+  `Infeasible_Problem_Detected` and `Invalid_Number_Detected`. A solve that
+  ended `Restoration_Failed` got no second opinion at all — even though that
+  verdict is a statement about the *path* in exactly the sense the other two
+  are: the restoration sub-problem could not work from where the iterate got
+  to. The rung that answers that question, a displaced start
+  (`start_point_perturbation=1e-2`), was already implemented, on by default,
+  and measured as the highest-yield rung there is — 13 recoveries of 15 over
+  the KRONOS corpus, against `mu_strategy=adaptive`'s 4 — and it was never
+  reached.
+
+  It is deliberately **not** treated like a budget exit. The paragraph in
+  `for_status` that excludes `Maximum_Iterations_Exceeded` argues that the
+  answer there is a bigger budget and a re-solve would burn the same budget to
+  reach the same wall. A restoration failure stops far short of `max_iter` —
+  47 iterations of a 3000 cap on the new fixture, 2 on the gh #815 report —
+  so a bigger budget is not the available answer, and the exclusion does not
+  apply.
+
+  **Only rung 3 opens on this trigger**, so a restoration failure costs
+  exactly one extra solve, not three. Rungs 1 and 2 vary the linear-solver
+  scaling and the barrier strategy from the *same* starting point; the
+  starting point is what put the iterate where restoration failed, and a
+  different path from it can arrive somewhere just as bad. That is the same
+  reasoning that already limits `Invalid_Number_Detected` to this one rung.
+
+  New fixture `square_flowsheet_resto.nl` — square (32 × 32, zero degrees of
+  freedom, `f(x) = 0`), flowsheet-shaped, mixing `1e-6` mole fractions with
+  `3e6` Pa, feasible by construction (every row is `expr(x) == expr(x*)`, and
+  the generator in `dev-notes/square_flowsheet_resto_gen.py` asserts the
+  residual at `x*` is exactly zero). From a start displaced 3× in `P` and
+  `1/3` in `F` — strictly inside every bound — pounce reached
+  `Restoration Failed!` in 47 iterations where Ipopt 3.13.2 solves in 34;
+  it now recovers to `Solve_Succeeded` in 54. A second member of the same
+  family, displaced 100×, goes from `Restoration Failed!` at 2 iterations to
+  `Solve_Succeeded` at 109 — an optimum Ipopt itself misses, reporting local
+  infeasibility after 89 iterations.
+
+  `scripts/sweep-fixtures.sh` over the pre-existing corpus: **0 of 154
+  fixture-legs move**, and the reason is worth stating rather than reading as
+  reassurance — the corpus contains **no** leg that exits `Restoration_Failed`
+  at default options, so it could not have moved and cannot regression-guard
+  this change either. That gap is what the new fixture closes.
+  `degenerate_start_ladder.rs` cannot cover this branch for the same reason:
+  both its fixtures are HS008 from the origin, which exits
+  `Infeasible_Problem_Detected`. Re-run at 156 legs with the fixture in,
+  exactly one leg moves and it is the intended one. Its **lbfgs** leg is the
+  control: same model, same start, exits `Maximum_Iterations_Exceeded` at the
+  3000 cap, and is **unmoved** — the budget-exit exclusion executing on a real
+  leg rather than only in a unit test.
+
+  **This does not fix gh #815, and the distinction is the point.** That report
+  exits `Infeasible_Problem_Detected`, with a log showing the ladder already
+  firing on it; `Restoration_Failed` never occurs there, so this change is
+  inert for that model. Two things about it remain open. Its build
+  (`5cf01b16`) **predates rung 3 entirely** — added in `abbe856c`, which is
+  why the log shows two rungs and not three — and rung 3 is untested against
+  that flowsheet, which is not available here. And the verdict itself lands at
+  iteration 2, far short of any budget, which the main-loop rapid-infeasibility
+  detector cannot produce (`infeas_max_streak = 5` plus a no-descent
+  confirmation), so it comes out of restoration's `resto_orig_verdict` — where
+  the 61 s behind a reported "2 iterations" also goes. Neither is addressed
+  here. The synthetic family built for this entry never reproduces
+  `Infeasible_Problem_Detected` at all, so it is a fixture for *this* branch
+  and is not evidence about that one.
+
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
   caches in `ipopt_cq.rs`, so every read reassembled
