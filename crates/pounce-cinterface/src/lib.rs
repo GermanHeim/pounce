@@ -1262,6 +1262,7 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
     groups: *mut Index,
     rho_max: *mut Index,
     coloring_fell_back: *mut Index,
+    objective_clique_widened: *mut Index,
 ) {
     unsafe {
         let stats = last_stat(ipopt_problem, |s| {
@@ -1275,9 +1276,14 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
                 } else {
                     0
                 },
+                if s.fd_hessian_objective_clique_widened {
+                    1
+                } else {
+                    0
+                },
             )
         });
-        let (p, n, g, r, f) = stats.unwrap_or((-1, 0, 0, 0, 0));
+        let (p, n, g, r, f, w) = stats.unwrap_or((-1, 0, 0, 0, 0, 0));
         if !pattern_used.is_null() {
             *pattern_used = p;
         }
@@ -1292,6 +1298,9 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
         }
         if !coloring_fell_back.is_null() {
             *coloring_fell_back = f;
+        }
+        if !objective_clique_widened.is_null() {
+            *objective_clique_widened = w;
         }
     }
 }

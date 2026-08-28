@@ -121,6 +121,12 @@ pub struct SolveStatistics {
     /// Whether a requested star colouring failed validation and CPR was
     /// substituted.
     pub fd_hessian_coloring_fell_back: bool,
+    /// Whether the objective clique fell back to a conservative structural
+    /// set because the model stated no objective linearity. This is the
+    /// field that explains a surprising `fd_hessian_groups`: the clique is
+    /// then `N`, or all `n`, and the probe count reflects that rather than
+    /// the objective's true support.
+    pub fd_hessian_objective_clique_widened: bool,
     pub restoration_calls: Index,
     /// Cumulative inner-IPM iterations across every restoration call —
     /// the number of `r`-suffix rows a `print_level=5` log would show.
@@ -237,6 +243,7 @@ impl Default for SolveStatistics {
             fd_hessian_groups: 0,
             fd_hessian_rho_max: 0,
             fd_hessian_coloring_fell_back: false,
+            fd_hessian_objective_clique_widened: false,
             restoration_calls: 0,
             restoration_inner_iters: 0,
             restoration_outer_iters: 0,

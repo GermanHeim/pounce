@@ -75,7 +75,10 @@ changes.
   from an embedder.** `GetPounceFdHessianStats` in the C API, and
   `stats()["fd_hessian"]` through the CasADi plugin, report the pattern
   source, its nonzero count, the probe groups per Hessian, `rho_max`, and
-  whether a requested star colouring fell back to Curtis-Powell-Reid.
+  whether a requested star colouring fell back to Curtis-Powell-Reid, and
+  whether the objective clique had to widen for want of a stated objective
+  linearity — the field that distinguishes a high probe count caused by a
+  widened clique from one caused by a genuinely dense objective.
   Previously reachable only through the `POUNCE_FD_HESSIAN_DEBUG`
   environment variable. The reported source is the one the run **ended up
   with**, not the one requested: `fd_hessian_pattern=declared` falls back

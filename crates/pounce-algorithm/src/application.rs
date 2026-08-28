@@ -3402,6 +3402,7 @@ impl IpoptApplication {
                 stats.fd_hessian_groups = fd.groups as Index;
                 stats.fd_hessian_rho_max = fd.rho_max as Index;
                 stats.fd_hessian_coloring_fell_back = fd.coloring_fell_back;
+                stats.fd_hessian_objective_clique_widened = fd.objective_clique_widened;
             }
             stats.restoration_calls = alg.resto_calls;
             stats.restoration_inner_iters = alg.resto_inner_iters;

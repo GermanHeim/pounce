@@ -195,12 +195,13 @@ Two things were tried and rejected while chasing this:
   dense `J` makes `JᵀJ` dense, so the constraint half of the pattern is
   dense anyway and the objective refinement changes nothing. There is no
   model on that surface where it pays, so it is not worth its complexity.
-- **Masking the clique by the nonlinear-variable set.** A no-op: the
-  clique is already built from `get_objective_variables_linearity`, the
-  objective's *own* nonlinear set, which is a subset of the global one.
-  (The `grad_f`-nonzeros *fallback*, used only when a TNLP declines to
-  state its objective linearity, is a different and weaker set — it
-  includes variables that are linear in `f`.)
+- **Masking the clique by the nonlinear-variable set.** A no-op *when the
+  model states its objective linearity*: the clique is then built from
+  `get_objective_variables_linearity`, the objective's own nonlinear set,
+  which is already a subset of the global one. When the model states
+  nothing the mask is the next level down and is used — that is the
+  `N`-then-all-`n` ladder, and `FdStats::objective_clique_widened` says
+  which rung a run took.
 
 The actionable consequence is not a code change but a reachability one:
 the mitigation has to be available and visible from every frontend. Both
@@ -210,6 +211,10 @@ which pattern a run ended up with was only observable through
 `POUNCE_FD_HESSIAN_DEBUG`. See `GetPounceFdHessianStats` and
 `stats()["fd_hessian"]`, which report the source actually **used**, so a
 silent fallback to the 341-group pattern is visible rather than inferred.
+`objective_clique_widened` in the same report answers the follow-up — a
+high `groups` caused by a widened clique is a different problem from one
+caused by a genuinely dense objective, and the two are indistinguishable
+from the probe count alone.
 
 ---
 

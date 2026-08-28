@@ -1518,6 +1518,15 @@ def test_fd_hessian_stats_are_reported():
         check(f"fd_hessian.{k} is a positive count", dec[k] > 0, f"{k}={dec[k]}")
     check("fd_hessian reports the colouring fallback",
           dec["coloring_fell_back"] is False)
+    # The declared pattern needs no objective clique at all; the Jacobian
+    # derivation does, and this model states no objective linearity
+    # through the C interface, so it is the widened one. That distinction
+    # is what makes a surprising `groups` diagnosable.
+    check("fd_hessian reports the objective-clique widening",
+          dec["objective_clique_widened"] is False
+          and jac["objective_clique_widened"] is True,
+          f'declared={dec["objective_clique_widened"]} '
+          f'jacobian={jac["objective_clique_widened"]}')
 
     # The property that makes the field worth reading: asking for
     # `declared` on a model with no Hessian at all reports what actually

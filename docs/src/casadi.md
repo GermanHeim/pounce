@@ -676,14 +676,20 @@ is present only when the mode ran:
 ```python
 r = solver(x0=..., lbg=..., ubg=...)
 solver.stats()["fd_hessian"]
-# {'pattern': 'declared', 'nnz': 34094, 'groups': 17,
-#  'rho_max': 15, 'coloring_fell_back': False}
+# {'pattern': 'declared', 'nnz': 34094, 'groups': 17, 'rho_max': 15,
+#  'coloring_fell_back': False, 'objective_clique_widened': False}
 ```
 
 `pattern` is the source the solve **ended up with**, not the one you
 asked for — `declared` falls back silently, and `groups` is what that
 fallback costs you, one gradient-and-Jacobian evaluation per group per
 Hessian rebuild. On `laptime` the two patterns are 17 groups against 341.
+
+`objective_clique_widened` is the other half of that answer. Under the
+Jacobian pattern POUNCE has to bound `∇²f` with a clique over the
+variables the objective is nonlinear in, and when the model states no
+objective linearity that clique widens to every nonlinear variable — so a
+surprising `groups` is a missing declaration, not a dense objective.
 
 **Restoration runs limited-memory regardless.** The restoration sub-NLP's
 primal is a five-block compound the model's Hessian pattern does not

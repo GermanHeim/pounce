@@ -375,6 +375,13 @@ void GetPounceRestorationStats(
  * evaluation per rebuild), and `rho_max` the pattern's widest row.
  * `coloring_fell_back` is 1 when a requested star colouring failed
  * validation and Curtis-Powell-Reid was substituted.
+ *
+ * `objective_clique_widened` is 1 when the objective clique fell back to
+ * a conservative structural set because the model stated no objective
+ * linearity. It is the field that explains a surprising `groups`: the
+ * clique is then the nonlinear-variable set, or every variable, and the
+ * probe count reflects that rather than the objective's true support. A
+ * model implementing get_objective_variables_linearity pays none of it.
  */
 void GetPounceFdHessianStats(
     IpoptProblem ipopt_problem,
@@ -382,7 +389,8 @@ void GetPounceFdHessianStats(
     ipindex*     nnz,
     ipindex*     groups,
     ipindex*     rho_max,
-    ipindex*     coloring_fell_back);
+    ipindex*     coloring_fell_back,
+    ipindex*     objective_clique_widened);
 
 /* -----------------------------------------------------------------
  * Pounce extensions — linear-solver post-mortem

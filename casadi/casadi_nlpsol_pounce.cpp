@@ -70,7 +70,7 @@ namespace casadi {
     /// which is what keeps `stats()["fd_hessian"]` absent rather than
     /// present-and-zero for the modes it does not describe.
     ipindex fd_pattern = -1, fd_nnz = 0, fd_groups = 0, fd_rho_max = 0,
-            fd_fell_back = 0;
+            fd_fell_back = 0, fd_clique_widened = 0;
     /// Working set carried from this memory object's previous solve
     /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
     /// variable / row numbering. Empty until a solve produces one.
@@ -835,6 +835,7 @@ namespace casadi {
     m->resto_calls = m->resto_inner = m->resto_outer = 0;
     m->fd_pattern = -1;
     m->fd_nnz = m->fd_groups = m->fd_rho_max = m->fd_fell_back = 0;
+    m->fd_clique_widened = 0;
     m->resto_secs = 0;
 
     m->xl.assign(d_nlp->lbz, d_nlp->lbz + n);
@@ -1011,7 +1012,8 @@ namespace casadi {
     GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
                               &m->resto_outer, &m->resto_secs);
     GetPounceFdHessianStats(prob, &m->fd_pattern, &m->fd_nnz, &m->fd_groups,
-                            &m->fd_rho_max, &m->fd_fell_back);
+                            &m->fd_rho_max, &m->fd_fell_back,
+                            &m->fd_clique_widened);
     // Same window as the harvest above, and for the same reason: the
     // report is built from the solve retained on `prob`, which the free
     // below takes with it.
@@ -1221,6 +1223,10 @@ namespace casadi {
         fd["groups"] = static_cast<casadi_int>(m->fd_groups);
         fd["rho_max"] = static_cast<casadi_int>(m->fd_rho_max);
         fd["coloring_fell_back"] = m->fd_fell_back != 0;
+        // Why `groups` is what it is, when it surprises: with no stated
+        // objective linearity the clique widens to every nonlinear
+        // variable, or to every variable, and the probe count follows.
+        fd["objective_clique_widened"] = m->fd_clique_widened != 0;
         stats["fd_hessian"] = fd;
       }
     }
