@@ -23,6 +23,7 @@ use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use pounce_common::cached::Cache;
+use pounce_common::tagged::TaggedObject;
 use pounce_common::types::Number;
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
@@ -94,6 +95,37 @@ pub struct IpoptCalculatedQuantities {
     curr_slack_s_u_cache: RefCell<Cache<Rc<dyn Vector>>>,
     curr_sigma_x_cache: RefCell<Cache<Rc<dyn Vector>>>,
     curr_sigma_s_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    // gh #812. Upstream caches both Lagrangian gradients
+    // (`IpIpoptCalculatedQuantities.cpp`: `curr_grad_lag_x_cache_`
+    // with `GetCachedResult5Dep(x, y_c, y_d, z_L, z_U)`,
+    // `curr_grad_lag_s_cache_` with `GetCachedResult3Dep(y_d, v_L,
+    // v_U)`); the port dropped both, so `∇_x L` was reassembled from
+    // scratch on every read — two transposed Jacobian products and
+    // three vector sweeps. On `benchmarks/large_scale/laptime.nl` that
+    // is 806 assemblies for 101 distinct iterates: seven of every
+    // eight reads recompute a value the previous read already had.
+    //
+    // THE X KEY CARRIES `mu`, AND UPSTREAM'S DOES NOT. The five vector
+    // tags are NOT a complete dependency set here, because the premise
+    // they rest on — that `∇f`, `J_c` and `J_d` are functions of `x`
+    // alone — is false for the NLP this CQ is built over during
+    // restoration. `RestoNlp`'s objective carries the proximity term
+    // `ζ/2·‖D_R(x − x_R)‖²` whose `ζ` is a function of the barrier
+    // parameter, so its `∇f` moves when `mu` moves and `x` does not.
+    // Keyed on the five tags alone this cache returns the pre-update
+    // gradient, which is a silent, self-consistent wrong answer: the
+    // solve still converges and still reports the right objective, it
+    // just takes a different route there. Measured, that route is
+    // worse — `scripts/sweep-fixtures.sh` moved 8 of 154 fixture-legs,
+    // `pooling_rt2stp` from 295 to 627 iterations on the lbfgs leg and
+    // `issue_508_infeasible_gap_1em4` from 79 to 224. With `mu` in the
+    // key the sweep is byte-identical across all 154.
+    //
+    // `∇_s L = −y_d − P_L v_L + P_U v_U` evaluates nothing on the NLP,
+    // so its three tags really are complete and it keeps upstream's
+    // key unchanged.
+    curr_grad_lag_x_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_grad_lag_s_cache: RefCell<Cache<Rc<dyn Vector>>>,
 }
 
 /// Helper: convert `Box<dyn Vector>` to `Rc<dyn Vector>`. Cheap; the
@@ -181,6 +213,8 @@ impl IpoptCalculatedQuantities {
             curr_slack_s_u_cache: RefCell::new(Cache::new(1)),
             curr_sigma_x_cache: RefCell::new(Cache::new(1)),
             curr_sigma_s_cache: RefCell::new(Cache::new(1)),
+            curr_grad_lag_x_cache: RefCell::new(Cache::new(1)),
+            curr_grad_lag_s_cache: RefCell::new(Cache::new(1)),
         }
     }
 
@@ -669,6 +703,20 @@ impl IpoptCalculatedQuantities {
     /// per `IpIpoptCalculatedQuantities.cpp:1993-2030`.
     pub fn curr_grad_lag_x(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        let deps: [&dyn TaggedObject; 5] = [
+            iv.x.as_tagged(),
+            iv.y_c.as_tagged(),
+            iv.y_d.as_tagged(),
+            iv.z_l.as_tagged(),
+            iv.z_u.as_tagged(),
+        ];
+        let mu = self.data.borrow().curr_mu;
+        {
+            let cache = self.curr_grad_lag_x_cache.borrow();
+            if let Some(v) = cache.get(&deps, &[mu]) {
+                return v;
+            }
+        }
         let grad_f = self.curr_grad_f();
         let jc_t_y_c = self.curr_jac_c_t_times_curr_y_c();
         let jd_t_y_d = self.curr_jac_d_t_times_curr_y_d();
@@ -680,13 +728,25 @@ impl IpoptCalculatedQuantities {
         let nlp = self.nlp.borrow();
         nlp.px_l().mult_vector(-1.0, &*iv.z_l, 1.0, &mut *tmp);
         nlp.px_u().mult_vector(1.0, &*iv.z_u, 1.0, &mut *tmp);
-        rc_from(tmp)
+        let v = rc_from(tmp);
+        self.curr_grad_lag_x_cache
+            .borrow_mut()
+            .add(v.clone(), &deps, &[mu]);
+        v
     }
 
     /// `∇_s L = -y_d - P_L v_L + P_U v_U`
     /// (`IpIpoptCalculatedQuantities.cpp:2069-2098`).
     pub fn curr_grad_lag_s(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        let deps: [&dyn TaggedObject; 3] =
+            [iv.y_d.as_tagged(), iv.v_l.as_tagged(), iv.v_u.as_tagged()];
+        {
+            let cache = self.curr_grad_lag_s_cache.borrow();
+            if let Some(v) = cache.get(&deps, &[]) {
+                return v;
+            }
+        }
         let mut tmp = iv.y_d.make_new();
         let nlp = self.nlp.borrow();
         // tmp = P_U v_U
@@ -695,7 +755,12 @@ impl IpoptCalculatedQuantities {
         nlp.pd_l().mult_vector(-1.0, &*iv.v_l, 1.0, &mut *tmp);
         // tmp = tmp - y_d
         tmp.axpy(-1.0, &*iv.y_d);
-        rc_from(tmp)
+        drop(nlp);
+        let v = rc_from(tmp);
+        self.curr_grad_lag_s_cache
+            .borrow_mut()
+            .add(v.clone(), &deps, &[]);
+        v
     }
 
     // --------------------------------------------------------------
@@ -2817,6 +2882,12 @@ mod tests {
         // inequality block (the default `x0 + x1 - 1` is 4 at the fixture's
         // point, which dominates any d-block difference under a max-norm).
         c_override: Option<Number>,
+        // gh#812: stand in for `RestoNlp`, whose objective carries the
+        // proximity term `ζ/2·‖D_R(x − x_R)‖²` and therefore has a `∇f`
+        // that moves with the barrier parameter at fixed `x`. When set,
+        // `eval_grad_f` adds `curr_mu` read from this handle — the same
+        // coupling, in one line.
+        mu_source: Option<IpoptDataHandle>,
     }
 
     impl MockNlp {
@@ -2908,6 +2979,7 @@ mod tests {
                 empty_jac_c: false,
                 c_rhs: None,
                 c_override: None,
+                mu_source: None,
             }
         }
     }
@@ -2933,6 +3005,11 @@ mod tests {
             let gg = g.as_any_mut().downcast_mut::<DenseVector>().unwrap();
             gg.values_mut()[0] = 2.0 * xx.values()[0];
             gg.values_mut()[1] = 2.0 * xx.values()[1];
+            if let Some(d) = self.mu_source.as_ref() {
+                let mu = d.borrow().curr_mu;
+                gg.values_mut()[0] += mu;
+                gg.values_mut()[1] += mu;
+            }
             if self.nan_grad {
                 gg.values_mut()[0] = Number::NAN;
             }
@@ -3056,6 +3133,67 @@ mod tests {
         // Disable damping for clean unit-test expectations.
         cq.kappa_d = 0.0;
         cq
+    }
+
+    /// gh#812 — `mu` is part of the `curr_grad_lag_x` cache key, and
+    /// removing it is a silent trajectory regression.
+    ///
+    /// The five vector tags upstream keys this cache on (`x`, `y_c`,
+    /// `y_d`, `z_L`, `z_U`) are a complete dependency set only while
+    /// `∇f` is a function of `x` alone. It is not during restoration:
+    /// `RestoNlp`'s proximity term scales with `ζ(mu)`, so its `∇f`
+    /// moves while every one of those five tags stands still. A cache
+    /// that misses `mu` then hands back the pre-update gradient — an
+    /// answer that is self-consistent, converges, and reports the
+    /// right objective, while taking a measurably worse route: drop
+    /// `mu` from the key and `scripts/sweep-fixtures.sh` moves 8 of
+    /// 154 fixture-legs, `pooling_rt2stp` 295 → 627 iterations on the
+    /// lbfgs leg.
+    ///
+    /// MUTATION CHECK: delete `&[mu]` from the `get`/`add` pair in
+    /// `curr_grad_lag_x` and this test fails — the second read returns
+    /// the first read's vector unchanged.
+    #[test]
+    fn grad_lag_x_cache_reruns_when_only_mu_moves() {
+        let mut data = IpoptData::new();
+        data.curr_mu = 0.1;
+        data.set_curr(IteratesVector::new(
+            rcv(&[2.0, 3.0]),
+            rcv(&[4.0]),
+            rcv(&[1.0]),
+            rcv(&[1.0]),
+            rcv(&[0.5]),
+            rcv(&[0.7]),
+            rcv(&[0.3]),
+            rcv(&[]),
+        ));
+        let data_handle = StdRc::new(RefCell::new(data));
+        let mut nlp = MockNlp::new();
+        nlp.mu_source = Some(StdRc::clone(&data_handle));
+        let nlp: StdRc<RefCell<dyn IpoptNlp>> = StdRc::new(RefCell::new(nlp));
+        let mut cq = IpoptCalculatedQuantities::new(StdRc::clone(&data_handle), nlp);
+        cq.kappa_d = 0.0;
+
+        let before = dense_vals(&cq.curr_grad_lag_x());
+        // A repeat read at unchanged `mu` must hit the cache and agree
+        // exactly — otherwise the test below proves nothing about the
+        // key and everything about a non-deterministic mock.
+        assert_eq!(before, dense_vals(&cq.curr_grad_lag_x()));
+
+        // Move ONLY `mu`. Every iterate vector — and so every one of
+        // the five tags upstream keys on — is untouched.
+        data_handle.borrow_mut().curr_mu = 0.5;
+        let after = dense_vals(&cq.curr_grad_lag_x());
+
+        // The mock adds `mu` to both gradient components, so the whole
+        // Lagrangian gradient shifts by exactly the change in `mu`.
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(after.iter()) {
+            assert!(
+                (a - b - 0.4).abs() < 1e-12,
+                "grad_lag_x did not follow mu: {b} -> {a}, expected +0.4"
+            );
+        }
     }
 
     fn dense_vals(v: &Rc<dyn Vector>) -> Vec<Number> {

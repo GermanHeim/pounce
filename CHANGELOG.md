@@ -9,6 +9,59 @@ changes.
 
 ## [Unreleased]
 
+- **Both Lagrangian gradients are now cached, and the cache key carries `mu`
+  (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
+  caches in `ipopt_cq.rs`, so every read reassembled
+  `∇f + J_cᵀy_c + J_dᵀy_d − P_L z_L + P_U z_U` from scratch — two transposed
+  Jacobian products and three vector sweeps. On
+  `benchmarks/large_scale/laptime.nl` that is **806 assemblies for 101 distinct
+  iterates**: seven of every eight reads recompute a value the previous read
+  already produced. The readers are spread across the KKT right-hand side, the
+  convergence check, the iteration output, the adaptive-μ oracle and the
+  intermediate callback, and a comment in `conv_check/opt_error.rs` already
+  named the cost and worked around it by calling the accessor only where it
+  could change the verdict. Upstream caches both
+  (`IpIpoptCalculatedQuantities.cpp`, `GetCachedResult5Dep(x, y_c, y_d, z_L,
+  z_U)` and `GetCachedResult3Dep(y_d, v_L, v_U)`); the port dropped them.
+
+  **Upstream's key is not complete in POUNCE, and restoring it verbatim is a
+  trajectory regression.** Memoizing a deterministic function is bit-identical
+  by construction only if the key names every input, and the five vector tags
+  name every input only while `∇f` is a function of `x` alone. That is false
+  for the NLP this CQ is built over during restoration: `RestoNlp`'s objective
+  carries the proximity term `ζ/2·‖D_R(x − x_R)‖²` whose `ζ` is a function of
+  the barrier parameter, so its `∇f` moves while all five tags stand still.
+  Keyed on the five tags alone the cache returns the pre-update gradient, and
+  `scripts/sweep-fixtures.sh` moved **8 of 154 fixture-legs** —
+  `pooling_rt2stp` from 295 to 627 iterations on the lbfgs leg and
+  `issue_508_infeasible_gap_1em4` from 79 to 224, both converging to the same
+  objective to nine digits. That is the gh #544 shape: the right answer,
+  slowly, invisible to a suite that asserts status and objective. `mu` is
+  therefore a scalar dependency on the `x` key, which `Cache::get`/`add`
+  already take a `&[Number]` for, and with it the sweep is byte-identical
+  across all 154 legs. `∇_s L = −y_d − P_L v_L + P_U v_U` evaluates nothing on
+  the NLP, so its three tags are complete and it keeps upstream's key.
+  `grad_lag_x_cache_reruns_when_only_mu_moves` pins the difference and is
+  mutation-checked: delete `&[mu]` and it fails.
+
+  Measured on `laptime.nl` (MA57, limited-memory, monotone, `max_iter=100`,
+  both BLAS libraries pinned to one thread, median of three runs), the three
+  rows that read `∇L` after it has been assembled drop about 0.29 s combined —
+  `CheckConvergence` 0.481 → 0.294 s, `UpdateBarrierParameter` 0.093 →
+  0.045 s, `OutputIteration` 0.070 → 0.022 s — and `OverallAlgorithm` goes
+  14.282 → 14.148 s. `ComputeSearchDirection` does not move (11.113 →
+  11.272 s, inside the run-to-run spread), which is the expected shape: it is
+  the *first* consumer of each new iterate, so it always pays the cold
+  assembly, and the cache pays back only in the readers behind it.
+
+  Filing note, since gh #812 said otherwise: the `FireIntermediateCallback`
+  row is **not** avoidable work. 0.888 s of its 0.989 s is `curr_jac_c()` —
+  the constraint Jacobian evaluation at the freshly accepted iterate, which
+  the callback merely happens to touch first because it fires at the bottom
+  of the loop. Ipopt has no such row because its first consumer of the new
+  iterate is inside `ComputeSearchDirection`. Making the payload lazy moves
+  that cost, it does not remove it.
+
 - **`neg_curv_escapes` above `1` could report a worse answer than turning it
   off (gh #805).** The option's help text and `docs/src/options.md` both state
   the guarantee without qualification — the escape "cannot return a worse
