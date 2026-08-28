@@ -178,13 +178,22 @@ def test_it_applies_under_every_mode():
             f"step, {plain:.3e} -> {corr:.3e}")
 
 
-def test_a_correction_that_achieves_nothing_says_so():
-    """A bound that has to LEAVE the active set is what the corrector's
-    operator cannot represent, whatever point it is assembled at, and
-    the caller has to be told rather than handed the uncorrected step
-    as though it were corrected."""
+def test_a_release_the_step_hides_is_corrected_partway():
+    """A bound that has to LEAVE the active set, on a step whose
+    endpoint does not show it. The operator at the predicted point
+    carries the step's clamped multiplier at that bound, a weak entry,
+    so the iterations move x partway off the bound and genuinely
+    reduce the residual: no achieves-nothing warning fires, the
+    estimate lands closer than the plain step, and it is still not
+    the re-solve. The modes that decide the release and get there
+    exactly are owned by
+    `test_the_modes_disagree_when_a_held_bound_must_be_released`.
+    Pinned deliberately: a corrector that reaches the re-solve here
+    has learned to apply the release inside its own loop, and this
+    test should then be updated on purpose."""
     m = held()
     pyo.SolverFactory("pounce").solve(m)
+    tx, _ty = resolve_held(2.0)
     # p goes to 2, so the solution wants x well off the lower bound the
     # base point holds, and only a mode that releases can follow
     with warnings.catch_warnings(record=True) as w:
@@ -194,11 +203,13 @@ def test_a_correction_that_achieves_nothing_says_so():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         plain = estimate(m, [(m.p, 2.0)])[m.x]
-    assert any("corrector spent" in x for x in msgs), (
-        f"the corrector achieved nothing and should say so: {msgs}")
-    assert corrected == pytest.approx(plain, abs=1e-9), (
-        "a correction that achieves nothing should leave the estimate "
-        f"where it was: {plain} -> {corrected}")
+    assert not any("corrector spent" in x for x in msgs), (
+        f"the residual genuinely falls here, so no warning: {msgs}")
+    assert abs(corrected - tx) < abs(plain - tx) / 2, (
+        f"partway lands closer than the plain step: {plain} -> "
+        f"{corrected}, re-solve {tx}")
+    assert abs(corrected - tx) > 1e-2, (
+        f"partway is not the re-solve: {corrected}, re-solve {tx}")
 
 
 def test_the_corrector_reaches_a_bound_the_step_arrives_at():
@@ -284,21 +295,25 @@ def test_it_pins_a_bound_the_step_reaches():
 def test_the_modes_disagree_when_a_held_bound_must_be_released():
     """`mode="linear"` holds the active set fixed as it builds the step,
     so its endpoint keeps `x` on the bound and there is no release for
-    the corrector to apply. The barrier term the base point carries
-    holds `x` down, and no number of iterations moves it. `fix_relax`
-    and `path` decide the release themselves and converge."""
+    the corrector to apply. The corrector moves `x` partway on the
+    weak entry the step's clamped multiplier builds and does not
+    reach the re-solve. `fix_relax` and `path` decide the release
+    themselves and converge."""
     m = held()
     solve_it(m)
     tx, _ = resolve_held(2.0)
     lin = mode_corrector(m, 2.0, "linear", 8)
     assert lin["released"] == 0, (
         f"the linear step's endpoint shows no release: {lin}")
-    assert lin["residual"] > lin["initial_residual"] * 0.99, (
-        f"with the bound still in the operator there is nothing to gain: "
+    # the weak clamped entry at the hidden release lets the iterations
+    # reduce the residual and move x partway, without the released-row
+    # elimination that would take it to the re-solve
+    assert lin["residual"] < lin["initial_residual"], (
+        f"the iterations reduce the residual they measure: "
         f"{lin['initial_residual']:.3e} -> {lin['residual']:.3e}")
     lx, _ = estimated(m, 2.0, mode="linear", corrector_iter=8)
-    assert abs(lx - tx) > 0.5, (
-        f"the linear estimate should stay on the bound, at {lx}")
+    assert abs(lx - tx) > 1e-2, (
+        f"partway is not the re-solve, at {lx} vs {tx}")
     for mode in ("fix_relax", "path"):
         c = mode_corrector(m, 2.0, mode, 8)
         assert c["released"] == 1, f"mode={mode} should release: {c}"

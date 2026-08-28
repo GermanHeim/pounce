@@ -315,17 +315,24 @@ fn the_corrector_releases_a_bound_the_solve_held() {
 }
 
 #[test]
-fn a_plain_step_leaves_a_held_bound_where_it_was() {
+fn a_release_the_step_hides_is_followed_partway() {
     // The same p through the plain step. Its endpoint keeps x2 on the
-    // bound, so there is no release to read and the corrector iterates
-    // against the base point's own barrier term, which holds x2 down.
-    // Nothing moves, and that is what the residual reports.
+    // bound, so there is no release for the corrector to apply and
+    // the bound's row stays in the operator. The step's multiplier
+    // block still encodes the release, the clamp floors that
+    // multiplier at the weak end of the kappa-sigma band, and the
+    // entry rebuilt at the predicted point is weak, so the iterations
+    // move x2 partway off the bound and reduce the residual they
+    // measure without reaching the released answer. Pinned
+    // deliberately: a corrector that reaches the exact answer here
+    // has learned to apply the release inside its own loop, and this
+    // test should then be updated on purpose.
     let solver = solved();
     let base = solver.converged().expect("converged").x.clone();
     let step = solver
         .parametric_step_full(&[0], &[RELEASE_DP])
         .expect("parametric step");
-    let (_, report) = solver
+    let (out, report) = solver
         .correct_step(&[0], &[RELEASE_DP], &step, 12)
         .expect("corrector");
     assert_eq!(
@@ -344,8 +351,20 @@ fn a_plain_step_leaves_a_held_bound_where_it_was() {
         base[1] + step[1],
     );
     assert!(
-        report.residual > report.initial_residual * 0.99,
-        "with the bound still in the operator there is nothing to gain:          {:.3e} -> {:.3e}",
+        report.residual < report.initial_residual,
+        "the weak entry lets the iterations reduce the residual: {:.3e} -> {:.3e}",
+        report.initial_residual,
+        report.residual,
+    );
+    let corrected = base[1] + out[1];
+    assert!(
+        corrected > 1e-2,
+        "the weak entry moves x2 partway off the bound, at {corrected}",
+    );
+    assert!(
+        (corrected - x2).abs() > 1e-2,
+        "partway is not the released answer: x2 {corrected}, exact {x2} \
+         (residual {:.3e} -> {:.3e})",
         report.initial_residual,
         report.residual,
     );

@@ -423,34 +423,21 @@ pub(crate) fn run(
     for &r in &released {
         iterate[r] = 0.0;
     }
-    // Always a FRESH copy of the diagonal, even when the active set
-    // did not change: the factorization cache keys on this object's
-    // tag, and handing it the held solve's own vector returns the
-    // base point's cached factor with nothing re-evaluated. A fresh
-    // tag is what makes the factorization below actually happen at
-    // the predicted point. With both sets empty this is the held
-    // diagonal unchanged, copied.
-    let sigma = if released.is_empty() && pinned.is_empty() {
-        bs.fresh_barrier_sigma_x()
-    } else {
-        bs.active_set_sigma_x(&released, &pinned)
-    }
-    .ok_or_else(|| {
-        SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
-    })?;
-
     // The operator is assembled at the PREDICTED point: the current
     // iterate is swapped to it for the duration of the correction, so
-    // the Hessian and the constraint Jacobians are evaluated there,
-    // with the step's own multipliers as clamped above, and the one
-    // factorization the correction pays is of that operator. A chord
+    // every block evaluates there. The Hessian and the constraint
+    // Jacobians at the stepped point with the step's own multipliers
+    // as clamped above, the bound rows with the stepped slacks and
+    // multipliers, and the barrier diagonal from the same frame
+    // (built below, after the swap), so the one factorization the
+    // correction pays is of one consistent operator. A chord
     // iteration contracts at the rate the distance between its
     // operator and the true Jacobian sets, and the predicted point is
-    // where the truth is. The barrier diagonal is the exception: it
-    // stays the held solve's, with the predictor's active set applied,
-    // because a diagonal rebuilt from the predicted slacks carries
-    // entries without the held solve's cap at any coordinate the step
-    // moves onto a bound.
+    // where the truth is. The clamp above bounds every multiplier
+    // into the kappa-sigma band at the stepped slacks, and the box
+    // put-back leaves a positive margin on every coordinate, so the
+    // rebuilt diagonal is large exactly where the step holds a
+    // coordinate on a bound and finite everywhere.
     let (data_h, cq_h, _) = bs.activity_handles();
     let predicted = bs.pack_natural(&iterate).ok_or_else(|| {
         SolverError::SensComputationFailed("corrector: packing the predicted point failed".into())
@@ -492,6 +479,21 @@ pub(crate) fn run(
         data_h.borrow_mut().w = Some(w);
     }
     let _restore = restore;
+
+    // Built AFTER the swap, so the slacks and multipliers it reads
+    // are the predicted point's. Always a FRESH object: the
+    // factorization cache keys on this vector's tag, and handing it
+    // an already-cached vector could return a factor of a different
+    // operator. With both sets empty this is the predicted point's
+    // own barrier diagonal, copied.
+    let sigma = if released.is_empty() && pinned.is_empty() {
+        bs.fresh_barrier_sigma_x()
+    } else {
+        bs.active_set_sigma_x(&released, &pinned)
+    }
+    .ok_or_else(|| {
+        SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
+    })?;
 
     let solve = |rhs: &[Number], lhs: &mut [Number]| -> bool {
         // The same Rc every call: the factorization cache keys on its

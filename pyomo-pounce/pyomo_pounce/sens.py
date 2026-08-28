@@ -1286,17 +1286,21 @@ def estimate(model, perturb, clamp=True, mode="linear",
 
     corrector_iter runs Newton iterations on the barrier system after
     the step, against an operator assembled at the predicted point:
-    one factorization there with the derivatives evaluated at the
-    stepped iterate, then a back-solve per iteration. It aims at the
-    barrier solution at the mu the solve finished on rather than at a
-    re-solve, so the accuracy it reaches is bounded by that offset,
-    and it stops as soon as an iteration fails to improve the
-    residual. Where the perturbation needs a bound the base point held
-    tightly to leave the active set, the corrector's operator cannot
-    represent the change, the iterations make no progress, and a
-    warning says so rather than letting the uncorrected step pass as
-    corrected. It applies under every mode, refining whatever step that
-    mode produced.
+    one derivative evaluation and one factorization there, every
+    block including the barrier diagonal, then a back-solve per
+    iteration. It aims at the barrier solution at the mu the solve
+    finished on rather than at a re-solve, so the accuracy it reaches
+    is bounded by that offset, and it stops as soon as an iteration
+    fails to improve the residual, warning when the whole correction
+    failed to improve it. Where the perturbation needs a bound to
+    leave the active set and the step's endpoint does not show the
+    release, no released row is applied: the iterations can move the
+    variable partway off the bound on the weak diagonal entry the
+    step's clamped multiplier builds, and the estimate is not the
+    re-solve. mode="fix_relax" and mode="path" decide such releases
+    themselves, and the corrector applies the rows they decided. It
+    applies under every mode, refining whatever step that mode
+    produced.
 
     bound_eps sets how far outside a variable bound a step has to end
     to count as having left it, which decides what mode="fix_relax"
@@ -1409,11 +1413,10 @@ def estimate(model, perturb, clamp=True, mode="linear",
         step, corrector = _correct(
             session, pin_idx, deltas, step, corrector_iter)
         # A correction that works drives the residual down by orders;
-        # one that cannot represent the active-set change the
-        # perturbation needs shaves a few percent off and leaves the
-        # estimate where it was. Halving is a low bar that separates
-        # them cleanly, and saying nothing would let the second case
-        # pass for the first.
+        # one whose Newton direction finds nothing to reduce shaves a
+        # few percent off and leaves the estimate where it was.
+        # Halving is a low bar that separates them cleanly, and saying
+        # nothing would let the second case pass for the first.
         if corrector is not None and corrector["residual"] > 0.5 * corrector[
                 "initial_residual"]:
             warnings.warn(
@@ -1422,10 +1425,11 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 f"residual from {corrector['initial_residual']:.2e} to "
                 f"{corrector['residual']:.2e}, measured from the point the "
                 "iterations start at rather than from the step handed in, "
-                "so the estimate is close to "
-                "the uncorrected step. That happens when the perturbation "
-                "needs a bound the base point held tightly to leave the "
-                "active set, which the corrector's operator cannot represent.")
+                "so the estimate is close to the uncorrected step. One "
+                "cause is a bound that must leave the active set with "
+                "nothing else for the iterations to reduce; "
+                "mode=\"fix_relax\" and mode=\"path\" decide such releases "
+                "where the step shows them.")
 
     dx = session.scatter_x(np.asarray(step))
     x_new = session.base_x + dx
