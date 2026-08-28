@@ -1132,18 +1132,28 @@ iterations at the shipped defaults.
 
 **Where it loses, and what to do about it.** Over a 32-cell sweep of the
 #818 model family (`n` ∈ {4, 8, 12, 20} × cond ∈ {1e2, 1e4, 1e8, 1e12} ×
-`limited_memory_max_history` ∈ {6, 10}) one cell loses a status: `n = 8`
-at cond 1e12 with the default memory of 6 goes from a 2000-iteration
-loose-tolerance success to `Diverging_Iterates` at 352. It is not a
-tuning artifact — it fails at every `alpha_red_factor_min` and every
-gate measured — and the mechanism is the floor rather than the fit:
-dropping `α` by up to 20× per trial reaches `alpha_min` in a fifth of
-the evaluations, so a line search that was going to fail anyway fails
-sooner and from a different iterate. If a limited-memory solve reports
-`Diverging_Iterates` or stalls where it used to crawl, the first thing
-to try is **`limited_memory_max_history 10`**, which converges that cell
-in 345 iterations; the general escape hatch is `alpha_red_factor_min`
-equal to `alpha_red_factor`, which restores upstream's sequence exactly.
+`limited_memory_max_history` ∈ {6, 10}) no cell loses a status and two
+gain one, but it is not free: of the 30 cells whose status is unchanged,
+14 take fewer iterations and 8 take more. The worst is `n = 8` at cond
+1e4 with memory 6, 646 → 822.
+
+If a limited-memory solve stalls where it used to crawl, the first thing
+to try is **`limited_memory_max_history 10`** — the cells this change
+does not fix are bounded by the quality of the quasi-Newton model, not
+by the trial sequence, and a wider window is what moves that bound (the
+8-variable cond-1e8 case takes 41 iterations at memory 10 against 1073
+at 6). The general escape hatch is `alpha_red_factor_min` equal to
+`alpha_red_factor`, which collapses the clamp and restores upstream's
+sequence exactly.
+
+One cell of that sweep, `n = 8` at cond 1e12 with memory 6, read as a
+status regression during review — `Diverging_Iterates` at 352, at every
+`alpha_red_factor_min` and every gate measured. The cause was not the
+line search: the divergence guard was pronouncing unboundedness on a
+*watchdog trial* iterate, a point the line search had already rejected
+and was holding a snapshot to revert to. That is fixed separately, and
+the cell now converges to an objective seven orders of magnitude below
+what upstream's sequence reaches at the same iteration count.
 
 ### When the line search fails anyway: `limited_memory_ls_failure_restarts`
 

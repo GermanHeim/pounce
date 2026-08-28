@@ -79,32 +79,34 @@ changes.
   | `n = 8`, cond 1e12, `m = 10` | 421 | **345** | - |
   | `n = 4`, cond 1e4 | 24 | 26 | 23 |
   | `n = 8`, cond 1e4, `m = 6` | 646 | 822 | - |
-  | `n = 8`, cond 1e12, `m = 6` | 2000, converged | **352, `Diverging_Iterates`** | - |
+  | `n = 8`, cond 1e12, `m = 6` | 2000, obj 2.5e-8 | 2000, obj **3.2e-15** | - |
 
   `* = Maximum_Iterations_Exceeded`. The default-memory 8-variable case
   at cond 1e8 - the one the first draft of this fix left open, on the
   reasoning that the solve was now bounded by model quality rather than
   by the trial sequence - now converges.
 
-  **The last row is a regression, and it is not tuned away.** It is the
-  one cell of a 32-cell sweep (`n` in {4, 8, 12, 20} x cond in {1e2,
-  1e4, 1e8, 1e12} x `m` in {6, 10}) where the interpolation loses a
-  status, and it is robust: it fails at every `alpha_red_factor_min` in
-  {0.05, 0.1, 0.2, 0.25, 0.3, 0.4} and at every trial gate in
-  {5, 8, 12, 20}, recovering only at a gate (40) high enough that the
-  interpolation never fires at all. The mechanism is the floor, not the
-  fit: dropping `alpha` by up to 20x per trial reaches `alpha_min` in a
-  fifth of the evaluations, so a line search that was always going to
-  fail fails *sooner*, from a different iterate, and on a 6-pair model
-  of an 8-variable Hessian at cond 1e12 the failure path it lands on is
-  a divergent one rather than a slow one. Note what the `before` column
-  buys there: 2000 iterations to a loose-tolerance success whose `x` is
-  still 1.2e-4 off, and 9353 to a tight one. It is the same "model
-  quality, not trial sequence" wall the 8-variable case has always been
-  against, reached by a different exit, and it has the same remedy -
-  `limited_memory_max_history 10` converges in 345. The general escape
+  Over the full 32-cell sweep this came from (`n` in {4, 8, 12, 20} x
+  cond in {1e2, 1e4, 1e8, 1e12} x `m` in {6, 10}) **no cell loses a
+  status and two gain one** — the row above, and `n = 12` cond 1e12
+  `m = 10`, which goes from `Restoration_Failed` at 1514 with `x` a
+  factor of 400 out to `Maximum_Iterations_Exceeded` at 982 with it
+  2e-4 out. Of the 30 cells that keep their status, 14 take fewer
+  iterations and 8 take more; the worst of the 8 is the `n = 8` cond
+  1e4 `m = 6` row above, 646 -> 822. The documented remedy for a cell
+  that is slower is `limited_memory_max_history 10`; the general escape
   hatch is `alpha_red_factor_min 0.5`, which collapses the clamp and
-  restores upstream's sequence exactly; a test pins that it still does.
+  restores upstream's sequence exactly. Tests pin both.
+
+  The last row got there the hard way, and is why the entry below
+  exists. Under review it read `Diverging_Iterates` at 352 — a status
+  regression, robust at every `alpha_red_factor_min` in {0.05, 0.1,
+  0.2, 0.25, 0.3, 0.4} and every trial gate in {5, 8, 12, 20}, which is
+  what it looks like when the constant being swept is not the variable.
+  It was not: the interpolation was reaching a pre-existing defect in
+  the divergence guard, and once that was fixed the cell not only kept
+  its status but beat the fixed sequence by seven orders of magnitude in
+  objective at the same iteration count.
 
   **On by default for the limited-memory path only**, resolved by
   `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
@@ -139,6 +141,49 @@ changes.
   models that moved badly before the trial gate was added, and both are
   now unmoved on this leg. Both are pre-existing `lbfgs`-leg failures
   either way, and both solve on the exact leg (147 and 54 iterations).
+
+- **A watchdog trial iterate is no longer reported as
+  `Diverging_Iterates`.** `BacktrackingLineSearch`'s `accept-anyway`
+  watchdog branch (info char `w`, upstream
+  `IpBacktrackingLineSearch.cpp:498-503`) promotes a trial point the
+  acceptor *rejected*, deliberately does not augment the filter, and
+  holds a snapshot of the pre-watchdog iterate and direction that it
+  reverts to within `watchdog_trial_iter_max` (default 3) iterations if
+  the gamble does not pay. The divergence guard in
+  `IpoptAlgorithm::iterate` was running on those provisional points, and
+  its absolute runaway backstop (`1e18`) fires without the growth and
+  descent streak `DIVERGENCE_PERSIST_ITERS` otherwise requires — so a
+  single watchdog gamble that overshot was enough to end the solve.
+
+  It is the same false positive the persistence streak was introduced
+  for in the first place (a transient excursion that peaks and recedes),
+  except that a watchdog excursion recedes *by construction* and the
+  backstop bypasses the streak. Measured on the gh #818 quadratic at
+  `n = 8`, cond 1e12, `m = 6`: iterations 350, 351 and 352 are all `w`
+  rows of one watchdog sequence; at 352 `|x|_inf` is ~5e22 and the
+  objective has climbed to **+2.0e45**, the opposite of the `f -> -inf`
+  that `Diverging_Iterates` asserts, one iteration before `StopWatchDog`
+  would have restored an iterate at `f = 2.26e4`. The same model on the
+  fixed trial sequence reaches `f = 1.7e27` on a watchdog trial of its
+  own and survives only because `|x|` happened to stay under `1e20`:
+  the guard was reporting which excursion got luckier, not which problem
+  was unbounded.
+
+  The guard is now skipped, not reset, while
+  `BacktrackingLineSearch::in_watchdog()` holds, so a watchdog gamble in
+  the middle of a genuine ray neither accumulates nor erases streak
+  evidence; a real divergence is reported at most three iterations
+  later, from a committed iterate, and the deferral is capped at four
+  consecutive iterations so a stale `in_watchdog` (the `TinyStep` arm of
+  `run_filter_line_search` can hand off to restoration without clearing
+  it) cannot hold the guard open. The four tests that own the true
+  positives (gh #248, #252, #285, #314) are unaffected, and the fix is
+  inert on the fixture corpus — `scripts/sweep-fixtures.sh` is
+  byte-identical across all 156 legs with and without it, because no
+  fixture reaches the divergence check inside a watchdog. New test:
+  `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`,
+  mutation-checked (drop either half of the guard and it fails with
+  `Diverging_Iterates` at 352, obj 2.02e45).
 
 - **A line-search failure at an already-feasible point no longer walks
   into a restoration phase that has nothing to reduce (gh #818).** When

@@ -37,12 +37,16 @@
 //!
 //! It is also not evidence that the change is free on this family. Over
 //! a 32-cell sweep of it (`n ∈ {4, 8, 12, 20}` × cond ∈ {1e2, 1e4, 1e8,
-//! 1e12} × `m ∈ {6, 10}`) one cell loses a status — `n = 8`, cond 1e12,
-//! `m = 6` goes from a 2000-iteration loose-tolerance success to
-//! `Diverging_Iterates` at 352, at every gate and every
-//! `alpha_red_factor_min` measured. CHANGELOG.md carries the sweep and
-//! the mechanism; `limited_memory_max_history 10` is the remedy, and
-//! `eight_variable_high_memory_converges` below pins that it works.
+//! 1e12} × `m ∈ {6, 10}`) no cell loses a status and two gain one, but
+//! 8 of the 30 same-status cells cost iterations — `n = 8` cond 1e4
+//! `m = 6` is the worst at 646 → 822. CHANGELOG.md carries the grid.
+//!
+//! The sweep is also how the divergence-guard defect in
+//! `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs` was
+//! found: `n = 8`, cond 1e12, `m = 6` read as a status regression here
+//! (`Diverging_Iterates` at 352) at every gate and every
+//! `alpha_red_factor_min` measured, because the thing that had moved was
+//! not in this crate at all.
 
 use pounce_rs::builder::{Nlp, Problem};
 
@@ -234,12 +238,12 @@ fn issue_818_eight_variable_default_memory_converges() {
     );
 }
 
-/// The documented remedy for the cells this change does not fix — and
-/// for the one it costs, `n = 8` at cond 1e12 with `m = 6`. Raising the
-/// window is what turns a model too poor to produce a usable step into
-/// one that is merely ill-conditioned. If this ever fails, the advice in
-/// CHANGELOG.md and `docs/src/options.md` is wrong and the regression it
-/// mitigates has no remedy left.
+/// The documented remedy for the cells this change does not fix, and for
+/// the eight it slows: raising the window is what turns a model too poor
+/// to produce a usable step into one that is merely ill-conditioned. At
+/// `m = 10` this case takes 41 iterations against 1073 at `m = 6`. If
+/// this ever fails, the advice in CHANGELOG.md and
+/// `docs/src/options.md` is wrong.
 #[test]
 fn issue_818_eight_variable_high_memory_converges() {
     let n = 8;

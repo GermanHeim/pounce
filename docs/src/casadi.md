@@ -610,8 +610,8 @@ options chapter for the measured populations and when it wins.
 > an L-BFGS trajectory from this release will not match one from 0.10.0
 > step for step. `alpha_red_factor_min alpha_red_factor` restores the
 > old sequence exactly. The exact-Hessian path is unchanged. See
-> [Options](options.md) for the one measured case where the new sequence
-> loses, and its remedy.
+> [Options](options.md) for the cells where the new sequence costs
+> iterations, and their remedy.
 
 ### When the duals will not converge
 
