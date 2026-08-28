@@ -116,26 +116,33 @@ const POWELL_THETA: Number = 0.2;
 const BFGS_DENOM_FLOOR: Number = 1e-8;
 
 /// Cap on a single update's magnitude, as a multiple of the curvature the
-/// element's own secant pair implies (`‖y_e‖ / ‖s_e‖`). This is the
-/// backstop the relative denominator floors do not provide on their own:
-/// they bound the *ratio* that produced the term, this bounds the term in
-/// the units of the quantity being modelled. An element Hessian has no
-/// business moving by orders of magnitude more than the curvature its own
-/// data implies, and rejecting such a step costs only a stale block for
-/// one iteration.
+/// element's own secant pair implies (`‖y_e‖ / ‖s_e‖`).
 ///
-/// `1e1` is the measured best of `{1e1, 1e2, 1e3, 1e4}` on
-/// `benchmarks/large_scale` `laptime` at `N = 80` — objective after 400
-/// iterations 65.46 / 68.83 / 83.46 / diverged against a true optimum of
-/// 65.37, and oracle `rel_fro` 0.999 / 1.01 / 2.45 / 30.6. Read the two
-/// rows together before trusting the default: the setting that behaves
-/// best is also the one where the assembled `W` is *closest to zero*
-/// (`rel_fro ≈ 1` means "the model contributes nothing"), so what this
-/// default buys is a solver that degrades gracefully toward a
-/// regularized gradient method, not one whose curvature model is right.
-/// See the measurement note for what that implies about the
-/// per-constraint decomposition.
-const DEFAULT_CURVATURE_CAP: Number = 1e1;
+/// **Off by default, because every finite value measured was worse than
+/// off.** The idea was to bound the update in the units of the quantity
+/// being modelled, since the relative denominator floors bound only the
+/// ratio that produced the term. It does bound it — and it makes the
+/// solver worse, non-monotonically. On `benchmarks/large_scale`
+/// `laptime` at `N = 80`, `max_iter = 1200` (true optimum 65.462928):
+///
+/// | cap | status | iters | wall | objective |
+/// |---|---|---|---|---|
+/// | 1e1 | ErrorInStepComputation | 1071 | 179 s | 65.518586 |
+/// | 1e2 | MaxIter | 1200 | 214 s | 67.202124 |
+/// | 1e6 | MaxIter | 1200 | 232 s | 80.398129 |
+/// | off | **Optimal** | 559 | 50 s | 65.462802 |
+///
+/// `1e6` being worse than both `1e1` and off is the shape of the result:
+/// this is not "less capping is better". Rejection is *selective* — it
+/// drops precisely the elements whose curvature is moving fastest,
+/// leaving those blocks stale while their neighbours update. The
+/// assembled `W` is then internally inconsistent, which costs more than a
+/// uniformly noisy but coherent model.
+///
+/// Kept as a knob rather than deleted so the non-monotonicity can be
+/// re-measured against a different element decomposition, where it may
+/// behave differently. Do not turn it on without measuring.
+const DEFAULT_CURVATURE_CAP: Number = Number::INFINITY;
 
 /// Which gradient an element reads to form its curvature pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

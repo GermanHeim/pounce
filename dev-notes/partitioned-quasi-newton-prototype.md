@@ -6,9 +6,13 @@
 > direct-collocation trajectory optimization?"
 >
 > **Headline: the machinery works and is validated against the exact
-> Hessian, but the per-constraint decomposition does not close the gap on
-> `laptime`. The reason is measured, not guessed, and it is a property of
-> the decomposition rather than a defect in the code.**
+> Hessian. Per-constraint SR1 converges on the smaller mesh, at 4.4× the
+> iterations and 7.5× the wall of the limited-memory path — and fails
+> outright one mesh refinement later, where limited-memory still
+> converges. It scales the wrong way, which is the disqualifying
+> property, since scaling is the whole reason the gap exists. The reason
+> is measured, not guessed, and it is a property of the decomposition
+> rather than a defect in the code.**
 
 ## Why this was worth building
 
@@ -164,83 +168,91 @@ control. The magnitude control added instead is
 the curvature that element's own secant pair implies (`‖y_e‖/‖s_e‖`) —
 i.e. a bound in the units of the thing being modelled.
 
-### 5. And the cap has no good setting
+### 5. The magnitude cap makes things worse, non-monotonically
 
-At `N = 80`, 400 iterations, true optimum 65.37:
+`partitioned_curvature_cap` bounds one update's size as a multiple of the
+curvature that element's own secant pair implies. It does bound it. It
+also makes the solver worse at every finite setting tried. `laptime`,
+`N = 80`, `max_iter = 1200`, true optimum 65.462928:
 
-| cap | objective @400 | oracle `rel_fro` |
-|---|---|---|
-| 1e1 | 65.46 | 0.999 |
-| 1e2 | 68.83 | 1.01 |
-| 1e3 | 83.46 | 2.45 |
-| 1e4 | diverged | 30.6 |
+| cap | status | iters | wall | objective |
+|---|---|---|---|---|
+| 1e1 | ErrorInStepComputation | 1071 | 179 s | 65.518586 |
+| 1e2 | MaxIter | 1200 | 214 s | 67.202124 |
+| 1e6 | MaxIter | 1200 | 232 s | 80.398129 |
+| **off** | **Optimal** | **559** | **50 s** | **65.462802** |
 
-**These two columns have to be read together, and together they are the
-negative result.** The cap that behaves best is the one where `rel_fro ≈
-1`, and `rel_fro ≈ 1` means the assembled `W` is essentially *zero*
-relative to the exact Hessian. The best-performing configuration is the
-one where the curvature model contributes almost nothing and the solver
-degrades to a regularized gradient method. There is no setting at which
-the model is both bounded and accurate.
+`1e6` worse than both `1e1` and off is the shape of the result: this is
+not "less capping is better". Rejection is **selective** — it drops
+precisely the elements whose curvature is moving fastest, leaving those
+blocks stale while their neighbours update. The assembled `W` is then
+internally inconsistent, and that costs more than a uniformly noisy but
+coherent model. The cap ships **off**.
 
-### 6. Scalar seeding annihilates every element's first SR1 update
+### 6. Two things this note got wrong first time, and how
 
-Found by a unit test, and a property of the design rather than a bug.
-Seeding sets `B_e = γI` with `γ = sᵀy/sᵀs`, so `B_e s = γs` and the SR1
-denominator is
+Both were errors of inference from measurements that were themselves
+fine, and both are worth keeping visible.
 
-```
-    wᵀs = sᵀy − γ·sᵀs ≡ 0
-```
+**Selecting a default on a truncated run.** The first cap sweep ran 400
+iterations over `{1e1, 1e2, 1e3, 1e4}` and never tested *off*. At a fixed
+truncation nothing has converged, so the configurations got ranked by
+interim objective — which is not a convergence measure. `1e1` won that
+ranking precisely because it suppresses the curvature model hardest and
+therefore creeps most smoothly, and it was shipped as the default. It is
+in fact the worst of the four, and the setting that actually converges was
+outside the sweep entirely.
 
-identically, for every element and every dimension. The seeded block
-already satisfies the secant equation along `s`, so the rank-1 term
-correctly declines. But it means an element's **first** curvature pair
-contributes only a multiple of the identity and no directional
-information at all — and given how few usable pairs most elements ever
-accumulate (below), losing the first one matters.
-`scalar_seeding_leaves_the_first_sr1_update_with_nothing_to_do` pins it.
+**Reading the oracle as a quality metric.** `rel_fro` was treated as a
+proxy for solver health. It is not one. The configuration that converges
+(uncapped) is the one whose blocks reach 1e8 and whose `rel_fro` runs
+1e3; the configurations with a well-behaved `rel_fro ≈ 1` all stall. A
+Hessian model can be far from exact in Frobenius norm and still drive
+convergence, because the inertia correction regularizes what it is handed.
+The oracle is excellent at finding **defects** — it found the NaN and the
+denominator blow-up, neither of which any self-comparison would have
+caught — and it does not rank working configurations. Use it as a bug
+detector, not a scoreboard.
 
 ## The measurement
 
-`scripts/partitioned-qn-sweep.sh`, `MAX_ITER=600`. `laptime` at two
-meshes. Legs run at their own default barrier strategy, which is what a
-user actually gets — `limited-memory` switches `mu_strategy` to adaptive
-on its own, exact and partitioned stay monotone — plus pinned controls.
+`scripts/partitioned-qn-sweep.sh` and direct runs, `max_iter = 1200`,
+cap off (the shipping default). Legs run at their own default barrier
+strategy, which is what a user actually gets — `limited-memory` switches
+`mu_strategy` to adaptive on its own, exact and partitioned stay monotone.
 
-**N = 80** (n = 4 654, m = 4 974):
-
-| leg | status | iters | wall | objective |
-|---|---|---|---|---|
-| exact | Optimal | 29 | 1.40 s | 65.462928 |
-| lbfgs | Optimal | 126 | 6.74 s | 65.462928 |
-| lbfgs-monotone | Acceptable | 155 | 7.84 s | 65.462928 |
-| partitioned-sr1 | **MaxIter** | 668 | 119.15 s | 65.501433 |
-| partitioned-bfgs | **MaxIter** | 600 | 98.90 s | 78.961171 |
-| partitioned-sr1-adaptive | **MaxIter** | 600 | 59.48 s | 65.735535 |
-
-**N = 160** (n = 9 294, m = 9 934):
+**N = 80** (n = 4 654, m = 4 974), true optimum 65.462928:
 
 | leg | status | iters | wall | objective |
 |---|---|---|---|---|
-| exact | Optimal | 30 | 4.43 s | 65.371107 |
-| lbfgs | Optimal | 246 | 40.18 s | 65.370540 |
-| lbfgs-monotone | Optimal | 234 | 34.67 s | 65.370589 |
-| partitioned-sr1 | **MaxIter** | 600 | 254.24 s | 66.971135 |
-| partitioned-bfgs | **MaxIter** | 600 | 157.11 s | 78.799284 |
+| exact | Optimal | 29 | 1.4 s | 65.462928 |
+| lbfgs | Optimal | 126 | 6.7 s | 65.462928 |
+| lbfgs-monotone | Acceptable | 155 | 7.8 s | 65.462928 |
+| **partitioned-sr1** | **Optimal** | **559** | **50.3 s** | **65.462802** |
+| partitioned-bfgs | MaxIter | 1200 | 250.9 s | 89.285871 |
 
-The prototype does not converge on either mesh, under either update
-formula, at any barrier strategy. SR1 gets the objective into the right
-neighbourhood (65.50 against 65.46 at N = 80) and then crawls; BFGS does
-not get there at all. Wall-clock is 6–18× the limited-memory path it was
-meant to beat, partly from the 5.2× denser Hessian pattern (below) and
-partly from simply taking many more iterations.
+**N = 160** (n = 9 294, m = 9 934), true optimum 65.371107:
 
-**This is a negative result and it should be read as one.** The prize
-described at the top — 8.2× iterations and 9.6× wall — is not collected
-by the per-constraint decomposition.
+| leg | status | iters | wall | objective |
+|---|---|---|---|---|
+| exact | Optimal | 30 | 4.4 s | 65.371107 |
+| lbfgs | Optimal | 246 | 40.2 s | 65.370540 |
+| lbfgs-monotone | Optimal | 234 | 34.7 s | 65.370589 |
+| partitioned-sr1 | **MaxIter** | 1200 | 458.7 s | 69.611866 |
+| partitioned-bfgs | **MaxIter** | 1200 | 529.7 s | 89.289627 |
 
-## Why — and why it is not a coding defect
+So: per-constraint SR1 **does** converge, on the smaller mesh, to the
+right answer — at 4.4× the iterations and 7.5× the wall of the
+limited-memory path it was meant to beat. One mesh refinement later it
+does not converge at all, while limited-memory still does.
+
+**It scales the wrong way, which is the disqualifying property.** The
+whole motivation was the models where limited-memory degrades with mesh
+refinement (`benchmarks/large_scale/README.md`: 71 → 144 → 276 → failure);
+a replacement that degrades *faster* is not a replacement. Damped BFGS
+elements never converge at either size.
+
+## Why — and why it is not a coding defect## Why — and why it is not a coding defect
 
 The implementation is validated where validation is possible.
 `crates/pounce-wasm/tests/simple.nl`, whose constraint Hessian is the
