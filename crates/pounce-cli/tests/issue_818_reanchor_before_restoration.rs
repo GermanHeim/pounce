@@ -22,12 +22,29 @@
 //! and it runs *after* the acceptable-point decline, so a reportable point is
 //! still reported.
 //!
+//! **The rung ships off.** `limited_memory_ls_failure_restarts` defaults to
+//! `0` — upstream's unconditional hand-off — because measured on top of the
+//! safeguarded interpolation that actually fixes gh #818, it does not pay for
+//! itself over the fixture corpus: `deb7` 715 -> 610 and
+//! `issue_508_infeasible_gap_1em4` 79 -> 76 in its favour, against `eigena2`
+//! 91 -> 98, `pooling_rt2stp` 295 -> 307 and `infeasible_square_scaled_1em4`
+//! 24 -> 26, the last two being models the shipped configuration leaves
+//! exactly where `main` had them. An earlier draft of this file measured the
+//! rung against `main` instead and read all five as wins.
+//!
+//! Every test here therefore sets the option explicitly on both sides. Both
+//! directions are pinned deliberately: the two wins are why the code stays in
+//! the tree and stays documented, and the two costs are why it is not the
+//! default. A change that moves any of the four is a change to that decision.
+//!
 //! **What this file is not evidence about.** It pins that the rung is wired,
-//! fires, and is switchable. It does not pin the corpus: that is
-//! `scripts/sweep-fixtures.sh`, where this change moves five lbfgs-leg lines
-//! (`deb7` 2295 -> 1695, `eigena2` 131 -> 93, `infeasible_square_scaled_1em4`
-//! 28 -> 19, `issue_508_infeasible_gap_1em4` 79 -> 76, and one objective
-//! digit) and leaves the exact leg byte-identical.
+//! fires, is switchable, and which way it moves four named models. It does not
+//! pin the corpus — that is `scripts/sweep-fixtures.sh` — and it says nothing
+//! about the exact-Hessian arm, which has no curvature history to re-anchor.
+//! Note also that setting the option at all, `0` included, opts the solve out
+//! of the `Solved_To_Acceptable_Level` re-solve ladder
+//! (`TERMINATION_POLICY_OPTIONS`), so every cell below runs in a regime the
+//! shipped default never enters.
 
 use pounce_solve_report::SolveReport;
 use std::path::PathBuf;
@@ -76,9 +93,9 @@ fn iters(r: &SolveReport) -> i32 {
     r.statistics.iteration_count
 }
 
-/// `infeasible_square_scaled_1em4` is the cheap, unambiguous case: the rung
+/// `issue_508_infeasible_gap_1em4` is the cheap, unambiguous win: the rung
 /// fires, the solve reaches the *same* verdict — the problem really is
-/// infeasible — and gets there in fewer iterations.
+/// infeasible — and gets there in fewer iterations (79 -> 76).
 ///
 /// The verdict assertion is the load-bearing half. A rung that reached the
 /// answer faster by giving up on a genuine restoration would show here as a
@@ -86,8 +103,8 @@ fn iters(r: &SolveReport) -> i32 {
 /// the acceptable-point decline is meant to prevent.
 #[test]
 fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
-    let off = solve("infeasible_square_scaled_1em4.nl", "infeas_off", 0);
-    let on = solve("infeasible_square_scaled_1em4.nl", "infeas_on", 1);
+    let off = solve("issue_508_infeasible_gap_1em4.nl", "gap_off", 0);
+    let on = solve("issue_508_infeasible_gap_1em4.nl", "gap_on", 1);
 
     assert_eq!(
         off.solution.status, on.solution.status,
@@ -109,11 +126,11 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
     );
 }
 
-/// `eigena2` is the stall the rung exists for: the solve fails on this arm
-/// whichever way the option is set, so the only thing that can move is how
-/// long it spends failing. Measured 131 iterations without the rung and 93
-/// with — a third of the trajectory was a restoration phase that had a
-/// constraint violation of ~1e-10 to work with.
+/// `deb7` is the stall the rung exists for, and the reason it stays in the
+/// tree: the solve fails on this arm whichever way the option is set, so the
+/// only thing that can move is how long it spends failing. Measured 715
+/// iterations without the rung and 610 with — the difference is a restoration
+/// phase entered at a point feasible to 8e-13, with nothing to reduce.
 ///
 /// Asserted as a strict inequality rather than a pinned count: the number is
 /// a property of a stalling solve and will drift, but "re-anchoring is not
@@ -121,8 +138,8 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
 /// claim, and it is falsifiable.
 #[test]
 fn reanchor_shortens_a_stall_that_ends_in_restoration() {
-    let off = solve("eigena2.nl", "eigena2_off", 0);
-    let on = solve("eigena2.nl", "eigena2_on", 1);
+    let off = solve("deb7.nl", "deb7_off", 0);
+    let on = solve("deb7.nl", "deb7_on", 1);
     assert!(
         iters(&on) < iters(&off),
         "expected the rung to shorten the stall; {} with, {} without",
@@ -131,18 +148,51 @@ fn reanchor_shortens_a_stall_that_ends_in_restoration() {
     );
 }
 
-/// `0` restores the pre-#818 hand-off. Without this the option could be
-/// registered and ignored — the gh #677 failure mode, where
+/// The other half of the measurement, and the one that decided the default.
+/// On `eigena2` and `infeasible_square_scaled_1em4` the rung *costs*
+/// iterations to the same verdict, and both of those models are ones the
+/// shipped configuration leaves exactly where `main` had them — so switching
+/// the rung on would introduce two regressions rather than inherit them.
+///
+/// This is pinned in the direction it was measured. If it ever goes red, the
+/// rung has become cheaper than it was, and the case for leaving it off is
+/// the thing to re-examine — not this assertion.
+#[test]
+fn the_rung_costs_iterations_on_the_two_models_that_kept_it_off() {
+    for (fixture, tag) in [
+        ("eigena2.nl", "eigena2"),
+        ("infeasible_square_scaled_1em4.nl", "infeas_sq"),
+    ] {
+        let off = solve(fixture, &format!("{tag}_cost_off"), 0);
+        let on = solve(fixture, &format!("{tag}_cost_on"), 1);
+        assert_eq!(
+            off.solution.status, on.solution.status,
+            "{fixture}: the rung must not change the verdict either way"
+        );
+        assert!(
+            iters(&on) > iters(&off),
+            "{fixture}: the rung was measured as a cost here ({} on against \
+             {} off) and the default is off because of it; a reversal means \
+             that decision needs re-measuring",
+            iters(&on),
+            iters(&off)
+        );
+    }
+}
+
+/// `0` is the default and is upstream's unconditional hand-off; `1` has to
+/// actually reach the algorithm. Without this the option could be registered
+/// and ignored — the gh #677 failure mode, where
 /// `limited_memory_initialization` was parsed, validated, and read nowhere.
 #[test]
-fn zero_restores_the_unconditional_restoration_handoff() {
+fn the_option_reaches_the_algorithm() {
     let off = solve("eigena2.nl", "eigena2_zero", 0);
     let on = solve("eigena2.nl", "eigena2_one", 1);
     assert_ne!(
         iters(&off),
         iters(&on),
-        "limited_memory_ls_failure_restarts=0 took the same {} iterations as \
-         the default 1 — the option is parsed but not reaching the algorithm",
+        "limited_memory_ls_failure_restarts=1 took the same {} iterations as \
+         the default 0 — the option is parsed but not reaching the algorithm",
         iters(&off)
     );
 }

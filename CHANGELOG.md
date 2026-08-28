@@ -44,58 +44,100 @@ changes.
   its minimizer — the textbook safeguarded backtracking step (Nocedal &
   Wright §3.5). It is a heuristic for *which* `α` to try next and nothing
   more: the acceptor still decides, so no step it proposes can be
-  accepted that the fixed sequence would have rejected. Two clamps bound
+  accepted that the fixed sequence would have rejected. The converse is
+  not free, and is where the one measured regression below comes from —
+  jumping from `α` to `0.05α` skips four points the fixed sequence would
+  have tried, any of which might have been acceptable. Two clamps bound
   it — capped at `alpha_red_factor · α` so the sequence still contracts
   at least as fast as upstream's and the `alpha_min` bail is still
   reached in a bounded number of trials, and floored at the new
   `alpha_red_factor_min · α` so one badly-shaped `φ` cannot drop `α` to
-  noise in a single step. Reported iterations on the issue's model, with
-  scipy's L-BFGS-B for scale:
+  noise in a single step.
+
+  **The interpolation does not fire until the fixed sequence has already
+  spent five trial points** (`ALPHA_INTERP_MIN_TRIALS` in
+  `backtracking.rs`). The pathology it treats is a 19-20 trial line
+  search; a line search that accepts in two or three trials never had
+  the problem, and interpolating into it only swaps a step length the
+  filter was about to accept for a different one. Ungated, the change
+  moves 12 fixture-legs and reports `square_flowsheet_resto` - feasible
+  by construction - as converged to a point of local infeasibility.
+  Gated at five it moves three, all of them explained below, and it
+  *widens* the fix rather than narrowing it.
+
+  Measured on the issue's model at the shipped defaults, `before` being
+  `alpha_red_factor_min` set equal to `alpha_red_factor` (i.e.
+  upstream's fixed sequence, bit for bit), with scipy's L-BFGS-B for
+  scale:
 
   | case | before | after | scipy |
   |---|---|---|---|
-  | `n = 4`, cond 1e8 (the report) | 76 | **18** | 34–37 |
-  | `n = 4`, cond 1e4 | 24 | **12** | 23 |
-  | `n = 8`, cond 1e4 | 993 | **396** | — |
-  | `n = 8`, cond 1e8, `m = 10` | 73 | **34** | 34 |
-  | `n = 8`, cond 1e8, `m = 6` | 2000\* | 2000\* | 146 |
+  | `n = 4`, cond 1e8 (the report) | 76 | **21** | 34-37 |
+  | `n = 4`, cond 1e12 | 66 | **19** | - |
+  | `n = 8`, cond 1e8, `m = 6` | 2000\* | **1073** | 146 |
+  | `n = 8`, cond 1e8, `m = 10` | 74 | **41** | 34 |
+  | `n = 8`, cond 1e12, `m = 10` | 421 | **345** | - |
+  | `n = 4`, cond 1e4 | 24 | 26 | 23 |
+  | `n = 8`, cond 1e4, `m = 6` | 646 | 822 | - |
+  | `n = 8`, cond 1e12, `m = 6` | 2000, converged | **352, `Diverging_Iterates`** | - |
 
   `* = Maximum_Iterations_Exceeded`. The default-memory 8-variable case
-  is **not** fixed: `ls` drops from 19–20 trial points to 3–5, so the
-  trial sequence is no longer what binds, but a 6-pair model of an
-  8-variable Hessian with a 1e8 spread still cannot produce a usable step
-  and the solve is now bounded by model quality. Raising
-  `limited_memory_max_history` to 10 solves it in 34.
+  at cond 1e8 - the one the first draft of this fix left open, on the
+  reasoning that the solve was now bounded by model quality rather than
+  by the trial sequence - now converges.
+
+  **The last row is a regression, and it is not tuned away.** It is the
+  one cell of a 32-cell sweep (`n` in {4, 8, 12, 20} x cond in {1e2,
+  1e4, 1e8, 1e12} x `m` in {6, 10}) where the interpolation loses a
+  status, and it is robust: it fails at every `alpha_red_factor_min` in
+  {0.05, 0.1, 0.2, 0.25, 0.3, 0.4} and at every trial gate in
+  {5, 8, 12, 20}, recovering only at a gate (40) high enough that the
+  interpolation never fires at all. The mechanism is the floor, not the
+  fit: dropping `alpha` by up to 20x per trial reaches `alpha_min` in a
+  fifth of the evaluations, so a line search that was always going to
+  fail fails *sooner*, from a different iterate, and on a 6-pair model
+  of an 8-variable Hessian at cond 1e12 the failure path it lands on is
+  a divergent one rather than a slow one. Note what the `before` column
+  buys there: 2000 iterations to a loose-tolerance success whose `x` is
+  still 1.2e-4 off, and 9353 to a tight one. It is the same "model
+  quality, not trial sequence" wall the 8-variable case has always been
+  against, reached by a different exit, and it has the same remedy -
+  `limited_memory_max_history 10` converges in 345. The general escape
+  hatch is `alpha_red_factor_min 0.5`, which collapses the clamp and
+  restores upstream's sequence exactly; a test pins that it still does.
 
   **On by default for the limited-memory path only**, resolved by
   `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
   `alpha_red_factor` (i.e. upstream's fixed sequence) under an exact
   Hessian. An explicit user value is honoured on both. The split is
-  measured, not assumed — turning it on for the exact path too moves 21
-  of the 154 fixture-legs in `scripts/sweep-fixtures.sh` and takes two
-  from solved to not solved: `deb7` (`SolveSucceeded`/143 →
-  `ErrorInStepComputation`/176) and `infeasible_square_scaled_1em4`
-  (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12, losing
-  the infeasibility certificate), against no exact-leg gain beyond two
-  faster infeasible detections. A Newton step's length is meaningful,
-  which is the reason the interpolation has nothing to add there.
+  measured, not assumed — turning it on for the exact path too moves 9
+  of the 156 fixture-legs in `scripts/sweep-fixtures.sh` and costs the
+  one thing an exact-Hessian arm has to keep:
+  `infeasible_square_scaled_1em4` goes `InfeasibleProblemDetected`/17 →
+  `ErrorInStepComputation`/12, losing the infeasibility certificate.
+  `square_flowsheet_resto` also goes 54 → 130 iterations and `eigena2`
+  27 → 32, against `deb7` 147 → 116 and two faster infeasible
+  detections (`issue_508_infeasible_gap_1em2` 114 → 96, `_1em4`
+  441 → 387). A Newton step's length is meaningful, which is the reason
+  the interpolation has nothing to add there.
 
-  Fixture sweep, with the re-anchor rung below: **the exact leg is
-  byte-identical; 12 lbfgs-leg lines move**, all explainable. Gains:
-  `cresc4` `RestorationFailed`/195 → **`SolveSucceeded`/241 at the
-  exact-Hessian optimum** (0.87189752 against the exact leg's
-  0.87189754); `eigenb2` `SolvedToAcceptableLevel`/41 →
-  **`SolveSucceeded`/39**; `eigena2` `ErrorInStepComputation` at 252 →
-  93 iterations; `pooling_rt2stp` 716 → 347 to the same objective to
-  five digits; `infeasible_square_scaled_1em4` 24 → 19 to the same
-  certificate. Cost: **`deb7` on the lbfgs leg, 1242 → 1695
-  iterations** — `ErrorInStepComputation` either way, at 14.8 s against
-  15.1 s. `deb7` on this arm is a *dual* stall (`inf_pr ~ 1e-12` with
-  `inf_du ~ 1e5` for a thousand iterations), which is the `recalc_y`
-  territory the option help already documents and which pounce
-  deliberately does not auto-enable for L-BFGS; the restart budget was
-  swept at 0/1/2/3/6 and none of them rescues it. The remaining six
-  lines are ±4 iterations or a digit of objective.
+  Fixture sweep against `a5e0a837`: **the exact leg is byte-identical,
+  and 3 of the 156 fixture-legs move**, all three on the `lbfgs` leg,
+  none of them a status change and none of them a routing change.
+
+  | fixture | `a5e0a837` | with this change |
+  |---|---|---|
+  | `eigena2` | `ErrorInStepComputation`/252, obj 82.5 | `ErrorInStepComputation`/**91**, obj 82.50000002 |
+  | `deb7` | `ErrorInStepComputation`/709, obj 101.0934311 | `ErrorInStepComputation`/**715**, obj 101.0934371 |
+  | `hs13_bigstart` | `SolveSucceeded`/34, obj 0.9796495289 | `SolveSucceeded`/34, obj 0.979629334 |
+
+  `eigena2` is a 2.8x reduction to the same verdict; `deb7` costs six
+  iterations to the same verdict and the same objective to seven
+  digits; `hs13_bigstart` moves an objective digit at an unchanged
+  iteration count. `deb7` and `square_flowsheet_resto` were the two
+  models that moved badly before the trial gate was added, and both are
+  now unmoved on this leg. Both are pre-existing `lbfgs`-leg failures
+  either way, and both solve on the exact leg (147 and 54 iterations).
 
 - **A line-search failure at an already-feasible point no longer walks
   into a restoration phase that has nothing to reduce (gh #818).** When
@@ -141,16 +183,33 @@ changes.
   The bound is structural as well as counted: `reanchor` returns `false`
   once the history is down to its newest pair, so a second failure at
   the same iterate finds nothing to give up and falls through.
-  `limited_memory_ls_failure_restarts` (default `1`, `0` restores the
-  unconditional hand-off) caps the number of stalls that may spend one.
-  No effect under an exact Hessian, which has no history to re-anchor.
+  `limited_memory_ls_failure_restarts` caps the number of stalls that
+  may spend one. No effect under an exact Hessian, which has no history
+  to re-anchor.
 
-  Over the interpolation change alone this moves five lbfgs-leg lines,
-  every one of them down: `deb7` `RestorationFailed`/2295/22.3 s →
-  `ErrorInStepComputation`/1695/14.8 s, `eigena2` 131 → 93,
-  `infeasible_square_scaled_1em4` 28 → 19 (below the 24 of the
-  pre-#818 baseline), `issue_508_infeasible_gap_1em4` 79 → 76, and one
-  objective digit on `infeasible_equalities`.
+  **It ships off (`limited_memory_ls_failure_restarts` defaults to `0`,
+  upstream's unconditional hand-off), and it is not what fixes gh #818**
+  — the safeguarded interpolation above is. Measured on top of that
+  interpolation rather than on top of `main` (which is what an earlier
+  draft of this entry got wrong), turning the rung on moves six
+  `lbfgs`-leg lines and does not pay for itself: `deb7` 715 → 610 and
+  `issue_508_infeasible_gap_1em4` 79 → 76 in its favour, against
+  `eigena2` 91 → 98, `pooling_rt2stp` 295 → **307**,
+  `infeasible_square_scaled_1em4` 24 → **26**, and an objective digit on
+  `infeasible_equalities`. The last two matter more than the count: the
+  shipped configuration leaves both of those models exactly where
+  `a5e0a837` had them, so the rung would be *introducing* two
+  regressions, not inheriting them.
+
+  It stays in the tree, registered and documented, because the failure
+  mode it treats is real and reproducible and the option is the only
+  thing that reaches it: on a model that stalls at `inf_pr ~ 1e-12` with
+  `inf_du` large, `limited_memory_ls_failure_restarts 1` is worth trying
+  before concluding the solve is stuck. Setting it — to any value, `0`
+  included — opts the solve out of the automatic
+  `Solved_To_Acceptable_Level` re-solve ladder, like every other member
+  of `TERMINATION_POLICY_OPTIONS`, so leaving it unset is not the same
+  as passing `0`.
 
 - **`limited_memory_initialization=history-max` (gh #818).** Every
   upstream rule reads the newest curvature pair; this one applies the
@@ -165,11 +224,22 @@ changes.
   the directions the model does know — the last rank-2 update enforces
   `B s_last = y_last` whatever `B0` was.
 
-  **Not the default**, because it wins where the window cannot span the
-  spectrum and loses where it can: on the issue's model it takes `n = 8`
-  cond 1e4 from 396 to 166 iterations and `n = 4` cond 1e12 from 61 to
-  28, while costing `n = 4` cond 1e4 12 → 29 and `n = 8`, `m = 10`
-  34 → 66. The obvious variant — a running maximum over the whole solve
+  **Not the default**, and the population it wins on is narrower than an
+  earlier draft of this entry claimed — those numbers predate the trial
+  gate, and re-measuring across the same 32-cell sweep used above puts
+  `history-max` ahead in 5 cells and behind in 20. It wins where the
+  window is too small for the spread and the *variables* outnumber it:
+  `n = 8` cond 1e4 `m = 6` 822 → **216**, `n = 8` cond 1e4 `m = 10`
+  70 → **58**, `n = 8` cond 1e12 `m = 10` 345 → **85**, `n = 12` cond
+  1e4 `m = 10` 957 → **222**. It loses on every 4-variable cell (cond
+  1e8 21 → 36, cond 1e12 19 → 35) and, notably, on the cell its own
+  rationale predicts hardest — `n = 8` cond 1e8 `m = 6`, where it takes
+  the interpolation's 1073 back to `Maximum_Iterations_Exceeded`. So the
+  rule is not "keep the largest whenever the window is short"; the
+  largest sample is a safe `B0` only when the history is wide enough
+  that the maximum is a real curvature rather than one stiff outlier.
+  Documented, opt-in, and worth a try on an `n >> m` model that is
+  crawling. The obvious variant — a running maximum over the whole solve
   rather than over the window — was measured too and is worse than
   `scalar1` at every size, because it never comes back down and keeps a
   stiff early transient in `B0` long after the iterate has left it.

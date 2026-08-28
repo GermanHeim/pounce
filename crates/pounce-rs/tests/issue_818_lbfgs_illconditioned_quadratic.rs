@@ -23,17 +23,26 @@
 //!
 //! `BacktrackingLineSearch::next_alpha` replaces the fixed factor with a
 //! safeguarded quadratic interpolation, defaulted on for the
-//! limited-memory path only (`alpha_red_factor_min`); see that method
-//! and `AlgorithmBuilder`'s field doc for why the exact path keeps
-//! upstream's sequence.
+//! limited-memory path only (`alpha_red_factor_min`) and gated behind
+//! `ALPHA_INTERP_MIN_TRIALS` trial points; see those two symbols and
+//! `AlgorithmBuilder`'s field doc for why the exact path keeps
+//! upstream's sequence and why a short line search is left alone.
 //!
 //! **What this file is not evidence about.** The corpus here is
 //! unconstrained and unbounded, so the filter never sees `θ > 0` and
 //! restoration is never entered. It says nothing about the constrained
 //! arm — `scripts/sweep-fixtures.sh` owns that, and the change is
 //! deliberately confined to the leg it moves (exact leg byte-identical;
-//! 11 lbfgs-leg lines move, `cresc4` `RestorationFailed` →
-//! `SolveSucceeded`).
+//! 3 lbfgs-leg lines move, none of them a status or a routing change).
+//!
+//! It is also not evidence that the change is free on this family. Over
+//! a 32-cell sweep of it (`n ∈ {4, 8, 12, 20}` × cond ∈ {1e2, 1e4, 1e8,
+//! 1e12} × `m ∈ {6, 10}`) one cell loses a status — `n = 8`, cond 1e12,
+//! `m = 6` goes from a 2000-iteration loose-tolerance success to
+//! `Diverging_Iterates` at 352, at every gate and every
+//! `alpha_red_factor_min` measured. CHANGELOG.md carries the sweep and
+//! the mechanism; `limited_memory_max_history 10` is the remedy, and
+//! `eight_variable_high_memory_converges` below pins that it works.
 
 use pounce_rs::builder::{Nlp, Problem};
 
@@ -193,4 +202,63 @@ fn issue_818_history_max_reaches_the_updater() {
         "history-max took the same {default_iters} iterations as scalar1 — \
          the value is registered but sigma is still read off the newest pair"
     );
+}
+
+/// The 8-variable case at the **default** memory, which the first draft
+/// of this fix left open and which `ALPHA_INTERP_MIN_TRIALS` is what
+/// closes. It is the constant's real test, and it pins it from both
+/// sides: interpolating from the first trial leaves this at
+/// `Maximum_Iterations_Exceeded`/2000 (the model never breaks out of
+/// the tiny-`s` cycle), and so does any gate of 8 or more (the
+/// interpolation stops firing where it was needed). Only a gate in the
+/// neighbourhood of 5 converges it, in 1073 iterations. Raise, lower or
+/// delete the constant and this test goes red; the fixture sweep will
+/// not tell you, because no fixture in the corpus is an unconstrained
+/// ill-conditioned quadratic.
+#[test]
+fn issue_818_eight_variable_default_memory_converges() {
+    let (iters, rel, ok) = solve_with(8, &[], &[]);
+    assert!(
+        ok,
+        "gh#818 8-variable quadratic at default memory did not converge \
+         ({iters} iterations); the trial gate is what closes this case"
+    );
+    assert!(
+        rel < 1e-4,
+        "converged to the wrong point: max relative error {rel:.3e}"
+    );
+    assert!(
+        iters < 1500,
+        "took {iters} iterations against the 1073 measured for the \
+         shipped gate; the fixed-factor sequence never converges here"
+    );
+}
+
+/// The documented remedy for the cells this change does not fix — and
+/// for the one it costs, `n = 8` at cond 1e12 with `m = 6`. Raising the
+/// window is what turns a model too poor to produce a usable step into
+/// one that is merely ill-conditioned. If this ever fails, the advice in
+/// CHANGELOG.md and `docs/src/options.md` is wrong and the regression it
+/// mitigates has no remedy left.
+#[test]
+fn issue_818_eight_variable_high_memory_converges() {
+    let n = 8;
+    let x_star = IllConditionedQuadratic::new(n).solution();
+    let sol = Nlp::new(IllConditionedQuadratic::new(n))
+        .x0(&vec![0.0; n])
+        .option_int("max_iter", 2000)
+        .option_int("print_level", 0)
+        .option_int("limited_memory_max_history", 10)
+        .option_str("hessian_approximation", "limited-memory")
+        .solve();
+    let iters = sol.stats.iteration_count;
+    let rel = (0..n)
+        .map(|i| ((sol.x[i] - x_star[i]) / x_star[i]).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        sol.success,
+        "8-variable quadratic did not converge at m = 10"
+    );
+    assert!(rel < 1e-6, "wrong point at m = 10: {rel:.3e}");
+    assert!(iters <= 120, "{iters} iterations at m = 10, expected ~41");
 }

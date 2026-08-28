@@ -31,6 +31,73 @@ use pounce_common::types::Number;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Number of trial points the plain geometric sequence gets to itself
+/// before [`BacktrackingLineSearch::next_alpha`]'s quadratic
+/// interpolation is allowed to pick the next `alpha` (gh #818).
+///
+/// **The interpolation is a treatment for a long line search, and it is
+/// only harmless where the line search is long.** gh #818 is a
+/// quasi-Newton model whose *scale* is wrong by orders of magnitude in
+/// the directions its curvature pairs do not span: the acceptable step
+/// is `alpha ~ 4e-6`, and halving walks there in 19-20 trial points,
+/// every one of them a full objective evaluation, every iteration. A
+/// line search that accepts in two or three trials does not have that
+/// problem, and interpolating into it replaces a step length the filter
+/// was about to accept with a different one — a trajectory change
+/// bought for nothing.
+///
+/// Measured, `scripts/sweep-fixtures.sh` against `a5e0a837`, 156
+/// fixture-legs, counting only lines that move (the `exact` leg is
+/// byte-identical at every value, because `alpha_red_factor_min`
+/// resolves to `alpha_red_factor` there):
+///
+/// | this constant | legs moved | `cresc4` | `pooling_rt2stp` | `square_flowsheet_resto` | `eigena2` |
+/// |---|---|---|---|---|---|
+/// | 0 (interpolate always) | 12 | 105 -> 243 | 295 -> 323 | `MaxIter` -> **`Infeasible`** | 252 -> 88 |
+/// | 2 | 7 | -- | 295 -> 268 | `MaxIter` -> **`Infeasible`**/49 | 252 -> 170 |
+/// | 3 | 5 | -- | -- | `MaxIter` -> **`Infeasible`**/2022 | 252 -> 109 |
+/// | **5** | **3** | -- | -- | -- | 252 -> **91** |
+///
+/// At 5 the only lines that move are `eigena2` (252 -> 91, the win),
+/// `deb7` (709 -> 715 at the same status and the same objective to
+/// seven digits), and one objective digit on `hs13_bigstart`. Every
+/// value below it buys `eigena2` a little more and pays for it
+/// somewhere else, and the thing it pays with at 0, 2 and 3 is
+/// `square_flowsheet_resto`'s verdict — a model that is feasible by
+/// construction reported as converged to a point of local
+/// infeasibility.
+///
+/// It also fixes *more* of gh #818, not less. On the issue's own
+/// quadratic at the default memory `m = 6` and the default
+/// `limited_memory_initialization=scalar1`:
+///
+/// | | before gh #818 | interpolate always | **gated at 5** |
+/// |---|---|---|---|
+/// | `n = 4` (the report) | 76 | 18 | **21** |
+/// | `n = 8` | 2000, failed | 2000, failed | **1073, converged** |
+///
+/// The 8-variable case is the one the issue thread left open. Twenty
+/// halvings per iteration is not merely slow, it feeds a tiny accepted
+/// `s` back into the curvature history and narrows the next sample;
+/// five is enough for the interpolation to break that cycle without
+/// touching a line search that was converging on its own.
+///
+/// What no value of this constant rescues is `n = 8` at cond 1e12 with
+/// `m = 6`, which the interpolation takes from a 2000-iteration
+/// loose-tolerance success to `Diverging_Iterates` at 352 and which
+/// fails at every gate in {5, 8, 12, 20} and every
+/// `alpha_red_factor_min` measured. That is the floor rather than the
+/// fit: a 20x drop per trial reaches `alpha_min` in a fifth of the
+/// evaluations, so a line search that was going to fail anyway fails
+/// from a different iterate. `limited_memory_max_history 10` converges
+/// it in 345; CHANGELOG.md carries the full 32-cell sweep.
+///
+/// Not a registered option. `alpha_red_factor_min = alpha_red_factor`
+/// already turns the interpolation off entirely, which is the escape
+/// hatch a caller needs; a second knob between "off" and "on" would be
+/// one more number with no population behind it.
+const ALPHA_INTERP_MIN_TRIALS: i32 = 5;
+
 /// Outcome of the backtracking line search. Mirrors the booleans
 /// upstream returns through `accept_` plus the `tiny_step_flag` on
 /// `IpoptData`.
@@ -1203,7 +1270,13 @@ impl BacktrackingLineSearch {
                 }
             }
 
-            alpha = self.next_alpha(alpha, phi, d_phi, phi_trial);
+            alpha = if trial < ALPHA_INTERP_MIN_TRIALS {
+                // The fixed sequence gets the first `ALPHA_INTERP_MIN_TRIALS`
+                // trials to itself; see that constant for why.
+                alpha * self.alpha_red_factor
+            } else {
+                self.next_alpha(alpha, phi, d_phi, phi_trial)
+            };
         }
 
         AlphaResult::Failed {
@@ -1251,7 +1324,9 @@ impl BacktrackingLineSearch {
     ///   `alpha_red_factor_min · alpha` (default 0.05, i.e. at most a
     ///   20× reduction per trial), so one badly-shaped `φ` cannot drop
     ///   `alpha` to noise in a single step and skip past an acceptable
-    ///   interval.
+    ///   interval. The cap wins if a caller inverts the pair, so the
+    ///   two options can be set in either order without aborting the
+    ///   solve.
     ///
     /// Falls back to the fixed factor whenever the interpolation is not
     /// defined: a non-descent `d_phi` (the quadratic has no positive
@@ -1273,7 +1348,16 @@ impl BacktrackingLineSearch {
         if !alpha_q.is_finite() {
             return fixed;
         }
-        alpha_q.clamp(alpha * self.alpha_red_factor_min, fixed)
+        // `f64::clamp` panics when `min > max`, and nothing constrains
+        // the two options against each other: the registry accepts
+        // `alpha_red_factor` anywhere in (0, 1) while the limited-memory
+        // default installs `alpha_red_factor_min = 0.05` regardless, so
+        // a lone `alpha_red_factor 0.01` is enough to invert them. The
+        // cap wins the tie, because "never slower than upstream" is the
+        // safeguard that bounds the trial count and the floor is only
+        // there to stop a collapse.
+        let floor = (alpha * self.alpha_red_factor_min).min(fixed);
+        alpha_q.clamp(floor, fixed)
     }
 
     /// Directional derivative of the barrier objective along the step
@@ -1802,6 +1886,28 @@ mod tests {
         for phi_trial in [0.001, 2.0, 50.0, 5e5] {
             assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, phi_trial), 0.5);
         }
+    }
+
+    /// The two safeguards can be set in either order, and an inverted
+    /// pair must not take the process down. `f64::clamp` panics on
+    /// `min > max`, and the pair inverts on one legal option: the
+    /// limited-memory default installs `alpha_red_factor_min = 0.05`
+    /// while the registry accepts `alpha_red_factor` anywhere in
+    /// (0, 1), so `alpha_red_factor 0.01` alone used to abort the solve
+    /// mid-iteration (measured on `deb7` at iteration 16). The cap wins
+    /// the tie, which also collapses the clamp — an inverted pair gets
+    /// upstream's fixed sequence, the same thing a closed clamp gives.
+    #[test]
+    fn next_alpha_survives_an_inverted_safeguard_pair() {
+        // Floor above the cap, both legal on their own.
+        let bls = ls_for_next_alpha(0.01, 0.05);
+        for phi_trial in [0.001, 2.0, 50.0, 5e5] {
+            let a = bls.next_alpha(1.0, 1.0, -1.0, phi_trial);
+            assert_eq!(a, 0.01, "inverted pair must fall back to the cap");
+        }
+        // And the same the other way about, where the clamp is ordinary.
+        let bls = ls_for_next_alpha(0.5, 0.05);
+        assert!((bls.next_alpha(1.0, 1.0, -1.0, 5e5) - 0.05).abs() < 1e-15);
     }
 
     /// Every case in which the quadratic fit is not defined falls back

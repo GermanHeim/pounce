@@ -1108,8 +1108,42 @@ honoured on both Hessian paths.
 The default is off for the exact-Hessian path because a Newton step's
 length is meaningful — the acceptable `α` is normally within a couple of
 halvings of 1, so interpolation buys nothing — and because enabling it
-there was measured to move 21 of the 154 fixture-legs in
-`scripts/sweep-fixtures.sh`, two of them from solved to not solved.
+there was measured to move 9 of the 156 fixture-legs in
+`scripts/sweep-fixtures.sh` and to cost the one thing an exact-Hessian
+arm has to keep: `infeasible_square_scaled_1em4` stops certifying
+infeasibility (`Infeasible_Problem_Detected` in 17 iterations →
+`Error_In_Step_Computation` in 12).
+
+**It engages only once the fixed sequence has already spent five trial
+points.** The interpolation treats a *long* line search, and it is only
+harmless where the line search is long: one that accepts in two or three
+trials never had the problem, and interpolating into it swaps a step
+length the filter was about to accept for a different one — a trajectory
+change bought for nothing. The threshold is not an option; it is the
+constant `ALPHA_INTERP_MIN_TRIALS` in
+`crates/pounce-algorithm/src/line_search/backtracking.rs`, which carries
+the sweep that chose it. Interpolating from the first trial instead moves
+12 fixture-legs and reports `square_flowsheet_resto` — a model that is
+feasible by construction — as converged to a point of local
+infeasibility; gating at five moves three, all of them explained. Gating
+also *widens* the fix: the 8-variable case in #818, which the ungated
+version leaves at `Maximum_Iterations_Exceeded`, converges in 1073
+iterations at the shipped defaults.
+
+**Where it loses, and what to do about it.** Over a 32-cell sweep of the
+#818 model family (`n` ∈ {4, 8, 12, 20} × cond ∈ {1e2, 1e4, 1e8, 1e12} ×
+`limited_memory_max_history` ∈ {6, 10}) one cell loses a status: `n = 8`
+at cond 1e12 with the default memory of 6 goes from a 2000-iteration
+loose-tolerance success to `Diverging_Iterates` at 352. It is not a
+tuning artifact — it fails at every `alpha_red_factor_min` and every
+gate measured — and the mechanism is the floor rather than the fit:
+dropping `α` by up to 20× per trial reaches `alpha_min` in a fifth of
+the evaluations, so a line search that was going to fail anyway fails
+sooner and from a different iterate. If a limited-memory solve reports
+`Diverging_Iterates` or stalls where it used to crawl, the first thing
+to try is **`limited_memory_max_history 10`**, which converges that cell
+in 345 iterations; the general escape hatch is `alpha_red_factor_min`
+equal to `alpha_red_factor`, which restores upstream's sequence exactly.
 
 ### When the line search fails anyway: `limited_memory_ls_failure_restarts`
 
@@ -1129,7 +1163,7 @@ is identically zero, so restoration cannot move at all.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `limited_memory_ls_failure_restarts` | `1` | How many times a line-search failure at a feasible point may drop every curvature pair but the newest and retry, before handing off to restoration. `0` restores the unconditional hand-off. |
+| `limited_memory_ls_failure_restarts` | `0` (off) | How many times a line-search failure at a feasible point may drop every curvature pair but the newest and retry, before handing off to restoration. `0` is upstream's unconditional hand-off. |
 
 The newest pair is kept rather than the history cleared, because `σ` is
 read off the history and an empty one falls back to
@@ -1146,6 +1180,25 @@ structural as well as counted — the re-anchor gives up once the history
 is down to one pair, so a second failure at the same iterate falls
 straight through. It has no effect under an exact Hessian, which has no
 curvature history to re-anchor.
+
+**It ships off, and it is not what fixes #818.** The safeguarded
+interpolation above is; the rung was measured separately on top of it
+and does not pay for itself across the fixture corpus. Turning it on
+moves six `lbfgs` legs: `deb7` 715 → 610 iterations and
+`issue_508_infeasible_gap_1em4` 79 → 76 in its favour, against
+`eigena2` 91 → 98, `pooling_rt2stp` 295 → 307 and
+`infeasible_square_scaled_1em4` 24 → 26 — the last two being models the
+shipped configuration leaves exactly where `main` had them, so the rung
+*introduces* those two regressions rather than inheriting them. It stays
+in the tree, and stays documented, because the failure mode it treats is
+real and reproducible: on a model that stalls at `inf_pr ≈ 1e-12` with
+`inf_du` large, `limited_memory_ls_failure_restarts 1` is worth trying
+before concluding the solve is stuck.
+
+Note that setting it — to any value, `0` included — opts the solve out
+of the automatic `Solved_To_Acceptable_Level` re-solve ladder, like
+every other option in `TERMINATION_POLICY_OPTIONS`. Leaving it unset is
+therefore not the same as passing `limited_memory_ls_failure_restarts 0`.
 
 ## ℓ₁ penalty-barrier wrapper options
 

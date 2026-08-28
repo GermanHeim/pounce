@@ -81,18 +81,40 @@ const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
 /// to spend itself on. It is also the conservative default — each escape is a
 /// separate bet, and while none of them can return a worse point than the
 /// certificate it left, each costs its own continuation budget.
-/// Default `limited_memory_ls_failure_restarts` (gh #818): one re-anchor
-/// per solve.
+/// Default `limited_memory_ls_failure_restarts` (gh #818): **off**. The
+/// rung is available, and it is not what fixes gh #818.
 ///
-/// One, because the rung is a hypothesis test — "the model, not the point,
-/// is why no step was acceptable" — and a second re-anchor at the same
-/// stall would be testing a hypothesis the first one already answered.
-/// `reanchor` is structurally self-limiting within a stall (it gives up
-/// once the history is down to one pair), so this counter exists to bound
-/// the *number of stalls* a solve may spend a retry on, and one is what
-/// the corpus needed: on `deb7` the single restart is taken at the first
-/// stall, and no fixture in the sweep asks for a second.
-const DEFAULT_LBFGS_LS_FAILURE_RESTARTS: usize = 1;
+/// It shipped in the first draft of this work defaulted to one, on a
+/// measurement taken before `ALPHA_INTERP_MIN_TRIALS` existed: with the
+/// interpolation firing on every trial, a line search failed often
+/// enough that standing in front of the restoration hand-off was worth
+/// something. Gating the interpolation removed most of those failures,
+/// and re-measuring the rung on top of the gate turned the trade
+/// negative. `scripts/sweep-fixtures.sh` against `a5e0a837`, both with
+/// the gate, rung off against rung on:
+///
+/// | fixture | rung off | rung on |
+/// |---|---|---|
+/// | `pooling_rt2stp` | `SolveSucceeded`/295 — *unmoved from `main`* | `SolveSucceeded`/**307** |
+/// | `infeasible_square_scaled_1em4` | 24 — *unmoved from `main`* | **26** |
+/// | `deb7` | `ErrorInStepComputation`/715 | `ErrorInStepComputation`/610 |
+/// | `eigena2` | `ErrorInStepComputation`/91 | `ErrorInStepComputation`/98 |
+/// | `issue_508_infeasible_gap_1em4` | 79 | 76 |
+///
+/// So the rung buys `deb7` about a hundred iterations of a solve that
+/// fails either way, and pays for them by moving two fixtures off the
+/// numbers they have on `main`. Off is the configuration with no
+/// regression in it, and every `issue_818_*` test in `pounce-rs` passes
+/// with the rung compiled out — the interpolation is the fix.
+///
+/// Left in the tree rather than deleted because the reasoning behind it
+/// is sound and unaddressed elsewhere: a restoration phase entered at a
+/// feasible point has no constraint violation to minimize and cannot
+/// help. Some model will want it. Setting the option to a positive value
+/// enables it — and note that setting it *at all*, including to 0, opts
+/// out of the `Solved_To_Acceptable_Level` re-solve, because it is a
+/// [`TERMINATION_POLICY_OPTIONS`](crate::application) key.
+const DEFAULT_LBFGS_LS_FAILURE_RESTARTS: usize = 0;
 
 const DEFAULT_NEG_CURV_ESCAPES: usize = 1;
 /// gh #797 — outer iterations a negative-curvature escape gets to produce a
@@ -3222,12 +3244,6 @@ impl IpoptAlgorithm {
                         if let Some(o) = self.debug_stop(crate::debug::Checkpoint::StepRejected) {
                             return o;
                         }
-                        // gh#818 — one rung before the restoration
-                        // hand-off: re-anchor the quasi-Newton model and
-                        // retry this iterate.
-                        if self.try_reanchor_before_restoration() {
-                            return IterateOutcome::Continue;
-                        }
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
                         // `LINE_SEARCH_FAILED` when α drops below
                         // `alpha_min` or all retries reject, which in
@@ -3360,13 +3376,6 @@ impl IpoptAlgorithm {
         true
     }
 
-    /// Drive the restoration phase after a line-search failure.
-    /// Returns `IterateOutcome::Continue` if the restoration driver
-    /// recovered (the algorithm carries on from the recovered iterate);
-    /// otherwise terminates with [`SolverReturn::RestorationFailure`].
-    /// Mirrors upstream's
-    /// `IpBacktrackingLineSearch::ActivateLineSearch` → `PerformRestoration`
-    /// chain.
     /// Re-anchor the quasi-Newton model instead of handing off to
     /// restoration, when the line search has failed at a point
     /// restoration cannot improve (gh#818). Returns `true` if the model
@@ -3396,11 +3405,17 @@ impl IpoptAlgorithm {
     /// has nothing to reduce, it is bounded, and every path that reached
     /// restoration before still reaches it once the rung is spent.
     ///
-    /// **Deliberately *after* the acceptable-point decline** in
-    /// [`Self::invoke_restoration`], which stays the first thing tried —
-    /// `eigena2` and `csfi2` reach here at feasible points that already
-    /// pass the acceptable tolerances, and those must go on being
-    /// reported rather than re-anchored and continued.
+    /// **Deliberately *after* the acceptable-point decline.** The call
+    /// site is inside [`Self::invoke_restoration`], immediately behind
+    /// that decline, and not at the `Outcome::Failed` arm in
+    /// [`Self::iterate`] where the hand-off is decided — `eigena2` and
+    /// `csfi2` reach the hand-off at feasible points that already pass
+    /// the acceptable tolerances, and those must go on being reported
+    /// rather than re-anchored and continued. Being inside
+    /// `invoke_restoration` means the `PreRestoration` debug checkpoint
+    /// fires ahead of a rung that then does not enter restoration; that
+    /// is the price of the ordering and is the checkpoint's documented
+    /// meaning ("just before entry"), not a promise that entry follows.
     ///
     /// **And deliberately not a feasibility gate on restoration itself.**
     /// That was tried and rejected before (see the `constr_viol_tol`
@@ -3451,6 +3466,13 @@ impl IpoptAlgorithm {
         true
     }
 
+    /// Drive the restoration phase after a line-search failure.
+    /// Returns `IterateOutcome::Continue` if the restoration driver
+    /// recovered (the algorithm carries on from the recovered iterate);
+    /// otherwise terminates with [`SolverReturn::RestorationFailure`].
+    /// Mirrors upstream's
+    /// `IpBacktrackingLineSearch::ActivateLineSearch` → `PerformRestoration`
+    /// chain.
     fn invoke_restoration(&mut self) -> IterateOutcome {
         // Snapshot the outer reference iterate's `(theta, barr)` and
         // build the orig-progress callback the inner IPM will consult
@@ -3561,6 +3583,20 @@ impl IpoptAlgorithm {
                 );
                 return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
             }
+        }
+
+        // gh#818 — one rung before the hand-off proper: re-anchor the
+        // quasi-Newton model and retry this iterate. Placed *here*, and
+        // not at the `Outcome::Failed` arm in `iterate`, because it has
+        // to run behind the acceptable-point decline above: `eigena2`
+        // and `csfi2` arrive at feasible points that already pass the
+        // acceptable tolerances, and those must go on being reported
+        // rather than re-anchored and continued. The gh#534 deferral
+        // path falls through to here, which is the right order too —
+        // the deferral has already captured its floor, so a rung taken
+        // under a live deferral is protected by it.
+        if self.try_reanchor_before_restoration() {
+            return IterateOutcome::Continue;
         }
 
         // No-progress restoration cycle detector. Two layered checks
