@@ -3838,15 +3838,54 @@ impl IpoptAlgorithm {
         // count (one outer iter is consumed per restoration call) and
         // wall-time around the inner call. Inner iter count is read
         // after via the trait accessor.
+        //
+        // `outer_iter_at_entry` is captured *before* the call because the
+        // inner IPM's counter is seeded from it (`inner.iter_count =
+        // outer_iter + 1`, upstream `IpRestoMinC_1Nrm.cpp:181`). The
+        // accessor hands back that seeded, absolute number; the sub-solve's
+        // own length is the difference. Adding the raw accessor value was
+        // gh #819's second defect — `restoration_inner_iters` was a sum of
+        // absolute positions, a quantity with no meaning — and it is the
+        // same misreading gh#664 records for the stall gate.
+        let outer_iter_at_entry = self.data.borrow().iter_count;
         self.resto_calls = self.resto_calls.saturating_add(1);
         self.resto_outer_iters = self.resto_outer_iters.saturating_add(1);
         let resto_t0 = std::time::Instant::now();
         let outcome = resto.perform_restoration(&self.data, &self.cq, nlp, aug);
         drop(pd_guard);
         self.resto_wall_secs += resto_t0.elapsed().as_secs_f64();
+        let inner_final_iter = resto.last_inner_iter_count();
         self.resto_inner_iters = self
             .resto_inner_iters
-            .saturating_add(resto.last_inner_iter_count());
+            .saturating_add((inner_final_iter - outer_iter_at_entry).max(0));
+        // gh #819. Roll the reported iteration count forward over the
+        // restoration rows on the paths that *terminate* the solve.
+        //
+        // `RestorationOutcome::Recovered` already does this for itself, in
+        // `min_c_1nrm.rs`'s step 2g (`Set_iter_count(resto_iter_count - 1)`,
+        // one short because the outer loop is about to increment). Every
+        // other outcome returns `Terminate` from the match below without
+        // passing through that block, so the whole sub-solve used to vanish
+        // from the summary: on gh #815's flowsheet the log ends at row
+        // `3000r`, above a summary that said `Number of Iterations....: 3`.
+        //
+        // Ipopt reports the index of the last row it printed, `r` rows
+        // included, on every exit path. Measured on the gh #815 model and
+        // three variants of it: last row `2418r` / reported 2418, `412r` /
+        // 412, `1547r` / 1547, `1348r` / 1348 — exits `Restoration Failed`,
+        // local infeasibility and `Maximum Number of Iterations Exceeded`
+        // respectively. Assigning the absolute inner count reproduces that
+        // rule exactly.
+        //
+        // Safe against trajectory: every non-`Recovered` arm below returns
+        // `IterateOutcome::Terminate`, and `optimize_inner`'s loop breaks on
+        // `Terminate` without consulting the counter again. Nothing reads
+        // `iter_count` between here and the summary.
+        if !matches!(outcome, RestorationOutcome::Recovered)
+            && inner_final_iter > outer_iter_at_entry
+        {
+            self.data.borrow_mut().iter_count = inner_final_iter;
+        }
         // pounce#244: the restoration inner IPM shares the outer solve's
         // `Deadline` (both its convergence check and — post-#244 — its KKT
         // solves consult it), so a budget crossing inside restoration

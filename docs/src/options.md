@@ -906,7 +906,7 @@ failed. Full rationale and the measurements behind the defaults:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `infeasibility_perturbed_start_retry` | `yes` | Rung 3 of the [second-opinion ladder](troubleshooting.md#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are): on `Infeasible_Problem_Detected` or `Invalid_Number_Detected`, re-solve once from a displaced start. Promoted only on `Solve_Succeeded` / `Solved_To_Acceptable_Level`. |
+| `infeasibility_perturbed_start_retry` | `yes` | Rung 3 of the [second-opinion ladder](troubleshooting.md#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are): on `Infeasible_Problem_Detected`, `Invalid_Number_Detected` or `Restoration_Failed`, re-solve once from a displaced start. Promoted only on `Solve_Succeeded` / `Solved_To_Acceptable_Level`. |
 | `start_point_perturbation` | `0.0` | Relative displacement `scale·(1 + \|x_i\|)·u_i`, `u_i` uniform on `[-1, 1)`, clipped into bounds. `0` disables. Non-finite entries are repaired to a finite in-bounds value first. |
 | `start_point_perturbation_seed` | `0` | SplitMix64 seed for that displacement — no clock, no address, no thread identity, so the same seed gives the same point on every platform. |
 | `start_point_conditioner` | `none` | `none`, or `adam` to run a first-order warm-up on `f(x) + ρ‖violation(x)‖²` and start from where it lands. |

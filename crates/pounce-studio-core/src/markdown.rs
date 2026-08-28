@@ -64,9 +64,12 @@ fn render_inspect_into(report: &SolveReport, out: &mut String) -> std::fmt::Resu
     if summary.restoration_calls > 0 {
         writeln!(
             out,
-            "- **restoration**: entered {} time(s), {} outer iters, {:.3} s",
+            "- **restoration**: entered {} time(s), {} iters, {:.3} s",
             summary.restoration_calls,
-            summary.restoration_outer_iters,
+            // gh #819: `restoration_outer_iters` is incremented once per
+            // call, so it read back the number left of it in the same line.
+            // The `r`-row count is `restoration_inner_iters`.
+            summary.restoration_inner_iters,
             summary.restoration_wall_secs,
         )?;
     }
