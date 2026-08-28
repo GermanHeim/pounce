@@ -486,9 +486,10 @@ direction-aware answer is `estimate()`'s.
 Every mode returns a step, and that step leaves a residual in the
 barrier KKT system at the perturbed parameter values. Newton iterations
 drive that residual down against an operator assembled at the
-predicted point: the Hessian and constraint Jacobians are evaluated at
-the stepped iterate with the step's own multipliers, one factorization
-is paid there, and each iteration afterwards costs one back-solve. A
+predicted point: the Hessian, the constraint Jacobians, and the
+barrier diagonal are all evaluated at the stepped iterate with the
+step's own multipliers, one factorization is paid there, and each
+iteration afterwards costs one back-solve. A
 chord iteration contracts at the rate the distance between its
 operator and the true Jacobian sets, and the predicted point is where
 the truth is. Under a `limited-memory` solve the quasi-Newton matrix
@@ -509,9 +510,9 @@ once before iterating. A bound the step takes off its minimum comes out
 of the operator, its multiplier held at zero and its complementarity
 row gone. A bound the step brings onto its minimum has its diagonal
 raised to the stiffness the barrier assigns there. Every other row
-keeps the held solve's term, never one recomputed from the predicted
-slacks. Both directions are the same change to one diagonal, so the
-single factorization at the predicted point serves the whole
+carries the predicted point's own term, in the same frame as the rest
+of the operator. Both directions are the same change to one diagonal,
+so the single factorization at the predicted point serves the whole
 correction.
 
 That decision is where the modes start from different places.
@@ -521,16 +522,16 @@ all the correction has to work with is whatever the clamp left sitting
 on a bound. On the CSTR at a quarter of the change to its steady state
 that is one bound against the seven the other two pass over, which is
 why the linear estimate stays furthest from a re-solve. Below the first
-crossing all three are the same step.
+crossing all three are the same step. A release no step endpoint
+shows is applied by no mode: the correction can move such a variable
+partway off its bound, on the weak diagonal entry the step's clamped
+multiplier builds at the predicted point, and the estimate is then
+not the re-solve.
 
 How far the correction reaches is set by how many crossings the
 predictor hands over rather than by the size of the perturbation
-directly. On the CSTR the notebook uses, whose first crossing is at
-1.3% of the change to its steady state, `fix_relax` with eight
-iterations takes the largest relative error from 2.4e-3 to 1e-6 at a 2%
-change, from 1.4e-2 to 2e-6 at 5%, and from 6.0e-2 to 6.0e-5 at 10%,
-which is four crossings. At seven crossings the same call improves the
-estimate by about 5% and stops.
+directly. Past the crossings the step decided, what limits it is the
+multiplier handoff below.
 
 The reason it stops is the multipliers rather than the operator. They
 arrive extrapolated over the whole perturbation, nothing sets them at

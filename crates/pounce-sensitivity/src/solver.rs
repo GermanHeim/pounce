@@ -966,35 +966,41 @@ impl Solver {
     ///
     /// `step` is a full compound step, the shape
     /// [`Self::parametric_step_full`] returns, so any mode's result
-    /// can be handed in. Each iteration costs one back-solve against
-    /// the held factor and no factorization. Returns the refined step
-    /// and a [`CorrectorReport`] saying what the iterations bought.
+    /// can be handed in. Every correction pays one derivative
+    /// evaluation and one factorization at the predicted point, and
+    /// each iteration after that costs one back-solve. Returns the
+    /// refined step and a [`CorrectorReport`] saying what the
+    /// iterations bought.
     ///
     /// The corrector aims at the barrier solution at the μ the solve
     /// finished on, not at a re-solve, so the accuracy it can reach is
     /// bounded by that offset. Its operator is assembled at the
-    /// PREDICTED point: the iterations pay one factorization there,
-    /// with the Hessian and constraint Jacobians evaluated at the
-    /// stepped iterate and the step's own multipliers, and the barrier
-    /// diagonal carried from the held solve with the predictor's
-    /// active set applied. A chord iteration contracts at the rate the
-    /// distance between its operator and the true Jacobian sets, and
-    /// the predicted point is where the truth is. Under a
-    /// `limited-memory` solve the quasi-Newton matrix is kept as is,
-    /// since no exact Hessian exists to evaluate elsewhere. Where the
-    /// perturbation needs a bound the base point held tightly to leave
-    /// the active set, the barrier diagonal cannot represent the
-    /// change and the iterations make no progress.
-    /// `CorrectorReport::improved` reports that case: the step handed
-    /// back is then the caller's own.
+    /// PREDICTED point, every block: the Hessian, the constraint
+    /// Jacobians, and the barrier diagonal all evaluated at the
+    /// stepped iterate with the step's own multipliers, and the
+    /// predictor's active set applied to the diagonal in that frame.
+    /// A chord iteration contracts at the rate the distance between
+    /// its operator and the true Jacobian sets, and the predicted
+    /// point is where the truth is. Under a `limited-memory` solve
+    /// the quasi-Newton matrix is kept as is, since no exact Hessian
+    /// exists to evaluate elsewhere. Where the perturbation needs a
+    /// bound to leave the active set that the step's endpoint does
+    /// not show, no released row is applied: the step's clamped
+    /// multiplier leaves a weak diagonal entry there, the iterations
+    /// can move the coordinate partway off the bound, and the answer
+    /// is not the re-solve. The release-deciding modes are the ones
+    /// that cross exactly. `CorrectorReport::improved` reports
+    /// whether the residual fell; when it did not, the step handed
+    /// back is the caller's own.
     ///
     /// The returned point always satisfies the variable bounds, since
     /// the barrier residual is undefined outside them and the
     /// fraction-to-boundary rule keeps every iterate inside. A step
     /// that arrives pointing out of the box is therefore put back in
     /// before the first iteration, which means `max_iter = 0` is not a
-    /// no-op: it costs one evaluation, no back-solve, and reports the
-    /// residual the caller's step leaves.
+    /// no-op: it costs the derivative evaluation and the residual
+    /// evaluation, no back-solve, and reports the residual the
+    /// caller's step leaves.
     pub fn correct_step(
         &self,
         pin_constraint_indices: &[Index],

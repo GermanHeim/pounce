@@ -250,13 +250,15 @@ another number it produced. Those catch a rule that is not invariant. They
 cannot catch a step that is **self-consistently** wrong.
 
 The number that makes this concrete is pinned in
-`the_corrector_reports_improved_without_crossing_a_release`
-(`sens_resolve_oracle.rs`): across a strongly active release the corrector
-reports `improved()` and drops its residual by `3e-8` while the point stays
-`0.1333` from the truth — the entire distance the variable should have
-travelled off its bound. Not a defect; the held barrier diagonal cannot
-represent a bound leaving the active set. But it is the proof that
-`improved()` plus a falling residual does **not** imply the answer is close.
+`the_corrector_stays_short_of_the_resolve_across_a_release`
+(`sens_resolve_oracle.rs`): across a strongly active release the corrector's
+answer stays short of the re-solve while the residual it measures falls, by
+a delta-dependent margin, and where the step hides the release behind
+curvature (`corrector.rs`'s `a_release_the_step_hides_is_followed_partway`)
+the same weak entry moves the variable partway. Not a defect; crossing
+exactly needs the released row taken out of the operator, which only the
+release decision applies. But it is the proof that a falling residual does
+**not** imply the answer is close.
 
 **Discharge.** `sens_resolve_oracle.rs` — a warm re-solve at the perturbed
 parameter, tolerance two orders tighter than the base solve. It is the only
