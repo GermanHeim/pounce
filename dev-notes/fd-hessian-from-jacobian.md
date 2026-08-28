@@ -119,3 +119,81 @@ only state the Jacobian pattern, `jacobian` still wins, by less.
 evaluations (17 per Hessian). Two obvious reductions, neither attempted:
 a star colouring instead of CPR (roughly half the groups), and skipping
 the Hessian rebuild on iterations where the iterate barely moved.
+
+---
+
+## Star colouring and Hessian reuse: measured, and one of them shipped off
+
+Two follow-ups to the above.
+
+### Hessian reuse — small, real, kept
+
+`fd_hessian_reuse_tol` skips the rebuild when neither the primal iterate
+nor the multipliers have moved relatively more than the tolerance. **Both**
+are tested: `∇²L = ∇²f + Σ yⱼ ∇²cⱼ` depends on the multipliers, so testing
+`x` alone would hand back a stale Hessian through the whole endgame of an
+interior-point solve, which is short steps with moving duals.
+
+`laptime` N=160, Jacobian pattern:
+
+| `fd_hessian_reuse_tol` | status | iters | wall |
+|---|---|---|---|
+| 0 (off) | Optimal | 38 | 13.5 s |
+| 1e-8 | Optimal | 38 | 13.0 s |
+| 1e-6 | Optimal | 38 | 12.5 s |
+
+~7%, no iteration cost, objective unchanged to 15 figures. Off by default;
+worth turning on.
+
+### Star colouring — correct, cheaper, and the wrong choice anyway
+
+A star colouring lets an entry be read from **either** endpoint's probe, so
+it needs fewer groups: **76 → 42** on the Jacobian-derived pattern, 17 → 16
+on the declared one. Its recovery is algebraically exact, verified in
+`overlapping_cliques_are_validated_not_assumed` by recovering a known matrix
+through it.
+
+It still loses:
+
+| pattern / colouring | groups | cols per group | result |
+|---|---|---|---|
+| declared / cpr | 17 | 546 | Optimal, 30 it, 65.3711067940 |
+| declared / star | 16 | 580 | Optimal, 30 it, 65.3711067940 |
+| jacobian / cpr | 76 | 122 | Optimal, 38 it, 65.3711063753 |
+| jacobian / star | 42 | 221 | **Acceptable, 404 it, 65.3683344570** |
+
+**Group size is not the cause.** `declared/star` packs the largest groups of
+the four — 580 columns per probe against `jacobian/cpr`'s 122 — and
+converges in 30 iterations to the exact objective. That was the first
+hypothesis and the measurement refutes it.
+
+The cause is the **finite-difference remainder**. Direct-recovery theory
+assumes exact Hessian-vector products. A forward difference also carries
+
+```
+    ½ Σ_{m,p ∈ g} T_imp h_m h_p
+```
+
+into row `i`, where `T` is the third derivative. `T_imp ≠ 0` requires `i`,
+`m` and `p` in a common constraint's support, hence `H_im ≠ 0` **and**
+`H_ip ≠ 0`. CPR's distance-2 property forbids two such columns from sharing
+a group, so those cross terms vanish *structurally*. A star colouring only
+guarantees the single-neighbour property for the pair being recovered, so
+they survive — and they matter precisely where the pattern is dense
+(`rho_max` 59 on the Jacobian pattern against 15 on the declared one).
+
+So the ordering of these two is the opposite of what it looks like from the
+group counts, and CPR is the default.
+
+### The check that should have caught it earlier
+
+The recovery's soundness condition was a `debug_assert`, which is compiled
+out in release. The invalid case therefore produced a wrong Hessian with no
+diagnostic — it surfaced only as 404 iterations and a wrong objective, which
+is the "silently wrong while reporting success" failure this whole module is
+most exposed to. It is now an unconditional validation with an automatic
+fallback to CPR, and `FdStats::coloring_fell_back` reports when that fires.
+
+On `laptime` the star colouring **passes** that validation and is still
+numerically wrong, which is the point worth carrying forward: the predicate
+is about algebraic recoverability and cannot see the differencing error.

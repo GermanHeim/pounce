@@ -267,6 +267,12 @@ pub struct AlgorithmBuilder {
     /// Where [`HessianApproxChoice::FiniteDifference`] takes its
     /// sparsity pattern from (`fd_hessian_pattern`).
     pub fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource,
+    /// How finite-difference probe groups are formed
+    /// (`fd_hessian_coloring`).
+    pub fd_hessian_coloring: crate::hess::fd_hessian::FdColoring,
+    /// Relative movement in `x` AND `y` below which the previous Hessian
+    /// is reused (`fd_hessian_reuse_tol`). `0` rebuilds every iteration.
+    pub fd_hessian_reuse_tol: Number,
     pub limited_memory_update_type: UpdateType,
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
@@ -1101,6 +1107,8 @@ impl Default for AlgorithmBuilder {
                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
             fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
+            fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
+            fd_hessian_reuse_tol: 0.0,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
@@ -1513,9 +1521,13 @@ impl AlgorithmBuilder {
                 u.init_val_max = self.limited_memory_init_val_max;
                 Box::new(u)
             }
-            HessianApproxChoice::FiniteDifference => Box::new(
-                crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern),
-            ),
+            HessianApproxChoice::FiniteDifference => {
+                let mut u =
+                    crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern);
+                u.coloring = self.fd_hessian_coloring;
+                u.reuse_tol = self.fd_hessian_reuse_tol;
+                Box::new(u)
+            }
         };
 
         let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
@@ -1632,6 +1644,8 @@ mod tests {
                             partitioned_block_size: 64,
                             fd_hessian_pattern:
                                 crate::hess::fd_hessian::FdPatternSource::Declared,
+                            fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
+                            fd_hessian_reuse_tol: 0.0,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,

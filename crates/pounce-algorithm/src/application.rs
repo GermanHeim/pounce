@@ -3779,6 +3779,19 @@ impl IpoptApplication {
                 };
             }
         }
+        if let Ok((v, found)) = self.options.get_string_value("fd_hessian_coloring", "") {
+            if found {
+                builder.fd_hessian_coloring = match v.as_str() {
+                    "cpr" => crate::hess::fd_hessian::FdColoring::Cpr,
+                    _ => crate::hess::fd_hessian::FdColoring::Star,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_numeric_value("fd_hessian_reuse_tol", "") {
+            if found && v >= 0.0 {
+                builder.fd_hessian_reuse_tol = v;
+            }
+        }
         if let Ok((v, found)) = self.options.get_string_value("partitioned_elements", "") {
             if found {
                 builder.partitioned_elements = match v.as_str() {

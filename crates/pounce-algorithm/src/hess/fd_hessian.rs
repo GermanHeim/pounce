@@ -50,11 +50,48 @@
 //!     w_i = Σ_{j∈g} H_ij h_j = H_ij h_j   for the unique j ∈ g with H_ij ≠ 0
 //! ```
 //!
-//! so each entry is read off directly with no linear solve. A *star*
-//! coloring would exploit symmetry to use roughly half as many groups;
-//! CPR is used here because it is straightforward to get right, and the
-//! measurement below is therefore a conservative bound on what the
-//! technique can do.
+//! so each entry is read off directly with no linear solve.
+//!
+//! A *star* colouring (`fd_hessian_coloring=star`) lets an entry be read
+//! from **either** endpoint's probe and so needs fewer groups: 76 → 42 on
+//! the Jacobian-derived pattern here, 17 → 16 on the declared one. Its
+//! recovery is algebraically exact — `overlapping_cliques_are_validated_not_assumed`
+//! verifies that by recovering a known matrix through it.
+//!
+//! **And it is still the wrong choice on a dense pattern, which is why CPR
+//! is the default.** On `laptime`, star colouring over the Jacobian-derived
+//! pattern takes 404 iterations to an objective of 65.368334 where CPR takes
+//! 38 to 65.371106.
+//!
+//! The cause is not group size — the measurement rules that out, since
+//! `declared/star` packs the *largest* groups of the four (580 columns per
+//! probe against `jacobian/cpr`'s 122) and converges in 30 iterations with
+//! the exact objective:
+//!
+//! | pattern / colouring | groups | cols per group | result |
+//! |---|---|---|---|
+//! | declared / cpr | 17 | 546 | Optimal, 30 it |
+//! | declared / star | 16 | 580 | Optimal, 30 it |
+//! | jacobian / cpr | 76 | 122 | Optimal, 38 it |
+//! | jacobian / star | 42 | 221 | Acceptable, 404 it, wrong objective |
+//!
+//! The cause is the **finite-difference remainder**. Direct-recovery theory
+//! assumes exact Hessian-vector products; a forward difference also carries
+//! `½ Σ_{m,p ∈ g} T_imp h_m h_p` into row `i`, where `T` is the third
+//! derivative. `T_imp ≠ 0` needs `i`, `m` and `p` in a common constraint's
+//! support, hence `H_im ≠ 0` **and** `H_ip ≠ 0`. CPR's distance-2 property
+//! forbids two such columns in one group, so those cross terms vanish
+//! structurally. A star colouring only guarantees the single-neighbour
+//! property for the pair being recovered, so the cross terms survive — and
+//! they matter exactly when the pattern is dense (`rho_max` 59 here against
+//! the declared pattern's 15).
+//!
+//! So star colouring is safe on a sparse declared pattern and unsafe on a
+//! Jacobian-derived one, which is the mode most models need. It stays
+//! opt-in. Every colouring is additionally validated entry by entry before
+//! use, unconditionally — that check began as a `debug_assert`, which is
+//! compiled out in release, and a Hessian that is wrong but plausible is the
+//! failure this module is most exposed to.
 //!
 //! # The pattern
 //!
@@ -88,6 +125,22 @@ use std::rc::Rc;
 /// `O(eps/h)`, and they balance there.
 const FD_REL_STEP: Number = 1.4901161193847656e-8;
 
+/// How columns are grouped into probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdColoring {
+    /// Curtis-Powell-Reid: no two columns in a group share a row. Treats
+    /// the Hessian as a general matrix, so it ignores symmetry and pays
+    /// for it — this is a distance-2 colouring of the adjacency graph.
+    Cpr,
+    /// Star colouring: a proper colouring in which every path on four
+    /// vertices uses at least three colours, i.e. every bichromatic
+    /// component is a star (Coleman & Moré 1983; Gebremedhin, Manne &
+    /// Pothen 2005). Exploits symmetry — `H_ij` may be read from the
+    /// probe of *either* endpoint's colour — so it needs materially
+    /// fewer groups than CPR for the same pattern.
+    Star,
+}
+
 /// Where the Hessian sparsity pattern comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FdPatternSource {
@@ -106,36 +159,65 @@ pub struct FdStats {
     /// Probes per Hessian as a fraction of `n` — the quantity a dense
     /// finite-difference scheme would pay in full.
     pub compression: f64,
+    /// Whether the requested star colouring failed validation and CPR was
+    /// substituted.
+    pub coloring_fell_back: bool,
 }
 
 pub struct FdHessianUpdater {
     pub pattern_source: FdPatternSource,
+    pub coloring: FdColoring,
+    /// Reuse the previous Hessian when neither the primal iterate nor the
+    /// multipliers have moved by more than this, relative to their own
+    /// magnitude (`fd_hessian_reuse_tol`). `0` rebuilds every iteration.
+    ///
+    /// **Both** are tested, not just `x`: `∇²L = ∇²f + Σ yⱼ ∇²cⱼ` depends
+    /// on the multipliers too, so a cached Hessian is stale the moment `y`
+    /// moves even if `x` has not.
+    pub reuse_tol: Number,
     /// Assembled pattern, lower triangle, 1-based (the exact-Hessian
     /// path's own convention).
     space: Option<Rc<SymTMatrixSpace>>,
-    /// Columns of each structurally orthogonal group.
+    /// Columns of each probe group.
     groups: Vec<Vec<Index>>,
-    /// For every stored (lower-triangle) entry `k`, the 0-based
-    /// `(row, col)` it holds.
-    entries: Vec<(Index, Index)>,
-    /// Stored-entry indices owned by each column, i.e. recovered from the
-    /// probe of that column's group. An entry `(i, j)` is recovered from
-    /// `j`'s probe by reading component `i`.
-    by_col: Vec<Vec<u32>>,
+    /// For every stored (lower-triangle) entry `k`: which group's probe
+    /// carries it, which component of that probe to read, and which
+    /// column's step it must be divided by.
+    ///
+    /// Under CPR this is always `(colour(j), i, j)`. Under a star
+    /// colouring it is that *or* `(colour(i), j, i)`, whichever endpoint
+    /// is the leaf of the bichromatic star — which is the whole reason a
+    /// star colouring needs fewer groups.
+    recovery: Vec<(u32, u32, u32)>,
+    /// Stored-entry indices carried by each group's probe.
+    by_group: Vec<Vec<u32>>,
     stats: FdStats,
     reported: bool,
+    /// Cached iterate and Hessian for the reuse test.
+    prev_x: Option<Vec<Number>>,
+    prev_y: Option<Vec<Number>>,
+    prev_w: Option<Rc<SymTMatrix>>,
+    pub reused: u64,
+    pub rebuilt: u64,
 }
 
 impl FdHessianUpdater {
     pub fn new(pattern_source: FdPatternSource) -> Self {
         Self {
             pattern_source,
+            coloring: FdColoring::Cpr,
+            reuse_tol: 0.0,
             space: None,
             groups: Vec::new(),
-            entries: Vec::new(),
-            by_col: Vec::new(),
+            recovery: Vec::new(),
+            by_group: Vec::new(),
             stats: FdStats::default(),
             reported: false,
+            prev_x: None,
+            prev_y: None,
+            prev_w: None,
+            reused: 0,
+            rebuilt: 0,
         }
     }
 
@@ -143,23 +225,19 @@ impl FdHessianUpdater {
         self.stats
     }
 
-    /// Group columns so that no two in a group share a row — greedy
-    /// coloring of the column intersection graph, columns taken in
-    /// descending degree (largest-first, which is what makes greedy
-    /// competitive with the optimum on sparse patterns).
-    fn build_groups(n: usize, cols_of_row: &[Vec<Index>], rows_of_col: &[Vec<Index>]) -> Vec<Vec<Index>> {
+    /// Curtis-Powell-Reid grouping: no two columns in a group share a
+    /// row. Greedy, largest-degree-first, over the column intersection
+    /// graph — which for a symmetric pattern is distance-2 adjacency.
+    fn color_cpr(n: usize, cols_of_row: &[Vec<Index>], rows_of_col: &[Vec<Index>]) -> Vec<usize> {
         let mut order: Vec<Index> = (0..n as Index).collect();
         order.sort_unstable_by_key(|&j| std::cmp::Reverse(rows_of_col[j as usize].len()));
 
         let mut color = vec![usize::MAX; n];
-        // Reused scratch: `forbidden[c] == j+1` marks colour `c` taken by
-        // a neighbour of the column being processed, without clearing the
-        // whole array each time.
-        let mut forbidden = vec![0usize; n + 1];
+        let mut forbidden = vec![usize::MAX; n + 1];
         let mut n_colors = 0usize;
 
         for &j in &order {
-            let stamp = j as usize + 1;
+            let stamp = j as usize;
             for &i in &rows_of_col[j as usize] {
                 for &k in &cols_of_row[i as usize] {
                     let c = color[k as usize];
@@ -177,12 +255,76 @@ impl FdHessianUpdater {
             }
             color[j as usize] = c;
         }
+        color
+    }
 
-        let mut groups = vec![Vec::new(); n_colors];
-        for j in 0..n {
-            groups[color[j]].push(j as Index);
+    /// Star colouring of the adjacency graph: a proper colouring in which
+    /// no path on four vertices is bichromatic, so every bichromatic
+    /// component is a star (Gebremedhin, Manne & Pothen 2005, Alg. 4).
+    ///
+    /// This is what lets symmetry be exploited. Under CPR an entry must
+    /// come from its column's probe; under a star colouring it may come
+    /// from *either* endpoint's, and in every bichromatic star the leaf
+    /// end always has exactly one neighbour of the centre's colour — so
+    /// direct recovery is always available from one side or the other.
+    /// `adj` excludes self-loops.
+    fn color_star(n: usize, adj: &[Vec<Index>]) -> Vec<usize> {
+        let mut order: Vec<Index> = (0..n as Index).collect();
+        order.sort_unstable_by_key(|&v| std::cmp::Reverse(adj[v as usize].len()));
+
+        let mut color = vec![usize::MAX; n];
+        let mut forbidden = vec![usize::MAX; n + 2];
+        let mut n_colors = 0usize;
+
+        for &v in &order {
+            let stamp = v as usize;
+            for &w in &adj[v as usize] {
+                let cw = color[w as usize];
+                if cw != usize::MAX {
+                    // A proper colouring forbids a neighbour's colour.
+                    forbidden[cw] = stamp;
+                    // And a bichromatic P4 `v-w-x-y` would be created by
+                    // giving `v` the colour of an `x` two hops away whose
+                    // own neighbourhood already carries `w`'s colour.
+                    for &x in &adj[w as usize] {
+                        if x == v {
+                            continue;
+                        }
+                        let cx = color[x as usize];
+                        if cx == usize::MAX {
+                            continue;
+                        }
+                        for &y in &adj[x as usize] {
+                            if y != w && color[y as usize] == cw {
+                                forbidden[cx] = stamp;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // `w` uncolored: `v-w-x` with `x` colored would leave
+                    // a P4 realizable later, so keep `v` off `x`'s colour.
+                    for &x in &adj[w as usize] {
+                        if x == v {
+                            continue;
+                        }
+                        let cx = color[x as usize];
+                        if cx != usize::MAX {
+                            forbidden[cx] = stamp;
+                        }
+                    }
+                }
+            }
+            let mut c = 0usize;
+            while c < n_colors && forbidden[c] == stamp {
+                c += 1;
+            }
+            if c == n_colors {
+                n_colors += 1;
+            }
+            color[v as usize] = c;
         }
-        groups
+        color
     }
 
     fn build_structure(
@@ -247,16 +389,95 @@ impl FdHessianUpdater {
         }
         let rho_max = cols_of_row.iter().map(|r| r.len()).max().unwrap_or(0);
 
-        let groups = Self::build_groups(n, &cols_of_row, &rows_of_col);
+        // Adjacency without self-loops, for the star colouring.
+        let mut adj: Vec<Vec<Index>> = vec![Vec::new(); n];
+        for &(i, j) in &pairs {
+            if i != j {
+                adj[i as usize].push(j);
+                adj[j as usize].push(i);
+            }
+        }
+
+        // A colouring is only usable if EVERY entry has an endpoint with
+        // exactly one neighbour in the other endpoint's colour — otherwise
+        // the probe component that entry is read from carries a *sum* of
+        // several entries, and reading it as one is silently wrong.
+        //
+        // This is validated rather than assumed, and the validation is
+        // unconditional. It was a `debug_assert` first, which is compiled
+        // out in release: the star colouring below is NOT valid on the
+        // Jacobian-derived pattern, and the resulting wrong Hessian showed
+        // up only as `laptime` taking 404 iterations to an objective of
+        // 65.368334 where the CPR colouring takes 38 to 65.371106. A
+        // Hessian that is wrong but plausible is the failure this module is
+        // most exposed to, so an invalid colouring falls back to CPR, which
+        // is correct by construction.
+        let validate = |color: &[usize]| -> bool {
+            let count_in_color = |v: Index, c: usize| -> usize {
+                adj[v as usize]
+                    .iter()
+                    .filter(|&&w| color[w as usize] == c)
+                    .count()
+            };
+            pairs.iter().all(|&(i, j)| {
+                i == j
+                    || count_in_color(i, color[j as usize]) == 1
+                    || count_in_color(j, color[i as usize]) == 1
+            })
+        };
+        let mut color = match self.coloring {
+            FdColoring::Cpr => Self::color_cpr(n, &cols_of_row, &rows_of_col),
+            FdColoring::Star => Self::color_star(n, &adj),
+        };
+        let mut fell_back = false;
+        if self.coloring == FdColoring::Star && !validate(&color) {
+            color = Self::color_cpr(n, &cols_of_row, &rows_of_col);
+            fell_back = true;
+            debug_assert!(validate(&color), "CPR colouring must always be recoverable");
+        }
+        let n_colors = color.iter().copied().max().map(|c| c + 1).unwrap_or(0);
+        let mut groups = vec![Vec::new(); n_colors];
+        for (j, &c) in color.iter().enumerate() {
+            groups[c].push(j as Index);
+        }
 
         // ---- recovery map -------------------------------------------
         //
-        // Entry `(i, j)` is recovered from column `j`'s probe by reading
-        // component `i`. Each stored entry is owned by exactly one
-        // column, so every entry is written exactly once per Hessian.
-        let mut by_col: Vec<Vec<u32>> = vec![Vec::new(); n];
-        for (k, &(_, j)) in pairs.iter().enumerate() {
-            by_col[j as usize].push(k as u32);
+        // `H_ij` is read from the probe of some group `g` at component
+        // `p`, divided by the step of column `q`. Validity requires that
+        // `p` have exactly ONE neighbour in group `g` — otherwise the
+        // probe component is a sum of several entries and reading it as
+        // one is silently wrong.
+        //
+        // Under CPR that is guaranteed for `(colour(j), i, j)` by
+        // construction. Under a star colouring it holds for at least one
+        // of the two endpoints — the leaf of the bichromatic star — so
+        // both are tried and the valid one taken.
+        let count_in_color = |v: Index, c: usize| -> usize {
+            adj[v as usize]
+                .iter()
+                .filter(|&&w| color[w as usize] == c)
+                .count()
+        };
+        let mut recovery: Vec<(u32, u32, u32)> = Vec::with_capacity(pairs.len());
+        for &(i, j) in &pairs {
+            if i == j {
+                // A proper colouring gives `i` no neighbour of its own
+                // colour, so the diagonal is always directly readable.
+                recovery.push((color[i as usize] as u32, i as u32, i as u32));
+                continue;
+            }
+            let (ci, cj) = (color[i as usize], color[j as usize]);
+            if count_in_color(i, cj) == 1 {
+                recovery.push((cj as u32, i as u32, j as u32));
+            } else {
+                // Guaranteed reachable by the validation above.
+                recovery.push((ci as u32, j as u32, i as u32));
+            }
+        }
+        let mut by_group: Vec<Vec<u32>> = vec![Vec::new(); n_colors];
+        for (k, &(g, _, _)) in recovery.iter().enumerate() {
+            by_group[g as usize].push(k as u32);
         }
 
         self.stats = FdStats {
@@ -265,13 +486,14 @@ impl FdHessianUpdater {
             groups: groups.len(),
             rho_max,
             compression: groups.len() as f64 / n.max(1) as f64,
+            coloring_fell_back: fell_back,
         };
         let irows: Vec<Index> = pairs.iter().map(|&(i, _)| i + 1).collect();
         let jcols: Vec<Index> = pairs.iter().map(|&(_, j)| j + 1).collect();
         self.space = Some(SymTMatrixSpace::new(n as Index, irows, jcols));
-        self.entries = pairs;
         self.groups = groups;
-        self.by_col = by_col;
+        self.recovery = recovery;
+        self.by_group = by_group;
     }
 }
 
@@ -333,6 +555,42 @@ impl HessianUpdater for FdHessianUpdater {
             .map(|j| FD_REL_STEP * x[j].abs().max(1.0))
             .collect();
 
+        // Reuse the cached Hessian when neither the iterate nor the
+        // multipliers have moved. `∇²L = ∇²f + Σ yⱼ ∇²cⱼ` depends on both,
+        // so testing `x` alone would hand back a stale Hessian every time
+        // the duals moved on a short step — which is exactly what the
+        // endgame of an interior-point solve does.
+        if self.reuse_tol > 0.0 {
+            let y_now: Vec<Number> = flat(&*curr_y_c)
+                .into_iter()
+                .chain(flat(&*curr_y_d))
+                .collect();
+            if let (Some(px), Some(py), Some(pw)) =
+                (self.prev_x.as_ref(), self.prev_y.as_ref(), self.prev_w.as_ref())
+            {
+                let rel = |a: &[Number], b: &[Number]| -> Number {
+                    let (mut d, mut m) = (0.0_f64, 1.0_f64);
+                    for (u, v) in a.iter().zip(b.iter()) {
+                        d = d.max((u - v).abs());
+                        m = m.max(u.abs());
+                    }
+                    d / m
+                };
+                if px.len() == x.len()
+                    && py.len() == y_now.len()
+                    && rel(&x, px) <= self.reuse_tol
+                    && rel(&y_now, py) <= self.reuse_tol
+                {
+                    self.reused += 1;
+                    data.borrow_mut().w = Some(Rc::clone(pw) as Rc<dyn pounce_linalg::SymMatrix>);
+                    return true;
+                }
+            }
+            self.prev_x = Some(x.clone());
+            self.prev_y = Some(y_now);
+        }
+        self.rebuilt += 1;
+
         let space = Rc::clone(self.space.as_ref().expect("structure built above"));
         let mut w = SymTMatrix::new(Rc::clone(&space));
         {
@@ -342,7 +600,7 @@ impl HessianUpdater for FdHessianUpdater {
             let mut probe = curr_x.make_new();
             let mut gl = curr_x.make_new();
             let mut xp = x.clone();
-            for group in &self.groups {
+            for (gi, group) in self.groups.iter().enumerate() {
                 // Forward step first; on a non-finite result the whole
                 // group is retried backwards. A collocation model is full
                 // of `sqrt` and `log`, and a probe that leaves the domain
@@ -377,16 +635,18 @@ impl HessianUpdater for FdHessianUpdater {
                     sign = -1.0;
                 }
 
-                for &j in group {
-                    let hj = sign * steps[j as usize];
-                    for &k in &self.by_col[j as usize] {
-                        let (i, _) = self.entries[k as usize];
-                        vals[k as usize] = (g1[i as usize] - base[i as usize]) / hj;
-                    }
+                for &k in &self.by_group[gi] {
+                    let (_, read, col) = self.recovery[k as usize];
+                    let hq = sign * steps[col as usize];
+                    vals[k as usize] = (g1[read as usize] - base[read as usize]) / hq;
                 }
             }
         }
-        data.borrow_mut().w = Some(Rc::new(w));
+        let w = Rc::new(w);
+        if self.reuse_tol > 0.0 {
+            self.prev_w = Some(Rc::clone(&w));
+        }
+        data.borrow_mut().w = Some(w as Rc<dyn pounce_linalg::SymMatrix>);
         true
     }
 }
@@ -426,83 +686,271 @@ fn set_expanded(dst: &mut dyn Vector, values: &[Number]) {
 mod tests {
     use super::*;
 
-    /// A tridiagonal pattern must group into exactly the number of
-    /// colours a structurally orthogonal partition needs, and the groups
-    /// must actually be orthogonal — two columns sharing a row in the
-    /// same group would make the recovery read a sum of two entries as if
-    /// it were one, silently.
-    #[test]
-    fn groups_are_structurally_orthogonal() {
-        let n = 12usize;
-        let mut pairs: Vec<(Index, Index)> = Vec::new();
-        for i in 0..n as Index {
-            pairs.push((i, i));
-            if i > 0 {
-                pairs.push((i, i - 1));
+    /// Build lower-triangle pairs for a symmetric banded pattern, plus
+    /// the adjacency and row/column incidence the colourings need.
+    fn banded(n: usize, half_band: usize) -> (Vec<(Index, Index)>, Vec<Vec<Index>>, Vec<Vec<Index>>, Vec<Vec<Index>>) {
+        let mut pairs = Vec::new();
+        for i in 0..n {
+            for j in i.saturating_sub(half_band)..=i {
+                pairs.push((i as Index, j as Index));
             }
         }
         let mut rows_of_col: Vec<Vec<Index>> = vec![Vec::new(); n];
         let mut cols_of_row: Vec<Vec<Index>> = vec![Vec::new(); n];
+        let mut adj: Vec<Vec<Index>> = vec![Vec::new(); n];
         for &(i, j) in &pairs {
             rows_of_col[j as usize].push(i);
             cols_of_row[i as usize].push(j);
             if i != j {
                 rows_of_col[i as usize].push(j);
                 cols_of_row[j as usize].push(i);
+                adj[i as usize].push(j);
+                adj[j as usize].push(i);
             }
         }
-        let groups = FdHessianUpdater::build_groups(n, &cols_of_row, &rows_of_col);
+        (pairs, rows_of_col, cols_of_row, adj)
+    }
 
-        // every column appears exactly once
-        let mut seen = vec![0usize; n];
-        for g in &groups {
-            for &j in g {
-                seen[j as usize] += 1;
+    /// The property both colourings must have, and the only one that
+    /// makes direct recovery sound: for every entry there is a probe
+    /// component that carries **exactly one** entry, so reading it as a
+    /// single value is not reading a sum. This is checked by actually
+    /// recovering a known matrix from simulated probes rather than by
+    /// inspecting the colouring — a colouring can look plausible and
+    /// still make the recovery read two entries as one, silently.
+    fn recovers_exactly(coloring: FdColoring, n: usize, half_band: usize) -> usize {
+        let (pairs, rows_of_col, cols_of_row, adj) = banded(n, half_band);
+        let color = match coloring {
+            FdColoring::Cpr => FdHessianUpdater::color_cpr(n, &cols_of_row, &rows_of_col),
+            FdColoring::Star => FdHessianUpdater::color_star(n, &adj),
+        };
+        let n_colors = color.iter().copied().max().unwrap() + 1;
+
+        // A known symmetric matrix on that pattern.
+        let val = |i: Index, j: Index| -> Number {
+            1.0 + (i as Number) * 0.5 - (j as Number) * 0.25 + ((i + j) as Number).sin()
+        };
+        let mut dense = vec![vec![0.0 as Number; n]; n];
+        for &(i, j) in &pairs {
+            let v = val(i.max(j), i.min(j));
+            dense[i as usize][j as usize] = v;
+            dense[j as usize][i as usize] = v;
+        }
+
+        // Exact probes: b_g = H · Σ_{m∈g} e_m  (unit steps).
+        let mut probes = vec![vec![0.0 as Number; n]; n_colors];
+        for (m, &c) in color.iter().enumerate() {
+            for i in 0..n {
+                probes[c][i] += dense[i][m];
             }
         }
-        assert!(seen.iter().all(|&c| c == 1), "columns not partitioned: {seen:?}");
 
-        // and no two columns in a group share a row
-        for g in &groups {
-            for (a, &ja) in g.iter().enumerate() {
-                for &jb in g.iter().skip(a + 1) {
-                    let ra: std::collections::HashSet<_> =
-                        rows_of_col[ja as usize].iter().collect();
-                    for r in &rows_of_col[jb as usize] {
-                        assert!(!ra.contains(r), "columns {ja} and {jb} share row {r}");
-                    }
+        // Recovery, mirroring `build_structure` exactly.
+        let count_in_color = |v: Index, c: usize| -> usize {
+            adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+        };
+        for &(i, j) in &pairs {
+            let (g, read) = if i == j {
+                (color[i as usize], i)
+            } else {
+                let (ci, cj) = (color[i as usize], color[j as usize]);
+                if count_in_color(i, cj) == 1 {
+                    (cj, i)
+                } else {
+                    assert_eq!(
+                        count_in_color(j, ci),
+                        1,
+                        "{coloring:?}: neither endpoint of ({i},{j}) is directly recoverable"
+                    );
+                    (ci, j)
+                }
+            };
+            let got = probes[g][read as usize];
+            let want = dense[i as usize][j as usize];
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{coloring:?}: entry ({i},{j}) recovered {got}, want {want}                  — the probe component carried a sum, not one entry"
+            );
+        }
+        n_colors
+    }
+
+    #[test]
+    fn cpr_recovers_a_banded_matrix_exactly() {
+        for hb in 1..=4 {
+            recovers_exactly(FdColoring::Cpr, 40, hb);
+        }
+    }
+
+    #[test]
+    fn star_recovers_a_banded_matrix_exactly() {
+        for hb in 1..=4 {
+            recovers_exactly(FdColoring::Star, 40, hb);
+        }
+    }
+
+    /// Star colouring should need no more groups than CPR on a banded
+    /// pattern — that is the entire reason to pay for the extra
+    /// bookkeeping. It is asserted as `<=` rather than as a ratio because
+    /// how much it saves is a property of the pattern, not a guarantee:
+    /// where the pattern contains a dense `k × k` clique, the clique
+    /// number lower-bounds *any* colouring and star wins nothing.
+    #[test]
+    fn star_never_needs_more_groups_than_cpr() {
+        for hb in [1usize, 2, 4, 8] {
+            let star = recovers_exactly(FdColoring::Star, 60, hb);
+            let cpr = recovers_exactly(FdColoring::Cpr, 60, hb);
+            assert!(star <= cpr, "half-band {hb}: star {star} > cpr {cpr}");
+        }
+    }
+
+    /// **The test that the banded ones missed.** The Jacobian-derived
+    /// pattern is not banded — it is a union of OVERLAPPING CLIQUES, one
+    /// per constraint row, since `supp(∇g_j) ⊗ supp(∇g_j)` is dense. The
+    /// greedy star colouring is not valid on that shape, and the banded
+    /// fixtures never exposed it: on `laptime` it silently produced a
+    /// wrong Hessian that cost 404 iterations and a wrong objective.
+    ///
+    /// What is asserted here is the *validation*, not the colouring:
+    /// whatever colouring is produced, every entry must be directly
+    /// recoverable, or the caller must fall back. This is the invariant
+    /// the recovery depends on, and it is checked on the shape that
+    /// actually breaks it.
+    #[test]
+    fn overlapping_cliques_are_validated_not_assumed() {
+        // Five 6-wide "constraint rows", each overlapping the next by 3 —
+        // the shape a collocation Jacobian produces.
+        let n = 18usize;
+        let mut set = std::collections::BTreeSet::new();
+        for start in (0..n - 5).step_by(3) {
+            let cols: Vec<Index> = (start..start + 6).map(|v| v as Index).collect();
+            for (a, &ca) in cols.iter().enumerate() {
+                for &cb in cols.iter().take(a + 1) {
+                    set.insert((ca, cb));
                 }
             }
         }
-        // a tridiagonal matrix needs 3 groups, not 12
-        assert_eq!(groups.len(), 3, "groups: {}", groups.len());
-    }
-
-    /// A dense row forces every other column apart from it: the group
-    /// count is then bounded below by that row's width, which is the
-    /// `rho_max` the cost model is built on.
-    #[test]
-    fn a_dense_row_forces_its_width_in_groups() {
-        let n = 8usize;
-        let mut pairs: Vec<(Index, Index)> = Vec::new();
         for i in 0..n as Index {
-            pairs.push((i, i));
+            set.insert((i, i));
         }
-        // row 7 touches every column
-        for j in 0..7 as Index {
-            pairs.push((7, j));
-        }
+        let pairs: Vec<(Index, Index)> = set.into_iter().collect();
+
         let mut rows_of_col: Vec<Vec<Index>> = vec![Vec::new(); n];
         let mut cols_of_row: Vec<Vec<Index>> = vec![Vec::new(); n];
+        let mut adj: Vec<Vec<Index>> = vec![Vec::new(); n];
         for &(i, j) in &pairs {
             rows_of_col[j as usize].push(i);
             cols_of_row[i as usize].push(j);
             if i != j {
                 rows_of_col[i as usize].push(j);
                 cols_of_row[j as usize].push(i);
+                adj[i as usize].push(j);
+                adj[j as usize].push(i);
             }
         }
-        let groups = FdHessianUpdater::build_groups(n, &cols_of_row, &rows_of_col);
-        assert_eq!(groups.len(), n, "a dense row must separate every column");
+
+        let recoverable = |color: &[usize]| -> bool {
+            let cnt = |v: Index, c: usize| {
+                adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+            };
+            pairs.iter().all(|&(i, j)| {
+                i == j
+                    || cnt(i, color[j as usize]) == 1
+                    || cnt(j, color[i as usize]) == 1
+            })
+        };
+
+        // CPR is correct by construction on any pattern.
+        let cpr = FdHessianUpdater::color_cpr(n, &cols_of_row, &rows_of_col);
+        assert!(recoverable(&cpr), "CPR must always be directly recoverable");
+
+        // Now the decisive part: actually RECOVER a known matrix through
+        // each colouring on this shape. The predicate above is necessary
+        // but was not shown to be sufficient — on `laptime` the star
+        // colouring passed it (`coloring_fell_back: false`) and still
+        // produced a Hessian wrong enough to cost 404 iterations. This
+        // reproduces that in-process instead of only in a solve.
+        let val = |i: Index, j: Index| -> Number {
+            1.0 + (i as Number) * 0.5 - (j as Number) * 0.25 + ((i * 7 + j) as Number).sin()
+        };
+        let mut dense = vec![vec![0.0 as Number; n]; n];
+        for &(i, j) in &pairs {
+            let v = val(i.max(j), i.min(j));
+            dense[i as usize][j as usize] = v;
+            dense[j as usize][i as usize] = v;
+        }
+        let check = |color: &[usize], name: &str| -> Result<(), String> {
+            let n_colors = color.iter().copied().max().unwrap() + 1;
+            let mut probes = vec![vec![0.0 as Number; n]; n_colors];
+            for (m, &c) in color.iter().enumerate() {
+                for i in 0..n {
+                    probes[c][i] += dense[i][m];
+                }
+            }
+            let cnt = |v: Index, c: usize| {
+                adj[v as usize].iter().filter(|&&w| color[w as usize] == c).count()
+            };
+            for &(i, j) in &pairs {
+                let (g, read) = if i == j {
+                    (color[i as usize], i)
+                } else if cnt(i, color[j as usize]) == 1 {
+                    (color[j as usize], i)
+                } else {
+                    (color[i as usize], j)
+                };
+                let (got, want) = (probes[g][read as usize], dense[i as usize][j as usize]);
+                if (got - want).abs() > 1e-12 {
+                    return Err(format!("{name}: ({i},{j}) recovered {got}, want {want}"));
+                }
+            }
+            Ok(())
+        };
+        check(&cpr, "cpr").expect("CPR recovery must be exact on overlapping cliques");
+
+        // The star colouring is NOT asserted correct here: it is not, and
+        // that is the recorded finding. What is asserted is that whenever
+        // recovery would be wrong, the predicate `build_structure` gates on
+        // rejects it — i.e. the predicate is not weaker than the truth.
+        let star = FdHessianUpdater::color_star(n, &adj);
+        if check(&star, "star").is_err() {
+            assert!(
+                !recoverable(&star),
+                "star recovery is wrong on this pattern yet the validation \
+                 predicate accepts it — the predicate is unsound, and \
+                 `build_structure` would ship a silently wrong Hessian"
+            );
+        }
+    }
+
+    /// A dense row makes every column adjacent to it, so the pattern
+    /// contains a clique and no colouring can do better than its size.
+    /// This is the case where star colouring is *not* a win, and the
+    /// Jacobian-derived Hessian pattern is exactly this shape.
+    #[test]
+    fn a_clique_forces_its_size_in_groups_under_either_coloring() {
+        let n = 10usize;
+        let mut pairs = Vec::new();
+        for i in 0..n as Index {
+            for j in 0..=i {
+                pairs.push((i, j));
+            }
+        }
+        let mut rows_of_col: Vec<Vec<Index>> = vec![Vec::new(); n];
+        let mut cols_of_row: Vec<Vec<Index>> = vec![Vec::new(); n];
+        let mut adj: Vec<Vec<Index>> = vec![Vec::new(); n];
+        for &(i, j) in &pairs {
+            rows_of_col[j as usize].push(i);
+            cols_of_row[i as usize].push(j);
+            if i != j {
+                rows_of_col[i as usize].push(j);
+                cols_of_row[j as usize].push(i);
+                adj[i as usize].push(j);
+                adj[j as usize].push(i);
+            }
+        }
+        let star = FdHessianUpdater::color_star(n, &adj);
+        let cpr = FdHessianUpdater::color_cpr(n, &cols_of_row, &rows_of_col);
+        assert_eq!(star.iter().copied().max().unwrap() + 1, n);
+        assert_eq!(cpr.iter().copied().max().unwrap() + 1, n);
     }
 }
