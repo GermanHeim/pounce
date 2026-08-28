@@ -151,6 +151,12 @@ pub struct ConvergedState {
     /// depends on unrelaxed bounds must guard on this value. See
     /// [`Solver::classify_activity`].
     pub bound_relax_factor: Number,
+    /// Whether the solve computed exact Hessians, **as it ran**. A
+    /// `limited-memory` solve's `IpoptData::w` is the quasi-Newton
+    /// matrix, and there is no exact Hessian to evaluate at another
+    /// point, so the corrector keeps that matrix instead of
+    /// refreshing it at the predicted iterate.
+    pub exact_hessian: bool,
     /// Converged KKT-factor wrapper. Owns `Rc` handles to the
     /// `PdFullSpaceSolver`, the IpoptData / Cq, and the NLP, so it
     /// outlives the IPM call frame.
@@ -234,6 +240,12 @@ impl Solver {
             .get_numeric_value("bound_relax_factor", "")
             .map(|(v, _)| v)
             .expect("bound_relax_factor is a registered core option");
+        let exact_hessian = self
+            .app
+            .options()
+            .get_string_value("hessian_approximation", "")
+            .map(|(v, _)| v == "exact")
+            .expect("hessian_approximation is a registered core option");
 
         let state_cb = Rc::clone(&self.state);
         self.app
@@ -273,6 +285,7 @@ impl Solver {
                     x,
                     obj_val,
                     bound_relax_factor: brf,
+                    exact_hessian,
                     backsolver,
                 });
             }));
@@ -953,25 +966,46 @@ impl Solver {
     ///
     /// `step` is a full compound step, the shape
     /// [`Self::parametric_step_full`] returns, so any mode's result
-    /// can be handed in. Each iteration costs one back-solve against
-    /// the held factor and no factorization. Returns the refined step
-    /// and a [`CorrectorReport`] saying what the iterations bought.
+    /// can be handed in. Every correction pays one derivative
+    /// evaluation and one factorization at the predicted point, and
+    /// each iteration after that costs one back-solve. Returns the
+    /// refined step and a [`CorrectorReport`] saying what the
+    /// iterations bought.
     ///
     /// The corrector aims at the barrier solution at the μ the solve
     /// finished on, not at a re-solve, so the accuracy it can reach is
-    /// bounded by that offset. Where the perturbation needs a bound
-    /// the base point held tightly to leave the active set, the held
-    /// barrier diagonal cannot represent the change and the iterations
-    /// make no progress. `CorrectorReport::improved` reports that
-    /// case: the step handed back is then the caller's own.
+    /// bounded by that offset. Its operator is assembled at the
+    /// PREDICTED point, every block: the Hessian, the constraint
+    /// Jacobians, and the barrier diagonal all evaluated at the
+    /// stepped iterate with the step's own multipliers, and the
+    /// predictor's active set applied to the diagonal in that frame.
+    /// A base solve the sigma ceiling (gh#737) touched, or one that
+    /// crossed over into the declared frame (gh#654), is no
+    /// exception: both rules are re-derived at the predicted point
+    /// rather than read from the base-point diagonals stored for the
+    /// held factor's own back-solves.
+    /// A chord iteration contracts at the rate the distance between
+    /// its operator and the true Jacobian sets, and the predicted
+    /// point is where the truth is. Under a `limited-memory` solve
+    /// the quasi-Newton matrix is kept as is, since no exact Hessian
+    /// exists to evaluate elsewhere. Where the perturbation needs a
+    /// bound to leave the active set that the step's endpoint does
+    /// not show, no released row is applied: the step's clamped
+    /// multiplier leaves a weak diagonal entry there, the iterations
+    /// can move the coordinate partway off the bound, and the answer
+    /// is not the re-solve. The release-deciding modes are the ones
+    /// that cross exactly. `CorrectorReport::improved` reports
+    /// whether the residual fell; when it did not, the step handed
+    /// back is the caller's own.
     ///
     /// The returned point always satisfies the variable bounds, since
     /// the barrier residual is undefined outside them and the
     /// fraction-to-boundary rule keeps every iterate inside. A step
     /// that arrives pointing out of the box is therefore put back in
     /// before the first iteration, which means `max_iter = 0` is not a
-    /// no-op: it costs one evaluation, no back-solve, and reports the
-    /// residual the caller's step leaves.
+    /// no-op: it costs the derivative evaluation and the residual
+    /// evaluation, no back-solve, and reports the residual the
+    /// caller's step leaves.
     pub fn correct_step(
         &self,
         pin_constraint_indices: &[Index],
@@ -1040,6 +1074,7 @@ impl Solver {
             &ctx.hi,
             mu,
             max_iter,
+            state.exact_hessian,
         )
     }
 
@@ -1248,7 +1283,14 @@ impl Solver {
         // solve: a weak bound's multiplier is order sqrt(mu) and the
         // released convention holds it at exactly zero, so the step
         // shift's multiplier injection is deliberately omitted.
-        if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &rhs_plain, &mut d0, false) {
+        if !bs.solve_released_prebuilt(
+            &released,
+            Rc::clone(&sigma),
+            None,
+            &rhs_plain,
+            &mut d0,
+            false,
+        ) {
             return Err(SolverError::BacksolveFailed);
         }
         work += 1;
@@ -1331,8 +1373,14 @@ impl Solver {
                 let mut unit = vec![0.0; dim];
                 unit[weak[k].var_row] = sign(k);
                 let mut xk = vec![0.0; dim];
-                if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &unit, &mut xk, false)
-                {
+                if !bs.solve_released_prebuilt(
+                    &released,
+                    Rc::clone(&sigma),
+                    None,
+                    &unit,
+                    &mut xk,
+                    false,
+                ) {
                     return Err(SolverError::BacksolveFailed);
                 }
                 work += 1;
@@ -1455,6 +1503,7 @@ impl Solver {
                 if !bs.solve_released_prebuilt(
                     &released,
                     Rc::clone(&sigma),
+                    None,
                     &comb,
                     &mut corr,
                     false,
