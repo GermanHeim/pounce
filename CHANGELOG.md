@@ -199,15 +199,21 @@ changes.
   for in the first place (a transient excursion that peaks and recedes),
   except that a watchdog excursion recedes *by construction* and the
   backstop bypasses the streak. Measured on the gh #818 quadratic at
-  `n = 8`, cond 1e12, `m = 6`: iterations 350, 351 and 352 are all `w`
-  rows of one watchdog sequence; at 352 `|x|_inf` is ~5e22 and the
-  objective has climbed to **+2.0e45**, the opposite of the `f -> -inf`
-  that `Diverging_Iterates` asserts, one iteration before `StopWatchDog`
-  would have restored an iterate at `f = 2.26e4`. The same model on the
-  fixed trial sequence reaches `f = 1.7e27` on a watchdog trial of its
-  own and survives only because `|x|` happened to stay under `1e20`:
-  the guard was reporting which excursion got luckier, not which problem
-  was unbounded.
+  `n = 12`, cond 1e14, `m = 10`, on the shipped defaults: the solve
+  stops at iteration 162 on the *third* `w` row of one watchdog
+  sequence, at `|x|_inf` 3.95e20 with the objective climbing to
+  **+1.72e42** — the opposite of the `f -> -inf` that
+  `Diverging_Iterates` asserts — and iteration 163 is `StopWatchDog`
+  throwing the excursion away, back to `f = 9.89e10`. A second cell
+  (`n = 10`, cond 1e12, `m = 10`, `alpha_red_factor_min 0.1`) does the
+  same at 326 and `+7.11e44`. The guard was reporting which gamble
+  overshot furthest, not which problem was unbounded.
+
+  What it costs to be wrong here is more than a mislabelled failure.
+  `Diverging_Iterates` is terminal, so it also denies the gh #815
+  restoration ladder its retry: the second cell's first attempt fails
+  either way, and with the guard in place the ladder re-solves and
+  converges to a maximum relative error of 5.9e-9.
 
   The guard is now skipped, not reset, while
   `BacktrackingLineSearch::in_watchdog()` holds, so a watchdog gamble in
@@ -222,8 +228,22 @@ changes.
   byte-identical across all 156 legs with and without it, because no
   fixture reaches the divergence check inside a watchdog. New test:
   `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`,
-  mutation-checked (drop either half of the guard and it fails with
-  `Diverging_Iterates` at 352, obj 2.02e45).
+  mutation-checked: replace the `in_watchdog` binding with `false` and
+  both tests fail with `Diverging_Iterates`, at 162 and 326. Note what
+  that table does *not* say. The binding gates the skip in two places —
+  the `(amax, structural_free, is_ray)` match arm and the `fire_*`
+  binding — and they are redundant rather than complementary: mutating
+  either one alone leaves both tests green, because the other still
+  suppresses the verdict. Both are kept because each answers a different
+  question, but only the pair of them is pinned.
+
+  Which cells of that family reach this branch is chaotic in
+  `ALPHA_INTERP_MIN_TRIALS`, and the two above were re-derived after the
+  gate moved from 5 to 6 — the cell the fix was originally measured on
+  (`n = 8`, cond 1e12, `m = 6`, which exited at 352 with the objective
+  at +2.0e45) stopped reaching it, leaving the test green and testing
+  nothing until it was caught. Re-run that scan if either fixture ever
+  passes under the mutation.
 
 - **A line-search failure at an already-feasible point no longer walks
   into a restoration phase that has nothing to reduce (gh #818).** When
