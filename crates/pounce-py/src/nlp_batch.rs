@@ -24,7 +24,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use pounce_algorithm::IpoptApplication;
-use pounce_algorithm::application::{default_backend_factory, feral_config_from_options};
+use pounce_algorithm::application::{
+    default_backend_factory, feral_config_from_options, ma57_config_from_options,
+};
 use pounce_algorithm::batch::{
     FeralBackendPool, NlpBatchResult, NlpWarmStart, install_pooled_serial_feral_backend,
     install_serial_feral_backend, solve_nlp_batch as solve_batch_seq,
@@ -129,6 +131,10 @@ fn configure_worker(
 ) {
     let _ = apply_options(app, opts);
     let mut feral_cfg = feral_config_from_options(app.options());
+    // MA57 knobs for the main IPM (prefix "") and, below, for the
+    // restoration sub-IPM (prefix "resto.") — see gh#825.
+    let ma57_cfg = ma57_config_from_options(app.options(), "");
+    let ma57_resto_cfg = ma57_config_from_options(app.options(), "resto.");
     if let Some(pool) = pool {
         install_pooled_serial_feral_backend(app, pool);
         feral_cfg.parallel = Some(false);
@@ -137,12 +143,13 @@ fn configure_worker(
         feral_cfg.parallel = Some(false);
     } else {
         let cfg = feral_cfg.clone();
-        app.set_linear_backend_factory(default_backend_factory(cfg));
+        app.set_linear_backend_factory(default_backend_factory(cfg, ma57_cfg.clone()));
     }
     // Restoration phase, including for the inner solves it runs.
     let bff_mint = move || -> InnerBackendFactoryFactory {
         let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
+        let ma57_cfg = ma57_resto_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
     };
     let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),

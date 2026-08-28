@@ -52,5 +52,25 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=openblas");
     // libcoinhsl.dylib's @rpath dependencies live in the same lib
     // directory, so this single rpath resolves all of them.
+    //
+    // Two emissions, because they reach different things.
+    //
+    // `rustc-link-arg` applies only to targets in *this* package — so
+    // it covers pounce-hsl's own integration tests and nothing else.
+    // It does not reach the `pounce` binary, and that was gh#811: an
+    // `ma57` build linked, then died at process start with
+    // "Library not loaded: @rpath/libcoinhsl.dylib ... no LC_RPATH's
+    // found". There is no propagating spelling of a linker argument,
+    // so a downstream package that produces a binary has to emit its
+    // own.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir_str}");
+    // The propagating half. This crate declares `links = "coinhsl"`,
+    // so cargo hands `cargo:rpath=<dir>` to the build script of every
+    // package that depends on pounce-hsl *directly*, as the env var
+    // `DEP_COINHSL_RPATH`. `crates/pounce-cli/build.rs` reads it and
+    // re-emits the `-rpath` against its own targets. A new package
+    // that grows an `ma57` feature and produces a binary or a test
+    // must do the same; `crates/pounce-cli/tests/ma57_binary_starts.rs`
+    // is the guard that the CLI's copy still works.
+    println!("cargo:rpath={lib_dir_str}");
 }

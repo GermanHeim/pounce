@@ -957,6 +957,26 @@ impl IpoptApplication {
             );
             return ApplicationReturnStatus::InvalidOption;
         }
+        // A `ma57_pivtolmax` the user set *below* `ma57_pivtol` is a
+        // contradiction — the escalation ceiling under its floor — and
+        // upstream refuses it outright
+        // (`IpMa57TSolverInterface.cpp:313`, `OPTION_INVALID`). pounce
+        // used to silently rewrite it to `ma57_pivtol`. That was
+        // unreachable while gh#825 was live, since no `ma57_*` value
+        // reached the backend at all, and became reachable the moment
+        // that was fixed — so it is refused here rather than shipped as
+        // a new way to be quietly ignored.
+        if let Some(msg) = self.ma57_pivtol_bracket_refusal() {
+            use pounce_common::journalist::JournalCategory;
+            eprintln!("{msg}");
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!("{msg}\n"),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
         let backend_warnings = self.take_unimplemented_backend_warnings();
         for warning in self
             .unexploited_hint_warnings()
@@ -2369,6 +2389,57 @@ impl IpoptApplication {
         builder
     }
 
+    /// Refuse an explicitly set `ma57_pivtolmax` that sits below
+    /// `ma57_pivtol`, at either option prefix.
+    ///
+    /// Upstream's `Ma57TSolverInterface::InitializeImpl` asserts
+    /// `pivtolmax >= pivtol` and raises `OPTION_INVALID`, but only when
+    /// the user set `ma57_pivtolmax` explicitly; left unset, the
+    /// registered default is lifted to `ma57_pivtol` instead. Both
+    /// halves are mirrored — the lifting in
+    /// `pounce_hsl::ma57::Options::from_options_list`, the refusal here.
+    ///
+    /// Checked at **both** prefixes because the restoration sub-IPM
+    /// configures its own MA57 backend from `"resto."`-scoped options
+    /// (gh#825), so `resto.ma57_pivtolmax` can contradict
+    /// `resto.ma57_pivtol` without the un-prefixed pair being wrong.
+    ///
+    /// Deliberately **not** gated on the `ma57` cargo feature or on
+    /// `linear_solver` resolving to MA57. It is a consistency check on
+    /// two numbers the user wrote, needs no HSL to perform, and a
+    /// verdict that changed with a build flag would be worse than a
+    /// consistent one — it would also be untestable in CI, which cannot
+    /// link CoinHSL. Only an *explicitly set* `ma57_pivtolmax` can
+    /// trigger it, so an options file that never mentions the option is
+    /// unaffected.
+    fn ma57_pivtol_bracket_refusal(&self) -> Option<String> {
+        for prefix in ["", "resto."] {
+            // `(_, true)` is the explicitly-set arm; an unset option
+            // reports the registry default with `false` and is the
+            // branch upstream lifts rather than refuses.
+            let Ok((pivtolmax, true)) = self.options.get_numeric_value("ma57_pivtolmax", prefix)
+            else {
+                continue;
+            };
+            let pivtol = self
+                .options
+                .get_numeric_value("ma57_pivtol", prefix)
+                .map(|(v, _)| v)
+                .unwrap_or(1e-8);
+            if pivtolmax < pivtol {
+                return Some(format!(
+                    "pounce: {prefix}ma57_pivtolmax ({pivtolmax:e}) is below \
+                     {prefix}ma57_pivtol ({pivtol:e}). ma57_pivtolmax is the ceiling MA57 \
+                     may raise the pivot tolerance to when it escalates for accuracy, so it \
+                     cannot sit below the tolerance it starts from. Raise \
+                     {prefix}ma57_pivtolmax to at least {pivtol:e}, or lower \
+                     {prefix}ma57_pivtol."
+                ));
+            }
+        }
+        None
+    }
+
     /// Construct a LinearBackendFactory honoring the
     /// `linear_solver` option. Default FERAL; HSL MA57 when
     /// built with the `ma57` feature.
@@ -3107,8 +3178,17 @@ impl IpoptApplication {
         if let Some(perm) = &self.external_ordering {
             feral_cfg.ordering = pounce_feral::OrderingMethod::External(perm.clone());
         }
+        // MA57's knobs come off the same `OptionsList`, at the main-IPM
+        // prefix. The restoration sub-IPM reads them again under
+        // `"resto."` when its caller mints the inner backend factory —
+        // see `ma57_config_from_options`.
+        let ma57_cfg = ma57_config_from_options(&self.options, "");
         let factory = self.linear_backend_factory.take().unwrap_or_else(|| {
-            default_backend_factory_with_sink(feral_cfg, Arc::clone(&self.linsol_summary_sink))
+            default_backend_factory_with_sink(
+                feral_cfg,
+                ma57_cfg,
+                Arc::clone(&self.linsol_summary_sink),
+            )
         });
         let bundle = builder.build_with_backend(factory);
 
@@ -4654,34 +4734,124 @@ fn journal_level_from_int(v: i32) -> JournalLevel {
     }
 }
 
+/// MA57 backend knobs snapshotted off an `OptionsList`, ready to be
+/// handed to a backend factory.
+///
+/// The type exists — rather than passing `pounce_hsl::Ma57Options`
+/// directly — so that the factory signature is the same shape whether or
+/// not the `ma57` cargo feature is on. `pounce-py`, `pounce-cinterface`
+/// and `pounce-restoration` all call [`default_backend_factory`] and none
+/// of them can name a `pounce-hsl` type; without the feature this struct
+/// carries nothing and costs nothing.
+///
+/// Build it with [`ma57_config_from_options`]. It is the MA57 half of
+/// what [`feral_config_from_options`] does for FERAL, and the asymmetry
+/// between the two was the root cause of gh#825: FERAL's knobs were
+/// threaded into the factory and MA57's were not, so the factory had
+/// nothing to give MA57 and called `Ma57SolverInterface::new()` — which
+/// hard-codes the defaults. Every `ma57_*` option was registered,
+/// documented, accepted, and then silently discarded.
+#[derive(Debug, Clone, Default)]
+pub struct Ma57Config {
+    #[cfg(feature = "ma57")]
+    opts: pounce_hsl::Ma57Options,
+}
+
+impl Ma57Config {
+    /// The wrapped MA57 settings.
+    #[cfg(feature = "ma57")]
+    pub fn options(&self) -> &pounce_hsl::Ma57Options {
+        &self.opts
+    }
+}
+
+/// Read the `ma57_*` options off `options` under `prefix`, for handing
+/// to [`default_backend_factory`] / [`default_backend_factory_with_sink`].
+///
+/// `prefix` is `""` for the main IPM and `"resto."` for the restoration
+/// sub-IPM, mirroring upstream's
+/// `Ma57TSolverInterface::InitializeImpl(options, prefix)`. The
+/// restoration sub-IPM builds its own backend through its own
+/// `InnerBackendFactoryFactory` (see
+/// `pounce_restoration::resto_inner_solver`), so the two really are
+/// separately configurable — before gh#825 neither was.
+///
+/// Without the `ma57` cargo feature this returns an empty config and
+/// does not touch `options`; nothing downstream can consume MA57
+/// settings in that build.
+pub fn ma57_config_from_options(
+    options: &pounce_common::options_list::OptionsList,
+    prefix: &str,
+) -> Ma57Config {
+    #[cfg(feature = "ma57")]
+    {
+        Ma57Config {
+            opts: pounce_hsl::Ma57Options::from_options_list(options, prefix),
+        }
+    }
+    #[cfg(not(feature = "ma57"))]
+    {
+        let _ = (options, prefix);
+        Ma57Config::default()
+    }
+}
+
+/// Construct the MA57 backend for a factory, or fall back to FERAL when
+/// the `ma57` cargo feature is off.
+///
+/// Factored out of the two factories below so there is exactly one place
+/// that decides how an MA57 backend is built from a [`Ma57Config`]. Both
+/// factories used to inline `Ma57SolverInterface::new()`, and the
+/// duplication is half of why gh#825 was easy to miss.
+fn make_ma57_backend(
+    ma57_cfg: &Ma57Config,
+    feral_fallback: impl FnOnce() -> Box<dyn SparseSymLinearSolverInterface>,
+) -> Box<dyn SparseSymLinearSolverInterface> {
+    #[cfg(feature = "ma57")]
+    {
+        let _ = feral_fallback;
+        Box::new(pounce_hsl::Ma57SolverInterface::with_options(
+            *ma57_cfg.options(),
+        ))
+    }
+    #[cfg(not(feature = "ma57"))]
+    {
+        // ma57 feature not compiled in — fall back to FERAL.
+        let _ = ma57_cfg;
+        feral_fallback()
+    }
+}
+
 /// Default symmetric linear-solver factory, parameterized by the
-/// pounce-extension FERAL knobs read off the application's
-/// `OptionsList`.
+/// pounce-extension FERAL knobs and the `ma57_*` knobs read off the
+/// application's `OptionsList`.
 ///
 /// FERAL (pure-Rust) is the shipping default. The HSL MA57 backend is
 /// available when the `ma57` cargo feature is enabled; without it,
 /// requesting `linear_solver = ma57` falls back to FERAL with a
 /// warning printed by the journalist (see [`AlgorithmBuilder`]).
-pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
+///
+/// Both configs are snapshots, not live views: take them with
+/// [`feral_config_from_options`] and [`ma57_config_from_options`] at the
+/// point the application's options are fully populated. The factory is
+/// called more than once per solve (the main KKT solver and, under
+/// limited memory, the Hessian-free bypass solver), so each call gets a
+/// fresh backend built from the same snapshot.
+pub fn default_backend_factory(
+    feral_cfg: pounce_feral::FeralConfig,
+    ma57_cfg: Ma57Config,
+) -> LinearBackendFactory {
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => Box::new(
                     pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()),
                 ),
-                LinearSolverChoice::Ma57 => {
-                    #[cfg(feature = "ma57")]
-                    {
-                        Box::new(pounce_hsl::Ma57SolverInterface::new())
-                    }
-                    #[cfg(not(feature = "ma57"))]
-                    {
-                        // ma57 feature not compiled in — fall back to FERAL.
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(
-                            feral_cfg.clone(),
-                        ))
-                    }
-                }
+                LinearSolverChoice::Ma57 => make_ma57_backend(&ma57_cfg, || {
+                    Box::new(pounce_feral::FeralSolverInterface::with_config(
+                        feral_cfg.clone(),
+                    ))
+                }),
             }
         },
     )
@@ -4695,6 +4865,7 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
 /// sink — the HSL backend doesn't carry the same instrumentation yet.
 pub fn default_backend_factory_with_sink(
     feral_cfg: pounce_feral::FeralConfig,
+    ma57_cfg: Ma57Config,
     sink: Arc<Mutex<LinearSolverSummary>>,
 ) -> LinearBackendFactory {
     Box::new(
@@ -4704,19 +4875,12 @@ pub fn default_backend_factory_with_sink(
                     pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
                         .with_summary_sink(Arc::clone(&sink)),
                 ),
-                LinearSolverChoice::Ma57 => {
-                    #[cfg(feature = "ma57")]
-                    {
-                        Box::new(pounce_hsl::Ma57SolverInterface::new())
-                    }
-                    #[cfg(not(feature = "ma57"))]
-                    {
-                        Box::new(
-                            pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
-                                .with_summary_sink(Arc::clone(&sink)),
-                        )
-                    }
-                }
+                LinearSolverChoice::Ma57 => make_ma57_backend(&ma57_cfg, || {
+                    Box::new(
+                        pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
+                            .with_summary_sink(Arc::clone(&sink)),
+                    )
+                }),
             }
         },
     )

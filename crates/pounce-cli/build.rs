@@ -1,12 +1,16 @@
 //! Stamps build-time metadata into the `pounce` binary so `--about`
-//! can print version/build/git/rustc info without runtime introspection.
+//! can print version/build/git/rustc info without runtime introspection,
+//! and — under `--features ma57` — emits the CoinHSL `-rpath` that the
+//! `pounce` binary needs to start.
 //!
-//! Everything here is best-effort: missing git or `date` just becomes
-//! "unknown" in the output. Nothing here changes link behavior.
+//! The metadata half is best-effort: missing git or `date` just becomes
+//! "unknown" in the output. The rpath half is not optional; see
+//! [`emit_coinhsl_rpath`].
 
 use std::process::Command;
 
 fn main() {
+    emit_coinhsl_rpath();
     // Re-stamp when HEAD moves; otherwise the SHA in the binary is stale.
     // The .git/HEAD path is relative to this crate's manifest dir.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
@@ -71,4 +75,43 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
     Some(s)
+}
+
+/// Re-emit the CoinHSL `-rpath` against *this* package's targets.
+///
+/// `crates/pounce-hsl/build.rs` knows the CoinHSL lib directory, but
+/// `cargo:rustc-link-arg` applies only to targets in the package that
+/// emitted it, and pounce-hsl is a library with no binary of its own —
+/// so the flag reached nothing, and an `ma57` build of `pounce` died at
+/// process start with "Library not loaded: @rpath/libcoinhsl.dylib ...
+/// no LC_RPATH's found" (gh#811). There is no propagating spelling of a
+/// linker argument, so the directory travels as build-script metadata
+/// instead: pounce-hsl declares `links = "coinhsl"` and emits
+/// `cargo:rpath=<dir>`, which cargo hands to the build script of each
+/// direct dependent as `DEP_COINHSL_RPATH`.
+///
+/// The var is present only when pounce-hsl is in the graph, i.e. under
+/// `--features ma57`; a default build sees nothing here and emits
+/// nothing.
+///
+/// `rustc-link-arg` (not `-bins`) on purpose: the integration tests in
+/// `tests/` link the same dylib and have to start too, and
+/// `ma57_binary_starts.rs` is one of them.
+fn emit_coinhsl_rpath() {
+    println!("cargo:rerun-if-env-changed=DEP_COINHSL_RPATH");
+    let Ok(rpath) = std::env::var("DEP_COINHSL_RPATH") else {
+        return;
+    };
+    if rpath.is_empty() {
+        return;
+    }
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
+    // Leave header padding so a packaging step can rewrite the rpath
+    // afterwards with `install_name_tool`. Without it a release link
+    // leaves no room and `install_name_tool -add_rpath` refuses with
+    // "larger updated load commands do not fit (the program must be
+    // relinked)" — which is why gh#811 could not be patched in place.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-headerpad_max_install_names");
+    }
 }

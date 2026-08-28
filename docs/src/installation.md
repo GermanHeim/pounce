@@ -138,6 +138,22 @@ primarily useful for benchmarking against upstream Ipopt; the FERAL
 backend is the supported default for everyday use, and a build without
 `--features ma57` never touches `COINHSL_DIR`.
 
+The build embeds `$COINHSL_DIR/lib` as an rpath, so the resulting
+binary finds `libcoinhsl` and its own dependencies (openblas, metis,
+libgfortran, libgomp) without `LD_LIBRARY_PATH` or
+`DYLD_LIBRARY_PATH`. If you relocate the CoinHSL install afterwards,
+rebuild — or, on macOS, rewrite the path with `install_name_tool
+-rpath <old> <new>`, which works because the link reserves header
+padding for it.
+
+The `ma57_*` options (`ma57_pivtol`, `ma57_pivot_order`,
+`ma57_pre_alloc`, and the rest — see
+[Options](options.md)) are honoured by this build, and can be scoped to
+the restoration sub-solve with a `resto.` prefix, e.g.
+`resto.ma57_pivtol=0.5`. Before
+[issue #825](https://github.com/jkitchin/pounce/issues/825) they were
+accepted and silently discarded.
+
 ## Using POUNCE as a Rust library
 
 The workspace is a set of library crates (see
