@@ -103,6 +103,8 @@ except ImportError as exc:  # pragma: no cover - depends on the Pyomo version
 
 from pyomo_pounce.pounce_solver import (
     _bundled_path,
+    _checkout_path,
+    _warn_checkout_fallback,
     _warn_path_fallback,
     reject_discrete_vars,
 )
@@ -114,17 +116,30 @@ __all__ = ["Pounce", "PounceConfig", "LegacyPounceSolver",
 
 
 def _default_executable():
-    """Default for the `executable` config: the wheel-bundled binary when
-    one is installed, else the bare name for a `PATH` lookup.
+    """Default for the `executable` config: the wheel-bundled binary when one
+    is installed, else the surrounding source checkout's cargo build, else the
+    bare name for a `PATH` lookup.
 
-    Same precedence as the legacy plugin's `_default_executable`, and for
-    the same reason -- the bundled path is deterministic while `PATH` can
-    hand back a stale build that reports an identical version string
-    (gh #315). Resolved once, when the CONFIG is built at import: the
-    bundled binary's location is fixed at install time.
+    Same precedence as the legacy plugin's `_default_executable`, and for the
+    same reason -- the bundled path is deterministic while `PATH` can hand
+    back a stale build that reports an identical version string (gh #315).
+    The checkout rung is there for the same reason it is there on the legacy
+    route: a `maturin develop` install bundles nothing, and the `pounce` this
+    would otherwise find on PATH is that install's own console-script shim
+    (gh #816). Keeping the two routes in step is not cosmetic -- gh #558 is a
+    guard that covered the legacy interface only, and left the modern one with
+    exactly the silent wrongness it existed to prevent.
+
+    Resolved once, when the CONFIG is built at import: the bundled binary's
+    location is fixed at install time, and so is the checkout's.
     """
     bundled = _bundled_path()
-    return bundled if bundled is not None else "pounce"
+    if bundled is not None:
+        return bundled
+    checkout = _checkout_path()
+    if checkout is not None:
+        return checkout
+    return "pounce"
 
 
 class PounceConfig(IpoptConfig):
@@ -612,7 +627,14 @@ class Pounce(Ipopt):
         if getattr(config.get("executable"), "_userSet", False):
             return
         path = config.executable.path()
-        if path is not None:
+        if path is None:
+            return
+        # Two different fallbacks, two different warnings: the checkout's own
+        # cargo build is at least provably this tree's, a PATH binary is not.
+        checkout = _checkout_path()
+        if checkout is not None and path == checkout:
+            _warn_checkout_fallback(path)
+        else:
             _warn_path_fallback(path)
 
     def solve(self, model, **kwds) -> Results:

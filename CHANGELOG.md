@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+- **A `maturin develop` checkout has a working `pounce` CLI again** (gh #816).
+  `maturin develop` builds the extension module and nothing else. The wheel's
+  `pounce` console script is a shim whose whole job is to exec the bundled
+  binary at `python/pounce/bin/pounce`, so in a source checkout it pointed at
+  a file nothing had ever created and **every** invocation failed, including
+  `pounce --version`.
+
+  The shim now recognises when it is being imported out of a POUNCE checkout
+  — `Cargo.toml` *and* `crates/pounce-cli/` above the package directory, both
+  of which an installed wheel lacks — and runs the newest of
+  `target/release/pounce` and `target/debug/pounce` (honoring
+  `CARGO_TARGET_DIR`), announcing on stderr that it did. It stays silent for
+  `-v` / `--version` / `--about` / `--help`: Pyomo's ASL layer reads
+  `pounce -v` with `stderr` folded into `stdout` and takes the first
+  `N.N[.N]` it finds, so a notice naming a path like `/opt/py3.11/...` would
+  not make the version unreadable — it would make Pyomo read `3.11` as
+  POUNCE's version.
+
+  `make dev` is the documented way to get a checkout into the shape a wheel
+  ships (it is `python-ext`, which already staged the CLI, under the name the
+  error messages now point at). The not-found message names it, and names
+  `pyomo_pounce.check_binary()`.
+
+- **`pyomo-pounce` resolves the checkout's CLI directly, and `available()`
+  explains a False** (gh #816). The plugin's binary resolution gained a
+  middle rung: bundled wheel binary, then the surrounding checkout's cargo
+  build, then `PATH`. Previously a source install fell straight to `PATH` and
+  found *its own console-script shim* there — the broken one above.
+
+  That is what the second half of gh #816 was.
+  `SolverFactory("pounce").available(exception_flag=False)` returned `False`
+  on an installation where `solve()` returned `optimal`, and both were true:
+  `solve()` resolved the bundled binary while `available()` went through
+  Pyomo's ASL layer, which runs `pounce -v` on the PATH shim, got no version,
+  and reported the solver unavailable. `available()` now returns the same
+  verdict Pyomo's does but never a bare `False`: it names the executable it
+  ran and quotes what running it printed, raising `ApplicationError` under
+  Pyomo's default `exception_flag=True` and warning once (per distinct
+  reason) otherwise. `check_binary()` gained `checkout_executable` and
+  `using_checkout`.
+
 - **Backtracking now interpolates the next trial step on the
   limited-memory path (gh #818).** `pounce.minimize(f, x0, jac=g)` — which
   selects `hessian_approximation=limited-memory`, the mode the Python
