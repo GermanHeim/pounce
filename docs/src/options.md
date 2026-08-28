@@ -1114,7 +1114,7 @@ there was measured to move 3 of the 156 fixture-legs in
 an objective digit on `hs13_bigstart` — with nothing on that leg
 improving in exchange.
 
-**It engages only once the fixed sequence has already spent five trial
+**It engages only once the fixed sequence has already spent six trial
 points.** The interpolation treats a *long* line search, and it is only
 harmless where the line search is long: one that accepts in two or three
 trials never had the problem, and interpolating into it swaps a step
@@ -1122,38 +1122,48 @@ length the filter was about to accept for a different one — a trajectory
 change bought for nothing. The threshold is not an option; it is the
 constant `ALPHA_INTERP_MIN_TRIALS` in
 `crates/pounce-algorithm/src/line_search/backtracking.rs`, which carries
-the sweep that chose it. Interpolating from the first trial instead moves
-12 fixture-legs and reports `square_flowsheet_resto` — a model that is
-feasible by construction — as converged to a point of local
-infeasibility; gating at five moves three, all of them explained. Gating
-also *widens* the fix: the 8-variable case in #818, which the ungated
-version leaves at `Maximum_Iterations_Exceeded`, converges in 1073
-iterations at the shipped defaults.
+the sweep that chose it, every row against one baseline. Interpolating
+from the first trial instead moves 12 fixture-legs, three of them to a
+status the baseline did not have; gating at six moves four, one of them
+a gain (`cresc4`, `Restoration_Failed`/1323 → `Solve_Succeeded`/281) and
+none of them a loss.
+
+Six rather than five because of two measurements. `deb7` changes verdict
+at a gate of 5 (`Error_In_Step_Computation` → `Restoration_Failed`) and
+keeps it at 6; and one line search in the `race_starts` regression suite
+reaches exactly 5–6 trial points, so a gate of 5 interpolates into it and
+reroutes a whole multistart race, costing 32% more solver evaluations on
+one model there.
 
 **Where it loses, and what to do about it.** Over a 32-cell sweep of the
 #818 model family (`n` ∈ {4, 8, 12, 20} × cond ∈ {1e2, 1e4, 1e8, 1e12} ×
-`limited_memory_max_history` ∈ {6, 10}) no cell loses a status and two
-gain one, but it is not free: of the 30 cells whose status is unchanged,
-14 take fewer iterations and 8 take more. The worst is `n = 8` at cond
-1e4 with memory 6, 646 → 822.
+`limited_memory_max_history` ∈ {6, 10}) the same 22 cells converge before
+and after — no cell gains or loses `Solve_Succeeded` — but it is not
+free: of those 22, 13 take fewer iterations, 5 are unchanged and 4 take
+more. The worst is `n = 8` at cond 1e4 with memory 10, 188 → 580, a 3.1×
+regression to the same answer.
 
 If a limited-memory solve stalls where it used to crawl, the first thing
 to try is **`limited_memory_max_history 10`** — the cells this change
 does not fix are bounded by the quality of the quasi-Newton model, not
-by the trial sequence, and a wider window is what moves that bound (the
-8-variable cond-1e8 case takes 41 iterations at memory 10 against 1073
-at 6). The general escape hatch is `alpha_red_factor_min` equal to
-`alpha_red_factor`, which collapses the clamp and restores upstream's
-sequence exactly.
+by the trial sequence, and a wider window is what moves that bound. The
+8-variable cond-1e8 case is the example: at memory 6 it exhausts
+`max_iter` — reaching `f ≈ 9e-13` and `x` to 6e-7 relative, so it has
+found the answer but cannot certify it — and at memory 10 it converges
+in 61 iterations. The general escape hatch is `alpha_red_factor_min`
+equal to `alpha_red_factor`, which collapses the clamp and restores
+upstream's sequence exactly.
 
 One cell of that sweep, `n = 8` at cond 1e12 with memory 6, read as a
 status regression during review — `Diverging_Iterates` at 352, at every
 `alpha_red_factor_min` and every gate measured. The cause was not the
 line search: the divergence guard was pronouncing unboundedness on a
 *watchdog trial* iterate, a point the line search had already rejected
-and was holding a snapshot to revert to. That is fixed separately, and
-the cell now converges to an objective seven orders of magnitude below
-what upstream's sequence reaches at the same iteration count.
+and was holding a snapshot to revert to. That is fixed separately. The
+cell still does not converge — it reports `Error_In_Step_Computation` at
+521 iterations — but it no longer claims divergence, and it gets to a
+better objective than upstream's sequence does in four times as many
+iterations (6.4e-11 against 2.8e-10 at `max_iter`).
 
 ### When the line search fails anyway: `limited_memory_ls_failure_restarts`
 

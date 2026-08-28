@@ -55,58 +55,98 @@ changes.
   noise in a single step.
 
   **The interpolation does not fire until the fixed sequence has already
-  spent five trial points** (`ALPHA_INTERP_MIN_TRIALS` in
+  spent six trial points** (`ALPHA_INTERP_MIN_TRIALS` in
   `backtracking.rs`). The pathology it treats is a 19-20 trial line
   search; a line search that accepts in two or three trials never had
   the problem, and interpolating into it only swaps a step length the
   filter was about to accept for a different one. Ungated, the change
-  moves 12 fixture-legs and reports `square_flowsheet_resto` - feasible
-  by construction - as converged to a point of local infeasibility.
-  Gated at five it moves three, all of them explained below, and it
-  *widens* the fix rather than narrowing it.
+  moves 12 fixture-legs, three of them to a status the baseline did not
+  have. Gated at six it moves four - one of them a *gain*, `cresc4`
+  from `Restoration_Failed` at 1323 to `Solve_Succeeded` at 281 - and
+  loses no status anywhere. The constant's own doc comment carries the
+  whole sweep, every row against one baseline.
+
+  Six rather than five, which an earlier revision of this entry shipped,
+  for two measured reasons. `deb7` changes verdict at a gate of 5
+  (`Error_In_Step_Computation` to `Restoration_Failed`) and keeps it at
+  6. And one `_rastrigin_eq` line search in
+  `python/tests/test_starts_racing.py` reaches exactly 5-6 trial points,
+  so a gate of 5 interpolates into it and reroutes the whole multistart
+  race: halving-against-fixed `solver_evals` over that suite reads 1.022
+  with the interpolation off, **1.320 at gate 5**, and 1.019 / 1.022 /
+  1.022 at gates 6 / 7 / 8. Six restores that suite to its
+  interpolation-off numbers.
+
+  One correction to the record. An earlier revision of this entry said
+  that interpolating from the first trial reports `square_flowsheet_resto`
+  - a model feasible by construction - as converged to a point of local
+  infeasibility. Re-measured against `a5e0a837`, it is the *baseline*
+  that carries `Infeasible_Problem_Detected`/3000 on that fixture's
+  `lbfgs` leg, and the ungated change is what turns it into
+  `Solve_Succeeded`/2393. The original measurement predates gh #817,
+  which is in `main` now and moved that leg. Gates 5 and 6 leave the line
+  untouched either way, so this is not a lever the constant has; it is a
+  latent wrong verdict on the limited-memory arm that this entry is not
+  claiming to fix.
 
   Measured on the issue's model at the shipped defaults, `before` being
   `alpha_red_factor_min` set equal to `alpha_red_factor` (i.e.
   upstream's fixed sequence, bit for bit), with scipy's L-BFGS-B for
   scale:
 
-  | case | before | after | scipy |
-  |---|---|---|---|
-  | `n = 4`, cond 1e8 (the report) | 76 | **21** | 34-37 |
-  | `n = 4`, cond 1e12 | 66 | **19** | - |
-  | `n = 8`, cond 1e8, `m = 6` | 2000\* | **1073** | 146 |
-  | `n = 8`, cond 1e8, `m = 10` | 74 | **41** | 34 |
-  | `n = 8`, cond 1e12, `m = 10` | 421 | **345** | - |
-  | `n = 4`, cond 1e4 | 24 | 26 | 23 |
-  | `n = 8`, cond 1e4, `m = 6` | 646 | 822 | - |
-  | `n = 8`, cond 1e12, `m = 6` | 2000, obj 2.5e-8 | 2000, obj **3.2e-15** | - |
+  | case | before | after |
+  |---|---|---|
+  | `n = 4`, cond 1e8 (the report) | 76 | **22** |
+  | `n = 4`, cond 1e12 | 44 | **13** |
+  | `n = 4`, cond 1e4 | 24 | **19** |
+  | `n = 8`, cond 1e8, `m = 10` | 73 | **61** |
+  | `n = 8`, cond 1e4, `m = 6` | 993 | **736** |
+  | `n = 8`, cond 1e12, `m = 10` | 535 | **173** |
+  | `n = 12`, cond 1e4, `m = 10` | 787 | **540** |
+  | `n = 8`, cond 1e4, `m = 10` | 188 | 580 |
+  | `n = 8`, cond 1e8, `m = 6` | 2000\*, obj 2.3e-12 | 2000\*, obj 9.0e-13 |
 
-  `* = Maximum_Iterations_Exceeded`. The default-memory 8-variable case
-  at cond 1e8 - the one the first draft of this fix left open, on the
-  reasoning that the solve was now bounded by model quality rather than
-  by the trial sequence - now converges.
+  `* = Maximum_Iterations_Exceeded`. scipy's L-BFGS-B takes 34-37 on the
+  reported `n = 4` cond-1e8 case.
+
+  **The default-memory 8-variable case at cond 1e8 is not fixed by this
+  change**, and an earlier revision of this entry claimed it was, on a
+  single measurement at a gate of 5. Swept over both knobs that reach
+  that line search, it converges in 5 of 15 (gate,
+  `alpha_red_factor_min`) cells with no pattern in either, at counts
+  spanning 388 to 1459 - a chaotic trajectory that sometimes escapes,
+  not a property. It does not *stall*: from `f(x0) = 8` it reaches
+  `f ~ 9e-13` with `x` correct to 6e-7 relative, and exhausts `max_iter`
+  because it cannot certify what it has already found at that memory.
+  The remedy is `limited_memory_max_history 10`, where it takes 61
+  iterations. `issue_818_eight_variable_default_memory_does_not_stall`
+  carries the sweep.
 
   Over the full 32-cell sweep this came from (`n` in {4, 8, 12, 20} x
-  cond in {1e2, 1e4, 1e8, 1e12} x `m` in {6, 10}) **no cell loses a
-  status and two gain one** — the row above, and `n = 12` cond 1e12
-  `m = 10`, which goes from `Restoration_Failed` at 1514 with `x` a
-  factor of 400 out to `Maximum_Iterations_Exceeded` at 982 with it
-  2e-4 out. Of the 30 cells that keep their status, 14 take fewer
-  iterations and 8 take more; the worst of the 8 is the `n = 8` cond
-  1e4 `m = 6` row above, 646 -> 822. The documented remedy for a cell
-  that is slower is `limited_memory_max_history 10`; the general escape
-  hatch is `alpha_red_factor_min 0.5`, which collapses the clamp and
-  restores upstream's sequence exactly. Tests pin both.
+  cond in {1e2, 1e4, 1e8, 1e12} x `m` in {6, 10}) **no cell gains or
+  loses `Solve_Succeeded`**: the same 22 cells converge before and
+  after. Of those 22, 13 take fewer iterations, 5 are unchanged and 4
+  take more. The worst is `n = 8` cond 1e4 `m = 10`, 188 -> 580, and it
+  is the honest cost of this change - a 3.1x iteration regression on a
+  cell that was already converging, to the same answer. One
+  non-converging cell changes which failure it reports: `n = 8` cond
+  1e12 `m = 6` goes from `Maximum_Iterations_Exceeded` at 2000 to
+  `Error_In_Step_Computation` at 521, at a better objective (2.8e-10 ->
+  6.4e-11). The documented remedy for a cell that is slower is
+  `limited_memory_max_history 10`; the general escape hatch is
+  `alpha_red_factor_min 0.5`, which collapses the clamp and restores
+  upstream's sequence exactly. Tests pin both.
 
-  The last row got there the hard way, and is why the entry below
-  exists. Under review it read `Diverging_Iterates` at 352 — a status
-  regression, robust at every `alpha_red_factor_min` in {0.05, 0.1,
-  0.2, 0.25, 0.3, 0.4} and every trial gate in {5, 8, 12, 20}, which is
-  what it looks like when the constant being swept is not the variable.
-  It was not: the interpolation was reaching a pre-existing defect in
-  the divergence guard, and once that was fixed the cell not only kept
-  its status but beat the fixed sequence by seven orders of magnitude in
-  objective at the same iteration count.
+  One cell of that grid, `n = 8` cond 1e12 `m = 6`, got there the hard
+  way and is why the entry below exists. Under review it read
+  `Diverging_Iterates` at 352 — a status regression, robust at every
+  `alpha_red_factor_min` in {0.05, 0.1, 0.2, 0.25, 0.3, 0.4} and every
+  trial gate in {5, 8, 12, 20}, which is what it looks like when the
+  constant being swept is not the variable. It was not: the
+  interpolation was reaching a pre-existing defect in the divergence
+  guard, and once that was fixed the cell stopped reporting divergence
+  and now beats the fixed sequence on objective (2.8e-10 -> 6.4e-11) in
+  a quarter of the iterations.
 
   **On by default for the limited-memory path only**, resolved by
   `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
@@ -273,17 +313,19 @@ changes.
   **Not the default**, and the population it wins on is narrower than an
   earlier draft of this entry claimed — those numbers predate the trial
   gate, and re-measuring across the same 32-cell sweep used above puts
-  `history-max` ahead in 5 cells and behind in 20. It wins where the
-  window is too small for the spread and the *variables* outnumber it:
-  `n = 8` cond 1e4 `m = 6` 822 → **216**, `n = 8` cond 1e4 `m = 10`
-  70 → **58**, `n = 8` cond 1e12 `m = 10` 345 → **85**, `n = 12` cond
-  1e4 `m = 10` 957 → **222**. It loses on every 4-variable cell (cond
-  1e8 21 → 36, cond 1e12 19 → 35) and, notably, on the cell its own
-  rationale predicts hardest — `n = 8` cond 1e8 `m = 6`, where it takes
-  the interpolation's 1073 back to `Maximum_Iterations_Exceeded`. So the
-  rule is not "keep the largest whenever the window is short"; the
-  largest sample is a safe `B0` only when the history is wide enough
-  that the maximum is a real curvature rather than one stiff outlier.
+  `history-max` ahead in 9 cells and behind in 20, with 3 ties or
+  ambiguous. It wins where the window is too small for the spread and
+  the *variables* outnumber it — every cond-1e4 cell at `n >= 8`:
+  `n = 8` `m = 6` 736 → **204**, `n = 8` `m = 10` 580 → **129**,
+  `n = 12` `m = 10` 540 → **264**, `n = 20` `m = 10` 691 → **513**.
+  It loses on **every** 4-variable cell, by wide margins (cond 1e12
+  `m = 6` 13 → 59, cond 1e4 `m = 10` 15 → 28) and, notably, on the cell
+  its own rationale predicts hardest — `n = 8` cond 1e8 `m = 6`, where
+  it takes the interpolation's result back to a far worse objective
+  (9.0e-13 → 6.7e+05, both at `max_iter`). So the rule is not "keep the
+  largest whenever the window is short"; the largest sample is a safe
+  `B0` only when the history is wide enough that the maximum is a real
+  curvature rather than one stiff outlier.
   Documented, opt-in, and worth a try on an `n >> m` model that is
   crawling. The obvious variant — a running maximum over the whole solve
   rather than over the window — was measured too and is worse than

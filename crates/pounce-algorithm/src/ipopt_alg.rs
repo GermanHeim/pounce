@@ -95,17 +95,25 @@ const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
 ///
 /// | fixture | rung off | rung on |
 /// |---|---|---|
-/// | `pooling_rt2stp` | `SolveSucceeded`/295 — *unmoved from `main`* | `SolveSucceeded`/**307** |
-/// | `infeasible_square_scaled_1em4` | 24 — *unmoved from `main`* | **26** |
-/// | `deb7` | `ErrorInStepComputation`/715 | `ErrorInStepComputation`/610 |
-/// | `eigena2` | `ErrorInStepComputation`/91 | `ErrorInStepComputation`/98 |
-/// | `issue_508_infeasible_gap_1em4` | 79 | 76 |
+/// | `pooling_rt2stp` | `ErrorInStepComputation`/716 — *unmoved from `main`* | `ErrorInStepComputation`/**744** |
+/// | `infeasible_square_scaled_1em4` | `InfeasibleProblemDetected`/24 — *unmoved from `main`* | **26** |
+/// | `deb7` | `ErrorInStepComputation`/1010 | **`RestorationFailed`**/460 |
+/// | `eigena2` | `ErrorInStepComputation`/201 | **`SolvedToAcceptableLevel`**/174 |
+/// | `issue_508_infeasible_gap_1em4` | `InfeasibleProblemDetected`/79 | 76 |
 ///
-/// So the rung buys `deb7` about a hundred iterations of a solve that
-/// fails either way, and pays for them by moving two fixtures off the
-/// numbers they have on `main`. Off is the configuration with no
-/// regression in it, and every `issue_818_*` test in `pounce-rs` passes
-/// with the rung compiled out — the interpolation is the fix.
+/// **This ledger is not the one that set the default.** At the gate of
+/// 5 an earlier revision shipped, the rung cost iterations on both
+/// `eigena2` and `infeasible_square_scaled_1em4` to the same verdict,
+/// and that pair is what kept it off. At 6, `eigena2` *gains* a
+/// reportable point. What still argues for off is narrower: the rung
+/// moves two fixtures off the numbers they have on `main` at no benefit
+/// (`pooling_rt2stp`, `infeasible_square_scaled_1em4`), and it changes
+/// `deb7`'s verdict rather than shortening it — a different answer, not
+/// a faster one. Turning it on is a trajectory change over the whole
+/// corpus and needs its own `scripts/sweep-fixtures.sh` run to justify;
+/// **that case has improved and is worth re-opening.** Every
+/// `issue_818_*` test in `pounce-rs` passes with the rung compiled out
+/// — the interpolation is the fix, not this.
 ///
 /// Left in the tree rather than deleted because the reasoning behind it
 /// is sound and unaddressed elsewhere: a restoration phase entered at a

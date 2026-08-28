@@ -47,52 +47,83 @@ use std::rc::Rc;
 /// bought for nothing.
 ///
 /// Measured, `scripts/sweep-fixtures.sh` against `a5e0a837`, 156
-/// fixture-legs, counting only lines that move (the `exact` leg is
-/// byte-identical at every value, because `alpha_red_factor_min`
-/// resolves to `alpha_red_factor` there):
+/// fixture-legs, every row taken against that one baseline. The `exact`
+/// leg is byte-identical at every value, because `alpha_red_factor_min`
+/// resolves to `alpha_red_factor` there, so every line below is an
+/// `lbfgs` leg. **Bold is a status the baseline did not have.**
 ///
-/// | this constant | legs moved | `cresc4` | `pooling_rt2stp` | `square_flowsheet_resto` | `eigena2` |
+/// | this constant | legs moved | `cresc4` `RestoFailed`/1323 | `deb7` `ErrInStep`/1242 | `eigena2` `ErrInStep`/252 | `square_flowsheet_resto` `Infeasible`/3000 |
 /// |---|---|---|---|---|---|
-/// | 0 (interpolate always) | 12 | 105 -> 243 | 295 -> 323 | `MaxIter` -> **`Infeasible`** | 252 -> 88 |
-/// | 2 | 7 | -- | 295 -> 268 | `MaxIter` -> **`Infeasible`**/49 | 252 -> 170 |
-/// | 3 | 5 | -- | -- | `MaxIter` -> **`Infeasible`**/2022 | 252 -> 109 |
-/// | **5** | **3** | -- | -- | -- | 252 -> **91** |
+/// | 0 (interpolate always) | 12 | `Succeeded`/241 | **`RestoFailed`**/2381 | 131 | **`Succeeded`**/2393 |
+/// | 2 | 7 | `RestoFailed`/215 | **`MaxIter`**/3000 | 170 | `Infeasible`/49 |
+/// | 3 | 6 | `Succeeded`/226 | `ErrInStep`/1327 | 109 | `Infeasible`/2022 |
+/// | 5 | 4 | `Succeeded`/264 | **`RestoFailed`**/455 | 91 | unmoved |
+/// | **6** (shipped) | **4** | `Succeeded`/281 | `ErrInStep`/1010 | 201 | unmoved |
 ///
-/// At 5 the only lines that move are `eigena2` (252 -> 91, the win),
-/// `deb7` (709 -> 715 at the same status and the same objective to
-/// seven digits), and one objective digit on `hs13_bigstart`. Every
-/// value below it buys `eigena2` a little more and pays for it
-/// somewhere else, and the thing it pays with at 0, 2 and 3 is
-/// `square_flowsheet_resto`'s verdict — a model that is feasible by
-/// construction reported as converged to a point of local
-/// infeasibility.
+/// Six is the only value measured that gains a status and loses none.
+/// `cresc4` is the gain at every gate that reaches it; what separates 6
+/// from its neighbours is `deb7`, which changes verdict at 0, 2 **and
+/// 5** and keeps `ErrorInStepComputation` only at 3 and 6, and of those
+/// two only 6 shortens it (1242 -> 1010 against 3's 1327). The fourth
+/// moving line at 5 and 6 is one objective digit on `hs13_bigstart` at
+/// an unchanged iteration count.
 ///
-/// It also fixes *more* of gh #818, not less. On the issue's own
-/// quadratic at the default memory `m = 6` and the default
-/// `limited_memory_initialization=scalar1`:
+/// **Why not 5, which an earlier revision shipped.** Two reasons, and
+/// the second is the one that forced the change. `deb7` above is the
+/// first. The second is `python/tests/test_starts_racing.py`: one
+/// `_rastrigin_eq` line search in that suite reaches exactly 5-6 trial
+/// points, so a gate of 5 interpolates into it and reroutes the whole
+/// multistart race. Halving-against-fixed `solver_evals` over that
+/// suite reads 1.022 with the interpolation off, **1.320 at gate 5**,
+/// and 1.019 / 1.022 / 1.022 at gates 6 / 7 / 8 — two red assertions,
+/// at 2870 `user_evals` and 2169 `solver_evals` against budgets of
+/// 2800 and 2006. Six restores that suite to its interpolation-off
+/// numbers (1949 `solver_evals` against 1951 off) without giving up
+/// gh #818.
 ///
-/// | | before gh #818 | interpolate always | **gated at 5** |
-/// |---|---|---|---|
-/// | `n = 4` (the report) | 76 | 18 | **21** |
-/// | `n = 8` | 2000, failed | 2000, failed | **1073, converged** |
+/// **`square_flowsheet_resto` is a pre-existing wrong verdict on the
+/// baseline, not something a gate value creates.** An earlier revision
+/// of this comment had it the other way round — that interpolating
+/// from the first trial reports a model feasible by construction as
+/// converged to a point of local infeasibility. Re-measured against
+/// `a5e0a837`, the *baseline* is the `InfeasibleProblemDetected`/3000
+/// line and gate 0 is what turns it into `SolveSucceeded`/2393. The
+/// original measurement predates gh #817, which is in `main` now and
+/// moved that fixture's `lbfgs` leg. Gates 5 and 6 do not touch the
+/// line either way, so this constant is not the lever for it; it is
+/// recorded here so the next reader does not inherit the inverted
+/// claim.
 ///
-/// The 8-variable case is the one the issue thread left open. Twenty
-/// halvings per iteration is not merely slow, it feeds a tiny accepted
-/// `s` back into the curvature history and narrows the next sample;
-/// five is enough for the interpolation to break that cycle without
-/// touching a line search that was converging on its own.
+/// It also fixes gh #818's own model. On the issue's quadratic at the
+/// default memory `m = 6` and `limited_memory_initialization=scalar1`,
+/// `before` being `alpha_red_factor_min` set equal to
+/// `alpha_red_factor` — upstream's fixed sequence, bit for bit:
 ///
-/// One cell of the 32-cell sweep — `n = 8` at cond 1e12 with `m = 6` —
-/// exited `Diverging_Iterates` at 352 under every gate in {5, 8, 12, 20}
-/// and every `alpha_red_factor_min` measured, which is what it looks
-/// like when the constant is not the variable. It was not: the
-/// interpolation was reaching a *watchdog* trial excursion that the
-/// divergence guard in `IpoptAlgorithm::iterate` then read as
+/// | | before gh #818 | **gated at 6** |
+/// |---|---|---|
+/// | `n = 4` (the report) | 76 | **22** |
+/// | `n = 8`, `m = 10` | 74 | **61** |
+///
+/// The 8-variable case at the *default* memory is not on that list.
+/// It is not closed by this change and is not closed by any gate:
+/// see `issue_818_eight_variable_default_memory_does_not_stall` in
+/// `pounce-rs/tests/issue_818_lbfgs_illconditioned_quadratic.rs`,
+/// which carries the two-knob sweep showing it converging in 5 of 15
+/// cells with no pattern. Tuning this constant to that cell is what
+/// produced the gate of 5 and the racing regression above.
+///
+/// One cell of the 32-cell model sweep — `n = 8` at cond 1e12 with
+/// `m = 6` — exited `Diverging_Iterates` at 352 under every gate in
+/// {5, 8, 12, 20} and every `alpha_red_factor_min` measured, which is
+/// what it looks like when the constant is not the variable. It was
+/// not: the interpolation was reaching a *watchdog* trial excursion
+/// that the divergence guard in `IpoptAlgorithm::iterate` then read as
 /// unboundedness, on a point [`Self::handle_watchdog_failure`] had
 /// already rejected and was holding a snapshot for. With that guard
-/// fixed the cell converges (`SolveSucceeded`, obj 3.16e-15 against the
-/// fixed sequence's 2.53e-8 at the same iteration count) and the sweep
-/// has no status regression left. See
+/// fixed the cell no longer claims divergence — it reports
+/// `Error_In_Step_Computation` at 521, still not a solve, but at a
+/// better objective than the fixed sequence reaches in four times the
+/// iterations (6.4e-11 against 2.8e-10 at `max_iter`). See
 /// `pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`;
 /// CHANGELOG.md carries the full grid.
 ///

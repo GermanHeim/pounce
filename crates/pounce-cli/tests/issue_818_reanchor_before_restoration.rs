@@ -23,19 +23,23 @@
 //! still reported.
 //!
 //! **The rung ships off.** `limited_memory_ls_failure_restarts` defaults to
-//! `0` — upstream's unconditional hand-off — because measured on top of the
-//! safeguarded interpolation that actually fixes gh #818, it does not pay for
-//! itself over the fixture corpus: `deb7` 715 -> 610 and
-//! `issue_508_infeasible_gap_1em4` 79 -> 76 in its favour, against `eigena2`
-//! 91 -> 98, `pooling_rt2stp` 295 -> 307 and `infeasible_square_scaled_1em4`
-//! 24 -> 26, the last two being models the shipped configuration leaves
-//! exactly where `main` had them. An earlier draft of this file measured the
-//! rung against `main` instead and read all five as wins.
+//! `0` — upstream's unconditional hand-off. That default was set on a
+//! measurement taken at `ALPHA_INTERP_MIN_TRIALS = 5`, where the rung cost
+//! iterations on `eigena2` and `infeasible_square_scaled_1em4` to the same
+//! verdict and bought only `deb7` and `issue_508_infeasible_gap_1em4`.
 //!
-//! Every test here therefore sets the option explicitly on both sides. Both
-//! directions are pinned deliberately: the two wins are why the code stays in
-//! the tree and stays documented, and the two costs are why it is not the
-//! default. A change that moves any of the four is a change to that decision.
+//! **At the gate this now ships (6) that ledger has changed**, and the
+//! table in `the_rung_ledger_that_decided_the_default` carries the current
+//! numbers: `eigena2` gains a reportable point rather than costing
+//! iterations. It stays off regardless, because turning it on is a
+//! trajectory change over the whole corpus that needs its own
+//! `scripts/sweep-fixtures.sh` run, and because `deb7` changes verdict
+//! under it. The case for switching it on is open, not settled.
+//!
+//! Every test here therefore sets the option explicitly on both sides, and
+//! both directions are pinned deliberately: the gain is why the code stays
+//! in the tree and stays documented, and the cost is why it is not the
+//! default. A change that moves either is a change to that decision.
 //!
 //! **What this file is not evidence about.** It pins that the rung is wired,
 //! fires, is switchable, and which way it moves four named models. It does not
@@ -158,26 +162,27 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
 /// stays in the tree. What is pinned here is that the rung **fires** on it,
 /// and that firing does not manufacture a success.
 ///
-/// **The iteration count is deliberately not asserted, because it is not
-/// portable.** An earlier revision of this test asserted that the rung
-/// shortens `deb7` (measured 715 without / 610 with). That ordering does not
-/// reproduce: on Linux, at this commit, `deb7` runs 455 iterations without
-/// the rung and 729 with — identical under `--release` and under the
-/// unoptimised profile CI actually builds, so it is not an optimisation
-/// artefact, and CI reported exactly those two numbers. A stalling solve's
-/// trajectory depends on the host's linear algebra, so any strict inequality
-/// on its length is a test that passes where it was measured and fails
-/// elsewhere.
+/// **Neither the iteration count nor the exact number of firings is
+/// asserted, because neither is a property of the rung.** An earlier
+/// revision asserted that the rung shortens `deb7` (measured 715 without /
+/// 610 with); a later one asserted that a budget of 1 is spent exactly once.
+/// Both were measurements of a particular gate. At
+/// `ALPHA_INTERP_MIN_TRIALS = 6` the rung fires **twice** on `deb7` with
+/// `limited_memory_ls_failure_restarts=1`, and that is correct: the budget
+/// is per `IpoptAlgorithm`, and a solve that enters restoration builds a
+/// second one for the restoration NLP (`resto_inner_solver.rs`), which
+/// carries its own counter. A solve gets one re-anchor per algorithm
+/// instance it constructs, not one per solve.
 ///
-/// What survives that is the mechanism: the re-anchor either happens or it
-/// does not, and that is a property of the code rather than of the arithmetic
-/// it runs on. `limited_memory_ls_failure_restarts` bounds it at one per
-/// solve, so "fires exactly once with the budget, never without it" is exact.
+/// What survives is the direction: the rung either happens or it does not,
+/// and that is a property of the code rather than of the arithmetic it runs
+/// on or of how many nested solves the trajectory happens to enter.
 ///
-/// The second assertion is the safety half. `deb7` does not solve on this arm
-/// under any setting measured, so a `Solve_Succeeded` appearing here would be
-/// the rung turning a stall into a spurious success — a wrong answer, and the
-/// one outcome that would matter more than any iteration count.
+/// The second assertion is the safety half. `deb7` does not solve on this
+/// arm under any setting measured, so a `Solve_Succeeded` appearing here
+/// would be the rung turning a stall into a spurious success — a wrong
+/// answer, and the one outcome that would matter more than any iteration
+/// count.
 #[test]
 fn the_rung_fires_on_the_model_it_was_designed_from() {
     let (off_fires, off_status) = solve_counting_reanchors("deb7.nl", "deb7_off", 0);
@@ -187,10 +192,10 @@ fn the_rung_fires_on_the_model_it_was_designed_from() {
         off_fires, 0,
         "the default budget is 0, so nothing may re-anchor; saw {off_fires}"
     );
-    assert_eq!(
-        on_fires, 1,
-        "a budget of 1 must be spent exactly once on deb7 — the model the rung \
-         was designed from; saw {on_fires}"
+    assert!(
+        on_fires >= 1,
+        "a budget of 1 must be spent at least once on deb7 — the model the \
+         rung was designed from; saw {on_fires}"
     );
 
     for (label, status) in [("off", &off_status), ("on", &on_status)] {
@@ -203,35 +208,58 @@ fn the_rung_fires_on_the_model_it_was_designed_from() {
 }
 
 /// The other half of the measurement, and the one that decided the default.
-/// On `eigena2` and `infeasible_square_scaled_1em4` the rung *costs*
-/// iterations to the same verdict, and both of those models are ones the
-/// shipped configuration leaves exactly where `main` had them — so switching
-/// the rung on would introduce two regressions rather than inherit them.
 ///
-/// This is pinned in the direction it was measured. If it ever goes red, the
-/// rung has become cheaper than it was, and the case for leaving it off is
-/// the thing to re-examine — not this assertion.
+/// **Re-measured at `ALPHA_INTERP_MIN_TRIALS = 6`, and the ledger is no
+/// longer the one that set the default.** At the gate of 5 this file
+/// shipped with, the rung cost iterations on both `eigena2` and
+/// `infeasible_square_scaled_1em4` to the same verdict, and that pair is
+/// what kept it off. At 6, rung off against rung on:
+///
+/// | fixture | rung off | rung on |
+/// |---|---|---|
+/// | `eigena2` | `ErrorInStepComputation`/201 | **`SolvedToAcceptableLevel`/174** |
+/// | `issue_508_infeasible_gap_1em4` | `InfeasibleProblemDetected`/79 | `InfeasibleProblemDetected`/76 |
+/// | `infeasible_square_scaled_1em4` | `InfeasibleProblemDetected`/24 | `InfeasibleProblemDetected`/26 |
+/// | `deb7` | `ErrorInStepComputation`/1010 | `RestorationFailed`/460 |
+///
+/// `eigena2` now *gains* a reportable point rather than costing
+/// iterations. The rung stays off anyway, for two reasons that are about
+/// the scope of this change rather than about the rung: switching it on is
+/// a trajectory change over the whole corpus and needs its own
+/// `scripts/sweep-fixtures.sh` run to justify, and `deb7` changes verdict
+/// under it — `ErrorInStepComputation` to `RestorationFailed` — which is a
+/// different answer, not a faster one. **The case for turning it on has
+/// improved and is worth re-opening on its own measurement.** What is
+/// pinned below is only that both directions are still real, so that a
+/// change to either is visible to the next reader.
 #[test]
-fn the_rung_costs_iterations_on_the_two_models_that_kept_it_off() {
-    for (fixture, tag) in [
-        ("eigena2.nl", "eigena2"),
-        ("infeasible_square_scaled_1em4.nl", "infeas_sq"),
-    ] {
-        let off = solve(fixture, &format!("{tag}_cost_off"), 0);
-        let on = solve(fixture, &format!("{tag}_cost_on"), 1);
-        assert_eq!(
-            off.solution.status, on.solution.status,
-            "{fixture}: the rung must not change the verdict either way"
-        );
-        assert!(
-            iters(&on) > iters(&off),
-            "{fixture}: the rung was measured as a cost here ({} on against \
-             {} off) and the default is off because of it; a reversal means \
-             that decision needs re-measuring",
-            iters(&on),
-            iters(&off)
-        );
-    }
+fn the_rung_ledger_that_decided_the_default() {
+    // The cost: same verdict, more iterations.
+    let cost_off = solve("infeasible_square_scaled_1em4.nl", "infeas_sq_off", 0);
+    let cost_on = solve("infeasible_square_scaled_1em4.nl", "infeas_sq_on", 1);
+    assert_eq!(
+        cost_off.solution.status, cost_on.solution.status,
+        "infeasible_square_scaled_1em4: the rung must not change the verdict"
+    );
+    assert!(
+        iters(&cost_on) > iters(&cost_off),
+        "infeasible_square_scaled_1em4: the rung was measured as a cost here \
+         ({} on against {} off); a reversal means the ledger above needs \
+         re-measuring",
+        iters(&cost_on),
+        iters(&cost_off)
+    );
+
+    // The gain: fewer iterations, at the gate this change ships.
+    let gain_off = solve("eigena2.nl", "eigena2_gain_off", 0);
+    let gain_on = solve("eigena2.nl", "eigena2_gain_on", 1);
+    assert!(
+        iters(&gain_on) < iters(&gain_off),
+        "eigena2: the rung was measured as a gain at this gate ({} on against \
+         {} off); a reversal means the ledger above needs re-measuring",
+        iters(&gain_on),
+        iters(&gain_off)
+    );
 }
 
 /// `0` is the default and is upstream's unconditional hand-off; `1` has to

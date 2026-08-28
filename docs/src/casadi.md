@@ -603,12 +603,13 @@ default — see "Limited-memory Hessian (L-BFGS) initialization" in the
 options chapter for the measured populations and when it wins.
 
 > **Changed in #818.** Under `limited-memory`, once a line search has
-> spent five trial points backtracking now picks the next one by
+> spent six trial points backtracking now picks the next one by
 > safeguarded quadratic interpolation rather than by the fixed
-> `alpha_red_factor`. It is worth 3.6× on the issue's badly scaled model
-> (76 → 21 iterations) and 2.8× on the `eigena2` fixture, and it is why
-> an L-BFGS trajectory from this release will not match one from 0.10.0
-> step for step. `alpha_red_factor_min alpha_red_factor` restores the
+> `alpha_red_factor`. It is worth 3.5× on the issue's badly scaled model
+> (76 → 22 iterations) and takes the `cresc4` fixture from
+> `Restoration_Failed` at 1323 iterations to `Solve_Succeeded` at 281,
+> and it is why an L-BFGS trajectory from this release will not match
+> one from 0.10.0 step for step. `alpha_red_factor_min alpha_red_factor` restores the
 > old sequence exactly. The exact-Hessian path is unchanged. See
 > [Options](options.md) for the cells where the new sequence costs
 > iterations, and their remedy.
