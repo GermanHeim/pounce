@@ -100,7 +100,7 @@ use std::rc::Rc;
 /// already turns the interpolation off entirely, which is the escape
 /// hatch a caller needs; a second knob between "off" and "on" would be
 /// one more number with no population behind it.
-const ALPHA_INTERP_MIN_TRIALS: i32 = 5;
+const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 
 /// Outcome of the backtracking line search. Mirrors the booleans
 /// upstream returns through `accept_` plus the `tiny_step_flag` on
