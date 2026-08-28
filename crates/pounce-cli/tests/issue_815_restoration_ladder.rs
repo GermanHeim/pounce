@@ -28,10 +28,13 @@
 //! is exactly `0`. The start is `x*` displaced by a factor of three in `P`,
 //! `1/3` in `F` and `3` in `y` — strictly inside every bound.
 //!
-//! From that start pounce reaches `Restoration Failed!` in 47 iterations,
-//! far short of `max_iter`, which is what makes "give it a bigger budget"
-//! the wrong answer and a different starting point the right one. Ipopt
-//! 3.13.2 solves the same model in 34.
+//! From that start pounce reaches `Restoration Failed!` in 131 iterations
+//! (47 outer, then 84 inside restoration), far short of `max_iter`, which is
+//! what makes "give it a bigger budget" the wrong answer and a different
+//! starting point the right one. Ipopt 3.13.2 solves the same model in 34.
+//! The 131 is what the summary reports as of gh#819; before that fix it read
+//! 47, because the restoration sub-solve's rows were printed and then left
+//! out of the count.
 //!
 //! # What this file is *not* evidence about
 //!

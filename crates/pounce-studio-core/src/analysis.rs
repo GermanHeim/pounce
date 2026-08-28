@@ -30,6 +30,10 @@ pub struct Summary {
     pub final_constr_viol: f64,
     pub final_compl: f64,
     pub restoration_calls: i32,
+    /// The `r`-suffix iteration rows spent in restoration, summed across
+    /// calls (gh #819). Distinct from `restoration_outer_iters`, which is
+    /// bumped once per call and therefore always equals `restoration_calls`.
+    pub restoration_inner_iters: i32,
     pub restoration_outer_iters: i32,
     pub restoration_wall_secs: f64,
     pub iterations_captured: usize,
@@ -52,6 +56,7 @@ pub fn summarize(report: &SolveReport) -> Summary {
         final_constr_viol: report.statistics.final_constr_viol,
         final_compl: report.statistics.final_compl,
         restoration_calls: report.statistics.restoration_calls,
+        restoration_inner_iters: report.statistics.restoration_inner_iters,
         restoration_outer_iters: report.statistics.restoration_outer_iters,
         restoration_wall_secs: report.statistics.restoration_wall_secs,
         iterations_captured: report.iterations.len(),
@@ -314,10 +319,15 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
             severity: Severity::Warning,
             code: "restoration_used",
             message: format!(
-                "Restoration phase entered {} time(s); {} outer iters spent in \
+                "Restoration phase entered {} time(s); {} iterations spent in \
                  restoration ({:.3}s). Indicates the line search couldn't make \
                  progress on the original problem.",
-                stats.restoration_calls, stats.restoration_outer_iters, stats.restoration_wall_secs,
+                // gh #819: `restoration_outer_iters` is bumped once per call,
+                // so this used to print the call count twice. The iterations
+                // actually spent — the `r`-suffixed rows — are the inner ones.
+                stats.restoration_calls,
+                stats.restoration_inner_iters,
+                stats.restoration_wall_secs,
             ),
         });
     }

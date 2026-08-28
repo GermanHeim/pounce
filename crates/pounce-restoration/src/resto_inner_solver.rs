@@ -385,6 +385,12 @@ where
 /// Single-shot inner-solve driver. Wraps the construction of the
 /// nested `IpoptAlgorithm` and the extraction of the recovered
 /// `(orig_x, orig_s)` from the inner-final iterate.
+///
+/// Returns the sub-solve's terminating `iter_count` alongside the recovered
+/// iterate, so the count survives every failure path (gh #819). The work of
+/// carrying it is done by the thin wrapper: [`run_inner_resto_impl`] keeps
+/// the `?`-heavy body and writes the count through `spent` as soon as the
+/// nested IPM returns, before any of the extractions that can bail.
 pub fn run_inner_resto(
     outer_data: &IpoptDataHandle,
     outer_cq: &IpoptCqHandle,
@@ -396,6 +402,42 @@ pub fn run_inner_resto(
     print_iter_output: bool,
     debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
     intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
+) -> crate::min_c_1nrm::RestoInnerReturn {
+    let mut spent: Index = 0;
+    let result = run_inner_resto_impl(
+        outer_data,
+        outer_cq,
+        outer_nlp,
+        resto_builder,
+        inner_alg_builder,
+        backend_factory,
+        orig_progress_cb,
+        print_iter_output,
+        debug_hook,
+        intermediate_tnlp,
+        &mut spent,
+    );
+    crate::min_c_1nrm::RestoInnerReturn {
+        inner_iter_count: spent,
+        result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner_resto_impl(
+    outer_data: &IpoptDataHandle,
+    outer_cq: &IpoptCqHandle,
+    outer_nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    resto_builder: &RestoAlgorithmBuilder,
+    inner_alg_builder: &AlgorithmBuilder,
+    backend_factory: LinearBackendFactory,
+    orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    print_iter_output: bool,
+    debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
+    // Out-param: the nested IPM's terminating `iter_count`, written as soon
+    // as it is known so every `?` below can bail without losing it.
+    spent: &mut Index,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -769,15 +811,19 @@ pub fn run_inner_resto(
     // resto NLP itself reached stationarity at a point of large
     // orig-NLP `inf_pr`). Hoist the extraction so it runs before the
     // status branch.
-    let final_iv = alg.data.borrow().curr.clone()?;
-    let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
-    let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
-    let trial_s = clone_to_dense(&*final_iv.s);
-
+    // Read the counters *before* the extractions below: each of those can
+    // bail with `?`, and gh #819 is what happens when the number the whole
+    // summary hangs on is only recorded on the paths that succeed.
     let (inner_iter_count, iters_since_header, last_output) = {
         let d = alg.data.borrow();
         (d.iter_count, d.info_iters_since_header, d.info_last_output)
     };
+    *spent = inner_iter_count;
+
+    let final_iv = alg.data.borrow().curr.clone()?;
+    let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
+    let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
+    let trial_s = clone_to_dense(&*final_iv.s);
 
     // gh#645: the user's callback returned `false` from a restoration
     // fire. Return before the locally-infeasible adjudication below

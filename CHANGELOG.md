@@ -154,14 +154,71 @@ changes.
   read `solve_result_num`, and the only non-reporting edit here is the
   extraction of an unchanged five-term conjunction into a named function.
 
-  Three Python success sets still count the status as a failure —
-  `_minimize._NLP_SUCCESS_STATUS` (shared by `_curve_fit`),
-  `jax._path._OK_STATUS` and `torch._path._OK_STATUS`. They are left split on
-  purpose: unlike the CLI, they are a scipy-style `success` flag on a library
-  call that writes no `.sol`, so they were not put in contradiction with a
-  file the same process had just written, and widening a public return value
-  deserves its own decision. Tracked as gh #820 so the split has an owner
-  rather than reading as an oversight.
+  **The Python surfaces move with it (gh #820).** Four success sets counted
+  the status as a failure, so `minimize` returned `success=False` on a solve
+  whose `.sol` the same build calls optimal: `_minimize._NLP_SUCCESS_STATUS`
+  (shared by `_curve_fit`, which imports the frozenset rather than copying
+  it), `jax._path._OK_STATUS`, `torch._path._OK_STATUS`, and — a fourth the
+  issue did not name — `_starts._DONE_STATUS`, where the cost was worse than
+  a wrong flag: a multi-start candidate that *solved* was scored
+  `solve failed`, given a `+10` health penalty and eliminated at its rung.
+  The two path followers already require an all-equality model
+  (`_require_equality_constraints`), which is the shape that produces this
+  status, so refusing it aborted the path at a converged anchor.
+  `python/tests/test_issue_815_square_feasible_point.py` pins all four, and
+  pins the premise underneath them by parsing `status_to_solve_result_num`
+  out of `crates/pounce-solve-report/src/lib.rs` — so a future edit that
+  moves the Rust band back out of `0..=99` fails the Python test that depends
+  on it, rather than leaving the two sides to drift.
+
+- **A solve that ends inside restoration now reports the iterations it spent
+  there (gh #819).** `Number of Iterations....:` is, in Ipopt, the index of
+  the last printed iteration row — `r` rows included — on every exit path.
+  Measured over four upstream logs from this repo's issue corpus rather than
+  assumed: `2418r`/2418 (`Restoration Failed`), `412r`/412 (local
+  infeasibility), `1547r`/1547, `1348r`/1348. POUNCE printed the same `r` rows
+  and then reported a number that ignored them. On the `square_flowsheet_resto`
+  fixture the log ended at row `131r` above a summary that said **47**; on
+  gh #815's raw `.nl` the three solves reported **3 / 0 / 3** iterations for
+  work that actually ran 3000 / 1471 / 1945.
+
+  Three defects stacked:
+
+  1. The outer counter's roll-forward lived only on the `Recovered` path
+     (`min_c_1nrm.rs`, step 2g). All four *terminating* restoration outcomes
+     return ahead of it, so the entire sub-solve vanished from the summary.
+     It is now applied in `invoke_restoration` for every non-`Recovered`
+     outcome, which is trajectory-safe by construction: each of those arms
+     `Terminate`s, and the loop breaks without re-reading the counter.
+  2. `restoration_inner_iters` summed the inner IPM's **absolute** terminating
+     `iter_count`. That counter is seeded from the outer's
+     (`inner.iter_count = outer_iter + 1`, mirroring `IpRestoMinC_1Nrm.cpp`
+     line 181), so the sum was a position in the shared `r`-row numbering, not
+     a length — the same misreading gh #664 documented for the stall gate. It
+     is now the delta against the outer count at entry, i.e. the number of `r`
+     rows actually printed.
+  3. The count was read off the `Some(result)` arm of the inner solver's
+     return, so on every path that bailed — which is every path that *ends* in
+     restoration, the ones the issue is about — it recorded `0`. The inner
+     solver now returns `RestoInnerReturn { inner_iter_count, result }` with
+     the count outside the `Option`, and the caller records it ahead of the
+     `None` check.
+
+  The console summary gained a line for the split, since a bare total cannot
+  say how much of it was restoration:
+  `Number of restoration iterations                      = 84 (in 1 call)`.
+  It is printed only when there was a restoration call. Two doc comments in
+  `solve_statistics.rs` are corrected with it: `restoration_inner_iters` is a
+  sub-solve *length*, and `restoration_outer_iters` is documented as what it
+  has always been — incremented in lockstep with `restoration_calls`, so
+  always equal to it, not the count of `r`-suffix rows it claimed to be.
+
+  Measured on the fixture: `131` reported against a last row of `131r`, with
+  `84` of it in restoration; the recovering leg is unchanged at `54`.
+  `scripts/sweep-fixtures.sh` moves the iteration count on exactly the legs
+  that terminate inside restoration and nothing else — no status, objective or
+  engine moves — which is the expected signature of a reporting change that
+  touches a counter the algorithm never reads back.
 
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the

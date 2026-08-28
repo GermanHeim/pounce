@@ -104,6 +104,37 @@ pub struct RestoSolveResult {
     pub feasible_point_found: bool,
 }
 
+/// What one restoration sub-solve cost, and — when it produced one — what
+/// it recovered.
+///
+/// The iteration number sits **outside** the `Option` deliberately (gh #819).
+/// A sub-solve that fails has still spent every iteration it ran, and the
+/// failing path is exactly where the number matters: on gh #815's flowsheet
+/// a 2997-iteration restoration grind was summarised as
+/// `Number of Iterations....: 3`, because the count was dropped along with
+/// the `None` — leaving nothing downstream able to tell a long grind from an
+/// early bail.
+pub struct RestoInnerReturn {
+    /// The inner IPM's `iter_count` at termination.
+    ///
+    /// **Absolute, not a length.** The inner counter is seeded from the
+    /// outer's at entry (`inner.iter_count = outer_iter + 1`, mirroring
+    /// `IpRestoMinC_1Nrm.cpp:181`), so this is a position in the shared
+    /// numbering the `r`-suffix rows print — the index of the last such row.
+    /// Subtract the outer count at entry to get the sub-solve's own length.
+    /// Reading it as a length is the mistake gh#664 documents for the stall
+    /// gate and gh #819 for the audit counters.
+    ///
+    /// `0` when the hook could not run at all (no snapshot, no nested IPM
+    /// wired up), which is distinguishable from a real count because a real
+    /// one is always at least `outer_iter + 1`.
+    pub inner_iter_count: Index,
+    /// `Some` on success and on the adjudicated locally-infeasible exit;
+    /// `None` on any other failure (matching upstream's `bool` return, with
+    /// the granular reasons mapped to log messages).
+    pub result: Option<RestoSolveResult>,
+}
+
 /// Inner-loop driver hook. Constructs and runs the nested IPM around
 /// a [`crate::resto_nlp::RestoIpoptNlp`] derived from `nlp` and the
 /// outer iterate at `data.curr`. The optional fourth argument is the
@@ -111,15 +142,12 @@ pub struct RestoSolveResult {
 /// entry (mirrors upstream
 /// `IpRestoFilterConvCheck::SetOrigLSAcceptor`); when `Some`, the
 /// inner conv check gates `Converged` on the recovered iterate also
-/// satisfying the outer filter+iterate acceptance test. Returns
-/// `Some(result)` on success, `None` on any failure (matching
-/// upstream's `bool` return; the more granular failure reasons are
-/// mapped to log messages).
+/// satisfying the outer filter+iterate acceptance test.
 ///
 /// Until Phase 10's nested-loop strategy slots are wired through
-/// `AlgBuilder`, the workspace-default hook always returns `None`. The
-/// hook is injected so the transcription block here can be unit-
-/// tested with a synthetic success result.
+/// `AlgBuilder`, the workspace-default hook always returns an empty
+/// [`RestoInnerReturn`]. The hook is injected so the transcription block
+/// here can be unit-tested with a synthetic success result.
 pub type RestoInnerSolver = Box<
     dyn FnMut(
         &IpoptDataHandle,
@@ -137,7 +165,7 @@ pub type RestoInnerSolver = Box<
         // `intermediate_callback` fires per inner iteration (gh#645).
         // `None` when the caller installed no callback.
         Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
-    ) -> Option<RestoSolveResult>,
+    ) -> RestoInnerReturn,
 >;
 
 pub struct MinC1NormRestoration {
@@ -157,10 +185,16 @@ pub struct MinC1NormRestoration {
     /// acceptor doesn't expose a filter (penalty / cg-penalty) or when
     /// the test fixture didn't wire one up.
     pub(crate) orig_progress: Option<pounce_algorithm::restoration::OrigProgressCallback>,
-    /// Inner-IPM iteration count from the most recent
-    /// `perform_restoration` invocation. Read by the outer
-    /// `IpoptAlgorithm` for the pounce#12 restoration audit
-    /// counters in `SolveStatistics`. Reset on each call.
+    /// The inner IPM's `iter_count` at the end of the most recent
+    /// `perform_restoration` invocation — **absolute**, in the shared
+    /// numbering the `r`-suffix rows print, not the sub-solve's length
+    /// (see [`RestoInnerReturn::inner_iter_count`]). Read by the outer
+    /// `IpoptAlgorithm`, which subtracts its own count at entry for the
+    /// pounce#12 audit counters and uses the absolute value to roll the
+    /// reported iteration count forward on a terminating restoration exit
+    /// (gh #819). Reset on each call, and now recorded on the failing paths
+    /// too — it used to stay `0` there, which is precisely where it was
+    /// wanted.
     pub(crate) last_inner_iter_count: Index,
     /// Forwarded by the outer driver via `set_print_iter_output`; the
     /// flag is threaded into the nested IPM through `inner_solver` so
@@ -186,7 +220,10 @@ impl Default for MinC1NormRestoration {
             expect_infeasible_problem: false,
             start_with_resto: false,
             eq_mult: Box::new(LeastSquareMults::new()),
-            inner_solver: Box::new(|_, _, _, _, _, _, _| None),
+            inner_solver: Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
+                inner_iter_count: 0,
+                result: None,
+            }),
             orig_progress: None,
             last_inner_iter_count: 0,
             print_iter_output: true,
@@ -266,9 +303,11 @@ impl RestorationPhase for MinC1NormRestoration {
         //    can gate `Converged` on outer-filter acceptance per
         //    upstream `IpRestoFilterConvCheck.cpp:53-80`.
         let cb = self.orig_progress.take();
-        // Reset per-call audit counter (pounce#12). Stays 0 on the
-        // early-fail path below; populated from `result.iter_count`
-        // on the success path.
+        // Reset per-call audit counter (pounce#12). Repopulated
+        // unconditionally from the hook's return below — including on the
+        // failing paths, which is the gh #819 fix: the count used to be read
+        // off `result`, so a restoration that ground for hundreds of
+        // iterations and then failed reported nothing at all.
         self.last_inner_iter_count = 0;
         // Upstream isolates the resto sub-IPM behind a separate
         // `IpoptData` (`IpRestoMinC_1Nrm.cpp:123`), so the outer's
@@ -282,7 +321,7 @@ impl RestorationPhase for MinC1NormRestoration {
         // mu/tau, matching upstream.
         let saved_mu = data.borrow().curr_mu;
         let saved_tau = data.borrow().curr_tau;
-        let Some(result) = (self.inner_solver)(
+        let inner = (self.inner_solver)(
             data,
             cq,
             nlp,
@@ -290,10 +329,12 @@ impl RestorationPhase for MinC1NormRestoration {
             self.print_iter_output,
             self.debug_hook.clone(),
             self.intermediate_tnlp.clone(),
-        ) else {
+        );
+        // Ahead of the `None` check, not after it (gh #819).
+        self.last_inner_iter_count = inner.inner_iter_count;
+        let Some(result) = inner.result else {
             return RestorationOutcome::Failed;
         };
-        self.last_inner_iter_count = result.iter_count;
         {
             let mut d = data.borrow_mut();
             d.curr_mu = saved_mu;
@@ -1004,8 +1045,9 @@ mod tests {
             Rc::clone(&nlp),
         )));
 
-        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| {
-            Some(RestoSolveResult {
+        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
+            inner_iter_count: 1,
+            result: Some(RestoSolveResult {
                 trial_x: rcv(&[10.0, 20.0]),
                 trial_s: rcv(&[4.0]),
                 iter_count: 1,
@@ -1014,7 +1056,7 @@ mod tests {
                 locally_infeasible: false,
                 user_requested_stop: false,
                 feasible_point_found: false,
-            })
+            }),
         });
 
         let mut driver = MinC1NormRestoration::new().with_inner_solver(hook);
@@ -1051,5 +1093,59 @@ mod tests {
         // untouched. Pins the invariant the threshold>0 path must match.
         let (before, after) = run_recover_with_threshold(0.0);
         assert_eq!(after, before);
+    }
+
+    /// gh #819. The inner solver's terminating iteration count is recorded
+    /// even when it hands back no result — which is *every* path that ends
+    /// inside restoration, and therefore every path whose summary line the
+    /// issue is about. Before the fix the count was read off the
+    /// `Some(result)` arm, so a failing sub-solve reported having spent no
+    /// iterations at all while its `r` rows sat in the log above the summary.
+    #[test]
+    fn the_inner_iteration_count_survives_a_failed_sub_solve() {
+        let mut data = IpoptData::new();
+        data.curr_mu = 0.1;
+        data.curr_tau = 0.99;
+        data.iter_count = 12;
+        data.set_curr(IteratesVector::new(
+            rcv(&[2.0, 3.0]),
+            rcv(&[4.0]),
+            rcv(&[1.0]),
+            rcv(&[1.0]),
+            rcv(&[0.5]),
+            rcv(&[0.7]),
+            rcv(&[0.3]),
+            rcv(&[]),
+        ));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(data));
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(MockNlp::new()));
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            Rc::clone(&data),
+            Rc::clone(&nlp),
+        )));
+
+        // 12 outer iterations in, the sub-solve prints rows `13r`..`37r` and
+        // then gives up. `inner_iter_count` is the *absolute* position of the
+        // last one, not the length — the inner IPM's counter is seeded from
+        // the outer's (`inner.iter_count = outer_iter + 1`).
+        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
+            inner_iter_count: 37,
+            result: None,
+        });
+        let mut driver = MinC1NormRestoration::new().with_inner_solver(hook);
+        driver.eq_mult = Box::new(StubEqMult);
+
+        let mut aug = UnusedAug;
+        let outcome = driver.perform_restoration(&data, &cq, &nlp, &mut aug);
+        assert!(
+            matches!(outcome, RestorationOutcome::Failed),
+            "a `None` result is a failed restoration, got {outcome:?}",
+        );
+        assert_eq!(
+            driver.last_inner_iter_count(),
+            37,
+            "the count must be recorded ahead of the `None` check, not \
+             after it (gh #819)",
+        );
     }
 }
