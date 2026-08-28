@@ -1108,11 +1108,11 @@ honoured on both Hessian paths.
 The default is off for the exact-Hessian path because a Newton step's
 length is meaningful — the acceptable `α` is normally within a couple of
 halvings of 1, so interpolation buys nothing — and because enabling it
-there was measured to move 9 of the 156 fixture-legs in
-`scripts/sweep-fixtures.sh` and to cost the one thing an exact-Hessian
-arm has to keep: `infeasible_square_scaled_1em4` stops certifying
-infeasibility (`Infeasible_Problem_Detected` in 17 iterations →
-`Error_In_Step_Computation` in 12).
+there was measured to move 3 of the 156 fixture-legs in
+`scripts/sweep-fixtures.sh` — `eigena2` 27 → 31,
+`issue_508_infeasible_gap_1em4` 441 → 580 to the same certificate, and
+an objective digit on `hs13_bigstart` — with nothing on that leg
+improving in exchange.
 
 **It engages only once the fixed sequence has already spent five trial
 points.** The interpolation treats a *long* line search, and it is only

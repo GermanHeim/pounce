@@ -110,16 +110,17 @@ changes.
   `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
   `alpha_red_factor` (i.e. upstream's fixed sequence) under an exact
   Hessian. An explicit user value is honoured on both. The split is
-  measured, not assumed — turning it on for the exact path too moves 9
-  of the 156 fixture-legs in `scripts/sweep-fixtures.sh` and costs the
-  one thing an exact-Hessian arm has to keep:
-  `infeasible_square_scaled_1em4` goes `InfeasibleProblemDetected`/17 →
-  `ErrorInStepComputation`/12, losing the infeasibility certificate.
-  `square_flowsheet_resto` also goes 54 → 130 iterations and `eigena2`
-  27 → 32, against `deb7` 147 → 116 and two faster infeasible
-  detections (`issue_508_infeasible_gap_1em2` 114 → 96, `_1em4`
-  441 → 387). A Newton step's length is meaningful, which is the reason
-  the interpolation has nothing to add there.
+  measured, not assumed — and re-measured under the trial gate, which
+  changed the answer: forcing `alpha_red_factor_min 0.05` onto the exact
+  path moves 3 of the 156 fixture-legs, all cost and no gain. `eigena2`
+  27 → 31, `issue_508_infeasible_gap_1em4` 441 → 580 to the same
+  certificate, and an objective digit on `hs13_bigstart`; nothing
+  improves and no status changes. (Ungated it was worse — 9 legs, and
+  `infeasible_square_scaled_1em4` lost its infeasibility certificate
+  outright, `InfeasibleProblemDetected`/17 →
+  `ErrorInStepComputation`/12. The gate removes the sharp edge but not
+  the reason for the split.) A Newton step's length is meaningful, which
+  is why the interpolation has nothing to add there.
 
   Fixture sweep against `a5e0a837`: **the exact leg is byte-identical,
   and 3 of the 156 fixture-legs move**, all three on the `lbfgs` leg,

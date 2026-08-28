@@ -710,18 +710,17 @@ pub struct LineSearchOptions {
     ///   acceptable `alpha` is normally within a few halvings of 1, and
     ///   the trial sequence is not what costs.
     ///
-    /// The split is measured, not assumed. Turning interpolation on for
-    /// the exact path too moves 21 of the 154 fixture-legs in
-    /// `scripts/sweep-fixtures.sh` and takes two of them from solved to
-    /// not solved — `deb7` (`SolveSucceeded`/143 →
-    /// `ErrorInStepComputation`/176) and `infeasible_square_scaled_1em4`
-    /// (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12,
-    /// losing the infeasibility certificate) — against no exact-leg
-    /// gain beyond two faster infeasible detections. On the
-    /// limited-memory leg over the same corpus it takes `cresc4` from
-    /// `RestorationFailed` to `SolveSucceeded` at the exact-Hessian
-    /// optimum and `eigenb2` from `SolvedToAcceptableLevel` to
-    /// `SolveSucceeded`.
+    /// The split is measured, not assumed. Forcing
+    /// `alpha_red_factor_min 0.05` onto the exact path moves 3 of the
+    /// 156 fixture-legs in `scripts/sweep-fixtures.sh`, all of them
+    /// cost and none of them gain: `eigena2` 27 → 31,
+    /// `issue_508_infeasible_gap_1em4` 441 → 580 to the same
+    /// certificate, and an objective digit on `hs13_bigstart`. Nothing
+    /// on that leg improves. Before `ALPHA_INTERP_MIN_TRIALS` gated the
+    /// interpolation the same experiment moved 9 legs and cost
+    /// `infeasible_square_scaled_1em4` its infeasibility certificate
+    /// (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12);
+    /// the gate removed the sharp edge, not the reason for the split.
     ///
     /// An explicit `alpha_red_factor_min` from the user is honoured on
     /// both paths — the mode-dependence is only in the default.
