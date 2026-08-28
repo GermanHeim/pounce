@@ -979,6 +979,11 @@ impl Solver {
     /// Jacobians, and the barrier diagonal all evaluated at the
     /// stepped iterate with the step's own multipliers, and the
     /// predictor's active set applied to the diagonal in that frame.
+    /// A base solve the sigma ceiling (gh#737) touched, or one that
+    /// crossed over into the declared frame (gh#654), is no
+    /// exception: both rules are re-derived at the predicted point
+    /// rather than read from the base-point diagonals stored for the
+    /// held factor's own back-solves.
     /// A chord iteration contracts at the rate the distance between
     /// its operator and the true Jacobian sets, and the predicted
     /// point is where the truth is. Under a `limited-memory` solve
@@ -1278,7 +1283,14 @@ impl Solver {
         // solve: a weak bound's multiplier is order sqrt(mu) and the
         // released convention holds it at exactly zero, so the step
         // shift's multiplier injection is deliberately omitted.
-        if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &rhs_plain, &mut d0, false) {
+        if !bs.solve_released_prebuilt(
+            &released,
+            Rc::clone(&sigma),
+            None,
+            &rhs_plain,
+            &mut d0,
+            false,
+        ) {
             return Err(SolverError::BacksolveFailed);
         }
         work += 1;
@@ -1361,8 +1373,14 @@ impl Solver {
                 let mut unit = vec![0.0; dim];
                 unit[weak[k].var_row] = sign(k);
                 let mut xk = vec![0.0; dim];
-                if !bs.solve_released_prebuilt(&released, Rc::clone(&sigma), &unit, &mut xk, false)
-                {
+                if !bs.solve_released_prebuilt(
+                    &released,
+                    Rc::clone(&sigma),
+                    None,
+                    &unit,
+                    &mut xk,
+                    false,
+                ) {
                     return Err(SolverError::BacksolveFailed);
                 }
                 work += 1;
@@ -1485,6 +1503,7 @@ impl Solver {
                 if !bs.solve_released_prebuilt(
                     &released,
                     Rc::clone(&sigma),
+                    None,
                     &comb,
                     &mut corr,
                     false,
