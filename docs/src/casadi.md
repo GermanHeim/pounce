@@ -595,6 +595,25 @@ the blunt instrument if you suspect it but cannot change the formula:
 > reproducing older POUNCE results, set `limited_memory_initialization
 > scalar2` explicitly.
 
+`limited_memory_initialization=history-max` (POUNCE's own, #818) is the
+other direction: it applies the `scalar1` formula to *every* pair in the
+history window and keeps the largest, so `σ` never understates the
+curvature of a direction the corrections do not span. It is not the
+default — see "Limited-memory Hessian (L-BFGS) initialization" in the
+options chapter for the measured populations and when it wins.
+
+> **Changed in #818.** Under `limited-memory`, once a line search has
+> spent six trial points backtracking now picks the next one by
+> safeguarded quadratic interpolation rather than by the fixed
+> `alpha_red_factor`. It is worth 3.5× on the issue's badly scaled model
+> (76 → 22 iterations) and takes the `cresc4` fixture from
+> `Restoration_Failed` at 1323 iterations to `Solve_Succeeded` at 281,
+> and it is why an L-BFGS trajectory from this release will not match
+> one from 0.10.0 step for step. `alpha_red_factor_min alpha_red_factor` restores the
+> old sequence exactly. The exact-Hessian path is unchanged. See
+> [Options](options.md) for the cells where the new sequence costs
+> iterations, and their remedy.
+
 ### When the duals will not converge
 
 A quasi-Newton dual step is computed from an approximate Hessian, so an
