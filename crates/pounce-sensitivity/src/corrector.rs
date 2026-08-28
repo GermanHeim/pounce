@@ -480,18 +480,12 @@ pub(crate) fn run(
     }
     let _restore = restore;
 
-    // Built AFTER the swap, so the slacks and multipliers it reads
-    // are the predicted point's. Always a FRESH object: the
-    // factorization cache keys on this vector's tag, and handing it
-    // an already-cached vector could return a factor of a different
-    // operator. With both sets empty this is the predicted point's
-    // own barrier diagonal, copied.
-    let sigma = if released.is_empty() && pinned.is_empty() {
-        bs.fresh_barrier_sigma_x()
-    } else {
-        bs.active_set_sigma_x(&released, &pinned)
-    }
-    .ok_or_else(|| {
+    // Built AFTER the swap, so both diagonal blocks read the
+    // predicted point: the stored base-point pair, which the ceiling
+    // (gh#737) or crossover (gh#654) would otherwise freeze, is never
+    // consulted, and the frame rule and the ceiling are re-derived at
+    // the predicted point instead. See `corrector_sigma`.
+    let (sigma, sigma_s) = bs.corrector_sigma(&pinned).ok_or_else(|| {
         SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
     })?;
 
@@ -499,7 +493,14 @@ pub(crate) fn run(
         // The same Rc every call: the factorization cache keys on its
         // tag, so the predicted point's operator is factored once and
         // every later solve is a back-solve.
-        bs.solve_released_prebuilt(&released, Rc::clone(&sigma), rhs, lhs, false)
+        bs.solve_released_prebuilt(
+            &released,
+            Rc::clone(&sigma),
+            Some(Rc::clone(&sigma_s)),
+            rhs,
+            lhs,
+            false,
+        )
     };
     // A released bound has no equation left, so its row does not count
     // toward the residual the stopping rule reads.

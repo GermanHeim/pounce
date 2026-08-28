@@ -523,7 +523,7 @@ impl PdSensBacksolver {
         let Some(sigma) = self.released_sigma_x(released) else {
             return false;
         };
-        self.solve_released_prebuilt(released, sigma, rhs, lhs, shift)
+        self.solve_released_prebuilt(released, sigma, None, rhs, lhs, shift)
     }
 
     /// [`Self::solve_released_inner`] with the released `Σ` supplied by
@@ -536,6 +536,7 @@ impl PdSensBacksolver {
         &self,
         released: &[usize],
         sigma: Rc<dyn pounce_linalg::Vector>,
+        sigma_s: Option<Rc<dyn pounce_linalg::Vector>>,
         rhs: &[Number],
         lhs: &mut [Number],
         shift: bool,
@@ -565,7 +566,7 @@ impl PdSensBacksolver {
         if shift && !self.shift_released_rhs(released, &mut scaled) {
             return false;
         }
-        if !self.solve_released_scaled(sigma, &scaled, lhs) {
+        if !self.solve_released_scaled(sigma, sigma_s, &scaled, lhs) {
             return false;
         }
         if let Some(c) = self.conj.as_ref() {
@@ -739,6 +740,7 @@ impl PdSensBacksolver {
     fn solve_released_scaled(
         &self,
         sigma: Rc<dyn pounce_linalg::Vector>,
+        sigma_s: Option<Rc<dyn pounce_linalg::Vector>>,
         rhs: &[Number],
         lhs: &mut [Number],
     ) -> bool {
@@ -777,8 +779,10 @@ impl PdSensBacksolver {
             SigmaOverride {
                 x: Some(sigma),
                 // The release is an x-block operation; the row block
-                // keeps whichever frame the held iterate belongs to.
-                s: self.sigma_override().s,
+                // keeps whichever frame the held iterate belongs to,
+                // unless the caller built its own (the corrector's
+                // predicted-point pair).
+                s: sigma_s.or_else(|| self.sigma_override().s),
             },
         ) {
             return false;
@@ -793,20 +797,89 @@ impl PdSensBacksolver {
             && read_res_block(&*res_iv.v_u, &mut lhs[off[7]..off[8]])
     }
 
-    /// A fresh copy of [`Self::barrier_sigma_x`], its own object with
-    /// its own tag, so the factorization cache cannot resolve it to a
-    /// factor built at another iterate. `None` when the diagonal is
-    /// not dense.
-    pub(crate) fn fresh_barrier_sigma_x(&self) -> Option<Rc<dyn pounce_linalg::Vector>> {
+    /// The corrector's barrier diagonals, both blocks, built at the
+    /// CURRENT iterate, which during a correction is the predicted
+    /// point. The stored [`Self::sigma`] pair is deliberately not
+    /// consulted: it is frozen at the base point for the back-solves
+    /// through the held factor, and a correction factors its own
+    /// operator, so the frame rule and the ceiling are re-derived
+    /// where that operator lives. Declared-frame slacks when the held
+    /// iterate came from crossover (gh#654; the declared bounds are
+    /// constants, so the frame follows the iterate), the calculated
+    /// quantities otherwise, and the gh#737 ceiling applied from the
+    /// Jacobians at the same point. Released rows need no handling:
+    /// the correction zeroes their multipliers in the packed iterate,
+    /// so their sides contribute nothing. Pinned rows are raised
+    /// under the same ceiling. Always fresh objects, because the
+    /// factorization cache keys on their tags and a cached vector
+    /// could resolve to a factor built at another iterate.
+    pub(crate) fn corrector_sigma(
+        &self,
+        pinned: &[(usize, Number)],
+    ) -> Option<(Rc<dyn pounce_linalg::Vector>, Rc<dyn pounce_linalg::Vector>)> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
-        let vals = self
-            .barrier_sigma_x()
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())?;
-        let mut out = DenseVector::new(DenseVectorSpace::new(vals.len() as Index));
-        out.values_mut().copy_from_slice(&vals);
-        Some(Rc::new(out) as Rc<dyn pounce_linalg::Vector>)
+        let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+        let (live_x, live_s) = if self.declared.is_some() {
+            let nlp_ref = self.nlp.borrow();
+            let (x_l, x_u) = nlp_ref.declared_x_bounds()?;
+            let (d_l, d_u) = nlp_ref.declared_d_bounds()?;
+            let d = self.data.borrow();
+            let curr = d.curr.as_ref()?;
+            let (sx, _, _) = declared_frame_sigma(
+                &*nlp_ref.px_l(),
+                &*nlp_ref.px_u(),
+                &*curr.x,
+                &x_l,
+                &x_u,
+                &*curr.z_l,
+                &*curr.z_u,
+                self.dims[0],
+            );
+            let (ss, _, _) = declared_frame_sigma(
+                &*nlp_ref.pd_l(),
+                &*nlp_ref.pd_u(),
+                &*curr.s,
+                &d_l,
+                &d_u,
+                &*curr.v_l,
+                &*curr.v_u,
+                self.dims[1],
+            );
+            (sx, ss)
+        } else {
+            let c = self.cq.borrow();
+            (c.curr_sigma_x(), c.curr_sigma_s())
+        };
+        let caps = sigma_pin_caps(&self.cq, self.dims[0]);
+        let cap_s = sigma_pin_cap(1.0);
+        let mut x = dense(live_x)?;
+        for (i, v) in x.iter_mut().enumerate() {
+            let c = caps.get(i).copied().unwrap_or(Number::INFINITY);
+            if *v > c {
+                *v = c;
+            }
+        }
+        for &(var_row, add) in pinned {
+            let c = caps.get(var_row).copied().unwrap_or(Number::INFINITY);
+            let slot = x.get_mut(var_row)?;
+            *slot = pinned_entry(*slot, add, c);
+        }
+        let mut s = dense(live_s)?;
+        for v in s.iter_mut() {
+            if *v > cap_s {
+                *v = cap_s;
+            }
+        }
+        let pack = |vals: Vec<Number>| -> Rc<dyn pounce_linalg::Vector> {
+            let mut out = DenseVector::new(DenseVectorSpace::new(vals.len() as Index));
+            out.values_mut().copy_from_slice(&vals);
+            Rc::new(out) as Rc<dyn pounce_linalg::Vector>
+        };
+        Some((pack(x), pack(s)))
     }
 
     /// A natural-units compound vector, packed as a frozen
