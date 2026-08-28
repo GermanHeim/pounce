@@ -141,33 +141,6 @@ changes.
   unconditional lift, or a lift-blind refusal — and the matching tests, and only
   those, go red.
 
-- **The corrector's operator is assembled at the predicted point.**
-  `corrector_iter`'s iterations used to run against the factorization
-  the solve left behind, evaluated at the base point. They now pay one
-  derivative evaluation and one factorization at the predicted point,
-  with the Hessian, the constraint Jacobians, and the barrier diagonal
-  all evaluated at the stepped iterate with the step's own
-  multipliers, and the predictor's active set applied to the diagonal
-  in that frame. A chord iteration contracts at the rate the distance
-  between its operator and the true Jacobian sets, so the correction
-  converges an order faster where the Hessian bends over the step,
-  reaches a bound the step carries a coordinate onto instead of
-  achieving nothing there, on the holding side of a kink lands on the
-  re-solve itself, and on a 62k-variable collocation model reaches
-  the base solve's own solution quality in one back-solve at
-  perturbations where the held-factor chord needed three. Under a
-  `limited-memory` solve the quasi-Newton matrix is kept, since no
-  exact Hessian exists to evaluate elsewhere.
-
-  Across a release the step's endpoint does not show, the corrector
-  still does not reach the re-solve. Just past the breakpoint the
-  iterations decline and the no-improvement warning fires as before.
-  Deeper past it, the weak diagonal entry the step's clamped
-  multiplier builds lets them move the variable partway off the bound
-  and reduce the residual they measure, without the released row
-  applied, so the answer stays short of the re-solve by a
-  delta-dependent margin. The release-deciding modes cross exactly at
-  every depth.
 - **A restoration failure now opens the second-opinion ladder.** (Found while
   investigating gh #815; it is *not* a fix for that issue — see the note at the
   end of this entry.)
