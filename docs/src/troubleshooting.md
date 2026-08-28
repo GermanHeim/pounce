@@ -360,6 +360,16 @@ linear-solver scaling or a different barrier strategy evaluates the same
 non-finite quantity again, so those two rungs are not evidence about it and
 would only burn solves.
 
+`Restoration_Failed` opens it as well, and likewise reaches only the third rung
+([pounce#815](https://github.com/jkitchin/pounce/issues/815)). Restoration
+failing is a report about the *path*: the iterate reached somewhere the
+restoration sub-problem could not work from. Rungs 1 and 2 vary the path from
+the same starting point and can arrive somewhere just as bad; rung 3 moves the
+point, which makes it a different sub-problem. Note that this is **not** a
+budget exit — a restoration failure typically stops far short of `max_iter`,
+so "give it more iterations" is not the available answer, which is why it
+qualifies where `Maximum_Iterations_Exceeded` does not.
+
 Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
 so a laddered run has several and only the last one is the verdict that
 shipped — if you are parsing pounce's output, read `Status:` and ignore the

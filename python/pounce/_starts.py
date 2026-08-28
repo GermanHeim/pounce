@@ -538,8 +538,13 @@ def project_to_feasible(
 # --------------------------------------------------------------------------
 
 #: Statuses that mean the candidate has *finished* — no budget it is
-#: given afterwards would be spent. Mirrors ``_minimize._NLP_SUCCESS_STATUS``.
-_DONE_STATUS = frozenset({0, 1})
+#: given afterwards would be spent. Mirrors ``_minimize._NLP_SUCCESS_STATUS``,
+#: including ``FeasiblePointFound`` (6) as of gh #815: a square problem's
+#: feasible point is its solution, so the candidate is done, not broken. While
+#: 6 was outside this set a square candidate that solved was scored as
+#: ``solve failed`` and eliminated at its rung, which is the opposite of what
+#: happened.
+_DONE_STATUS = frozenset({0, 1, 6})
 
 #: Statuses that mean the candidate stopped because its truncation budget
 #: ran out, i.e. it is *paused* and can be resumed. Everything outside

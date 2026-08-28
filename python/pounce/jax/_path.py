@@ -46,7 +46,18 @@ import numpy as np
 from .._ad_common import ACTIVE_TOL
 from .._continuation import StepController
 
-_OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
+# Anchor/corrector solves the path follower accepts. ``Feasible_Point_Found``
+# joined the two obvious ones in gh #815: it is emitted only for a square
+# problem (``is_square_problem`` gates its single producer), where the
+# objective is constant and a feasible point is the solution — and a square
+# all-equality model is precisely the shape this follower requires anyway
+# (see ``_require_equality_constraints``). Refusing it aborted the path at a
+# converged anchor.
+_OK_STATUS = (
+    "Solve_Succeeded",
+    "Solved_To_Acceptable_Level",
+    "Feasible_Point_Found",
+)
 
 
 def _require_equality_constraints(jp, where):

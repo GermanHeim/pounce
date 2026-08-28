@@ -166,14 +166,6 @@ _QP_STATUS_MESSAGE = {
     "numerical_failure": "Numerical difficulties encountered.",
 }
 
-# NLP ``ApplicationReturnStatus`` codes that count as a successful solve for the
-# scipy-style ``success`` flag. ``SolveSucceeded`` (0) is the obvious one;
-# ``SolvedToAcceptableLevel`` (1) means the iterate met the *acceptable*
-# tolerance after the tight tolerance stalled — Ipopt/cyipopt and scipy both
-# treat that as a success, and pounce's own differentiable path already does
-# (``jax/_path.py`` / ``torch/_path.py`` ``_OK_STATUS``). Excluding it (gh #119)
-# made HS071 and similar problems report ``success=False`` at a verified
-# optimum. Codes 2..6 (infeasible, tiny step, diverging, …) stay failures.
 # The `solver_selection` values the Rust option registry accepts
 # (`upstream_options.rs`, `add_string_option("solver_selection", ...)`). Kept in
 # sync by `test_solver_selection_values_match_rust`, which parses that file --
@@ -196,7 +188,30 @@ _SOLVER_SELECTION_VALUES = frozenset(
     {"auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set", "socp"}
 )
 
-_NLP_SUCCESS_STATUS = frozenset({0, 1})
+# NLP ``ApplicationReturnStatus`` codes that count as a successful solve for the
+# scipy-style ``success`` flag.
+#
+# ``SolveSucceeded`` (0) is the obvious one; ``SolvedToAcceptableLevel`` (1)
+# means the iterate met the *acceptable* tolerance after the tight tolerance
+# stalled — Ipopt/cyipopt and scipy both treat that as a success, and pounce's
+# own differentiable path already does (``jax/_path.py`` / ``torch/_path.py``
+# ``_OK_STATUS``). Excluding it (gh #119) made HS071 and similar problems
+# report ``success=False`` at a verified optimum.
+#
+# ``FeasiblePointFound`` (6) joined them in gh #815. The engine emits it from
+# exactly one place — ``min_c_1nrm.rs``, reached only through
+# ``square_feasible_point_found`` in ``resto_inner_solver.rs``, whose first
+# conjunct is ``is_square_problem`` (``c.x.dim() == c.y_c.dim()``, a port of
+# ``IpoptCalculatedQuantities::IsSquareProblem``). On a square problem the
+# objective is constant, so a feasible point *is* the solution: there is no
+# further criterion left to miss. Ipopt's own ASL driver says the same thing by
+# reporting AMPL code ``2``, in the solved band. Keeping it a failure here left
+# ``minimize`` disagreeing with the ``.sol`` the CLI writes for the identical
+# solve.
+#
+# Codes 2..5 (infeasible, tiny step, diverging, user stop) stay failures, and
+# the negative codes with them.
+_NLP_SUCCESS_STATUS = frozenset({0, 1, 6})
 
 # Statuses for which the KKT-error fallback below must NOT upgrade the solve to
 # ``success=True``. ``User_Requested_Stop`` (5) means the solve was aborted by

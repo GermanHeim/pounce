@@ -36,6 +36,216 @@ changes.
   applied, so the answer stays short of the re-solve by a
   delta-dependent margin. The release-deciding modes cross exactly at
   every depth.
+- **A restoration failure now opens the second-opinion ladder.** (Found while
+  investigating gh #815; it is *not* a fix for that issue — see the note at the
+  end of this entry.)
+  `SecondOpinionTrigger::for_status` recognised exactly two verdicts,
+  `Infeasible_Problem_Detected` and `Invalid_Number_Detected`. A solve that
+  ended `Restoration_Failed` got no second opinion at all — even though that
+  verdict is a statement about the *path* in exactly the sense the other two
+  are: the restoration sub-problem could not work from where the iterate got
+  to. The rung that answers that question, a displaced start
+  (`start_point_perturbation=1e-2`), was already implemented, on by default,
+  and measured as the highest-yield rung there is — 13 recoveries of 15 over
+  the KRONOS corpus, against `mu_strategy=adaptive`'s 4 — and it was never
+  reached.
+
+  It is deliberately **not** treated like a budget exit. The paragraph in
+  `for_status` that excludes `Maximum_Iterations_Exceeded` argues that the
+  answer there is a bigger budget and a re-solve would burn the same budget to
+  reach the same wall. A restoration failure stops far short of `max_iter` —
+  47 iterations of a 3000 cap on the new fixture, 2 on the gh #815 report —
+  so a bigger budget is not the available answer, and the exclusion does not
+  apply.
+
+  **Only rung 3 opens on this trigger**, so a restoration failure costs
+  exactly one extra solve, not three. Rungs 1 and 2 vary the linear-solver
+  scaling and the barrier strategy from the *same* starting point; the
+  starting point is what put the iterate where restoration failed, and a
+  different path from it can arrive somewhere just as bad. That is the same
+  reasoning that already limits `Invalid_Number_Detected` to this one rung.
+
+  New fixture `square_flowsheet_resto.nl` — square (32 × 32, zero degrees of
+  freedom, `f(x) = 0`), flowsheet-shaped, mixing `1e-6` mole fractions with
+  `3e6` Pa, feasible by construction (every row is `expr(x) == expr(x*)`, and
+  the generator in `dev-notes/square_flowsheet_resto_gen.py` asserts the
+  residual at `x*` is exactly zero). From a start displaced 3× in `P` and
+  `1/3` in `F` — strictly inside every bound — pounce reached
+  `Restoration Failed!` in 47 iterations where Ipopt 3.13.2 solves in 34;
+  it now recovers to `Solve_Succeeded` in 54. A second member of the same
+  family, displaced 100×, goes from `Restoration Failed!` at 2 iterations to
+  `Solve_Succeeded` at 109 — an optimum Ipopt itself misses, reporting local
+  infeasibility after 89 iterations.
+
+  `scripts/sweep-fixtures.sh` over the pre-existing corpus: **0 of 154
+  fixture-legs move**, and the reason is worth stating rather than reading as
+  reassurance — the corpus contains **no** leg that exits `Restoration_Failed`
+  at default options, so it could not have moved and cannot regression-guard
+  this change either. That gap is what the new fixture closes.
+  `degenerate_start_ladder.rs` cannot cover this branch for the same reason:
+  both its fixtures are HS008 from the origin, which exits
+  `Infeasible_Problem_Detected`. Re-run at 156 legs with the fixture in,
+  exactly one leg moves and it is the intended one. Its **lbfgs** leg is the
+  control: same model, same start, exits `Maximum_Iterations_Exceeded` at the
+  3000 cap, and is **unmoved** — the budget-exit exclusion executing on a real
+  leg rather than only in a unit test.
+
+  **This does not fix gh #815, and the distinction is the point.** That report
+  exits `Infeasible_Problem_Detected`, with a log showing the ladder already
+  firing on it; `Restoration_Failed` never occurs there, so this change is
+  inert for that model. Two things about it remain open. Its build
+  (`5cf01b16`) **predates rung 3 entirely** — added in `abbe856c`, which is
+  why the log shows two rungs and not three — and rung 3 is untested against
+  that flowsheet, which is not available here. And the verdict itself lands at
+  iteration 2, far short of any budget, which the main-loop rapid-infeasibility
+  detector cannot produce (`infeas_max_streak = 5` plus a no-descent
+  confirmation), so it comes out of restoration's `resto_orig_verdict` — where
+  the 61 s behind a reported "2 iterations" also goes. Neither is addressed
+  here. The synthetic family built for this entry never reproduces
+  `Infeasible_Problem_Detected` at all, so it is a fixture for *this* branch
+  and is not evidence about that one.
+- **A square problem solved to feasibility is now reported as a success
+  (gh #815).** `Feasible_Point_Found` wrote AMPL `solve_result_num = 100`.
+  Pyomo's contrib v2 `.sol` reader maps `100..=199` to
+  `TerminationCondition.error`, so a correct answer reached the caller as a
+  *solver error*; the legacy reader maps it to `optimal` with
+  `status=warning`, the same complaint that moved `Solved_To_Acceptable_Level`
+  out of that band in gh #591. It is now `2`, Ipopt's own code, in the
+  `0..=99` solved band. `pounce`'s process exit code follows (0, not 1), and
+  the two `pyomo_pounce` status tables (`v2._V2_STATUS`,
+  `sens._STATUS_RESULT`) report the status as a success rather than as
+  `unknown` / `warning`.
+
+  **The reason the band was `100` had stopped being true of the code.** The
+  doc comment defending it said the two statuses do not mean the same thing:
+  that Ipopt returns `FEASIBLE_POINT_FOUND` only for a square problem, where a
+  feasible point *is* the solution, while POUNCE used it more loosely for any
+  usable feasible point that missed the convergence criteria. POUNCE does not.
+  The status has one producer — `min_c_1nrm.rs` returning
+  `RestorationOutcome::FeasiblePointFound` — behind one gate, now
+  `square_feasible_point_found` in `resto_inner_solver.rs`, whose first
+  conjunct is `is_square_problem`: `c.x.dim() == c.y_c.dim()`, a port of
+  `IpoptCalculatedQuantities::IsSquareProblem`. Same condition as Ipopt, hence
+  the same meaning, and on a square problem there is no further criterion to
+  miss because the objective is constant. Two other surfaces had already
+  written the correct reading down —
+  `python/pounce/gams/link.py` maps the status to
+  `(MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL)`, and
+  `issue_390_nonlinear_equality_scale.rs` calls it "a success-band answer —
+  AMPL `objno` code 2, which every band table reads as SOLVED" — so the repo
+  had been contradicting itself in comments for as long as the divergence
+  existed.
+
+  **What it cost, measured.** gh #815 is a 536x536 IDAES naphtha-hydrotreater
+  flowsheet, zero degrees of freedom. Written the way IDAES writes it for
+  Ipopt (`writer_config={"scale_model": True}`), POUNCE reaches a constraint
+  violation of **2.208e-06 in the model's original units in 1.0 s**, 18
+  iterations; adding `linear_presolve=True` gives a 468x468 model, 2.899e-06
+  in 0.8 s, 7 iterations. The two configurations agree on the flowsheet's
+  thiophene conversion to six digits (0.3918770, 0.3918766). Before this
+  change that solve loaded as `termination_condition=optimal, status=warning`
+  through the legacy reader and as `TerminationCondition.error` through the
+  v2 reader; it now loads `optimal` / `ok`, and the `.sol` line moved from
+  `objno 0 100` to `objno 0 2`.
+
+  **This does not make the model as filed solvable, and the issue's premise
+  did not survive measurement.** On the raw unscaled `.nl`, POUNCE stalls at a
+  constraint violation of ~4.97e+03; so does Ipopt 3.13.2/ma27, which exits
+  `Restoration Failed` at 2418 iterations from a stall at `inf_pr = 1.56e+01`
+  against POUNCE's 1.60e+01, the two trajectories being bit-identical over
+  iterations 0-3. An 18-configuration option sweep — linear solver, `mu`
+  strategy, scaling method, `nlp_scaling_max_gradient`, `mu_init`,
+  `start_with_resto`, `expect_infeasible_problem`, bound handling, `mc64`
+  equilibration, iteration cap — moved none of it: every configuration ended
+  `Restoration_Failed` or `Infeasible_Problem_Detected` at that same
+  violation. What makes the model tractable is IDAES's own per-variable
+  scaling factors applied by the NL writer, which is a frontend
+  configuration and not reachable from any solver option; no
+  `nlp_scaling_method` substitutes for it. Ipopt did not solve this model in
+  any configuration tried here, including through the reporter's own script.
+
+  **What the new tests are and are not evidence about.**
+  `the_exit_code_and_the_sol_band_never_disagree` states the guard as an `iff`
+  over all twenty statuses, so a status added to the exit-code success set but
+  not the solved band, or the reverse, fails it — gh #815 is that predicate
+  failing on `FeasiblePointFound` and gh #591 was the same shape one status
+  over. `only_a_square_problem_yields_a_feasible_point_verdict` holds the
+  conjunct the whole band argument rests on, with every other input at a value
+  that would pass, so squareness alone decides it. None of this is end-to-end:
+  **no fixture in the CLI corpus reaches this exit**, and 72 generated square
+  models — three nonlinearity families, three start points, three row-scale
+  spreads — under five option sets failed to reach it too. It needs a model
+  larger than the corpus carries, and the end-to-end evidence is gh #815's own
+  536x536 model, cited above. `scripts/sweep-fixtures.sh` moved 0 of 154
+  fixture-legs, which is a control rather than evidence: the sweep does not
+  read `solve_result_num`, and the only non-reporting edit here is the
+  extraction of an unchanged five-term conjunction into a named function.
+
+  **The Python surfaces move with it (gh #820).** Four success sets counted
+  the status as a failure, so `minimize` returned `success=False` on a solve
+  whose `.sol` the same build calls optimal: `_minimize._NLP_SUCCESS_STATUS`
+  (shared by `_curve_fit`, which imports the frozenset rather than copying
+  it), `jax._path._OK_STATUS`, `torch._path._OK_STATUS`, and — a fourth the
+  issue did not name — `_starts._DONE_STATUS`, where the cost was worse than
+  a wrong flag: a multi-start candidate that *solved* was scored
+  `solve failed`, given a `+10` health penalty and eliminated at its rung.
+  The two path followers already require an all-equality model
+  (`_require_equality_constraints`), which is the shape that produces this
+  status, so refusing it aborted the path at a converged anchor.
+  `python/tests/test_issue_815_square_feasible_point.py` pins all four, and
+  pins the premise underneath them by parsing `status_to_solve_result_num`
+  out of `crates/pounce-solve-report/src/lib.rs` — so a future edit that
+  moves the Rust band back out of `0..=99` fails the Python test that depends
+  on it, rather than leaving the two sides to drift.
+
+- **A solve that ends inside restoration now reports the iterations it spent
+  there (gh #819).** `Number of Iterations....:` is, in Ipopt, the index of
+  the last printed iteration row — `r` rows included — on every exit path.
+  Measured over four upstream logs from this repo's issue corpus rather than
+  assumed: `2418r`/2418 (`Restoration Failed`), `412r`/412 (local
+  infeasibility), `1547r`/1547, `1348r`/1348. POUNCE printed the same `r` rows
+  and then reported a number that ignored them. On the `square_flowsheet_resto`
+  fixture the log ended at row `131r` above a summary that said **47**; on
+  gh #815's raw `.nl` the three solves reported **3 / 0 / 3** iterations for
+  work that actually ran 3000 / 1471 / 1945.
+
+  Three defects stacked:
+
+  1. The outer counter's roll-forward lived only on the `Recovered` path
+     (`min_c_1nrm.rs`, step 2g). All four *terminating* restoration outcomes
+     return ahead of it, so the entire sub-solve vanished from the summary.
+     It is now applied in `invoke_restoration` for every non-`Recovered`
+     outcome, which is trajectory-safe by construction: each of those arms
+     `Terminate`s, and the loop breaks without re-reading the counter.
+  2. `restoration_inner_iters` summed the inner IPM's **absolute** terminating
+     `iter_count`. That counter is seeded from the outer's
+     (`inner.iter_count = outer_iter + 1`, mirroring `IpRestoMinC_1Nrm.cpp`
+     line 181), so the sum was a position in the shared `r`-row numbering, not
+     a length — the same misreading gh #664 documented for the stall gate. It
+     is now the delta against the outer count at entry, i.e. the number of `r`
+     rows actually printed.
+  3. The count was read off the `Some(result)` arm of the inner solver's
+     return, so on every path that bailed — which is every path that *ends* in
+     restoration, the ones the issue is about — it recorded `0`. The inner
+     solver now returns `RestoInnerReturn { inner_iter_count, result }` with
+     the count outside the `Option`, and the caller records it ahead of the
+     `None` check.
+
+  The console summary gained a line for the split, since a bare total cannot
+  say how much of it was restoration:
+  `Number of restoration iterations                      = 84 (in 1 call)`.
+  It is printed only when there was a restoration call. Two doc comments in
+  `solve_statistics.rs` are corrected with it: `restoration_inner_iters` is a
+  sub-solve *length*, and `restoration_outer_iters` is documented as what it
+  has always been — incremented in lockstep with `restoration_calls`, so
+  always equal to it, not the count of `r`-suffix rows it claimed to be.
+
+  Measured on the fixture: `131` reported against a last row of `131r`, with
+  `84` of it in restoration; the recovering leg is unchanged at `54`.
+  `scripts/sweep-fixtures.sh` moves the iteration count on exactly the legs
+  that terminate inside restoration and nothing else — no status, objective or
+  engine moves — which is the expected signature of a reporting change that
+  touches a counter the algorithm never reads back.
 
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
