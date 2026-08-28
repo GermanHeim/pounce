@@ -44,6 +44,17 @@ per-stage stencil, not the horizon — so the probe count does not grow with
 the mesh. The realised colouring is **17 groups** at N=160, against a
 Jacobian evaluation costing 5.4 ms in a 92.6 ms iteration.
 
+**This is a fact about `laptime`, not about the method, and the heading
+above overclaims.** What the probe count tracks is the Hessian's *row
+width*, and `laptime`'s is narrow because its per-stage stencil is. A model
+whose rows are wide pays in proportion: measured on a 60 000-variable
+CasADi model in the gh#823 review, `rho_max = 176` and 181 colour groups,
+i.e. ~180 gradient-plus-Jacobian evaluations per Hessian — about 200× the
+per-iteration first-derivative cost of the limited-memory path it would
+replace, which on that model made it far slower overall despite reaching a
+comparable point. Read `rho_max` out of `POUNCE_FD_HESSIAN_DEBUG` on a new
+model before assuming this mode is affordable on it.
+
 ## The measurement
 
 `max_iter=1200`. True optima 65.371107 (N=160) and 65.326908 (N=320).
@@ -53,11 +64,11 @@ Jacobian evaluation costing 5.4 ms in a 92.6 ms iteration.
 | N=160 | exact | Optimal | 30 | 2.9 s | 65.3711067940491 |
 | N=160 | lbfgs | Optimal | 246 | 35.6 s | 65.3705401621855 |
 | N=160 | **fd-declared** | **Optimal** | **30** | **7.0 s** | 65.3711067940491 |
-| N=160 | **fd-jacobian** | **Optimal** | **38** | 15.9 s | 65.3711063753353 |
+| N=160 | **fd-jacobian** | **Optimal** | **30** | 34.2 s | 65.3711067940490 |
 | N=320 | exact | Optimal | 57 | 17.5 s | 65.3269077801929 |
 | N=320 | lbfgs | **MaxIter** | 1200 | 728.3 s | 65.3265568888976 |
 | N=320 | **fd-declared** | **Optimal** | **57** | **22.5 s** | 65.3269077802016 |
-| N=320 | **fd-jacobian** | Acceptable | 101 | 443.5 s | 65.3269077802655 |
+| N=320 | **fd-jacobian** † | **Optimal** | **62** | 429.9 s | 65.3269077801958 |
 
 `fd-declared` reproduces the exact path's iteration count exactly at both
 meshes and its objective to 14 significant figures, for 1.3–2.4× the wall
@@ -76,13 +87,43 @@ at N=320 where limited-memory does not converge at all**.
 
 The Jacobian-derived pattern is a strict **superset** of the true one,
 which is safe — a superset costs extra probe groups, never a wrong answer
-— but not free: 146 267 nonzeros against the true 28 000, which is why
-`fd-jacobian` costs 38 iterations and 15.9 s where `fd-declared` costs 30
-and 7.0. It still beats limited-memory 2.2× at N=160 and reaches
-acceptable tolerance at N=320 where limited-memory fails.
+— but not free: 143 854 nonzeros against the true 28 000, which is why
+`fd-jacobian` costs 34.2 s where `fd-declared` costs 3.5.
 
 There is deliberately no mode that guesses a *subset*: that would silently
 drop curvature.
+
+† Measured after the objective-clique fix but before the two gh#823 review
+fixes (`b0eff6c`). Those cannot change this leg's iteration count —
+`laptime` states its objective linearity, so the widened-clique fallback
+never fires here — but the wall figure is expected to rise by roughly one
+Hessian build, as it did at N=160 (38.7 s → 42.3 s). Being re-measured;
+the row is flagged rather than quietly carried forward, which is the
+failure mode the next section is about.
+
+### The table above used to disprove the paragraph above it
+
+Worth recording, because the contradiction sat here unread through a
+review. Before gh#823's review the `fd-jacobian` rows read **38 iterations
+/ 65.3711063753353** at N=160 and **101 / 65.3269077802655** at N=320, and
+the paragraph beside them asserted a superset and therefore "never a wrong
+answer". Those two claims cannot both hold: exact reaches
+65.3711067940491, so a leg landing on 65.371106**3753353** — agreeing to
+eight digits where every other leg agrees to fourteen — *is* a wrong
+answer, tolerance-legal but wrong, and it was the visible fingerprint of a
+pattern that was not in fact a superset.
+
+The cause was that the pattern omitted `O ⊗ O`, so `∇²f` was outside it
+(review finding, @srikanth-gm). What makes this worth writing down is not
+the bug but the reading failure: the number that disproved the safety
+argument was printed directly underneath it, in a table I wrote, and I read
+the iteration count as "conservative pattern costs extra iterations"
+instead of asking why the objective had moved at all. **A superset cannot
+change the answer. If the answer moved, it was not a superset** — that
+implication was available the whole time.
+
+With the objective clique in place both legs agree with exact to fourteen
+digits and take the exact path's own iteration count.
 
 **For a CasADi/FMU model this is the decision point.** If the frontend can
 state a Hessian sparsity pattern — which is much weaker than evaluating
