@@ -3283,6 +3283,11 @@ impl IpoptApplication {
         );
         alg.recalc_y = builder.recalc_y;
         alg.recalc_y_feas_tol = builder.recalc_y_feas_tol;
+        // `start_with_resto` — the outer loop is what acts on it. It was
+        // previously copied only into the restoration sub-solver's own
+        // builder, which has no first outer iteration to force, so
+        // setting the option did nothing at all.
+        alg.start_with_resto = builder.resto.start_with_resto;
         // Tiny-step and divergence guards (#191): registered but
         // previously never read. Struct defaults match the registered
         // defaults, so default runs are unchanged.
