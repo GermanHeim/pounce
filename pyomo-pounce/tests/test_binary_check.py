@@ -233,8 +233,11 @@ def test_env_skip_guard_is_inert_when_bundled():
 def test_default_executable_warns_on_path_fallback(monkeypatch):
     """When no bundled binary exists and the plugin falls back to a PATH
     binary, it emits a one-time UserWarning naming the resolved executable."""
-    # Force the "no bundled binary" branch.
+    # Force the "no bundled binary" branch — and the "no checkout build"
+    # branch with it, since PATH is the *third* rung (gh #816) and this
+    # suite normally runs inside a checkout that has one.
     monkeypatch.setattr(ps, "_bundled_path", lambda: None)
+    monkeypatch.setattr(ps, "_checkout_path", lambda: None)
     monkeypatch.setattr(ps.shutil, "which", lambda name: "/some/path/pounce")
     # Reset the one-time latch so the warning can fire in this test.
     monkeypatch.setattr(ps, "_fallback_warned", False)

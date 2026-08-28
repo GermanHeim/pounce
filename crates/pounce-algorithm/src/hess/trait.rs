@@ -67,4 +67,25 @@ pub trait HessianUpdater {
     fn fd_hessian_stats(&self) -> Option<crate::hess::fd_hessian::FdStats> {
         None
     }
+
+    /// Discard the accumulated quasi-Newton curvature and re-anchor the
+    /// approximation at the current iterate, returning `true` if there
+    /// was anything to discard (gh#818).
+    ///
+    /// This is the recovery for "the *direction* is unusable", as
+    /// distinct from restoration's "the *point* is infeasible". A
+    /// limited-memory model can carry curvature the iterate has left
+    /// behind, and when the resulting step cannot be accepted at any
+    /// step length the fix is to forget it, not to walk somewhere else.
+    /// L-BFGS-B does exactly this on a line-search failure (`col = 0`
+    /// in `mainlb`); Ipopt has no equivalent, because it always has
+    /// restoration to fall back on — which is fine while the point is
+    /// infeasible and a no-op when it is not.
+    ///
+    /// The default is `false`: an exact Hessian has no history, so
+    /// there is nothing to re-anchor and the caller must fall straight
+    /// through to its existing hand-off.
+    fn reanchor(&mut self) -> bool {
+        false
+    }
 }

@@ -67,11 +67,14 @@ def test_default_executable_prefers_bundled(monkeypatch, tmp_path):
 
 
 def test_default_executable_falls_back_to_path(monkeypatch, tmp_path):
-    # No bundled binary (system install / local cargo dev build): fall back to
-    # whatever `pounce` is on PATH.
+    # No bundled binary and no checkout build (a system install): fall back to
+    # whatever `pounce` is on PATH. The checkout rung has to be stubbed out
+    # too — this suite normally runs inside a checkout that has one, and since
+    # gh #816 that rung comes first.
     cli = pytest.importorskip("pounce._cli")
 
     monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
+    monkeypatch.setattr(cli, "_checkout_binary", lambda: None)
     shim_dir = tmp_path / "pathbin"
     shim_dir.mkdir()
     shim = _make_executable(shim_dir / "pounce")
@@ -82,10 +85,12 @@ def test_default_executable_falls_back_to_path(monkeypatch, tmp_path):
 
 
 def test_default_executable_none_when_nowhere(monkeypatch, tmp_path):
-    # Neither bundled nor on PATH → None (the honest "unavailable" signal).
+    # Bundled, checkout build, PATH: none of the three → None (the honest
+    # "unavailable" signal).
     cli = pytest.importorskip("pounce._cli")
 
     monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
+    monkeypatch.setattr(cli, "_checkout_binary", lambda: None)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
 
     assert SolverFactory("pounce")._default_executable() is None
