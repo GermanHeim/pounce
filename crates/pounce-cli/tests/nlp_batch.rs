@@ -16,7 +16,9 @@
 //! - a bound-tightened instance honors its own bounds while its
 //!   siblings are unaffected.
 
-use pounce_algorithm::application::{default_backend_factory, feral_config_from_options};
+use pounce_algorithm::application::{
+    Ma57Config, default_backend_factory, feral_config_from_options,
+};
 use pounce_algorithm::{IpoptApplication, install_serial_feral_backend, solve_nlp_batch_parallel};
 use pounce_nl::nl_reader::{NlTnlp, NlVariation, read_nl_file};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -50,7 +52,7 @@ fn configure(_i: usize, app: &mut IpoptApplication) {
     feral_cfg.parallel = Some(false);
     let bff_mint = move || -> InnerBackendFactoryFactory {
         let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
+        Box::new(move || default_backend_factory(feral_cfg.clone(), Ma57Config::default()))
     };
     let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),

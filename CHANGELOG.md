@@ -331,6 +331,102 @@ changes.
   rather than over the window — was measured too and is worse than
   `scalar1` at every size, because it never comes back down and keeps a
   stiff early transient in `B0` long after the iterate has left it.
+- **Every `ma57_*` option now reaches the MA57 backend, and an `--features
+  ma57` build now starts.** Fixes gh #825 and gh #811.
+
+  All nine `ma57_*` options — `ma57_print_level`, `ma57_pivtol`,
+  `ma57_pivtolmax`, `ma57_pre_alloc`, `ma57_pivot_order`,
+  `ma57_automatic_scaling`, `ma57_block_size`, `ma57_node_amalgamation`,
+  `ma57_small_pivot_flag` — were registered, documented, accepted, and then
+  discarded. A correct reader (`Ma57Options::from_options_list`) existed and
+  was unit-tested, so it looked live; nothing called it. Every production
+  construction site went through `Ma57SolverInterface::new()`, which
+  hard-codes `Options::defaults()`.
+
+  The root cause was an asymmetry with FERAL. `default_backend_factory` took a
+  `FeralConfig` read off the application's `OptionsList` and had no equivalent
+  parameter for MA57, so the factory had nothing to give it. Both factories now
+  take a `Ma57Config` alongside the `FeralConfig`, built by the new
+  `ma57_config_from_options(options, prefix)`. **This is a breaking change to
+  `default_backend_factory` / `default_backend_factory_with_sink`**, and
+  deliberately so: the argument is what makes the omission a compile error
+  rather than a silent default.
+
+  The failure mode was that there was no failure mode. Two solves whose option
+  blocks differed by eight orders of magnitude in `ma57_pivtol` and swapped the
+  elimination ordering printed identical iteration logs and an objective
+  identical to all seventeen digits — no warning, no diagnostic, no journal
+  message. Measured on `deb7` after the fix, `ma57_pivtol=0.5` moves the solve
+  from 124 iterations plus a fallback retry to 165 and `Solve_Succeeded`.
+
+  **`resto.`-prefixed options work now too.** `from_options_list` always took a
+  prefix, mirroring upstream's
+  `Ma57TSolverInterface::InitializeImpl(options, prefix)`, and with no callers
+  the facility did not exist. The restoration sub-IPM builds its own backend
+  through its own `InnerBackendFactoryFactory`, so the two are genuinely
+  independent: on `deb7`, `resto.ma57_pivtol=0.5` gives 130 iterations —
+  neither the baseline's 124 nor the un-prefixed arm's 165.
+
+  **No trajectory change on any existing run.** Every registered default is
+  identical to the reader's fallback and to `Options::defaults()`
+  (`default_options_are_the_registrys` pins this, which is the gh #677 shape —
+  registered with one default, read with another). A default MA57 run is
+  bit-identical to before; FERAL is untouched, and the fixture sweep is clean.
+
+  Two consequences worth naming. Any Ipopt-vs-POUNCE MA57 comparison run with a
+  shared options file that sets `ma57_*` was not like-for-like: gh #825 reports
+  one setting `ma57_pre_alloc: 2.0`, which Ipopt honoured and POUNCE did not,
+  so POUNCE paid for a reallocation Ipopt avoided. The handicap was not in
+  POUNCE's favour, and such numbers — including the `LinearSystemFactorization`
+  comparison on gh #730 and the figures on gh #809 — should be re-measured.
+  Separately, the mechanism gh #809 needs to make
+  `multi_solve_matches_single_solve` an MA57 opt-in now exists; the gate itself
+  is not implemented here.
+
+  **gh #811, found while building MA57 binaries to review gh #809.** An
+  `--features ma57` build died at process start: `Library not loaded:
+  @rpath/libcoinhsl.dylib ... no LC_RPATH's found`. `pounce-hsl/build.rs`
+  emitted `cargo:rustc-link-arg=-Wl,-rpath,...`, which applies only to targets
+  in the emitting package — and pounce-hsl is a library with no binary, so the
+  flag reached nothing. It could not even be patched after the fact: a release
+  link leaves no header padding, so `install_name_tool -add_rpath` refuses. The
+  directory now travels as `links` metadata (`cargo:rpath=` →
+  `DEP_COINHSL_RPATH`), which `pounce-cli/build.rs` and the new
+  `pounce-algorithm/build.rs` re-emit against their own targets, together with
+  `-headerpad_max_install_names` on macOS so a packaging step can relocate it.
+  Linux with `libcoinhsl.so` on the loader path never showed this, which is why
+  it went unnoticed.
+
+  **`ma57_pivtolmax` below `ma57_pivtol` is now refused, not silently lifted.**
+  A pre-existing deviation from upstream that only became reachable once the
+  above landed. Upstream has two branches
+  (`IpMa57TSolverInterface.cpp:311-320`): an *explicitly set* `ma57_pivtolmax`
+  under `ma57_pivtol` raises `OPTION_INVALID`, while an *unset* one has its
+  registered default lifted to `ma57_pivtol`. pounce applied the lift
+  unconditionally, so a self-contradictory pair — an escalation ceiling below
+  the tolerance it starts from — was quietly rewritten and nothing said so.
+  `IpoptApplication::optimize_tnlp` now refuses it with `Invalid_Option`, at
+  both the main and `resto.` prefixes; the reader reports what the user wrote
+  and leaves the verdict to the layer that has an error channel. The lifting
+  branch is deliberately preserved: `ma57_pivtolmax` defaults to `1e-4`, so a
+  rule that merely compared the two numbers would reject `ma57_pivtol 0.5` on
+  its own — the most ordinary MA57 tuning there is.
+
+  **Guards.** `pounce-algorithm/tests/ma57_options_reach_the_backend.rs` asserts
+  that each option arrives at a live backend built by the real factory, at both
+  prefixes, via a new `SparseSymLinearSolverInterface::as_any` downcast seam —
+  configuration reaching a backend is not otherwise observable through that
+  trait, which is why the defect had no symptom.
+  `pounce-cli/tests/ma57_binary_starts.rs` covers gh #811 and the end-to-end
+  gh #825 property. Both need CoinHSL, so neither runs in CI; the always-running
+  half is `pounce-algorithm/tests/no_production_site_builds_ma57_with_defaults.rs`,
+  which fails on any `Ma57SolverInterface::new()` in production source, and
+  `pounce-algorithm/tests/ma57_pivtol_bracket.rs`, which covers both branches of
+  the `ma57_pivtolmax` rule and needs no HSL at all. All are mutation-checked:
+  reintroduce any of the defects — the discarded options, the missing rpath, the
+  unconditional lift, or a lift-blind refusal — and the matching tests, and only
+  those, go red.
+
 - **A restoration failure now opens the second-opinion ladder.** (Found while
   investigating gh #815; it is *not* a fix for that issue — see the note at the
   end of this entry.)
