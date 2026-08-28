@@ -793,6 +793,41 @@ impl PdSensBacksolver {
             && read_res_block(&*res_iv.v_u, &mut lhs[off[7]..off[8]])
     }
 
+    /// A fresh copy of [`Self::barrier_sigma_x`], its own object with
+    /// its own tag, so the factorization cache cannot resolve it to a
+    /// factor built at another iterate. `None` when the diagonal is
+    /// not dense.
+    pub(crate) fn fresh_barrier_sigma_x(&self) -> Option<Rc<dyn pounce_linalg::Vector>> {
+        use pounce_linalg::dense_vector::DenseVectorSpace;
+        let vals = self
+            .barrier_sigma_x()
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .map(|d| d.expanded_values())?;
+        let mut out = DenseVector::new(DenseVectorSpace::new(vals.len() as Index));
+        out.values_mut().copy_from_slice(&vals);
+        Some(Rc::new(out) as Rc<dyn pounce_linalg::Vector>)
+    }
+
+    /// A natural-units compound vector, packed as a frozen
+    /// `IteratesVector` in the algorithm's scaled frame, so a caller
+    /// can install it as the current iterate. The corrector uses this
+    /// to assemble its operator at the predicted point.
+    pub(crate) fn pack_natural(
+        &self,
+        flat: &[Number],
+    ) -> Option<pounce_algorithm::iterates_vector::IteratesVector> {
+        let scaled: Vec<Number> = match self.natural_units_factor() {
+            None => flat.to_vec(),
+            Some(f) => flat
+                .iter()
+                .zip(f)
+                .map(|(&v, &s)| if s == 0.0 { v } else { v / s })
+                .collect(),
+        };
+        self.pack_public(&scaled).ok().map(|iv| iv.freeze())
+    }
+
     /// Var-x row behind each `z_l` then `z_u` entry, through the
     /// `px_l` / `px_u` expansions. `None` when either is not an
     /// `ExpansionMatrix` or reports the wrong length -- the release

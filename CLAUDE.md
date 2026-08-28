@@ -265,11 +265,16 @@ wrong by the full released distance (`directional` is a no-op with no
 weak rows); only `fix_relax` reproduces the re-solve.
 
 **What a falling residual does not tell you.** Across a release the
-corrector reports `improved()` and drops its residual by 3e-8 while the
-point stays 0.1333 from the truth — the whole distance the variable
-should have travelled off its bound. That is not a defect: the held
-barrier diagonal cannot represent a bound leaving the active set, and
-`correct_step` says so. It is the gh#764 thesis as a number —
+corrector's answer stays short of the re-solve by a delta-dependent
+margin while the residual it measures falls
+(`the_corrector_stays_short_of_the_resolve_across_a_release`), and
+where the step hides the release behind curvature the same weak entry
+moves the variable partway
+(`a_release_the_step_hides_is_followed_partway`). That is not a
+defect: crossing exactly needs the released row taken out of the
+operator, which only the release decision applies, and `correct_step`
+says so.
+It is the gh#764 thesis as a number —
 `improved()` plus a converged residual does **not** imply the answer is
 close, and no internal guard can tell you that. It is pinned, so a
 corrector that learns to cross a release fails the test deliberately

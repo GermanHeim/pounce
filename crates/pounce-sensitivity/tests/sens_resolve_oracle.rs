@@ -90,11 +90,12 @@
 //!   the algorithm's scaled frame with the model's units reads correct
 //!   here. `sens_invariance_legs.rs` leg 1 and
 //!   `variable_scaling_sensitivity.rs` own that.
-//! * **`improved() == false`.** No measured point on either fixture
-//!   reaches it, so the arm asserting that branch in
-//!   [`leg_oracle_improved_means_closer_to_the_resolve`] is written but
-//!   unexercised. A fixture whose corrector declines to improve is the
-//!   missing one.
+//! * **`improved() == false` is now reached.** With the operator at
+//!   the predicted point, the Release fixture just past its
+//!   breakpoint declines while deeper deltas reduce the residual
+//!   without crossing, so both arms of
+//!   [`leg_oracle_improved_means_closer_to_the_resolve`] are
+//!   exercised.
 //! * **Scale.** Every fixture here is three variables. The resource
 //!   paths that only appear at 62k (gh#672 f2's `2^n` masks, gh#708
 //!   f4's full-length basis columns) are out of reach by construction,
@@ -1139,13 +1140,16 @@ fn leg_oracle_improved_means_closer_to_the_resolve() {
                 );
             } else {
                 // Documented on `correct_step`: the step handed back is
-                // then the caller's own, so the distance cannot move.
+                // then the caller's own, put back into the box before
+                // the first iteration. The put-back clamps infeasible
+                // coordinates toward the feasible re-solve, so the
+                // distance can only shrink or hold, never grow.
                 assert!(
-                    (after - before).abs() <= before * 1e-6 + noise,
+                    after <= before + noise,
                     "{fx:?} at delta={delta:e}: improved() is false, so \
-                     correct_step must hand back the caller's own step \
-                     unchanged, but the distance to the re-solve moved \
-                     {before:e} -> {after:e}",
+                     the returned step is the caller's own put back into \
+                     the box, and the distance to the re-solve cannot \
+                     grow: {before:e} -> {after:e}",
                 );
             }
         }
@@ -1158,30 +1162,32 @@ fn leg_oracle_improved_means_closer_to_the_resolve() {
     );
 }
 
-/// A falling residual is not a converging answer, and here is the
-/// measured proof.
+/// The corrector stays short of the re-solve across a strongly active
+/// release, whatever its residual report says.
 ///
-/// Across a strongly active release the corrector cannot reach the
-/// re-solve: the held barrier diagonal has no way to represent a bound
-/// leaving the active set, which `correct_step`'s own doc says. What
-/// it *does* do is report `improved()` and drop the residual, because
-/// the residual it measures is the one it can still reduce. On this
-/// fixture at `delta = 0.7` that is a residual falling by `3e-8` while
-/// the point stays `0.1333` from the truth -- and `0.1333` is the
-/// entire quantity at stake, the whole distance `x1` should have
-/// travelled off its bound.
+/// Crossing exactly needs the released bound's row taken out of the
+/// operator, and the step's endpoint shows no release to apply. What
+/// the weak diagonal entry the step's clamped multiplier builds lets
+/// through instead is delta-dependent and deliberately not pinned:
+/// just past the breakpoint the iterations decline, at mid deltas
+/// they reduce the residual while the answer keeps most of the
+/// released distance, and deep past the breakpoint they carry the
+/// answer most of the way while still orders short of the re-solve
+/// the releasing mode reaches (`corrector.rs`'s hidden-release pin
+/// owns the same shape on a curvature fixture). `improved()` follows
+/// the same gradation and is measured, not asserted. The
+/// improved-versus-oracle contract is owned by
+/// [`leg_oracle_improved_means_closer_to_the_resolve`]; this test
+/// owns the two facts that hold at every measured delta: the
+/// corrected answer is not the re-solve, and the mode that decides
+/// the release reaches it.
 ///
-/// This is the gh#764 thesis stated as a number: `improved()` plus a
-/// converged residual does **not** imply the answer is close, and no
-/// internal guard can tell you that. Only the re-solve can.
-///
-/// Pinned deliberately, in the manner of gh#762's
-/// `the_coupled_fixture_carries_an_ambiguous_kink`: this asserts
-/// *current* behaviour, so a corrector that learns to cross a release
-/// makes it fail, and that failure is the signal to update it on
-/// purpose rather than a regression.
+/// Pinned deliberately: a corrector that reaches the re-solve here,
+/// flipping the distance assertion below, has learned to apply the
+/// release inside its own loop, and this test should then be updated
+/// on purpose rather than treated as a regression.
 #[test]
-fn the_corrector_reports_improved_without_crossing_a_release() {
+fn the_corrector_stays_short_of_the_resolve_across_a_release() {
     let (s, seed) = base(Fx::Release);
     let base_x = s.converged().expect("converged").x.clone();
     let n_x = base_x.len();
@@ -1194,21 +1200,16 @@ fn the_corrector_reports_improved_without_crossing_a_release() {
         let (refined, report) = s.correct_step(&[0], &[delta], &step, 8).expect("corrector");
         let after = dist(&add(&base_x, &refined[..n_x]), &want);
 
+        // improved() is measured, not asserted: see the doc above.
+        let _ = report.improved();
         assert!(
-            report.improved(),
-            "delta={delta:e}: the corrector is expected to report an \
-             improvement here -- that is what makes the gap below \
-             worth pinning",
-        );
-        assert!(
-            after > 0.5 * released,
-            "delta={delta:e}: the corrector is not expected to cross a \
-             strongly active release. If it now does, this is the good \
-             kind of red: the held barrier diagonal has gained a way to \
-             represent a bound leaving the active set, and this test \
-             should be updated deliberately. Distance to the re-solve \
-             {after:e}, released distance {released:e}, residual {:e} -> \
-             {:e}",
+            after > 1e-2,
+            "delta={delta:e}: the corrected answer must stay short of \
+             the re-solve without the released row applied. If it now \
+             reaches it, the corrector has learned to apply the release \
+             and this test should be updated deliberately. Distance to \
+             the re-solve {after:e}, released distance {released:e}, \
+             residual {:e} -> {:e}",
             report.initial_residual,
             report.residual,
         );
