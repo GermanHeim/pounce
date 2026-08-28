@@ -1686,11 +1686,17 @@ impl IpoptAlgorithm {
         // `hessian_approximation=limited-memory` the probe's inertia test
         // passes at δ_x = 0 and the escape declines — correctly, since the only
         // curvature information the solve has says the point is a minimum.
-        let w_at_curr = self
-            .bundle
-            .hess
-            .provides_exact_hessian()
-            .then(|| self.cq.borrow().curr_exact_hessian());
+        //
+        // That argument is about BFGS's definiteness, NOT about "not exact",
+        // and gating on `provides_exact_hessian` conflated the two. A
+        // finite-difference `W` is not exact but does carry genuine negative
+        // curvature, so judging the current iterate by the previous one's
+        // matrix let a stationary maximum be reported as optimal where the
+        // exact path escapes it (gh#823 review, finding 1, @srikanth-gm).
+        // `hessian_at_current` asks the question the probe actually has:
+        // can you give me `W` here? Quasi-Newton updaters still answer `None`
+        // and still take the stale path, for the reason above.
+        let w_at_curr = self.bundle.hess.hessian_at_current(&self.data, &self.cq);
 
         let probe = {
             let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) else {

@@ -31,4 +31,13 @@ impl HessianUpdater for ExactHessianUpdater {
     fn provides_exact_hessian(&self) -> bool {
         true
     }
+
+    /// A pure evaluation at the current iterate; `data.w` is untouched.
+    fn hessian_at_current(
+        &mut self,
+        _data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> Option<std::rc::Rc<dyn pounce_linalg::SymMatrix>> {
+        Some(cq.borrow().curr_exact_hessian())
+    }
 }

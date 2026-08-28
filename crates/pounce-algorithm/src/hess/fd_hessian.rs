@@ -116,7 +116,24 @@
 //!   silently.
 //!
 //! A superset is always safe; a subset would silently drop curvature, so
-//! there is no fallback that guesses.
+//! there is no fallback that guesses. That sentence was written before the
+//! code honoured it: the objective clique's fallback read the first `∇f`'s
+//! *values*, which for `f = x₀x₁` at the origin is the zero vector, so the
+//! clique came back empty and the pattern was a subset after all — and a
+//! different subset from a different starting point. Every level of the
+//! fallback is structural now: stated objective linearity, else the
+//! nonlinear-variable set `N`, else all `n`. The last two are conservative
+//! and can cost a great many probes; `FdStats::objective_clique_widened`
+//! reports when one of them was taken. gh#823 review (@srikanth-gm).
+//!
+//! **Probe cost scales with the Hessian's row width, not with the model's
+//! size.** `laptime` needs 17 groups because its per-stage stencil makes
+//! `rho_max = 15`; that is a property of that transcription and does not
+//! generalise. A model with `rho_max = 176` needs ~181 groups and therefore
+//! ~180 gradient-plus-Jacobian evaluations per Hessian, which can be far more
+//! expensive per iteration than the limited-memory path it replaces — measured
+//! on a 60k-variable model in gh#823 review. Read `rho_max` from
+//! `POUNCE_FD_HESSIAN_DEBUG` before assuming this mode is affordable.
 
 use crate::hess::r#trait::HessianUpdater;
 use crate::ipopt_cq::IpoptCqHandle;
@@ -170,6 +187,14 @@ pub struct FdStats {
     /// Whether the requested star colouring failed validation and CPR was
     /// substituted.
     pub coloring_fell_back: bool,
+    /// Whether the objective clique had to fall back to a conservative
+    /// structural set because the model stated no objective linearity
+    /// (gh#823 review, finding 2). When this is set the clique is `N`, or
+    /// all `n` when the model states no nonlinear-variable set either, and
+    /// the probe count reflects that rather than the objective's true
+    /// support. A model that states `get_objective_variables_linearity`
+    /// pays none of it.
+    pub objective_clique_widened: bool,
 }
 
 pub struct FdHessianUpdater {
@@ -367,7 +392,6 @@ impl FdHessianUpdater {
         declared: Option<&(Vec<Index>, Vec<Index>)>,
         jac_c: &GenTMatrix,
         jac_d: &GenTMatrix,
-        grad_f: &[Number],
     ) {
         // ---- lower-triangle pattern ---------------------------------
         let mut pairs: Vec<(Index, Index)> = Vec::new();
@@ -389,17 +413,32 @@ impl FdHessianUpdater {
                 // silently drops curvature. `laptime` did not expose it
                 // because its objective is minimise-final-time, one
                 // variable, `∇²f = 0`. Found in review by @srikanth-gm.
-                let obj: Vec<Index> = match self.objective_vars.clone() {
-                    Some(v) => v,
-                    // Value-derived fallback, and weaker: a coordinate
-                    // whose `∂f/∂xᵢ` happens to vanish at the starting
-                    // point is missed. Structural information is
-                    // preferred wherever the TNLP will state it.
-                    None => (0..n)
-                        .filter(|&i| grad_f[i] != 0.0)
-                        .map(|i| i as Index)
-                        .collect(),
-                };
+                // The fallback must be STRUCTURAL. It used to read the
+                // first `∇f`'s nonzeros, which is unsound, not merely
+                // weaker: for `f(x) = x₀x₁` at `x = (0,0)` the gradient is
+                // `(x₁, x₀) = (0,0)`, so the support comes back empty and
+                // the `∂²f/∂x₀∂x₁ = 1` entry is dropped — the pattern is a
+                // *subset* of the truth, which is precisely the property
+                // this mode's safety rests on. It was also value-dependent:
+                // the same model started at `(1,1)` got a different
+                // pattern. Reported by @srikanth-gm (gh#823 review,
+                // finding 2), reproduced by
+                // `the_objective_fallback_is_structural_not_value_derived`.
+                //
+                // So: the model's own objective linearity when it states
+                // one; else the nonlinear-variable set `N`, which cannot
+                // omit a variable the objective is nonlinear in; else all
+                // `n`. The last two are conservative and can be expensive —
+                // `objective_clique_widened` says so rather than letting it
+                // look like the objective really is that dense.
+                let (obj, widened) = objective_support(
+                    self.objective_vars.as_deref(),
+                    self.nonlinear_vars.as_deref(),
+                    n,
+                );
+                if widened {
+                    self.stats.objective_clique_widened = true;
+                }
                 for (a, &ca) in obj.iter().enumerate() {
                     for &cb in obj.iter().take(a + 1) {
                         pairs.push(if ca >= cb { (ca, cb) } else { (cb, ca) });
@@ -560,6 +599,9 @@ impl FdHessianUpdater {
             rho_max,
             compression: groups.len() as f64 / n.max(1) as f64,
             coloring_fell_back: fell_back,
+            // Set while the pattern was being built, above; this
+            // reassignment must carry it rather than reset it.
+            objective_clique_widened: self.stats.objective_clique_widened,
         };
         let irows: Vec<Index> = pairs.iter().map(|&(i, _)| i + 1).collect();
         let jcols: Vec<Index> = pairs.iter().map(|&(_, j)| j + 1).collect();
@@ -597,10 +639,7 @@ impl HessianUpdater for FdHessianUpdater {
                 .downcast_ref::<SymTMatrix>()
                 .filter(|t| t.nonzeros() > 0)
                 .map(|t| (t.irows().to_vec(), t.jcols().to_vec()));
-            // Only needed for the objective-clique fallback when the TNLP
-            // will not state its objective linearity.
-            let grad_f0 = flat(&*base_grad_f);
-            self.build_structure(n, declared_pat.as_ref(), jc, jd, &grad_f0);
+            self.build_structure(n, declared_pat.as_ref(), jc, jd);
             if !self.reported && std::env::var("POUNCE_FD_HESSIAN_DEBUG").is_ok() {
                 self.reported = true;
                 eprintln!("fd-hessian: {:?}", self.stats);
@@ -724,6 +763,58 @@ impl HessianUpdater for FdHessianUpdater {
         }
         data.borrow_mut().w = Some(w as Rc<dyn pounce_linalg::SymMatrix>);
         true
+    }
+
+    /// The finite-difference Hessian is a pure function of `(x, y)` — it
+    /// reads `data.curr` and the already-evaluated `curr_grad_f` / `curr_jac_*`
+    /// and carries no step history — so it can simply be rebuilt here. That is
+    /// what makes it different from the quasi-Newton updaters, and what
+    /// `provides_exact_hessian` could not express (gh#823 review, finding 1).
+    ///
+    /// `data.w` is saved and restored around the rebuild: at this point it
+    /// holds `W` for the *previous* iterate, and the post-optimal sensitivity
+    /// hook reads it. The rebuild does refresh the reuse cache to the current
+    /// `(x, y)`, which is correct — the cache is keyed on exactly that, so the
+    /// `update_hessian` call in step 3 of this same iterate then hits it
+    /// instead of paying for a second pass.
+    fn hessian_at_current(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> Option<Rc<dyn pounce_linalg::SymMatrix>> {
+        let saved = data.borrow().w.clone();
+        let ok = self.update_hessian(data, cq);
+        let built = data.borrow().w.clone();
+        data.borrow_mut().w = saved;
+        if ok { built } else { None }
+    }
+}
+
+/// Which variables the objective clique spans, and whether that had to be
+/// widened past what the objective actually needs.
+///
+/// The rule is deliberately structural at every level. The previous version
+/// took the fallback from the first `∇f`'s nonzeros, which is unsound rather
+/// than merely imprecise: for `f(x) = x₀x₁` at `x = (0,0)` the gradient
+/// vanishes, the support comes back empty, and `∂²f/∂x₀∂x₁ = 1` is dropped —
+/// a *subset* of the true pattern, which is the one property this mode may
+/// not violate. It was value-dependent too, so the same model started at
+/// `(1,1)` got a different pattern. gh#823 review finding 2 (@srikanth-gm).
+fn objective_support(
+    objective_vars: Option<&[Index]>,
+    nonlinear_vars: Option<&[Index]>,
+    n: usize,
+) -> (Vec<Index>, bool) {
+    match objective_vars {
+        // The model stated its objective's nonlinear support: exact, cheap.
+        Some(v) => (v.to_vec(), false),
+        // No objective linearity. `N` cannot omit a variable the objective is
+        // nonlinear in, so it is a sound superset — and conservative.
+        None => match nonlinear_vars {
+            Some(v) => (v.to_vec(), true),
+            // Nothing structural at all. All `n` is the only superset left.
+            None => ((0..n as Index).collect(), true),
+        },
     }
 }
 
@@ -942,6 +1033,65 @@ mod tests {
              Jacobian-derived pattern is a SUBSET of the true Hessian and \
              `∂²f/∂x₀∂x₂` is dropped with no diagnostic"
         );
+    }
+
+    /// gh#823 review finding 2 (@srikanth-gm). The objective clique's
+    /// fallback must be STRUCTURAL. The version this replaces read the
+    /// first `∇f`'s nonzeros, which for `f(x) = x₀x₁` at the origin is
+    /// `(x₁, x₀) = (0, 0)` — an empty support, dropping `∂²f/∂x₀∂x₁ = 1`
+    /// and making the pattern a subset of the truth.
+    ///
+    /// The point is not that the old fallback was imprecise. It is that it
+    /// was a function of VALUES, so the same model got different sparsity
+    /// from a different starting point. This test pins that the rule now
+    /// reads only structure, and so cannot depend on where the solve starts.
+    #[test]
+    fn the_objective_fallback_is_structural_not_value_derived() {
+        let n = 2usize;
+
+        // Nothing structural stated at all: the only sound answer is the
+        // full set. The old rule returned {} here (zero gradient at the
+        // origin) and silently lost the cross term.
+        let (obj, widened) = objective_support(None, None, n);
+        assert_eq!(obj, vec![0 as Index, 1]);
+        assert!(widened, "a fallback this wide must be reported as widened");
+        assert!(
+            obj.contains(&0) && obj.contains(&1),
+            "`f = x₀x₁` has `∂²f/∂x₀∂x₁ ≠ 0`; both coordinates must be in \
+             the clique whatever the starting point"
+        );
+
+        // The nonlinear-variable set, when the model states one, is a
+        // sound superset of the objective's nonlinear support and is
+        // preferred over "all n".
+        let (obj, widened) = objective_support(None, Some(&[1 as Index]), n);
+        assert_eq!(obj, vec![1 as Index]);
+        assert!(widened);
+
+        // Stated objective linearity wins and costs nothing.
+        let (obj, widened) = objective_support(Some(&[0 as Index]), Some(&[0, 1]), n);
+        assert_eq!(obj, vec![0 as Index]);
+        assert!(
+            !widened,
+            "a model that states its objective support must not be \
+             reported as widened — that flag is what tells a user why \
+             their probe count is large"
+        );
+    }
+
+    /// The rule reads no values at all, so it cannot vary with the iterate.
+    /// Stated as its own assertion because "structural" is the property
+    /// under test, and a future refactor that reintroduces a value argument
+    /// would still pass the test above if it happened to be called at a
+    /// point with a nonzero gradient.
+    #[test]
+    fn the_objective_support_rule_is_a_function_of_structure_alone() {
+        // Same structural inputs, called repeatedly: identical answers.
+        // There is no parameter through which an iterate could enter.
+        let a = objective_support(None, Some(&[0 as Index, 2]), 4);
+        let b = objective_support(None, Some(&[0 as Index, 2]), 4);
+        assert_eq!(a, b);
+        assert_eq!(a.0, vec![0 as Index, 2]);
     }
 
     /// **The test that the banded ones missed.** The Jacobian-derived

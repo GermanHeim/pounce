@@ -21,13 +21,19 @@ changes.
   `benchmarks/large_scale/laptime` against a *genuinely* Hessian-less model
   (`POUNCE_DROP_HESSIAN=1`, which reports `nnz_h_lag = 0` and declines
   `eval_h` exactly as a Python problem with no `hessian` method does): at
-  N=160, **38 iterations / 12.6 s and `Solve_Succeeded`** against
-  limited-memory's 207 / 53.7 s and `Solved_To_Acceptable_Level`; at N=320,
-  **106 iterations to twelve correct digits** where limited-memory spends
-  1210 iterations and lands on 65.395 against a true optimum of 65.326908.
-  Affordable because the pattern's widest row is `rho_max = 15` and is
-  *unchanged* under mesh refinement — set by the per-stage stencil, not the
-  horizon — so the probe count does not grow with the problem. This does not
+  N=160, **30 iterations — the exact path's own count — and
+  `Solve_Succeeded`** against limited-memory's 207 and
+  `Solved_To_Acceptable_Level`; at N=320, **62 iterations to twelve correct
+  digits** where limited-memory spends 1210 iterations and lands on 65.395
+  against a true optimum of 65.326908.
+  Whether it is affordable is a property of the model, and `laptime` is a
+  favourable one: its pattern's widest row is `rho_max = 15`, unchanged under
+  mesh refinement because it is set by the per-stage stencil rather than the
+  horizon, so 17 probe groups suffice. That does not generalise — a 60k model
+  with `rho_max = 176` needs ~181 groups, i.e. ~180 gradient-plus-Jacobian
+  evaluations per Hessian, which can cost far more per iteration than the
+  limited-memory path it replaces. Check `rho_max` under
+  `POUNCE_FD_HESSIAN_DEBUG` before reaching for this on a new model. This does not
   and cannot beat `exact`: on a model that has a Hessian, reading it costs
   less than reconstructing it. Opt-in; every default is unchanged.
   `fd_hessian_pattern` selects the pattern source (`declared` uses the TNLP's
