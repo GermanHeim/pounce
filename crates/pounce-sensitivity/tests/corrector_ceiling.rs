@@ -1,15 +1,14 @@
-//! The corrector on a base solve that trips the gh#737 sigma ceiling.
+//! The corrector on a base solve the gh#737 sigma ceiling touched, or
+//! that crossed over into the gh#654 declared frame.
 //!
-//! When the ceiling caps at least one entry, the sensitivity layer
-//! stores the whole capped diagonal, and `barrier_sigma_x()` returns
-//! that stored copy instead of reading the current iterate. During a
-//! correction the current iterate is the predicted point, so on such
-//! a solve the corrector factors the base point's diagonal against
-//! predicted-point derivatives: the mixed operator the change that
-//! moved the corrector to the predicted point measured making no
-//! progress on the double column. This file pins what that mixture
-//! does to a correction here, against the same workload with the
-//! degenerate bound removed, which takes the live path.
+//! In both of those cases the sensitivity layer stores a base-point
+//! diagonal for the back-solves through the held factor, and
+//! `barrier_sigma_x()` returns the stored copy. The corrector must
+//! not use it: it factors its own operator at the predicted point,
+//! so `corrector_sigma` rebuilds both diagonal blocks there, with
+//! the frame rule and the ceiling re-derived at that point, and this
+//! file pins that a correction on such solves acts instead of
+//! stalling.
 //!
 //! The fixture is gh#737's cap trigger (a variable held between a
 //! binding equality and its own bound, the multiplier split not
@@ -17,26 +16,25 @@
 //! perturbation moves `y` through `exp(y)` curvature, which the plain
 //! step misses at second order and a correction closes.
 //!
-//! # Measured (2026-08-28, instrumented `barrier_sigma_x`)
+//! # Measured (2026-08-28), error against a tol 1e-10 re-solve
 //!
 //! ```text
-//!                       branch   plain err   c1        c2        c8
-//!  ceiling engaged      frozen   1.48e-1     1.48e-1   1.48e-1   1.48e-1   improved: false
-//!  bound removed        live     1.48e-1     1.04e-2   1.38e-3   5.0e-8    improved: true
+//!                                  plain err   c1        c8
+//!  ceiling engaged, frozen copy    1.48e-1     1.48e-1   1.48e-1   improved: false
+//!  ceiling engaged, rebuilt        1.48e-1     1.05e-2   1.05e-2   improved: true
+//!  bound removed (control)         1.48e-1     1.04e-2   5.0e-8    improved: true
 //! ```
 //!
-//! On the frozen branch the first iteration fails to reduce the
-//! residual and the no-improvement rule keeps the handed step, at
-//! every budget: the double column's signature. Forcing the live
-//! branch on the same capped fixture recovers the correction in
-//! proportion to what the raw diagonal permits: fully on a geometry
-//! whose uncapped entry is `7.1e15` (to `1.8e-7` at budget 8), and
-//! only the first iteration (to `1.0e-2`, then flat) on this one,
-//! whose uncapped entry is `6.9e27`, past what the factorization can
-//! carry, which is why the ceiling exists. A fix therefore needs the
-//! live rebuild plus the ceiling re-derived at the predicted point,
-//! not raw `z/s`, and the first test below is pinned deliberately:
-//! that fix flips it, and should update it on purpose.
+//! The frozen row is the pre-`corrector_sigma` behaviour, the double
+//! column's no-progress signature: the first iteration fails to
+//! reduce the residual against the mixed operator and the
+//! no-improvement rule keeps the handed step at every budget. The
+//! rebuilt row's first iteration matches the control's, and the
+//! plateau past it belongs to the degenerate rows themselves: the
+//! trial residual at the non-unique multiplier split stops falling,
+//! measured identically under a forced raw uncapped diagonal
+//! (`6.9e27` on this geometry), so no diagonal choice moves it. The
+//! control, with nothing degenerate, continues to the floor.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -228,6 +226,7 @@ fn solved(
     t: Number,
     q0: Number,
     bounded: bool,
+    crossover: bool,
     start: Option<Vec<Number>>,
     tol: Option<Number>,
 ) -> Solver {
@@ -238,6 +237,13 @@ fn solved(
         o.set_string_value("sb", "yes", true, false).unwrap();
         o.set_numeric_value("bound_relax_factor", 0.0, true, false)
             .unwrap();
+        o.set_string_value(
+            "crossover",
+            if crossover { "yes" } else { "no" },
+            true,
+            false,
+        )
+        .unwrap();
         if let Some(tol) = tol {
             o.set_numeric_value("tol", tol, true, false).unwrap();
         }
@@ -265,7 +271,14 @@ fn solved(
 /// The perturbed problem's solution at tol 1e-10, warm-started from
 /// the base point, the same truth the re-solve oracle uses.
 fn truth(t: Number, bounded: bool, base_x: &[Number]) -> Vec<Number> {
-    let s = solved(t, Q0 + DELTA, bounded, Some(base_x.to_vec()), Some(1e-10));
+    let s = solved(
+        t,
+        Q0 + DELTA,
+        bounded,
+        false,
+        Some(base_x.to_vec()),
+        Some(1e-10),
+    );
     s.converged().expect("truth converged").x.clone()
 }
 
@@ -279,20 +292,22 @@ fn add(base: &[Number], step: &[Number]) -> Vec<Number> {
     base.iter().zip(step).map(|(&b, &s)| b + s).collect()
 }
 
-/// A base solve the ceiling touched hands the corrector the frozen
-/// base-point diagonal, and the correction achieves nothing: the
-/// first iteration fails to reduce the residual against the mixed
-/// operator, the no-improvement rule keeps the handed step, and
-/// `improved()` says so at every budget.
+/// A base solve the ceiling touched corrects like any other: the
+/// diagonal is rebuilt at the predicted point with the ceiling
+/// re-derived there, never the stored base-point copy.
 ///
-/// Pinned deliberately: a corrector that closes this workload on a
-/// ceiling-engaged solve has gained a predicted-point diagonal with
-/// the ceiling re-derived there, and this test should then be
-/// updated on purpose. The module doc carries the forced-live
-/// measurement saying what to expect from such a fix.
+/// The first iteration takes the error down an order and the residual
+/// fifteenfold, matching the no-ceiling control's first iteration.
+/// The iterations then stop: the trial residual at the degenerate
+/// rows, where the multiplier split between the bound and the
+/// equality is not unique, does not fall further, and the measured
+/// plateau is identical under a forced raw uncapped diagonal, so it
+/// is the degeneracy's own property and no diagonal choice moves it.
+/// The budget-8 error equals the budget-1 error here, pinned as a
+/// measured fact rather than a target.
 #[test]
-fn a_ceiling_solve_stalls_the_correction() {
-    let solver = solved(2.0, Q0, true, None, None);
+fn a_ceiling_solve_corrects_at_the_predicted_point() {
+    let solver = solved(2.0, Q0, true, false, None, None);
     let report = solver.classify_activity().expect("activity report");
     assert!(
         report.var_sigma[0] > 1e10 && report.var_sigma[0] < 1e20,
@@ -315,29 +330,25 @@ fn a_ceiling_solve_stalls_the_correction() {
         let (out, rep) = solver
             .correct_step(&[3], &[DELTA], &step, budget)
             .expect("corrector");
-        assert!(
-            !rep.improved(),
-            "budget {budget}: the mixed operator finds no reduction and \
-             must say so: residual {:e} -> {:e}",
-            rep.initial_residual,
-            rep.residual,
-        );
         let corrected = dist(&add(&base, &out[..n]), &want);
         assert!(
-            (corrected - plain).abs() < 1e-8,
-            "budget {budget}: a correction that achieves nothing leaves \
-             the estimate where it was: {plain:e} -> {corrected:e}",
+            rep.improved() && corrected < plain / 10.0,
+            "budget {budget}: the predicted-point diagonal must let the \
+             correction act: {plain:e} -> {corrected:e} (residual {:e} \
+             -> {:e})",
+            rep.initial_residual,
+            rep.residual,
         );
     }
 }
 
-/// The identical workload with only the degenerate bound removed
-/// takes the live branch and converges, which pins the stall above on
-/// the frozen diagonal rather than on the workload or the equality
-/// block.
+/// The identical workload with only the degenerate bound removed has
+/// no ceiling and nothing degenerate, and converges to the floor: the
+/// control separating the workload from the degenerate rows' plateau
+/// above.
 #[test]
 fn the_same_workload_without_the_ceiling_corrects() {
-    let solver = solved(2.0, Q0, false, None, None);
+    let solver = solved(2.0, Q0, false, false, None, None);
     let base = solver.converged().expect("converged").x.clone();
     let want = truth(2.0, false, &base);
     let step = solver
@@ -353,6 +364,37 @@ fn the_same_workload_without_the_ceiling_corrects() {
         rep.improved() && corrected < 1e-6 && corrected < plain * 1e-5,
         "the live operator closes the curvature: {plain:e} -> {corrected:e} \
          (residual {:e} -> {:e})",
+        rep.initial_residual,
+        rep.residual,
+    );
+}
+
+/// The other way the stored diagonal freezes: a solve that crossed
+/// over into the declared frame. `corrector_sigma` re-derives that
+/// frame at the predicted point (the declared bounds are constants,
+/// so the frame follows the iterate), and the correction acts the
+/// same way it does on the interior ceiling solve above.
+#[test]
+fn a_crossover_solve_corrects_at_the_predicted_point() {
+    let solver = solved(2.0, Q0, true, true, None, None);
+    let base = solver.converged().expect("converged").x.clone();
+    let want = truth(2.0, true, &base);
+    let step = solver
+        .parametric_step_full(&[3], &[DELTA])
+        .expect("full step");
+    let n = base.len();
+    let plain = dist(&add(&base, &step[..n]), &want);
+    assert!(
+        plain > 1e-1,
+        "the workload must leave the plain step something to close: {plain:e}",
+    );
+    let (out, rep) = solver
+        .correct_step(&[3], &[DELTA], &step, 8)
+        .expect("corrector");
+    let corrected = dist(&add(&base, &out[..n]), &want);
+    assert!(
+        rep.improved() && corrected < plain / 10.0,
+        "the declared frame must follow the iterate: {plain:e} ->          {corrected:e} (residual {:e} -> {:e})",
         rep.initial_residual,
         rep.residual,
     );

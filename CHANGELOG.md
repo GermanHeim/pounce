@@ -27,6 +27,15 @@ changes.
   `limited-memory` solve the quasi-Newton matrix is kept, since no
   exact Hessian exists to evaluate elsewhere.
 
+  The rebuild covers the two cases that store a base-point diagonal
+  for the held factor's back-solves: a solve the sigma ceiling
+  (gh #737) touched, and one that crossed over into the declared
+  frame (gh #654). The corrector consults neither stored copy: it
+  re-derives the ceiling and the frame rule at the predicted point,
+  for both diagonal blocks. Measured on a ceiling-engaged fixture,
+  the correction went from no progress at any budget to matching the
+  no-ceiling control's first iteration.
+
   Across a release the step's endpoint does not show, the corrector
   still does not reach the re-solve. Just past the breakpoint the
   iterations decline and the no-improvement warning fires as before.
