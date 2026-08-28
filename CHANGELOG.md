@@ -9,6 +9,115 @@ changes.
 
 ## [Unreleased]
 
+- **Backtracking now interpolates the next trial step on the
+  limited-memory path (gh #818).** `pounce.minimize(f, x0, jac=g)` — which
+  selects `hessian_approximation=limited-memory`, the mode the Python
+  frontend and the CasADi plugin pick on their own when no exact
+  Lagrangian Hessian is available — exhausted `max_iter` on a
+  **4-variable, unconstrained, strictly convex, separable quadratic**
+  with `cond(H) = 1e8`, returning `x` wrong by 3.7e-3 relative.
+  `scipy.optimize.minimize`'s L-BFGS-B solves the identical problem in 34
+  iterations **at the same memory size**, so "scipy uses more memory" was
+  not the difference, and POUNCE's own exact-Hessian arm solves it in one.
+
+  **The model was right and the linear algebra was right.** The published
+  `B = σI + VVᵀ − UUᵀ` is the textbook L-BFGS matrix, and the
+  Sherman-Morrison-Woodbury solve in `low_rank_aug_system_solver.rs`
+  reproduces `−B⁻¹∇f` to a relative residual of ~1e-12 — checked
+  directly, and worth stating because it is the hypothesis the compact
+  representation invites. An independent 40-line L-BFGS in Python,
+  sharing nothing with POUNCE but the algorithm, reproduces the same
+  stall, which is what moved the search off the implementation.
+
+  What costs is the **trial sequence**. The quasi-Newton model's *scale*
+  can be wrong by up to `cond(H)` in any direction its curvature pairs do
+  not span, so the acceptable step is `α ≈ 4e-6`; upstream's fixed
+  `alpha *= alpha_red_factor` walks there in halves, spending 19–20 trial
+  points — each a full objective evaluation — every iteration. The
+  measurement that isolates it, with nothing else changed: under
+  `alpha_red_factor 0.2` (nine trials instead of twenty) the 8-variable
+  case goes from `MaximumIterationsExceeded` at 2000 iterations to
+  converged at 1099.
+
+  `BacktrackingLineSearch::next_alpha` therefore fits the quadratic
+  through `φ(0)`, `φ'(0)` and `φ(α)` at the rejected trial and jumps to
+  its minimizer — the textbook safeguarded backtracking step (Nocedal &
+  Wright §3.5). It is a heuristic for *which* `α` to try next and nothing
+  more: the acceptor still decides, so no step it proposes can be
+  accepted that the fixed sequence would have rejected. Two clamps bound
+  it — capped at `alpha_red_factor · α` so the sequence still contracts
+  at least as fast as upstream's and the `alpha_min` bail is still
+  reached in a bounded number of trials, and floored at the new
+  `alpha_red_factor_min · α` so one badly-shaped `φ` cannot drop `α` to
+  noise in a single step. Reported iterations on the issue's model, with
+  scipy's L-BFGS-B for scale:
+
+  | case | before | after | scipy |
+  |---|---|---|---|
+  | `n = 4`, cond 1e8 (the report) | 76 | **18** | 34–37 |
+  | `n = 4`, cond 1e4 | 24 | **12** | 23 |
+  | `n = 8`, cond 1e4 | 993 | **396** | — |
+  | `n = 8`, cond 1e8, `m = 10` | 73 | **34** | 34 |
+  | `n = 8`, cond 1e8, `m = 6` | 2000\* | 2000\* | 146 |
+
+  `* = Maximum_Iterations_Exceeded`. The default-memory 8-variable case
+  is **not** fixed: `ls` drops from 19–20 trial points to 3–5, so the
+  trial sequence is no longer what binds, but a 6-pair model of an
+  8-variable Hessian with a 1e8 spread still cannot produce a usable step
+  and the solve is now bounded by model quality. Raising
+  `limited_memory_max_history` to 10 solves it in 34.
+
+  **On by default for the limited-memory path only**, resolved by
+  `alpha_red_factor_min`: `0.05` under `limited-memory`, equal to
+  `alpha_red_factor` (i.e. upstream's fixed sequence) under an exact
+  Hessian. An explicit user value is honoured on both. The split is
+  measured, not assumed — turning it on for the exact path too moves 21
+  of the 154 fixture-legs in `scripts/sweep-fixtures.sh` and takes two
+  from solved to not solved: `deb7` (`SolveSucceeded`/143 →
+  `ErrorInStepComputation`/176) and `infeasible_square_scaled_1em4`
+  (`InfeasibleProblemDetected`/17 → `ErrorInStepComputation`/12, losing
+  the infeasibility certificate), against no exact-leg gain beyond two
+  faster infeasible detections. A Newton step's length is meaningful,
+  which is the reason the interpolation has nothing to add there.
+
+  **Fixture sweep: the exact leg is byte-identical; 11 lbfgs-leg lines
+  move**, all explainable. Gains: `cresc4` `RestorationFailed`/195 →
+  **`SolveSucceeded`/241 at the exact-Hessian optimum** (0.87189752
+  against the exact leg's 0.87189754); `eigenb2`
+  `SolvedToAcceptableLevel`/41 → **`SolveSucceeded`/39**; `eigena2`
+  `ErrorInStepComputation` at 252 → 131 iterations; `pooling_rt2stp`
+  716 → 347 to the same objective to five digits. Cost: **`deb7` on the
+  lbfgs leg goes from `ErrorInStepComputation`/1242/15.1 s to
+  `RestorationFailed`/2295/22.3 s** — failing either way, and the new
+  run lands at 97.5851 against the true 97.5599 where the old one landed
+  at 101.097, so it is closer to the answer and takes half again as long
+  to not certify it. That is an accepted cost with an owner, filed as
+  its own issue rather than left in a commit message (see gh #544 for
+  what that costs). The remaining six lines are ±4 iterations or a digit
+  of objective.
+
+- **`limited_memory_initialization=history-max` (gh #818).** Every
+  upstream rule reads the newest curvature pair; this one applies the
+  `scalar1` formula to every pair in the history window and keeps the
+  largest. `σ` is the curvature the model assigns to every direction
+  *outside* the span of the stored pairs, and `sᵀy/sᵀs` is a Rayleigh
+  quotient along one step — an arbitrary sample of the spectrum when the
+  curvature spans orders of magnitude. The two errors are not symmetric:
+  over-stating `σ` shortens the step and costs an iteration, while
+  under-stating it costs a backtracking sweep and then feeds a tiny `s`
+  back into the history, narrowing the next sample. Nothing is lost on
+  the directions the model does know — the last rank-2 update enforces
+  `B s_last = y_last` whatever `B0` was.
+
+  **Not the default**, because it wins where the window cannot span the
+  spectrum and loses where it can: on the issue's model it takes `n = 8`
+  cond 1e4 from 396 to 166 iterations and `n = 4` cond 1e12 from 61 to
+  28, while costing `n = 4` cond 1e4 12 → 29 and `n = 8`, `m = 10`
+  34 → 66. The obvious variant — a running maximum over the whole solve
+  rather than over the window — was measured too and is worse than
+  `scalar1` at every size, because it never comes back down and keeps a
+  stiff early transient in `B0` long after the iterate has left it.
+
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
   caches in `ipopt_cq.rs`, so every read reassembled

@@ -89,6 +89,21 @@ impl AlphaForY {
 pub struct BacktrackingLineSearch {
     pub acceptor: Box<dyn BacktrackingLsAcceptor>,
     pub alpha_red_factor: Number,
+    /// `alpha_red_factor_min` — the *floor* on one backtracking
+    /// reduction, which is what turns the fixed geometric sequence into
+    /// a safeguarded interpolation (gh#818). See
+    /// [`BacktrackingLineSearch::next_alpha`]. Setting it equal to
+    /// `alpha_red_factor` collapses the clamp and restores the plain
+    /// `alpha *= alpha_red_factor` sequence.
+    ///
+    /// The `0.05` here is the *direct-construction* default (tests and
+    /// drivers that assemble a line search by hand).
+    /// `AlgorithmBuilder::build` overwrites it from
+    /// `LineSearchOptions::alpha_red_factor_min`, which resolves to
+    /// `0.05` under `limited-memory` and to `alpha_red_factor` — i.e.
+    /// off — under an exact Hessian; that field's doc carries the
+    /// measurement behind the split.
+    pub alpha_red_factor_min: Number,
     pub max_soc: i32,
     /// Threshold for the SOC outer-loop convergence test
     /// `theta_trial <= kappa_soc * theta_soc_old`. Mirrors upstream's
@@ -244,6 +259,7 @@ impl BacktrackingLineSearch {
         Self {
             acceptor,
             alpha_red_factor: 0.5,
+            alpha_red_factor_min: 0.05,
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
@@ -1187,7 +1203,7 @@ impl BacktrackingLineSearch {
                 }
             }
 
-            alpha *= self.alpha_red_factor;
+            alpha = self.next_alpha(alpha, phi, d_phi, phi_trial);
         }
 
         AlphaResult::Failed {
@@ -1195,6 +1211,69 @@ impl BacktrackingLineSearch {
             last_alpha,
             evaluation_error,
         }
+    }
+
+    /// The next backtracking trial step, given that `alpha` was
+    /// rejected and `phi_trial = φ(alpha)` was measured there.
+    ///
+    /// Upstream reduces by a fixed factor, `alpha *= alpha_red_factor`
+    /// (`IpBacktrackingLineSearch.cpp`), which walks down in halves and
+    /// so needs `log₂(1/α*)` trial points to reach a step of size `α*`.
+    /// That is cheap when the model is roughly right and ruinous when
+    /// it is not: on gh#818's unconstrained ill-conditioned quadratic
+    /// the limited-memory model understates the curvature along `d` by
+    /// six orders of magnitude, the acceptable step is `α ≈ 4e-6`, and
+    /// every iteration spends 19–20 trial points — each a full
+    /// objective evaluation — walking there. Under `alpha_red_factor
+    /// 0.2` (nine trials instead of twenty) the same solve goes from
+    /// `Maximum_Iterations_Exceeded` at 2000 iterations to converged at
+    /// 1099, which is the measurement that says the trial *sequence*,
+    /// not the acceptance test, is what costs.
+    ///
+    /// So instead of a fixed factor, fit the quadratic through
+    /// `(0, φ)`, `(0, φ')` and `(alpha, φ(alpha))` and jump to its
+    /// minimizer — the textbook safeguarded backtracking step
+    /// (Nocedal & Wright, *Numerical Optimization* §3.5;
+    /// Dennis & Schnabel Alg. A6.3.1). This is a heuristic for *which*
+    /// `alpha` to try next and nothing more: the acceptor still decides
+    /// whether a trial is taken, so no step this method proposes can be
+    /// accepted that the fixed-factor sequence would have rejected.
+    ///
+    /// Two safeguards keep it bounded, and they are what make the
+    /// change safe rather than merely faster:
+    ///
+    /// * **Never slower than upstream.** The result is capped at
+    ///   `alpha_red_factor · alpha`, so the trial sequence still
+    ///   contracts at least as fast as the plain geometric one and the
+    ///   `alpha < alpha_min_eff` bail is still reached in a bounded
+    ///   number of trials.
+    /// * **Never a collapse.** The result is floored at
+    ///   `alpha_red_factor_min · alpha` (default 0.05, i.e. at most a
+    ///   20× reduction per trial), so one badly-shaped `φ` cannot drop
+    ///   `alpha` to noise in a single step and skip past an acceptable
+    ///   interval.
+    ///
+    /// Falls back to the fixed factor whenever the interpolation is not
+    /// defined: a non-descent `d_phi` (the quadratic has no positive
+    /// minimizer), a non-finite `phi_trial`, or a non-positive
+    /// denominator (`φ(alpha)` below the tangent line, i.e. the fit is
+    /// concave and its stationary point is a maximum).
+    fn next_alpha(&self, alpha: Number, phi: Number, d_phi: Number, phi_trial: Number) -> Number {
+        let fixed = alpha * self.alpha_red_factor;
+        if !(d_phi < 0.0) || !phi_trial.is_finite() || !phi.is_finite() {
+            return fixed;
+        }
+        // φ(α) ≈ φ + φ'·α + c·α², with c pinned by the measured
+        // `phi_trial`; the minimizer is −φ'/(2c).
+        let denom = 2.0 * (phi_trial - phi - d_phi * alpha);
+        if !(denom > 0.0) {
+            return fixed;
+        }
+        let alpha_q = -d_phi * alpha * alpha / denom;
+        if !alpha_q.is_finite() {
+            return fixed;
+        }
+        alpha_q.clamp(alpha * self.alpha_red_factor_min, fixed)
     }
 
     /// Directional derivative of the barrier objective along the step
@@ -1559,6 +1638,7 @@ mod tests {
     fn driver_constructs_with_defaults() {
         let bls = BacktrackingLineSearch::new(Box::new(FilterLsAcceptor::new()));
         assert_eq!(bls.alpha_red_factor, 0.5);
+        assert_eq!(bls.alpha_red_factor_min, 0.05);
         assert_eq!(bls.max_soc, 4);
     }
 
@@ -1662,5 +1742,89 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // ---------------------------------------------------- gh#818: next_alpha
+
+    fn ls_for_next_alpha(red: Number, red_min: Number) -> BacktrackingLineSearch {
+        let mut bls = BacktrackingLineSearch::new(Box::new(FilterLsAcceptor::default()));
+        bls.alpha_red_factor = red;
+        bls.alpha_red_factor_min = red_min;
+        bls
+    }
+
+    /// The interpolated step is what the model says, when the model is
+    /// inside the safeguards. `φ(α) = 1 − α + 50α²` has `φ(0) = 1`,
+    /// `φ'(0) = −1` and minimizer `1/100`; at the rejected `α = 1`,
+    /// `φ(1) = 50`, so the fit is exact and `next_alpha` must return
+    /// `0.01` — a 100× reduction the fixed factor would have needed
+    /// seven halvings to reach.
+    #[test]
+    fn next_alpha_jumps_to_the_interpolated_minimizer() {
+        let bls = ls_for_next_alpha(0.5, 1e-4);
+        let a = bls.next_alpha(1.0, 1.0, -1.0, 50.0);
+        assert!((a - 0.01).abs() < 1e-12, "got {a}");
+    }
+
+    /// Never slower than upstream: the result is capped at
+    /// `alpha_red_factor · alpha`, so a `φ` whose minimizer sits above
+    /// the fixed step still contracts at the fixed rate. Without this
+    /// cap the `alpha < alpha_min_eff` bail could be pushed arbitrarily
+    /// far out, turning a bounded backtracking sweep into
+    /// `max_trials` evaluations.
+    #[test]
+    fn next_alpha_is_never_slower_than_the_fixed_factor() {
+        let bls = ls_for_next_alpha(0.5, 1e-4);
+        // φ(1) barely above the tangent line ⇒ interpolated minimizer
+        // near 1, far above 0.5.
+        let a = bls.next_alpha(1.0, 1.0, -1.0, 0.001);
+        assert_eq!(a, 0.5, "must clamp up to alpha_red_factor * alpha");
+    }
+
+    /// Never a collapse: floored at `alpha_red_factor_min · alpha`, so
+    /// one badly-shaped `φ` cannot drop α to noise in a single trial and
+    /// step over an acceptable interval.
+    #[test]
+    fn next_alpha_is_floored_by_alpha_red_factor_min() {
+        let bls = ls_for_next_alpha(0.5, 0.05);
+        // Minimizer at 1e-6; the floor holds it at 0.05.
+        let a = bls.next_alpha(1.0, 1.0, -1.0, 5e5);
+        assert!((a - 0.05).abs() < 1e-15, "got {a}");
+    }
+
+    /// `alpha_red_factor_min == alpha_red_factor` collapses the clamp,
+    /// which is the documented way to restore upstream's fixed
+    /// geometric sequence — and the default the builder installs on the
+    /// exact-Hessian path.
+    #[test]
+    fn next_alpha_degenerates_to_the_fixed_factor_when_the_clamp_is_closed() {
+        let bls = ls_for_next_alpha(0.5, 0.5);
+        for phi_trial in [0.001, 2.0, 50.0, 5e5] {
+            assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, phi_trial), 0.5);
+        }
+    }
+
+    /// Every case in which the quadratic fit is not defined falls back
+    /// to the fixed factor rather than producing a NaN, a negative step,
+    /// or an increase. A NaN α here would be silent: the
+    /// `alpha < alpha_min_eff` comparison is false for NaN, so the loop
+    /// would keep staging trial points at a NaN step until `max_trials`.
+    #[test]
+    fn next_alpha_falls_back_on_every_undefined_fit() {
+        let bls = ls_for_next_alpha(0.5, 0.05);
+        // Non-descent direction: no positive minimizer.
+        assert_eq!(bls.next_alpha(1.0, 1.0, 0.0, 2.0), 0.5);
+        assert_eq!(bls.next_alpha(1.0, 1.0, 1.0, 2.0), 0.5);
+        assert_eq!(bls.next_alpha(1.0, 1.0, Number::NAN, 2.0), 0.5);
+        // Non-finite / non-finite-from φ.
+        assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, Number::INFINITY), 0.5);
+        assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, Number::NAN), 0.5);
+        assert_eq!(bls.next_alpha(1.0, Number::NAN, -1.0, 2.0), 0.5);
+        // φ(α) at or below the tangent line ⇒ denominator ≤ 0, the fit
+        // is concave and its stationary point is a maximum. (The
+        // acceptor rejected this α for a filter reason, not an Armijo
+        // one, so it is reachable.)
+        assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, 0.0), 0.5);
+        assert_eq!(bls.next_alpha(1.0, 1.0, -1.0, -5.0), 0.5);
     }
 }

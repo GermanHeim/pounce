@@ -3790,6 +3790,7 @@ impl IpoptApplication {
                     "scalar3" => InitialApprox::Scalar3,
                     "scalar4" => InitialApprox::Scalar4,
                     "constant" => InitialApprox::Constant,
+                    "history-max" => InitialApprox::HistoryMax,
                     _ => InitialApprox::Scalar2,
                 };
             }
@@ -4296,6 +4297,9 @@ impl IpoptApplication {
         // alone.
         if let Some(v) = read_num("alpha_red_factor") {
             builder.line_search.alpha_red_factor = v;
+        }
+        if let Some(v) = read_num("alpha_red_factor_min") {
+            builder.line_search.alpha_red_factor_min = Some(v);
         }
         if let Some(v) = read_int("accept_after_max_steps") {
             builder.line_search.accept_after_max_steps = v;
@@ -6031,6 +6035,7 @@ mod tests {
             ("scalar3", InitialApprox::Scalar3),
             ("scalar4", InitialApprox::Scalar4),
             ("constant", InitialApprox::Constant),
+            ("history-max", InitialApprox::HistoryMax),
         ] {
             let mut app = IpoptApplication::new();
             app.initialize().unwrap();

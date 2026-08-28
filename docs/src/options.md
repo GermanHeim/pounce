@@ -995,7 +995,7 @@ history; `σ` is the diagonal they are built on, and
 
 | Option | Default | Meaning |
 |---|---|---|
-| `limited_memory_initialization` | `scalar2` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`). |
+| `limited_memory_initialization` | `scalar1` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`), `history-max` (the `scalar1` formula over the *whole* history, largest wins — POUNCE extension, #818). |
 | `limited_memory_init_val` | `1.0` | `σ` on the first iteration, before any curvature pair exists — and every iteration under `constant`. |
 | `limited_memory_init_val_min` / `_max` | `1e-8` / `1e8` | Clamp applied to `σ` however it was computed. |
 
@@ -1007,6 +1007,47 @@ is ≥ 1 by Cauchy–Schwarz and grows without bound as the curvature pair
 becomes ill-conditioned, so on a badly scaled problem they are far
 apart. If you are reproducing results from an older POUNCE, set
 `limited_memory_initialization scalar2`.
+
+### `history-max` (#818)
+
+Every upstream rule reads the **newest** curvature pair. `history-max`
+is POUNCE's, and reads all of them: it applies the `scalar1` formula to
+each pair in the history window and keeps the largest.
+
+`σ` is the curvature the model assigns to every direction *outside* the
+span of the stored pairs — the rank-2 corrections say nothing there.
+`sᵀy/sᵀs` is a Rayleigh quotient of the true Hessian along one step, so
+when the problem's curvature spans orders of magnitude it is an
+arbitrary sample of the spectrum. Land near the small end and `B`
+understates the curvature of every unexplored direction by up to
+`cond(H)`; the step is longer than the truth by that factor and the
+line search has to claw it back. Over-stating `σ` costs an iteration;
+under-stating it costs a backtracking sweep and then feeds a tiny `s`
+back into the history. `history-max` takes the conservative reading.
+Nothing is lost on the directions the model does know: the last rank-2
+update enforces `B s_last = y_last` whatever `B0` was.
+
+This is **not** the default, because it wins where the window cannot
+span the spectrum and loses where it can. On #818's separable quadratic
+`f(x) = Σ (sᵢxᵢ − 1)²` with `s = 10^linspace(0, 4, n)` (iterations to
+converge, `max_iter 2000`, `*` = did not converge):
+
+| case | `scalar1` | `history-max` |
+|---|---|---|
+| `n = 4`, cond 1e4  | 12   | 29   |
+| `n = 4`, cond 1e8  | 18   | 21   |
+| `n = 4`, cond 1e12 | 61   | 28   |
+| `n = 8`, cond 1e4  | 396  | 166  |
+| `n = 8`, cond 1e8  | 2000\* | 2000\* |
+| `n = 8`, `m = 10`  | 34   | 66   |
+
+Reach for it when a limited-memory solve is stalling with a long
+backtracking sweep every iteration on a problem you know is badly
+conditioned, and the memory (`limited_memory_max_history`) is small
+relative to the number of variables. A running maximum over the whole
+solve rather than over the window was measured too and is worse than
+`scalar1` at every size — it never comes back down, so a stiff early
+transient stays in `B0` long after the iterate has left it.
 
 ### `recalc_y` under L-BFGS
 
@@ -1031,6 +1072,44 @@ recognisable: a search direction much larger than the problem's scale,
 primal step sizes collapsing to `1e-3` or below, primal infeasibility
 that barely moves, and dual infeasibility climbing by orders of magnitude
 while the objective drifts.
+
+## Backtracking trial steps and `alpha_red_factor_min`
+
+When the filter rejects a trial step the line search shortens it and
+tries again. Upstream reduces by a fixed factor,
+`alpha *= alpha_red_factor` (default `0.5`), so reaching a step of size
+`α` takes `log(1/α)` trial points — each one a full objective
+evaluation.
+
+That is cheap when the Hessian model is roughly right and ruinous when
+it is not. Under `hessian_approximation=limited-memory` the model's
+*scale* can be wrong by orders of magnitude in any direction its
+curvature pairs do not span, so the acceptable step can be `α ≈ 1e-6`
+and every iteration spends 19–20 trial points walking down to it
+(#818).
+
+POUNCE therefore picks the next trial step by fitting the quadratic
+through the barrier objective's value and slope at the current iterate
+and its value at the rejected trial, and jumping to that quadratic's
+minimizer — the textbook safeguarded backtracking step. Two clamps
+bound it:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `alpha_red_factor` | `0.5` | *Upper* bound on one reduction: the trial sequence still contracts at least as fast as upstream's. |
+| `alpha_red_factor_min` | `0.05` under `limited-memory`, `= alpha_red_factor` (off) under an exact Hessian | *Lower* bound on one reduction, so a badly shaped objective cannot collapse `α` to noise in a single trial. |
+
+Acceptance is unchanged — this only decides which `α` is tried next, so
+no step it proposes can be accepted that the fixed sequence would have
+rejected. Set `alpha_red_factor_min` equal to `alpha_red_factor` to
+restore upstream's fixed geometric sequence; an explicit value is
+honoured on both Hessian paths.
+
+The default is off for the exact-Hessian path because a Newton step's
+length is meaningful — the acceptable `α` is normally within a couple of
+halvings of 1, so interpolation buys nothing — and because enabling it
+there was measured to move 21 of the 154 fixture-legs in
+`scripts/sweep-fixtures.sh`, two of them from solved to not solved.
 
 ## ℓ₁ penalty-barrier wrapper options
 

@@ -76,6 +76,11 @@ pub enum InitialApprox {
     Scalar4,
     /// `constant` — σ = `limited_memory_init_val`, every iteration.
     Constant,
+    /// `history-max` — the `scalar1` formula evaluated on **every**
+    /// stored curvature pair, largest wins (gh#818). No upstream
+    /// keyword; see [`LimMemQuasiNewtonUpdater::compute_sigma_bfgs`]
+    /// for why the maximum rather than the newest pair.
+    HistoryMax,
 }
 
 pub struct LimMemQuasiNewtonUpdater {
@@ -453,24 +458,75 @@ impl LimMemQuasiNewtonUpdater {
         Some(mask)
     }
 
+    /// σ, the diagonal of `B0`, for this iteration's rebuild.
+    ///
+    /// Every upstream rule reads the **newest** curvature pair only.
+    /// [`InitialApprox::HistoryMax`] is the one exception: it applies
+    /// the `scalar1` formula to every pair in the window and takes the
+    /// largest (gh#818).
+    ///
+    /// **Why a maximum.** σ is the curvature the model assigns to every
+    /// direction *outside* the span of the stored pairs — the rank-2
+    /// corrections say nothing there. `sᵀy/sᵀs` is a Rayleigh quotient
+    /// of the true Hessian along one step, so on a problem whose
+    /// curvature spans orders of magnitude it is an arbitrary sample of
+    /// the spectrum. When it lands near the small end, `B` understates
+    /// the curvature of every unexplored direction by up to `cond(H)`,
+    /// `d = −B⁻¹∇f` is longer than the truth by that factor, and a
+    /// backtracking line search can only recover by halving.
+    ///
+    /// The two errors are not symmetric. Over-stating σ shortens the
+    /// step: the line search accepts `α = 1` and the iteration is
+    /// merely less ambitious. Under-stating it costs a whole
+    /// backtracking sequence — measured at 19–20 trial points per
+    /// iteration on gh#818's 8-variable quadratic, landing at
+    /// `α ≈ 4e-6` — and the tiny step then feeds a tiny `s` back into
+    /// the history, so the next σ is drawn from an even narrower
+    /// sample.
+    ///
+    /// The pairs in the window are all measured curvature of the same
+    /// Lagrangian at nearby iterates, so the largest of them is the
+    /// stiffest thing the solver has actually seen and is the
+    /// conservative reading. Nothing is lost on the directions the
+    /// model *does* know: the last rank-2 update enforces
+    /// `B s_last = y_last` whatever `B0` was, so the secant condition
+    /// on the newest pair holds under this rule exactly as under
+    /// `scalar1`.
+    ///
+    /// The window matters. A running maximum over the whole solve — the
+    /// obvious variant — is monotone and never comes back down, so it
+    /// keeps a stiff early transient in `B0` long after the iterate has
+    /// left it; measured on gh#818's fixture it is worse than `scalar1`
+    /// at every size (131 vs 36 iterations at `n = 4`, and no
+    /// convergence at all at `n = 8`). Bounding the maximum by the
+    /// history window lets σ decay as the pairs turn over.
     fn compute_sigma_bfgs(&self) -> Number {
         if self.history.is_empty() {
             // Upstream: `B0 = limited_memory_init_val * I` "in the first
             // iteration (when no updates have been performed yet)".
             return self.init_val;
         }
-        let last = self.history.last().unwrap();
-        let s_dot_s = last.s_norm * last.s_norm;
-        let y_dot_y = last.y_norm * last.y_norm;
-        initial_hessian_scalar(
-            self.initial_approx,
-            s_dot_s,
-            last.s_dot_y,
-            y_dot_y,
-            self.init_val,
-            self.init_val_min,
-            self.init_val_max,
-        )
+        let per_pair = |p: &CurvaturePair| {
+            initial_hessian_scalar(
+                self.initial_approx,
+                p.s_norm * p.s_norm,
+                p.s_dot_y,
+                p.y_norm * p.y_norm,
+                self.init_val,
+                self.init_val_min,
+                self.init_val_max,
+            )
+        };
+        if self.initial_approx == InitialApprox::HistoryMax {
+            // `clamp` is monotone, so folding the max over already-clamped
+            // per-pair values is the same number as clamping the max.
+            return self
+                .history
+                .iter()
+                .map(per_pair)
+                .fold(Number::NEG_INFINITY, Number::max);
+        }
+        per_pair(self.history.last().unwrap())
     }
 
     /// Walk the curvature-pair history oldest→newest, applying the BFGS
@@ -667,6 +723,12 @@ fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
 /// * `Scalar4` → geometric mean of `Scalar1` and `Scalar2`
 /// * `Constant` → `init_val` (`limited_memory_init_val`)
 /// * `Identity` → `1.0` (no upstream keyword; direct callers only)
+/// * `HistoryMax` → the `Scalar1` formula (no upstream keyword). This
+///   kernel is per-pair; what makes `HistoryMax` different from
+///   `Scalar1` is that
+///   [`LimMemQuasiNewtonUpdater::compute_sigma_bfgs`] calls it on every
+///   pair in the window and keeps the largest, rather than calling it
+///   on the newest pair alone (gh#818).
 ///
 /// Each degenerate denominator falls back to `1.0` independently, so
 /// `Scalar3`/`Scalar4` degrade to the mean of whichever term is
@@ -710,6 +772,9 @@ pub fn initial_hessian_scalar(
             if prod > 0.0 { prod.sqrt() } else { 1.0 }
         }
         InitialApprox::Constant => init_val,
+        // Per-pair, `HistoryMax` *is* `Scalar1`; the maximum is taken
+        // over the history by the caller.
+        InitialApprox::HistoryMax => scalar1(),
     };
     raw.clamp(min_val, max_val)
 }
@@ -1100,5 +1165,99 @@ mod tests {
         // s·y over the nonlinear coordinates only: 1*1 + 1*1 = 2. The
         // linear coordinates (5·9 + 7·3) must not contribute.
         assert!((stored.s_dot_y - 2.0).abs() < 1e-15);
+    }
+
+    // -------------------------------------------- gh#818: history-max sigma
+
+    /// Every upstream rule reads the newest pair; `HistoryMax` reads the
+    /// whole window. The fixture below puts the *largest* curvature in
+    /// the middle of the history so neither "newest" nor "oldest" can
+    /// pass by accident.
+    ///
+    /// Pairs are `s = e_i`, `y = c_i · e_i`, so `sᵀy/sᵀs = c_i`
+    /// exactly: curvatures 3, 400, 7 in insertion order.
+    fn updater_with_curvatures(cs: &[Number]) -> LimMemQuasiNewtonUpdater {
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.max_history = cs.len() as i32;
+        for (i, &c) in cs.iter().enumerate() {
+            let mut sv = vec![0.0; cs.len()];
+            sv[i] = 1.0;
+            let yv: Vec<Number> = sv.iter().map(|&v| c * v).collect();
+            assert!(u.ingest_pair(rcv(&sv), rcv(&yv)), "pair {i} was skipped");
+        }
+        u
+    }
+
+    #[test]
+    fn history_max_sigma_is_the_largest_curvature_in_the_window() {
+        let mut u = updater_with_curvatures(&[3.0, 400.0, 7.0]);
+
+        u.initial_approx = InitialApprox::Scalar1;
+        assert!(
+            (u.compute_sigma_bfgs() - 7.0).abs() < 1e-12,
+            "scalar1 must read the NEWEST pair, got {}",
+            u.compute_sigma_bfgs()
+        );
+
+        u.initial_approx = InitialApprox::HistoryMax;
+        assert!(
+            (u.compute_sigma_bfgs() - 400.0).abs() < 1e-12,
+            "history-max must read the LARGEST pair, got {}",
+            u.compute_sigma_bfgs()
+        );
+    }
+
+    /// The maximum is bounded by the *window*, not by the run. A
+    /// running maximum never comes back down, which keeps a stiff early
+    /// transient in `B0` long after the iterate has left it — measured
+    /// worse than `scalar1` at every size on gh#818's fixture. Once the
+    /// stiff pair ages out of the window, σ must fall with it.
+    #[test]
+    fn history_max_sigma_decays_as_the_window_turns_over() {
+        let mut u = updater_with_curvatures(&[3.0, 400.0, 7.0]);
+        u.initial_approx = InitialApprox::HistoryMax;
+        assert!((u.compute_sigma_bfgs() - 400.0).abs() < 1e-12);
+
+        // Push two mild pairs; the FIFO drops the 400 one.
+        for c in [5.0, 6.0] {
+            let sv = vec![1.0, 0.0, 0.0];
+            let yv = vec![c, 0.0, 0.0];
+            assert!(u.ingest_pair(rcv(&sv), rcv(&yv)));
+        }
+        assert_eq!(u.history.len(), 3);
+        assert!(
+            (u.compute_sigma_bfgs() - 7.0).abs() < 1e-12,
+            "sigma must fall to the largest curvature STILL in the window, got {}",
+            u.compute_sigma_bfgs()
+        );
+    }
+
+    /// An empty history has no curvature to maximize over, so
+    /// `HistoryMax` takes the same `limited_memory_init_val` every other
+    /// rule takes on the first iteration. The `fold` seed is
+    /// `NEG_INFINITY`, so getting this wrong would put `-inf` (clamped
+    /// to `init_val_min`) on the whole `B0` diagonal rather than
+    /// returning early.
+    #[test]
+    fn history_max_sigma_on_empty_history_is_init_val() {
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.initial_approx = InitialApprox::HistoryMax;
+        u.init_val = 3.0;
+        assert!(u.history.is_empty());
+        assert_eq!(u.compute_sigma_bfgs(), 3.0);
+    }
+
+    /// Per pair, `HistoryMax` is `Scalar1` — the kernel is shared and
+    /// only the caller's fold differs. If this drifts, the doc on
+    /// `initial_hessian_scalar` is wrong and the option means something
+    /// nobody wrote down.
+    #[test]
+    fn history_max_per_pair_kernel_equals_scalar1() {
+        for (ss, sy, yy) in [(4.0, 2.0, 8.0), (1.0, 1.0, 1.0), (0.0, 2.0, 8.0)] {
+            assert_eq!(
+                initial_hessian_scalar(InitialApprox::HistoryMax, ss, sy, yy, 1.0, 1e-8, 1e8),
+                initial_hessian_scalar(InitialApprox::Scalar1, ss, sy, yy, 1.0, 1e-8, 1e8),
+            );
+        }
     }
 }
