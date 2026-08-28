@@ -296,6 +296,8 @@ pub struct PartitionedQuasiNewtonUpdater {
     prev_jac_c: Option<Vec<Number>>,
     prev_jac_d: Option<Vec<Number>>,
     stats: PartitionStats,
+    /// One-shot latch for `POUNCE_HESS_PATTERN_CENSUS`.
+    census_done: bool,
     /// Curvature pairs accepted / skipped, cumulative — a cheap health
     /// signal for the write-up.
     pub accepted_updates: u64,
@@ -327,6 +329,7 @@ impl PartitionedQuasiNewtonUpdater {
             prev_jac_c: None,
             prev_jac_d: None,
             stats: PartitionStats::default(),
+            census_done: false,
             accepted_updates: 0,
             skipped_updates: 0,
             dbg: DebugPeaks::default(),
@@ -1007,6 +1010,35 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
         if std::env::var("POUNCE_PARTITIONED_ORACLE").is_ok() {
             let exact = cq.borrow().curr_exact_hessian();
             if let Some(t) = exact.as_any().downcast_ref::<SymTMatrix>() {
+                // Feasibility census for a sparse finite-difference
+                // Hessian: the number of directional derivatives such a
+                // scheme needs is set by the coloring of this pattern,
+                // and `rho_max` (the widest symmetric row) is its
+                // practical lower bound. Printed once.
+                if std::env::var("POUNCE_HESS_PATTERN_CENSUS").is_ok() && !self.census_done {
+                    self.census_done = true;
+                    let n_h = t.space().dim() as usize;
+                    let mut deg = vec![0usize; n_h];
+                    for (&i, &j) in t.irows().iter().zip(t.jcols().iter()) {
+                        let (a, b) = ((i - 1) as usize, (j - 1) as usize);
+                        deg[a] += 1;
+                        if a != b {
+                            deg[b] += 1;
+                        }
+                    }
+                    let rho_max = deg.iter().copied().max().unwrap_or(0);
+                    let mean = deg.iter().sum::<usize>() as f64 / n_h as f64;
+                    let mut hist = [0usize; 8];
+                    for &d in &deg {
+                        let b = (d.saturating_sub(1) / 8).min(7);
+                        hist[b] += 1;
+                    }
+                    eprintln!(
+                        "hess-pattern: n={n_h} nnz={} rho_max={rho_max} mean_row={mean:.2} \
+                         hist(1-8,9-16,...)={hist:?}",
+                        t.nonzeros()
+                    );
+                }
                 use std::collections::HashMap;
                 let mut mine: HashMap<(Index, Index), Number> = HashMap::new();
                 for ((&i, &j), &v) in space
