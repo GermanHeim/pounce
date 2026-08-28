@@ -109,9 +109,25 @@ only state the Jacobian pattern, `jacobian` still wins, by less.
   stronger: each group's probe is checked for finiteness and retried with
   the step reversed, and a group that leaves the domain in both directions
   fails the update loudly rather than scattering NaN into `W`.
-* **Not run through `scripts/sweep-fixtures.sh`.** It is an opt-in path
-  and leaves both default legs bit-identical, but that sweep is the gate
-  before merge.
+* **Run through `scripts/sweep-fixtures.sh`: empty diff.** The gate is
+  met, not argued around. Baseline `origin/main` (`a5e0a83`) against this
+  branch (`ec78423`), 156 fixture-legs each, `exact` and `lbfgs`: not one
+  line moves — status, objective, iteration count and engine all
+  unchanged. The corpus is live rather than vacuous (5 `cvx-qcqp`, 36
+  `cvx-qp`, 37 `nlp` per leg; zero `NO_JSON`, zero `unknown`), so the
+  convex arms are covered as `CLAUDE.md` requires.
+
+  The control that makes the empty diff mean something: the two binaries
+  differ (`c14ed24a` vs `70773820`), and the baseline *rejects*
+  `hessian_approximation=finite-difference` while the branch accepts it.
+  So the feature is present and reachable in the swept binary and still
+  moves nothing on the default legs — which is the claim, rather than
+  "we changed nothing".
+
+  What the sweep does **not** cover: `finite-difference` itself. Both legs
+  run `exact` and `limited-memory` only, so the new path is never swept.
+  Its evidence is the `laptime` measurements above, and those do not
+  exercise restoration (`restoration_calls: 0` at N=80).
 
 ## Where the remaining cost is
 
