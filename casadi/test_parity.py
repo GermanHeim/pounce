@@ -1201,6 +1201,270 @@ def test_codegen_refuses_what_it_cannot_reproduce():
             check(f"codegen refuses {label} by name", refused, detail)
 
 
+def _hessian_free_objective():
+    """An objective whose Jacobian is an opaque callback declaring no
+    derivative of its own, so CasADi genuinely cannot form a Hessian.
+
+    This is the model class `hessian_approximation='finite-difference'`
+    exists for -- an FMU or `DaeBuilder` transcription with analytic first
+    derivatives and nothing above them -- and it is the one the plugin
+    could not serve while a single `exact_hessian_` flag stood for both
+    "may call cb_h for values" and "can declare a sparsity pattern".
+    """
+    class JacCB(ca.Callback):
+        def __init__(self, name):
+            ca.Callback.__init__(self)
+            self.construct(name, {})
+
+        def get_n_in(self):
+            return 2
+
+        def get_n_out(self):
+            return 1
+
+        def get_sparsity_in(self, i):
+            return ca.Sparsity.dense(3, 1) if i == 0 else ca.Sparsity.dense(1, 1)
+
+        def get_sparsity_out(self, i):
+            return ca.Sparsity.dense(1, 3)
+
+        def eval(self, arg):
+            x = np.array(arg[0]).flatten()
+            e = np.exp(x[0] * x[1])
+            return [ca.DM([[e * x[1] + 2 * (x[0] - 1), e * x[0], 4 * x[2] ** 3]])]
+
+        def has_jacobian(self):
+            return False
+
+    class FCB(ca.Callback):
+        def __init__(self, name):
+            ca.Callback.__init__(self)
+            self.jc = JacCB(name + "_jac")
+            self.construct(name, {})
+
+        def get_n_in(self):
+            return 1
+
+        def get_n_out(self):
+            return 1
+
+        def get_sparsity_in(self, i):
+            return ca.Sparsity.dense(3, 1)
+
+        def get_sparsity_out(self, i):
+            return ca.Sparsity.dense(1, 1)
+
+        def eval(self, arg):
+            x = np.array(arg[0]).flatten()
+            return [ca.DM(np.exp(x[0] * x[1]) + x[2] ** 4 + (x[0] - 1) ** 2)]
+
+        def has_jacobian(self):
+            return True
+
+        def get_jacobian(self, name, inames, onames, opts):
+            return self.jc
+
+    return FCB
+
+
+def test_finite_difference_does_not_need_second_derivatives():
+    """`finite-difference` must not require what it exists to replace.
+
+    Fails on the parent commit: `exact_hessian_` was cleared only for
+    `limited-memory`, so this mode still ran `create_function('nlp_hess_l')`
+    and died with CasADi's `Derivatives cannot be calculated for ...` --
+    the same error `exact` correctly gives -- on the only model class the
+    mode is for. Found in review by @srikanth-gm (gh#823).
+    """
+    FCB = _hessian_free_objective()
+    fcb = FCB("fcb_nohess")
+    x = ca.MX.sym("x", 3)
+    nlp = {"x": x, "f": fcb(x),
+           "g": ca.vertcat(x[0] ** 2 + x[1] ** 2 + x[2] ** 2 - 1.0)}
+    kw = dict(x0=[0.5, 0.5, 0.5], lbg=0, ubg=0)
+
+    # The reference: the same model written so CasADi *can* differentiate it.
+    y = ca.MX.sym("y", 3)
+    ref_nlp = {"x": y,
+               "f": ca.exp(y[0] * y[1]) + y[2] ** 4 + (y[0] - 1) ** 2,
+               "g": ca.vertcat(y[0] ** 2 + y[1] ** 2 + y[2] ** 2 - 1.0)}
+    ref = ca.nlpsol("ref", "pounce", ref_nlp,
+                    {"print_time": False, "pounce": {"print_level": 0}})(**kw)
+
+    # `exact` SHOULD still fail here -- there is no Hessian to evaluate.
+    exact_failed = False
+    try:
+        ca.nlpsol("e", "pounce", nlp,
+                  {"print_time": False,
+                   "pounce": {"print_level": 0, "hessian_approximation": "exact"}})
+    except Exception:
+        exact_failed = True
+    check("no-Hessian model: exact is still refused", exact_failed)
+
+    for pattern in ("declared", "jacobian"):
+        opts = {"print_time": False,
+                "pounce": {"print_level": 0,
+                           "hessian_approximation": "finite-difference",
+                           "fd_hessian_pattern": pattern}}
+        try:
+            r = ca.nlpsol("fd", "pounce", nlp, opts)(**kw)
+            ok, detail = close(r["f"], ref["f"], 1e-8), f"f={float(r['f']):.12g}"
+        except Exception as exc:
+            ok, detail = False, str(exc).strip().splitlines()[-1][:90]
+        check(f"no-Hessian model: finite-difference/{pattern} solves", ok, detail)
+
+
+def test_finite_difference_takes_structure_without_values():
+    """The capability split, on a model that HAS a Hessian.
+
+    `finite-difference` may read CasADi's Hessian *sparsity* -- it is worth
+    real probe groups -- but must never ask for a value, because the values
+    are what it recovers by probing. `cb_h` enforces that by refusing a
+    values request outright, so a solve that completes is itself the proof
+    that no value was ever requested.
+    """
+    x = ca.MX.sym("x", 3)
+    nlp = {"x": x,
+           "f": ca.exp(x[0] * x[1]) + x[2] ** 4 + (x[0] - 1) ** 2,
+           "g": ca.vertcat(x[0] ** 2 + x[1] ** 2 + x[2] ** 2 - 1.0)}
+    kw = dict(x0=[0.5, 0.5, 0.5], lbg=0, ubg=0)
+    ref = ca.nlpsol("ref", "pounce", nlp,
+                    {"print_time": False, "pounce": {"print_level": 0}})(**kw)
+
+    def built_hess(sol):
+        try:
+            sol.get_function("nlp_hess_l")
+            return True
+        except Exception:
+            return False
+
+    made = {}
+    for pattern in ("declared", "jacobian"):
+        sol = ca.nlpsol("fd", "pounce", nlp,
+                        {"print_time": False,
+                         "pounce": {"print_level": 0,
+                                    "hessian_approximation": "finite-difference",
+                                    "fd_hessian_pattern": pattern}})
+        made[pattern] = built_hess(sol)
+        r = sol(**kw)
+        check(f"fd/{pattern} reaches the exact objective",
+              close(r["f"], ref["f"], 1e-8), f"f={float(r['f']):.12g}")
+
+    # `declared` wants the pattern, so it builds the symbolic Hessian and
+    # uses it for STRUCTURE only. `jacobian` says the pattern comes from
+    # the Jacobian, so building it at all would be pure cost.
+    check("fd/declared obtains CasADi's Hessian sparsity", made["declared"])
+    check("fd/jacobian does not build a symbolic Hessian", not made["jacobian"])
+
+    lm = ca.nlpsol("lm", "pounce", nlp,
+                   {"print_time": False,
+                    "pounce": {"print_level": 0,
+                               "hessian_approximation": "limited-memory"}})
+    check("limited-memory builds no symbolic Hessian", not built_hess(lm))
+
+    # The split added a serialized field, so the stream version moved 1 -> 2.
+    # A v1 stream has no `hessian_structure` to read and is restored with
+    # `exact_hessian`, which is what the flag meant when the two were one.
+    with tempfile.TemporaryDirectory() as d:
+        for pattern in ("declared", "jacobian"):
+            S = ca.nlpsol("ser", "pounce", nlp,
+                          {"print_time": False,
+                           "pounce": {"print_level": 0,
+                                      "hessian_approximation": "finite-difference",
+                                      "fd_hessian_pattern": pattern}})
+            before = S(**kw)
+            path = os.path.join(d, f"fd_{pattern}.casadi")
+            S.save(path)
+            after = ca.Function.load(path)(**kw)
+            check(f"fd/{pattern} survives a serialization round trip",
+                  float(ca.norm_inf(ca.DM(before["x"]) - ca.DM(after["x"]))) == 0.0)
+
+
+def test_finite_difference_survives_restoration():
+    """A nonconvex pair with bounds that block the Newton direction, so the
+    solve enters feasibility restoration.
+
+    Fails on the parent commit with `Restoration_Failed` at iteration 6,
+    where every other Hessian mode converges: the FD updater ran inside the
+    restoration sub-NLP, whose primal is the 5-block compound, carrying a
+    pattern and an objective clique built for the original NLP's space.
+    Restoration runs limited-memory for it now, as it already did for the
+    partitioned Hessian and for the same stated reason.
+    """
+    x = ca.MX.sym("x", 3)
+    nlp = {"x": x, "f": x[0] + x[1] + x[2],
+           "g": ca.vertcat(x[0] ** 2 + x[1] ** 2 + x[2] ** 2 - 1.0,
+                           ca.sin(5 * x[0]) + x[1] ** 3 - 0.9)}
+    kw = dict(x0=[0.99, 0.99, 0.99], lbx=[-1, -1, -1], ubx=[1, 1, 1],
+              lbg=0, ubg=0)
+    gf = ca.Function("gf", [x], [nlp["g"]])
+
+    for mode in ("exact", "limited-memory", "finite-difference"):
+        sol = ca.nlpsol("s", "pounce", nlp,
+                        {"print_time": False,
+                         "pounce": {"print_level": 0, "max_iter": 500,
+                                    "hessian_approximation": mode}})
+        r = sol(**kw)
+        st = sol.stats()
+        entered = st.get("restoration", {}).get("calls", 0)
+        viol = float(np.max(np.abs(np.array(gf(r["x"])).flatten())))
+        xs = np.array(r["x"]).flatten()
+        boxed = bool(np.all(xs >= -1 - 1e-8) and np.all(xs <= 1 + 1e-8))
+        check(f"restoration/{mode}: converges",
+              st.get("return_status") == "Solve_Succeeded",
+              f'{st.get("return_status")}, resto_calls={entered}')
+        # The problem is nonconvex and the modes legitimately land on
+        # different local solutions, so the assertion is feasibility, not
+        # a shared objective.
+        check(f"restoration/{mode}: answer is feasible and in bounds",
+              viol < 1e-8 and boxed, f"|g|inf={viol:.2e}")
+    check("restoration: the fixture really does enter restoration",
+          entered > 0, f"resto_calls={entered}")
+
+
+def test_codegen_reproduces_the_finite_difference_hessian():
+    """The generated path must carry the same capability split as the
+    interpreted one.
+
+    Under `finite-difference` the emitted C declares the Hessian *pattern*
+    -- baked in as a literal, so the block needs no `nlp_hess_l`
+    dependency -- and wires an `eval_h` that serves the structure request
+    and refuses a values one. Getting this wrong is silent: the generated
+    solve would simply use CasADi's exact Hessian and quietly stop being a
+    finite-difference solve.
+    """
+    if not (shutil.which("cc") or shutil.which("gcc")):
+        print("SKIP  codegen finite-difference (no C compiler)")
+        return
+
+    x = ca.MX.sym("x", 3)
+    nlp = {"x": x,
+           "f": ca.exp(x[0] * x[1]) + x[2] ** 4 + (x[0] - 1) ** 2,
+           "g": ca.vertcat(x[0] ** 2 + x[1] ** 2 + x[2] ** 2 - 1.0)}
+    kw = dict(x0=[0.5, 0.5, 0.5], lbg=0, ubg=0)
+
+    with tempfile.TemporaryDirectory() as d:
+        for pattern in ("declared", "jacobian"):
+            S = ca.nlpsol(f"cg_fd_{pattern}", "pounce", nlp,
+                          {"print_time": False,
+                           "pounce": {"print_level": 0, "tol": 1e-10,
+                                      "hessian_approximation": "finite-difference",
+                                      "fd_hessian_pattern": pattern}})
+            want = S(**kw)
+            try:
+                G = _compile_generated(S, d, f"cg_fd_{pattern}")
+            except subprocess.CalledProcessError as exc:
+                check(f"codegen fd/{pattern} compiles", False,
+                      exc.stderr.strip().splitlines()[-1][:120])
+                continue
+            check(f"codegen fd/{pattern} compiles", True)
+            got = G(x0=[0.5, 0.5, 0.5], lbx=-ca.inf, ubx=ca.inf,
+                    lbg=0, ubg=0, lam_x0=0, lam_g0=0)
+            check(f"codegen fd/{pattern} == interpreted",
+                  float(ca.norm_inf(ca.DM(got["x"]) - ca.DM(want["x"]))) == 0.0,
+                  f"f={float(got['f']):.12g}")
+
+
 def main():
     probe_x = ca.MX.sym("x")
     try:
@@ -1242,6 +1506,10 @@ def main():
         test_codegen_matches_the_interpreted_solve,
         test_codegen_refuses_what_it_cannot_reproduce,
         test_output_does_not_tear_embedder_lines,
+        test_finite_difference_does_not_need_second_derivatives,
+        test_finite_difference_takes_structure_without_values,
+        test_finite_difference_survives_restoration,
+        test_codegen_reproduces_the_finite_difference_hessian,
     ):
         t()
     print()

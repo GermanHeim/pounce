@@ -43,6 +43,33 @@ changes.
   nor the multipliers moved (~7%). `fd_hessian_coloring` defaults to
   Curtis-Powell-Reid; star colouring needs fewer probes but is numerically
   wrong on a dense pattern — see `dev-notes/fd-hessian-from-jacobian.md`.
+  Feasibility restoration runs the limited-memory updater for this mode, as
+  it already did for `partitioned`: the restoration sub-NLP's primal is the
+  five-block compound, which the model's Hessian pattern and objective
+  clique do not describe. Without that scoping the mode was the only one to
+  report `Restoration_Failed` on a nonconvex fixture every other mode
+  solved, returning an answer 1.9 infeasible.
+
+- **The CasADi plugin can reach `finite-difference`, and asks CasADi only
+  for what the mode needs.** `casadi_nlpsol_pounce.cpp` carried a single
+  `exact_hessian_` flag standing for two independent capabilities — may
+  POUNCE call `cb_h` for Hessian *values*, and can the plugin declare a
+  sparsity *pattern*. The flag was cleared only for `limited-memory`, so
+  `hessian_approximation=finite-difference` still built CasADi's symbolic
+  `nlp_hess_l` and failed with `Derivatives cannot be calculated for ...` on
+  exactly the models the mode exists for: an external `Callback`, an FMU or
+  a `DaeBuilder` transcription with analytic first derivatives and nothing
+  above them. The two capabilities are now separate. `finite-difference`
+  reads CasADi's Hessian sparsity for its **structure only** — `cb_h`
+  refuses a values request outright, so a completed solve is itself proof
+  that every number was recovered by probing — and falls back to the
+  Jacobian-derived pattern when CasADi cannot build a symbolic Hessian at
+  all. `fd_hessian_pattern=jacobian` skips building it even where it is
+  available. Measured on a 3-variable model, the declared pattern is 4
+  nonzeros in 2 probe groups against the Jacobian superset's 6 in 3. The
+  same split is reproduced in the generated C, whose emitted `eval_h`
+  serves the pattern as a literal and refuses values. Found in review by
+  @srikanth-gm (gh#823).
 
 - **`hessian_approximation=partitioned` (negative result, opt-in).** Two
   partitioned quasi-Newton decompositions, built and measured against the same
