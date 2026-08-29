@@ -261,3 +261,48 @@ def test_the_coupled_variable_follows_the_decided_side():
             f"target {target}, mode {mode}")
         assert est[m.y] == pytest.approx(pyo.value(exact.y), abs=1e-4), (
             f"target {target}, mode {mode}")
+
+
+def test_release_all_takes_the_released_direction_undecided():
+    """degeneracy="release_all" hands back the all-released step with
+    no decision: on the kink's holding side the raw step follows the
+    released direction to -1, where the true derivative is 0, and the
+    repair belongs to whatever runs next. Deterministic, unlike
+    "one_sided", whose holding-side answer depends on which side the
+    held factorization leans toward."""
+    m = kink()
+    down = estimate(m, [(m.p, -1.0)], degeneracy="release_all",
+                    clamp=False)
+    assert down[m.x] == pytest.approx(-1.0, abs=1e-4), (
+        "the released direction follows p through the bound")
+
+
+def test_release_all_is_repaired_by_every_mode():
+    """The releasing side is right in every mode, and the holding
+    side's violation is repaired by each mode's own machinery: pins
+    under fix_relax, the walk under path, and the clamp under linear.
+    On this one-variable fixture the clamp repair is exact; the
+    neighbor coupling a clamp cannot repair needs a coupled fixture
+    and is documented on estimate()."""
+    m = kink()
+    for mode in ("linear", "fix_relax", "path"):
+        up = estimate(m, [(m.p, 1.0)], mode=mode,
+                      degeneracy="release_all")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            down = estimate(m, [(m.p, -1.0)], mode=mode,
+                            degeneracy="release_all")
+        assert up[m.x] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the releasing side's derivative is 1")
+        assert down[m.x] == pytest.approx(0.0, abs=1e-4), (
+            f"mode={mode}: the holding side repairs to the bound")
+
+
+def test_release_all_at_a_clean_base_point_is_the_plain_step():
+    """Without a weakly active bound there is nothing to release and
+    every degeneracy option takes the same step."""
+    m = kink(p=2.0)
+    assert pyo.value(m.x) == pytest.approx(2.0, abs=1e-6), "interior"
+    a = estimate(m, [(m.p, 3.0)], degeneracy="release_all")
+    b = estimate(m, [(m.p, 3.0)], degeneracy="one_sided")
+    assert a[m.x] == pytest.approx(b[m.x], abs=1e-12)

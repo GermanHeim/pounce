@@ -1301,7 +1301,15 @@ def estimate(model, perturb, clamp=True, mode="linear",
     a budget the engagement cannot fit falls back to the one-sided
     step with a warning naming the counts. "one_sided" takes the
     single-sided value today's thresholds produce, bit-identical to
-    the release before this option existed.
+    the release before this option existed. "release_all" releases
+    every weakly active bound undecided, at one back-solve and no QP:
+    the step is the all-released direction, and the bounds this
+    perturbation actually holds come back as bound crossings for the
+    mode or a correction to handle. It trades the decision's cost for
+    downstream repair: under mode="fix_relax" or "path" the crossings
+    are pinned or walked by the mode's own machinery, while
+    mode="linear" clamps each crossing coordinate and leaves its
+    neighbors carrying the released coupling.
 
     corrector_iter runs Newton iterations on the barrier system after
     the step, against an operator assembled at the predicted point:
@@ -1373,10 +1381,10 @@ def estimate(model, perturb, clamp=True, mode="linear",
         raise ValueError(
             "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
             f"{mode!r}")
-    if degeneracy not in ("directional", "one_sided"):
+    if degeneracy not in ("directional", "one_sided", "release_all"):
         raise ValueError(
-            "estimate: degeneracy must be 'directional' or 'one_sided', "
-            f"got {degeneracy!r}")
+            "estimate: degeneracy must be 'directional', 'one_sided' or "
+            f"'release_all', got {degeneracy!r}")
     _check_margins(bound_eps, max_pdpert, "estimate")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
@@ -1418,6 +1426,23 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 f"estimate: {e}. Falling back to the one-sided step, "
                 "the degeneracy='one_sided' behavior.")
             fell_back = True
+    if degeneracy == "release_all":
+        # Every weakly active bound is released undecided, at one
+        # back-solve and no QP: the bounds this perturbation actually
+        # holds come back as crossings for the mode or a correction to
+        # handle. fix_relax and path run their own machinery under the
+        # all-released treatment, the decided variants' empty held set.
+        if mode == "fix_relax":
+            step, pinned, stop = (
+                session.solver.parametric_step_bounded_decided(
+                    pin_idx, deltas, [], predictor_iter, bound_eps))
+        elif mode == "path":
+            step, segments = (
+                session.solver.parametric_step_path_decided(
+                    pin_idx, deltas, [], predictor_iter))
+        else:
+            step, _released = session.solver.parametric_step_release_all(
+                pin_idx, deltas)
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
             step, pinned, stop = session.solver.parametric_step_bounded(
@@ -1875,10 +1900,10 @@ def estimate_report(model, perturb, max_iter=None,
         raise ValueError(
             "estimate_report: mode must be 'linear', 'fix_relax' or "
             f"'path', got {mode!r}")
-    if degeneracy not in ("directional", "one_sided"):
+    if degeneracy not in ("directional", "one_sided", "release_all"):
         raise ValueError(
-            "estimate_report: degeneracy must be 'directional' or "
-            f"'one_sided', got {degeneracy!r}")
+            "estimate_report: degeneracy must be 'directional', "
+            f"'one_sided' or 'release_all', got {degeneracy!r}")
     _check_margins(bound_eps, max_pdpert, "estimate_report")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
@@ -1916,6 +1941,17 @@ def estimate_report(model, perturb, max_iter=None,
                 f"estimate_report: {e}. Falling back to the one-sided "
                 "step, the degeneracy='one_sided' behavior.")
             fell_back = True
+    if degeneracy == "release_all":
+        if mode == "fix_relax":
+            step, _, refine_stop = (
+                session.solver.parametric_step_bounded_decided(
+                    pin_idx, deltas, [], predictor_iter, bound_eps))
+        elif mode == "path":
+            step, _ = session.solver.parametric_step_path_decided(
+                pin_idx, deltas, [], predictor_iter)
+        else:
+            step, _released = session.solver.parametric_step_release_all(
+                pin_idx, deltas)
     if degeneracy == "one_sided" or fell_back:
         if mode == "fix_relax":
             step, _, refine_stop = session.solver.parametric_step_bounded(
@@ -2060,7 +2096,10 @@ def active_set_changes(model, perturb, predictor_iter=16,
     the first stretch. degeneracy_iter budgets that decision's
     back-solves, and a budget it cannot fit falls back to the one-sided
     record with a warning, and predictor_iter above still caps the path
-    itself.
+    itself. Under "release_all" every weakly active bound starts the
+    path released undecided, so a bound the perturbation holds appears
+    as a return to its bound along the path rather than a decision at
+    the base point.
 
     max_pdpert refuses rather than answering when the converged KKT
     factor carries an inertia correction larger than the value given.
@@ -2077,10 +2116,10 @@ def active_set_changes(model, perturb, predictor_iter=16,
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
 
-    if degeneracy not in ("directional", "one_sided"):
+    if degeneracy not in ("directional", "one_sided", "release_all"):
         raise ValueError(
-            "active_set_changes: degeneracy must be 'directional' or "
-            f"'one_sided', got {degeneracy!r}")
+            "active_set_changes: degeneracy must be 'directional', "
+            f"'one_sided' or 'release_all', got {degeneracy!r}")
     _check_margins(None, max_pdpert, "active_set_changes")
     _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
     pin_idx, deltas = _perturbation_deltas(session, perturb)
@@ -2099,6 +2138,9 @@ def active_set_changes(model, perturb, predictor_iter=16,
                 "one-sided record, the degeneracy='one_sided' behavior.")
             _, segments = session.solver.parametric_step_path(
                 pin_idx, deltas, predictor_iter)
+    elif degeneracy == "release_all":
+        _, segments = session.solver.parametric_step_path_decided(
+            pin_idx, deltas, [], predictor_iter)
     else:
         _, segments = session.solver.parametric_step_path(
             pin_idx, deltas, predictor_iter)

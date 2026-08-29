@@ -403,6 +403,7 @@ quantities they compare are the same size.
 ```python
 estimate(m, [(m.p, 2.5)], degeneracy="directional")   # the default
 estimate(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
+estimate(m, [(m.p, 2.5)], degeneracy="release_all")   # released, undecided
 ```
 
 `"directional"` decides each weakly active bound for the
@@ -445,6 +446,23 @@ solve sits inside the ambiguous band rather than exactly at the kink,
 releases at the fraction where its multiplier reaches zero rather
 than at the start. The record then carries that departure at its
 measured fraction.
+
+`"release_all"` releases every weakly active bound undecided, at one
+back-solve and no QP: the step is the all-released direction, and a
+weak bound the perturbation actually holds comes back as a bound
+crossing for whatever runs next. `fix_relax` pins it, `path` walks it
+and records a return to the bound along the path rather than a
+decision at the base point, and `linear` clamps the crossing
+coordinate, which repairs that coordinate alone and leaves its
+neighbors carrying the released coupling. The trade is the decision's
+cost against downstream repair, and the cost is deterministic and
+independent of `degeneracy_iter`, which makes this the option for a
+kinked base point too large for the engagement's budget, where
+`"directional"` pays the failed attempt and falls back to one-sided
+anyway. At an exact kink under `mode="linear"` the holding side's
+answer is the released one until the clamp truncates it, where
+`"directional"` decides it correctly, so the accuracy-first choice at
+small kink counts remains the default.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held

@@ -9,6 +9,19 @@ changes.
 
 ## [Unreleased]
 
+- **`degeneracy="release_all"`.** A third option beside `"directional"`
+  and `"one_sided"`, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`: every weakly active bound is released
+  undecided, at one back-solve and no directional QP. The bounds the
+  perturbation actually holds come back as bound crossings for the
+  mode or a correction to handle: `fix_relax` pins them, `path` walks
+  them, `linear` clamps each crossing coordinate and leaves its
+  neighbors carrying the released coupling. The trade is the
+  decision's cost, deterministic and independent of `degeneracy_iter`,
+  against downstream repair, and it is the option for a kinked base
+  point too large for the engagement's budget, where `"directional"`
+  pays the failed attempt and falls back to one-sided anyway.
+
 - **Limited-memory: the SMW update now costs one pass over the KKT factor,
   not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
   `LowRankAugSystemSolver` builds its Sherman-Morrison-Woodbury correction by

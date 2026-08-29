@@ -1134,6 +1134,57 @@ impl Solver {
         ))
     }
 
+    /// The all-released step: the plain parametric step solved with
+    /// every weakly active bound's row released, and nothing decided.
+    ///
+    /// This is [`Self::parametric_step_directional`]'s first
+    /// back-solve returned as the answer instead of refined. The
+    /// caller trades the engagement's budget for whatever violations
+    /// the released direction carries at weak bounds the perturbation
+    /// actually holds, which come back as crossings for the mode's
+    /// clamp, pins, or path segments, or for a correction, to handle.
+    /// A clean base point takes the plain step. Returns the direction
+    /// over the model's variables and the number of rows released.
+    pub fn parametric_step_release_all(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+    ) -> Result<(Vec<Number>, usize), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let weak = self.weakly_active_bounds()?;
+        let ctx = self.bound_context(None)?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let bs = &state.backsolver;
+        let mut d = vec![0.0; bs.dim()];
+        if weak.is_empty() {
+            if !bs.solve(&rhs_plain, &mut d) {
+                return Err(SolverError::BacksolveFailed);
+            }
+            return Ok((d[..ctx.n_x].to_vec(), 0));
+        }
+        let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+        let sigma = bs.released_sigma_x(&released).ok_or_else(|| {
+            SolverError::SensComputationFailed("release_all: released sigma unavailable".into())
+        })?;
+        // shift = false, as the directional path's all-released solve:
+        // a weak bound's multiplier is order sqrt(mu) and the released
+        // convention holds it at exactly zero, so the shift's
+        // multiplier injection is deliberately omitted.
+        if !bs.solve_released_prebuilt(
+            &released,
+            Rc::clone(&sigma),
+            None,
+            None,
+            &rhs_plain,
+            &mut d,
+            false,
+        ) {
+            return Err(SolverError::BacksolveFailed);
+        }
+        Ok((d[..ctx.n_x].to_vec(), released.len()))
+    }
+
     /// The eq. 14 directional derivative, decided by pounce-qp over
     /// the weak rows the direction engages.
     ///
