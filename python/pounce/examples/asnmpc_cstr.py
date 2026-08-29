@@ -18,6 +18,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Literal, Sequence
 
 import numpy as np
@@ -572,7 +573,7 @@ def _solve_with_recovery(
 
 def _component_value(
     component: VarData,
-    values: pyo.ComponentMap | None,
+    values: Mapping | None,
 ) -> float:
     """Read one model value, optionally from a sensitivity estimate."""
     if values is None:
@@ -587,7 +588,7 @@ def _component_value(
 def _profile_value(
     component: pyo.Var,
     requested: float,
-    values: pyo.ComponentMap | None,
+    values: Mapping | None,
 ) -> float:
     """Read the piecewise-constant value held at a collocation point."""
     indices = sorted(float(index) for index in component)
@@ -597,7 +598,7 @@ def _profile_value(
 
 def trajectory(
     model: pyo.ConcreteModel,
-    values: pyo.ComponentMap | None = None,
+    values: Mapping | None = None,
 ) -> Trajectory:
     """Extract a model or corrected estimate on the collocation grid."""
     grid = sorted(model.t)
@@ -699,7 +700,7 @@ def _corrected_update(
     return trajectory(background, values), report, events, latency_s, values
 
 
-def _load_estimate(values: pyo.ComponentMap) -> None:
+def _load_estimate(values: Mapping) -> None:
     """Materialize an accepted estimate as the next primal warm start."""
     for variable, value in values.items():
         variable.set_value(float(value), skip_validation=True)

@@ -361,6 +361,83 @@ changes.
   declared unbounded, where `dp = -5` predicts `x = -1` — plus an in-domain leg
   so "always fail" is not a passing fix, and a unit test on `residual_norm`
   for the mid-loop branch the fixture cannot reach.
+- **`estimate()` and `gradient()` no longer re-parse variable names on
+  every call.** The sensitivity session now keeps the variable data
+  objects the solve resolves when it loads its solution back, in
+  column order, and every later query reads that list instead of
+  routing each solver column's name through pyomo's component-UID
+  parser per call. On the 62k-variable double column (N=25 Radau
+  collocation), 62,412 `find_component` calls accumulate 0.87 s of
+  wall time inside one `estimate()` call, 13.9 us per name, measured
+  by an accumulating timer on the method itself. Constraint rows
+  resolve the same way, once per session, at the first report whose
+  crossed rows need them.
+
+- **`estimate()` returns a read-only `SolutionMap` instead of a
+  mutable `ComponentMap`.** Lookup, iteration, membership, length,
+  and `items()` are unchanged and still keyed by the component data
+  objects themselves. The keys and the identity index are shared per
+  session and each result carries only its value vector, so
+  constructing a result no longer pays one container insertion per
+  variable per call. Item assignment raises: writing into a result
+  never changed anything downstream.
+- **Release preflight: the option surface added since 0.10.0 is documented,
+  and four version references pointed at releases that do not exist.** A
+  registered-options-versus-`docs/src` diff over `v0.10.0..HEAD` found 39 new
+  options, of which 8 were reachable and undocumented: `fd_hessian_coloring`,
+  `fd_hessian_reuse_tol` and the five `partitioned_*` knobs, plus
+  `perturb_delta_c_max_rungs`. `hessian_approximation` itself had no section —
+  `finite-difference` was described only on the CasADi page, so a CLI, Python
+  or Pyomo user had no way to find a whole Hessian mode, and `partitioned` was
+  described nowhere. `options.md` now carries a **Hessian approximation**
+  section covering all four values and both extension modes' knobs, with the
+  measured reasons the surprising defaults are the defaults (star colouring
+  takes `laptime` to a wrong objective in 404 iterations where CPR takes 38 to
+  the right one; every finite `partitioned_curvature_cap` measured was worse
+  than off, non-monotonically), and `casadi.md` now points at it instead of
+  being the only copy.
+
+  The `ma57_*` family had the opposite problem: `installation.md` said "and the
+  rest — see [Options]", and Options listed none of them. It now has the table,
+  with each knob's `ICNTL`, and the note that matters for anyone upgrading —
+  through 0.10.0 **none of the nine reached the backend** (gh #825), so a build
+  that was "tuning MA57" was running defaults, and from 0.11.0 those settings
+  will actually take effect and move the trajectory.
+
+  Five version references were wrong rather than merely stale, all pointing at
+  releases that were never cut — only `v0.2.0` through `v0.10.0` exist, with no
+  patch release among them. `cli.md` dated the dual-sign fix (gh #271) to
+  "before v0.9.1" and `gams.md` dated its sibling, the GAMS marginal-sign fix
+  (gh #272), the same way; the CHANGELOG records both as landing *in* 0.9.0.
+  `gams.md` also dated the restoration-exit status fix (gh #589) to "before
+  v0.10.1"; it is in this release. And two install snippets pinned containers
+  to `0.9.0` — one of them in `installation.md`, ten lines under the paragraph
+  explaining that 0.9.0 is the release whose CLI will not start on Debian 12,
+  RHEL 8/9 or most cluster images.
+
+- **`docker/Dockerfile.release` drops from Debian trixie to bookworm.** The
+  trixie pin was the one item in `dev-notes/cargo-release.md` carrying an
+  expiry date: it existed because the wheels published through 0.9.0 bundled a
+  CLI needing glibc 2.39 (gh #452, fixed in gh #456), and the image installs a
+  *published* wheel, so it could not be lowered until a fixed one was on PyPI.
+  0.10.0 is. Measured on the artifact rather than inferred from the build —
+  `objdump -T pounce/bin/pounce` on the published
+  `manylinux_2_17_x86_64` wheel tops out at `GLIBC_2.16`, under manylinux2014's
+  own floor and well under bookworm's 2.36. The bookworm image is verified end
+  to end: `pounce --version`, `import pounce`, and `import pyomo_pounce` all
+  run on glibc 2.36. `installation.md`'s GLIBC troubleshooting entry now states
+  the measured floor instead of "fixed for releases after 0.9.0".
+
+- **The README's workspace table was missing three crates.** `pounce-nl` (the
+  `.nl` reader and AD tape) and `pounce-rs` (the single-crate Rust facade) are
+  both *published* to crates.io and both absent. `pounce-wasm`, which is behind
+  the documented in-browser demo, was missing too. The omission was easy to
+  miss because the table happened to list exactly 20 rows and the release
+  publishes exactly 20 crates — but they are different twenties: the publish
+  list drops `pounce-py` and `pounce-studio-pyo3` (they ship on PyPI) and keeps
+  `pounce-nl` and `pounce-rs`, and the table did the reverse. The table now
+  lists 23 of the 24 members; `iter-diff` stays out as an internal validation
+  tool that is not part of the solver.
 
 - **The QP suite's +515 iterations now have a name, and the fixture corpus can
   see the class they came from (gh #760).** `4c02817d` ("Apply
