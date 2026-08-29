@@ -36,10 +36,12 @@
 #
 # THE CONVEX ARM IS COVERED. DO NOT SKIP THIS SWEEP FOR A CONVEX-PATH CHANGE.
 # Both legs run at the default `solver_selection=auto`, and `auto` routes to
-# the most specialized engine it can, so the corpus splits three ways: 36
+# the most specialized engine it can, so the corpus splits three ways: 37
 # fixtures reach the convex QP interior-point, 5 the convex QCQP conic
-# interior-point, and 36 the NLP filter line-search. Forty-one of seventy-seven
-# fixtures never touch the NLP arm at all.
+# interior-point, and 37 the NLP filter line-search. Forty-two of seventy-nine
+# fixtures never touch the NLP arm at all. (Counted off the engine column of a
+# run on `fdea82b5`; recount it there rather than trusting this line, the split
+# moves whenever a fixture is added.)
 #
 # This is written in capitals because the reasoning it refutes has already
 # shipped once. gh#760: `4c02817d` applied `bound_relax_factor` on the convex
@@ -52,11 +54,20 @@
 # `MaximumIterationsExceeded`/199 to `SolveSucceeded`/69. The signal was there
 # for the asking.
 #
-# WHAT THE CORPUS STILL CANNOT TELL YOU is magnitude on large degenerate
-# models: every fixture here is small, so nothing in it predicted the 4.4x
-# iteration cost the same commit carried on the Maros-Meszaros QSCFXM family
-# (38 -> 168 iterations). A moved convex line is a signal to go measure
-# `benchmarks/qp`, not a bound on what you will find there.
+# WHAT THE CORPUS STILL CANNOT TELL YOU is magnitude on models the size of
+# the benchmark suite's. A moved convex line is a signal to go measure
+# `benchmarks/qp`, not a bound on what you will find there: the largest
+# fixture here is 813 variables and the QP suite reaches 93 263 (BOYD2).
+#
+# What it CAN now tell you is that the bound relaxation is expensive on a
+# degenerate model, which is the specific thing it could not in 2026-08.
+# Nothing in the corpus predicted `4c02817d`'s 4.4x on the Maros-Meszaros
+# QSCFXM family (38 -> 168) because no convex fixture in it was one on which
+# relaxing the box costs anything: swept twice, default vs
+# `bound_relax_factor=0`, the convex lines moved by tens of percent in both
+# directions and the largest well-posed one (`lp_degen2`) moved 18 -> 15.
+# `convex_qp_qscfxm1` is QSCFXM1 itself and moves 131 -> 30 on both legs, so
+# the magnitude class is now IN the diff a reviewer reads (gh#760).
 #
 # THE ENGINE COLUMN (gh#760). Each line records which engine solved the model.
 # Status, objective and iteration count can all three be unchanged while a

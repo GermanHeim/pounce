@@ -115,6 +115,64 @@ still *responds* to a step-rule perturbation. It deliberately asserts no
 absolute iteration count — those are the most platform-sensitive numbers in the
 repository. Measuring is the sweep's job.
 
+## The second gap, one dimension over (gh#760)
+
+Size was not the whole of it. Two months after the four fixtures above landed,
+`4c02817d` applied `bound_relax_factor` on the convex arm — a correctness fix
+— and cost **+515 iterations across the 138-problem Maros–Mészáros QP suite**,
+4.4× on the QSCFXM family. The corpus, by then carrying a 534-column
+degenerate LP, still did not predict it.
+
+Not because the models were small. Because **not one of them was a model on
+which relaxing the box costs anything.** Swept twice on `fdea82b5`, default
+versus `bound_relax_factor=0`, every convex line that moves at all:
+
+| fixture | relaxed | `bound_relax_factor=0` |
+|---|---|---|
+| `lp_degen2` (534 cols) | 18 | 15 |
+| `feasible_x0_sentinel_bound` | 27 | 25 |
+| `feasible_x0_extreme_row` | 32 | 33 |
+| `scaled_feasible_b` | 44 | 47 |
+| `qcqp_ball` | 12 | 17 |
+| `lp_afiro`, `lp_israel`, `lp_share1b`, `convex_qp_share1b` | unmoved | unmoved |
+
+Tens of percent, in both directions, plus two ill-scaled stress fixtures
+(`scaled_feasible_a` 69 → 199, `feasible_x0_wide_scale` 32 → 80) whose numbers
+are about their scaling. A reviewer reading that diff learns "small and mixed",
+which is true of the corpus and false of the suite.
+
+The four above were chosen for *pathology* — degeneracy, ill-conditioning,
+dense columns, a quadratic term. None of those is the dimension a bound
+relaxation acts on, which is how much slack the box has where the multipliers
+are large. That is the same failure as gh#690's, one dimension over: a corpus
+uniform in the dimension a change acts on reports "no effect" no matter what
+else it varies.
+
+| fixture | source | n | m | iters | `bound_relax_factor=0` |
+|---|---|---|---|---|---|
+| `convex_qp_qscfxm1` | Maros–Mészáros `QSCFXM1` | 457 | 330 | 131 | 30 |
+
+`QSCFXM1` is the cheapest member of the family the benchmark measured — 457
+columns and 0.40 s per leg, against `QSCFXM3`'s 1371 columns and 1.7 s — and
+carries the same 4.4× signature. Published optimum `1.68826917D+07` (DOC 97/6,
+BPMPD); POUNCE returns 1.6882691485e+07, 1.3e-8 relative. Provenance is the
+same harness as the others:
+
+```sh
+cd benchmarks/qp && python3 generate_nl.py QSCFXM1
+cp nl/QSCFXM1.nl ../../crates/pounce-cli/tests/fixtures/convex_qp_qscfxm1.nl
+```
+
+The sweep's wall time goes 10.9 s → 11.9 s for it (three runs each way, spread
+under 0.3 s). `crates/pounce-cli/tests/issue_760_convex_bound_relax_magnitude.rs`
+pins the routing, the dimensions, the published optimum and the *ratio* — no
+absolute count, same reason as the gh#690 file. Mutation-checked: set the
+convex arm's relax factor back to zero and two of its three tests go red at
+1.00×.
+
+Full record of the measurement it exists for:
+`dev-notes/qp-bound-relax-iteration-cost.md`.
+
 ## What this does not fix
 
 The models gh#535 was actually filed on — NETLIB/Mészáros `gen`/`gen1`, where
@@ -133,5 +191,8 @@ no `NumericalFailure` on the corpus as it stood.
   the source of the table above.
 * gh#724 — the LP→NLP reroute gate omitted `NumericalFailure`; found by the
   same study, fixed alongside this corpus work.
+* gh#760 — the same population failure one dimension over, and the
+  `convex_qp_qscfxm1` fixture that closes it:
+  `dev-notes/qp-bound-relax-iteration-cost.md`.
 * `dev-notes/trajectory-regressions-and-the-fixture-sweep.md` — why the sweep
   exists at all (gh#544, gh#592).
