@@ -85,8 +85,15 @@ pip install 'casadi==3.7.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
 
 Per-platform build notes:
 
-- **Linux** — inside a manylinux image, `-D_GLIBCXX_USE_CXX11_ABI=0` to match
-  the CasADi wheels (the Makefile's default), then `auditwheel` **excluding**
+- **Linux** — inside a manylinux image, `-D_GLIBCXX_USE_CXX11_ABI` set to
+  match the CasADi wheel being built against. Do not assume 0: casadi
+  publishes both a `manylinux2014` build (old ABI) and, from 3.8.0, a
+  `manylinux_2_28` build (new ABI) of the *same version*, and pip picks
+  between them on the image's glibc (gh#782). The Makefile measures it from
+  the installed `libcasadi.so` and `make -C casadi abi-flags` prints what it
+  decided; a wheel staged against the wrong one links clean — a `-shared`
+  link tolerates undefined symbols — and fails at the user's `dlopen` as
+  `Plugin 'pounce' is not found`. Then `auditwheel` **excluding**
   `libcasadi` (it must resolve to the user's installed copy at runtime, not be
   vendored). `auditwheel repair` also does the manylinux retag, so
   `POUNCE_CASADI_PLAT_NAME` is not needed when it runs — but note it *refuses*

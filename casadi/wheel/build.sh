@@ -32,7 +32,7 @@ try:
 except ImportError:
     sys.exit(
         "error: casadi is not installed in this environment.\n"
-        "       pip install 'casadi>=3.7,<3.8' and re-run."
+        "       pip install casadi and re-run."
     )
 version = getattr(casadi, "__version__", None)
 if version is None:
