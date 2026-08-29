@@ -58,6 +58,7 @@ one solver mechanism. One cell of the matrix is
 | `scholtes_cold` | `G*H <= tau` | continuation, independent cold solves |
 | `scholtes_warm_primal` | `G*H <= tau` | continuation, primal-only warm starts |
 | `scholtes_warm_full` | `G*H <= tau` | continuation, full primal/dual/barrier warm starts |
+| **`scholtes_then_ncp`** | `G*H <= tau`, then `G*H = 0` | **the supported route**: continuation to locate the branch, then one exact-product solve seeded from it |
 
 Controls: `no_acceptable` (`acceptable_iter=0`), `no_scaling`
 (`nlp_scaling_method=none`), `upstream_heuristics` (the three POUNCE-only
@@ -66,6 +67,16 @@ as restoring bit-for-bit upstream Ipopt behaviour), and `no_presolve`.
 gh#794 requires these to be run before a failure is attributed to a new
 mechanism, and the report lists only the cells whose verdict actually
 moves under one.
+
+The composition is the route the Gate 0 report recommends, and neither
+half is sufficient alone: the continuation always converges but its
+answer is only ever feasible for `G*H <= tau`, and the exact-product
+solve returns an MPCC-feasible point but fails from a cold start where a
+pair is biactive. The finishing solve takes the **point and nothing
+else** — the relaxed problem's duals are duals of a different constraint
+(the product row is an active inequality at `G*H <= tau` and an equality
+at `G*H = 0`), and seeding them measurably sent a three-variable finish
+into a thrash that had not returned in 25 s.
 
 ## The ladder
 
@@ -114,6 +125,26 @@ solver, no per-route backend selection. So no comparison in the result
 file crosses a linear-algebra boundary and none needs the disclosure
 gh#794 asks for. The optional CCOpt comparison would cross one, which is
 part of why it is pinned rather than merely named.
+
+## The complementarity tolerance floor
+
+`G*H` is quadratically flat at the corner, so a solve that drives the
+product to `eps` pins each side of the pair only to `sqrt(eps)`. Two
+things follow, and both are visible throughout the results:
+
+* **an objective is only as good as `sqrt(tol)`.** At the pinned
+  `tol = 1e-8` that is `1e-4`, whatever route produced it — `ralph1` at
+  a residual of `2.6e-09` sits `5.07e-05` below `f*`, against
+  `sqrt(2.6e-09) = 5.1e-05`.
+* **so is the stationarity class.** The MPCC multipliers a biactive pair
+  generates at that residual are themselves `O(sqrt(eps))`, and S- and
+  C-stationarity differ only in their signs.
+
+`spec.pair_activity` is built on the same fact: membership is judged
+against `max(ACTIVE_TOL, sqrt(tol) * term_scale)`, not a fixed
+tolerance. A fixed `1e-6` classified twelve points that had reached the
+optimum to nine digits as `none` — not even weakly stationary — and the
+triage table read them as solver defects.
 
 ## What a record contains, and the one rule about reading it
 
