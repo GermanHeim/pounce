@@ -90,15 +90,17 @@ automatically when no exact Lagrangian Hessian is available.
 
 **The convex arm is covered — do not skip the sweep for a convex-path
 change.** Both legs run at the default `solver_selection=auto`, which routes
-to the most specialized engine available, so 41 of the 77 fixtures never touch
-the NLP arm at all: 36 reach the convex QP interior-point and 5 the convex
-QCQP conic one. gh#760 is the case for saying so explicitly — `4c02817d`
-skipped the sweep on the reasoning that "this is a trajectory change on the
-convex path, not the NLP path, so `scripts/sweep-fixtures.sh` does not cover
-it", and substituted an objective-parity check over the convex corpus.
-Objective parity is blind to trajectory by construction. Run across that
-commit the sweep moves 52 fixture-legs and flips `scaled_feasible_a` on the
-lbfgs leg from `MaximumIterationsExceeded`/199 to `SolveSucceeded`/69.
+to the most specialized engine available, so 42 of the 79 fixtures never touch
+the NLP arm at all: 37 reach the convex QP interior-point and 5 the convex
+QCQP conic one (counted off the engine column on `fdea82b5`; recount rather
+than trust it, the split moves whenever a fixture is added). gh#760 is the
+case for saying so explicitly — `4c02817d` skipped the sweep on the reasoning
+that "this is a trajectory change on the convex path, not the NLP path, so
+`scripts/sweep-fixtures.sh` does not cover it", and substituted an
+objective-parity check over the convex corpus. Objective parity is blind to
+trajectory by construction. Run across that commit the sweep moves 52
+fixture-legs and flips `scaled_feasible_a` on the lbfgs leg from
+`MaximumIterationsExceeded`/199 to `SolveSucceeded`/69.
 
 Each line also records **which engine solved the model** (`cvx-qp`,
 `cvx-qcqp`, `nlp`). Status, objective and iteration count can all be unchanged
@@ -107,17 +109,29 @@ engine, so a routing regression used to leave no trace in the diff. A line
 whose only moving field is the engine is a routing change, and is as
 reportable as a moved iteration count.
 
-What the corpus still cannot give you is **magnitude on large degenerate
-models**. Every convex fixture is 1–32 variables while the substantial models
-(`deb7`, `eigena2`/`eigenb2`, `pooling_rt2stp`) are all NLP class — see
-`dev-notes/convex-fixture-corpus.md`. Nothing in the corpus predicted the 4.4×
-iteration cost `4c02817d` carried on the Maros-Meszaros QSCFXM family
-(38 → 168). A moved convex line is a signal to go measure `benchmarks/qp`, not
-a bound on what you will find there.
+What the corpus still cannot give you is **magnitude at benchmark scale**. The
+largest fixture of any class is `deb7` at 813 variables and the largest convex
+one is `lp_degen2` at 534, while `benchmarks/qp` reaches 93 263 (`BOYD2`). A
+moved convex line is a signal to go measure `benchmarks/qp`, not a bound on
+what you will find there.
+
+The *degenerate* half of that gap is closed, and how it was closed is the
+lesson. Nothing in the corpus predicted the 4.4× iteration cost `4c02817d`
+carried on the Maros-Meszaros QSCFXM family (38 → 168) — not because the
+fixtures were small (gh#690 had already added 142–534-column convex ones) but
+because **not one of them was a model on which relaxing the box costs
+anything**. Swept twice, default versus `bound_relax_factor=0`, the convex
+lines move by tens of percent in both directions and `lp_degen2` moves 18 → 15.
+`convex_qp_qscfxm1` is QSCFXM1 itself, moves 131 → 30 on both legs, and is
+pinned by `crates/pounce-cli/tests/issue_760_convex_bound_relax_magnitude.rs`.
+The general rule it instances is the branch rule below: a corpus that is
+uniform in the dimension a change acts on reports "small and mixed" no matter
+how large its models are. See `dev-notes/qp-bound-relax-iteration-cost.md` and
+`dev-notes/convex-fixture-corpus.md`.
 
 Nor does it cover the convex arm's **cost-normalization** (`σ`) path, and
 neither does `benchmarks/qp` — measured, not assumed, while fixing gh#414
-reopened: exactly **1 of 78** fixtures reaches it (`qcqp_columns_illcond`, on
+reopened: exactly **1 of 79** fixtures reaches it (`qcqp_columns_illcond`, on
 both legs) and **0 of 138** Maros-Meszaros problems do. `σ` engages only when
 `max(‖P‖∞, ‖c‖∞)·ε > tol`, which almost nothing in either corpus satisfies. So
 an empty sweep *and* an empty `benchmarks/qp` diff are together compatible with

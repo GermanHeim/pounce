@@ -81,6 +81,43 @@ independent HiGHS QP solve:
 
 All reported `Optimal Solution Found`.
 
+## A step in this suite's iteration counts, and where it came from
+
+`4c02817d` ("Apply bound_relax_factor on the convex arm too") took this
+suite's total from **2633 to 3148 iterations (+515)** and its wall time from
+354.7 s to 382.0 s, with no status flips and no objective regressions. The
+QSCFXM family carries most of it: `QSCFXM3` 38 → 168, `QSCFXM2` 35 → 145,
+`QSCFXM1` 30 → 131.
+
+That is a recorded, accepted cost, not a regression to bisect. The convex arm
+used to read the `.nl` bounds verbatim while the NLP arm relaxed them, so one
+binary on one file solved two different models depending on
+`solver_selection`; the cheap old counts were the cost of solving an easier,
+wrong model. To confirm the attribution on any current build, without checking
+out an old one:
+
+```bash
+target/release/pounce nl/QSCFXM1.nl --no-sol                        # 131 iters
+target/release/pounce nl/QSCFXM1.nl --no-sol bound_relax_factor=0   #  30 iters
+```
+
+`bound_relax_factor=0` is exactly what the extractors used to read before
+`4c02817d`, so it restores the pre-commit counts to the iteration — 30 / 35 /
+38 on QSCFXM1/2/3, re-verified on the current tree. That is the whole bisect.
+
+The suite has since been re-run so the committed `BENCHMARK_REPORT.md` is
+again what the current tree produces: total **3164** iterations, six models
+moved against the 2026-08-23 run, no status flips and no objective changes.
+That movement is `d18c289e` ("escalate the primal (x,x) regularization on
+wrong inertia"), not the bound relaxation, and it is a **speed-up**: STADAT1
+goes 34 → 92 iterations and 4.89 s → 0.72 s, Q25FV47 120 iterations and
+10.96 s → 3.20 s, measured at that commit and its parent. Across the suite
+nothing got slower by more than 12 %. Read this table by time as well as by
+iteration count.
+
+Full record, including why the cost is right and what the fixture corpus could
+not see: `dev-notes/qp-bound-relax-iteration-cost.md` (gh#760).
+
 ## Contents
 
 - `generate_nl.py` — downloads the `.mat` mirror (into `data/`, gitignored)
