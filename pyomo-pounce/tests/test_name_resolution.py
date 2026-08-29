@@ -3,8 +3,8 @@ variable exactly once, when the solve loads its solution back.
 
 Every later query reads the captured objects: routing a name through
 `find_component` parses it through pyomo's component-UID lexer, and
-doing that per variable per call was 2.2 s of a 3.4 s `estimate()`
-call on a 62k-variable model.
+doing that per variable per call was 1.4 s of a 3.4 s `estimate()`
+call on the 62k-variable double column (N=25 Radau collocation).
 """
 from unittest import mock
 
@@ -91,3 +91,44 @@ def test_estimate_keys_are_the_models_own_variables():
     est = estimate(m, [(m.p, 1.2)])
     for i in range(3):
         assert m.x[i] in est
+
+
+def test_the_report_and_the_record_resolve_names_once_per_session():
+    """The report's constraint rows resolve lazily, once per session:
+    the first estimate_report() call resolves exactly the solve's row
+    names, every later call and every active_set_changes() call
+    resolves nothing."""
+    from pyomo_pounce import active_set_changes, estimate_report
+    from pyomo_pounce.sens import _REG
+
+    m = solved()
+    session = m.__dict__[_REG].session
+    with _counting() as fc:
+        estimate_report(m, [(m.p, 1.5)])
+    assert fc.call_count == len(session.con_names), (
+        f"the first report resolves the row names once: "
+        f"{fc.call_count} of {len(session.con_names)}")
+    with _counting() as fc:
+        estimate_report(m, [(m.p, 1.6)])
+    assert fc.call_count == 0, (
+        f"a later report resolves nothing: {fc.call_count}")
+    with _counting() as fc:
+        active_set_changes(m, [(m.p, 1.5)])
+    assert fc.call_count == 0, (
+        f"the record resolves nothing: {fc.call_count}")
+
+
+def test_solution_maps_compare_by_contents_without_hashing_keys():
+    """Mapping's default equality round-trips through dict(self) and
+    raises on unhashable component data; the identity-index equality
+    returns the bool ComponentMap returned."""
+    m = solved()
+    a = estimate(m, [(m.p, 1.5)])
+    b = estimate(m, [(m.p, 1.5)])
+    c = estimate(m, [(m.p, 1.6)])
+    assert a == a
+    assert a == b
+    assert not (a == c)
+    assert a != c
+    assert not (a == {})
+    assert not (a == 5)

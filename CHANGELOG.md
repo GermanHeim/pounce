@@ -14,9 +14,10 @@ changes.
   objects the solve resolves when it loads its solution back, in
   column order, and every later query reads that list instead of
   routing each solver column's name through pyomo's component-UID
-  parser per call. On a 62k-variable collocation model that parsing
-  was 2.2 s of a 3.4 s `estimate()` call. Constraint rows resolve the
-  same way, once per session, at the first report that needs them.
+  parser per call. On the 62k-variable double column (N=25 Radau
+  collocation) that parsing was 1.4 s of a 3.4 s `estimate()` call.
+  Constraint rows resolve the same way, once per session, at the
+  first report that needs them.
 
 - **`estimate()` returns a read-only `SolutionMap` instead of a
   mutable `ComponentMap`.** Lookup, iteration, membership, length,
@@ -26,6 +27,7 @@ changes.
   constructing a result no longer pays one container insertion per
   variable per call. Item assignment raises: writing into a result
   never changed anything downstream.
+
 - **Limited-memory: the SMW update now costs one pass over the KKT factor,
   not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
   `LowRankAugSystemSolver` builds its Sherman-Morrison-Woodbury correction by

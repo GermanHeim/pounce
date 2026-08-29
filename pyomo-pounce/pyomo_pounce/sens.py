@@ -338,6 +338,23 @@ class SolutionMap(Mapping):
     def __contains__(self, vd):
         return id(vd) in self._index_of
 
+    def __eq__(self, other):
+        # Mapping's default equality round-trips through dict(self),
+        # which raises on unhashable component data, the very reason
+        # ComponentMap exists. Compare through the identity index the
+        # way ComponentMap compares.
+        if self is other:
+            return True
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        if len(self) != len(other):
+            return False
+        for k, v in other.items():
+            i = self._index_of.get(id(k))
+            if i is None or float(self._values[i]) != v:
+                return False
+        return True
+
     def __repr__(self):
         return f"SolutionMap({len(self._keys)} variables)"
 
@@ -377,28 +394,17 @@ class _Session:
         # when the solve loads its solution back. A column the
         # declared-parameter surgery created has no model counterpart
         # and holds None. Resolving a name through find_component
-        # parses it through pyomo's component-UID lexer, ~2 s over a
-        # 62k-variable model, and every estimate() and
+        # parses it through pyomo's component-UID lexer, 1.4 s of a
+        # 3.4 s estimate() call on the 62k-variable double column
+        # (N=25 Radau collocation), and every estimate() and
         # gradient(target=None) call needs the whole list, so the one
         # resolution the solve already performs is kept instead. The
         # references are the solve's own objects: a caller who deletes
         # and rebuilds model components after the solve invalidates
         # this session like any other of its caches.
         self.var_data = None
-        self._var_by_name = None      # var name -> data, built on demand
         self._row_data = None         # user row name -> data, on demand
         self._solution_keys = None    # (keys, id -> column), on demand
-
-    def orig_var(self, name):
-        """The captured variable for a solver column's name, None for a
-        column with no model counterpart. Every caller iterates
-        `var_names`, so an unknown name is a caller bug and returns
-        None rather than a fallback resolution."""
-        by = self._var_by_name
-        if by is None:
-            by = dict(zip(self.var_names, self.var_data))
-            self._var_by_name = by
-        return by.get(name)
 
     def user_row_data(self):
         """The original model's constraint data per solve row, in .row
@@ -1216,8 +1222,7 @@ def gradient(target=None, *, wrt, max_pdpert=None):
             "derivative for the perturbation it is given.")
     params = list(_iter_data(wrt))
     if target is None:
-        targets = [v for v in (session.orig_var(nm)
-                               for nm in session.var_names) if v is not None]
+        targets = [v for v in session.var_data if v is not None]
     else:
         targets = list(_iter_data(target))
     if target is not None and not target.is_indexed() and len(params) == 1:
@@ -2957,7 +2962,7 @@ def _conditioned_on(session, act, rows, who):
             pinned = (_classify_ratio(sig / max(q_red, floor), mu)
                       == "strongly_active")
         if pinned:
-            v = session.orig_var(session.var_names[idx])
+            v = session.var_data[idx]
             out.append(v if v is not None else session.var_names[idx])
     return tuple(out)
 
