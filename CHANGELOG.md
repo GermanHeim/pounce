@@ -9,6 +9,56 @@ changes.
 
 ## [Unreleased]
 
+- **A promoted second-opinion re-solve is now recorded, instead of reading as a
+  speed-up (gh #850).** When the base solve fails and a ladder rung recovers it,
+  the report's `status` and `statistics.iteration_count` both became the
+  *promoted rung's* and nothing else said the base solver had failed — so a
+  fixture that **lost** its baseline solve and is now only rescued by a retry
+  read in `scripts/sweep-fixtures.sh` as a large improvement:
+
+  ```text
+                                                  status              iters
+    v0.10.0, defaults                             SolveSucceeded       116
+    HEAD, defaults                                SolveSucceeded        54
+    HEAD, infeasibility_perturbed_start_retry=no  RestorationFailed    131
+  ```
+
+  `v0.10.0` does not have `infeasibility_perturbed_start_retry` — it rejects the
+  option outright — so that 116 is the *base solver* converging and HEAD's base
+  solver no longer does; the only thing between the user and a
+  `RestorationFailed` is a rung added in the same release. The sweep read it as
+  `116 → 54`, a 2× win. That is worse than a gap in the evidence: the sweep is
+  the repo's primary trajectory guard and CLAUDE.md makes it the *required*
+  evidence for a trajectory change, so a guard that converts a lost solve into a
+  recorded win produces positive evidence for the wrong conclusion. It is the
+  same shape of invisibility the engine column was added to close (gh #760).
+
+  `SecondOpinionOutcome` now carries `base_status`, `base_iteration_count` and
+  `rung_iteration_counts`, so the base solve survives a promotion; the JSON
+  report gained an additive `second_opinion` block (absent entirely when the
+  verdict opened no ladder, so its *presence* is itself the signal); and the
+  sweep gained a `2nd=` column built from it — `-`, `kept(n),tot=N`, or
+  `<rung>@<base status>/<base iters>,tot=N`.
+
+  **The column immediately found a second hidden fixture.**
+  `degenerate_start_hs008` is also solved only by a rung — its base solve
+  returns `InfeasibleProblemDetected` — and it reads `SolveSucceeded` at
+  `it=5`. Fifteen fixture-legs now carry a `2nd=` entry and every one of them
+  was reporting a fraction of its true cost: `square_flowsheet_resto` really
+  costs `131 + 54 = 185` against a reported 54, `degenerate_start_hs008` costs
+  30 against 5, and among the legs where the ladder promotes *nothing*,
+  `issue_508_infeasible_gap_1em4` costs 982 against a reported 441.
+
+  **The underlying regression on `square_flowsheet_resto` is made visible here,
+  not fixed.** gh #850 bisects it to `2c4f25f1` ("perf(feral): wire
+  increase_quality…"), and per CLAUDE.md a measured regression recorded as an
+  accepted cost needs an owner; `dev-notes/second-opinion-promotions-in-the-sweep.md`
+  records the measurement, the bisect and what is left to answer.
+
+  Note for anyone holding an older sweep baseline: the new column moves **every**
+  line, so a diff across this commit is not comparable field-by-field. Re-baseline
+  against a binary built at or after it.
+
 - **The PSD guard no longer switches itself off above `n = 1500` (gh #849).**
   `_PSD_CHECK_AUTO_MAX_N = 1500` made the default `check_psd=None` skip the
   check entirely for larger problems, so the convex QP interior-point engine —
