@@ -231,6 +231,36 @@ pub trait AugSystemSolver {
         None
     }
 
+    /// Factorize **and** solve `nrhs` right-hand sides in a single
+    /// backend call, with `packed_rhs` in the same column-major layout
+    /// [`Self::try_resolve_many_flat`] uses. Solutions overwrite
+    /// `packed_rhs` in place.
+    ///
+    /// This is the factorizing counterpart of `try_resolve_many_flat`,
+    /// and it exists to reproduce upstream's single
+    /// `AugSystemSolver::MultiSolve` (`IpLowRankAugSystemSolver.cpp:487`)
+    /// in one step rather than two. Splitting that call into a
+    /// single-RHS `solve` followed by a batched `try_resolve_many_flat`
+    /// costs one **extra full traversal of the factor**: a sparse
+    /// triangular solve streams the whole factor once per call and then
+    /// applies it to every column, so its cost is `F + nrhs·W` with `F`
+    /// several times `W` on a large KKT. Merging the two calls removes
+    /// one `F` per Sherman-Morrison-Woodbury update.
+    ///
+    /// Returns `None` when the backend does not support the path, in
+    /// which case the caller keeps the split. Inertia bookkeeping
+    /// (`check_neg_evals` / `num_neg_evals`) matches [`Self::solve`].
+    fn try_solve_many_flat(
+        &mut self,
+        _coeffs: &AugSysCoeffs<'_>,
+        _packed_rhs: &mut [Number],
+        _nrhs: usize,
+        _check_neg_evals: bool,
+        _num_neg_evals: Index,
+    ) -> Option<ESymSolverStatus> {
+        None
+    }
+
     /// Whether [`Self::try_resolve_many_flat`] with `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate [`Self::resolve`] calls.
     ///
