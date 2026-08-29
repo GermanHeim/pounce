@@ -35,8 +35,18 @@
 //! # The cost was understated too
 //!
 //! `statistics.iteration_count` is the promoted rung's **alone**. The 131
-//! iterations that failed first are not in it, so the fixture's true cost is
-//! `131 + 54 = 185`, 3.4× what the report says.
+//! iterations that failed first are not in it, so that fixture's true cost was
+//! `131 + 54 = 185`, 3.4× what the report said.
+//!
+//! # What recording it made possible
+//!
+//! With the loss legible it was traced to the `increase_quality` rung, and
+//! `feral_increase_quality=no` recovers both of this fixture's legs — see
+//! `issue850_increase_quality_regression.rs`, which also records why that is
+//! an option rather than a changed default. The column also exposed a second
+//! instance the issue never mentions, `degenerate_start_hs008`, whose base
+//! solve returns `Infeasible_Problem_Detected` at 9 iterations and which is
+//! reported `SolveSucceeded` at `it=5` against a true cost of 30.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -54,10 +64,21 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Solve `name` and return its JSON report as untyped text.
+///
+/// The output paths carry the *options* as well as the fixture name. Three
+/// tests here solve `PROMOTING` — with the rung on, with it off, and for the
+/// cost check — and cargo runs them on parallel threads, so a filename keyed
+/// on the fixture alone has them overwriting each other's report and reading
+/// whichever landed last. That is a race in the test, and it showed up as
+/// exactly one intermittently-red assertion.
 fn report(name: &str, extra: &[&str]) -> String {
     let dir = std::env::temp_dir();
-    let sol = dir.join(format!("pounce_850_{name}.sol"));
-    let json = dir.join(format!("pounce_850_{name}.json"));
+    let tag: String = format!("{name}{}", extra.join("_"))
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let sol = dir.join(format!("pounce_850_{tag}.sol"));
+    let json = dir.join(format!("pounce_850_{tag}.json"));
     let out = Command::new(pounce_exe())
         .arg(fixture(name))
         .arg(&sol)
@@ -82,6 +103,20 @@ fn number(json: &str, key: &str) -> Option<i64> {
     let rest = json[at..].trim_start();
     let end = rest.find(|c: char| !c.is_ascii_digit() && c != '-')?;
     rest[..end].parse().ok()
+}
+
+/// The integers of a `"key": [a, b, c]` array.
+fn numbers(json: &str, key: &str) -> Option<Vec<i64>> {
+    let pat = format!("\"{key}\":");
+    let at = json.find(&pat)? + pat.len();
+    let rest = json[at..].trim_start().strip_prefix('[')?;
+    let end = rest.find(']')?;
+    Some(
+        rest[..end]
+            .split(',')
+            .filter_map(|t| t.trim().parse().ok())
+            .collect(),
+    )
 }
 
 fn string(json: &str, key: &str) -> Option<String> {
@@ -148,10 +183,21 @@ fn the_true_cost_is_recorded_not_just_the_promoted_rungs() {
         "the reported {reported} iterations understate the true cost {total}, \
          which is the point of recording it"
     );
+    // `total` is the base solve plus *every* rung, not just the promoted one.
+    // This fixture runs three (9 + 7 + 5 against a base of 9), so an assertion
+    // of `base + reported` would only have been right for a single-rung
+    // fixture -- which is what it was originally written against.
+    let rungs = numbers(&json, "rung_iteration_counts").expect("rung_iteration_counts");
     assert_eq!(
         total,
-        base + reported,
-        "with one rung promoted, total is exactly base + the promoted rung"
+        base + rungs.iter().sum::<i64>(),
+        "total must be the base solve plus every rung: base {base}, rungs {rungs:?}"
+    );
+    assert_eq!(
+        rungs.last().copied(),
+        Some(reported),
+        "the promoted rung is the last one tried, and its count is what \
+         `statistics.iteration_count` reports"
     );
 }
 

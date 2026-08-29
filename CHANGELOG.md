@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+- **`feral_increase_quality`: a lever for the `increase_quality` rung, which
+  costs two solves on `square_flowsheet_resto` (gh #850, the underlying
+  regression).** `2c4f25f1` wired `FeralSolverInterface::increase_quality`,
+  which had returned a hard-coded `false`, through to FERAL's escalation ladder.
+  Ipopt calls `IncreaseQuality` when `PdFullSpaceSolver`'s refinement stalls and
+  every upstream backend that can escalate does, so wiring it looked like
+  restoring a missing rung.
+
+  The contract it restores is not the one the ladder satisfies. MA57 answers by
+  raising `pivtol` toward `pivtolmax` — strictly more conservative each time, so
+  keeping it raised for the rest of the solve can only make the factorization
+  safer. FERAL's ladder changes *which pivots are taken*, a lateral move in
+  trajectory terms, and it persists identically. On `square_flowsheet_resto` it
+  reroutes both legs into failure:
+
+  ```text
+    exact   Optimal/99   ->  RestorationFailed/131, shipped only because a
+                             second-opinion rung rescues it at 185 total
+    lbfgs   Optimal/178  ->  3000 iterations, at the cap, rescued by nothing
+  ```
+
+  The lbfgs leg is worse than the reported exact one and was found by the `2nd=`
+  column added below, which showed it failing with no ladder behind it.
+
+  **The default is unchanged, and that is a finding rather than a hedge.** The
+  rung also buys things nothing else supplies: the 12-variable model in
+  `watchdog_trial_is_not_a_divergence_verdict` ends `SolvedToAcceptableLevel` at
+  `obj = 3.7e-6` with it and at `obj = 3.42` against `f* = 0` without it — a
+  wrong-ish answer under a success-shaped status, which is worse than an honest
+  failure — plus 15–25% of the iterations on five fixture-legs. Nothing
+  separates the two sides: measured with a process-global firing cap the rung
+  fires exactly twice on `square_flowsheet_resto`, once in the main solve at
+  iteration 25 and once inside restoration at `76r`, and allowing **only the
+  first** still loses the leg, so scoping it out of restoration would not help;
+  nor does a count, since `deb7` and `square_flowsheet_resto` each fire it
+  exactly twice on their exact legs, one gaining 16% and the other losing its
+  verdict.
+
+  So `feral_increase_quality=no` is the documented recovery — it solves both
+  legs cleanly — and resolving this properly needs a *revertible* escalation,
+  one that does not govern every later factorization, which FERAL's
+  `quality_level` cannot express today (it only ratchets up). Not to be confused
+  with `feral_refine`, the other half of that commit and where its performance
+  win lives: refinement makes no difference to either regressed leg.
+  `dev-notes/second-opinion-promotions-in-the-sweep.md` carries the full
+  measurement.
+
 - **A promoted second-opinion re-solve is now recorded, instead of reading as a
   speed-up (gh #850).** When the base solve fails and a ladder rung recovers it,
   the report's `status` and `statistics.iteration_count` both became the

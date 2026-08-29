@@ -57,13 +57,97 @@ added in the same release window. gh#850 bisects the loss to `2c4f25f1`
 ("perf(feral): wire increase_quality, and turn the backend refinement off for
 the IPM (gh#698 obs 5)").
 
-**This regression is not fixed here, and per CLAUDE.md it needs an owner.**
-gh#850 is closed by making it *visible* — the sweep now prints
-`start_point_perturbation=1e-2@Restoration_Failed/131,tot=185` on that line, so
-the next reader meets the fact rather than a 2× win. The underlying question —
-why `2c4f25f1` cost the base solver this model, and whether the refinement
-should be restored for restoration sub-problems — is separate work on a
-different commit and belongs in its own issue.
+## The regression itself, and what it turned out to be
+
+Made visible first, then fixed. The visible form is what the sweep now prints
+on that line — `start_point_perturbation=1e-2@Restoration_Failed/131,tot=185`
+— and it is what let the second, worse instance be found at all.
+
+**The lbfgs leg was worse than the reported exact one and nothing was rescuing
+it.** With the column in place, `lbfgs square_flowsheet_resto` reads
+`MaximumIterationsExceeded`, `it=3000`, `2nd=-`: it ran to the cap, and no
+ladder opened because that verdict does not trigger one. The exact leg at
+least came back `SolveSucceeded`.
+
+**Which half of `2c4f25f1` did it.** That commit does two things — wires
+`increase_quality`, and turns the backend refinement off — and only the first
+is responsible. Measured, one binary, the rung switchable:
+
+| `increase_quality` | `feral_refine` | exact leg |
+|---|---|---|
+| on (0.11 default) | off (default) | `RestorationFailed`, 131 |
+| on | **on** | `RestorationFailed`, 131 |
+| **off** | off | **`Optimal`, 99** |
+| off | on | `Optimal`, 99 |
+
+Refinement makes no difference to this model in either direction, so the
+68.9 s → 18.8 s win that `2c4f25f1` bought — which lives entirely in
+`refine = false` — is untouched by the fix.
+
+**Why the rung costs a solve.** Ipopt calls `IncreaseQuality` when
+`PdFullSpaceSolver`'s refinement stalls, and MA57 answers by raising `pivtol`
+toward `pivtolmax`: strictly more conservative each time, so keeping it raised
+for the rest of the solve can only make the factorization safer. FERAL's ladder
+changes *which pivots are taken*, which is a lateral move in trajectory terms,
+and it persists the same way — across every later factorization, including a
+restoration sub-solve's. On this fixture it fires exactly twice: once in the
+main solve at iteration 25, and once inside restoration at `76r`.
+
+**There is no firing-count policy that separates the cases.** `deb7` and
+`square_flowsheet_resto` each fire the rung exactly twice on their exact legs;
+one gains 16% of its iterations and the other loses its verdict. So the fix is
+a default, not a cap: `feral_increase_quality` is off, and `=yes` restores the
+0.11 behaviour for a problem that needs it.
+
+**The trade, from the sweep — 18 fixture-legs move.** Within the CLI corpus the
+rung costs a *verdict* twice and buys *iterations* five times:
+
+| | with the rung | without |
+|---|---|---|
+| `exact square_flowsheet_resto` | `RestorationFailed`/131, rescued at 185 total | **`Optimal`/99, no ladder** |
+| `lbfgs square_flowsheet_resto` | `MaximumIterationsExceeded`/3000 | **`Optimal`/178** |
+| `exact deb7` | 147 | 171 |
+| `exact pooling_rt2stp` | 109 | 128 |
+| `lbfgs eigena2` | 186 | 202 (`ErrorInStepComputation` either way) |
+| `lbfgs pooling_rt2stp` | 295 | **273** |
+| three ladder `tot=` counts on infeasible fixtures | | +3 ‥ +24 |
+
+On that evidence alone the rung looks like a bad trade, and the first draft of
+this work flipped the default off. **The workspace suite refuted it**, which is
+worth recording because the fixture corpus could not:
+`pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`'s 12-variable
+model ends `SolvedToAcceptableLevel` at `obj = 3.7e-6` **with** the rung and at
+`obj = 3.42` against `f* = 0` **without** it. That is a wrong-ish answer under a
+success-shaped status — worse than an honest cap failure — and the 158-leg sweep
+is blind to it because the model is not a CLI fixture. The same lesson as the
+corpus notes in CLAUDE.md, one layer out.
+
+**And nothing separates the two sides.** Measured with a process-global firing
+cap, the rung fires exactly twice on `square_flowsheet_resto` — once in the main
+solve at iteration 25 and once inside restoration at `76r` — and allowing *only
+the first* still loses the leg, so declining it for the restoration sub-solve
+would not help. Nor does a count: `deb7` and `square_flowsheet_resto` each fire
+it exactly twice on their exact legs, one gaining 16% of its iterations and the
+other losing its verdict.
+
+**So the default stands and the rung gets a lever, not a flip.**
+`feral_increase_quality=no` recovers both legs of `square_flowsheet_resto`
+cleanly (99 and 178 iterations), and is the documented recovery for a model this
+rung costs. Pinned by
+`crates/pounce-cli/tests/issue850_increase_quality_regression.rs`, which asserts
+the trade in both directions.
+
+**What a real fix needs.** A *revertible* escalation — one that does not govern
+every later factorization, including a restoration sub-solve's. FERAL's
+`quality_level` cannot express that today: it only ratchets up, with no reset.
+That is the shape of the remaining work, and it is upstream of this repo.
+
+**One thing checked and worth knowing:** gh#590's badly-scaled LP grid
+(`issue_590_primal_noise_floor_component`, data scale `1e10` and `1e11`, six
+seeds), which `2c4f25f1` cites as needing the escalation once refinement came
+off, passes with the rung off — so that particular justification no longer
+binds. The perf claim that commit measured lives in `feral_refine`, which none
+of this touches.
 
 The cost is understated on the same lines, and the `tot=` field is what says
 so. `square_flowsheet_resto` really costs `131 + 54 = 185`, 3.4× its reported
