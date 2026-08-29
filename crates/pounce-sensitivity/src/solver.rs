@@ -1287,6 +1287,7 @@ impl Solver {
             &released,
             Rc::clone(&sigma),
             None,
+            None,
             &rhs_plain,
             &mut d0,
             false,
@@ -1376,6 +1377,7 @@ impl Solver {
                 if !bs.solve_released_prebuilt(
                     &released,
                     Rc::clone(&sigma),
+                    None,
                     None,
                     &unit,
                     &mut xk,
@@ -1503,6 +1505,7 @@ impl Solver {
                 if !bs.solve_released_prebuilt(
                     &released,
                     Rc::clone(&sigma),
+                    None,
                     None,
                     &comb,
                     &mut corr,
