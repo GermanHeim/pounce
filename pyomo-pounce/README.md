@@ -153,21 +153,26 @@ install fails on the dependency. Two workarounds:
 2. **Install `pounce-solver` from source** via maturin:
 
    ```bash
-   cd pounce/python && maturin develop --release
-   # then `cargo install --path ../crates/pounce-cli` to get the CLI
-   # since maturin develop does not bundle the binary.
+   make -C pounce dev     # maturin develop --release + the bundled CLI
    pip install pyomo-pounce
    ```
+
+   `make dev` rather than a bare `maturin develop --release`: maturin builds
+   the extension module and not the CLI, and this plugin shells out to the
+   CLI. Without it the plugin falls through to the checkout's
+   `target/release/pounce` (warning that it did) or, failing that, to
+   whatever `pounce` is on `PATH` — see gh #816.
 
 ## Running the tests locally
 
 Which binary the tests exercise depends on whether a *bundled* one is
 present: the plugin prefers `pounce/bin/pounce` inside the installed
-`pounce-solver` package and falls back to `PATH` only when that is absent.
-Neither setup above bundles anything, so a plain source checkout takes the
-fallback path while CI takes the bundled one. Tests that describe the
-bundled arrangement then skip, and the suite you run locally is not the
-suite CI runs.
+`pounce-solver` package, then the surrounding checkout's own
+`target/release/pounce` or `target/debug/pounce`, and reaches `PATH` only
+when there is neither (gh #816). Setup 1 above bundles nothing, so a plain
+source checkout takes one of the fallback rungs while CI takes the bundled
+one. Tests that describe the bundled arrangement then skip, and the suite you
+run locally is not the suite CI runs.
 
 To match CI, stage the freshly built CLI into the package *before* building
 the wheel — this is what `.github/workflows/ci.yml` does:

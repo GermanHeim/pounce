@@ -43,8 +43,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, ScalingRequest, Solution,
+    SparsityRequest, StartingPoint, TNLP,
 };
 use pounce_sensitivity::Solver;
 
@@ -81,11 +81,28 @@ struct CeilingWithWorkload {
     /// bound, so the equality still holds `x` at `PIN` but nothing is
     /// degenerate and no ceiling can engage.
     bounded: bool,
+    /// Per-variable `user-scaling` factors, or `None` to decline
+    /// scaling. The declared frame is read at the iterate, so it has to
+    /// be in the iterate's own units; every other fixture here is
+    /// unit-scaled, which is the configuration `205bb67` was invisible
+    /// in.
+    x_scaling: Option<[Number; 6]>,
     /// Starting point override, for warm-starting the truth solve.
     start: Option<Vec<Number>>,
 }
 
 impl TNLP for CeilingWithWorkload {
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(d) = self.x_scaling else {
+            return false;
+        };
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = true;
+        req.x_scaling.copy_from_slice(&d);
+        *req.use_g_scaling = false;
+        true
+    }
+
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: 6,
@@ -230,13 +247,34 @@ fn solved(
     start: Option<Vec<Number>>,
     tol: Option<Number>,
 ) -> Solver {
+    solved_in_frame(t, q0, bounded, crossover, start, tol, 0.0, None)
+}
+
+/// `solved`, with the two knobs the declared-frame recompute is
+/// sensitive to and every other fixture here pins at one value:
+/// `relax` (`bound_relax_factor`) and `x_scaling`.
+#[allow(clippy::too_many_arguments)]
+fn solved_in_frame(
+    t: Number,
+    q0: Number,
+    bounded: bool,
+    crossover: bool,
+    start: Option<Vec<Number>>,
+    tol: Option<Number>,
+    relax: Number,
+    x_scaling: Option<[Number; 6]>,
+) -> Solver {
     let mut app = IpoptApplication::new();
     {
         let o = app.options_mut();
         o.set_integer_value("print_level", 0, true, false).unwrap();
         o.set_string_value("sb", "yes", true, false).unwrap();
-        o.set_numeric_value("bound_relax_factor", 0.0, true, false)
+        o.set_numeric_value("bound_relax_factor", relax, true, false)
             .unwrap();
+        if x_scaling.is_some() {
+            o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
+                .unwrap();
+        }
         o.set_string_value(
             "crossover",
             if crossover { "yes" } else { "no" },
@@ -253,6 +291,7 @@ fn solved(
         t,
         q0,
         bounded,
+        x_scaling,
         start,
     }));
     let mut solver = Solver::new(app, tnlp);
@@ -397,5 +436,167 @@ fn a_crossover_solve_corrects_at_the_predicted_point() {
         "the declared frame must follow the iterate: {plain:e} ->          {corrected:e} (residual {:e} -> {:e})",
         rep.initial_residual,
         rep.residual,
+    );
+}
+
+/// The declared-frame arm under a **non-unit change of variables**.
+///
+/// `corrector_sigma` forms `s = Pᵀx − b_l` from `curr.x` and
+/// `declared_x_bounds()`. Those coincide at unit scaling, which is what
+/// every other fixture in this file runs, and `205bb67` is the corrector
+/// frame defect that was invisible for exactly that reason — in its own
+/// words, the two "coincide only at unit scaling, which is every fixture
+/// it had."
+///
+/// The reason this holds is worth stating, because it is not obvious
+/// from `corrector_sigma`: variable scaling is applied by a TNLP
+/// *wrapper* (`pounce_nlp::scaling_tnlp::wrap_with_scaling`) that sits
+/// **outside** `OrigIpoptNlp`, so the box the core snapshots as
+/// `declared_x_l` and the iterate it carries are both already in the
+/// scaled frame. There is nothing to reapply, which is what
+/// `declared_x_bounds`'s own comment says. This arm is what makes that
+/// a checked fact rather than a read.
+///
+/// Asserted as **parity with the unscaled arm**, not against a
+/// hand-derived value: the correction must close the same fraction of
+/// the same gap, since a change of variables does not move the KKT
+/// point. That is the criterion `variable_scaling_sensitivity.rs` uses.
+#[test]
+fn the_declared_frame_follows_the_iterate_under_a_change_of_variables() {
+    // Deliberately spread over four orders, and non-unit on the pinned
+    // variable and the workload variable both.
+    const D: [Number; 6] = [1.0e2, 1.0e-2, 5.0, 1.0e-1, 2.0, 1.0e1];
+
+    let unscaled = solved_in_frame(2.0, Q0, true, true, None, None, 0.0, None);
+    let scaled = solved_in_frame(2.0, Q0, true, true, None, None, 0.0, Some(D));
+
+    let closed = |solver: &Solver| -> (Number, Number) {
+        let base = solver.converged().expect("converged").x.clone();
+        let want = truth(2.0, true, &base);
+        let step = solver
+            .parametric_step_full(&[3], &[DELTA])
+            .expect("full step");
+        let n = base.len();
+        let plain = dist(&add(&base, &step[..n]), &want);
+        let (out, rep) = solver
+            .correct_step(&[3], &[DELTA], &step, 8)
+            .expect("corrector");
+        assert!(rep.improved(), "the correction must act");
+        (plain, dist(&add(&base, &out[..n]), &want))
+    };
+
+    let (plain_u, corr_u) = closed(&unscaled);
+    let (plain_s, corr_s) = closed(&scaled);
+
+    // The workload is the same problem either way, so the plain step
+    // leaves the same gap. If this fails the two arms are not comparable
+    // and the parity below would be meaningless.
+    assert!(
+        (plain_s - plain_u).abs() <= 1e-6 * plain_u.max(1.0),
+        "the two arms must pose the same problem: {plain_u:e} vs {plain_s:e}",
+    );
+    assert!(
+        corr_u < plain_u / 10.0 && corr_s < plain_s / 10.0,
+        "both arms must correct: {plain_u:e} -> {corr_u:e}, {plain_s:e} -> {corr_s:e}",
+    );
+    // The invariant. A frame mix would show here as the scaled arm
+    // closing a different fraction, because `s` would carry `d` while
+    // the bound did not.
+    let ratio = (corr_s / corr_u).abs();
+    assert!(
+        (0.1..=10.0).contains(&ratio),
+        "the corrected error must not depend on the change of variables: \
+         unscaled {corr_u:e}, scaled {corr_s:e} (ratio {ratio:e})",
+    );
+}
+
+/// The declared-frame arm where the predicted point lands **outside the
+/// declared box**.
+///
+/// `bound_context` builds the corrector's box from the **live relaxed**
+/// bounds, so at a non-zero `bound_relax_factor` the predicted point may
+/// sit up to `δ` outside a declared bound and `s = x − b_l` goes
+/// negative. `declared_slack_floor` is what keeps that a
+/// large-but-finite `Σ` rather than a negative diagonal or a NaN. Every
+/// other fixture here sets `bound_relax_factor = 0.0`, so declared and
+/// relaxed bounds coincide and that floor is never load-bearing.
+///
+/// **Reaching the branch needed a wider perturbation than the file's
+/// `DELTA`, and that is the point of the constant below.** At -0.45 the
+/// predicted point still lands inside the declared box — the lower
+/// block's minimum raw slack is exactly `0`, the pinned variable on its
+/// bound — so this test passed while testing nothing. At -0.9 the raw
+/// slack reaches `-9.85e-9`, and it tracks `bound_relax_factor`
+/// (`-9.99e-5` at `1e-2`), which is what identifies it as the relaxation
+/// margin rather than as noise.
+///
+/// **What is asserted is the floor's guarantee, not convergence.** At
+/// this perturbation the corrector declines — `improved()` is false and
+/// the handed step comes back unchanged — and that is correct rather
+/// than a defect: the same `-0.9` step at `bound_relax_factor = 0`,
+/// where no slack goes negative, *does* report `improved()` and lands
+/// **1.28e0 from the truth against the plain step's 4.51e-1**, i.e. it
+/// "improves" a residual while moving the answer three times further
+/// away. That is the gh#764 property the re-solve oracle exists for —
+/// `improved()` plus a falling residual does not imply the answer is
+/// close — and declining is the better of the two behaviours. Asserting
+/// "the correction must act" here would have pinned the worse one.
+#[test]
+fn the_declared_frame_survives_a_point_outside_the_declared_box() {
+    // The registered default, i.e. what a user actually gets.
+    const RELAX: Number = 1e-8;
+    // Wide enough that the predicted point leaves the declared box; see
+    // the doc comment for the measurement.
+    const WIDE: Number = -0.9;
+
+    let solver = solved_in_frame(2.0, Q0, true, true, None, None, RELAX, None);
+    let base = solver.converged().expect("converged").x.clone();
+    let step = solver
+        .parametric_step_full(&[3], &[WIDE])
+        .expect("full step");
+    let n = base.len();
+
+    let (out, rep) = solver
+        .correct_step(&[3], &[WIDE], &step, 8)
+        .expect("corrector");
+
+    // The floor's guarantee: a finite operator, hence a finite step. A
+    // negative diagonal or a `z/0` would surface here as a NaN or an
+    // infinity rather than as a bad number.
+    assert!(
+        out.iter().all(|v| v.is_finite()),
+        "the corrected step must be finite at a point outside the declared box",
+    );
+    assert!(
+        rep.residual.is_finite() && rep.initial_residual.is_finite(),
+        "residuals must be finite: {:e} -> {:e}",
+        rep.initial_residual,
+        rep.residual,
+    );
+    // Declining returns the caller's own step, put back into the box.
+    // Pinned so that a corrector which learns to act here fails
+    // deliberately rather than silently — at which point the assertion
+    // to add is against a re-solve, not against `improved()`.
+    assert!(
+        !rep.improved(),
+        "measured: the corrector declines at this perturbation; if it now \
+         acts, check it against a re-solve before loosening this",
+    );
+
+    // And the narrower perturbation still corrects at the same relaxed
+    // bounds, so the decline above is the step width, not the relaxation.
+    let step_n = solver
+        .parametric_step_full(&[3], &[DELTA])
+        .expect("full step");
+    let want = truth(2.0, true, &base);
+    let plain = dist(&add(&base, &step_n[..n]), &want);
+    let (out_n, rep_n) = solver
+        .correct_step(&[3], &[DELTA], &step_n, 8)
+        .expect("corrector");
+    let corrected = dist(&add(&base, &out_n[..n]), &want);
+    assert!(
+        rep_n.improved() && corrected < plain / 10.0,
+        "the declared frame must still correct at the default \
+         bound_relax_factor: {plain:e} -> {corrected:e}",
     );
 }

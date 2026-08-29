@@ -7,6 +7,19 @@ the import.
 ## Install
 
 ```sh
+make dev                     # from the repo root: extension module + CLI
+```
+
+`make dev` is `maturin develop --release` plus the step maturin does not do:
+building the `pounce` CLI and staging it at `python/pounce/bin/pounce`, where
+the wheel puts it and where the `pounce` console script looks for it. A bare
+`maturin develop` leaves the CLI unbuilt; the console script then falls back
+to `target/release/pounce` (announcing that it did), and anything that shells
+out to `pounce` runs a build directory rather than the package's own binary.
+
+Just the extension module, if that is all you need:
+
+```sh
 cd python
 pip install maturin
 maturin develop --release    # builds the native extension into your venv

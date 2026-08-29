@@ -18,6 +18,7 @@
 #   make uninstall        # remove installed artifacts
 #   make docker           # container image compiled from the current tree
 #   make docker-release   # container image from the published PyPI wheels
+#   make dev              # build the CLI + extension for a source checkout
 #   make install-mcp      # build studio/mcp + register with Claude Code
 #   make uninstall-mcp    # unregister + remove the studio/mcp venv
 #   make install-skill    # build pounce + pounce-studio, drop SKILL.md into ~/.claude/skills/
@@ -76,7 +77,8 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
-        python-ext python-cli-bin python-test coverage coverage-quick \
+        test-ma57 \
+        dev python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
         docker docker-release
 
@@ -207,6 +209,39 @@ pounce-ma57:
 	@echo "Add $(abspath $(TARGET_DIR)) to PATH or copy the binary into ~/.local/bin"
 	@echo "to invoke it as just 'pounce-ma57'."
 
+# Run the whole workspace with the MA57 backend actually LINKED.
+#
+# CI cannot do this: it has no CoinHSL, so `ci.yml` passes
+# `--exclude pounce-hsl` everywhere and compile-checks that crate with
+# `cargo check`, which neither links nor runs anything. The entire MA57
+# link path is therefore exercised only here, by someone with an install
+# — which is how gh#811's defect survived in four more crates than the
+# one it was fixed in.
+#
+# Every crate that links coinhsl needs its own `ma57` feature, because
+# the rpath travels as `links` metadata to *direct* dependents only; the
+# feature list below is the set, and a new such crate has to join it.
+#
+# pounce-wasm is excluded rather than added to it. Enabling `ma57`
+# anywhere in the workspace unifies the feature onto pounce-algorithm, so
+# pounce-wasm's *host* test binary links coinhsl and needs the rpath like
+# any other — but its real target is wasm32, where libcoinhsl does not
+# exist and MA57 can never run. Giving it an `ma57` feature to satisfy a
+# host-only build artifact would advertise a backend it cannot have.
+#
+# Needs COINHSL_DIR pointing at an install whose lib/ holds libcoinhsl.
+MA57_FEATURES := pounce-cli/ma57,pounce-cinterface/ma57,pounce-algorithm/ma57,\
+pounce-py/ma57,pounce-restoration/ma57,pounce-rs/ma57,pounce-sensitivity/ma57
+
+test-ma57:
+	@test -n "$(COINHSL_DIR)" || { \
+	  echo "COINHSL_DIR is not set. Point it at a CoinHSL install whose"; \
+	  echo "lib/ holds libcoinhsl.dylib (or .so), e.g."; \
+	  echo "    make test-ma57 COINHSL_DIR=/path/to/CoinHSL"; \
+	  exit 1; }
+	$(CARGO) test --workspace --exclude pounce-wasm $(CARGO_PROFILE_FLAG) \
+	  --features "$(MA57_FEATURES)" $(CARGO_FLAGS)
+
 help:
 	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,48p'
 
@@ -249,6 +284,20 @@ python-cli-bin:
 
 python-ext: python-cli-bin
 	cd python && maturin develop --release
+
+# The one command that makes a source checkout behave like an installed
+# wheel. `maturin develop` on its own builds the extension module and
+# nothing else, which leaves the `pounce` console script pointing at a
+# bundled binary that was never built — every CLI invocation fails,
+# `--version` included, and Pyomo reports the solver unavailable while an
+# in-process solve works fine (gh #816). `dev` is `python-ext` under the
+# name the error messages tell people to run.
+dev: python-ext
+	@echo
+	@echo "Source checkout ready:"
+	@echo "  CLI staged at python/pounce/bin/pounce (what the wheel ships)"
+	@echo "  extension module built in place"
+	@echo "Verify with: pounce --version"
 
 python-test: python-ext
 	cd python && python -m pytest tests -q

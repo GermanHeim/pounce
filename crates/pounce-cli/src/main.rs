@@ -1480,6 +1480,19 @@ pub fn main() -> ExitCode {
     // option.
     app.set_presolve_already_applied(true);
 
+    // `POUNCE_DROP_HESSIAN=1` hides the model's second derivatives, so a
+    // `.nl` — which always carries an exact Hessian through AMPL's AD —
+    // can be benchmarked as the Hessian-less model the quasi-Newton and
+    // finite-difference paths actually target. See `no_hessian_tnlp`.
+    let post_presolve: Rc<RefCell<dyn TNLP>> =
+        if pounce_cli::no_hessian_tnlp::NoHessianTnlp::requested() {
+            Rc::new(RefCell::new(
+                pounce_cli::no_hessian_tnlp::NoHessianTnlp::new(Rc::clone(&post_presolve)),
+            ))
+        } else {
+            Rc::clone(&post_presolve)
+        };
+
     // Wrap so we can pull eval-call counts out for the final summary.
     let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;

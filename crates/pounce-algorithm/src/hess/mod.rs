@@ -3,7 +3,9 @@
 //! `IpLimMemQuasiNewtonUpdater.{hpp,cpp}` (Phase 8).
 
 pub mod exact;
+pub mod fd_hessian;
 pub mod lim_mem_quasi_newton;
+pub mod partitioned_quasi_newton;
 pub mod r#trait;
 
 pub use r#trait::HessianUpdater;

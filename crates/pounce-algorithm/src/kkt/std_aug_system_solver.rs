@@ -97,6 +97,15 @@ pub struct StdAugSystemSolver {
     /// to `<dump_dir>/iter_NNN/kkt_solve_MMM.jsonl`, gated by the
     /// configured iter-spec for [`DiagCategory::Kkt`].
     diagnostics: Option<Rc<DiagnosticsState>>,
+
+    /// The deprecated `POUNCE_DUMP_KKT` path, resolved once. It used to
+    /// be read with `std::env::var` on *every* `solve`, which puts a
+    /// global-environment lock and a linear scan of `environ` on the
+    /// hottest path in the solver for a debug surface that is off in
+    /// every production run. Resolving it once is also what lets
+    /// `try_solve_many_flat` decline the batch when a dump is active
+    /// without re-reading the environment per call.
+    legacy_dump_path: std::cell::OnceCell<Option<String>>,
 }
 
 impl std::fmt::Debug for StdAugSystemSolver {
@@ -118,6 +127,7 @@ impl StdAugSystemSolver {
             linsol,
             initialized: false,
             struct_sig: None,
+            legacy_dump_path: std::cell::OnceCell::new(),
             n_x: 0,
             n_s: 0,
             n_c: 0,
@@ -395,6 +405,24 @@ impl StdAugSystemSolver {
         (&self.irn, &self.jcn, &self.vals)
     }
 
+    /// The deprecated `POUNCE_DUMP_KKT` target, read from the
+    /// environment at most once per solver.
+    fn legacy_dump_path(&self) -> Option<&String> {
+        self.legacy_dump_path
+            .get_or_init(|| std::env::var("POUNCE_DUMP_KKT").ok())
+            .as_ref()
+    }
+
+    /// Whether either KKT-dump surface is armed. The batched
+    /// factorizing path declines when one is, so a dump run keeps
+    /// emitting one record per single-RHS solve exactly as before.
+    fn kkt_dump_active(&self) -> bool {
+        self.diagnostics
+            .as_deref()
+            .is_some_and(|d| d.want(DiagCategory::Kkt))
+            || self.legacy_dump_path().is_some()
+    }
+
     pub(crate) fn pack_rhs(&self, rhs: &AugSysRhs<'_>, packed: &mut [Number]) {
         let n_x = self.n_x as usize;
         let n_s = self.n_s as usize;
@@ -569,7 +597,7 @@ impl AugSystemSolver for StdAugSystemSolver {
                 }
             }
         }
-        if let Ok(path) = std::env::var("POUNCE_DUMP_KKT") {
+        if let Some(path) = self.legacy_dump_path().cloned() {
             use std::sync::atomic::{AtomicBool, Ordering};
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::SeqCst) {
@@ -645,6 +673,72 @@ impl AugSystemSolver for StdAugSystemSolver {
 
     fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
         self.linsol.multi_solve_matches_single_solve(nrhs)
+    }
+
+    fn try_solve_many_flat(
+        &mut self,
+        coeffs: &AugSysCoeffs<'_>,
+        packed_rhs: &mut [Number],
+        nrhs: usize,
+        check_neg_evals: bool,
+        num_neg_evals: Index,
+    ) -> Option<ESymSolverStatus> {
+        // A KKT dump wants one JSONL record per solve, and
+        // `write_kkt_record` describes a single RHS/solution pair.
+        // Decline so a dump run keeps the split path it has always had.
+        if self.kkt_dump_active() {
+            return None;
+        }
+        let s = self.assemble(coeffs);
+        if s != ESymSolverStatus::Success {
+            self.last_status = Some(s);
+            return Some(s);
+        }
+        // Decline rather than fail: the caller cannot know `dim` before
+        // this call assembles, so a disagreement here means "this
+        // backend's layout is not what you packed", and the split path
+        // is a correct answer to that. Assembling and then declining is
+        // safe — `assemble` is idempotent and no factorization ran.
+        if packed_rhs.len() != (self.dim as usize) * nrhs {
+            return None;
+        }
+
+        // `new_matrix = true`: this is the factorizing call, so it is
+        // attributed to `linear_system_factorization` exactly as the
+        // single-RHS `solve` above is (upstream
+        // `IpStdAugSystemSolver.cpp:155`). The back-substitution for all
+        // `nrhs` columns rides along inside it, which is the point —
+        // upstream pays one factor traversal here, not two.
+        let _factor_guard = self
+            .timing
+            .as_deref()
+            .map(|t| t.linear_system_factorization.guard());
+        let status = self.linsol.multi_solve(
+            &self.vals,
+            true,
+            nrhs as Index,
+            packed_rhs,
+            check_neg_evals,
+            num_neg_evals,
+        );
+        drop(_factor_guard);
+        self.last_status = Some(status);
+        // Same refresh rule as `solve`: any outcome where the backend
+        // computed an inertia updates the cached count (pounce#99).
+        if self.linsol.provides_inertia()
+            && matches!(
+                status,
+                ESymSolverStatus::Success
+                    | ESymSolverStatus::WrongInertia
+                    | ESymSolverStatus::Singular
+            )
+        {
+            self.last_neg_evals = self.linsol.number_of_neg_evals();
+        }
+        if status == ESymSolverStatus::Success {
+            self.have_factor = true;
+        }
+        Some(status)
     }
 
     fn try_resolve_many_flat(

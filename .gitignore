@@ -70,6 +70,10 @@
 # (and README, via the rule above); the generated .nl and per-run results
 # stay ignored like every other suite.
 !/benchmarks/large_scale/generate_nl.py
+# Its mesh-continuation harness is source too: mapping a coarse solution onto
+# a fine mesh is transcription knowledge the solver cannot have, so the
+# frontend that does it is part of the measurement, not a per-run artifact.
+!/benchmarks/large_scale/mesh_continuation.py
 # The qp (Maros-Meszaros convex QP) suite is likewise .nl-driven: its
 # problems are downloaded as .mat from the qpsolvers mirror and converted
 # to .nl by a Pyomo generator. Track the generator (and README +

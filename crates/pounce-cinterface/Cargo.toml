@@ -23,6 +23,17 @@ pounce-sensitivity.workspace = true
 pounce-linsol.workspace = true
 pounce-solve-report.workspace = true
 pounce-observability.workspace = true
+# Not called from this crate. It is here so cargo treats pounce-cinterface
+# as a *direct* dependent of pounce-hsl and hands `build.rs` the
+# `DEP_COINHSL_RPATH` it needs; see the build script.
+pounce-hsl = { workspace = true, optional = true }
+
+[features]
+# Mirrors `pounce-cli`'s. Without it `--features pounce-algorithm/ma57`
+# still links coinhsl into this crate's test binaries transitively but
+# emits no rpath, and they abort at process start (gh#811's defect, third
+# package).
+ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 
 [dev-dependencies]
 serde_json = "1"

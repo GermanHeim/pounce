@@ -18,6 +18,32 @@ git config core.hooksPath .githooks
 The `pre-commit` hook runs `cargo fmt --all -- --check`, mirroring CI so
 formatting drift never reaches `main`.
 
+## Setting up a source checkout (`make dev`)
+
+```sh
+make dev        # builds the CLI, stages it into python/pounce/bin/, and
+                # builds the extension module (maturin develop --release)
+```
+
+Use this instead of a bare `cd python && maturin develop --release`. `maturin
+develop` builds the extension module and **nothing else**, and the wheel's
+`pounce` console script is a shim whose whole job is to exec a bundled binary
+at `python/pounce/bin/pounce` — which `maturin develop` never creates. Before
+gh #816 that made a dev install's CLI fail on every invocation, `--version`
+included, and Pyomo reported the solver *unavailable* while an in-process
+solve worked fine.
+
+The shim now falls back to `target/release/pounce` or `target/debug/pounce`
+when it can see that it is being imported out of a checkout, so a plain
+`maturin develop` install is no longer broken — but it prints a notice on
+every run saying it is standing in for the wheel's binary, and it is picking
+up whatever cargo last built, which may not be what you think. `make dev`
+stages the binary the way the wheel does and the notice goes away.
+
+`python/pounce/bin/` is gitignored. `pyomo_pounce.check_binary()` reports
+which binary a Pyomo solve would actually run, and `pounce --version` is the
+one-second check that the CLI works at all.
+
 ## Definition of done for a user-facing change
 
 POUNCE is a family of solvers (NLP filter-IPM, active-set SQP, convex/conic

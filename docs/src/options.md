@@ -352,6 +352,58 @@ the command line would be.
 A file that *selects* the backend it tunes never reaches this: `linear_solver=ma97`
 is refused on its own, as [above](#choosing-a-linear-solver).
 
+### MA57 batched back-substitution (`ma57_batched_backsolve`)
+
+Only relevant in a `--features ma57` build running `linear_solver=ma57`.
+
+Under the limited-memory quasi-Newton Hessian the solver builds a
+Sherman-Morrison-Woodbury correction from a handful of extra
+right-hand sides. Those could go to the linear solver in one call
+instead of one call per column, which saves traversals of the factor —
+but only if the backend's multi-RHS answer is *bit-identical* to
+solving the columns one at a time, because these columns feed an
+iterate whose trajectory must not move. So the solver asks first, and a
+backend that blocks its triangular substitution across columns has to
+say no.
+
+MA57 blocks. Its batched answer is tolerance-equal but not bit-equal,
+so it says no by default, and this option is how you overrule it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ma57_batched_backsolve` | `no` | `yes` lets the SMW correction hand MA57 all its columns in one blocked back-substitution. Accepts a ~1-ulp difference in the resulting iterate. Also takes a `resto.` prefix. |
+
+**Turning this on is a trajectory change, not a free speed-up.**
+Measured on a 118276-row KKT system, the same binary with and without
+the batch diverges in the last printed digit of the objective at
+iteration 20 and finishes at a different iteration count. On a
+nonconvex problem a perturbation that size can select a different local
+optimum — [issue&nbsp;#729](https://github.com/jkitchin/pounce/issues/729)
+is MA57 taking `pooling_rt2stp` to an objective 25% worse while still
+reporting `Optimal Solution Found`.
+
+What it buys, per iteration on that model:
+
+| per iteration | column at a time | batched | Δ |
+|---|---:|---:|---:|
+| back-solve | 0.1256 s | 0.0854 s | **−32.0%** |
+| numeric factorization | 0.1443 s | 0.1711 s | +18.5% |
+| linear algebra total | 0.2796 s | 0.2678 s | −4.2% |
+
+against a 3–5% replicate spread, so the net is small and the headline
+row is not the whole story. Against Ipopt/MA57 on an equal-iteration
+basis it is more interesting: the back-solve row goes from 51% worse to
+19% better.
+
+**Do not compare wall-clock across this option.** The two settings walk
+different trajectories, so the difference is dominated by how many
+iterations each run happened to take rather than by work removed. In
+the measurement above the runs finished in 201 / 206 / 173 / 160
+iterations, and the fastest arm was luck, not throughput.
+
+Full write-up, including why the option has no width ceiling the way
+the FERAL backend's equivalent does: `dev-notes/ma57-batched-backsolve.md`.
+
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 
 By default every KKT factorization is checked for the right inertia — as
@@ -995,7 +1047,7 @@ history; `σ` is the diagonal they are built on, and
 
 | Option | Default | Meaning |
 |---|---|---|
-| `limited_memory_initialization` | `scalar2` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`). |
+| `limited_memory_initialization` | `scalar1` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`), `history-max` (the `scalar1` formula over the *whole* history, largest wins — POUNCE extension, #818). |
 | `limited_memory_init_val` | `1.0` | `σ` on the first iteration, before any curvature pair exists — and every iteration under `constant`. |
 | `limited_memory_init_val_min` / `_max` | `1e-8` / `1e8` | Clamp applied to `σ` however it was computed. |
 
@@ -1007,6 +1059,47 @@ is ≥ 1 by Cauchy–Schwarz and grows without bound as the curvature pair
 becomes ill-conditioned, so on a badly scaled problem they are far
 apart. If you are reproducing results from an older POUNCE, set
 `limited_memory_initialization scalar2`.
+
+### `history-max` (#818)
+
+Every upstream rule reads the **newest** curvature pair. `history-max`
+is POUNCE's, and reads all of them: it applies the `scalar1` formula to
+each pair in the history window and keeps the largest.
+
+`σ` is the curvature the model assigns to every direction *outside* the
+span of the stored pairs — the rank-2 corrections say nothing there.
+`sᵀy/sᵀs` is a Rayleigh quotient of the true Hessian along one step, so
+when the problem's curvature spans orders of magnitude it is an
+arbitrary sample of the spectrum. Land near the small end and `B`
+understates the curvature of every unexplored direction by up to
+`cond(H)`; the step is longer than the truth by that factor and the
+line search has to claw it back. Over-stating `σ` costs an iteration;
+under-stating it costs a backtracking sweep and then feeds a tiny `s`
+back into the history. `history-max` takes the conservative reading.
+Nothing is lost on the directions the model does know: the last rank-2
+update enforces `B s_last = y_last` whatever `B0` was.
+
+This is **not** the default, because it wins where the window cannot
+span the spectrum and loses where it can. On #818's separable quadratic
+`f(x) = Σ (sᵢxᵢ − 1)²` with `s = 10^linspace(0, 4, n)` (iterations to
+converge, `max_iter 2000`, `*` = did not converge):
+
+| case | `scalar1` | `history-max` |
+|---|---|---|
+| `n = 4`, cond 1e4  | 12   | 29   |
+| `n = 4`, cond 1e8  | 18   | 21   |
+| `n = 4`, cond 1e12 | 61   | 28   |
+| `n = 8`, cond 1e4  | 396  | 166  |
+| `n = 8`, cond 1e8  | 2000\* | 2000\* |
+| `n = 8`, `m = 10`  | 34   | 66   |
+
+Reach for it when a limited-memory solve is stalling with a long
+backtracking sweep every iteration on a problem you know is badly
+conditioned, and the memory (`limited_memory_max_history`) is small
+relative to the number of variables. A running maximum over the whole
+solve rather than over the window was measured too and is worse than
+`scalar1` at every size — it never comes back down, so a stiff early
+transient stays in `B0` long after the iterate has left it.
 
 ### `recalc_y` under L-BFGS
 
@@ -1031,6 +1124,153 @@ recognisable: a search direction much larger than the problem's scale,
 primal step sizes collapsing to `1e-3` or below, primal infeasibility
 that barely moves, and dual infeasibility climbing by orders of magnitude
 while the objective drifts.
+
+## Backtracking trial steps and `alpha_red_factor_min`
+
+When the filter rejects a trial step the line search shortens it and
+tries again. Upstream reduces by a fixed factor,
+`alpha *= alpha_red_factor` (default `0.5`), so reaching a step of size
+`α` takes `log(1/α)` trial points — each one a full objective
+evaluation.
+
+That is cheap when the Hessian model is roughly right and ruinous when
+it is not. Under `hessian_approximation=limited-memory` the model's
+*scale* can be wrong by orders of magnitude in any direction its
+curvature pairs do not span, so the acceptable step can be `α ≈ 1e-6`
+and every iteration spends 19–20 trial points walking down to it
+(#818).
+
+POUNCE therefore picks the next trial step by fitting the quadratic
+through the barrier objective's value and slope at the current iterate
+and its value at the rejected trial, and jumping to that quadratic's
+minimizer — the textbook safeguarded backtracking step. Two clamps
+bound it:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `alpha_red_factor` | `0.5` | *Upper* bound on one reduction: the trial sequence still contracts at least as fast as upstream's. |
+| `alpha_red_factor_min` | `0.05` under `limited-memory`, `= alpha_red_factor` (off) under an exact Hessian | *Lower* bound on one reduction, so a badly shaped objective cannot collapse `α` to noise in a single trial. |
+
+Acceptance is unchanged — this only decides which `α` is tried next, so
+no step it proposes can be accepted that the fixed sequence would have
+rejected. Set `alpha_red_factor_min` equal to `alpha_red_factor` to
+restore upstream's fixed geometric sequence; an explicit value is
+honoured on both Hessian paths.
+
+The default is off for the exact-Hessian path because a Newton step's
+length is meaningful — the acceptable `α` is normally within a couple of
+halvings of 1, so interpolation buys nothing — and because enabling it
+there was measured to move 3 of the 156 fixture-legs in
+`scripts/sweep-fixtures.sh` — `eigena2` 27 → 31,
+`issue_508_infeasible_gap_1em4` 441 → 580 to the same certificate, and
+an objective digit on `hs13_bigstart` — with nothing on that leg
+improving in exchange.
+
+**It engages only once the fixed sequence has already spent six trial
+points.** The interpolation treats a *long* line search, and it is only
+harmless where the line search is long: one that accepts in two or three
+trials never had the problem, and interpolating into it swaps a step
+length the filter was about to accept for a different one — a trajectory
+change bought for nothing. The threshold is not an option; it is the
+constant `ALPHA_INTERP_MIN_TRIALS` in
+`crates/pounce-algorithm/src/line_search/backtracking.rs`, which carries
+the sweep that chose it, every row against one baseline. Interpolating
+from the first trial instead moves 12 fixture-legs, three of them to a
+status the baseline did not have; gating at six moves four, one of them
+a gain (`cresc4`, `Restoration_Failed`/1323 → `Solve_Succeeded`/281) and
+none of them a loss.
+
+Six rather than five because of two measurements. `deb7` changes verdict
+at a gate of 5 (`Error_In_Step_Computation` → `Restoration_Failed`) and
+keeps it at 6; and one line search in the `race_starts` regression suite
+reaches exactly 5–6 trial points, so a gate of 5 interpolates into it and
+reroutes a whole multistart race, costing 32% more solver evaluations on
+one model there.
+
+**Where it loses, and what to do about it.** Over a 32-cell sweep of the
+#818 model family (`n` ∈ {4, 8, 12, 20} × cond ∈ {1e2, 1e4, 1e8, 1e12} ×
+`limited_memory_max_history` ∈ {6, 10}) the same 22 cells converge before
+and after — no cell gains or loses `Solve_Succeeded` — but it is not
+free: of those 22, 13 take fewer iterations, 5 are unchanged and 4 take
+more. The worst is `n = 8` at cond 1e4 with memory 10, 188 → 580, a 3.1×
+regression to the same answer.
+
+If a limited-memory solve stalls where it used to crawl, the first thing
+to try is **`limited_memory_max_history 10`** — the cells this change
+does not fix are bounded by the quality of the quasi-Newton model, not
+by the trial sequence, and a wider window is what moves that bound. The
+8-variable cond-1e8 case is the example: at memory 6 it exhausts
+`max_iter` — reaching `f ≈ 9e-13` and `x` to 6e-7 relative, so it has
+found the answer but cannot certify it — and at memory 10 it converges
+in 61 iterations. The general escape hatch is `alpha_red_factor_min`
+equal to `alpha_red_factor`, which collapses the clamp and restores
+upstream's sequence exactly.
+
+One cell of that sweep, `n = 8` at cond 1e12 with memory 6, read as a
+status regression during review — `Diverging_Iterates` at 352, at every
+`alpha_red_factor_min` and every gate measured. The cause was not the
+line search: the divergence guard was pronouncing unboundedness on a
+*watchdog trial* iterate, a point the line search had already rejected
+and was holding a snapshot to revert to. That is fixed separately. The
+cell still does not converge — it reports `Error_In_Step_Computation` at
+521 iterations — but it no longer claims divergence, and it gets to a
+better objective than upstream's sequence does in four times as many
+iterations (6.4e-11 against 2.8e-10 at `max_iter`).
+
+### When the line search fails anyway: `limited_memory_ls_failure_restarts`
+
+When no trial step is acceptable, either the **point** is bad —
+infeasible, and the restoration phase is exactly the right tool — or the
+**direction** is, because `W` is a quasi-Newton model carrying curvature
+the iterate has left behind. Upstream has one answer for both, because
+restoration is the only fallback it has.
+
+At an already-feasible point that answer is a no-op. The restoration NLP
+minimizes the constraint violation and there is none to minimize, so it
+wanders at `θ ≈ 1e-13` and reports `Restoration_Failed`. On the `deb7`
+fixture under `limited-memory` the solve stalls at `inf_pr ≈ 1e-12` with
+`inf_du ≈ 1e5`, enters restoration at a point feasible to 8e-13, and
+spends 340 of its 1242 iterations there. On an unconstrained model `θ`
+is identically zero, so restoration cannot move at all.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `limited_memory_ls_failure_restarts` | `0` (off) | How many times a line-search failure at a feasible point may drop every curvature pair but the newest and retry, before handing off to restoration. `0` is upstream's unconditional hand-off. |
+
+The newest pair is kept rather than the history cleared, because `σ` is
+read off the history and an empty one falls back to
+`limited_memory_init_val` — a bare `1.0`, which throws the model back to
+its first-iteration state on a problem whose curvature the solver has by
+now measured. This is L-BFGS-B's `col = 0` restart, adapted.
+
+It is a rung and not a refusal: it fires only where restoration has
+nothing to reduce, it runs *after* the acceptable-point decline (so a
+point that already passes the acceptable tolerances is still reported
+rather than re-anchored and continued), and every path that reached
+restoration before still reaches it once the rung is spent. The bound is
+structural as well as counted — the re-anchor gives up once the history
+is down to one pair, so a second failure at the same iterate falls
+straight through. It has no effect under an exact Hessian, which has no
+curvature history to re-anchor.
+
+**It ships off, and it is not what fixes #818.** The safeguarded
+interpolation above is; the rung was measured separately on top of it
+and does not pay for itself across the fixture corpus. Turning it on
+moves six `lbfgs` legs: `deb7` 715 → 610 iterations and
+`issue_508_infeasible_gap_1em4` 79 → 76 in its favour, against
+`eigena2` 91 → 98, `pooling_rt2stp` 295 → 307 and
+`infeasible_square_scaled_1em4` 24 → 26 — the last two being models the
+shipped configuration leaves exactly where `main` had them, so the rung
+*introduces* those two regressions rather than inheriting them. It stays
+in the tree, and stays documented, because the failure mode it treats is
+real and reproducible: on a model that stalls at `inf_pr ≈ 1e-12` with
+`inf_du` large, `limited_memory_ls_failure_restarts 1` is worth trying
+before concluding the solve is stuck.
+
+Note that setting it — to any value, `0` included — opts the solve out
+of the automatic `Solved_To_Acceptable_Level` re-solve ladder, like
+every other option in `TERMINATION_POLICY_OPTIONS`. Leaving it unset is
+therefore not the same as passing `limited_memory_ls_failure_restarts 0`.
 
 ## ℓ₁ penalty-barrier wrapper options
 

@@ -190,3 +190,35 @@ fn the_inequality_shape_reproduces_the_defect_with_the_escape_off() {
         report.solution.objective
     );
 }
+
+/// gh#823 review finding 1 (@srikanth-gm): the escape must run against `W` at
+/// the iterate it is judging under `hessian_approximation=finite-difference`
+/// too, not one iterate stale.
+///
+/// The refresh used to be gated on `provides_exact_hessian`, which conflated
+/// "is exact" with "can be re-evaluated here". The FD updater answers `false`
+/// to the first and `true` to the second, so it took the stale path; it is now
+/// asked the second question directly, via `HessianUpdater::hessian_at_current`.
+///
+/// **What this test does and does not establish.** It establishes that the
+/// escape still reaches the constrained minimum under FD — i.e. that adding a
+/// current-iterate rebuild did not break the mechanism, and that FD does not
+/// certify the maximum on this model. It does **not** reach the stale-`W`
+/// branch, and is therefore not evidence that the stale-`W` defect is fixed:
+/// this fixture's objective is `x₀·x₁`, whose Hessian is the constant
+/// `[[0,1],[1,0]]`, so the previous iterate's matrix and the current one's are
+/// the same matrix and the two paths cannot diverge here. Reproducing the
+/// symptom needs a model whose curvature varies between consecutive iterates
+/// AND whose earlier iterate looks positive-definite; the reporter has such a
+/// reproducer, and this repository does not yet. Recorded rather than papered
+/// over, per the "which branch does the fixture take" rule in CLAUDE.md.
+#[test]
+fn the_escape_still_reaches_the_minimum_under_a_finite_difference_hessian() {
+    let report = solve("fd", &["hessian_approximation=finite-difference"]);
+    assert_eq!(report.solution.solve_result_num, 0, "AMPL srn 0 = solved");
+    assert!(
+        report.solution.objective.abs() < 1e-6,
+        "expected the constrained minimum 0, not the maximum 1; got {}",
+        report.solution.objective
+    );
+}
