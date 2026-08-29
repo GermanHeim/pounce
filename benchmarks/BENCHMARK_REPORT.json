@@ -8904,7 +8904,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13744447.807933336,
+    "pounce_obj": 13744447.807933189,
     "ipopt_obj": 13744447.807831159,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9024,7 +9024,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 100790584333.72995,
+    "pounce_obj": 100790585112.37862,
     "ipopt_obj": 100790584576.92372,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9244,7 +9244,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 940.7635147875764,
+    "pounce_obj": 940.7635147875886,
     "ipopt_obj": 940.763520242705,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9274,7 +9274,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1438.7546267836976,
+    "pounce_obj": 1438.7546269002494,
     "ipopt_obj": 1438.7546303790668,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9354,7 +9354,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2385728.8452719836,
+    "pounce_obj": 2385728.8452642662,
     "ipopt_obj": 2385728.8456512373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9374,7 +9374,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3056962.239137096,
+    "pounce_obj": 3056962.2391370935,
     "ipopt_obj": 3056962.2393831746,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9384,7 +9384,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 23750458.146187592,
+    "pounce_obj": 23750458.146177422,
     "ipopt_obj": 23750458.149273343,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9404,7 +9404,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6411.838079427639,
+    "pounce_obj": 6411.838079704533,
     "ipopt_obj": 6411.838081933376,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9424,7 +9424,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -28526864.046122015,
+    "pounce_obj": -28526864.069404893,
     "ipopt_obj": -28526864.06806983,
     "pounce_solved": true,
     "ipopt_solved": true

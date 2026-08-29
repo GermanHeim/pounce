@@ -27,6 +27,50 @@ changes.
   constructing a result no longer pays one container insertion per
   variable per call. Item assignment raises: writing into a result
   never changed anything downstream.
+- **The QP suite's +515 iterations now have a name, and the fixture corpus can
+  see the class they came from (gh #760).** `4c02817d` ("Apply
+  `bound_relax_factor` on the convex arm too") took `benchmarks/qp` from 2633
+  to 3148 iterations across the 138 Maros-Meszaros QPs — 4.4× on the QSCFXM
+  family, no status flips, no objective regressions. It is the honest price of
+  a correctness fix: the convex arm used to read the `.nl` bounds verbatim
+  while the NLP arm relaxed them, so one binary on one file solved two
+  different models depending on `solver_selection`, and the cheap old counts
+  were the cost of solving the easier, wrong one. On degenerate models that was
+  not a rounding difference — LISWET1 returned 36.1224 against the Ipopt-MA57
+  reference's 27.1221. The arms now agree to 12 digits, and the convex arm is
+  still the faster of the two (QSCFXM3: 168 iterations against the NLP arm's
+  282).
+
+  What was missing was the record. `dev-notes/qp-bound-relax-iteration-cost.md`
+  is it, per CLAUDE.md's rule that a measured cost booked as "accepted" needs
+  an issue and an owner; `benchmarks/qp/README.md` carries the short version so
+  a reader who meets the number finds the cause. The attribution needs no
+  bisect: `bound_relax_factor=0` is what the extractors used to read, and it
+  restores the pre-commit counts to the iteration (30 / 35 / 38 on
+  QSCFXM1/2/3, re-verified on the current tree). The QP suite is re-run so
+  `benchmarks/BENCHMARK_REPORT.md` again carries the numbers the tree
+  produces: 3148 → 3164 iterations, six models moved since 2026-08-23, no
+  status flips and no objective changes. That movement is `d18c289e`, not
+  this one, and it is a speed-up wearing an iteration count as a disguise —
+  STADAT1 goes 34 → 92 iterations and 4.89 s → 0.72 s, and nothing in the
+  suite is slower by more than 12 %.
+
+  The corpus gap is the interesting half. The sweep was never blind to the
+  convex arm — that reasoning was corrected in gh #761 — but nothing in it
+  predicted the magnitude, and *not because the fixtures were small*. gh #690
+  had already added convex models up to 534 columns. It was that **not one of
+  them was a model on which relaxing the box costs anything**: swept twice,
+  default versus `bound_relax_factor=0`, the convex lines move by tens of
+  percent in both directions and the largest well-posed one (`lp_degen2`) moves
+  18 → 15. A reviewer reading that diff learns "small and mixed", which is true
+  of the corpus and false of the suite. New fixture `convex_qp_qscfxm1` is
+  `QSCFXM1` itself — 457 columns, 0.40 s per leg, moving 131 → 30 on both sweep
+  legs — so the magnitude class is now in the diff. Pinned (routing,
+  dimensions, published DOC 97/6 optimum, and the *ratio*, never an absolute
+  count) by `crates/pounce-cli/tests/issue_760_convex_bound_relax_magnitude.rs`,
+  and mutation-checked: reverting the convex arm's relax factor to zero takes
+  the ratio to 1.00× and two of its three tests go red. Sweep cost: 10.9 s →
+  11.9 s over both legs.
 
 - **Limited-memory: the SMW update now costs one pass over the KKT factor,
   not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
@@ -69,6 +113,54 @@ changes.
   @srikanth-gm, whose measurements on a 59 939-variable CasADi collocation
   model put POUNCE/MA57 within 1.6% of Ipopt/MA57 on wall time while spending
   41% more per iteration on back-solve; this addresses part of that row.
+- **The CasADi plugin builds and code-generates against CasADi 3.8, and the
+  CI pin that was hiding it is gone** (gh#782). 3.8.0 broke the plugin
+  parity job two ways on the day it shipped, and neither was what it looked
+  like.
+
+  *Code generation.* Through 3.7, CasADi decided whether to emit a
+  per-instance memory array for a function from `!codegen_mem_type().empty()`.
+  3.8 split that decision into a new virtual, `codegen_needs_mem()`, which
+  defaults to `false`. The plugin answered only the old question, so 3.8
+  stopped declaring the `<name>_mem` array while the plugin's emitted bodies
+  went on referring to it, and generated C failed to compile with `use of
+  undeclared identifier`. The plugin now answers the new question. It cannot
+  say `override` doing so — 3.7 declares no such virtual and `override`
+  there is a hard error — so nothing in the compiler checks that the member
+  binds to anything, which is the same unchecked-binding shape that produced
+  the defect. `casadi/tests/codegen_mem_compat/` is the check instead: it
+  extracts the declaration from the plugin source (not a copy, which would
+  drift) and compiles it against a mock base in all three shapes — virtual
+  absent, virtual present, virtual whose signature moved — asserting through
+  a base pointer which of them actually bind. Adding `override` turns the
+  3.7 leg red; deleting the member fails the extraction.
+
+  *The Linux link.* Not an ABI change in CasADi, which is what it appeared
+  to be. 3.8.0 added a `manylinux_2_28` wheel next to the `manylinux2014`
+  one, and pip chooses between them on the machine's glibc. Measured on the
+  published artifacts, the 2_28 build of 3.8.0 exports 855 `casadi::`
+  symbols spelled `__cxx11` and none spelled `Ss`; the manylinux2014 build
+  of **the same version** is exactly the other way round, as is 3.7.2, which
+  ships no 2_28 wheel at all. So the string ABI is a property of the wheel
+  the runner resolves, not of the release, and `casadi/Makefile`'s hardcoded
+  `CXX11_ABI ?= 0` could not have been right for both. It is now measured
+  from the installed `libcasadi.so`'s own exported symbols on Linux, and
+  left at 0 where the macro is inert (macOS libc++, Windows). The probe
+  looks for `__cxx11` **on casadi's symbols specifically**: libstdc++'s
+  transactional clones of `std::logic_error` carry that spelling in every
+  build, old ABI included, so the naive grep answers 1 for everything.
+  `make -C casadi abi-flags` now prints what was decided and from which
+  file.
+
+  With both fixed, `casadi==3.7.*` comes back out of `ci.yml` and the job
+  tracks CasADi releases again, which is what it is for. The wheel-smoke
+  step now pins to the exact version `build.sh` just built against rather
+  than to a version literal. One thing worth knowing while chasing an ABI
+  mismatch, now recorded in the Makefile: the plugin is a `-shared` link and
+  so builds clean against a CasADi it cannot talk to — the executable
+  `test_output_interleaving` is what turns the mismatch into a list of
+  names, and without it the first symptom is CasADi reporting `Plugin
+  'pounce' is not found` at dlopen.
 
 - **`ma57_batched_backsolve`: MA57 can now be let into the batched
   back-substitution, and the cost of doing so is written down.** Under the
