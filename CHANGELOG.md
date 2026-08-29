@@ -26,6 +26,47 @@ changes.
   constructing a result no longer pays one container insertion per
   variable per call. Item assignment raises: writing into a result
   never changed anything downstream.
+- **Limited-memory: the SMW update now costs one pass over the KKT factor,
+  not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
+  `LowRankAugSystemSolver` builds its Sherman-Morrison-Woodbury correction by
+  solving the augmented system for the `2q` low-rank columns. Upstream issues
+  a single `MultiSolve` over all of them
+  (`IpLowRankAugSystemSolver.cpp:487`), so the factorization and every
+  column's back-substitution share one traversal of the factor. POUNCE split
+  that in two: a single-RHS `solve` to pay the factorization, then a batched
+  `try_resolve_many_flat` for the rest. A sparse triangular solve streams the
+  whole factor once per call and then applies it to each column, so its cost
+  is `F + nrhs·W` — and on a large KKT `F` is several times `W`. The split
+  therefore threw away one full `F` on every SMW update.
+
+  There is now a factorizing multi-RHS path (`try_solve_many_flat`) and the
+  cold SMW block takes it, so all columns ride along with the factorization.
+
+  Be careful reading the timing rows, because most of the movement between
+  them is bookkeeping: the merged call bills its substitutions to
+  `LinearSystemFactorization`, so `LinearSystemBackSolve` falls by far more
+  than any work is removed. Measured on `benchmarks/large_scale/laptime`
+  (58 014 variables, 62 014 constraints, FERAL, 100 iterations, two
+  interleaved A/B pairs): back-solve 34.2 s → 23.7 s (−31%) against
+  factorization 55.6 s → 64.7 s (+16%), for a **net −1.45 s of 89 s of
+  linear algebra, −1.6%**, and −0.7% overall. The baseline's own run-to-run
+  spread is 4.2%, so the net is **inside noise on wall time** and should not
+  be quoted as a wall-clock win. It is, however, the size the mechanism
+  predicts — roughly 20 ms per removed factor traversal over ~75–90 SMW
+  updates — so it is real work removed, just not much of it on this model
+  and this backend.
+
+  The trajectory is **bit-identical** over all 100 iterations in both pairs
+  and the fixture sweep is empty on both legs, so nothing was re-associated.
+  Whether the effect is larger under MA57, where the fixed-versus-per-RHS
+  cost ratio differs, is unmeasured here — no coinhsl in the dev container.
+
+  The gh#729 bit-identity gate still governs: the merged call is taken only
+  when the backend affirms `multi_solve_matches_single_solve` at the full
+  column count, and the old split remains as the fallback. Reported by
+  @srikanth-gm, whose measurements on a 59 939-variable CasADi collocation
+  model put POUNCE/MA57 within 1.6% of Ipopt/MA57 on wall time while spending
+  41% more per iteration on back-solve; this addresses part of that row.
 
 - **`ma57_batched_backsolve`: MA57 can now be let into the batched
   back-substitution, and the cost of doing so is written down.** Under the
@@ -1161,48 +1202,6 @@ changes.
   because a fitted vertex value is blind to a uniform rescaling of the
   abscissa — which is why the arclength is asserted beside it rather than
   the temperature being trusted alone.
-- **Limited-memory: the SMW update now costs one pass over the KKT factor,
-  not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
-  `LowRankAugSystemSolver` builds its Sherman-Morrison-Woodbury correction by
-  solving the augmented system for the `2q` low-rank columns. Upstream issues
-  a single `MultiSolve` over all of them
-  (`IpLowRankAugSystemSolver.cpp:487`), so the factorization and every
-  column's back-substitution share one traversal of the factor. POUNCE split
-  that in two: a single-RHS `solve` to pay the factorization, then a batched
-  `try_resolve_many_flat` for the rest. A sparse triangular solve streams the
-  whole factor once per call and then applies it to each column, so its cost
-  is `F + nrhs·W` — and on a large KKT `F` is several times `W`. The split
-  therefore threw away one full `F` on every SMW update.
-
-  There is now a factorizing multi-RHS path (`try_solve_many_flat`) and the
-  cold SMW block takes it, so all columns ride along with the factorization.
-
-  Be careful reading the timing rows, because most of the movement between
-  them is bookkeeping: the merged call bills its substitutions to
-  `LinearSystemFactorization`, so `LinearSystemBackSolve` falls by far more
-  than any work is removed. Measured on `benchmarks/large_scale/laptime`
-  (58 014 variables, 62 014 constraints, FERAL, 100 iterations, two
-  interleaved A/B pairs): back-solve 34.2 s → 23.7 s (−31%) against
-  factorization 55.6 s → 64.7 s (+16%), for a **net −1.45 s of 89 s of
-  linear algebra, −1.6%**, and −0.7% overall. The baseline's own run-to-run
-  spread is 4.2%, so the net is **inside noise on wall time** and should not
-  be quoted as a wall-clock win. It is, however, the size the mechanism
-  predicts — roughly 20 ms per removed factor traversal over ~75–90 SMW
-  updates — so it is real work removed, just not much of it on this model
-  and this backend.
-
-  The trajectory is **bit-identical** over all 100 iterations in both pairs
-  and the fixture sweep is empty on both legs, so nothing was re-associated.
-  Whether the effect is larger under MA57, where the fixed-versus-per-RHS
-  cost ratio differs, is unmeasured here — no coinhsl in the dev container.
-
-  The gh#729 bit-identity gate still governs: the merged call is taken only
-  when the backend affirms `multi_solve_matches_single_solve` at the full
-  column count, and the old split remains as the fallback. Reported by
-  @srikanth-gm, whose measurements on a 59 939-variable CasADi collocation
-  model put POUNCE/MA57 within 1.6% of Ipopt/MA57 on wall time while spending
-  41% more per iteration on back-solve; this addresses part of that row.
-
 - **The NLP arm no longer certifies a constrained maximum as
   `Solve_Succeeded` (gh #797).** On the CLI fixture `nonconvex_qp.nl` —
   `min x₀·x₁ s.t. x₀ + x₁ = 2, 0 ≤ x ≤ 4`, whose restriction to the feasible
