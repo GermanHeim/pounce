@@ -20,7 +20,12 @@ changes.
   decision's cost, deterministic and independent of `degeneracy_iter`,
   against downstream repair, and it is the option for a kinked base
   point too large for the engagement's budget, where `"directional"`
-  pays the failed attempt and falls back to one-sided anyway.
+  pays the failed attempt and falls back to one-sided anyway. The
+  step itself is the new public
+  `pounce_sensitivity::Solver::parametric_step_release_all`, the
+  directional path's all-released solve returned undecided, and
+  `degeneracy_iter` warns when passed under an option that makes no
+  decision.
 
 - **Limited-memory: the SMW update now costs one pass over the KKT factor,
   not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,

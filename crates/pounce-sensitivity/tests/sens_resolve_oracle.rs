@@ -1223,3 +1223,64 @@ fn the_corrector_stays_short_of_the_resolve_across_a_release() {
         );
     }
 }
+
+/// `degeneracy="release_all"` reroutes which step the corrector
+/// starts from under `mode="linear"`, so the oracle pins two facts
+/// about that start. On the Kink fixture the corrector's fixed point
+/// does not depend on it: correcting the all-released start lands
+/// where correcting the plain start lands, within the put-back's
+/// noise. And on the Release fixture, whose bound is strongly
+/// active, the option touches nothing by construction: the released
+/// step is the plain step bit for bit with zero rows released.
+#[test]
+fn leg_oracle_the_released_start_reaches_the_same_correction() {
+    let (s, _seed) = base(Fx::Kink);
+    let n_x = s.converged().expect("converged").x.len();
+    for &delta in &[-1.0e-1, -1.0e-2, 1.0e-2, 1.0e-1] {
+        let plain = s.parametric_step_full(&[0], &[delta]).expect("full step");
+        let (from_plain, _) = s
+            .correct_step(&[0], &[delta], &plain, 8)
+            .expect("corrector");
+
+        let (released, count) = s
+            .parametric_step_release_all(&[0], &[delta])
+            .expect("released step");
+        assert!(count > 0, "the kink fixture's bound is in the weak set");
+        let mut start = plain.clone();
+        start[..n_x].copy_from_slice(&released);
+        let (from_released, _) = s
+            .correct_step(&[0], &[delta], &start, 8)
+            .expect("corrector");
+
+        for i in 0..n_x {
+            assert!(
+                (from_plain[i] - from_released[i]).abs() < 1e-6,
+                "delta={delta:e}: the corrector's fixed point must not \
+                 depend on which start it was handed: coordinate {i} \
+                 differs, {:e} vs {:e}",
+                from_plain[i],
+                from_released[i],
+            );
+        }
+    }
+
+    let (s, _seed) = base(Fx::Release);
+    for &delta in &[0.3, 1.0] {
+        let plain = s.parametric_step_full(&[0], &[delta]).expect("full step");
+        let n_x = s.converged().expect("converged").x.len();
+        let (released, count) = s
+            .parametric_step_release_all(&[0], &[delta])
+            .expect("released step");
+        assert_eq!(count, 0, "a strongly active bound is not weak");
+        // the option's empty-set branch is the plain solve; the full
+        // step's path refines, so agreement is to refinement noise
+        for i in 0..n_x {
+            assert!(
+                (released[i] - plain[i]).abs() < 1e-8,
+                "with nothing weak the released step is the plain                  answer: coordinate {i} differs, {:e} vs {:e}",
+                released[i],
+                plain[i],
+            );
+        }
+    }
+}

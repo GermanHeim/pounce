@@ -1224,6 +1224,21 @@ def _refuse_on_pdpert(session, max_pdpert, who):
             f"to accept it anyway.")
 
 
+def _degeneracy_iter(degeneracy_iter, degeneracy, who):
+    """Resolve the budget's default and warn when it is inert: only
+    the "directional" decision spends back-solves, so a budget passed
+    under another option changes nothing, the same shape as bound_eps
+    under a mode that runs no refinement."""
+    if degeneracy_iter is None:
+        return 16
+    if degeneracy != "directional":
+        warnings.warn(
+            f"{who}: degeneracy_iter budgets the directional decision's "
+            f"back-solves and degeneracy={degeneracy!r} makes no "
+            "decision, so it changes nothing here.")
+    return degeneracy_iter
+
+
 def _correct(session, pin_idx, deltas, step, corrector_iter):
     """Refine a step by Newton iterations on the barrier system.
 
@@ -1241,7 +1256,11 @@ def _correct(session, pin_idx, deltas, step, corrector_iter):
     then overwrites is the one it just computed. And under
     degeneracy="directional" the multipliers come from the one-sided
     step rather than the directional one that produced `step`, since
-    there is no directional full step to ask.
+    there is no directional full step to ask. Under
+    degeneracy="release_all" the mismatch is sharper still: the held
+    factorization supplies bound multipliers at exactly the bounds the
+    step just released to zero, over the maximal weak set rather than
+    a decided subset.
     """
     full = np.asarray(session.solver.parametric_step_full(pin_idx, deltas))
     n_x = len(step)
@@ -1252,7 +1271,7 @@ def _correct(session, pin_idx, deltas, step, corrector_iter):
 
 
 def estimate(model, perturb, clamp=True, mode="linear",
-             predictor_iter=16, degeneracy="directional", degeneracy_iter=16,
+             predictor_iter=16, degeneracy="directional", degeneracy_iter=None,
              corrector_iter=0, bound_eps=None, max_pdpert=None):
     """First-order estimate of the solution at perturbed parameter values.
 
@@ -1299,7 +1318,9 @@ def estimate(model, perturb, clamp=True, mode="linear",
     kink. degeneracy_iter budgets those backsolves: the all-released
     solve and one basis column per engaged bound count against it, and
     a budget the engagement cannot fit falls back to the one-sided
-    step with a warning naming the counts. "one_sided" takes the
+    step with a warning naming the counts. Only
+    degeneracy="directional" reads it, and passing it under another
+    option warns and changes nothing. "one_sided" takes the
     single-sided value today's thresholds produce, bit-identical to
     the release before this option existed. "release_all" releases
     every weakly active bound undecided, at one back-solve and no QP:
@@ -1385,6 +1406,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
         raise ValueError(
             "estimate: degeneracy must be 'directional', 'one_sided' or "
             f"'release_all', got {degeneracy!r}")
+    degeneracy_iter = _degeneracy_iter(
+        degeneracy_iter, degeneracy, "estimate")
     _check_margins(bound_eps, max_pdpert, "estimate")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
@@ -1804,7 +1827,7 @@ def _user_row_names(session):
 
 
 def estimate_report(model, perturb, max_iter=None,
-                    degeneracy="directional", degeneracy_iter=16,
+                    degeneracy="directional", degeneracy_iter=None,
                     corrector_iter=0, mode="linear", predictor_iter=16,
                     bound_eps=None, max_pdpert=None):
     """Report what `estimate()`'s step does about the bounds.
@@ -1904,6 +1927,8 @@ def estimate_report(model, perturb, max_iter=None,
         raise ValueError(
             "estimate_report: degeneracy must be 'directional', "
             f"'one_sided' or 'release_all', got {degeneracy!r}")
+    degeneracy_iter = _degeneracy_iter(
+        degeneracy_iter, degeneracy, "estimate_report")
     _check_margins(bound_eps, max_pdpert, "estimate_report")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
@@ -2069,7 +2094,7 @@ ActiveSetChange = namedtuple(
 
 
 def active_set_changes(model, perturb, predictor_iter=16,
-                       degeneracy="directional", degeneracy_iter=16,
+                       degeneracy="directional", degeneracy_iter=None,
                        max_pdpert=None):
     """The active-set changes `estimate(mode="path")` applies, in order.
 
@@ -2120,6 +2145,8 @@ def active_set_changes(model, perturb, predictor_iter=16,
         raise ValueError(
             "active_set_changes: degeneracy must be 'directional', "
             f"'one_sided' or 'release_all', got {degeneracy!r}")
+    degeneracy_iter = _degeneracy_iter(
+        degeneracy_iter, degeneracy, "active_set_changes")
     _check_margins(None, max_pdpert, "active_set_changes")
     _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
     pin_idx, deltas = _perturbation_deltas(session, perturb)

@@ -1155,31 +1155,16 @@ impl Solver {
         let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let bs = &state.backsolver;
-        let mut d = vec![0.0; bs.dim()];
-        if weak.is_empty() {
-            if !bs.solve(&rhs_plain, &mut d) {
-                return Err(SolverError::BacksolveFailed);
-            }
-            return Ok((d[..ctx.n_x].to_vec(), 0));
-        }
         let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
-        let sigma = bs.released_sigma_x(&released).ok_or_else(|| {
-            SolverError::SensComputationFailed("release_all: released sigma unavailable".into())
-        })?;
-        // shift = false, as the directional path's all-released solve:
-        // a weak bound's multiplier is order sqrt(mu) and the released
-        // convention holds it at exactly zero, so the shift's
-        // multiplier injection is deliberately omitted.
-        if !bs.solve_released_prebuilt(
-            &released,
-            Rc::clone(&sigma),
-            None,
-            None,
-            &rhs_plain,
-            &mut d,
-            false,
-        ) {
+        let mut d = vec![0.0; state.backsolver.dim()];
+        // solve_released is the whole mechanism: an empty released set
+        // is the plain solve, and shift = false matches the
+        // directional path's all-released solve, whose rationale lives
+        // on `solve_released_inner`.
+        if !state
+            .backsolver
+            .solve_released(&released, &rhs_plain, &mut d)
+        {
             return Err(SolverError::BacksolveFailed);
         }
         Ok((d[..ctx.n_x].to_vec(), released.len()))
