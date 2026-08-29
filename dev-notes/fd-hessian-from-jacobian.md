@@ -296,6 +296,24 @@ It still loses:
 | jacobian / cpr | 76 | 122 | Optimal, 38 it, 65.3711063753 |
 | jacobian / star | 42 | 221 | **Acceptable, 404 it, 65.3683344570** |
 
+**The two `jacobian` rows predate the objective clique** and their group
+counts no longer reproduce. Re-measured at the same N=160 on the code as
+it stands: `jacobian / cpr` is **341** groups and `jacobian / star`
+**320**, both at `rho_max` 338, against the 76 and 42 above. The clique
+that closed the pattern's `∇²f` gap is what moved them — see "The
+objective clique sets a hard floor on `rho_max`" — and it widened the
+pattern far more than the colouring choice ever did. The `declared` rows
+are unmoved (17 and 16, `rho_max` 15, re-measured), because the declared
+pattern never builds a clique.
+
+The **conclusion is unaffected**, and the mechanism below says why: star
+colouring loses to CPR through third-derivative cross terms that survive
+exactly where the pattern is dense, and the clique made the Jacobian
+pattern denser, not sparser. The iteration counts and objectives in the
+table were measured on the old pattern and have not been re-run — they
+are kept as the record of the experiment that settled the default, not as
+current numbers.
+
 **Group size is not the cause.** `declared/star` packs the largest groups of
 the four — 580 columns per probe against `jacobian/cpr`'s 122 — and
 converges in 30 iterations to the exact objective. That was the first
@@ -314,7 +332,9 @@ into row `i`, where `T` is the third derivative. `T_imp ≠ 0` requires `i`,
 a group, so those cross terms vanish *structurally*. A star colouring only
 guarantees the single-neighbour property for the pair being recovered, so
 they survive — and they matter precisely where the pattern is dense
-(`rho_max` 59 on the Jacobian pattern against 15 on the declared one).
+(`rho_max` 59 on the Jacobian pattern against 15 on the declared one, at
+the time of that experiment; the Jacobian pattern's `rho_max` is 338 now
+that the objective clique is in it, which only sharpens the point).
 
 So the ordering of these two is the opposite of what it looks like from the
 group counts, and CPR is the default.
