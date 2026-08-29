@@ -446,10 +446,25 @@ def run_cell(
         rec.obj = float(case.objective.value(best_x))
         rec.source = case.source_feasibility(best_x)
         rec.regime = case.regime(best_x)
-        rec.stationarity = classify(case, best_x)
+        # The classifier runs a bounded least-squares per sign branch and
+        # the validators are user code; neither is worth losing a
+        # three-minute sweep to. A cell that cannot be classified says so
+        # in its own record instead of taking the run down with it.
+        try:
+            rec.stationarity = classify(case, best_x)
+        except Exception as exc:  # pragma: no cover - classifier failure
+            rec.stationarity = {
+                "klass": "not-enumerated",
+                "reason": f"classifier raised {type(exc).__name__}: {exc}",
+            }
         val: Dict[str, object] = {}
         for fn in case.validators:
-            val.update(fn(case, best_x))
+            try:
+                val.update(fn(case, best_x))
+            except Exception as exc:  # pragma: no cover - validator failure
+                val[f"{getattr(fn, '__name__', 'validator')}_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
         rec.validation = val
         # The point in the *unscaled* source model, so records from the
         # two scaling legs can be compared without the reader doing the

@@ -392,6 +392,10 @@
             },
             "note": {
               "type": "string"
+            },
+            "dual_scale": {
+              "type": "number",
+              "description": "The magnitude of the largest term the stationarity sum is assembled from, including the terms inside grad f. The residual tolerance is this times 1e-6; an absolute threshold here would be a scale-dependent one, and the skew scaling leg breaks it."
             }
           }
         },
