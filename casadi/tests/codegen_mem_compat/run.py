@@ -88,15 +88,45 @@ def compilers(requested):
     return found
 
 
-def command(cxx, std, defines, incdir, out, is_msvc):
-    if is_msvc:
+def kind_of(cxx):
+    """Which compiler this really is, asked rather than assumed.
+
+    Naming it from the executable is how you get this wrong: `g++` on macOS
+    is Apple clang, so a matrix that trusts the name reports a GNU column it
+    never compiled — and the two disagree about exactly the diagnostics
+    below.
+    """
+    if os.path.basename(cxx).lower() in ("cl", "cl.exe"):
+        return "msvc"
+    try:
+        out = subprocess.run([cxx, "--version"], capture_output=True,
+                             text=True).stdout.lower()
+    except OSError:
+        return "gcc"
+    return "clang" if "clang" in out else "gcc"
+
+
+def command(cxx, std, defines, incdir, out, kind):
+    if kind == "msvc":
         # /W4 without /WX: an unrelated warning in a future toolset should
         # not fail a test about virtual binding.
         return (["cl", "/nologo", "/EHsc", "/W4", f"/std:{std}",
                  f"/I{incdir}"]
                 + [f"/D{d}" for d in defines]
                 + [PROBE, f"/Fe:{out}", f"/Fo:{out}.obj"])
-    return ([cxx, f"-std={std}", "-Wall", "-Wextra", "-Werror", "-I", incdir]
+    # The two diagnostics an unchecked binding is *supposed* to raise; see
+    # probe.cpp. Off on the command line rather than by pragma, because GCC
+    # attributes -Woverloaded-virtual to the base declaration and a pragma
+    # around the derived member does not reach it. -Werror stays on for
+    # everything else. The clang-only spelling is passed only to clang: GCC
+    # accepts unknown -Wno-* silently until some other diagnostic fires, and
+    # then reports it, which under -Werror is a failure with a confusing
+    # cause.
+    suppress = ["-Wno-overloaded-virtual"]
+    if kind == "clang":
+        suppress.append("-Wno-inconsistent-missing-override")
+    return ([cxx, f"-std={std}", "-Wall", "-Wextra", "-Werror"] + suppress
+            + ["-I", incdir]
             + [f"-D{d}" for d in defines] + [PROBE, "-o", out])
 
 
@@ -123,10 +153,10 @@ def main():
             fh.write(member)
 
         for cxx in found:
-            # exact match: "clang++" also begins with "cl"
-            is_msvc = os.path.basename(cxx).lower() in ("cl", "cl.exe")
+            kind = kind_of(cxx)
+            print(f"{cxx} is {kind}")
             for std in STANDARDS:
-                if is_msvc and std == "c++11":
+                if kind == "msvc" and std == "c++11":
                     continue  # MSVC has no /std:c++11; c++14 is its floor
                 for label, defines, expect in CASES:
                     out = os.path.join(tmp, "probe.exe")
@@ -134,7 +164,7 @@ def main():
                         if os.path.exists(stale):
                             os.remove(stale)
                     build = subprocess.run(
-                        command(cxx, std, defines, tmp, out, is_msvc),
+                        command(cxx, std, defines, tmp, out, kind),
                         capture_output=True, text=True, cwd=tmp)
                     what = f"{cxx:8s} {std:6s} {label:33s}"
 

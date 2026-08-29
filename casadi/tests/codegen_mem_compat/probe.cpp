@@ -30,30 +30,18 @@ namespace casadi {
     // Extracted from the plugin by run.py. Deliberately included rather
     // than copied.
     //
-    // Both suppressions below are the shadow of the thing under test, not
-    // sloppiness, and the plugin carries the first one for the same reason.
-    // A member that binds to a base virtual without saying `override` is
-    // what `-Winconsistent-missing-override` is for, and a member that
-    // fails to bind because the signature moved is what
-    // `-Woverloaded-virtual` is for. Each fires in exactly one of the cases
-    // below, and this file is compiled `-Werror`, so leaving them on would
-    // turn both interesting cases into "did not compile" and lose the
-    // distinction the test is here to draw. The verdict comes from
-    // `base_call` instead, which separates them by what the program does.
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Winconsistent-missing-override"
-#pragma clang diagnostic ignored "-Woverloaded-virtual"
-#elif defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Woverloaded-virtual"
-#endif
+    // Two warnings are the expected shadow of the thing under test rather
+    // than defects — a member binding to a base virtual without saying
+    // `override` is what `-Winconsistent-missing-override` is for, and one
+    // failing to bind because the signature moved is what
+    // `-Woverloaded-virtual` is for — and each fires in exactly one of the
+    // cases. `run.py` disables those two on the command line, because a
+    // `#pragma` here cannot: GCC attributes `-Woverloaded-virtual` to the
+    // *base* declaration in `mock_casadi.hpp`, so a suppression wrapped
+    // around this include never covers it. The verdict comes from
+    // `base_call` instead, which separates the cases by what the program
+    // does rather than by what the compiler says about it.
 #include "plugin_member.inc"
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
   };
 
 }  // namespace casadi
