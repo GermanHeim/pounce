@@ -1436,8 +1436,16 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # few percent off and leaves the estimate where it was.
         # Halving is a low bar that separates them cleanly, and saying
         # nothing would let the second case pass for the first.
-        if corrector is not None and corrector["residual"] > 0.5 * corrector[
-                "initial_residual"]:
+        # Written as `not (<=)` rather than `>`, so a non-finite
+        # residual warns instead of comparing false and passing in
+        # silence. gh#845 was exactly that: the corrector normed an
+        # all-NaN residual to 0.0, `0.0 > 0.5 * 6.09` was false, and
+        # `estimate()` returned {x: nan} with nothing said. The Rust
+        # side no longer produces that number, and this side no longer
+        # depends on it not doing so.
+        if corrector is not None and not (
+                corrector["residual"] <= 0.5 * corrector[
+                    "initial_residual"]):
             warnings.warn(
                 "estimate: the corrector spent "
                 f"{corrector['iterations']} back-solve(s) and moved the "

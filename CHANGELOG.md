@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+- **A sensitivity correction that leaves the model's domain no longer reports
+  itself as perfect (gh #845).** `corrector::run` normed its residual with a
+  fold over `f64::max`, and `f64::max` returns the *other* operand when one is
+  NaN — so an all-NaN residual normed to `0.0`, the smallest number the
+  stopping rule can see. The NaN iterate won `now < best_residual`, the next
+  pass could not improve on `0.0` and set `converged = true`, and the report
+  was filled from that point: `residual = 0.0`, all three of `stationarity`,
+  `feasibility` and `complementarity` `0.0`, and `improved() = true`, while the
+  step handed back was `[nan, nan]`. Downstream, `pyomo_pounce.sens.estimate`
+  gated its "the corrector barely moved" warning on
+  `residual > 0.5 * initial_residual`; `0.0 > 3.04` is false, so it returned
+  `{x: nan}` in silence.
+
+  `correct_step` puts a coordinate back inside its **declared bounds** before
+  evaluating, so a bound was protection. A variable kept inside a *function's*
+  domain by a **constraint** has no bound to be put back inside, and that is an
+  ordinary modelling pattern — `log`, `sqrt`, `1/x`, an Arrhenius `1/T`. A
+  perturbation whose predicted point crosses that edge sent the residual NaN.
+
+  The norm is now `residual_norm`, which returns infinity at a non-finite
+  entry: no residual at all, rather than the smallest one. A non-finite
+  residual at the point the iterations start from is a
+  `SensComputationFailed` naming the domain crossing, since there is nothing
+  there to correct; one that appears mid-loop ends the loop with the best
+  finite point and `improved() == false`. The returned step is screened for
+  finiteness besides, so no NaN reaches a caller wearing a report that says it
+  did not. The `pyomo-pounce` gate is now `not (residual <= 0.5 * initial)`,
+  which fires on a non-finite residual instead of comparing false.
+
+  The whole corrector surface is new in this cycle (`fb284574`), and
+  `cargo test -p pounce-sensitivity` was green throughout: this is a guard it
+  never had. `crates/pounce-sensitivity/tests/issue_845_nonfinite_residual.rs`
+  is the fixture — the issue's own `y = log(x)`, `x = 4 + p` model with `x`
+  declared unbounded, where `dp = -5` predicts `x = -1` — plus an in-domain leg
+  so "always fail" is not a passing fix, and a unit test on `residual_norm`
+  for the mid-loop branch the fixture cannot reach.
+
 - **The QP suite's +515 iterations now have a name, and the fixture corpus can
   see the class they came from (gh #760).** `4c02817d` ("Apply
   `bound_relax_factor` on the convex arm too") took `benchmarks/qp` from 2633
