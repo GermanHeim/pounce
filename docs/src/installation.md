@@ -154,6 +154,13 @@ the restoration sub-solve with a `resto.` prefix, e.g.
 [issue #825](https://github.com/jkitchin/pounce/issues/825) they were
 accepted and silently discarded.
 
+One of them is a POUNCE addition rather than an Ipopt option:
+[`ma57_batched_backsolve`](options.md#ma57-batched-back-substitution-ma57_batched_backsolve)
+lets the limited-memory correction hand MA57 several right-hand sides
+at once. It is off by default because turning it on perturbs the
+iterate by about one bit and therefore moves the trajectory — read that
+section before using it.
+
 ## Using POUNCE as a Rust library
 
 The workspace is a set of library crates (see

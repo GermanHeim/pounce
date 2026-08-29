@@ -352,6 +352,58 @@ the command line would be.
 A file that *selects* the backend it tunes never reaches this: `linear_solver=ma97`
 is refused on its own, as [above](#choosing-a-linear-solver).
 
+### MA57 batched back-substitution (`ma57_batched_backsolve`)
+
+Only relevant in a `--features ma57` build running `linear_solver=ma57`.
+
+Under the limited-memory quasi-Newton Hessian the solver builds a
+Sherman-Morrison-Woodbury correction from a handful of extra
+right-hand sides. Those could go to the linear solver in one call
+instead of one call per column, which saves traversals of the factor —
+but only if the backend's multi-RHS answer is *bit-identical* to
+solving the columns one at a time, because these columns feed an
+iterate whose trajectory must not move. So the solver asks first, and a
+backend that blocks its triangular substitution across columns has to
+say no.
+
+MA57 blocks. Its batched answer is tolerance-equal but not bit-equal,
+so it says no by default, and this option is how you overrule it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ma57_batched_backsolve` | `no` | `yes` lets the SMW correction hand MA57 all its columns in one blocked back-substitution. Accepts a ~1-ulp difference in the resulting iterate. Also takes a `resto.` prefix. |
+
+**Turning this on is a trajectory change, not a free speed-up.**
+Measured on a 118276-row KKT system, the same binary with and without
+the batch diverges in the last printed digit of the objective at
+iteration 20 and finishes at a different iteration count. On a
+nonconvex problem a perturbation that size can select a different local
+optimum — [issue&nbsp;#729](https://github.com/jkitchin/pounce/issues/729)
+is MA57 taking `pooling_rt2stp` to an objective 25% worse while still
+reporting `Optimal Solution Found`.
+
+What it buys, per iteration on that model:
+
+| per iteration | column at a time | batched | Δ |
+|---|---:|---:|---:|
+| back-solve | 0.1256 s | 0.0854 s | **−32.0%** |
+| numeric factorization | 0.1443 s | 0.1711 s | +18.5% |
+| linear algebra total | 0.2796 s | 0.2678 s | −4.2% |
+
+against a 3–5% replicate spread, so the net is small and the headline
+row is not the whole story. Against Ipopt/MA57 on an equal-iteration
+basis it is more interesting: the back-solve row goes from 51% worse to
+19% better.
+
+**Do not compare wall-clock across this option.** The two settings walk
+different trajectories, so the difference is dominated by how many
+iterations each run happened to take rather than by work removed. In
+the measurement above the runs finished in 201 / 206 / 173 / 160
+iterations, and the fastest arm was luck, not throughput.
+
+Full write-up, including why the option has no width ceiling the way
+the FERAL backend's equivalent does: `dev-notes/ma57-batched-backsolve.md`.
+
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 
 By default every KKT factorization is checked for the right inertia — as

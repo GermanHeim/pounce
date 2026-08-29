@@ -4,7 +4,7 @@
 //! tested, so the reader was covered and looked live. Nothing tested that
 //! the reader was *reached*, and it was not: every production
 //! construction of `Ma57SolverInterface` called `::new()`, which
-//! hard-codes `Options::defaults()`. All nine options were registered,
+//! hard-codes `Options::defaults()`. All nine upstream options were registered,
 //! documented, accepted — and discarded (gh#825). The symptom was that
 //! there was no symptom: two solves whose `ma57_*` blocks spanned eight
 //! orders of magnitude in `ma57_pivtol` and swapped the elimination
@@ -86,13 +86,13 @@ fn ma57_options_from(options: &OptionsList, prefix: &str) -> Ma57Options {
     options_of(factory(LinearSolverChoice::Ma57))
 }
 
-/// The nine values used throughout, chosen so every one differs from
+/// The ten values used throughout, chosen so every one differs from
 /// both the registry default and its neighbours — a factory that crossed
 /// two fields, or that honoured some options and not others, fails on the
 /// specific field rather than passing by coincidence.
 struct Probe;
 impl Probe {
-    const ASSIGNMENTS: [&'static str; 9] = [
+    const ASSIGNMENTS: [&'static str; 10] = [
         "ma57_print_level 3",
         "ma57_pivtol 0.5",
         "ma57_pivtolmax 0.75",
@@ -102,6 +102,7 @@ impl Probe {
         "ma57_block_size 128",
         "ma57_node_amalgamation 1",
         "ma57_small_pivot_flag 1",
+        "ma57_batched_backsolve yes",
     ];
 
     fn assert_arrived(o: &Ma57Options) {
@@ -114,12 +115,18 @@ impl Probe {
         assert_eq!(o.block_size(), 128, "ma57_block_size");
         assert_eq!(o.node_amalgamation(), 1, "ma57_node_amalgamation");
         assert_eq!(o.small_pivot_flag(), 1, "ma57_small_pivot_flag");
+        assert!(o.batched_backsolve(), "ma57_batched_backsolve");
     }
 }
 
-/// The headline: all nine options, set at the main-IPM prefix, arrive.
+/// The headline: every option in the family, set at the main-IPM
+/// prefix, arrives.
 ///
 /// Before gh#825 every assertion here read the registry default instead.
+/// `ma57_batched_backsolve` joined the list afterwards and is not a
+/// gh#825 casualty — it never existed while the reader was unreached —
+/// but it rides the same plumbing, and an option that did not arrive
+/// would fail silently in exactly the same way.
 #[test]
 fn every_ma57_option_reaches_the_backend() {
     let mut app = app();
@@ -212,6 +219,12 @@ fn default_options_are_the_registrys() {
     assert_eq!(o.block_size(), 16);
     assert_eq!(o.node_amalgamation(), 16);
     assert_eq!(o.small_pivot_flag(), 0);
+    assert!(
+        !o.batched_backsolve(),
+        "the batch must stay off unless asked for: it is a trajectory \
+         change, and `ma57_batched_backsolve_is_opt_in.rs` pins the \
+         registry half of the same property in CI"
+    );
     // And identical to the no-OptionsList constructor, which is what
     // `::new()` used to hand production.
     assert_eq!(o, Ma57Options::defaults());
