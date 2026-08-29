@@ -9,6 +9,85 @@ changes.
 
 ## [Unreleased]
 
+- **The convex `σ` path no longer certifies a wrong `x` as `Optimal` on an
+  ill-conditioned box QP (gh #846).** A 6-variable diagonal box QP with
+  `eig = [1e3 ‥ 1e11]` on `[-1, 1]` is separable, so `x* = clamp(t, -1, 1)`
+  with no solver in the loop. At the **default** tolerance the cost-normalized
+  convex arm returned `x₀ = 0.831` against `1.0` under `EXIT: Optimal Solution
+  Found.`, and at `tol = 1e-6` it returned `0.039` — 96% wrong on a unit box.
+  Ipopt 3.14.19, cvxpy/Clarabel, cvxpy/SCS, the closed form, `solver_selection
+  =nlp` and `qp_hsde=no` all agree on the true minimiser. Over a generated
+  family the reporter measured **84 of 157** instances wrong under `Optimal`,
+  worst `‖x − x*‖∞ = 5.72e-1`.
+
+  Every test standing behind that verdict was an **aggregate**.
+  `normalized_optimum_is_genuine` divided each residual by one number for the
+  whole problem — `gscale = ‖Px‖∞ ∨ ‖c‖∞ = 4.0e10`, which belongs to the
+  *stiffest* coordinate and was then the denominator for every other one. The
+  binding violation is complementarity: `x₀` sat `2.9e-3` off its bound
+  carrying a multiplier of `6.3e3` insisting it was on it, and `18.2` over
+  `4.0e10` reads `4.5e-10`, comfortably inside the `100·tol` cut. The
+  objective could not see it either — `-1.17834000816e10` against
+  `-1.17834002580e10`, **a relative objective error of 1.5e-8 for a 17% error
+  in x₀** — which is why an objective-parity check rates this problem solved,
+  the substitute CLAUDE.md records `4c02817d` making for the fixture sweep on
+  this arm.
+
+  The relative arm is now asked **one orthant row at a time**. Complementarity
+  says one factor is at zero, so it is asked as exactly that: the slack is
+  negligible against the largest term that built it (`|hⱼ| ∨ |(Gx)ⱼ|`), *or*
+  the multiplier is negligible against the largest term in every stationarity
+  row it feeds. Neither factor needs a floor and neither is a product of unlike
+  units, which is what `|zⱼsⱼ| / (gscale ∨ pscale)` was. Componentwise the two
+  ratios read `2.9e-3` and `1.0` — and `2.9e-3` is not an abstraction, it *is*
+  the returned `x`'s error, because `zs/z = s` is the distance from the bound.
+
+  **`σ` turned out to be the amplifier, not the origin.** Rejecting the
+  normalized certificate only moved the answer from `1.6e-1` wrong to `2.9e-3`
+  wrong, because gh #324's fallback is the *same embedding* un-normalized and
+  the embedding's own stopping test normalizes the gap by the objective's
+  magnitude (`gap / (1 + |obj|)`): at `|obj| = 1.18e10` that licenses an
+  absolute gap of `118`, which on curvature `1e3` is `0.49` in `x`. Measured
+  across `mag = 1e7 ‥ 1e14` the embedding degrades from `1e9` up while the
+  direct driver behind Ruiz is accurate at every magnitude, so a `σ` answer
+  that fails the test twice now falls through to that driver, and its answer is
+  taken only when it passes the same test. When nothing certifies, the closest
+  claimed optimum by **absolute** `kkt_error` in the caller's own coordinates
+  is returned — a ranking, not another threshold. Under it the reported
+  instance is correct at every tolerance in the reported table and under a
+  ten-decade objective rescaling, which is argmin-invariant by identity and was
+  costing eight orders of accuracy per decade.
+
+  **The cone gate is the part a reviewer should look at hardest.** The direct
+  driver is an orthant-only entry point — Ruiz is a row scaling — so handing it
+  a QCQP reads `h − Gx ∈ K` as `h − Gx ≥ 0` row by row and answers a looser
+  problem. The first draft had no gate, and `scripts/sweep-fixtures.sh` caught
+  it: exactly one fixture moved, on both legs, `qcqp_columns_illcond`
+  `-364.2102538 → -210.5328764` at `SolveSucceeded`, where
+  `solver_selection=nlp` and `qp_hsde=no` both put the optimum at `-364.2102`.
+  Every orthant fixture stayed green, because none of them takes that branch.
+  With the gate the sweep diff is **empty across all 158 fixture-legs**, which
+  is the expected result: CLAUDE.md records that 1 of 79 fixtures reaches `σ`
+  and 0 of 138 Maros-Meszaros problems do, so an empty sweep is evidence of no
+  collateral damage and nothing more —
+  `crates/pounce-convex/tests/issue846_sigma_flat_direction.rs` is the evidence
+  about the path itself, including a conic leg with a closed-form oracle for
+  the branch the corpus reaches only through one fixture.
+
+  A companion arm asking the same question of the **stationarity** rows was
+  written, carried through the investigation, and then removed: on this family
+  it rejects nothing the complementarity arm does not, and removing it turned
+  no test red while removing complementarity turns four red. Nor is that an
+  accident of the fixtures — the same spectrum unconstrained, in a wide box it
+  never reaches, and under an equality row all come back exact to `3e-16`. The
+  failure needs an *active bound*, because the slack it spends is bought by the
+  objective-relative gap test and a gap is spent on the bound multipliers.
+  Recorded here rather than shipped as an unexercised guard.
+
+  `ipm.rs` also emitted no `info!`/`debug!`/`trace!` at all, so an accepted
+  normalized optimum and a rejected one were indistinguishable from outside.
+  The four `σ` decisions now log at `debug`.
+
 - **A sensitivity correction that leaves the model's domain no longer reports
   itself as perfect (gh #845).** `corrector::run` normed its residual with a
   fold over `f64::max`, and `f64::max` returns the *other* operand when one is
