@@ -2698,8 +2698,8 @@ impl IpoptApplication {
                     .map(|i| i.m.max(0) as usize)
                     .unwrap_or(0);
                 let mut g_here = vec![0.0; m_inner];
-                let evaluated = m_inner == 0
-                    || tnlp.borrow_mut().eval_g(&x_here, true, &mut g_here);
+                let evaluated =
+                    m_inner == 0 || tnlp.borrow_mut().eval_g(&x_here, true, &mut g_here);
                 evaluated
                     .then(|| {
                         original_space_feasibility(

@@ -2401,11 +2401,11 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     )?;
     r.add_lower_bounded_number_option(
         "l1_slack_tol",
-        "Slack-sum tolerance for termination and honest-infeasibility upgrade.",
+        "Fallback slack-sum tolerance, used only when the model's own feasibility cannot be measured.",
         0.0,
         true,
         1.0e-6,
-        "Σ(p+n) ≤ tol counts as the original constraints being satisfied. Σ(p+n) > tol after ρ saturates triggers the honest-infeasibility upgrade — the returned point is the ℓ₁-best least-infeasible iterate, status is overridden to Infeasible_Problem_Detected.",
+        "SINCE gh#794 THIS IS A FALLBACK, NOT THE TEST. The wrapper's outer loop and its honest-infeasibility upgrade both judge the ORIGINAL model's feasibility at the returned point -- the violation of the user's own rows and bounds -- against the tolerances the caller set (tol for the strict verdict, acceptable_tol for Solved_To_Acceptable_Level), scale-relative. Sigma(p+n) was the wrong quantity twice over: the violation of equality row i is |p_i - n_i|, not p_i + n_i, and at the barrier's interior both slacks stay positive where their difference is zero; and 1e-6 is four orders looser than a tol = 1e-8 solve asked for, so a violation the strict gate would refuse on the unwrapped problem read as \"the constraints are satisfied\". Measured: ralph1 (benchmarks/mpcc) returned Solve_Succeeded at a point violating its one equality row by 2.5e-07 while reporting final_constr_viol = 9.6e-15, the augmented problem's residual, with no field in the result disclosing it. Sigma(p+n) keeps its other job unchanged -- it is the Byrd-Nocedal-Waltz steering signal for rho escalation, which is what it is the right quantity for -- and this tolerance still applies on a model whose rows cannot be evaluated at the returned point.",
     )?;
     r.add_lower_bounded_number_option(
         "l1_steering_factor",

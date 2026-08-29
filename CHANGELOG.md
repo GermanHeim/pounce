@@ -9,6 +9,52 @@ changes.
 
 ## [Unreleased]
 
+- **`l1_exact_penalty_barrier` no longer reports success on a point that
+  violates your constraints.** The wrapper solves an augmented problem,
+  `c(x) − p + n = target`, whose equality rows the slack variables satisfy
+  to machine precision by construction — and that residual was what
+  `final_constr_viol` reported. On the MPCC benchmark's `ralph1` the solve
+  returned `Solve_Succeeded` at an objective `5.0e-04` *below* the true
+  optimum, from a point violating its one equality row by `2.5e-07`, while
+  reporting a constraint violation of `9.6e-15`. `final_unscaled_constr_viol`
+  said the same, so no field in the result disclosed it.
+
+  Two things were wrong and both are fixed. The reported violation is now
+  the violation of the rows **you** declared, measured at the returned
+  point. And the verdict — both the ρ-escalation loop's stopping test and
+  the honest-infeasibility upgrade — is now judged on that same quantity
+  against the tolerances you set (`tol` for a strict success,
+  `acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative),
+  rather than on the slack sum `Σ(p + n)` against `l1_slack_tol`. `Σ(p + n)`
+  was the wrong quantity twice over: the violation of row `i` is
+  `|pᵢ − nᵢ|`, not `pᵢ + nᵢ`, and at the barrier's interior both slacks
+  stay positive where their difference is zero; and `l1_slack_tol`'s
+  `1e-6` default is four orders looser than a `tol = 1e-8` solve asked
+  for. It keeps its other job — steering ρ, which is what it is right for
+  — and survives as the fallback when a model's rows cannot be evaluated.
+
+  The change is downgrade-only: a solve that meets the strict standard on
+  your rows keeps the status it had, and nothing here turns a failure into
+  a success. In practice the loop now escalates ρ where it used to stop at
+  the penalty point, so answers also improve — `ralph1` moves from
+  `-5.0e-04` to `-5.1e-05` with the reported violation (`2.6e-09`) equal to
+  the actual one, and under `l1_fallback_on_restoration_failure` it now
+  reaches the true optimum with the complementarity product exactly zero.
+  Only solves that opt into the wrapper are affected.
+
+- **`benchmarks/mpcc/`: the MPCC benchmark harness POUNCE has listed as
+  outstanding since pounce#10.** Eleven small complementarity-constrained
+  problems covering strict, biactive, degenerate, infeasible and
+  Boolean-selector cases plus a MacMPEC-style subset, each with a
+  hand-derived optimum that an independent branch-enumeration oracle
+  re-derives; nine solver routes (direct, exact-product/NCP, the three ℓ₁
+  routes, three Scholtes continuations, and the composition of a
+  continuation with an exact-product finish); four kill-switch controls;
+  and a result contract that keeps source-level complementarity and MPCC
+  stationarity strictly apart from the NLP's own residuals. The gate report
+  — supported route, failure boundary, and ownership of every observed gap
+  — is `dev-notes/mpcc-gate0-report.md`.
+
 - **`ma57_batched_backsolve`: MA57 can now be let into the batched
   back-substitution, and the cost of doing so is written down.** Under the
   limited-memory quasi-Newton Hessian the Sherman-Morrison-Woodbury

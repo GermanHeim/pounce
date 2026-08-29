@@ -1286,8 +1286,25 @@ overriding:
 | `l1_penalty_max`                     | `1e6`   | Maximum penalty weight before declaring infeasibility.     |
 | `l1_penalty_increase_factor`         | `8.0`   | Multiplier applied to ρ each outer iteration.              |
 | `l1_penalty_max_outer_iter`          | `8`     | Maximum penalty outer iterations.                          |
-| `l1_slack_tol`                       | `1e-6`  | Slack tolerance for "constraints satisfied".               |
+| `l1_slack_tol`                       | `1e-6`  | *Fallback* slack tolerance — see below.                    |
 | `l1_steering_factor`                 | `10.0`  | Steering-rule factor for ρ escalation.                     |
+
+The wrapper solves an *augmented* problem, `c(x) − p + n = target` with
+`p, n ≥ 0`, whose equality rows the slacks satisfy to machine precision
+by construction. So neither the residual the inner solve converged nor
+the slack sum `Σ(p + n)` is the violation of the constraints you
+declared — that is `|pᵢ − nᵢ|` per row, and at the barrier's interior
+both slacks stay positive where their difference is zero.
+
+Since gh#794 the wrapper therefore **measures the original model's rows
+and bounds at the returned point**, reports that violation in
+`final_constr_viol` / `final_unscaled_constr_viol`, and judges it by the
+tolerances you set — `tol` for a strict `Solve_Succeeded`,
+`acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative in
+both cases — before the ρ loop stops or the honest-infeasibility upgrade
+fires. `l1_slack_tol` survives only as the fallback for a model whose
+rows cannot be evaluated at the returned point, and `Σ(p + n)` keeps its
+other job as the Byrd-Nocedal-Waltz steering signal for ρ escalation.
 
 ## NLP Presolve
 
