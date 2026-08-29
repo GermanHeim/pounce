@@ -29,7 +29,10 @@ changes.
   a reader who meets the number finds the cause. The attribution needs no
   bisect: `bound_relax_factor=0` is what the extractors used to read, and it
   restores the pre-commit counts to the iteration (30 / 35 / 38 on
-  QSCFXM1/2/3, re-verified on `fdea82b5`).
+  QSCFXM1/2/3, re-verified on the current tree). The QP suite is re-run so
+  `benchmarks/BENCHMARK_REPORT.md` again carries the numbers the tree
+  produces: 3148 → 3164 iterations, six models moved since 2026-08-23, no
+  status flips and no objective changes.
 
   The corpus gap is the interesting half. The sweep was never blind to the
   convex arm — that reasoning was corrected in gh #761 — but nothing in it

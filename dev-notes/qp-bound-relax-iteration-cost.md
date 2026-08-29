@@ -37,22 +37,28 @@ The attribution does not need the old binary. `bound_relax_factor=0` on a
 current build restores the pre-commit counts, because zero is exactly what the
 convex extractors used to read. Re-run on `fdea82b5` (2026-08-29), same host:
 
-| model | default (relaxed) | `bound_relax_factor=0` |
-|---|---|---|
-| QSCFXM1 | 131 | 30 |
-| QSCFXM2 | 145 | 35 |
-| QSCFXM3 | 168 | 38 |
+| model | default (relaxed) | `bound_relax_factor=0` | as first measured |
+|---|---|---|---|
+| QSCFXM1 | 131 | 30 | 30 → 131 |
+| QSCFXM2 | 145 | 35 | 35 → 145 |
+| QSCFXM3 | 168 | 38 | 38 → 168 |
+| Q25FV47 | 120 | 35 | 41 → 142 |
+| STADAT1 | 92 | 53 | 22 → 34 |
 
-Those are the pre-commit numbers to the iteration. So a reader who finds the
-QP suite slower than an old report and reaches for `git bisect` can stop here:
-run the suite once with `bound_relax_factor=0` and compare.
+On the QSCFXM family the zeroed column reproduces the pre-commit counts *to
+the iteration*. So a reader who finds the QP suite slower than an old report
+and reaches for `git bisect` can stop here: run it once with
+`bound_relax_factor=0` and compare.
 
-Two of the five original movers no longer reproduce their 2026-08-23 numbers
-on `fdea82b5` — `Q25FV47` reads 120 (was 142) and `STADAT1` 92 (was 34), and
-`STADAT1` moves at `bound_relax_factor=0` too (53, was 22). That drift is
-*not* attributable to `4c02817d` and is not what this note is about; it is
-recorded here only so the next reader does not mistake it for part of this
-cost. See gh#760 for its own follow-up.
+`Q25FV47` and `STADAT1` are the two that no longer land on their 2026-08-23
+numbers, and the zeroed column is how you can tell that is a different
+question. Both moved in **both** columns — `Q25FV47` 41 → 35 with the
+relaxation off, `STADAT1` 22 → 53 — so what moved them is not the relaxation.
+Something else in the 245 commits between `32fea00e` and this branch did, with
+no status flip and no objective change anywhere in the suite. Both still carry
+the relaxation cost this note is about (3.4× and 1.7×). The refreshed baseline
+below is the current-status record of that; attributing it further means
+running `STADAT1` across the window, which nobody has needed to yet.
 
 ## Why the cost is right
 
@@ -96,9 +102,9 @@ the fixture sweep asserts trajectory.
 
 The premise was also wrong: the sweep was never blind to the convex arm. Both
 legs run at the default `solver_selection=auto`, which routes to the most
-specialized engine available, so 41 of 78 fixtures never touch the NLP arm.
-Run across `4c02817d` with the unmodified script, **52 fixture-legs move**,
-including a status flip:
+specialized engine available, so most of the corpus never touches the NLP arm
+at all (42 of 79 fixtures as of `fdea82b5`). Run across `4c02817d` with the
+unmodified script, **52 fixture-legs move**, including a status flip:
 
 ```
 lbfgs scaled_feasible_a  MaximumIterationsExceeded it=199 -> SolveSucceeded it=69
@@ -160,17 +166,48 @@ in the corpus is within two orders of magnitude of `BOYD2` (93 263 columns), so
 magnitude on models that size is still only knowable by running
 `benchmarks/qp`. See `dev-notes/convex-fixture-corpus.md`.
 
-## The committed baseline
+## The committed baseline, refreshed
 
 `benchmarks/qp/pounce.json` is gitignored — the durable record is
-`benchmarks/BENCHMARK_REPORT.md` and its JSON. Those were regenerated at
-`32fea00e` by `e84f4259`, which is downstream of `4c02817d`, so **the
-committed QP numbers are already the post-relaxation ones**: mean iterations
-22.3 (POUNCE) against Ipopt's 75.6 over the 133 commonly-solved problems,
-reproduced exactly from the post-fix `pounce.json`. The pre-fix report was the
-one generated at `a798ae1b` on 2026-08-22, which `e84f4259` replaced. Nothing
-further is needed to make the new counts the reference; this note exists so
-that the step *between* those two reports has a name.
+`benchmarks/BENCHMARK_REPORT.md`. It was already post-relaxation before this
+note existed: `e84f4259` regenerated it at `32fea00e`, downstream of
+`4c02817d`, replacing the pre-fix report generated at `a798ae1b` on
+2026-08-22. gh#760's second follow-up — "refresh the committed QP baseline so
+the new counts are the reference" — was satisfied by that, on paper.
+
+It is now satisfied by measurement instead. The suite was re-run on this
+branch (`make -C benchmarks qp-rerun`, same host, same committed
+`ipopt_ma57.json` reference; the report stamps the exact commit in its own
+provenance table), because the spot checks above turned up two problems whose
+committed counts the current tree no longer produces. Whole-suite delta
+against the 2026-08-23 run:
+
+* 138/138 solved both ways, **no status flips, no objective changes**
+* total iterations **3148 → 3164 (+16)**; six models moved, none of the others
+  by a single iteration
+* total solve time 358.3 s → 354.9 s
+
+| model | 2026-08-23 | current |
+|---|---|---|
+| STADAT1 | 34 | 92 |
+| Q25FV47 | 142 | 120 |
+| QSHIP12S | 38 | 30 |
+| QSHIP08S | 23 | 18 |
+| QSTANDAT | 36 | 31 |
+| QSIERRA | 41 | 39 |
+
+In the report's QP table that is mean iterations 22.3 → 22.4 and total time
+102.79 s → 93.45 s over the 133 commonly-solved problems. None of it is
+`4c02817d`'s — that commit is six days upstream of the run it replaces — and
+none of it is the bound relaxation, per the two-column table above. It is
+recorded here rather than filed because a baseline refresh is what it is: the
+committed numbers are once again the ones the tree produces, which is the only
+property the baseline is for.
+
+The 132 unmoved models are the useful half of that table. A six-day window of
+245 commits moved six problems and no verdicts, so the next reader who finds a
+QP number that disagrees with the report has a small, specific list of models
+where that is ordinary.
 
 ## Related
 

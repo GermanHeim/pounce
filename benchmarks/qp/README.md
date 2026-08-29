@@ -103,7 +103,14 @@ target/release/pounce nl/QSCFXM1.nl --no-sol bound_relax_factor=0   #  30 iters
 
 `bound_relax_factor=0` is exactly what the extractors used to read before
 `4c02817d`, so it restores the pre-commit counts to the iteration — 30 / 35 /
-38 on QSCFXM1/2/3, re-verified on `fdea82b5`. That is the whole bisect.
+38 on QSCFXM1/2/3, re-verified on the current tree. That is the whole bisect.
+
+The suite has since been re-run so the committed `BENCHMARK_REPORT.md` is
+again what the current tree produces: total **3164** iterations, six models
+moved against the 2026-08-23 run (`STADAT1` 34 → 92 dominates), no status
+flips and no objective changes. That drift is *not* the bound relaxation —
+`STADAT1` moves at `bound_relax_factor=0` too — and it is not `4c02817d`,
+which is six days upstream of the run it replaced.
 
 Full record, including why the cost is right and what the fixture corpus could
 not see: `dev-notes/qp-bound-relax-iteration-cost.md` (gh#760).
