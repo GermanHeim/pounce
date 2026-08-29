@@ -22,6 +22,7 @@
 | CCOpt | absent. Optional per gh#794; the pin a comparison would have used is `ccopt==0.4.1`. |
 | matrix | 11 cases × 2 scaling legs × 3 starts × 8 routes × 5 controls = 2560 records, 188 s |
 | pinned options | `tol=1e-8`, `max_iter=300`, `bound_relax_factor=0`, `honor_original_bounds=yes` |
+| linear algebra | identical across all eight routes — one POUNCE build, one process, the default linear solver, no per-route backend selection. No comparison below crosses a linear-algebra boundary. |
 | relaxation schedule | `tau = 1e0 … 1e-8`, ×0.1, one bisection allowed after a rejected stage |
 
 `bound_relax_factor=0` is not a detail. Its default of 1e-8 relaxes every

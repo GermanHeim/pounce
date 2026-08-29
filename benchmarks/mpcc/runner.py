@@ -43,6 +43,7 @@ from . import routes as R
 from .lowering import LoweredNlp, lower
 from .spec import MpccCase, RouteRecord, StageRecord
 from .stationarity import classify
+from .validate import validate as validate_class
 
 
 # --------------------------------------------------------------------
@@ -458,6 +459,10 @@ def run_cell(
                 "reason": f"classifier raised {type(exc).__name__}: {exc}",
             }
         val: Dict[str, object] = {}
+        try:
+            val.update(validate_class(case, best_x))
+        except Exception as exc:  # pragma: no cover - validator failure
+            val["class_validator_error"] = f"{type(exc).__name__}: {exc}"
         for fn in case.validators:
             try:
                 val.update(fn(case, best_x))

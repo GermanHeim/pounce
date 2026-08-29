@@ -22,6 +22,7 @@ Layout
 ``cases``         the benchmark ladder, one registry.
 ``lowering``      MPCC -> smooth NLP, one function per lowering.
 ``stationarity``  the MPCC stationarity classifier (S / M / C / W).
+``validate``      source-level validation, one function per class.
 ``oracle``        branch-enumeration global oracle; optional CCOpt hook.
 ``routes``        the POUNCE configurations and the kill-switch controls.
 ``runner``        the measurement protocol, including the continuation

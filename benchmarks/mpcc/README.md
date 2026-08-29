@@ -87,6 +87,34 @@ every complementarity branch as a smooth program with SciPy;
 | `scholtes4` | macmpec | two active rows; the solution is M- but not S-stationary |
 | `qpec_small` | macmpec | two pairs (one strict, one biactive) — the only case that catches a mis-indexed product row |
 
+## Source-level validation
+
+Each of the six benchmark classes has its own validation function in
+`validate.py`, applied to every case of that class: strict
+complementarity for `regular`, a genuinely biactive pair for
+`biactive`, source feasibility for `degenerate`, *in*feasibility for
+`infeasible`, branch commitment for `selector`, and a signed gap
+against the pinned optimum for `macmpec`. A few cases add their own on
+top — which branch a selector chose, whether `ctrap` stopped at the
+C-stationary origin.
+
+They read the source MPCC and nothing else: no solver status, no NLP
+residual, no lowering. A route can converge its reformulation and still
+be wrong about the model, and only a check written against the model
+says so. `selftest` requires every class to have one and requires each
+to pass at its own cases' expected solutions — a validator no expected
+point satisfies is describing a different class than the one it is
+registered under.
+
+## Comparability of the arms
+
+All eight routes are the same POUNCE build solving through the same
+linear algebra: one process, one extension module, the default linear
+solver, no per-route backend selection. So no comparison in the result
+file crosses a linear-algebra boundary and none needs the disclosure
+gh#794 asks for. The optional CCOpt comparison would cross one, which is
+part of why it is pinned rather than merely named.
+
 ## What a record contains, and the one rule about reading it
 
 **Source-level quantities and POUNCE's NLP diagnostics never share a

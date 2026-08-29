@@ -30,6 +30,7 @@ from .lowering import fd_check, lower
 from .oracle import enumerate_branches
 from .spec import CLASSES, SCALINGS
 from .stationarity import classify
+from .validate import CLASS_VALIDATORS, validate
 
 _FD_TOL = 1e-7
 
@@ -275,8 +276,82 @@ def _check_manifest() -> List[str]:
     return fails
 
 
+def _check_class_validators() -> List[str]:
+    """gh#794: each benchmark class has a source-level validation function.
+
+    Checked two ways -- every class in `CLASSES` has an entry, and the
+    entry actually runs at each case's expected point and passes there.
+    A validator that no expected point satisfies is describing a
+    different class than the one it is registered under.
+    """
+    fails = [
+        f"benchmark class {k!r} has no source-level validation function"
+        for k in CLASSES
+        if k not in CLASS_VALIDATORS
+    ]
+    for name in C.REGISTRY:
+        case = C.make(name)
+        x = case.expected.x
+        if x is None:
+            continue
+        out = validate(case, np.asarray(x, float))
+        for k, v in out.items():
+            if k.endswith("_ok") and v is False:
+                fails.append(
+                    f"{name}: class validator for {case.klass!r} fails at the "
+                    f"case's own expected solution ({k})"
+                )
+    return fails
+
+
+def _check_validators_are_scale_invariant() -> List[str]:
+    """A validator's verdict must not depend on the units it is read in.
+
+    Both scaling legs describe the same MPCC, so a `_ok` key that flips
+    between them is measuring the coordinates rather than the model.
+    This is not hypothetical: the selector's one-hot test compared
+    ``x`` against 1 and failed on every `skew` cell because the solution
+    ``(0, 1)`` is ``(0, 1e-3)`` there -- 72 spurious failures in a full
+    run, all of them looking like route behaviour. The fix is to read
+    the pair values, which `rescale` leaves alone; this check is what
+    keeps the next validator honest.
+    """
+    fails = []
+    rng = np.random.default_rng(7942)
+    for name in C.REGISTRY:
+        case = C.make(name)
+        pts = [np.asarray(v, float) for v in case.starts.values()]
+        if case.expected.x is not None:
+            pts.append(np.asarray(case.expected.x, float))
+        pts += [rng.normal(size=case.n) for _ in range(4)]
+        for sname, fn in SCALINGS.items():
+            if sname == "unit":
+                continue
+            d = fn(case.n)
+            sc = case.rescale(d)
+            for x in pts:
+                a = dict(validate(case, x))
+                for v in case.validators:
+                    a.update(v(case, x))
+                b = dict(validate(sc, x / d))
+                for v in sc.validators:
+                    b.update(v(sc, x / d))
+                for k in a:
+                    if not k.endswith("_ok"):
+                        continue
+                    if a[k] != b.get(k):
+                        fails.append(
+                            f"{name}/{sname}: validator key {k!r} is "
+                            f"{a[k]} unscaled and {b.get(k)} rescaled at the "
+                            "same point"
+                        )
+    return sorted(set(fails))
+
+
 CHECKS = (
     ("benchmark classes covered", _check_classes),
+    ("each class has a source-level validator", _check_class_validators),
+    ("validators are scale invariant", _check_validators_are_scale_invariant),
     ("smoke subset covers every class", _check_smoke_covers_classes),
     ("derivatives against finite differences", _check_derivatives),
     ("branch-enumeration oracle vs hand-derived optima", _check_oracle),

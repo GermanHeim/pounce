@@ -299,7 +299,15 @@ def ctrap() -> MpccCase:
 
 
 def _ctrap_validator(case: MpccCase, x: np.ndarray) -> dict:
-    at_trap = bool(np.linalg.norm(x) <= 1e-4)
+    """Did this route stop at the C-stationary origin?
+
+    Read off the **pair values**, not off ``x``. ``G`` and ``H`` are
+    invariant under `MpccCase.rescale` while the coordinates are not, so
+    a norm on ``x`` would answer a different question on each scaling
+    leg -- the "absolute threshold on a scale-dependent quantity" trap.
+    """
+    g, h = case.pair_values(x)
+    at_trap = bool(np.max(np.maximum(np.abs(g), np.abs(h))) <= 1e-4)
     return {
         "landed_at_trap": at_trap,
         "reached_global_ok": bool(abs(case.objective.value(x) + 0.25) <= 1e-6),
@@ -362,18 +370,11 @@ def infeasible_pair() -> MpccCase:
             ),
         ),
         provenance="derived in-repo.",
-        validators=(_infeasible_validator,),
+        # No case-level validator: the `infeasible` class validator in
+        # `validate.py` already checks the only thing there is to check
+        # here -- that the returned point is not source-feasible, because
+        # no such point exists.
     )
-
-
-def _infeasible_validator(case: MpccCase, x: np.ndarray) -> dict:
-    s = case.source_feasibility(x)
-    return {
-        "correctly_infeasible_ok": bool(
-            max(s["row_viol"], s["bound_viol"], s["sign_viol"], s["compl_max"]) > 1e-6
-        ),
-        "residual_at_forced_point": float(s["compl_max"]),
-    }
 
 
 # --------------------------------------------------------------------
@@ -460,14 +461,25 @@ def _selector(theta: float) -> MpccCase:
 
 
 def _selector_validator(case: MpccCase, x: np.ndarray) -> dict:
-    onehot = (abs(x[0] - 1.0) < 1e-5 and abs(x[1]) < 1e-5) or (
-        abs(x[0]) < 1e-5 and abs(x[1] - 1.0) < 1e-5
+    """Which branch, and is it a clean one-hot.
+
+    Commitment as such is the `selector` class validator's job
+    (`validate._selector`); what is case-specific here is *which* branch
+    came out, which is the reportable quantity at the tie and the thing
+    a branch-change comparison across theta is made of.
+    """
+    # Both quantities come off the pair values, which `rescale` leaves
+    # alone; ``x`` itself does not survive the skew leg (the solution
+    # (0, 1) becomes (0, 1e-3) there, and a test against 1 fails for no
+    # reason but the units).
+    y1, y2 = case.pair_values(x)
+    y1, y2 = float(y1[0]), float(y2[0])
+    onehot = (abs(y1 - 1.0) < 1e-5 and abs(y2) < 1e-5) or (
+        abs(y1) < 1e-5 and abs(y2 - 1.0) < 1e-5
     )
-    branch = "A" if x[0] > x[1] else "B"
     return {
-        "committed_to_branch_ok": bool(onehot),
-        "branch": branch,
-        "fractional_gap": float(min(abs(x[0]), abs(x[1]))),
+        "branch": "A" if y1 > y2 else "B",
+        "one_hot_ok": bool(onehot),
     }
 
 

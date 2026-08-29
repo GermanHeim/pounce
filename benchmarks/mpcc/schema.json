@@ -401,7 +401,7 @@
         },
         "validation": {
           "type": "object",
-          "description": "Source-level validation function output; keys ending in _ok are pass/fail."
+          "description": "Source-level validation at the returned point: the benchmark class's own validator (validate.CLASS_VALIDATORS, one per class as gh#794 requires) plus any case-specific checks. Every entry is computed from the source MPCC -- no solver status, no NLP residual, no lowering. Keys ending in _ok are pass/fail; a failing one is a claim that the returned point is not the one the class describes, not automatically a defect (a local solver reaching a different local solution fails strict_complementarity_ok honestly). x_unscaled carries the returned point mapped back to the unscaled source model so the two scaling legs can be compared directly."
         },
         "regime": {
           "type": [
