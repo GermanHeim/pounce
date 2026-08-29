@@ -32,10 +32,19 @@ import numpy as np
 from .spec import ACTIVE_TOL, MpccCase, pair_activity
 
 
+def _activity(case: MpccCase, x: np.ndarray):
+    """`spec.pair_activity` over every pair, as two boolean arrays."""
+    acts = [pair_activity(p, x, ACTIVE_TOL) for p in case.pairs]
+    return (
+        np.array([a for a, _ in acts], dtype=bool),
+        np.array([b for _, b in acts], dtype=bool),
+    )
+
+
 def _regular(case: MpccCase, x: np.ndarray) -> Dict[str, object]:
     """Strict complementarity: exactly one side of every pair vanishes."""
     g, h = case.pair_values(x)
-    gz, hz = pair_activity(g, h, ACTIVE_TOL)
+    gz, hz = _activity(case, x)
     return {
         "strict_complementarity_ok": bool(np.all(gz ^ hz)),
         "n_biactive_at_point": int(np.sum(gz & hz)),
@@ -46,7 +55,7 @@ def _regular(case: MpccCase, x: np.ndarray) -> Dict[str, object]:
 def _biactive(case: MpccCase, x: np.ndarray) -> Dict[str, object]:
     """At least one pair with both sides at zero, as the class claims."""
     g, h = case.pair_values(x)
-    gz, hz = pair_activity(g, h, ACTIVE_TOL)
+    gz, hz = _activity(case, x)
     both = gz & hz
     return {
         "has_biactive_pair_ok": bool(np.any(both)),
@@ -94,7 +103,7 @@ def _infeasible(case: MpccCase, x: np.ndarray) -> Dict[str, object]:
 def _selector(case: MpccCase, x: np.ndarray) -> Dict[str, object]:
     """The selector committed to a branch rather than staying fractional."""
     g, h = case.pair_values(x)
-    gz, hz = pair_activity(g, h, ACTIVE_TOL)
+    gz, hz = _activity(case, x)
     # Distance to the nearest branch, per pair: a committed selector has
     # min(|G_i|, |H_i|) = 0. The worst over pairs is what gets reported,
     # because one uncommitted pair is enough to make the answer

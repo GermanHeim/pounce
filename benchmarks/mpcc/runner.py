@@ -304,10 +304,20 @@ def run_cell(
     # come out of this harness looking solved by three routes. The point
     # is still recorded, with accepted/rejected stage counts beside it.
     completed = False
+    #: The finishing solve is appended to the schedule from inside the
+    #: loop that tests `si >= len(schedule)`, so it has to be appended
+    #: exactly once. Without this guard the loop re-queues a finish
+    #: stage every time one is accepted and never terminates.
+    finish_queued = False
     try:
         while si < len(schedule):
             tau, tau_reason = schedule[si]
-            nlp = lower(case, route.lowering, tau)
+            lowering_here = (
+                route.finish
+                if route.finish is not None and tau is None
+                else route.lowering
+            )
+            nlp = lower(case, lowering_here, tau)
             accepted = False
             for restart_level, warm_level in _ladder_levels(route.warm):
                 if restart_level == "cold_x0":
@@ -332,6 +342,18 @@ def run_cell(
                     seed = prev_x
                     state = warm_state
                 eff_warm = warm_level if state is not None else "none"
+                if route.finish is not None and tau is None and state is not None:
+                    # The finishing solve takes the point and nothing
+                    # else. Its duals would be the relaxed problem's:
+                    # the product row is an *active inequality* at
+                    # `G*H <= tau` and an *equality* at `G*H = 0`, so the
+                    # multiplier that converged one is a multiplier of a
+                    # different constraint. Seeding it costs more than it
+                    # saves — measured, the full transfer sent a
+                    # three-variable finish into a thrash that never
+                    # returned inside 25 s, where the primal-only
+                    # transfer converges in tens of iterations.
+                    eff_warm = "primal"
                 mu_in = None
                 if eff_warm == "full" and state is not None:
                     mu_in = state.get("mu")
@@ -388,6 +410,16 @@ def run_cell(
 
             if accepted:
                 si += 1
+                if (
+                    si >= len(schedule)
+                    and route.finish is not None
+                    and not finish_queued
+                ):
+                    finish_queued = True
+                    # The continuation has run out. Append one solve on
+                    # the finishing lowering, warm-started from the last
+                    # accepted stage, and let the same ladder cover it.
+                    schedule.append((None, f"{route.finish} finish"))
                 continue
 
             if (
@@ -413,6 +445,14 @@ def run_cell(
     rec.wall_s = time.perf_counter() - t_all
     rec.stages = stages
     rec.outer_stages = len({s.tau for s in stages}) if route.continuation else len(stages)
+    if route.finish is not None:
+        # Report the lowering the *answer* came from. A composition whose
+        # record said `scholtes` would invite the reader to apply the
+        # relaxation-limit reading to a point that is exactly
+        # complementary.
+        rec.lowering = route.finish if any(
+            s.tau is None and s.accepted for s in stages
+        ) else route.lowering
     rec.accepted_stages = sum(1 for s in stages if s.accepted)
     rec.rejected_stages = sum(1 for s in stages if not s.accepted)
     rec.restarts = sum(1 for s in stages if s.restart_level != "route")

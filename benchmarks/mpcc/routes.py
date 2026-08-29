@@ -61,7 +61,7 @@ mechanism that could otherwise explain an outcome:
 from __future__ import annotations
 
 import dataclasses
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 #: Applied to every solve in every route.
 BASE_OPTIONS: Dict[str, object] = {
@@ -88,6 +88,13 @@ class Route:
     warm: str
     continuation: bool
     why: str
+    #: Optional lowering for one final solve after the schedule runs
+    #: out, warm-started from the last accepted stage. This is what
+    #: turns a continuation's `tau`-feasible answer into an
+    #: MPCC-feasible one: the relaxation locates the branch, and a
+    #: single exact-product solve seeded inside it drives the
+    #: complementarity to zero. `None` for every other route.
+    finish: Optional[str] = None
 
 
 #: Warm-start levels for the continuation routes.
@@ -173,6 +180,26 @@ ROUTES: Dict[str, Route] = {
         warm="full",
         continuation=True,
         why="Scholtes continuation with full primal/dual/barrier warm starts.",
+    ),
+    # The composition, and the one gh#794 recommends as the default
+    # where the branch is not known in advance. Neither half is
+    # sufficient on its own: the continuation always converges but its
+    # answer is only ever feasible for `G*H <= tau`, and the
+    # exact-product solve returns an MPCC-feasible point but fails from
+    # a cold start on the cases where a pair is biactive. Run in
+    # sequence they cover each other, which is a measurement (see the
+    # route summary) rather than a hope.
+    "scholtes_then_ncp": Route(
+        name="scholtes_then_ncp",
+        lowering="scholtes",
+        options={},
+        warm="full",
+        continuation=True,
+        why=(
+            "Scholtes continuation with full warm starts to locate the branch, "
+            "then one exact-product NCP-equality solve seeded from it."
+        ),
+        finish="prod_eq",
     ),
 }
 

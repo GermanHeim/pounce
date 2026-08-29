@@ -79,7 +79,9 @@ def _sets(case: MpccCase, x: np.ndarray, tol: float):
     that had reached the optimum to nine digits; see `pair_activity`.
     """
     g, h = case.pair_values(x)
-    g_act, h_act = pair_activity(g, h, tol)
+    acts = [pair_activity(p, x, tol) for p in case.pairs]
+    g_act = np.array([a for a, _ in acts], dtype=bool)
+    h_act = np.array([b for _, b in acts], dtype=bool)
     return g, h, g_act, h_act
 
 

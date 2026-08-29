@@ -55,6 +55,20 @@ import numpy as np
 #: It is a *floor*, not the tolerance -- see `pair_activity`.
 ACTIVE_TOL = 1e-6
 
+#: The solver tolerance every route in this suite is pinned to. Stated
+#: here because `pair_activity` needs it and `spec` must not import
+#: `routes`; `selftest` fails if the two disagree.
+SOLVE_TOL = 1e-8
+
+#: How far from the complementarity corner a solve converged to
+#: `SOLVE_TOL` is entitled to leave a pair. Derived, not chosen: the
+#: constraint the solver was given is `G*H`, which is quadratically flat
+#: at the corner, so driving the product to `eps` pins each side only to
+#: `sqrt(eps)`. At `tol = 1e-8` that is `1e-4` -- a hundred times
+#: `ACTIVE_TOL`, which is why a fixed membership threshold misreads a
+#: converged MPCC point.
+CORNER_TOL = SOLVE_TOL**0.5
+
 #: Benchmark classes. Every case carries exactly one, and the ladder is
 #: required to cover all of them (`selftest` enforces it).
 CLASSES = (
@@ -129,48 +143,22 @@ class Affine:
     def as_quad(self) -> Quad:
         return Quad(np.zeros((self.n, self.n)), self.a, self.b)
 
+    def term_scale(self, x: np.ndarray) -> float:
+        """Magnitude of the largest term this form is assembled from.
+
+        ``max_j |a_j x_j|`` and ``|b|``. The form's own value is
+        deliberately not in the max: at an active row the value is the
+        thing being judged, and letting it set its own scale makes every
+        threshold self-fulfilling. Invariant under `MpccCase.rescale`,
+        because ``a_j`` gains the factor ``d_j`` exactly where ``x_j``
+        loses it.
+        """
+        x = np.asarray(x, dtype=float)
+        terms = np.abs(self.a * x)
+        return float(max(terms.max() if terms.size else 0.0, abs(self.b)))
+
     def rescale(self, d: np.ndarray) -> "Affine":
         return Affine(self.a * d, self.b)
-
-
-def pair_activity(
-    g: np.ndarray, h: np.ndarray, act_tol: float = ACTIVE_TOL
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Which side of each complementarity pair counts as zero at a point.
-
-    The threshold is ``max(act_tol, sqrt(|G_i H_i|))`` — per pair, from
-    the pair's own achieved complementarity — and **not** a fixed
-    ``act_tol``. The reason is the geometry of the constraint the solver
-    was actually given: ``G*H`` is quadratically flat at the corner, so a
-    solve that drives the product to ``eps`` leaves the pair sitting
-    ``sqrt(eps)`` away from it. At the default ``tol = 1e-8`` that is
-    ``1e-4``, a hundred times the floor here — so a fixed ``1e-6``
-    threshold reads a perfectly converged MPCC point as lying on
-    *neither* branch, reports "no active constraints", and then finds no
-    multipliers reproducing ``grad f``.
-
-    Measured before this rule existed: 12 of the corpus's 512
-    control-free observations — every ℓ₁ cell on `ralph2` and
-    `qpec_small` that reached the optimum to nine digits — came back
-    classified `none`, i.e. not even weakly stationary, purely from the
-    threshold. That is the same "absolute threshold on a scale-dependent
-    quantity" failure the rest of this harness is built to avoid; here
-    the scale is the square root of the achieved residual.
-
-    Both limbs behave correctly at the extremes: with ``G = 1`` and
-    ``H = 1e-9`` the threshold is ``3e-5``, so ``H`` is active and ``G``
-    is not; with ``G = H = 3e-5`` (the same product) both are, which is
-    the biactive reading and the right one. At an exactly complementary
-    point the product is zero and the threshold falls back to
-    ``act_tol``.
-
-    ``G`` and ``H`` are invariant under `MpccCase.rescale`, so the rule
-    is scale-invariant like everything else that reads them.
-    """
-    g = np.asarray(g, dtype=float)
-    h = np.asarray(h, dtype=float)
-    thresh = np.maximum(act_tol, np.sqrt(np.abs(g * h)))
-    return np.abs(g) <= thresh, np.abs(h) <= thresh
 
 
 def product(g: Affine, h: Affine) -> Quad:
@@ -224,6 +212,55 @@ class Pair:
             self.branch_G_zero,
             self.branch_H_zero,
         )
+
+
+def pair_activity(
+    pair: "Pair",
+    x: np.ndarray,
+    act_tol: float = ACTIVE_TOL,
+    corner_tol: float = CORNER_TOL,
+) -> Tuple[bool, bool]:
+    """Which side of a complementarity pair counts as zero at ``x``.
+
+    The threshold is ``max(act_tol, corner_tol * max(term_scale, 1))``
+    per side, and **not** a fixed ``act_tol``. Two things go into that,
+    and both are derived rather than picked:
+
+    * ``corner_tol = sqrt(tol)`` is how far from the corner a solve
+      converged to ``tol`` is entitled to leave the pair. ``G*H`` is
+      quadratically flat there, so driving the product to ``1e-8`` pins
+      each side only to ``1e-4``. A fixed ``1e-6`` therefore reads a
+      perfectly converged MPCC point as lying on *neither* branch,
+      reports no active constraints, and then finds no multipliers
+      reproducing ``grad f``. Measured before this rule existed: 12 of
+      the corpus's 512 control-free observations -- every ℓ₁ cell on
+      `ralph2` and `qpec_small` that had reached the optimum to nine
+      digits -- came back classified `none`, not even weakly stationary,
+      purely from the threshold.
+
+    * ``term_scale`` makes it relative, in the idiom the rest of this
+      harness uses: a side whose own terms live at ``1e6`` is not
+      "nonzero" at ``1e-3``.
+
+    Judging against ``sqrt(tol)`` rather than against the *achieved*
+    product ``sqrt(|G H|)`` is deliberate, and the difference is not
+    cosmetic. The achieved product is a geometric mean, so at a pair
+    sitting at ``G = 3.5e-5``, ``H = 7.7e-5`` -- plainly one corner --
+    ``sqrt(|G H|) = 5.2e-5`` falls *between* the two sides and admits
+    only the smaller one, reporting a biactive point as strictly
+    complementary. Worse, it is knife-edged exactly on the diagonal
+    ``G = H``, where the threshold equals both sides and the verdict
+    turns on the last bit of a square root. ``sqrt(tol)`` is a property
+    of what was asked for, not of what luck delivered.
+
+    Returns ``(G_is_zero, H_is_zero)``.
+    """
+    x = np.asarray(x, dtype=float)
+    out = []
+    for form in (pair.G, pair.H):
+        thresh = max(act_tol, corner_tol * max(form.term_scale(x), 1.0))
+        out.append(bool(abs(form.value(x)) <= thresh))
+    return out[0], out[1]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -334,10 +371,9 @@ class MpccCase:
 
     def regime(self, x: np.ndarray, tol: float = ACTIVE_TOL) -> List[str]:
         """Per-pair branch label at ``x``: ``G0``, ``H0``, ``both`` or ``none``."""
-        g, h = self.pair_values(x)
-        gz_arr, hz_arr = pair_activity(g, h, tol)
         out = []
-        for gz, hz in zip(gz_arr, hz_arr):
+        for p in self.pairs:
+            gz, hz = pair_activity(p, x, tol)
             out.append("both" if gz and hz else "G0" if gz else "H0" if hz else "none")
         return out
 

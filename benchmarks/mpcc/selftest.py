@@ -28,7 +28,8 @@ from . import cases as C
 from . import manifest as M
 from .lowering import fd_check, lower
 from .oracle import enumerate_branches
-from .spec import CLASSES, SCALINGS
+from . import routes as R
+from .spec import CLASSES, SCALINGS, SOLVE_TOL
 from .stationarity import classify
 from .validate import CLASS_VALIDATORS, validate
 
@@ -164,32 +165,54 @@ def _check_classifier_discriminates() -> List[str]:
     return fails
 
 
-def _check_activity_threshold_is_sqrt_aware() -> List[str]:
+def _check_activity_threshold_is_corner_aware() -> List[str]:
     """A tol-converged MPCC point must classify, not read as `none`.
 
-    `spec.pair_activity`'s threshold is
-    ``max(act_tol, sqrt(|G_i H_i|))``. This pins why: perturb
-    `qpec_small`'s biactive pair off the corner by ``sqrt(1e-9)``, which
-    is exactly what a solve that drove the product to ``1e-9`` returns,
-    and the point must still classify as S-stationary. Replace the
-    threshold with a fixed ``act_tol`` and it reads regime
-    ``['H0', 'none']`` and class `none` — not even weakly stationary —
-    for a point that reached the optimum to nine digits.
+    `spec.pair_activity` judges each side against
+    ``max(act_tol, CORNER_TOL * max(term_scale, 1))`` with
+    ``CORNER_TOL = sqrt(SOLVE_TOL)``. Three things are pinned here.
 
-    The second row is the control: at an exactly complementary point the
-    product is zero, the threshold falls back to ``act_tol``, and the
-    rule changes nothing.
+    First, that ``SOLVE_TOL`` still equals what the routes actually
+    pin ``tol`` to — every activity verdict in the suite is derived from
+    it, so a silent drift would move the classification of the whole
+    corpus.
+
+    Second, that a pair left where a ``tol``-converged solve leaves it —
+    both sides inside ``sqrt(tol)``, and *asymmetric* — reads biactive
+    and classifies. This is the case a threshold built on the achieved
+    product ``sqrt(|G H|)`` gets wrong: that is a geometric mean, so at
+    ``G = 3.5e-5``, ``H = 7.7e-5`` it falls between the two sides and
+    admits only the smaller, reporting a biactive point as strictly
+    complementary. A fixed ``act_tol`` is worse still: it admits
+    neither, and the point comes back `none` — not even weakly
+    stationary — having reached the optimum to nine digits.
+
+    Third, the control: at an exactly complementary point nothing about
+    the rule matters and the class is unchanged.
     """
     fails = []
+    if abs(SOLVE_TOL - R.BASE_OPTIONS["tol"]) > 0:
+        fails.append(
+            f"spec.SOLVE_TOL ({SOLVE_TOL}) has drifted from "
+            f"routes.BASE_OPTIONS['tol'] ({R.BASE_OPTIONS['tol']}); "
+            "CORNER_TOL is derived from it and every activity verdict moves"
+        )
     case = C.make("qpec_small")
-    eps = 1e-9
-    x = np.array([1.0 - 1.3e-9, 1.0, float(np.sqrt(eps))])
+    # A pair sitting where a `tol`-converged solve leaves it: both sides
+    # inside `sqrt(tol)`, asymmetric, which is where a threshold built on
+    # the *achieved* product `sqrt(|G H|)` admits only the smaller side.
+    x = np.array([1.0 - 1.3e-9, 1.0, 3.53e-5])
     got = classify(case, x)
     if got["klass"] != "S":
         fails.append(
-            "a point sqrt(1e-9) off qpec_small's biactive corner classifies "
+            "a point inside sqrt(tol) of qpec_small's biactive corner classifies "
             f"{got['klass']!r} (regime {got['regime']}), not S — the pair "
-            "activity threshold is not sqrt-aware"
+            "activity threshold is not corner-aware"
+        )
+    if got["n_biactive"] != 1:
+        fails.append(
+            f"the perturbed qpec_small pair reads {got['n_biactive']} biactive "
+            f"(regime {got['regime']}), not 1 — both sides are inside sqrt(tol)"
         )
     exact = classify(case, np.asarray(case.expected.x, float))
     if exact["klass"] != "S":
@@ -392,7 +415,7 @@ CHECKS = (
     ("branch-enumeration oracle vs hand-derived optima", _check_oracle),
     ("expected points are feasible and correctly classified", _check_expected_points),
     ("classifier discriminates S / M / C", _check_classifier_discriminates),
-    ("pair activity threshold is sqrt-aware", _check_activity_threshold_is_sqrt_aware),
+    ("pair activity threshold is corner-aware", _check_activity_threshold_is_corner_aware),
     ("rescaling is an equivalence", _check_rescaling),
     ("lowering feasible sets equal the MPCC's", _check_lowering_feasible_sets),
     ("manifest is current", _check_manifest),

@@ -226,6 +226,34 @@ def triage(
             "evidence": "manifest expected.stationarity",
         }
     if klass in ("C", "W", "none"):
+        # Same corner effect as rule 3c, read off the class instead of
+        # the objective. Inside the feasibility tolerance the pair sits
+        # `sqrt(tol)` from the corner and the MPCC multipliers it
+        # generates are of that size; S and C differ only in their
+        # *signs*, so at a multiplier of 3e-05 against a corner band of
+        # 1e-04 the class is not resolved by the data. Measured:
+        # `ralph2` under the ℓ₁ routes stops at G = H = 1.46e-05 with
+        # nu = w = -2.9e-05, which reads C — correctly, and without
+        # meaning the solver did anything wrong.
+        mults = (rec.get("stationarity") or {}).get("multipliers") or {}
+        pair_mult = max(
+            (abs(v) for k, v in mults.items() if k.startswith(("nu[", "w["))),
+            default=0.0,
+        )
+        if (
+            feas_tol is not None
+            and worst <= 100.0 * feas_tol
+            and pair_mult <= feas_tol**0.5
+        ):
+            return {
+                "owner": "complementarity tolerance floor",
+                "why": (
+                    f"class {klass} rests on MPCC multipliers of size {pair_mult:.1e} at a "
+                    f"source residual of {worst:.1e}; inside the sqrt(tol) corner band "
+                    "their signs are not resolved by the data"
+                ),
+                "evidence": "tighten tol to resolve the class; nothing else will",
+            }
         return {
             "owner": "POUNCE candidate",
             "why": f"stopped at a {klass}-stationary point where the MPCC has an S-stationary one",
