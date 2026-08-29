@@ -100,6 +100,38 @@ namespace casadi {
     void codegen_init_mem(CodeGenerator& g) const override;
     void codegen_free_mem(CodeGenerator& g) const override;
     std::string codegen_mem_type() const override { return "struct casadi_pounce_data"; }
+    /// CasADi 3.8 asks a second question before it emits per-instance memory
+    /// in generated code (gh#782). Through 3.7 the question was implicit:
+    /// `CodeGenerator` treated a non-empty `codegen_mem_type()` as the
+    /// request, so the override above was the whole declaration. 3.8 split
+    /// the request out into this virtual, which defaults to `false` — so the
+    /// `<name>_mem` array stops being declared while `codegen_mem()` keeps
+    /// expanding to `<name>_mem[mem]` in the bodies below, and the generated
+    /// C fails to compile on `use of undeclared identifier`.
+    ///
+    /// Deliberately NOT marked `override`: 3.7 and earlier declare no such
+    /// virtual, and `override` there is a hard error. Without it this is an
+    /// override where the virtual exists and an unused member where it does
+    /// not, so one spelling serves both — the same reasoning as
+    /// `convexify_compat.hpp`, which detects the fact rather than the
+    /// version. `tests/codegen_mem_compat/` is what keeps the unused branch
+    /// from rotting: it compiles this very declaration, extracted from this
+    /// file, against a mock base in all three shapes — virtual absent,
+    /// virtual present, and a virtual whose signature has drifted — and
+    /// asserts through a base pointer which of them actually bind.
+    ///
+    /// Clang notices the missing `override` on a class that uses it
+    /// elsewhere. That warning is the binding working, not a defect, and
+    /// there is nowhere to put the keyword that is correct on both CasADis,
+    /// so it is silenced here and checked by the test above instead.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+#endif
+    bool codegen_needs_mem() const { return true; }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     /// Emit the `p.…` assignments that describe the problem to the runtime.
     void set_pounce_prob(CodeGenerator& g) const;
     /// Refuse, at generation time, the options the generated code cannot

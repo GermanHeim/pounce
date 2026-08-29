@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-08-23 22:39:14
+Generated: 2026-08-29 11:16:03
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.10.0 (main @ 32fea00e) |
+| POUNCE | v0.10.0 (fix/760-record-qp-bound-relax-cost @ 31cd87a0) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -273,16 +273,16 @@ On 133 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 97.1ms | 92.9ms |
-| Total time | 102.79s | 172.97s |
-| Mean iterations | 22.3 | 75.6 |
+| Median time | 85.4ms | 92.9ms |
+| Total time | 93.45s | 172.97s |
+| Mean iterations | 22.4 | 75.6 |
 | Median iterations | 18 | 24 |
 
-- **Geometric mean speedup**: 1.0x
-- **Median speedup**: 1.0x
-- POUNCE faster: 71/133 (53%)
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
+- POUNCE faster: 73/133 (55%)
 - POUNCE 10x+ faster: 3/133
-- Ipopt faster: 62/133
+- Ipopt faster: 60/133
 
 ## LP Suite — Performance
 
