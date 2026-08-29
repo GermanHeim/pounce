@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+- **The `.nl` reader refuses non-finite numbers instead of silently dropping
+  them (gh #847).** `str::parse::<f64>()` accepts `inf`, `-inf` and `nan`, and
+  returns `inf` for any literal that overflows — `1e400` is a plausible thing
+  for a model generator to write. The reader had no finiteness screen, and
+  `pounce_common::types::lower_bound_present` / `upper_bound_present` are
+  `is_finite() && ...`, so a non-finite bound was **indistinguishable from a
+  bound that was never declared** and was dropped. On a model whose feasible
+  region a lower bound makes empty, the sweep across that bound was `100`,
+  `1e18`, `1e300` all correctly infeasible and then `1e400` and `inf` both
+  `EXIT: Optimal Solution Found.` with exit code 0 — the transition sitting
+  exactly at the finiteness edge, not at any modelling scale. A `nan` was
+  worse: it reached the answer, and the solve reported `Objective: nan` under
+  `Solve_Succeeded`, rc 0.
+
+  This was not a tolerance opinion. POUNCE already refuses the same value on
+  another surface — `solve_qp` rejects a non-finite bound with a bespoke
+  `ValueError` — and Ipopt, which POUNCE ports, refuses it too ("Invalid
+  number"); the `.nl` path simply had not implemented the project's own
+  position.
+
+  Every number the reader parses is now screened: bounds (all five bound
+  kinds), numeric literals in expression bodies, and the coefficient/initial-
+  value lines that the `J`, `G`, `x` and `d` segments share. The quadratic-
+  recognition fast path reads `n` tokens separately from the general expression
+  parser, so it is screened too — a fix to one is not a fix to the other, and
+  `both_expression_paths_refuse_it_not_just_the_general_one` is what says so.
+  `NlProblem::from_expressions` gets the same screen, because the issue's
+  closing note is right that the two presence predicates are load-bearing
+  beyond the file reader: a caller building a model programmatically hit the
+  identical silent drop.
+
+  **One non-finite value per side is not an error, and the asymmetry is
+  load-bearing.** `.nl` states "no bound" with a bound *kind* (1 = upper only,
+  2 = lower only, 3 = free), so a non-finite number in a bound slot is a
+  corrupt value rather than a notation — except that `-inf` in a *lower* slot
+  and `+inf` in an *upper* one say exactly what the `±1e19` sentinel says, and
+  a writer that emits them means it. Those normalize to the sentinel.
+  Everything else is refused, `+inf` as a *lower* bound most of all: that is
+  the reported case, and it is an empty box, not an absent bound.
+
+  Nothing that exists is now refused: no `.nl` file in the repository contains
+  an `inf`/`nan` token or an overflowing literal, all 88 still read, and
+  `scripts/sweep-fixtures.sh` is unchanged across all 158 fixture-legs.
+
 - **The convex `σ` path no longer certifies a wrong `x` as `Optimal` on an
   ill-conditioned box QP (gh #846).** A 6-variable diagonal box QP with
   `eig = [1e3 ‥ 1e11]` on `[-1, 1]` is separable, so `x* = clamp(t, -1, 1)`
