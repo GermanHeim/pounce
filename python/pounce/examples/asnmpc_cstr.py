@@ -18,11 +18,10 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Literal, Sequence
 
 import numpy as np
-from collections.abc import Mapping
-
 import pyomo.environ as pyo
 from pyomo.common.errors import ApplicationError
 from pyomo.core.base.var import VarData

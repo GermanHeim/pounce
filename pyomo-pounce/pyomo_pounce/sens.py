@@ -355,6 +355,20 @@ class SolutionMap(Mapping):
                 return False
         return True
 
+    def __deepcopy__(self, memo):
+        # The identity index is valid only for the objects in _keys, so
+        # a copy rebuilds it from the copied keys at their original
+        # columns. ComponentMap does the same through its autoslot
+        # rehash hook.
+        import copy
+        cols = [self._index_of[id(k)] for k in self._keys]
+        keys = copy.deepcopy(self._keys, memo)
+        values = copy.deepcopy(self._values, memo)
+        new = self.__class__(
+            keys, {id(k): c for k, c in zip(keys, cols)}, values)
+        memo[id(self)] = new
+        return new
+
     def __repr__(self):
         return f"SolutionMap({len(self._keys)} variables)"
 
@@ -394,9 +408,9 @@ class _Session:
         # when the solve loads its solution back. A column the
         # declared-parameter surgery created has no model counterpart
         # and holds None. Resolving a name through find_component
-        # parses it through pyomo's component-UID lexer, 1.4 s of a
-        # 3.4 s estimate() call on the 62k-variable double column
-        # (N=25 Radau collocation), and every estimate() and
+        # parses it through pyomo's component-UID lexer, 0.87 s
+        # accumulated inside one estimate() call on the 62k-variable
+        # double column (N=25 Radau collocation), and every estimate() and
         # gradient(target=None) call needs the whole list, so the one
         # resolution the solve already performs is kept instead. The
         # references are the solve's own objects: a caller who deletes
@@ -1039,12 +1053,12 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         rows = [var_row[rd.name] for rd in _iter_data(container)]
         session.res_rows.setdefault(group, []).extend(rows)
 
-    reg.session = session
-
     # load the solution back onto the ORIGINAL model's variables (when the
     # solve ran on a clone; in the estimation-only path clone IS model and
     # this simply refreshes the same variables), and keep the resolved
-    # objects: this is the one name resolution the session pays
+    # objects: this is the one name resolution the session pays.
+    # Registration comes after the capture, so a load loop that raises
+    # leaves no session behind rather than one whose var_data is None.
     var_data = []
     for name, val in zip(var_names, session.base_x):
         ov = model.find_component(name)
@@ -1052,6 +1066,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         if ov is not None:
             ov.set_value(float(val), skip_validation=True)
     session.var_data = var_data
+
+    reg.session = session
 
     # consistency check: declared residuals should reproduce the objective
     if session.res_rows:
@@ -2085,9 +2101,12 @@ def estimate_report(model, perturb, max_iter=None,
         if ov is not None:
             crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
     crossed_rows = ComponentMap()
-    row_data = session.user_row_data()
     out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
-    for j in np.where(live & out_of_bounds)[0]:
+    rows_out = np.where(live & out_of_bounds)[0]
+    # resolved only when a row actually crossed: the resolution is
+    # once per session, but the common case has nothing to resolve for
+    row_data = session.user_row_data() if rows_out.size else ()
+    for j in rows_out:
         oc = row_data[j]
         if oc is not None:
             crossed_rows[oc] = float(

@@ -3,9 +3,11 @@ variable exactly once, when the solve loads its solution back.
 
 Every later query reads the captured objects: routing a name through
 `find_component` parses it through pyomo's component-UID lexer, and
-doing that per variable per call was 1.4 s of a 3.4 s `estimate()`
-call on the 62k-variable double column (N=25 Radau collocation).
+doing that per variable per call accumulated 0.87 s inside one
+`estimate()` call on the 62k-variable double column (N=25 Radau
+collocation), timed on the method itself.
 """
+import warnings
 from unittest import mock
 
 import pytest
@@ -93,29 +95,77 @@ def test_estimate_keys_are_the_models_own_variables():
         assert m.x[i] in est
 
 
-def test_the_report_and_the_record_resolve_names_once_per_session():
-    """The report's constraint rows resolve lazily, once per session:
-    the first estimate_report() call resolves exactly the solve's row
-    names, every later call and every active_set_changes() call
-    resolves nothing."""
+def crossed_row():
+    """A live inequality row the step drives out of bounds, so the
+    report's crossed_rows is non-empty and the row resolution runs."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.5, mutable=True)
+    m.x = pyo.Var(initialize=0.5)
+
+    @m.Constraint()
+    def cap(m):
+        return m.x <= 1.0
+
+    @m.Objective()
+    def obj(m):
+        return (m.x - m.p) ** 2
+
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_the_report_resolves_row_names_only_for_a_crossing():
+    """A report with nothing crossed resolves no names at all, and the
+    first report that carries a crossed row resolves exactly the
+    solve's row names, once per session: later reports and every
+    active_set_changes() call resolve nothing."""
     from pyomo_pounce import active_set_changes, estimate_report
     from pyomo_pounce.sens import _REG
 
     m = solved()
-    session = m.__dict__[_REG].session
     with _counting() as fc:
         estimate_report(m, [(m.p, 1.5)])
-    assert fc.call_count == len(session.con_names), (
-        f"the first report resolves the row names once: "
-        f"{fc.call_count} of {len(session.con_names)}")
-    with _counting() as fc:
-        estimate_report(m, [(m.p, 1.6)])
     assert fc.call_count == 0, (
-        f"a later report resolves nothing: {fc.call_count}")
+        f"nothing crossed, so nothing resolves: {fc.call_count}")
     with _counting() as fc:
         active_set_changes(m, [(m.p, 1.5)])
     assert fc.call_count == 0, (
         f"the record resolves nothing: {fc.call_count}")
+
+    m = crossed_row()
+    session = m.__dict__[_REG].session
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with _counting() as fc:
+            rep = estimate_report(m, [(m.p, 2.0)])
+        assert len(rep.crossed_rows), "the fixture must cross its row"
+        assert fc.call_count == len(session.con_names), (
+            f"the first crossing resolves the row names once: "
+            f"{fc.call_count} of {len(session.con_names)}")
+        with _counting() as fc:
+            estimate_report(m, [(m.p, 2.0)])
+    assert fc.call_count == 0, (
+        f"a later report resolves nothing: {fc.call_count}")
+
+
+def test_a_deepcopied_result_answers_for_its_own_keys():
+    """The identity index is valid only for the objects in the keys
+    list, so a deepcopy rebuilds it: the copy answers for its own
+    copied keys and refuses the original's, the way ComponentMap's
+    rehash hook behaves."""
+    import copy
+
+    m = solved()
+    est = estimate(m, [(m.p, 1.5)])
+    cp = copy.deepcopy(est)
+    new_keys = list(cp)
+    assert new_keys[0] is not m.x[0]
+    for old, new in zip(est, new_keys):
+        assert cp[new] == est[old]
+    assert m.x[0] not in cp
+    with pytest.raises(KeyError):
+        cp[m.x[0]]
 
 
 def test_solution_maps_compare_by_contents_without_hashing_keys():
