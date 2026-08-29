@@ -274,7 +274,8 @@
           ]
         },
         "ok": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "The route ran to completion: every scheduled stage was accepted (after the restart ladder, if it was climbed). NOT 'a point came back' -- a continuation that accepts two stages and then fails still returns its best accepted point in `x`/`obj`, with accepted_stages/rejected_stages beside it, but is not ok."
         },
         "status": {
           "type": "integer",

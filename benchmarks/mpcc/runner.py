@@ -296,6 +296,13 @@ def run_cell(
     last_accepted_tau: Optional[float] = None
     idx = 0
     si = 0
+    # `ok` means the route *ran to completion*, not merely that some
+    # point came back. A continuation that accepts two stages and then
+    # fails has a returned point, and reporting that as a success is how
+    # `infeasible_pair` -- an MPCC with no feasible point at all -- would
+    # come out of this harness looking solved by three routes. The point
+    # is still recorded, with accepted/rejected stage counts beside it.
+    completed = False
     try:
         while si < len(schedule):
             tau, tau_reason = schedule[si]
@@ -397,6 +404,8 @@ def run_cell(
                 )
                 continue
             break
+        else:
+            completed = True
     except Exception as exc:  # pragma: no cover - solver-side failure
         rec.error = f"{type(exc).__name__}: {exc}"
 
@@ -432,7 +441,7 @@ def run_cell(
         rec.nlp = _nlp_block(last_info)
 
     if best_x is not None:
-        rec.ok = True
+        rec.ok = completed
         rec.x = [float(v) for v in best_x]
         rec.obj = float(case.objective.value(best_x))
         rec.source = case.source_feasibility(best_x)
