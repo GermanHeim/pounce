@@ -9,6 +9,85 @@ changes.
 
 ## [Unreleased]
 
+- **The active-set SQP no longer certifies a constrained maximum (gh #856).**
+  `algorithm=active-set-sqp` on `nonconvex_qp.nl` — `min x₀x₁ s.t. x₀+x₁ = 2`,
+  `0 ≤ x ≤ 4` — reported `f = 1` as `Solve_Succeeded`. On the feasible segment
+  `f(x₀) = x₀(2−x₀)` is concave, so `(1, 1)` is the constrained **maximum**;
+  the minimum is `0` at either endpoint, which the NLP filter line-search arm
+  reaches on the same file in the same binary.
+
+  First-order KKT is necessary and not sufficient, and gh #856 explains why
+  handing gh #848's second-order screen to the SQP's **step** subproblem is the
+  wrong answer: that QP is a local model built from the *current* multiplier
+  estimates. At SQP iteration 0 the multipliers are still zero, so the
+  Lagrangian Hessian is `∇²f`, and started at HS071's own `x*` the step QP
+  refutes it on a direction with `dᵀHd = -4.05e-2` — correctly for that model,
+  wrongly for the NLP.
+
+  So the check runs **at convergence**, where that objection dissolves: the
+  multipliers are the converged ones, which is gh #856's own observation ("with
+  the converged multipliers the reduced Hessian is positive") used as the
+  design rather than as an obstacle. The reduced Hessian on the null space of
+  the active set is eigen-decomposed, and a negative eigenvalue yields a
+  direction that is then refuted **by exhibition** — stepped along, and acted
+  on only if the true objective is strictly lower at a point satisfying the
+  *nonlinear* constraints. As in gh #848, that makes the curvature search free
+  to be approximate: a direction it gets wrong costs two evaluations, not a
+  wrong answer.
+
+  **The limited-memory leg is the part worth reading.** The first version gated
+  the escape on `SqpHessianSource::Exact`, and the SQP-arm sweep caught that
+  leg still certifying the same maximum. The gate was not an optimization: a
+  damped-BFGS or L-BFGS matrix is positive definite *by construction*, so
+  searching it for negative curvature can only ever find none — the gate was
+  the reason the check did not exist there. `eval_hess_lag` is a required
+  method of `SqpProblemSpec`, so the exact `∇²L` is always available and is now
+  taken once at convergence whatever drove the steps. That is not a corner: the
+  Python frontend and the CasADi plugin both select `limited-memory` on their
+  own whenever no exact Lagrangian Hessian is available.
+
+  Swept on the `algorithm=active-set-sqp` arm, both legs, 10 lines move and
+  every one is an improvement toward the NLP arm's answer:
+  `nonconvex_qp` `1.0 → 0` on both legs, `nonconvex_qcqp` `0 → -2.0` on both,
+  and `nonconvex_qp_ineq` `1.0 → 0` on the limited-memory leg — a third wrong
+  answer the issue does not mention, which only the L-BFGS fix reaches. All
+  four HS071 starts in `sqp_near_solution_start.rs` stay green, including the
+  quasi-Newton one, which is the guard that the convergence-time distinction is
+  real. The default arm is untouched (`auto` does not route here): the fixture
+  sweep is empty across all 158 legs.
+
+  Known and unmoved: `nonconvex_two_escapes` still returns `0` on this arm
+  where the NLP arm reaches `-0.225`. Pre-existing, and not addressed here.
+
+- **A failed warm step-QP no longer takes the SQP down with it (gh #855).**
+  `sqp_alg` has a cold-start fallback (gh #349) for a warm solve that returns
+  `MaxIter` / `NumericalError`, but a warm solve that returned `Err` was
+  propagated by `?` out of the whole algorithm before any retry ran — the
+  **stronger** form of the same signal, and the one case the fallback could not
+  see. `eigena2` under `algorithm=active-set-sqp` reaches outer iteration 17
+  and fails with "pinned KKT constraint block is rank-deficient … prune to a
+  linearly-independent subset", which is a statement about the *pinned set* —
+  exactly what a warm start supplies and a cold start rebuilds. It exited
+  `Internal_Error` / `solve_result_num=500`, "the solver broke, retry", on a
+  model whose objective it can report; it now ends
+  `Maximum_Iterations_Exceeded` at `obj = 82.5177` against the NLP arm's 82.5.
+
+  Both retries additionally accept an `Unbounded` verdict rather than only
+  `Optimal`, which is gh #855 as filed: an `Unbounded` return is a *finding* —
+  an unblocked negative-curvature direction in the null space of the working
+  set — and discarding it left `sol` on the original failure, so the gh #423
+  unbounded-model fallback, gated on `sol.status == Unbounded`, never saw it.
+  Accepting it is safe because that fallback re-tests the ray against the true
+  NLP (gh #388) before acting.
+
+  **That half is not covered by any fixture, and the source says so where it
+  lives.** Swept under `active-set-sqp`, the retries fire on three fixtures and
+  return only `MaxIter` or `Optimal`, including with `sqp_qp_max_iter` forced
+  to 2. It is kept rather than dropped because it is not redundant — nothing
+  else makes that fallback reachable from a retry — which is the opposite of
+  the gh #846 case, where a second arm already rejected everything the removed
+  one would have.
+
 - **`feral_increase_quality`: a lever for the `increase_quality` rung, which
   costs two solves on `square_flowsheet_resto` (gh #850, the underlying
   regression).** `2c4f25f1` wired `FeralSolverInterface::increase_quality`,
