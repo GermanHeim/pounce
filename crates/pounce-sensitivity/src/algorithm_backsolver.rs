@@ -524,20 +524,30 @@ impl PdSensBacksolver {
     /// active and a pinned entry is raised by an addend — so no single
     /// per-variable ratio describes it, and those paths are left in the
     /// frame they already had.
+    ///
+    /// Returns `false` when a ratio is in force and the correction
+    /// could **not** be applied — an unexpected vector or matrix type
+    /// behind a block, a missing iterate — and every caller fails the
+    /// solve on it. Skipping quietly would put back exactly the defect
+    /// this exists to fix, with no signal: `Σ` capped, the multiplier
+    /// rows read back uncapped, and an answer that looks like every
+    /// other. `true` whenever every ratio is `1.0`, which is the whole
+    /// of an uncapped solve and costs one pass over two slices.
+    #[must_use]
     pub(crate) fn rescale_bound_multipliers(
         &self,
         lhs: &mut [Number],
         ratio_x: &[Number],
         ratio_s: &[Number],
-    ) {
+    ) -> bool {
         let unit = |r: &[Number]| r.iter().all(|&v| v == 1.0);
         if unit(ratio_x) && unit(ratio_s) {
-            return;
+            return true;
         }
         let off = self.offsets();
         let d = self.data.borrow();
         let Some(curr) = d.curr.as_ref() else {
-            return;
+            return false;
         };
         let cq_ref = self.cq.borrow();
         let nlp_ref = self.nlp.borrow();
@@ -565,16 +575,23 @@ impl PdSensBacksolver {
                        primal_lo: usize,
                        block_lo: usize,
                        block_hi: usize,
-                       sign: Number| {
-            if block_hi == block_lo {
-                return;
+                       sign: Number|
+         -> bool {
+            if block_hi == block_lo || ratio.iter().all(|&v| v == 1.0) {
+                return true;
             }
             let (Some(pos), Some(zv), Some(sv)) = (rows(p), dense(z), dense(slack)) else {
-                return;
+                return false;
             };
+            // The expansion's rows ARE the block, one per bound; a
+            // mismatch means the index arithmetic below is against the
+            // wrong layout, so say so rather than scatter into it.
+            if pos.len() != block_hi - block_lo {
+                return false;
+            }
             for (k, &i) in pos.iter().enumerate() {
                 let (Some(&r), Some(&zk), Some(&sk)) = (ratio.get(i), zv.get(k), sv.get(k)) else {
-                    continue;
+                    return false;
                 };
                 if r == 1.0 || sk == 0.0 || !sk.is_finite() {
                     continue;
@@ -582,7 +599,7 @@ impl PdSensBacksolver {
                 let dx = lhs[primal_lo + i];
                 lhs[block_lo + k] += sign * (1.0 - r) * (zk / sk) * dx;
             }
-            debug_assert!(pos.len() == block_hi - block_lo);
+            true
         };
         fix(
             &*nlp_ref.px_l(),
@@ -593,8 +610,7 @@ impl PdSensBacksolver {
             off[4],
             off[5],
             1.0,
-        );
-        fix(
+        ) && fix(
             &*nlp_ref.px_u(),
             &*curr.z_u,
             &*cq_ref.curr_slack_x_u(),
@@ -603,8 +619,7 @@ impl PdSensBacksolver {
             off[5],
             off[6],
             -1.0,
-        );
-        fix(
+        ) && fix(
             &*nlp_ref.pd_l(),
             &*curr.v_l,
             &*cq_ref.curr_slack_s_l(),
@@ -613,8 +628,7 @@ impl PdSensBacksolver {
             off[6],
             off[7],
             1.0,
-        );
-        fix(
+        ) && fix(
             &*nlp_ref.pd_u(),
             &*curr.v_u,
             &*cq_ref.curr_slack_s_u(),
@@ -623,7 +637,7 @@ impl PdSensBacksolver {
             off[7],
             off[8],
             -1.0,
-        );
+        )
     }
 
     /// Whether the held-factor back-solve may run
@@ -747,7 +761,9 @@ impl PdSensBacksolver {
         // factored, and `z / s` is read off the iterate in the frame
         // that operator lives in (gh#828).
         if let Some((rx, rs)) = ratios {
-            self.rescale_bound_multipliers(lhs, rx, rs);
+            if !self.rescale_bound_multipliers(lhs, rx, rs) {
+                return false;
+            }
         }
         if let Some(c) = self.conj.as_ref() {
             for (l, &f) in lhs.iter_mut().zip(c.f.iter()) {
@@ -992,7 +1008,11 @@ impl PdSensBacksolver {
     /// so their sides contribute nothing. Pinned rows are raised
     /// under the same ceiling. Always fresh objects, because the
     /// factorization cache keys on their tags and a cached vector
-    /// could resolve to a factor built at another iterate.
+    /// could resolve to a factor built at another iterate. How much of
+    /// each entry the ceiling left standing comes back with them, in
+    /// the same [`CorrectorOperator`], because the solve that folds a
+    /// bound row into one of these diagonals has to read that row back
+    /// through the same cap (gh#828).
     pub(crate) fn corrector_sigma(&self, pinned: &[(usize, Number)]) -> Option<CorrectorOperator> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
@@ -1817,7 +1837,9 @@ impl PdSensBacksolver {
                 return false;
             }
 
-            self.rescale_bound_multipliers(lhs_row, &self.sigma.ratio_x, &self.sigma.ratio_s);
+            if !self.rescale_bound_multipliers(lhs_row, &self.sigma.ratio_x, &self.sigma.ratio_s) {
+                return false;
+            }
         }
         true
     }
@@ -2294,8 +2316,7 @@ impl PdSensBacksolver {
         if self.unpack(&res_iv, lhs).is_err() {
             return false;
         }
-        self.rescale_bound_multipliers(lhs, &self.sigma.ratio_x, &self.sigma.ratio_s);
-        true
+        self.rescale_bound_multipliers(lhs, &self.sigma.ratio_x, &self.sigma.ratio_s)
     }
 }
 
