@@ -1464,10 +1464,32 @@ impl AlgorithmBuilder {
             self.line_search
                 .alpha_red_factor_min
                 .unwrap_or(match self.hessian_approximation {
-                    HessianApproxChoice::LimitedMemory => 0.05,
+                    // The criterion in the field's doc is whether the
+                    // model's *scale* is trustworthy, not whether it is
+                    // the exact Hessian. A quasi-Newton `B` can be wrong
+                    // by orders of magnitude in any direction its
+                    // curvature pairs do not span, which is as true of
+                    // the partitioned elements as of the limited-memory
+                    // ones — they are the same update on a finer
+                    // decomposition.
+                    HessianApproxChoice::LimitedMemory | HessianApproxChoice::Partitioned => 0.05,
                     // Equal to `alpha_red_factor`, so the clamp in
                     // `next_alpha` collapses and the sequence is upstream's.
-                    HessianApproxChoice::Exact => self.line_search.alpha_red_factor,
+                    //
+                    // `FiniteDifference` belongs here rather than above:
+                    // it recovers the Lagrangian Hessian itself by
+                    // probing the analytic Jacobian, so it carries no
+                    // curvature history and its step is a Newton step
+                    // whose length is meaningful. It is the same
+                    // distinction `hessian_at_current` draws — a pure
+                    // function of `(x, y)` on one side, a history-carrying
+                    // `B` on the other. And the measurement behind the
+                    // split cuts this way too: forcing `0.05` onto a path
+                    // with a meaningful step length cost `eigena2` a
+                    // solve.
+                    HessianApproxChoice::Exact | HessianApproxChoice::FiniteDifference => {
+                        self.line_search.alpha_red_factor
+                    }
                 });
         line_search.watchdog_shortened_iter_trigger =
             self.line_search.watchdog_shortened_iter_trigger;

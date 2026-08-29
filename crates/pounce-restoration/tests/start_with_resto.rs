@@ -21,7 +21,7 @@
 //! opposite by construction and cannot be reused here.
 
 use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options,
+    IpoptApplication, Ma57Config, default_backend_factory, feral_config_from_options,
 };
 use pounce_common::types::Number;
 use pounce_nlp::ApplicationReturnStatus;
@@ -156,7 +156,7 @@ fn solve(start_with_resto: bool) -> (ApplicationReturnStatus, i32, i32) {
     let feral_cfg = feral_config_from_options(app.options());
     let bff_mint = move || -> InnerBackendFactoryFactory {
         let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
+        Box::new(move || default_backend_factory(feral_cfg.clone(), Ma57Config::default()))
     };
     let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),
