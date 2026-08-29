@@ -223,25 +223,35 @@ fn issue_414_a_tighter_tol_is_honoured_not_absorbed() {
 
 /// `socp` and `auto` inherit the defect because they route to the same engine —
 /// stated in the original report and still true of this door, so the entry
-/// point that reaches it through `solve_socp_ipm` is pinned too. An all-orthant
-/// cone program is the same LP/QP arm one signature over.
+/// point reached through `solve_socp_ipm` is pinned on the same instance.
+///
+/// **The cone machinery is not the subject, and no cone-carrying instance in
+/// this family reaches the defect.** That is a measurement, not an omission:
+/// adding *any* inequality row to the two-variable instance — `x ≥ -1`,
+/// `x ≥ -1e6`, a single row on either variable, `Σx ≤ 1e6` — gives the
+/// embedding a real trajectory (12‥21 iterations instead of 3) and it converges
+/// to `x` correct at `1e-12`‥`1e-14` on the parent commit, defect and all. The
+/// same holds sweeping `span` 3.7‥6.0 at `n = 2` and `n = 4`. What this door
+/// therefore pins is that `solve_socp_ipm` reaches the same `solve_qp_core`
+/// verdict check, on the one geometry that exhibits the failure — an empty cone
+/// list, matching the QP fixture above.
+///
+/// If a future change makes a cone-carrying instance reach it, that instance
+/// belongs here and this comment is the record that none did.
 #[test]
 fn issue_414_the_socp_entry_point_is_covered_too() {
-    // min (x₀−1)² + (10⁴x₁−1)²  s.t.  x ≥ −1  (slack, so the optimum is the
-    // unconstrained one and the closed form still applies).
-    let (mut prob, exact) = separable(&[1.0, 1e4]);
-    prob.g = vec![Triplet::new(0, 0, -1.0), Triplet::new(1, 1, -1.0)];
-    prob.h = vec![1.0, 1.0];
+    let (prob, exact) = separable(&[1.0, 1e4]);
     let opts = QpOptions::default();
-    let cones = [pounce_convex::ConeSpec::Nonneg(2)];
+    let cones: [pounce_convex::ConeSpec; 0] = [];
     let sol = solve_socp_ipm(&prob, &cones, &opts, backend);
 
     assert_eq!(sol.status, QpStatus::Optimal);
     let kkt = sol.kkt_residuals_conic(&prob, &cones).kkt_error();
-    assert!(kkt <= opts.tol, "socp: Optimal at kkt_error {kkt:.4e}");
     assert!(
-        max_rel_x_err(&sol.x, &exact) < 1e-9,
-        "socp: x off by {:.2e}",
-        max_rel_x_err(&sol.x, &exact)
+        kkt <= opts.tol,
+        "socp: Optimal at kkt_error {kkt:.4e} > tol {:.0e}",
+        opts.tol
     );
+    let rel = max_rel_x_err(&sol.x, &exact);
+    assert!(rel < 1e-9, "socp: x off by {rel:.2e}");
 }
