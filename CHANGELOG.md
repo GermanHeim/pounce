@@ -9,6 +9,27 @@ changes.
 
 ## [Unreleased]
 
+- **`estimate()` and `gradient()` no longer re-parse variable names on
+  every call.** The sensitivity session now keeps the variable data
+  objects the solve resolves when it loads its solution back, in
+  column order, and every later query reads that list instead of
+  routing each solver column's name through pyomo's component-UID
+  parser per call. On the 62k-variable double column (N=25 Radau
+  collocation), 62,412 `find_component` calls accumulate 0.87 s of
+  wall time inside one `estimate()` call, 13.9 us per name, measured
+  by an accumulating timer on the method itself. Constraint rows
+  resolve the same way, once per session, at the first report whose
+  crossed rows need them.
+
+- **`estimate()` returns a read-only `SolutionMap` instead of a
+  mutable `ComponentMap`.** Lookup, iteration, membership, length,
+  and `items()` are unchanged and still keyed by the component data
+  objects themselves. The keys and the identity index are shared per
+  session and each result carries only its value vector, so
+  constructing a result no longer pays one container insertion per
+  variable per call. Item assignment raises: writing into a result
+  never changed anything downstream.
+
 - **The QP suite's +515 iterations now have a name, and the fixture corpus can
   see the class they came from (gh #760).** `4c02817d` ("Apply
   `bound_relax_factor` on the convex arm too") took `benchmarks/qp` from 2633
