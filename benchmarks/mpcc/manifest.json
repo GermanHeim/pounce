@@ -1,0 +1,1116 @@
+{
+  "schema": "pounce-mpcc-manifest/1",
+  "issue": "https://github.com/jkitchin/pounce/issues/794",
+  "model_data_revision": "026d1d608551db43",
+  "classes_required": [
+    "regular",
+    "biactive",
+    "degenerate",
+    "infeasible",
+    "selector",
+    "macmpec"
+  ],
+  "classes_present": [
+    "biactive",
+    "degenerate",
+    "infeasible",
+    "macmpec",
+    "regular",
+    "selector"
+  ],
+  "smoke_subset": [
+    "regular_strict",
+    "biactive_positive",
+    "ralph1",
+    "infeasible_pair",
+    "selector_theta_050",
+    "ralph2"
+  ],
+  "active_tol": 1e-06,
+  "routes": {
+    "direct": {
+      "lowering": "prod_ineq",
+      "warm": "none",
+      "continuation": false,
+      "options": {},
+      "why": "Direct POUNCE NLP formulation: G,H >= 0 with G*H <= 0."
+    },
+    "ncp_eq": {
+      "lowering": "prod_eq",
+      "warm": "none",
+      "continuation": false,
+      "options": {},
+      "why": "Exact product / NCP equality, ordinary POUNCE."
+    },
+    "ncp_eq_l1": {
+      "lowering": "prod_eq",
+      "warm": "none",
+      "continuation": false,
+      "options": {
+        "l1_exact_penalty_barrier": "yes"
+      },
+      "why": "NCP equality through the opt-in l1 exact penalty-barrier wrapper."
+    },
+    "ncp_eq_l1_fallback": {
+      "lowering": "prod_eq",
+      "warm": "none",
+      "continuation": false,
+      "options": {
+        "l1_fallback_on_restoration_failure": "yes"
+      },
+      "why": "NCP equality, ordinary solve, l1 wrapper only after a restoration failure."
+    },
+    "ncp_eq_auto_l1": {
+      "lowering": "prod_eq",
+      "warm": "none",
+      "continuation": false,
+      "options": {
+        "presolve": "yes",
+        "presolve_licq_check": "yes",
+        "presolve_licq_action": "auto_l1"
+      },
+      "why": "NCP equality with presolve's LICQ check routing degeneracy into the l1 wrapper."
+    },
+    "scholtes_cold": {
+      "lowering": "scholtes",
+      "warm": "none",
+      "continuation": true,
+      "options": {},
+      "why": "Explicit Scholtes continuation, independent solves with cold starts."
+    },
+    "scholtes_warm_primal": {
+      "lowering": "scholtes",
+      "warm": "primal",
+      "continuation": true,
+      "options": {},
+      "why": "Scholtes continuation with primal-only warm starts."
+    },
+    "scholtes_warm_full": {
+      "lowering": "scholtes",
+      "warm": "full",
+      "continuation": true,
+      "options": {},
+      "why": "Scholtes continuation with full primal/dual/barrier warm starts."
+    }
+  },
+  "controls": {
+    "none": {},
+    "no_acceptable": {
+      "acceptable_iter": 0
+    },
+    "no_scaling": {
+      "nlp_scaling_method": "none"
+    },
+    "upstream_heuristics": {
+      "acceptable_progress_kappa": 0.0,
+      "dual_inf_scale_kappa": 0.0,
+      "obj_scale_certificate_threshold": 0.0
+    },
+    "no_presolve": {
+      "presolve": "no"
+    }
+  },
+  "base_options": {
+    "print_level": 0,
+    "tol": 1e-08,
+    "max_iter": 300,
+    "bound_relax_factor": 0.0,
+    "honor_original_bounds": "yes"
+  },
+  "tau_schedule": [
+    1.0,
+    0.1,
+    0.01,
+    0.001,
+    0.0001,
+    1e-05,
+    1e-06,
+    1e-07,
+    1e-08
+  ],
+  "restart_ladder": [
+    "route",
+    "primal",
+    "cold_prev",
+    "cold_x0"
+  ],
+  "tau_bisections": 1,
+  "scalings": {
+    "unit": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "skew": [
+      0.001,
+      1.0,
+      1000.0
+    ]
+  },
+  "ccopt_pin": "ccopt==0.4.1",
+  "cases": [
+    {
+      "name": "regular_strict",
+      "class": "regular",
+      "n_variables": 2,
+      "n_rows": 0,
+      "n_pairs": 1,
+      "provenance": "derived in-repo; the standard two-axis textbook MPCC.",
+      "derivation": "Strict complementarity, unique solution, MPCC-LICQ holds.\n\n    ``min (x1-1)^2 + (x2-2)^2  s.t.  0 <= x1 _|_ x2 >= 0``\n\n    The feasible set is the two nonnegative axes. On ``x2 = 0`` the\n    objective is ``(x1-1)^2 + 4``, minimised at ``x1 = 1`` with value\n    ``4``; on ``x1 = 0`` it is ``1 + (x2-2)^2``, minimised at ``x2 = 2``\n    with value ``1``. So the global solution is ``(0, 2)``, ``f* = 1``,\n    and it is strict: ``G = 0``, ``H = 2 > 0``.\n\n    Active gradients there are ``{grad G} = {(1,0)}`` -- rank 1 of one\n    vector, so MPCC-LICQ holds. With no biactive pair the four\n    stationarity classes coincide and the point is S-stationary\n    (``nu = -2``, ``w = 0``).\n\n    This is the case every route is expected to solve. A route that\n    fails here has a defect that needs no MPCC to explain it.",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "x1 absent",
+          "branch_H_zero": "x2 absent"
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "wrong_branch": [
+          2.0,
+          0.0
+        ],
+        "interior": [
+          1.0,
+          1.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 1.0,
+        "x": [
+          0.0,
+          2.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "notes": "Every route should reach f=1 from every start. The 'wrong_branch' start sits on the other axis at the other branch's local minimum (f=4); a route that stops there has found a genuine local solution, which is reported, not scored as a failure -- POUNCE is a local solver."
+      },
+      "in_smoke_subset": true,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 0.0,
+          "M": 0.0,
+          "C": 0.0,
+          "W": 0.0
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 1.0,
+        "x": [
+          0.0,
+          2.0
+        ],
+        "optimal_branches": [
+          "G"
+        ],
+        "unique": true
+      }
+    },
+    {
+      "name": "biactive_positive",
+      "class": "biactive",
+      "n_variables": 2,
+      "n_rows": 0,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "Biactive solution with both MPCC multipliers strictly positive.\n\n    ``min x1 + x2  s.t.  0 <= x1 _|_ x2 >= 0``\n\n    Feasible set is the two nonnegative axes, on which ``f = x1 + x2 >=\n    0``; the minimum is ``0`` at the origin, where both pair sides\n    vanish -- one biactive pair.\n\n    Stationarity with ``L = f - nu*G - w*H``: ``(1,1) - nu(1,0) -\n    w(0,1) = 0`` gives ``nu = w = 1 > 0``, the unique multiplier. Both\n    strictly positive, so the point is S-stationary and therefore also\n    M-, C- and weakly stationary. MPCC-LICQ holds (``(1,0)``, ``(0,1)``\n    are independent).\n\n    The value of this case is that it is biactive *and* benign: it\n    separates \"the route cannot handle a biactive point\" from \"the route\n    cannot handle a hard biactive point\".",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        10.0,
+        10.0
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "far": [
+          5.0,
+          5.0
+        ],
+        "axis": [
+          3.0,
+          0.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "notes": "The relaxed problem at tau > 0 has the same optimum (0 at the origin), so Scholtes continuation should be flat in tau here; a route whose stage count grows as tau shrinks is paying for the relaxation, not for the problem."
+      },
+      "in_smoke_subset": true,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 0.0,
+          "M": 0.0,
+          "C": 0.0,
+          "W": 0.0
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": -2.2126003837000966e-12,
+        "x": [
+          -2.2126003837000966e-12,
+          0.0
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "ralph1",
+      "class": "degenerate",
+      "n_variables": 2,
+      "n_rows": 0,
+      "n_pairs": 1,
+      "provenance": "derived in-repo; the instance is the classical `ralph1` shape used throughout the MPEC literature (Ralph & Wright).",
+      "derivation": "MPCC-LICQ fails; the solution is M-stationary but not S-stationary.\n\n    ``min 2x - y  s.t.  x >= 0,  0 <= y _|_ (y - x) >= 0``\n\n    Feasibility: ``y >= 0``, ``y - x >= 0`` and ``y(y-x) = 0``. Either\n    ``y = 0``, which with ``y >= x >= 0`` forces ``x = 0``; or ``y = x``\n    with ``x >= 0``. So the feasible set is the ray ``{(t,t) : t >= 0}``\n    together with the origin, and ``f = 2t - t = t >= 0``. The global\n    solution is the origin with ``f* = 0``, and both pair sides vanish\n    there.\n\n    Active gradients at the origin are ``grad G = (0,1)``, ``grad H =\n    (-1,1)`` and the bound ``x >= 0`` -- three vectors in ``R^2``, so\n    **MPCC-LICQ fails**.\n\n    Stationarity, ``L = f - nu*G - w*H - z*x`` with ``z >= 0``:\n\n        x:   2 + w - z = 0\n        y:  -1 - nu - w = 0     =>  nu = -1 - w\n\n    S-stationarity needs ``nu >= 0`` and ``w >= 0``, impossible since\n    ``nu = -1 - w <= -1``. M-stationarity is attained at ``w = 0``,\n    ``nu = -1`` (the product vanishes), with ``z = 2 >= 0``. So the\n    classifier must return **M** here, not S -- and a classifier that\n    reads a single least-squares multiplier vector instead of searching\n    the multiplier *set* can easily return C and be wrong.\n\n    This is the case that decides whether the classifier is worth\n    anything.",
+      "lb": [
+        0.0,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              -1.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "ray": [
+          1.0,
+          1.0
+        ],
+        "off_ray": [
+          1.0,
+          2.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0
+        ],
+        "stationarity": "M",
+        "n_biactive": 1,
+        "mpcc_licq": false,
+        "notes": "Known-hard: MPCC-LICQ fails and no S-stationary point exists, so a route that reports a converged NLP KKT point here is reporting on its own reformulation, not on the MPCC. Routes are expected to differ; the interesting record is which ones stop at the origin and what stationarity class they can certify."
+      },
+      "in_smoke_subset": true,
+      "classifier_at_expected_x": {
+        "klass": "M",
+        "n_biactive": 1,
+        "mpcc_licq": false,
+        "residuals": {
+          "S": 1.0,
+          "M": 0.0,
+          "C": 4.440892098500626e-16,
+          "W": 4.440892098500626e-16
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "ctrap",
+      "class": "degenerate",
+      "n_variables": 2,
+      "n_rows": 0,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "A C-stationary point that is not a local minimiser.\n\n    ``min x1^2 + x2^2 - x1 - x2  s.t.  0 <= x1 _|_ x2 >= 0``\n\n    On ``x2 = 0`` the objective is ``x1^2 - x1``, minimised at ``x1 =\n    1/2`` with value ``-1/4``; symmetrically on the other axis. So there\n    are two global minimisers, ``(1/2, 0)`` and ``(0, 1/2)``, both with\n    ``f* = -1/4`` and both strictly complementary.\n\n    The origin is feasible and biactive. Its unique multiplier is\n    ``nu = w = -1`` (``grad f(0) = (-1,-1)``), so ``nu*w = 1 > 0``: the\n    origin is **C-stationary but neither M- nor S-stationary**, and it is\n    not a local minimiser -- the objective strictly decreases along both\n    axes leaving it.\n\n    That is the whole point of the case. A route that stops at the origin\n    has converged to a point where every ordinary NLP residual is small\n    and the answer is 0.25 above the optimum, and only the MPCC\n    stationarity class says so. Started from the origin, the exact\n    product lowerings have nothing to move them off it; Scholtes\n    continuation at ``tau > 0`` does, because the relaxed feasible set\n    has interior near the origin.",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        5.0,
+        5.0
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "axis": [
+          1.0,
+          0.0
+        ],
+        "sym": [
+          0.5,
+          0.5
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": -0.25,
+        "x": null,
+        "stationarity": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "notes": "Two global minimisers. The reportable outcome is whether a route stopped at the origin (f=0, C-stationary, not a local minimiser) or at f=-0.25. `landed_at_trap` in the validation block says which."
+      },
+      "in_smoke_subset": false,
+      "oracle": {
+        "feasible": true,
+        "obj": -0.25,
+        "x": [
+          0.0,
+          0.5
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "infeasible_pair",
+      "class": "infeasible",
+      "n_variables": 2,
+      "n_rows": 2,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "No feasible point, with an analytically known relaxation crossover.\n\n    ``min x1^2 + x2^2  s.t.  x1 + x2 = 1,  x1 - x2 = 0,\n                             0 <= x1 _|_ x2 >= 0``\n\n    The two equalities force ``x = (1/2, 1/2)``, where the\n    complementarity product is ``1/4``. The MPCC is therefore\n    **infeasible**, while the Scholtes relaxation ``x1 x2 <= tau`` is\n    feasible exactly for ``tau >= 1/4`` and infeasible below it. The\n    continuation is expected to accept its first stages and then fail at\n    a stage crossing ``tau = 0.25``; the stage index at which it fails is\n    a property of the schedule, and the harness records it.\n\n    An MPCC benchmark without this case cannot distinguish \"the route is\n    robust\" from \"the route never says no\".",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "midpoint": [
+          0.5,
+          0.5
+        ]
+      },
+      "expected": {
+        "feasible": false,
+        "obj": null,
+        "x": null,
+        "stationarity": null,
+        "n_biactive": 0,
+        "mpcc_licq": null,
+        "notes": "Expected failure. A route that returns Solve_Succeeded here is wrong regardless of its residuals; a route that returns an infeasibility status, or a restoration failure, is correct. The l1 routes exist for exactly this shape and are expected to report infeasibility rather than diverge."
+      },
+      "in_smoke_subset": true,
+      "oracle": {
+        "feasible": false,
+        "obj": null,
+        "x": null,
+        "optimal_branches": null,
+        "unique": null
+      }
+    },
+    {
+      "name": "selector_theta_025",
+      "class": "selector",
+      "n_variables": 2,
+      "n_rows": 1,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "sel",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "branch B selected (y2 = 1)",
+          "branch_H_zero": "branch A selected (y1 = 1)"
+        }
+      ],
+      "starts": {
+        "fractional": [
+          0.5,
+          0.5
+        ],
+        "branch_A": [
+          1.0,
+          0.0
+        ],
+        "branch_B": [
+          0.0,
+          1.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.25,
+        "x": [
+          0.0,
+          1.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "notes": "The optimal branch is unique; a route that returns the other branch has found the other local solution, which is reported with its objective."
+      },
+      "in_smoke_subset": false,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 1.6653345369377348e-16,
+          "M": 1.6653345369377348e-16,
+          "C": 1.6653345369377348e-16,
+          "W": 1.6653345369377348e-16
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.25,
+        "x": [
+          0.0,
+          1.0
+        ],
+        "optimal_branches": [
+          "G"
+        ],
+        "unique": true
+      }
+    },
+    {
+      "name": "selector_theta_050",
+      "class": "selector",
+      "n_variables": 2,
+      "n_rows": 1,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "sel",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "branch B selected (y2 = 1)",
+          "branch_H_zero": "branch A selected (y1 = 1)"
+        }
+      ],
+      "starts": {
+        "fractional": [
+          0.5,
+          0.5
+        ],
+        "branch_A": [
+          1.0,
+          0.0
+        ],
+        "branch_B": [
+          0.0,
+          1.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.5,
+        "x": null,
+        "stationarity": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "notes": "Tie: both branches are globally optimal and the branch returned is start- and arithmetic-dependent. Recorded, not scored."
+      },
+      "in_smoke_subset": true,
+      "oracle": {
+        "feasible": true,
+        "obj": 0.5,
+        "x": [
+          0.0,
+          1.0
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "selector_theta_075",
+      "class": "selector",
+      "n_variables": 2,
+      "n_rows": 1,
+      "n_pairs": 1,
+      "provenance": "derived in-repo.",
+      "derivation": "",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "sel",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "branch B selected (y2 = 1)",
+          "branch_H_zero": "branch A selected (y1 = 1)"
+        }
+      ],
+      "starts": {
+        "fractional": [
+          0.5,
+          0.5
+        ],
+        "branch_A": [
+          1.0,
+          0.0
+        ],
+        "branch_B": [
+          0.0,
+          1.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.25,
+        "x": [
+          1.0,
+          0.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "notes": "The optimal branch is unique; a route that returns the other branch has found the other local solution, which is reported with its objective."
+      },
+      "in_smoke_subset": false,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 0,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 5.551115123125783e-17,
+          "M": 5.551115123125783e-17,
+          "C": 5.551115123125783e-17,
+          "W": 5.551115123125783e-17
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.25,
+        "x": [
+          1.0,
+          0.0
+        ],
+        "optimal_branches": [
+          "H"
+        ],
+        "unique": true
+      }
+    },
+    {
+      "name": "ralph2",
+      "class": "macmpec",
+      "n_variables": 2,
+      "n_rows": 0,
+      "n_pairs": 1,
+      "provenance": "derived in-repo; the instance is the classical `ralph2` shape from the MPEC regularisation literature (Scholtes 2001).",
+      "derivation": "The relaxed optimum approaches the MPCC optimum *from below*.\n\n    ``min x1^2 + x2^2 - 4 x1 x2  s.t.  0 <= x1 _|_ x2 >= 0``\n\n    On either axis the objective is ``t^2 >= 0``, so ``f* = 0`` at the\n    origin, biactive, with ``grad f(0) = 0`` -- every multiplier vector\n    is zero and the point is S-stationary. MPCC-LICQ holds.\n\n    The relaxation is the point of the case. At ``x1 = x2 = t`` the\n    objective is ``-2 t^2`` while the relaxed row gives ``t^2 <= tau``,\n    so the ``tau``-problem's optimum is exactly ``-2 tau``, attained on\n    the relaxation boundary and **below** the MPCC's own optimum for\n    every ``tau > 0``. Continuation therefore approaches ``0`` from\n    below through a sequence of points that are not MPCC-feasible, and a\n    harness that reads a relaxed objective as an MPCC objective reports a\n    better-than-optimal answer. The runner evaluates every stage's source\n    feasibility for this reason.",
+      "lb": [
+        null,
+        null
+      ],
+      "ub": [
+        10.0,
+        10.0
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0
+        ],
+        "diag": [
+          1.0,
+          1.0
+        ],
+        "axis": [
+          2.0,
+          0.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "notes": "Expect the final relaxed objective to sit at about -2*tau_min for the continuation routes and at 0 for the exact-product routes. The gap is the relaxation's, not the solver's."
+      },
+      "in_smoke_subset": true,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 0.0,
+          "M": 0.0,
+          "C": 0.0,
+          "W": 0.0
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "scholtes4",
+      "class": "macmpec",
+      "n_variables": 3,
+      "n_rows": 2,
+      "n_pairs": 1,
+      "provenance": "derived in-repo; the instance is the classical `scholtes4` shape from the MPEC regularisation literature.",
+      "derivation": "No S-stationary point at the solution; two active ordinary rows.\n\n    ``min x1 + x2 - x3\n       s.t. -4 x1 + x3 <= 0,  -4 x2 + x3 <= 0,\n            0 <= x1 _|_ x2 >= 0``\n\n    Complementarity forces ``min(x1,x2) = 0``, and the two rows then\n    force ``x3 <= 0``, so ``f = x1 + x2 - x3 >= 0`` with equality only at\n    the origin: ``f* = 0``, uniquely, biactive.\n\n    Stationarity at the origin, with ``lambda >= 0`` on the two active\n    rows:\n\n        x1:  1 - 4 l1 - nu = 0\n        x2:  1 - 4 l2 - w  = 0\n        x3: -1 + l1 + l2   = 0   =>  l1 + l2 = 1\n\n    S-stationarity needs ``nu, w >= 0``, i.e. ``l1, l2 <= 1/4``, which\n    contradicts ``l1 + l2 = 1``: **the origin is not S-stationary**. It\n    is M-stationary, via ``l1 = 1/4``, ``l2 = 3/4`` giving ``nu = 0``,\n    ``w = -2`` (the product vanishes), and C-stationary via ``l1 = l2 =\n    1/2`` giving ``nu = w = -1``.\n\n    The multiplier set here is a line, and which class you report depends\n    on searching it rather than on picking one point of it. That is why\n    the classifier enumerates branches instead of taking a least-squares\n    multiplier at face value.",
+      "lb": [
+        null,
+        null,
+        null
+      ],
+      "ub": [
+        null,
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "p1",
+          "G": {
+            "a": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "offset": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "neg_x3": [
+          0.5,
+          0.5,
+          -1.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "stationarity": "M",
+        "n_biactive": 1,
+        "mpcc_licq": false,
+        "notes": "The classifier must report M and refuse S. A route returning Solve_Succeeded on the NCP-equality lowering here is returning an NLP KKT point of a problem whose constraints are degenerate at every feasible point; the stationarity block is the only field that says so."
+      },
+      "in_smoke_subset": false,
+      "classifier_at_expected_x": {
+        "klass": "M",
+        "n_biactive": 1,
+        "mpcc_licq": false,
+        "residuals": {
+          "S": 0.44444444444444464,
+          "M": 1.3322676295501878e-15,
+          "C": 2.4424906541753444e-15,
+          "W": 2.4424906541753444e-15
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "optimal_branches": [
+          "G",
+          "H"
+        ],
+        "unique": false
+      }
+    },
+    {
+      "name": "qpec_small",
+      "class": "macmpec",
+      "n_variables": 3,
+      "n_rows": 0,
+      "n_pairs": 2,
+      "provenance": "derived in-repo; a minimal LCP-constrained QPEC.",
+      "derivation": "A two-pair QPEC: one strict pair, one biactive pair.\n\n    Upper level over ``x`` with a lower-level LCP in ``y``::\n\n        min (x-1)^2 + (y1-1)^2 + y2^2\n        s.t. 0 <= x <= 2\n             0 <= y1 _|_ (2 y1 - 1 - x) >= 0\n             0 <= y2 _|_ (2 y2 - 1 + x) >= 0\n\n    The LCP solves in closed form: ``y1 = max(0, (1+x)/2)`` and\n    ``y2 = max(0, (1-x)/2)``. For ``x`` in ``[0,2]`` that is\n    ``y1 = (1+x)/2`` and ``y2 = (1-x)/2`` for ``x <= 1``, else ``0``.\n    Substituting, the upper objective is ``1.5 (x-1)^2`` for ``x <= 1``\n    and ``1.25 (x-1)^2`` above, so ``f* = 0`` at ``x = 1``, giving\n    ``(x, y1, y2) = (1, 1, 0)``.\n\n    At that point pair 1 is strict (``y1 = 1 > 0``, ``2y1-1-x = 0``) and\n    pair 2 is **biactive** (``y2 = 0`` and ``2y2-1+x = 0``). ``grad f``\n    vanishes there, so the zero multiplier vector is admissible and the\n    point is S-stationary; the three active gradients ``(-1,2,0)``,\n    ``(0,0,1)``, ``(1,0,2)`` have determinant 2, so MPCC-LICQ holds.\n\n    It is the only case in the ladder with more than one pair, which is\n    what makes it the one that can catch a lowering that indexes its\n    product rows wrongly.",
+      "lb": [
+        0.0,
+        null,
+        null
+      ],
+      "ub": [
+        2.0,
+        null,
+        null
+      ],
+      "pairs": [
+        {
+          "name": "lcp1",
+          "G": {
+            "a": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              -1.0,
+              2.0,
+              0.0
+            ],
+            "b": -1.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        },
+        {
+          "name": "lcp2",
+          "G": {
+            "a": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "b": 0.0
+          },
+          "H": {
+            "a": [
+              1.0,
+              0.0,
+              2.0
+            ],
+            "b": -1.0
+          },
+          "branch_G_zero": "",
+          "branch_H_zero": ""
+        }
+      ],
+      "starts": {
+        "origin": [
+          0.0,
+          0.5,
+          0.5
+        ],
+        "upper_left": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "upper_right": [
+          2.0,
+          1.5,
+          0.0
+        ]
+      },
+      "expected": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          1.0,
+          1.0,
+          0.0
+        ],
+        "stationarity": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "notes": "Two pairs, so a lowering that builds q product rows but wires the wrong (G,H) into one of them still produces a plausible answer on every one-pair case in the ladder and fails here."
+      },
+      "in_smoke_subset": false,
+      "classifier_at_expected_x": {
+        "klass": "S",
+        "n_biactive": 1,
+        "mpcc_licq": true,
+        "residuals": {
+          "S": 0.0,
+          "M": 0.0,
+          "C": 0.0,
+          "W": 0.0
+        }
+      },
+      "oracle": {
+        "feasible": true,
+        "obj": 0.0,
+        "x": [
+          1.0,
+          1.0,
+          0.0
+        ],
+        "optimal_branches": [
+          "HG",
+          "HH"
+        ],
+        "unique": false
+      }
+    }
+  ]
+}
