@@ -17,6 +17,20 @@
 > prototype chose, rather than in the curvature model. That is a fixable
 > next step, and it is the first result here that points forward.**
 
+> **Every number below predates the gh#818 line-search split reaching this
+> mode.** `alpha_red_factor_min` now resolves to `0.05` for `partitioned`
+> as well as `limited-memory` — quasi-Newton elements are the same update
+> on a finer decomposition, so the criterion that put L-BFGS on
+> safeguarded quadratic interpolation puts these there too — and that is a
+> trajectory change on the very path this note measures. Nothing here has
+> been re-measured against it, so treat the iteration counts as a record of
+> what the decomposition did under the fixed geometric sequence, not as
+> current. `scripts/sweep-fixtures.sh` does not cover the gap: it runs the
+> `exact` and `lbfgs` legs only, so no partitioned leg is swept either way.
+> If this mode is ever picked back up, re-measure first — interpolation is
+> aimed squarely at the weakness these numbers document, so it may well
+> move them in the mode's favour.
+
 ## Why this was worth building
 
 `benchmarks/large_scale` `laptime` is a minimum-lap-time Radau collocation
