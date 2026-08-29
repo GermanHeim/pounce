@@ -54,11 +54,36 @@ and reaches for `git bisect` can stop here: run it once with
 numbers, and the zeroed column is how you can tell that is a different
 question. Both moved in **both** columns — `Q25FV47` 41 → 35 with the
 relaxation off, `STADAT1` 22 → 53 — so what moved them is not the relaxation.
-Something else in the 245 commits between `32fea00e` and this branch did, with
-no status flip and no objective change anywhere in the suite. Both still carry
-the relaxation cost this note is about (3.4× and 1.7×). The refreshed baseline
-below is the current-status record of that; attributing it further means
-running `STADAT1` across the window, which nobody has needed to yet.
+Both still carry the relaxation cost this note is about (3.4× and 1.7×).
+
+What did move them is `d18c289e`, "escalate the primal (x,x) regularization on
+wrong inertia", and it is a **speed-up that shows up as an iteration count
+going the wrong way** — the one shape a trajectory sweep reads backwards.
+Built at that commit and its parent, one problem each way:
+
+| | `d18c289e^` | `d18c289e` |
+|---|---|---|
+| STADAT1 | 34 it / 4.89 s | 92 it / **0.72 s** |
+| Q25FV47 | 142 it / 10.96 s | 120 it / **3.20 s** |
+| STADAT2 (control) | 18 it / 0.16 s | 18 it / 0.16 s |
+
+The parent reproduces the committed baseline to the iteration, so nothing
+else in the 245-commit window contributes.
+
+STADAT1 is the one to read. It is the same size as `STADAT2`/`STADAT3`, which
+did not move at all, and it used to cost **0.127 s per iteration against their
+0.0094 s** — thirteen times its own siblings. It now costs 0.0074 s, in line
+with them. That is `d18c289e`'s subject exactly: the escalation loop was
+answering a wrong-inertia deficit in the `(x,x)` block by escalating `delta_c`
+and `(z,z)`, which cannot repair it, so it refactored up to its whole try
+budget every iteration — 4.19 tries per iteration on that commit's own
+instrumentation. Thirty-four iterations of mis-targeted regularization is not
+a better trajectory than 92 honest ones; the old count was low because each
+step was doing several factorizations and biasing the equality residual.
+
+Suite-wide the same run shows it: of the 97 problems over 0.05 s, the median
+time ratio is 1.00×, **eight are faster by more than 20 % and none is slower
+by more than 20 %** (worst 1.12×, noise).
 
 ## Why the cost is right
 
@@ -197,17 +222,14 @@ against the 2026-08-23 run:
 | QSIERRA | 41 | 39 |
 
 In the report's QP table that is mean iterations 22.3 → 22.4 and total time
-102.79 s → 93.45 s over the 133 commonly-solved problems. None of it is
-`4c02817d`'s — that commit is six days upstream of the run it replaces — and
-none of it is the bound relaxation, per the two-column table above. It is
-recorded here rather than filed because a baseline refresh is what it is: the
-committed numbers are once again the ones the tree produces, which is the only
-property the baseline is for.
+102.79 s → 93.45 s over the 133 commonly-solved problems — **the suite got
+faster while its iteration total rose**, which is `d18c289e` and is explained
+above, not `4c02817d` and not the bound relaxation.
 
-The 132 unmoved models are the useful half of that table. A six-day window of
-245 commits moved six problems and no verdicts, so the next reader who finds a
-QP number that disagrees with the report has a small, specific list of models
-where that is ordinary.
+That is the reason to read this table by time and not only by iterations. Six
+models moved and no verdict did, in a six-day window of 245 commits; the two
+that moved most are the two that got several times faster. A reader who
+diffs only the iteration column here sees a regression that is not there.
 
 ## Related
 

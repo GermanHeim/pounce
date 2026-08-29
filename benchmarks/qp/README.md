@@ -107,10 +107,13 @@ target/release/pounce nl/QSCFXM1.nl --no-sol bound_relax_factor=0   #  30 iters
 
 The suite has since been re-run so the committed `BENCHMARK_REPORT.md` is
 again what the current tree produces: total **3164** iterations, six models
-moved against the 2026-08-23 run (`STADAT1` 34 → 92 dominates), no status
-flips and no objective changes. That drift is *not* the bound relaxation —
-`STADAT1` moves at `bound_relax_factor=0` too — and it is not `4c02817d`,
-which is six days upstream of the run it replaced.
+moved against the 2026-08-23 run, no status flips and no objective changes.
+That movement is `d18c289e` ("escalate the primal (x,x) regularization on
+wrong inertia"), not the bound relaxation, and it is a **speed-up**: STADAT1
+goes 34 → 92 iterations and 4.89 s → 0.72 s, Q25FV47 120 iterations and
+10.96 s → 3.20 s, measured at that commit and its parent. Across the suite
+nothing got slower by more than 12 %. Read this table by time as well as by
+iteration count.
 
 Full record, including why the cost is right and what the fixture corpus could
 not see: `dev-notes/qp-bound-relax-iteration-cost.md` (gh#760).

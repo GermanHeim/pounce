@@ -32,7 +32,10 @@ changes.
   QSCFXM1/2/3, re-verified on the current tree). The QP suite is re-run so
   `benchmarks/BENCHMARK_REPORT.md` again carries the numbers the tree
   produces: 3148 → 3164 iterations, six models moved since 2026-08-23, no
-  status flips and no objective changes.
+  status flips and no objective changes. That movement is `d18c289e`, not
+  this one, and it is a speed-up wearing an iteration count as a disguise —
+  STADAT1 goes 34 → 92 iterations and 4.89 s → 0.72 s, and nothing in the
+  suite is slower by more than 12 %.
 
   The corpus gap is the interesting half. The sweep was never blind to the
   convex arm — that reasoning was corrected in gh #761 — but nothing in it
