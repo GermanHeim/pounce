@@ -53,6 +53,25 @@ changes.
   right to eight digits. Neither `scripts/sweep-fixtures.sh` (156 fixture-legs,
   1 of which reaches the `σ` path) nor the 138-problem Maros-Mészáros set (0 of
   which do) moves a single line under this change.
+- **Sensitivity: bound-multiplier derivatives are readable again under the
+  gh #737 barrier ceiling, and `corrector_iter` works there** (gh #828).
+  A strongly active bound whose constraint row carries a small Jacobian
+  coefficient reaches that ceiling well before anything looks pathological.
+  When it did, the solve held the bound softly — which is what the ceiling
+  is for — but recovered the bound's own multiplier derivative stiffly, off
+  the uncapped quantities, so the two halves disagreed by exactly the cap's
+  ratio. The returned `dz` was wrong by that factor (`1.8e7` against a true
+  `0` on the issue's fixture, growing as the coefficient shrank), and
+  `estimate(..., corrector_iter=n)` / `estimate_report(..., corrector_iter=n)`
+  opened on a stationarity residual of the same size, failed to reduce it,
+  and handed back the *uncorrected* step at every budget. The report said so
+  (`improved()` was false), so no wrong answer was passed off as a corrected
+  one — but the refinement was unavailable in exactly the stiff, tightly
+  bounded regime it is asked for. Both the returned step's multiplier block
+  and the corrector's own operator now read those rows back through the same
+  cap. Affects the Rust `pounce-sensitivity` API and the Python / Pyomo
+  sensitivity entry points on top of it; where the ceiling does not bind —
+  every result that was already correct — nothing moves.
 
 - **A `maturin develop` checkout has a working `pounce` CLI again** (gh #816).
   `maturin develop` builds the extension module and nothing else. The wheel's

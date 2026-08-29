@@ -485,7 +485,7 @@ pub(crate) fn run(
     // (gh#737) or crossover (gh#654) would otherwise freeze, is never
     // consulted, and the frame rule and the ceiling are re-derived at
     // the predicted point instead. See `corrector_sigma`.
-    let (sigma, sigma_s) = bs.corrector_sigma(&pinned).ok_or_else(|| {
+    let op = bs.corrector_sigma(&pinned).ok_or_else(|| {
         SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
     })?;
 
@@ -493,10 +493,16 @@ pub(crate) fn run(
         // The same Rc every call: the factorization cache keys on its
         // tag, so the predicted point's operator is factored once and
         // every later solve is a back-solve.
+        // The ratios go with the diagonals: the chord operator
+        // eliminates each bound row into a diagonal the gh#737 ceiling
+        // may have softened, so the row is read back through the same
+        // cap (gh#828). A no-op wherever the ceiling did not bind,
+        // which is every corrector fixture that predates it.
         bs.solve_released_prebuilt(
             &released,
-            Rc::clone(&sigma),
-            Some(Rc::clone(&sigma_s)),
+            Rc::clone(&op.sigma_x),
+            Some(Rc::clone(&op.sigma_s)),
+            Some((&op.ratio_x, &op.ratio_s)),
             rhs,
             lhs,
             false,

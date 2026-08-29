@@ -178,6 +178,36 @@ struct EffectiveSigma {
     /// entry from the bounds that stay active, and a rebuilt entry has
     /// to land under the same ceiling the rest of the diagonal did.
     cap_x: Rc<Vec<Number>>,
+    /// `Σ_used / Σ_base` per var-x row — how much of each variable's
+    /// barrier stiffness survived the ceiling. `1.0` wherever the
+    /// ceiling did not bind, which is every entry of an uncapped
+    /// solve. Read by
+    /// [`PdSensBacksolver::rescale_bound_multipliers`] (gh#828); see
+    /// there for why the multiplier block has to know.
+    ratio_x: Rc<Vec<Number>>,
+    /// [`Self::ratio_x`] for the `s` block.
+    ratio_s: Rc<Vec<Number>>,
+}
+
+/// The operator a correction factors: both barrier diagonals built at
+/// the predicted point, plus how much of each entry survived the
+/// gh#737 ceiling.
+///
+/// The two ratios travel with the diagonals because they answer the
+/// same question about the same operator — a solve that eliminates a
+/// bound row into a *capped* diagonal has to read that row back
+/// through the same cap, and separating the two is exactly the gh#828
+/// defect. See [`PdSensBacksolver::rescale_bound_multipliers`].
+pub(crate) struct CorrectorOperator {
+    /// `x`-block diagonal at the predicted point.
+    pub(crate) sigma_x: Rc<dyn pounce_linalg::Vector>,
+    /// `s`-block diagonal at the predicted point.
+    pub(crate) sigma_s: Rc<dyn pounce_linalg::Vector>,
+    /// Per var-x row, the fraction of the uncapped diagonal the
+    /// ceiling left standing; `1.0` where it did not bind.
+    pub(crate) ratio_x: Vec<Number>,
+    /// [`Self::ratio_x`] for the `s` block.
+    pub(crate) ratio_s: Vec<Number>,
 }
 
 /// `Σ` and the active-bound slacks of a **crossed-over** iterate,
@@ -373,12 +403,18 @@ impl PdSensBacksolver {
         // each row's slack to its `d(x)` row, exactly `1` in the scaled
         // space this is measured in, so its ceiling is one scalar.
         let cap_s = sigma_pin_cap(1.0);
-        let x = cap_sigma(&base_x, &|i| {
-            cap_x.get(i).copied().unwrap_or(Number::INFINITY)
-        })
-        .or_else(|| declared.map(|d| Rc::clone(&d.sigma_x)));
+        let cap_of_x = |i: usize| cap_x.get(i).copied().unwrap_or(Number::INFINITY);
+        let ratio_x = Rc::new(cap_ratio(&base_x, &cap_of_x));
+        let ratio_s = Rc::new(cap_ratio(&base_s, &|_| cap_s));
+        let x = cap_sigma(&base_x, &cap_of_x).or_else(|| declared.map(|d| Rc::clone(&d.sigma_x)));
         let s = cap_sigma(&base_s, &|_| cap_s).or_else(|| declared.map(|d| Rc::clone(&d.sigma_s)));
-        EffectiveSigma { x, s, cap_x }
+        EffectiveSigma {
+            x,
+            s,
+            cap_x,
+            ratio_x,
+            ratio_s,
+        }
     }
 
     /// Re-measure `Σ` against the declared bounds when the held iterate
@@ -455,6 +491,155 @@ impl PdSensBacksolver {
         }
     }
 
+    /// Put the four bound-multiplier blocks of a scaled-space solution
+    /// into the same frame the operator was factored in (gh#828).
+    ///
+    /// `PdFullSpaceSolver` eliminates the bound rows into the `x` / `s`
+    /// diagonal and recovers them afterwards as
+    /// `dz = r_z/s − (z/s)·dx`. That recovery re-derives `z/s` straight
+    /// off the iterate, which is right exactly when the diagonal it
+    /// eliminated into *was* `Σ = Σ z/s` — and under the gh#737 ceiling
+    /// it is not. The solve then holds the capped bound softly and
+    /// reads its multiplier back stiffly, and the two disagree by the
+    /// cap ratio.
+    ///
+    /// The measured cost is not subtle. On gh#828's fixture a strongly
+    /// active bound with `Σ = 2.5e12` capped to `7.0e5` came back with
+    /// `dz = 1.78e7` against a true `0`, growing as `A⁻²` as the row
+    /// coefficient shrank — enough that `correct_step` opened on a
+    /// stationarity residual of `1.78e7`, failed to improve it in one
+    /// chord step, and handed the caller back its own uncorrected
+    /// input at every budget.
+    ///
+    /// Consistency asks for the capped bound's complementarity row to
+    /// read `s·dz + r·z·dx = r_z` — the same `r` the diagonal was
+    /// scaled by — so the fix adds `(1 − r)·(z/s)·dx` back onto each
+    /// affected row. `r == 1` wherever the ceiling did not bind, which
+    /// is every row of an uncapped solve, so this is exactly a no-op
+    /// off the capped path.
+    ///
+    /// Scoped to the solves that carry [`Self::sigma_override`]. A
+    /// *released* or *pinned* diagonal is not a rescaling of the base
+    /// one — a released entry is rebuilt from the bounds that stay
+    /// active and a pinned entry is raised by an addend — so no single
+    /// per-variable ratio describes it, and those paths are left in the
+    /// frame they already had.
+    ///
+    /// Returns `false` when a ratio is in force and the correction
+    /// could **not** be applied — an unexpected vector or matrix type
+    /// behind a block, a missing iterate — and every caller fails the
+    /// solve on it. Skipping quietly would put back exactly the defect
+    /// this exists to fix, with no signal: `Σ` capped, the multiplier
+    /// rows read back uncapped, and an answer that looks like every
+    /// other. `true` whenever every ratio is `1.0`, which is the whole
+    /// of an uncapped solve and costs one pass over two slices.
+    #[must_use]
+    pub(crate) fn rescale_bound_multipliers(
+        &self,
+        lhs: &mut [Number],
+        ratio_x: &[Number],
+        ratio_s: &[Number],
+    ) -> bool {
+        let unit = |r: &[Number]| r.iter().all(|&v| v == 1.0);
+        if unit(ratio_x) && unit(ratio_s) {
+            return true;
+        }
+        let off = self.offsets();
+        let d = self.data.borrow();
+        let Some(curr) = d.curr.as_ref() else {
+            return false;
+        };
+        let cq_ref = self.cq.borrow();
+        let nlp_ref = self.nlp.borrow();
+        let dense = |v: &dyn pounce_linalg::Vector| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+        let rows = |m: &dyn pounce_linalg::Matrix| -> Option<Vec<usize>> {
+            m.as_any()
+                .downcast_ref::<pounce_linalg::expansion_matrix::ExpansionMatrix>()
+                .map(|e| {
+                    e.expanded_pos_indices()
+                        .iter()
+                        .map(|&i| i as usize)
+                        .collect()
+                })
+        };
+        // `sign` is the one the expansion carries: a lower bound folds
+        // in as `−z·dx` and an upper one as `+z·dx`.
+        let mut fix = |p: &dyn pounce_linalg::Matrix,
+                       z: &dyn pounce_linalg::Vector,
+                       slack: &dyn pounce_linalg::Vector,
+                       ratio: &[Number],
+                       primal_lo: usize,
+                       block_lo: usize,
+                       block_hi: usize,
+                       sign: Number|
+         -> bool {
+            if block_hi == block_lo || ratio.iter().all(|&v| v == 1.0) {
+                return true;
+            }
+            let (Some(pos), Some(zv), Some(sv)) = (rows(p), dense(z), dense(slack)) else {
+                return false;
+            };
+            // The expansion's rows ARE the block, one per bound; a
+            // mismatch means the index arithmetic below is against the
+            // wrong layout, so say so rather than scatter into it.
+            if pos.len() != block_hi - block_lo {
+                return false;
+            }
+            for (k, &i) in pos.iter().enumerate() {
+                let (Some(&r), Some(&zk), Some(&sk)) = (ratio.get(i), zv.get(k), sv.get(k)) else {
+                    return false;
+                };
+                if r == 1.0 || sk == 0.0 || !sk.is_finite() {
+                    continue;
+                }
+                let dx = lhs[primal_lo + i];
+                lhs[block_lo + k] += sign * (1.0 - r) * (zk / sk) * dx;
+            }
+            true
+        };
+        fix(
+            &*nlp_ref.px_l(),
+            &*curr.z_l,
+            &*cq_ref.curr_slack_x_l(),
+            ratio_x,
+            off[0],
+            off[4],
+            off[5],
+            1.0,
+        ) && fix(
+            &*nlp_ref.px_u(),
+            &*curr.z_u,
+            &*cq_ref.curr_slack_x_u(),
+            ratio_x,
+            off[0],
+            off[5],
+            off[6],
+            -1.0,
+        ) && fix(
+            &*nlp_ref.pd_l(),
+            &*curr.v_l,
+            &*cq_ref.curr_slack_s_l(),
+            ratio_s,
+            off[1],
+            off[6],
+            off[7],
+            1.0,
+        ) && fix(
+            &*nlp_ref.pd_u(),
+            &*curr.v_u,
+            &*cq_ref.curr_slack_s_u(),
+            ratio_s,
+            off[1],
+            off[7],
+            off[8],
+            -1.0,
+        )
+    }
+
     /// Whether the held-factor back-solve may run
     /// `PdFullSpaceSolver`'s iterative refinement.
     ///
@@ -523,7 +708,7 @@ impl PdSensBacksolver {
         let Some(sigma) = self.released_sigma_x(released) else {
             return false;
         };
-        self.solve_released_prebuilt(released, sigma, None, rhs, lhs, shift)
+        self.solve_released_prebuilt(released, sigma, None, None, rhs, lhs, shift)
     }
 
     /// [`Self::solve_released_inner`] with the released `Σ` supplied by
@@ -532,11 +717,13 @@ impl PdSensBacksolver {
     /// the sigma object's tag, so a sigma rebuilt per call forces a
     /// re-factorization per call, while a held one factorizes once and
     /// back-solves thereafter.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_released_prebuilt(
         &self,
         released: &[usize],
         sigma: Rc<dyn pounce_linalg::Vector>,
         sigma_s: Option<Rc<dyn pounce_linalg::Vector>>,
+        ratios: Option<(&[Number], &[Number])>,
         rhs: &[Number],
         lhs: &mut [Number],
         shift: bool,
@@ -568,6 +755,15 @@ impl PdSensBacksolver {
         }
         if !self.solve_released_scaled(sigma, sigma_s, &scaled, lhs) {
             return false;
+        }
+        // In scaled space, before the natural-units conjugation: the
+        // ceiling ratio is a property of the operator that was
+        // factored, and `z / s` is read off the iterate in the frame
+        // that operator lives in (gh#828).
+        if let Some((rx, rs)) = ratios {
+            if !self.rescale_bound_multipliers(lhs, rx, rs) {
+                return false;
+            }
         }
         if let Some(c) = self.conj.as_ref() {
             for (l, &f) in lhs.iter_mut().zip(c.f.iter()) {
@@ -812,11 +1008,12 @@ impl PdSensBacksolver {
     /// so their sides contribute nothing. Pinned rows are raised
     /// under the same ceiling. Always fresh objects, because the
     /// factorization cache keys on their tags and a cached vector
-    /// could resolve to a factor built at another iterate.
-    pub(crate) fn corrector_sigma(
-        &self,
-        pinned: &[(usize, Number)],
-    ) -> Option<(Rc<dyn pounce_linalg::Vector>, Rc<dyn pounce_linalg::Vector>)> {
+    /// could resolve to a factor built at another iterate. How much of
+    /// each entry the ceiling left standing comes back with them, in
+    /// the same [`CorrectorOperator`], because the solve that folds a
+    /// bound row into one of these diagonals has to read that row back
+    /// through the same cap (gh#828).
+    pub(crate) fn corrector_sigma(&self, pinned: &[(usize, Number)]) -> Option<CorrectorOperator> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
             v.as_any()
@@ -857,6 +1054,10 @@ impl PdSensBacksolver {
         let caps = sigma_pin_caps(&self.cq, self.dims[0]);
         let cap_s = sigma_pin_cap(1.0);
         let mut x = dense(live_x)?;
+        // What the diagonal would have been with no ceiling, kept
+        // entry by entry so the multiplier rows can be read back in
+        // the frame the operator is actually built in (gh#828).
+        let mut base_x = x.clone();
         for (i, v) in x.iter_mut().enumerate() {
             let c = caps.get(i).copied().unwrap_or(Number::INFINITY);
             if *v > c {
@@ -867,8 +1068,10 @@ impl PdSensBacksolver {
             let c = caps.get(var_row).copied().unwrap_or(Number::INFINITY);
             let slot = x.get_mut(var_row)?;
             *slot = pinned_entry(*slot, add, c);
+            *base_x.get_mut(var_row)? += add;
         }
         let mut s = dense(live_s)?;
+        let base_s = s.clone();
         for v in s.iter_mut() {
             if *v > cap_s {
                 *v = cap_s;
@@ -879,7 +1082,12 @@ impl PdSensBacksolver {
             out.values_mut().copy_from_slice(&vals);
             Rc::new(out) as Rc<dyn pounce_linalg::Vector>
         };
-        Some((pack(x), pack(s)))
+        Some(CorrectorOperator {
+            ratio_x: surviving_fraction(&base_x, &x),
+            ratio_s: surviving_fraction(&base_s, &s),
+            sigma_x: pack(x),
+            sigma_s: pack(s),
+        })
     }
 
     /// A natural-units compound vector, packed as a frozen
@@ -1507,7 +1715,13 @@ impl PdSensBacksolver {
         // Refined, for the reason spelled out in `solve_scaled_space`:
         // one shot, no outer loop.
         let allow_inexact = !self.may_refine();
-        let corrected = self.declared.is_some();
+        // Any override at all, not just crossover's: gh#737's ceiling
+        // is a second one, it fires with `declared` empty, and these
+        // tiers fold the bound rows in from the *calculated* `z / s`
+        // against whatever factor was left behind — which on the first
+        // call after convergence is the algorithm's own uncapped one.
+        // Same predicate, same reason, as `may_refine` (gh#828).
+        let corrected = !self.may_refine();
 
         // Tier 1: fully-inline flat-slice path. `PdFullSpaceSolver::
         // solve_many_cached_flat` downcasts the slack / z / v vectors to
@@ -1620,6 +1834,10 @@ impl PdSensBacksolver {
                 || !read_res_block(&*res_iv.v_l, &mut lhs_row[off[6]..off[7]])
                 || !read_res_block(&*res_iv.v_u, &mut lhs_row[off[7]..off[8]])
             {
+                return false;
+            }
+
+            if !self.rescale_bound_multipliers(lhs_row, &self.sigma.ratio_x, &self.sigma.ratio_s) {
                 return false;
             }
         }
@@ -1823,6 +2041,46 @@ fn sigma_pin_cap(a: Number) -> Number {
 /// margin staying where it is.
 fn pinned_entry(had: Number, add: Number, cap: Number) -> Number {
     (had + add).min(cap)
+}
+
+/// How much of each entry of `sigma` survives `cap` — `min(Σ, cap)/Σ`,
+/// and exactly `1.0` wherever the ceiling does not bind (gh#828).
+///
+/// [`cap_sigma`] builds the *operator's* diagonal; this builds the
+/// factor the bound-multiplier rows have to be read back through, so
+/// the two describe the same system. Non-positive and non-finite
+/// entries get `1.0`: there is no ratio to take, and the capping loop
+/// leaves them alone too.
+fn cap_ratio(sigma: &Rc<dyn pounce_linalg::Vector>, cap: &dyn Fn(usize) -> Number) -> Vec<Number> {
+    let Some(dv) = sigma.as_any().downcast_ref::<DenseVector>() else {
+        return Vec::new();
+    };
+    let base = dv.expanded_values();
+    let used: Vec<Number> = base
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let c = cap(i);
+            if v > c { c } else { v }
+        })
+        .collect();
+    surviving_fraction(&base, &used)
+}
+
+/// `used / base` entrywise, and `1.0` wherever the two agree or the
+/// base carries no ratio to take (gh#828). The shared kernel behind
+/// [`cap_ratio`] and [`CorrectorOperator::ratio_x`].
+fn surviving_fraction(base: &[Number], used: &[Number]) -> Vec<Number> {
+    base.iter()
+        .zip(used)
+        .map(|(&b, &u)| {
+            if u < b && b > 0.0 && b.is_finite() {
+                u / b
+            } else {
+                1.0
+            }
+        })
+        .collect()
 }
 
 /// `min(Σ, cap)` entrywise, or the input unchanged (and `None`) when no
@@ -2055,7 +2313,10 @@ impl PdSensBacksolver {
         if !ok {
             return false;
         }
-        self.unpack(&res_iv, lhs).is_ok()
+        if self.unpack(&res_iv, lhs).is_err() {
+            return false;
+        }
+        self.rescale_bound_multipliers(lhs, &self.sigma.ratio_x, &self.sigma.ratio_s)
     }
 }
 
