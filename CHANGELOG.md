@@ -9,6 +9,51 @@ changes.
 
 ## [Unreleased]
 
+- **The QP suite's +515 iterations now have a name, and the fixture corpus can
+  see the class they came from (gh #760).** `4c02817d` ("Apply
+  `bound_relax_factor` on the convex arm too") took `benchmarks/qp` from 2633
+  to 3148 iterations across the 138 Maros-Meszaros QPs — 4.4× on the QSCFXM
+  family, no status flips, no objective regressions. It is the honest price of
+  a correctness fix: the convex arm used to read the `.nl` bounds verbatim
+  while the NLP arm relaxed them, so one binary on one file solved two
+  different models depending on `solver_selection`, and the cheap old counts
+  were the cost of solving the easier, wrong one. On degenerate models that was
+  not a rounding difference — LISWET1 returned 36.1224 against the Ipopt-MA57
+  reference's 27.1221. The arms now agree to 12 digits, and the convex arm is
+  still the faster of the two (QSCFXM3: 168 iterations against the NLP arm's
+  282).
+
+  What was missing was the record. `dev-notes/qp-bound-relax-iteration-cost.md`
+  is it, per CLAUDE.md's rule that a measured cost booked as "accepted" needs
+  an issue and an owner; `benchmarks/qp/README.md` carries the short version so
+  a reader who meets the number finds the cause. The attribution needs no
+  bisect: `bound_relax_factor=0` is what the extractors used to read, and it
+  restores the pre-commit counts to the iteration (30 / 35 / 38 on
+  QSCFXM1/2/3, re-verified on the current tree). The QP suite is re-run so
+  `benchmarks/BENCHMARK_REPORT.md` again carries the numbers the tree
+  produces: 3148 → 3164 iterations, six models moved since 2026-08-23, no
+  status flips and no objective changes. That movement is `d18c289e`, not
+  this one, and it is a speed-up wearing an iteration count as a disguise —
+  STADAT1 goes 34 → 92 iterations and 4.89 s → 0.72 s, and nothing in the
+  suite is slower by more than 12 %.
+
+  The corpus gap is the interesting half. The sweep was never blind to the
+  convex arm — that reasoning was corrected in gh #761 — but nothing in it
+  predicted the magnitude, and *not because the fixtures were small*. gh #690
+  had already added convex models up to 534 columns. It was that **not one of
+  them was a model on which relaxing the box costs anything**: swept twice,
+  default versus `bound_relax_factor=0`, the convex lines move by tens of
+  percent in both directions and the largest well-posed one (`lp_degen2`) moves
+  18 → 15. A reviewer reading that diff learns "small and mixed", which is true
+  of the corpus and false of the suite. New fixture `convex_qp_qscfxm1` is
+  `QSCFXM1` itself — 457 columns, 0.40 s per leg, moving 131 → 30 on both sweep
+  legs — so the magnitude class is now in the diff. Pinned (routing,
+  dimensions, published DOC 97/6 optimum, and the *ratio*, never an absolute
+  count) by `crates/pounce-cli/tests/issue_760_convex_bound_relax_magnitude.rs`,
+  and mutation-checked: reverting the convex arm's relax factor to zero takes
+  the ratio to 1.00× and two of its three tests go red. Sweep cost: 10.9 s →
+  11.9 s over both legs.
+
 - **Limited-memory: the SMW update now costs one pass over the KKT factor,
   not two (gh #730 follow-up).** Under `hessian_approximation=limited-memory`,
   `LowRankAugSystemSolver` builds its Sherman-Morrison-Woodbury correction by
