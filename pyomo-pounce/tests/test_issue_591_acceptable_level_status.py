@@ -25,6 +25,26 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce.sens import _STATUS_RESULT
+
+# `pyomo_pounce.v2` needs Pyomo 6.10.1+ and raises a clear ImportError below
+# that (6.9.2-6.10.0 ship `pyomo.contrib.solver` with the older
+# SolutionLoaderBase/get_primals API). Without this guard the module raised
+# during *collection*, failing the suite over a missing environment.
+#
+# Gated on the package's own `HAVE_V2_INTERFACE` rather than a try/except
+# around the import: `pyomo_pounce/__init__.py` explains that wrapping the
+# import would also swallow a genuine ImportError from a bug inside v2 and
+# report the interface as merely unavailable. Where Pyomo is new enough the
+# import below stays unguarded, so real breakage is still loud.
+if not pyomo_pounce.HAVE_V2_INTERFACE:
+    import pyomo
+
+    pytest.skip(
+        f"pyomo_pounce.v2 needs Pyomo 6.10.1+ (this environment has "
+        f"{pyomo.version.version})",
+        allow_module_level=True,
+    )
+
 from pyomo_pounce.v2 import _V2_STATUS
 
 #: `tol` below anything reachable plus a generous `acceptable_tol` routes the

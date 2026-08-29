@@ -169,6 +169,52 @@ def _same_commit(got, want):
     return a[:n] == b[:n]
 
 
+def solver_routes():
+    """The `(name, solve)` pairs a "every route agrees" test should compare,
+    or a skip when there is nothing to compare.
+
+    Three entry points reach the same in-process sensitivity machinery: the
+    legacy `SolverFactory("pounce")` plugin, the `pounce_v2` registration, and
+    Pyomo's `contrib.solver` factory. The **last two are the same
+    registration** — both come from `pyomo_pounce.v2` — so on a Pyomo older
+    than 6.10.1 they are absent together, `SolverFactory("pounce_v2")` returns
+    an `UnknownSolver` and `SF2("pounce")` returns `None`, and a test that
+    calls `.solve()` on either dies with an unhelpful `AttributeError` or a
+    `ValueError` about an `asl` executable. That is a missing *environment*,
+    not a defect.
+
+    Keyed on `pyomo_pounce.HAVE_V2_INTERFACE`, which is the package's own
+    supported predicate for this. Deliberately **not** `try: import
+    pyomo_pounce.v2` — `pyomo_pounce/__init__.py` says why in as many words: a
+    try/except there would also swallow a genuine `ImportError` raised by a bug
+    *inside* v2 and report the interface as merely unavailable.
+
+    When only one route survives there is nothing for an agreement test to
+    compare, so this skips rather than passing vacuously — a single-route
+    "every route agrees" assertion is worse than no assertion. CI runs a Pyomo
+    that has all three, so this never fires there.
+    """
+    import pyomo.environ as pyo
+    import pyomo_pounce
+
+    routes = [("legacy", lambda m: pyo.SolverFactory("pounce").solve(m))]
+    if pyomo_pounce.HAVE_V2_INTERFACE:
+        from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+
+        routes.append(("v2", lambda m: pyo.SolverFactory("pounce_v2").solve(m)))
+        routes.append(("contrib", lambda m: SF2("pounce").solve(m)))
+    if len(routes) < 2:
+        import pyomo
+
+        pytest.skip(
+            f"only the legacy route is registered: the v2 and contrib routes "
+            f"both come from pyomo_pounce.v2, which needs Pyomo 6.10.1+ "
+            f"(this environment has {pyomo.version.version}). Nothing to "
+            f"compare, so this is an environment gap rather than a result."
+        )
+    return routes
+
+
 @pytest.fixture(scope="session")
 def pounce_exe():
     """A `pounce` executable this checkout vouches for, or a skip."""
