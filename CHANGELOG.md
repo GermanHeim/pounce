@@ -25,7 +25,10 @@ changes.
   `pounce_sensitivity::Solver::parametric_step_release_all`, the
   directional path's all-released solve returned undecided, and
   `degeneracy_iter` warns when passed under an option that makes no
-  decision.
+  decision. To tell a passed budget from the default, the
+  `degeneracy_iter` parameter on all three entry points is now
+  declared as `None` and resolved to 16 inside, a visible signature
+  change with unchanged behavior for every existing call.
 - **`estimate()` and `gradient()` no longer re-parse variable names on
   every call.** The sensitivity session now keeps the variable data
   objects the solve resolves when it loads its solution back, in

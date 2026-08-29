@@ -1277,7 +1277,8 @@ fn leg_oracle_the_released_start_reaches_the_same_correction() {
         for i in 0..n_x {
             assert!(
                 (released[i] - plain[i]).abs() < 1e-8,
-                "with nothing weak the released step is the plain                  answer: coordinate {i} differs, {:e} vs {:e}",
+                "with nothing weak the released step is the plain \
+                 answer: coordinate {i} differs, {:e} vs {:e}",
                 released[i],
                 plain[i],
             );
@@ -1316,7 +1317,11 @@ fn leg_oracle_the_released_start_reaches_the_resolve() {
     let budget = 4.0 * floor.max(width);
     let n_x = base_x.len();
     let at = |step: &[Number]| -> Vec<Number> {
-        base_x.iter().zip(step.iter()).map(|(&b, &d)| b + d).collect()
+        base_x
+            .iter()
+            .zip(step.iter())
+            .map(|(&b, &d)| b + d)
+            .collect()
     };
 
     for &delta in &[-1.0e-1, -1.0e-2, 1.0e-2, 1.0e-1] as &[Number] {
