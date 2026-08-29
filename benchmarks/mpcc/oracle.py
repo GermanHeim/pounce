@@ -37,7 +37,7 @@ vendored, pinned in any requirements file, or imported at module scope.
 from __future__ import annotations
 
 import itertools
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 from scipy.optimize import minimize

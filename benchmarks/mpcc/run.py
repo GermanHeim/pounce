@@ -31,8 +31,6 @@ import os
 import sys
 from typing import Dict, List, Optional
 
-import numpy as np
-
 from . import cases as C
 from . import manifest as M
 from . import report as REPORT

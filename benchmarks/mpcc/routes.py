@@ -61,7 +61,7 @@ mechanism that could otherwise explain an outcome:
 from __future__ import annotations
 
 import dataclasses
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 #: Applied to every solve in every route.
 BASE_OPTIONS: Dict[str, object] = {

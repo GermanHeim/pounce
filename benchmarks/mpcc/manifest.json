@@ -1,7 +1,7 @@
 {
   "schema": "pounce-mpcc-manifest/1",
   "issue": "https://github.com/jkitchin/pounce/issues/794",
-  "model_data_revision": "026d1d608551db43",
+  "model_data_revision": "93f01eeffb84c866",
   "classes_required": [
     "regular",
     "biactive",

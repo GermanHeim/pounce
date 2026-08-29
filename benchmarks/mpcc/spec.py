@@ -42,7 +42,7 @@ reporting a converged NLP as a solved MPCC.
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
