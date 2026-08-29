@@ -15,12 +15,12 @@
 
 | field | value |
 |---|---|
-| pounce commit | `235956e` (clean) |
-| model-data revision | `93f01eeffb84c866` |
+| pounce commit | `501c599` (clean) |
+| model-data revision | `adc36ea8e912b549` |
 | pounce version | 0.10.0 (Python extension, release build) |
 | discopt | absent — a cross-repository *design* dependency of gh#776, not a runtime dependency of this harness. No DiscOpt comparison was run. |
 | CCOpt | absent. Optional per gh#794; the pin a comparison would have used is `ccopt==0.4.1`. |
-| matrix | 11 cases × 2 scaling legs × 3 starts × 8 routes × 5 controls = 2560 records, 188 s |
+| matrix | 11 cases × 2 scaling legs × 3 starts × 8 routes × 5 controls = 2560 records, 189 s |
 | pinned options | `tol=1e-8`, `max_iter=300`, `bound_relax_factor=0`, `honor_original_bounds=yes` |
 | linear algebra | identical across all eight routes — one POUNCE build, one process, the default linear solver, no per-route backend selection. No comparison below crosses a linear-algebra boundary. |
 | relaxation schedule | `tau = 1e0 … 1e-8`, ×0.1, one bisection allowed after a rejected stage |
@@ -177,6 +177,27 @@ either returns a point below the optimum or, on `direct`, fails.
    size, and nothing here says anything about a *nonlinear*
    complementarity function — which a VLE pair will be.
 
+## What the source-level validators flagged
+
+`validate.py` runs one check per benchmark class against the source
+model at every returned point, independently of any status or residual.
+Across the 512 control-free observations exactly four groups fail, and
+all four are the expected behaviour of a local solver rather than
+anything wrong:
+
+| case | key | failures | reading |
+|---|---|---:|---|
+| `scholtes4` | `matches_pinned_optimum_ok` | 30 | the 24 ℓ₁/continuation cells that land below `f*` plus 6 direct-route cells at another point |
+| `ralph2` | `matches_pinned_optimum_ok` | 6 | the two `ncp_eq`-family cells at a suboptimal feasible point on the axis, both scaling legs |
+| `biactive_positive` | `has_biactive_pair_ok` | 3 | routes that reached a nearby non-biactive point |
+| `ctrap` | `reached_global_ok` | 3 | the C-stationary origin — this case's whole purpose |
+
+No `regular`, `selector`, `degenerate` or `infeasible` check fails
+anywhere, which is the clean part of the result: strict complementarity
+holds where it should, every selector commits to a branch, every
+degenerate cell returns a source-feasible point, and no cell of the
+infeasible case is ever source-feasible.
+
 ## Warm starting across the continuation
 
 Total inner iterations over the 60 non-infeasible cells, same stages,
@@ -268,7 +289,7 @@ for l1 in ("no", "yes"):
           "actual |c3|", abs(P().constraints(x)[2]))
 ```
 
-Output on `235956e`:
+Output on `501c599`:
 
 ```
 no  Solve_Succeeded  1.818182e-09  [1.8e-09 1.8e-09]  reported viol 5.5e-26  actual |c3| 1.7e-29
