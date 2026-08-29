@@ -2,6 +2,7 @@
 
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
+use std::rc::Rc;
 
 pub trait HessianUpdater {
     /// Refresh `data.w` for the current iterate. Returns `true` on
@@ -22,6 +23,49 @@ pub trait HessianUpdater {
     /// `limited_memory_max_skipping`.
     fn provides_exact_hessian(&self) -> bool {
         false
+    }
+
+    /// `W` at the *current* iterate, for an updater that can produce it as a
+    /// pure function of `(x, y)` with no dependence on the step history.
+    ///
+    /// This exists because `provides_exact_hessian` conflated two different
+    /// questions (gh#823 review, finding 1, reported by @srikanth-gm): "is
+    /// this the exact Hessian?" and "can this be re-evaluated at the current
+    /// iterate?". The negative-curvature probe only ever needed the second.
+    /// Answering it with the first is safe for the limited-memory updater —
+    /// BFGS keeps `B` positive definite, so the probe declines at `δ_x = 0`
+    /// and declining is correct — but it is *not* safe for a finite-difference
+    /// Hessian, which carries genuine negative curvature and was being judged
+    /// one iterate stale. The measured symptom is a stationary maximum
+    /// reported as optimal, where the exact path escapes it.
+    ///
+    /// Returning `None` keeps the previous behaviour: the probe runs against
+    /// whatever `data.w` holds. That is the right answer for a history-carrying
+    /// quasi-Newton `B`, where there is nothing to re-evaluate — recomputing
+    /// would hand the updater a zero-length curvature pair to skip and count
+    /// against `limited_memory_max_skipping`.
+    ///
+    /// An implementation MUST NOT leave `data.w` describing a different
+    /// iterate than it found it describing; the post-optimal sensitivity hook
+    /// reads it.
+    fn hessian_at_current(
+        &mut self,
+        _data: &IpoptDataHandle,
+        _cq: &IpoptCqHandle,
+    ) -> Option<Rc<dyn pounce_linalg::SymMatrix>> {
+        None
+    }
+
+    /// The finite-difference Hessian's pattern and probe census, for the
+    /// updater that has one. `None` for every other updater.
+    ///
+    /// Exposed because the two things that decide whether the mode is
+    /// affordable on a given model — which pattern it ended up with, and
+    /// how many probe groups that cost — were reachable only through the
+    /// `POUNCE_FD_HESSIAN_DEBUG` environment variable, i.e. not from an
+    /// embedder at all. Asked for by @srikanth-gm on gh#823.
+    fn fd_hessian_stats(&self) -> Option<crate::hess::fd_hessian::FdStats> {
+        None
     }
 
     /// Discard the accumulated quasi-Newton curvature and re-anchor the

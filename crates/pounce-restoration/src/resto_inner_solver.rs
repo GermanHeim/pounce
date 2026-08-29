@@ -518,8 +518,49 @@ fn run_inner_resto_impl(
     // indices mean something else entirely, so the mask never crosses
     // into the inner solve: restoration approximates over its whole
     // space, exactly as it did before the mask existed.
+    //
+    // The partitioned Hessian (`hessian_approximation=partitioned`) is
+    // scoped out of restoration for the same reason and one more. Its
+    // element table is built from the *original* NLP's constraint
+    // Jacobian, whose row and column spaces the restoration sub-NLP does
+    // not share: the resto primal carries the four slack blocks and the
+    // resto Jacobian carries their columns, so an element's support
+    // would name the wrong variables. `RestoIpoptNlp::eval_h` also wants
+    // the *orig* Hessian as a `SymTMatrix` from the original NLP's
+    // `eval_h`, which is exactly what a model without second derivatives
+    // cannot supply. Restoration therefore runs the limited-memory
+    // updater, which owns the compound-primal case already (gh#102).
+    // The finite-difference Hessian is scoped out for the *first* of
+    // those two reasons. It survives the second — it never calls
+    // `eval_h`, so a model with no second derivatives is fine — and that
+    // is exactly what made it look safe. But its pattern is the original
+    // NLP's: `objective_vars` names positions in the orig `x_var` space,
+    // and the declared block it would otherwise read is the orig NLP's
+    // too. Against the 5-block compound primal those indices land on the
+    // slack blocks' neighbours, and the probe directions they generate
+    // recover a Hessian for the wrong variables.
+    //
+    // Measured, on a nonconvex equality pair with bounds that block the
+    // Newton direction: every other mode converges to -1.567047 and
+    // `finite-difference` alone reports `Restoration_Failed` at
+    // iteration 6. Restoration runs the limited-memory updater for it
+    // too (gh#823 review).
     let mut inner_alg_builder = inner_alg_builder.clone();
     inner_alg_builder.limited_memory_nonlinear_vars = None;
+    // Orig-`x_var` indices, and the compound primal is a different space
+    // — the same reason the mask above is dropped. It is not enough that
+    // the orig block leads the compound, which makes the indices merely
+    // *in range*: the resto objective is the l1 + proximal term, not the
+    // model's, so the clique would be the wrong function's.
+    inner_alg_builder.objective_nonlinear_vars = None;
+    if matches!(
+        inner_alg_builder.hessian_approximation,
+        pounce_algorithm::alg_builder::HessianApproxChoice::Partitioned
+            | pounce_algorithm::alg_builder::HessianApproxChoice::FiniteDifference
+    ) {
+        inner_alg_builder.hessian_approximation =
+            pounce_algorithm::alg_builder::HessianApproxChoice::LimitedMemory;
+    }
     let inner_alg_builder = &inner_alg_builder;
 
     let mut alg_bundle = inner_alg_builder.build_with_backend(backend_factory);

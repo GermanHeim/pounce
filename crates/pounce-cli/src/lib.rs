@@ -10,6 +10,7 @@ pub mod citations;
 pub mod cli;
 pub mod counting_tnlp;
 pub mod debug_repl;
+pub mod no_hessian_tnlp;
 // The `.nl` pipeline (reader, AD tape, external functions, FBBT lowering)
 // now lives in the leaf `pounce-nl` crate so the Python bindings can reuse
 // it. Re-export the modules so existing `crate::nl_reader::…` /

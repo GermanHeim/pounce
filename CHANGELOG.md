@@ -9,6 +9,108 @@ changes.
 
 ## [Unreleased]
 
+- **`hessian_approximation=finite-difference`: the exact Hessian for models
+  that have none.** A collocation model built from an FMU or CasADi supplies
+  analytic first derivatives and no second ones, and until now that left only
+  `limited-memory`, which degrades with mesh refinement until it stops
+  converging. The new mode recovers the exact Lagrangian Hessian by
+  graph-coloured finite differences of the analytic Jacobian: `∇ₓL` is closed
+  form when `J` is, so one gradient-plus-Jacobian evaluation gives a
+  directional derivative, and with a sparsity pattern one probe recovers a
+  whole group of structurally orthogonal columns. Measured on
+  `benchmarks/large_scale/laptime` against a *genuinely* Hessian-less model
+  (`POUNCE_DROP_HESSIAN=1`, which reports `nnz_h_lag = 0` and declines
+  `eval_h` exactly as a Python problem with no `hessian` method does): at
+  N=160, **30 iterations — the exact path's own count — and
+  `Solve_Succeeded`** against limited-memory's 207 and
+  `Solved_To_Acceptable_Level`; at N=320, **62 iterations to twelve correct
+  digits** where limited-memory spends 1210 iterations and lands on 65.395
+  against a true optimum of 65.326908.
+  Whether it is affordable is a property of the model, and `laptime` is a
+  favourable one: its pattern's widest row is `rho_max = 15`, unchanged under
+  mesh refinement because it is set by the per-stage stencil rather than the
+  horizon, so 17 probe groups suffice. That does not generalise — a 60k model
+  with `rho_max = 176` needs ~181 groups, i.e. ~180 gradient-plus-Jacobian
+  evaluations per Hessian, which can cost far more per iteration than the
+  limited-memory path it replaces. Check `rho_max` under
+  `POUNCE_FD_HESSIAN_DEBUG` before reaching for this on a new model. This does not
+  and cannot beat `exact`: on a model that has a Hessian, reading it costs
+  less than reconstructing it. Opt-in; every default is unchanged.
+  `fd_hessian_pattern` selects the pattern source (`declared` uses the TNLP's
+  structure call only, never its values; `jacobian` derives it from the
+  Jacobian pattern alone and is the automatic fallback when nothing is
+  declared). `fd_hessian_reuse_tol` skips the rebuild when neither the iterate
+  nor the multipliers moved (~7%). `fd_hessian_coloring` defaults to
+  Curtis-Powell-Reid; star colouring needs fewer probes but is numerically
+  wrong on a dense pattern — see `dev-notes/fd-hessian-from-jacobian.md`.
+  Feasibility restoration runs the limited-memory updater for this mode, as
+  it already did for `partitioned`: the restoration sub-NLP's primal is the
+  five-block compound, which the model's Hessian pattern and objective
+  clique do not describe. Without that scoping the mode was the only one to
+  report `Restoration_Failed` on a nonconvex fixture every other mode
+  solved, returning an answer 1.9 infeasible.
+
+- **The CasADi plugin can reach `finite-difference`, and asks CasADi only
+  for what the mode needs.** `casadi_nlpsol_pounce.cpp` carried a single
+  `exact_hessian_` flag standing for two independent capabilities — may
+  POUNCE call `cb_h` for Hessian *values*, and can the plugin declare a
+  sparsity *pattern*. The flag was cleared only for `limited-memory`, so
+  `hessian_approximation=finite-difference` still built CasADi's symbolic
+  `nlp_hess_l` and failed with `Derivatives cannot be calculated for ...` on
+  exactly the models the mode exists for: an external `Callback`, an FMU or
+  a `DaeBuilder` transcription with analytic first derivatives and nothing
+  above them. The two capabilities are now separate. `finite-difference`
+  reads CasADi's Hessian sparsity for its **structure only** — `cb_h`
+  refuses a values request outright, so a completed solve is itself proof
+  that every number was recovered by probing — and falls back to the
+  Jacobian-derived pattern when CasADi cannot build a symbolic Hessian at
+  all. `fd_hessian_pattern=jacobian` skips building it even where it is
+  available. Measured on a 3-variable model, the declared pattern is 4
+  nonzeros in 2 probe groups against the Jacobian superset's 6 in 3. The
+  same split is reproduced in the generated C, whose emitted `eval_h`
+  serves the pattern as a literal and refuses values. Found in review by
+  @srikanth-gm (gh#823).
+
+- **The finite-difference Hessian's pattern and probe count are readable
+  from an embedder.** `GetPounceFdHessianStats` in the C API, and
+  `stats()["fd_hessian"]` through the CasADi plugin, report the pattern
+  source, its nonzero count, the column count (so `groups / n`, the
+  fraction of a dense scheme's probes, is derivable), the probe groups per
+  Hessian, `rho_max`, and
+  whether a requested star colouring fell back to Curtis-Powell-Reid, and
+  whether the objective clique had to widen for want of a stated objective
+  linearity — the field that distinguishes a high probe count caused by a
+  widened clique from one caused by a genuinely dense objective.
+  Previously reachable only through the `POUNCE_FD_HESSIAN_DEBUG`
+  environment variable. The reported source is the one the run **ended up
+  with**, not the one requested: `fd_hessian_pattern=declared` falls back
+  to the Jacobian derivation whenever the model declares no Hessian
+  structure, and that fallback is worth 17 probe groups against 341 on
+  `benchmarks/large_scale` `laptime` — so reporting the request would hide
+  the number a reader is there for. Absent, rather than zero, on every
+  other Hessian mode. Asked for by @srikanth-gm (gh#823).
+
+- **`start_with_resto` does something.** The option was threaded from the
+  `OptionsList` into `AlgorithmBuilder::resto`, from there into
+  `RestoAlgorithmBuilder`, and from there into `MinC1NrmDriver` — a field
+  on the *inner* restoration solver, which has no first outer iteration to
+  force. Every layer set it and no layer read it, so `start_with_resto
+  yes` was a silent no-op. It is an outer-loop behaviour and the outer
+  loop consumes it now, riding the same `request_resto` flag the
+  probing-oracle guard uses. `unimplemented_options.rs`'s
+  `the_restoration_switches_reach_the_builder` could not catch this: it
+  asserts the value *reaches the builder*, which is exactly the "read site
+  populating a field nobody consumes" its own comment names as the defect
+  to avoid. Default is unchanged (`no`), so no default run moves.
+
+- **`hessian_approximation=partitioned` (negative result, opt-in).** Two
+  partitioned quasi-Newton decompositions, built and measured against the same
+  benchmark and kept for the record rather than proposed for use: per-constraint
+  elements scale the wrong way, and per-primal-block elements have near-flat
+  iteration scaling but never converge faster. Both are beaten by
+  `finite-difference` on every measure. Full measurements, including two wrong
+  inferences made along the way and how they were caught, in
+  `dev-notes/partitioned-quasi-newton-prototype.md`.
 - **The convex QP arm's cost normalization no longer buys an `Optimal`
   verdict** (gh #414, reopened). `pounce.solve_qp(P=diag(2, 2e8), c=(-2, -2e4))`
   — `min (x₀−1)² + (10⁴x₁−1)²`, two variables, diagonal, unconstrained —

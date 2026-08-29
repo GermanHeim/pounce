@@ -3125,12 +3125,28 @@ impl IpoptApplication {
         // HS71-class problems.
         let mut builder = self.algorithm_builder_from_options();
 
+        // The objective element's support for the partitioned Hessian.
+        // Every constraint element reads its support off a Jacobian row;
+        // only the objective has none declared, so without this the
+        // updater falls back to the first `∇f`'s nonzeros — a
+        // value-derived pattern. See
+        // `TNLPAdapter::objective_nonlinear_vars`.
+        if matches!(
+            builder.hessian_approximation,
+            HessianApproxChoice::Partitioned | HessianApproxChoice::FiniteDifference
+        ) {
+            builder.objective_nonlinear_vars = adapter.borrow().objective_nonlinear_vars();
+        }
+
         // Which variables the limited-memory Hessian should span (gh#624).
         // Upstream's precedence: a TNLP that implements
         // `get_number_of_nonlinear_variables` wins, and
         // `num_linear_variables` is only the contiguous-prefix fallback.
         // Exact-Hessian solves never consult either.
-        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory {
+        if matches!(
+            builder.hessian_approximation,
+            HessianApproxChoice::LimitedMemory | HessianApproxChoice::FiniteDifference
+        ) {
             let num_linear_variables = self
                 .options
                 .get_integer_value("num_linear_variables", "")
@@ -3348,6 +3364,11 @@ impl IpoptApplication {
         );
         alg.recalc_y = builder.recalc_y;
         alg.recalc_y_feas_tol = builder.recalc_y_feas_tol;
+        // `start_with_resto` — the outer loop is what acts on it. It was
+        // previously copied only into the restoration sub-solver's own
+        // builder, which has no first outer iteration to force, so
+        // setting the option did nothing at all.
+        alg.start_with_resto = builder.resto.start_with_resto;
         // Tiny-step and divergence guards (#191): registered but
         // previously never read. Struct defaults match the registered
         // defaults, so default runs are unchanged.
@@ -3448,6 +3469,24 @@ impl IpoptApplication {
             // Restoration-phase audit counters (pounce#12). Zero on
             // problems where restoration never fires; populated by
             // `IpoptAlgorithm::invoke_restoration`.
+            // Finite-difference Hessian census (gh#823 review). `None` on
+            // every other updater, which leaves the `-1` sentinel in
+            // place and says "this mode did not run" rather than "it ran
+            // and found nothing".
+            if let Some(fd) = alg.bundle.hess.fd_hessian_stats() {
+                use crate::hess::fd_hessian::FdPatternSource;
+                stats.fd_hessian_pattern_used = match fd.pattern_used {
+                    Some(FdPatternSource::Declared) => 0,
+                    Some(FdPatternSource::Jacobian) => 1,
+                    None => -1,
+                };
+                stats.fd_hessian_nnz = fd.nnz as Index;
+                stats.fd_hessian_n = fd.n as Index;
+                stats.fd_hessian_groups = fd.groups as Index;
+                stats.fd_hessian_rho_max = fd.rho_max as Index;
+                stats.fd_hessian_coloring_fell_back = fd.coloring_fell_back;
+                stats.fd_hessian_objective_clique_widened = fd.objective_clique_widened;
+            }
             stats.restoration_calls = alg.resto_calls;
             stats.restoration_inner_iters = alg.resto_inner_iters;
             stats.restoration_outer_iters = alg.resto_outer_iters;
@@ -3778,6 +3817,8 @@ impl IpoptApplication {
             if found {
                 builder.hessian_approximation = match v.as_str() {
                     "limited-memory" => HessianApproxChoice::LimitedMemory,
+                    "partitioned" => HessianApproxChoice::Partitioned,
+                    "finite-difference" => HessianApproxChoice::FiniteDifference,
                     _ => HessianApproxChoice::Exact,
                 };
             }
@@ -3817,6 +3858,69 @@ impl IpoptApplication {
         // until now read nowhere on the IPM path — the updater was hard-wired
         // to Powell-damped BFGS. SR1 is honored too (the updater and the
         // low-rank/inertia path already handle its indefinite models).
+        // Partitioned quasi-Newton knobs. `partitioned_update_type`
+        // defaults to SR1 rather than BFGS — see
+        // `crates::hess::partitioned_quasi_newton` for why damping is
+        // the wrong choice on a per-constraint element.
+        if let Ok((v, found)) = self.options.get_string_value("partitioned_update_type", "") {
+            if found {
+                builder.partitioned_update_type = match v.as_str() {
+                    "bfgs" => UpdateType::Bfgs,
+                    _ => UpdateType::Sr1,
+                };
+                builder.partitioned_update_type_was_set = true;
+            }
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_integer_value("partitioned_max_element", "")
+        {
+            if found && v > 0 {
+                builder.partitioned_max_element = v as usize;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("fd_hessian_pattern", "") {
+            if found {
+                builder.fd_hessian_pattern = match v.as_str() {
+                    "jacobian" => crate::hess::fd_hessian::FdPatternSource::Jacobian,
+                    _ => crate::hess::fd_hessian::FdPatternSource::Declared,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("fd_hessian_coloring", "") {
+            if found {
+                builder.fd_hessian_coloring = match v.as_str() {
+                    "cpr" => crate::hess::fd_hessian::FdColoring::Cpr,
+                    _ => crate::hess::fd_hessian::FdColoring::Star,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_numeric_value("fd_hessian_reuse_tol", "") {
+            if found && v >= 0.0 {
+                builder.fd_hessian_reuse_tol = v;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("partitioned_elements", "") {
+            if found {
+                builder.partitioned_elements = match v.as_str() {
+                    "blocks" => crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock,
+                    _ => crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_integer_value("partitioned_block_size", "") {
+            if found && v > 0 {
+                builder.partitioned_block_size = v as usize;
+            }
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_numeric_value("partitioned_curvature_cap", "")
+        {
+            if found && v > 0.0 {
+                builder.partitioned_curvature_cap = v;
+            }
+        }
         if let Ok((v, found)) = self
             .options
             .get_string_value("limited_memory_update_type", "")

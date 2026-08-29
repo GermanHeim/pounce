@@ -104,6 +104,15 @@ pub enum MuStrategyChoice {
 pub enum HessianApproxChoice {
     Exact,
     LimitedMemory,
+    /// Partitioned quasi-Newton: one small dense block per element
+    /// function (the objective and each constraint row), assembled into
+    /// a genuine sparse `SymTMatrix`. See
+    /// [`crate::hess::partitioned_quasi_newton`].
+    Partitioned,
+    /// Sparse finite-difference Lagrangian Hessian, recovered by graph
+    /// coloring from the analytic Jacobian. See
+    /// [`crate::hess::fd_hessian`].
+    FiniteDifference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +234,48 @@ pub struct AlgorithmBuilder {
     /// `QualityFunction` per upstream's `RegisterOptions` default.
     pub mu_oracle: MuOracleKind,
     pub hessian_approximation: HessianApproxChoice,
+
+    /// Element update formula for
+    /// [`HessianApproxChoice::Partitioned`] (`partitioned_update_type`).
+    /// SR1 by default: a single constraint is not convex, so damped
+    /// BFGS would force every `∇²c_j` model PSD and then scale it by a
+    /// multiplier of either sign.
+    pub partitioned_update_type: UpdateType,
+    /// Whether the caller named `partitioned_update_type` explicitly, so
+    /// the block mode's BFGS default does not override them.
+    pub partitioned_update_type_was_set: bool,
+    /// Widest element that keeps a dense block under
+    /// [`HessianApproxChoice::Partitioned`]; wider elements degrade to a
+    /// diagonal approximation (`partitioned_max_element`).
+    pub partitioned_max_element: usize,
+    /// Variables the **objective** is nonlinear in, in the compressed
+    /// `x_var` space — `TNLPAdapter::objective_nonlinear_vars`. Consumed
+    /// by both the partitioned updater (as its objective element's
+    /// support) and the finite-difference updater (as the objective's
+    /// contribution to a Jacobian-derived Hessian pattern, which the
+    /// constraint Jacobian cannot supply). `None` leaves each to fall
+    /// back on the first `∇f`'s nonzeros, which is value-derived; see
+    /// that method for what it costs.
+    pub objective_nonlinear_vars: Option<Vec<Index>>,
+    /// `partitioned_curvature_cap` — multiple of an element's implied
+    /// curvature that one update may reach. See
+    /// [`crate::hess::partitioned_quasi_newton`].
+    pub partitioned_curvature_cap: Number,
+    /// How the Lagrangian is split into elements under
+    /// [`HessianApproxChoice::Partitioned`] (`partitioned_elements`).
+    pub partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode,
+    /// Target primal-block width when `partitioned_elements` is
+    /// `blocks` (`partitioned_block_size`).
+    pub partitioned_block_size: usize,
+    /// Where [`HessianApproxChoice::FiniteDifference`] takes its
+    /// sparsity pattern from (`fd_hessian_pattern`).
+    pub fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource,
+    /// How finite-difference probe groups are formed
+    /// (`fd_hessian_coloring`).
+    pub fd_hessian_coloring: crate::hess::fd_hessian::FdColoring,
+    /// Relative movement in `x` AND `y` below which the previous Hessian
+    /// is reused (`fd_hessian_reuse_tol`). `0` rebuilds every iteration.
+    pub fd_hessian_reuse_tol: Number,
     pub limited_memory_update_type: UpdateType,
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
@@ -1096,6 +1147,16 @@ impl Default for AlgorithmBuilder {
             mu_strategy: MuStrategyChoice::Monotone,
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
+            partitioned_update_type: UpdateType::Sr1,
+            partitioned_update_type_was_set: false,
+            partitioned_max_element: 64,
+            objective_nonlinear_vars: None,
+            partitioned_curvature_cap: Number::INFINITY,
+            partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+            partitioned_block_size: 64,
+            fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
+            fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
+            fd_hessian_reuse_tol: 0.0,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
@@ -1403,10 +1464,32 @@ impl AlgorithmBuilder {
             self.line_search
                 .alpha_red_factor_min
                 .unwrap_or(match self.hessian_approximation {
-                    HessianApproxChoice::LimitedMemory => 0.05,
+                    // The criterion in the field's doc is whether the
+                    // model's *scale* is trustworthy, not whether it is
+                    // the exact Hessian. A quasi-Newton `B` can be wrong
+                    // by orders of magnitude in any direction its
+                    // curvature pairs do not span, which is as true of
+                    // the partitioned elements as of the limited-memory
+                    // ones — they are the same update on a finer
+                    // decomposition.
+                    HessianApproxChoice::LimitedMemory | HessianApproxChoice::Partitioned => 0.05,
                     // Equal to `alpha_red_factor`, so the clamp in
                     // `next_alpha` collapses and the sequence is upstream's.
-                    HessianApproxChoice::Exact => self.line_search.alpha_red_factor,
+                    //
+                    // `FiniteDifference` belongs here rather than above:
+                    // it recovers the Lagrangian Hessian itself by
+                    // probing the analytic Jacobian, so it carries no
+                    // curvature history and its step is a Newton step
+                    // whose length is meaningful. It is the same
+                    // distinction `hessian_at_current` draws — a pure
+                    // function of `(x, y)` on one side, a history-carrying
+                    // `B` on the other. And the measurement behind the
+                    // split cuts this way too: forcing `0.05` onto a path
+                    // with a meaningful step length cost `eigena2` a
+                    // solve.
+                    HessianApproxChoice::Exact | HessianApproxChoice::FiniteDifference => {
+                        self.line_search.alpha_red_factor
+                    }
                 });
         line_search.watchdog_shortened_iter_trigger =
             self.line_search.watchdog_shortened_iter_trigger;
@@ -1496,6 +1579,40 @@ impl AlgorithmBuilder {
                 nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
                 ..LimMemQuasiNewtonUpdater::default()
             }),
+            HessianApproxChoice::Partitioned => {
+                let mut u =
+                    crate::hess::partitioned_quasi_newton::PartitionedQuasiNewtonUpdater::new(
+                        self.partitioned_update_type,
+                    );
+                u.max_element = self.partitioned_max_element;
+                u.objective_vars = self.objective_nonlinear_vars.clone();
+                u.curvature_cap = self.partitioned_curvature_cap;
+                u.mode = self.partitioned_elements;
+                u.block_size = self.partitioned_block_size;
+                // Damped BFGS is the right pairing for a Lagrangian
+                // block: unlike a single constraint's Hessian, the
+                // Lagrangian's is the object the IPM wants a positive
+                // definite model of, and the sign problem that makes
+                // damping wrong per constraint does not arise. Only when
+                // the caller has not named a formula.
+                if self.partitioned_elements
+                    == crate::hess::partitioned_quasi_newton::ElementMode::PrimalBlock
+                    && !self.partitioned_update_type_was_set
+                {
+                    u.update_type = UpdateType::Bfgs;
+                }
+                u.init_val_min = self.limited_memory_init_val_min;
+                u.init_val_max = self.limited_memory_init_val_max;
+                Box::new(u)
+            }
+            HessianApproxChoice::FiniteDifference => {
+                let mut u = crate::hess::fd_hessian::FdHessianUpdater::new(self.fd_hessian_pattern);
+                u.coloring = self.fd_hessian_coloring;
+                u.reuse_tol = self.fd_hessian_reuse_tol;
+                u.objective_vars = self.objective_nonlinear_vars.clone();
+                u.nonlinear_vars = self.limited_memory_nonlinear_vars.clone();
+                Box::new(u)
+            }
         };
 
         let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
@@ -1602,6 +1719,17 @@ mod tests {
                             mu_strategy,
                             mu_oracle: MuOracleKind::QualityFunction,
                             hessian_approximation,
+                            partitioned_update_type: UpdateType::Sr1,
+                            partitioned_update_type_was_set: false,
+                            partitioned_max_element: 64,
+                            objective_nonlinear_vars: None,
+                            partitioned_curvature_cap: Number::INFINITY,
+                            partitioned_elements:
+                                crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
+                            partitioned_block_size: 64,
+                            fd_hessian_pattern: crate::hess::fd_hessian::FdPatternSource::Declared,
+                            fd_hessian_coloring: crate::hess::fd_hessian::FdColoring::Cpr,
+                            fd_hessian_reuse_tol: 0.0,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,

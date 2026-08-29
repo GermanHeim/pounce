@@ -229,6 +229,20 @@ pub struct IpoptAlgorithm {
     /// which [`Self::recalc_y`] fires. Upstream default `1e-6`.
     pub recalc_y_feas_tol: Number,
     pub max_iter: Index,
+    /// `start_with_resto` — force the feasibility restoration phase in
+    /// the first iteration.
+    ///
+    /// This is an **outer**-loop behaviour, which is where it went wrong
+    /// before: the option was threaded from the `OptionsList` through
+    /// `AlgorithmBuilder::resto` into `RestoAlgorithmBuilder` and on into
+    /// `MinC1NrmDriver`, a field on the *inner* restoration solver, where
+    /// there is no first iteration of the outer algorithm to act on. It
+    /// was set by everything and read by nothing, so `start_with_resto
+    /// yes` was a silent no-op. `unimplemented_options.rs`'s
+    /// `the_restoration_switches_reach_the_builder` asserted only that the
+    /// value reached the builder — the very "read site populating a field
+    /// nobody consumes" its own comment names as the defect to avoid.
+    pub start_with_resto: bool,
     /// Initial primal step length offered to the line search at the
     /// top of each iteration. Mirrors `IpBacktrackingLineSearch`'s
     /// fraction-to-the-boundary primal step (with τ = `data.curr_tau`).
@@ -575,6 +589,7 @@ impl IpoptAlgorithm {
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             max_iter: 3000,
+            start_with_resto: false,
             alpha_init: 1.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
             diverging_iterates_tol: 1e20,
@@ -1767,11 +1782,17 @@ impl IpoptAlgorithm {
         // `hessian_approximation=limited-memory` the probe's inertia test
         // passes at δ_x = 0 and the escape declines — correctly, since the only
         // curvature information the solve has says the point is a minimum.
-        let w_at_curr = self
-            .bundle
-            .hess
-            .provides_exact_hessian()
-            .then(|| self.cq.borrow().curr_exact_hessian());
+        //
+        // That argument is about BFGS's definiteness, NOT about "not exact",
+        // and gating on `provides_exact_hessian` conflated the two. A
+        // finite-difference `W` is not exact but does carry genuine negative
+        // curvature, so judging the current iterate by the previous one's
+        // matrix let a stationary maximum be reported as optimal where the
+        // exact path escapes it (gh#823 review, finding 1, @srikanth-gm).
+        // `hessian_at_current` asks the question the probe actually has:
+        // can you give me `W` here? Quasi-Newton updaters still answer `None`
+        // and still take the stale path, for the reason above.
+        let w_at_curr = self.bundle.hess.hessian_at_current(&self.data, &self.cq);
 
         let probe = {
             let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) else {
@@ -2893,7 +2914,13 @@ impl IpoptAlgorithm {
             let mut d = self.data.borrow_mut();
             let f = d.request_resto;
             d.request_resto = false;
-            f
+            // `start_with_resto` — upstream's "switch to the feasibility
+            // restoration phase in the first iteration". It rides the
+            // same request flag rather than adding a second path into
+            // restoration, and it is consumed here so it fires exactly
+            // once: `iter_count` is 0 only on the first pass, and
+            // restoration advances it.
+            f || (self.start_with_resto && d.iter_count == 0)
         };
         if request_resto {
             if self.restoration.is_some() {
