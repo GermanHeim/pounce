@@ -9,6 +9,65 @@ changes.
 
 ## [Unreleased]
 
+- **The PSD guard no longer switches itself off above `n = 1500` (gh #849).**
+  `_PSD_CHECK_AUTO_MAX_N = 1500` made the default `check_psd=None` skip the
+  check entirely for larger problems, so the convex QP interior-point engine —
+  the *guarded* engine — returned a silently-wrong `optimal` on an indefinite
+  `P` at **default settings**, with no option named and no warning:
+
+  ```text
+  P = I with P[0,0] = -3, c = 0, box [-1, 1];  true infimum -1.5
+  n = 1400, check_psd=None  ->  ValueError: P is not positive semidefinite
+  n = 1600, check_psd=None  ->  status='optimal', obj = 0.0
+  ```
+
+  The only thing that changed is `n` crossing a constant. The oracle is
+  arithmetic: `P` is diagonal, so `x = (1, 0, …, 0)` is feasible at `f = -1.5`,
+  and no bound is active at the returned `x = 0`, so the reduced Hessian is `P`
+  and the point is a strict saddle. The ceiling is pre-existing and was
+  documented, but gh #848 is what made it load-bearing — with the active-set
+  engine also certifying saddles there was, briefly, no engine and no default
+  setting on which an indefinite `P` above `n = 1500` was caught.
+
+  The trade-off the ceiling encoded was real: the check was a dense `O(n³)`
+  `eigvalsh` and a large sparse QP should not silently pay it. It is now paid
+  for properly instead — past the ceiling the same question is answered by an
+  **inertia count on a sparse factorization** (Sylvester's law: `P − σI = LDLᵀ`
+  has as many negative pivots as `P` has eigenvalues below `σ`), which is exact,
+  needs no iteration, and is *faster than the dense path it replaces*: 0.6 ms on
+  a 5000-variable Laplacian, and 0.24 s against `eigvalsh`'s 0.47 s even on a
+  fully dense 1600×1600. `λ_min` is then bisected on the same primitive, but
+  only on the failing branch and only to the three digits the error message
+  prints. It is the same test the Rust side already uses via
+  `Factorization::number_of_neg_evals`.
+
+  **Lanczos was tried first and the measurements rejected it**, which is worth
+  recording because it is the obvious choice. On this exact problem it is both
+  slower and wrong in a way that is hard to notice: a 5000-variable 1-D
+  Laplacian takes **9.3 s** to reach its smallest eigenvalue — a spectrum
+  clustered near zero is its worst case — and under any bounded iteration budget
+  it fails to refute `Laplacian − 4I`, a matrix whose eigenvalues are *all*
+  negative, because that matrix's extremes are clustered too. A guard that
+  misses a negative-definite Hessian is not a guard.
+
+  The new verdict is validated against the dense one on sixteen spectra at a
+  size where both are affordable — random indefinite, `AᵀA`, the zero matrix,
+  rank-one, rank-deficient, a 1-D Laplacian and that Laplacian shifted
+  negative-definite, `λ_min` at `±1e-10` straddling the guard's own tolerance,
+  and the same shapes at a `1e12` scale — and agrees on every one. The delicate
+  rows are the point: the rank-deficient and rank-one matrices carry
+  rounding-level negative eigenvalues that must **not** read as indefinite.
+
+  **A check that runs and cannot decide now warns rather than passing quietly.**
+  "No check was run" and "the check passed" must not be the same observable,
+  which is exactly what the old cliff made them.
+
+  The same cliff was in `pounce.jax` and `pounce.torch`, whose layers are
+  IPM-only by construction — an indefinite `P` gives them a saddle point, and
+  the implicit-function gradient taken through a non-KKT point is meaningless —
+  and it is gone from both. `check_psd=False` remains the explicit opt-out at
+  every size; asking for it is not the same as being given it silently.
+
 - **`qp-active-set` no longer certifies a strict saddle, or an unbounded-below
   QP, as `Optimal` (gh #848).** gh #112 added `check_psd` because `solve_qp`
   "accepts an indefinite `P` and returns a silently-wrong `optimal`"; gh #786
