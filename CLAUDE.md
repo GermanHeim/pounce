@@ -115,6 +115,19 @@ iteration cost `4c02817d` carried on the Maros-Meszaros QSCFXM family
 (38 → 168). A moved convex line is a signal to go measure `benchmarks/qp`, not
 a bound on what you will find there.
 
+Nor does it cover the convex arm's **cost-normalization** (`σ`) path, and
+neither does `benchmarks/qp` — measured, not assumed, while fixing gh#414
+reopened: exactly **1 of 78** fixtures reaches it (`qcqp_columns_illcond`, on
+both legs) and **0 of 138** Maros-Meszaros problems do. `σ` engages only when
+`max(‖P‖∞, ‖c‖∞)·ε > tol`, which almost nothing in either corpus satisfies. So
+an empty sweep *and* an empty `benchmarks/qp` diff are together compatible with
+having changed that path's verdict on every input it sees — which is what
+gh#414's second fix did. A change to `crates/pounce-convex/src/ipm.rs`'s
+`normalized_optimum_is_genuine` / `hsde_cost_scale` needs
+`crates/pounce-convex/tests/issue414_cost_normalized_false_optimal.rs` and
+`illconditioned_huge_scale.rs`, which reach the accept and reject branches on
+purpose; the corpora are evidence of no *collateral* damage and nothing more.
+
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
 regression produces the *right* answer, slowly — or a differently-wrong

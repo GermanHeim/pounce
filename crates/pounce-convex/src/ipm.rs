@@ -703,7 +703,7 @@ where
 fn demote_false_equilibrated_optimum(prob: &QpProblem, sol: QpSolution, tol: f64) -> QpSolution {
     if sol.status != QpStatus::Optimal
         || sol.kkt_residuals(prob).kkt_error() <= tol
-        || normalized_optimum_is_genuine(prob, &sol)
+        || normalized_optimum_is_genuine_relative(prob, &sol)
     {
         return sol;
     }
@@ -715,7 +715,8 @@ fn demote_false_equilibrated_optimum(prob: &QpProblem, sol: QpSolution, tol: f64
 
 /// The relative-KKT cut separating a genuine optimum from a scaling artifact,
 /// shared by [`equilibrated_kkt_rel`] (gh #414) and
-/// [`normalized_optimum_is_genuine`] (gh #324).
+/// [`normalized_optimum_is_genuine_relative`] (gh #324). It is also the ceiling
+/// on [`sigma_path_rel_tol`], so the `σ` path is never *looser* than this.
 ///
 /// Measured on the #414 family, the false optima land in `2e-2‥1.2e2` and the
 /// repaired optima of the very same problems in `1e-12‥1e-9`; the #286
@@ -2195,6 +2196,34 @@ fn split_bound_duals(
     sol
 }
 
+/// The cost-normalized embedding solve, with the recovered duals and objective
+/// mapped back out of the `σ` metric — the `σ ≠ 1` branch of [`solve_qp_core`]
+/// with its verdict check removed.
+///
+/// Split out so the check can be tested against the point it actually judges.
+/// The `σ` guard is now strict enough that no public entry point returns a
+/// `σ`-manufactured false optimum (gh #414 reopened), which is the fix — but it
+/// also means the guarantee tests behind that guard can no longer construct
+/// their subject through a public door. They call this instead, so they keep
+/// measuring a real escaped point rather than a hand-written one.
+fn cost_normalized_hsde_solve<F>(
+    scaled: &QpProblem,
+    cone: &CompositeCone,
+    inner: &QpOptions,
+    sigma: f64,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let mut sol = crate::hsde::solve_conic_hsde(scaled, cone, inner, make_backend, None);
+    for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
+        *v *= sigma;
+    }
+    sol.obj *= sigma;
+    sol
+}
+
 /// Objective-normalization factor `σ ≥ 1` for the HSDE driver (see the call
 /// site in [`solve_qp_core`]). Returns the magnitude of the objective data
 /// `max(‖P‖∞, ‖c‖∞)`, rounded **up to a power of two** so that dividing the
@@ -2237,28 +2266,160 @@ fn hsde_cost_scale(prob: &QpProblem, tol: f64) -> f64 {
 
 /// Whether a solution the cost-normalized HSDE path certified `Optimal` is a
 /// *genuine* optimum of `prob` (the original, un-normalized problem), rather
-/// than a false certificate manufactured by the objective scaling (gh #324).
+/// than a false certificate manufactured by the objective scaling (gh #324, and
+/// gh #414 reopened).
 ///
-/// The test is the solution's **relative** KKT residual: each residual divided
-/// by the natural magnitude of its own terms (the stationarity residual by the
-/// objective-gradient scale `‖Px‖∞ ∨ ‖c‖∞`, the primal by the rhs scale). That
-/// ratio is invariant to the objective scaling σ, so a true optimum sits at
-/// `tol`-level relative accuracy regardless of σ, while the spurious cold-start
-/// certificate — accepted only because `‖c/σ‖ < tol` in the scaled metric —
-/// shows an `O(1)` relative residual. The `1e-3` cut sits three orders below
-/// that `O(1)` failure and three orders above a genuine solve's relative
-/// accuracy (the #286 huge-magnitude regression converges to ≲ 1e-6), so it
-/// separates the two cleanly without second-guessing a real large-scale solve.
-fn normalized_optimum_is_genuine(prob: &QpProblem, sol: &QpSolution) -> bool {
+/// # What `σ` actually promises, and what it delivers
+///
+/// The embedding solves `(P/σ, c/σ)` and applies its **absolute** stopping test
+/// there, so what it certifies is `‖r‖ ≤ tol` on the scaled data — `‖r‖ ≤ σ·tol`
+/// in the caller's coordinates. That is a *relative* test wearing an absolute
+/// one's clothes, and two things about it are wrong unless this function
+/// corrects them:
+///
+/// 1. **It never passes the gate.** The driver's own relative arm is admissible
+///    only once absolute `tol` accuracy is below the finite-precision floor
+///    ([`crate::hsde::relative_stop_permitted`]). The `σ` route reaches the same
+///    relaxation without ever asking that question, because inside the scaled
+///    metric the data looks `O(1)` and the loop believes it is running the
+///    strict test.
+/// 2. **It is relative to the wrong thing.** `σ` is sized by the objective
+///    **coefficient** magnitude `max(‖P‖∞, ‖c‖∞)`
+///    ([`hsde_cost_scale`]), while a stationarity residual has to be small
+///    against the **gradient** scale `‖Px*‖∞ ∨ ‖c‖∞`. The two differ by `‖x*‖`,
+///    unboundedly: on `min (x₀−1)² + (10⁴x₁−1)²`, `σ = 2²⁸ ≈ 2.7e8` and the
+///    gradient scale is `2e4`, so the embedding stopped at `‖Px+c‖∞ = 2.499` and
+///    called it `Optimal` — `x` wrong by `2.5e-4` relative, on a problem
+///    clarabel solves to `1.4e-16`. That is gh #414 reopened, and no amount of
+///    conditioning explains it: the un-normalized embedding solves the same
+///    instance in **one** iteration.
+///
+/// So the test is asked in two arms, in this order:
+///
+/// - **Absolute.** A point accurate to `tol` in the caller's own coordinates is
+///   optimal by the definition the caller was given, whatever `σ` was. Every
+///   well- and moderately-scaled solve leaves here for the price of one
+///   residual evaluation.
+/// - **Relative**, and only where [`crate::hsde::relative_stop_permitted`] says
+///   a relative test is admissible **at the gradient scale that governs this
+///   point** — the correction to (1) and (2) together — against
+///   [`sigma_path_rel_tol`], which is the correction to a flat cut that did not
+///   track `tol` (see there for the measured populations).
+///
+/// A `false` costs one un-normalized re-solve, which then faces this same test;
+/// it never costs an answer. That is why this door can be strict where
+/// [`normalized_optimum_is_genuine_relative`]'s cannot.
+fn normalized_optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64) -> bool {
+    // Absolute arm, asked first and unconditionally: a point already accurate
+    // to `tol` in the caller's own coordinates is optimal by the definition the
+    // caller was given, whatever `σ` was. Every well- and moderately-scaled
+    // solve leaves here, paying one residual evaluation.
+    if sol.kkt_residuals(prob).kkt_error() <= tol {
+        return true;
+    }
+    // Relative arm, admissible only where the embedding's own relative stop
+    // would be — and asked at the scale that actually governs the caller's
+    // residual. This gate is the gh #414-reopened fix; see the doc comment.
+    let (gscale, pscale) = unscaled_residual_scales(prob, sol);
+    crate::hsde::relative_stop_permitted(gscale.max(pscale), tol)
+        && unscaled_relative_kkt(prob, sol) <= sigma_path_rel_tol(tol)
+}
+
+/// The relative-KKT cut the `σ` path holds a claimed optimum to: `tol`-level
+/// accuracy in the relative metric, with two orders of slack for the digits a
+/// finite-precision solve cannot control — never looser than the flat
+/// [`FALSE_OPTIMUM_REL_TOL`] a caller got before, so loosening `tol` cannot buy
+/// more slack than the historical cut.
+///
+/// The flat cut alone is what left gh #414 open after the equilibrated repair.
+/// It was calibrated against gh #324's *cold-start* certificate, which is
+/// `O(1)`, so it separates that failure by three orders — and says nothing at
+/// all about a point four orders inside it.
+///
+/// Measured on this crate's fixtures, as multiples of `tol` (which is what a
+/// `tol`-tracking cut has to separate — the absolute numbers below are all at
+/// the default `tol = 1e-8`):
+///
+/// | population | relative KKT | × `tol` |
+/// |---|---|---|
+/// | `issue414_cost_normalized_false_optimal`, the un-normalized re-solves this fix routes to | `5e-11 ‥ 1e-10` | `0.005 ‥ 0.01` |
+/// | gh #324 cold-start family, after its re-solve | `6.9e-10 ‥ 2.0e-9` | `0.069 ‥ 0.20` |
+/// | gh #286 huge-magnitude optima — genuine solves that only a relative arm can certify, so the population most at risk of a wrong reject | `6.9e-10 ‥ 3.2e-9` | `0.069 ‥ 0.32` |
+/// | **worst genuine** | | **`0.32`** |
+/// | **mildest false** | | **`625`** |
+/// | `issue414_cost_normalized_false_optimal`, the `σ` points (`span` 3.7 ‥ 6.0) | `6.2e-6 ‥ 2.5e-3` | `625 ‥ 2.5e5` |
+/// | `qcqp_columns_illcond`'s `σ` point (the one CLI fixture that reaches this path) | `9.6e-2` | `9.6e6` |
+///
+/// `100·tol` sits **313× above** the worst genuine solve and **6.25× below**
+/// the mildest false one. The margin is deliberately lopsided toward the
+/// genuine side: a wrong reject costs one un-normalized re-solve, a wrong
+/// accept ships a wrong answer under `success=True`, and the genuine
+/// population above is measured while the next one is not.
+///
+/// Two figures here correct gh #418's notes, which put the gh #286 optima at
+/// `4e-10` and `1.5e-8` (`1.5·tol`) and the gh #414 false optima at
+/// `2e-2 ‥ 1.2e2`. Re-measured on current `main` the gh #286 family reads
+/// `6.9e-10 ‥ 3.2e-9`; the gh #414 original's `σ` point is not in the table at
+/// all because it is rejected by the **absolute** arm, its relative residual
+/// being inside even the flat cut — which is the fact
+/// `the_false_optimum_is_invisible_unscaled_and_obvious_equilibrated` pins.
+///
+/// The tightening is affordable *here* and nowhere else in this file, for the
+/// reason [`normalized_optimum_is_genuine_relative`] gives: a reject on this
+/// path costs one un-normalized re-solve, which faces the same test again.
+fn sigma_path_rel_tol(tol: f64) -> f64 {
+    (100.0 * tol).min(FALSE_OPTIMUM_REL_TOL)
+}
+
+/// Each un-normalized KKT residual of `sol` over the natural magnitude of its
+/// own terms — the ratio both `σ`-path cuts are applied to.
+fn unscaled_relative_kkt(prob: &QpProblem, sol: &QpSolution) -> f64 {
     let res = sol.kkt_residuals(prob);
+    let (gscale, pscale) = unscaled_residual_scales(prob, sol);
+    (res.dual_infeasibility / gscale)
+        .max(res.primal_infeasibility / pscale)
+        .max(res.complementarity / gscale.max(pscale))
+}
+
+/// The natural magnitudes the un-normalized KKT residuals of `sol` are measured
+/// against: the objective-gradient scale `‖Px‖∞ ∨ ‖c‖∞` for stationarity and
+/// the rhs scale `‖b‖∞ ∨ ‖h‖∞` for primal feasibility, each floored at 1 so a
+/// zero-scale block cannot divide by zero.
+///
+/// Both are evaluated **at the returned point**, not on the data alone: that is
+/// the whole difference between this and `σ`, and the reason a residual `σ` was
+/// willing to license can still be enormous relative to the gradient it has to
+/// be small against.
+fn unscaled_residual_scales(prob: &QpProblem, sol: &QpSolution) -> (f64, f64) {
     let mut px = vec![0.0; prob.n];
     prob.p_mul(&sol.x, &mut px);
     let gscale = inf_norm(&px).max(inf_norm(&prob.c)).max(1.0);
     let pscale = inf_norm(&prob.b).max(inf_norm(&prob.h)).max(1.0);
-    let rel = (res.dual_infeasibility / gscale)
-        .max(res.primal_infeasibility / pscale)
-        .max(res.complementarity / gscale.max(pscale));
-    rel <= 1e-3
+    (gscale, pscale)
+}
+
+/// The *relative* half of [`normalized_optimum_is_genuine`], ungated: each
+/// residual over the natural magnitude of its own terms, against
+/// [`FALSE_OPTIMUM_REL_TOL`].
+///
+/// Kept separate because the two callers can afford different strictness, and
+/// the difference is what their failure branch does:
+///
+/// - [`normalized_optimum_is_genuine`] (the `σ` path) answers a question whose
+///   "no" costs one un-normalized re-solve, which then faces the same test
+///   again. It can afford the gate: a wrong "no" loses an iteration, never an
+///   answer.
+/// - [`demote_false_equilibrated_optimum`] answers a question whose "no" is a
+///   demotion to [`QpStatus::NumericalFailure`], with no repair behind it. A
+///   wrong "no" there destroys a correct answer, so it must reject only on
+///   positive evidence that the point is bad — and "the stopping rule was not
+///   entitled to a relative test at this scale" is not that evidence. It stays
+///   ungated: `equilibrated_trace_objective_is_in_original_coordinates` is a
+///   well-scaled LP (`‖c‖ = 1e3`) whose direct-driver point is correct at a
+///   relative `1e-10` and an absolute residual just past `tol`; gating this
+///   caller demotes it.
+fn normalized_optimum_is_genuine_relative(prob: &QpProblem, sol: &QpSolution) -> bool {
+    unscaled_relative_kkt(prob, sol) <= FALSE_OPTIMUM_REL_TOL
 }
 
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
@@ -2314,12 +2475,7 @@ where
                 obj_constant: opts.obj_constant / sigma,
                 ..*opts
             };
-            let mut sol =
-                crate::hsde::solve_conic_hsde(&scaled, cone, &inner, &mut make_backend, None);
-            for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
-                *v *= sigma;
-            }
-            sol.obj *= sigma;
+            let sol = cost_normalized_hsde_solve(&scaled, cone, &inner, sigma, &mut make_backend);
             // gh #324: the cost normalization divides the objective by σ (sized
             // to ‖P‖∞). When ‖c‖ ≪ σ — a huge Hessian coefficient paired with a
             // modest gradient, e.g. `P = diag(1e-10, 1e10)`, `c = [-1, -1]` — the
@@ -2332,7 +2488,9 @@ where
             // actually collapsed τ, which is exactly the ‖c‖ ≪ σ regime — reaches
             // the real optimum; if that solve cannot converge either, its honest
             // non-`Optimal` status stands (never a false `Optimal`).
-            if sol.status == QpStatus::Optimal && !normalized_optimum_is_genuine(prob, &sol) {
+            if sol.status == QpStatus::Optimal
+                && !normalized_optimum_is_genuine(prob, &sol, opts.tol)
+            {
                 return crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None);
             }
             return sol;
@@ -4553,10 +4711,12 @@ mod false_optimum_metric_tests {
     //! floor it guarantees when the repair cannot succeed.
 
     use super::{
-        FALSE_OPTIMUM_REL_TOL, QpOptions, SparseSymLinearSolverInterface, equilibrated_kkt_rel,
-        normalized_optimum_is_genuine, optimum_is_genuine, solve_qp_ipm_unscaled,
-        verify_or_repair_optimum,
+        FALSE_OPTIMUM_REL_TOL, QpOptions, SparseSymLinearSolverInterface,
+        cost_normalized_hsde_solve, equilibrated_kkt_rel, expand_bounds, hsde_cost_scale,
+        normalized_optimum_is_genuine, normalized_optimum_is_genuine_relative, optimum_is_genuine,
+        solve_qp_ipm_unscaled, split_bound_duals, verify_or_repair_optimum,
     };
+    use crate::cones::CompositeCone;
     use crate::qp::{QpProblem, QpStatus, Triplet};
     use pounce_feral::FeralSolverInterface;
 
@@ -4600,19 +4760,56 @@ mod false_optimum_metric_tests {
         }
     }
 
+    /// The point the cost-normalized embedding certifies on [`illscaled_qp`] —
+    /// the one the issue reports: `obj = 67.1341`, its own `kkt_error = 8.28e3`,
+    /// under `status = Optimal`.
+    ///
+    /// Reached through [`cost_normalized_hsde_solve`] rather than
+    /// [`super::solve_qp_ipm`] because the `σ` guard now rejects it before any
+    /// public entry point can return it (gh #414 reopened) — which is the fix,
+    /// and which would otherwise leave the two properties below with no subject
+    /// to measure. This is the same arithmetic `solve_qp_core` runs, minus the
+    /// verdict check the tests are about.
+    fn escaped_sigma_optimum(prob: &QpProblem, opts: &QpOptions) -> super::QpSolution {
+        let sigma = hsde_cost_scale(prob, opts.tol);
+        assert!(
+            sigma > 1.0,
+            "premise: this instance triggers cost normalization"
+        );
+        let (expanded, bound_rows) = expand_bounds(prob);
+        let cone = CompositeCone::single_nonneg(expanded.m_ineq());
+        let scaled = expanded.scaled_objective(1.0 / sigma);
+        let inner = QpOptions {
+            obj_constant: opts.obj_constant / sigma,
+            ..*opts
+        };
+        let sol = cost_normalized_hsde_solve(&scaled, &cone, &inner, sigma, &mut backend);
+        split_bound_duals(prob, &bound_rows, sol)
+    }
+
     /// Why the metric had to change, stated as a measurement rather than an
-    /// argument: on the *same point*, the unscaled relative test (gh #324) sees
-    /// nothing wrong and the equilibrated one sees an `O(100)` violation.
+    /// argument: on the *same point*, the unscaled **relative** test (gh #324)
+    /// sees nothing wrong and the equilibrated one sees an `O(100)` violation.
     ///
     /// This is the load-bearing claim of the fix. If a future change to the
-    /// normalizers makes the unscaled test able to catch this on its own, this
-    /// test fails loudly rather than leaving the extra machinery unexplained.
+    /// normalizers makes the unscaled relative test able to catch this on its
+    /// own, this test fails loudly rather than leaving the extra machinery
+    /// unexplained.
+    ///
+    /// The gh #414-reopened gate does not make it redundant, and the two
+    /// assertions below say so as a measurement: the gate rejects this point
+    /// through the **absolute** arm (`8.3e3 > tol` at a gradient scale that
+    /// forbids a relative test), while the relative formula it wraps still
+    /// cannot see the violation. The equilibrated metric remains the only thing
+    /// that can, and it is what guards the non-`σ` HSDE door, which no gate
+    /// covers.
     #[test]
     fn the_false_optimum_is_invisible_unscaled_and_obvious_equilibrated() {
         let prob = illscaled_qp();
         let opts = QpOptions::default();
-        // The un-repaired HSDE solve: exactly what `solve_qp_ipm` used to return.
-        let bad = solve_qp_ipm_unscaled(&prob, &opts, backend);
+        // The point the cost-normalized embedding certifies — what `solve_qp_ipm`
+        // used to return before the repair, and before the gate.
+        let bad = escaped_sigma_optimum(&prob, &opts);
         assert_eq!(
             bad.status,
             QpStatus::Optimal,
@@ -4629,8 +4826,13 @@ mod false_optimum_metric_tests {
         // coordinates, where the badly-scaled column inflates ‖Px‖ enough to
         // hide the violation — it passes this point.
         assert!(
-            normalized_optimum_is_genuine(&prob, &bad),
+            normalized_optimum_is_genuine_relative(&prob, &bad),
             "premise: the unscaled relative test cannot see this failure"
+        );
+        // The gh #414-reopened gate rejects it anyway, on the absolute arm.
+        assert!(
+            !normalized_optimum_is_genuine(&prob, &bad, opts.tol),
+            "the gated test must reject a point whose own KKT error is {abs:.3e}"
         );
 
         // Measured in the equilibrated metric the same point is plainly not a
@@ -4668,7 +4870,7 @@ mod false_optimum_metric_tests {
     #[test]
     fn an_unrepairable_false_optimum_is_demoted_never_reported_optimal() {
         let prob = illscaled_qp();
-        let bad = solve_qp_ipm_unscaled(&prob, &QpOptions::default(), backend);
+        let bad = escaped_sigma_optimum(&prob, &QpOptions::default());
         assert_eq!(bad.status, QpStatus::Optimal, "premise");
 
         let starved = QpOptions {

@@ -703,6 +703,22 @@ a step brings a variable onto a bound included — a bound the corrector
 newly pins arrives as `mu / s²` off the step's own endpoint, which is
 the same quantity by another name.
 
+It holds on the way back out, too. Folding a bound row into the diagonal
+is only half of a solve: the row's own multiplier is recovered from that
+diagonal afterwards, and the recovery has to divide by the same
+stiffness the fold used. Before
+[#828](https://github.com/jkitchin/pounce/issues/828) it divided by the
+uncapped one, so a capped bound was held softly and read back stiffly,
+and the returned bound-multiplier derivative came out wrong by the cap's
+ratio — `1.8e7` against a true `0` on that issue's fixture, growing as
+the row's Jacobian coefficient shrank. `corrector_iter` then opened on a
+stationarity residual of the same size, could not reduce it in a single
+step, and returned the step it had been handed at every budget: the
+refinement unavailable in exactly the stiff, tightly bounded regime a
+caller reaches for it in. The multiplier rows now come back through the
+same cap, on the returned step and on the corrector's own operator
+alike, and where the ceiling does not bind nothing moves.
+
 Nothing about the solve changes; this is the sensitivity system only.
 
 ### Solver options and warm starts

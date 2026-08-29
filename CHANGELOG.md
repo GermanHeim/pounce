@@ -111,6 +111,70 @@ changes.
   `finite-difference` on every measure. Full measurements, including two wrong
   inferences made along the way and how they were caught, in
   `dev-notes/partitioned-quasi-newton-prototype.md`.
+- **The convex QP arm's cost normalization no longer buys an `Optimal`
+  verdict** (gh #414, reopened). `pounce.solve_qp(P=diag(2, 2e8), c=(-2, -2e4))`
+  — `min (x₀−1)² + (10⁴x₁−1)²`, two variables, diagonal, unconstrained —
+  returned `status="optimal"`, `success=True` after 3 iterations at a point
+  whose `kkt_error`, on the same result object, was `2.499`, with `x` wrong by
+  `2.5e-4` relative. Through the CLI the same solve printed
+  `Optimal Solution Found` and `Overall NLP error 2.4991` in one report, and
+  `SolveSucceeded` in `--json-output`. `solver_selection=nlp` solved the
+  identical `.nl` exactly, and clarabel matches the closed form to `1.4e-16`.
+
+  Before handing a QP to the embedding, the convex arm divides the objective
+  data by `σ = 2^⌈log₂ max(‖P‖∞, ‖c‖∞)⌉` (gh #286, so the homogeneous `τ` stays
+  off the certificate boundary). The embedding's **absolute** stopping test
+  then runs in that metric, certifying `‖r‖ ≤ tol` on scaled data — `σ·tol` in
+  the caller's. Two things were wrong with that and both are now fixed:
+
+  - It reached the relaxation without passing the gate that decides whether a
+    relative test is admissible at all (`hsde::relative_stop_permitted`).
+    Inside the scaled metric the data looks `O(1)`, so the loop believed it was
+    running the strict test.
+  - `σ` is sized by the objective **coefficient** magnitude, while a
+    stationarity residual has to be small against the **gradient** scale
+    `‖Px*‖∞ ∨ ‖c‖∞`. The two differ by `‖x*‖`, unboundedly: here `σ = 2²⁸` and
+    the gradient scale is `2e4`.
+
+  The gh #324 re-check of a `σ`-path `Optimal` already measured the right
+  ratio, but was cut at a flat `1e-3` calibrated against gh #324's own
+  *cold-start* certificate, which is `O(1)` — five orders looser than this
+  family. It is now asked as an absolute test first, then a relative one gated
+  at the gradient scale and cut at `100·tol` rather than a constant. The
+  un-normalized re-solve that check already had behind it recovers every
+  reported instance in **one** iteration.
+
+  This also closes the residual the original report kept after the gh #418
+  equilibrated repair: that instance returned the right objective at
+  `kkt_error = 2.1e-4` under `success=True`, and now converges to
+  `kkt_error = 4.9e-9`, inside `tol`. A tightened `tol` is honoured rather than
+  absorbed (`1e-12` gave `rel x err 1.7e-6`, now `1.3e-13`).
+
+  The corpus could not see any of it: the returned *objective* is second-order
+  in the `x` error at an optimum, so at `x` wrong by `2.5e-4` the objective is
+  right to eight digits. Neither `scripts/sweep-fixtures.sh` (156 fixture-legs,
+  1 of which reaches the `σ` path) nor the 138-problem Maros-Mészáros set (0 of
+  which do) moves a single line under this change.
+- **Sensitivity: bound-multiplier derivatives are readable again under the
+  gh #737 barrier ceiling, and `corrector_iter` works there** (gh #828).
+  A strongly active bound whose constraint row carries a small Jacobian
+  coefficient reaches that ceiling well before anything looks pathological.
+  When it did, the solve held the bound softly — which is what the ceiling
+  is for — but recovered the bound's own multiplier derivative stiffly, off
+  the uncapped quantities, so the two halves disagreed by exactly the cap's
+  ratio. The returned `dz` was wrong by that factor (`1.8e7` against a true
+  `0` on the issue's fixture, growing as the coefficient shrank), and
+  `estimate(..., corrector_iter=n)` / `estimate_report(..., corrector_iter=n)`
+  opened on a stationarity residual of the same size, failed to reduce it,
+  and handed back the *uncorrected* step at every budget. The report said so
+  (`improved()` was false), so no wrong answer was passed off as a corrected
+  one — but the refinement was unavailable in exactly the stiff, tightly
+  bounded regime it is asked for. Both the returned step's multiplier block
+  and the corrector's own operator now read those rows back through the same
+  cap. Affects the Rust `pounce-sensitivity` API and the Python / Pyomo
+  sensitivity entry points on top of it; where the ceiling does not bind —
+  every result that was already correct — nothing moves.
+
 - **A `maturin develop` checkout has a working `pounce` CLI again** (gh #816).
   `maturin develop` builds the extension module and nothing else. The wheel's
   `pounce` console script is a shim whose whole job is to exec the bundled

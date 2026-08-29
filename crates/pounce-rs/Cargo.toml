@@ -14,6 +14,8 @@ categories = ["mathematics", "science"]
 pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
+# Not called from this crate; see the `ma57` feature and `build.rs`.
+pounce-hsl = { workspace = true, optional = true }
 pounce-observability.workspace = true
 # The second-opinion ladder's driver (`solve()` runs it on a failing verdict,
 # as the CLI and the Python / C frontends do). It lives in pounce-restoration
@@ -44,6 +46,10 @@ pounce-feral = { workspace = true, optional = true }
 pounce-linalg = { workspace = true, optional = true }
 
 [features]
+# Mirrors `pounce-cli`'s. The optional pounce-hsl dependency above is
+# there only to make this crate a *direct* dependent of it, so cargo
+# hands `build.rs` the `DEP_COINHSL_RPATH` its test binaries need.
+ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 # Lean by default: the NLP path only, as before.
 default = []
 # LP / convex QP / SOCP / SDP / SOS interior point, batched solves, and QP
