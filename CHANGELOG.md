@@ -74,7 +74,9 @@ changes.
 - **The finite-difference Hessian's pattern and probe count are readable
   from an embedder.** `GetPounceFdHessianStats` in the C API, and
   `stats()["fd_hessian"]` through the CasADi plugin, report the pattern
-  source, its nonzero count, the probe groups per Hessian, `rho_max`, and
+  source, its nonzero count, the column count (so `groups / n`, the
+  fraction of a dense scheme's probes, is derivable), the probe groups per
+  Hessian, `rho_max`, and
   whether a requested star colouring fell back to Curtis-Powell-Reid, and
   whether the objective clique had to widen for want of a stated objective
   linearity — the field that distinguishes a high probe count caused by a

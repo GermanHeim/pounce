@@ -1514,7 +1514,9 @@ def test_fd_hessian_stats_are_reported():
           dec["nnz"] < jac["nnz"] and dec["groups"] <= jac["groups"],
           f'declared {dec["nnz"]}nnz/{dec["groups"]}groups vs '
           f'jacobian {jac["nnz"]}nnz/{jac["groups"]}groups')
-    for k in ("nnz", "groups", "rho_max"):
+    check("fd_hessian carries n, so compression is derivable",
+          dec["n"] == 3 and jac["n"] == 3, f'n={dec["n"]}')
+    for k in ("nnz", "groups", "rho_max", "n"):
         check(f"fd_hessian.{k} is a positive count", dec[k] > 0, f"{k}={dec[k]}")
     check("fd_hessian reports the colouring fallback",
           dec["coloring_fell_back"] is False)

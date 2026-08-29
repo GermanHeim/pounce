@@ -112,6 +112,11 @@ pub struct SolveStatistics {
     pub fd_hessian_pattern_used: Index,
     /// Hessian nonzeros in the pattern that was coloured (lower triangle).
     pub fd_hessian_nnz: Index,
+    /// Columns the colouring ran over, i.e. the problem's variable count.
+    /// Present so the report is self-contained: `groups / n` is the
+    /// compression, the fraction of a dense finite-difference scheme's
+    /// probes this pattern costs, and without `n` a reader cannot form it.
+    pub fd_hessian_n: Index,
     /// Probe groups per Hessian — the count of extra gradient/Jacobian
     /// evaluations each rebuild costs.
     pub fd_hessian_groups: Index,
@@ -240,6 +245,7 @@ impl Default for SolveStatistics {
             // finite-difference`. Distinct from 0, a real pattern source.
             fd_hessian_pattern_used: -1,
             fd_hessian_nnz: 0,
+            fd_hessian_n: 0,
             fd_hessian_groups: 0,
             fd_hessian_rho_max: 0,
             fd_hessian_coloring_fell_back: false,

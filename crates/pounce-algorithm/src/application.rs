@@ -3481,6 +3481,7 @@ impl IpoptApplication {
                     None => -1,
                 };
                 stats.fd_hessian_nnz = fd.nnz as Index;
+                stats.fd_hessian_n = fd.n as Index;
                 stats.fd_hessian_groups = fd.groups as Index;
                 stats.fd_hessian_rho_max = fd.rho_max as Index;
                 stats.fd_hessian_coloring_fell_back = fd.coloring_fell_back;

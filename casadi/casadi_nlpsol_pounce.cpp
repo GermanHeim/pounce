@@ -69,8 +69,8 @@ namespace casadi {
     /// solve that was not `hessian_approximation=finite-difference`,
     /// which is what keeps `stats()["fd_hessian"]` absent rather than
     /// present-and-zero for the modes it does not describe.
-    ipindex fd_pattern = -1, fd_nnz = 0, fd_groups = 0, fd_rho_max = 0,
-            fd_fell_back = 0, fd_clique_widened = 0;
+    ipindex fd_pattern = -1, fd_nnz = 0, fd_n = 0, fd_groups = 0,
+            fd_rho_max = 0, fd_fell_back = 0, fd_clique_widened = 0;
     /// Working set carried from this memory object's previous solve
     /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
     /// variable / row numbering. Empty until a solve produces one.
@@ -834,7 +834,7 @@ namespace casadi {
     m->linsol_valid = false;
     m->resto_calls = m->resto_inner = m->resto_outer = 0;
     m->fd_pattern = -1;
-    m->fd_nnz = m->fd_groups = m->fd_rho_max = m->fd_fell_back = 0;
+    m->fd_nnz = m->fd_n = m->fd_groups = m->fd_rho_max = m->fd_fell_back = 0;
     m->fd_clique_widened = 0;
     m->resto_secs = 0;
 
@@ -1011,8 +1011,8 @@ namespace casadi {
     m->linsol_valid = GetPounceLinearSolverStats(prob, &m->linsol);
     GetPounceRestorationStats(prob, &m->resto_calls, &m->resto_inner,
                               &m->resto_outer, &m->resto_secs);
-    GetPounceFdHessianStats(prob, &m->fd_pattern, &m->fd_nnz, &m->fd_groups,
-                            &m->fd_rho_max, &m->fd_fell_back,
+    GetPounceFdHessianStats(prob, &m->fd_pattern, &m->fd_nnz, &m->fd_n,
+                            &m->fd_groups, &m->fd_rho_max, &m->fd_fell_back,
                             &m->fd_clique_widened);
     // Same window as the harvest above, and for the same reason: the
     // report is built from the solve retained on `prob`, which the free
@@ -1220,6 +1220,9 @@ namespace casadi {
         Dict fd;
         fd["pattern"] = std::string(m->fd_pattern == 0 ? "declared" : "jacobian");
         fd["nnz"] = static_cast<casadi_int>(m->fd_nnz);
+        // `groups / n` is the compression: the fraction of a dense
+        // finite-difference scheme's probes this pattern costs.
+        fd["n"] = static_cast<casadi_int>(m->fd_n);
         fd["groups"] = static_cast<casadi_int>(m->fd_groups);
         fd["rho_max"] = static_cast<casadi_int>(m->fd_rho_max);
         fd["coloring_fell_back"] = m->fd_fell_back != 0;

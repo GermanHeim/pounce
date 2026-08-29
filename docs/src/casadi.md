@@ -695,8 +695,9 @@ is present only when the mode ran:
 ```python
 r = solver(x0=..., lbg=..., ubg=...)
 solver.stats()["fd_hessian"]
-# {'pattern': 'declared', 'nnz': 34094, 'groups': 17, 'rho_max': 15,
-#  'coloring_fell_back': False, 'objective_clique_widened': False}
+# {'pattern': 'declared', 'nnz': 34094, 'n': 9294, 'groups': 17,
+#  'rho_max': 15, 'coloring_fell_back': False,
+#  'objective_clique_widened': False}
 ```
 
 `pattern` is the source the solve **ended up with**, not the one you

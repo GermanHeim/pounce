@@ -1263,6 +1263,7 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
     ipopt_problem: IpoptProblem,
     pattern_used: *mut Index,
     nnz: *mut Index,
+    n: *mut Index,
     groups: *mut Index,
     rho_max: *mut Index,
     coloring_fell_back: *mut Index,
@@ -1273,6 +1274,7 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
             (
                 s.fd_hessian_pattern_used,
                 s.fd_hessian_nnz,
+                s.fd_hessian_n,
                 s.fd_hessian_groups,
                 s.fd_hessian_rho_max,
                 if s.fd_hessian_coloring_fell_back {
@@ -1287,12 +1289,15 @@ pub unsafe extern "C" fn GetPounceFdHessianStats(
                 },
             )
         });
-        let (p, n, g, r, f, w) = stats.unwrap_or((-1, 0, 0, 0, 0, 0));
+        let (p, nz, cols, g, r, f, w) = stats.unwrap_or((-1, 0, 0, 0, 0, 0, 0));
         if !pattern_used.is_null() {
             *pattern_used = p;
         }
         if !nnz.is_null() {
-            *nnz = n;
+            *nnz = nz;
+        }
+        if !n.is_null() {
+            *n = cols;
         }
         if !groups.is_null() {
             *groups = g;

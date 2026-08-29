@@ -370,7 +370,9 @@ void GetPounceRestorationStats(
  * 341 probe groups on benchmarks/large_scale laptime -- which is the
  * question this call exists to answer.
  *
- * `nnz` is the coloured pattern's lower-triangle nonzero count, `groups`
+ * `nnz` is the coloured pattern's lower-triangle nonzero count, `n` the
+ * columns the colouring ran over (so `groups / n` is the fraction of a
+ * dense scheme's probes this pattern costs), `groups`
  * the probe groups per Hessian (each one extra gradient and Jacobian
  * evaluation per rebuild), and `rho_max` the pattern's widest row.
  * `coloring_fell_back` is 1 when a requested star colouring failed
@@ -387,6 +389,7 @@ void GetPounceFdHessianStats(
     IpoptProblem ipopt_problem,
     ipindex*     pattern_used,
     ipindex*     nnz,
+    ipindex*     n,
     ipindex*     groups,
     ipindex*     rho_max,
     ipindex*     coloring_fell_back,
