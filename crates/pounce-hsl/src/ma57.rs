@@ -45,6 +45,7 @@ pub struct Options {
     block_size: Index,
     node_amalgamation: Index,
     small_pivot_flag: Index,
+    batched_backsolve: bool,
 }
 
 impl Options {
@@ -133,6 +134,14 @@ impl Options {
             .ok()
             .map(|(v, _)| v)
             .unwrap_or(0);
+        // pounce extension, not an upstream Ipopt option. The accessor
+        // `Options::batched_backsolve` carries why the default is
+        // `false` and what turning it on costs.
+        let batched_backsolve = opts
+            .get_bool_value("ma57_batched_backsolve", prefix)
+            .ok()
+            .map(|(v, _)| v)
+            .unwrap_or(false);
         Self {
             print_level,
             pivtol,
@@ -143,6 +152,7 @@ impl Options {
             block_size,
             node_amalgamation,
             small_pivot_flag,
+            batched_backsolve,
         }
     }
 
@@ -159,6 +169,7 @@ impl Options {
             block_size: 16,
             node_amalgamation: 16,
             small_pivot_flag: 0,
+            batched_backsolve: false,
         }
     }
 
@@ -205,6 +216,55 @@ impl Options {
     /// `ma57_small_pivot_flag` → `ICNTL(16)`.
     pub fn small_pivot_flag(&self) -> Index {
         self.small_pivot_flag
+    }
+
+    /// `ma57_batched_backsolve` — whether this backend affirms
+    /// [`SparseSymLinearSolverInterface::multi_solve_matches_single_solve`].
+    ///
+    /// **Not an upstream Ipopt option**, and not an `ICNTL`. It does not
+    /// change what MA57C does with the right-hand sides it is handed; it
+    /// changes whether callers that batch *purely to save time* are
+    /// allowed to hand it more than one. Today that is
+    /// `LowRankAugSystemSolver`'s SMW correction block, which otherwise
+    /// walks the factor one column at a time.
+    ///
+    /// Default `false`, and the default is load-bearing rather than
+    /// cautious boilerplate: **MA57's blocked back-substitution is not
+    /// bit-identical to the per-column path.** Measured on gh#809's
+    /// review model (118276-row KKT, `nrhs = 2`), an otherwise unmodified
+    /// binary with the affirmation hard-coded to `true` diverges from the
+    /// same binary without it at iteration 20, in the last printed digit
+    /// of the objective:
+    ///
+    /// ```text
+    ///   gate closed   20  9.7709874e+01 3.29e+00 5.87e+01  -1.5 ...
+    ///   gate open     20  9.7709873e+01 3.29e+00 5.87e+01  -1.5 ...
+    /// ```
+    ///
+    /// About one ulp — and enough. The four arms of that experiment
+    /// finished in 201 / 206 / 173 / 160 iterations at different
+    /// objectives. So turning this on is a **trajectory change** in the
+    /// sense of `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`,
+    /// and on a nonconvex problem it can select a different local optimum
+    /// — which is gh#729, where MA57 took `pooling_rt2stp` to an objective
+    /// 25% worse while still reporting `Optimal Solution Found`.
+    ///
+    /// The trap that comes with it, also from that review: a wall-clock
+    /// comparison **across** the gate is not a measurement of this option.
+    /// The 326.0 s / 356.5 s / 269.2 s figures there are a one-ulp
+    /// perturbation landing favourably on a chaotic trajectory, not work
+    /// removed, and could as easily have gone the other way. Only
+    /// per-iteration figures compare. On that basis the batch moves the
+    /// back-solve row −32.0% and the factorization row +18.5%, for a
+    /// linear-algebra net of −4.2% against a 3.4–5.3% replicate spread —
+    /// close to the same ratios feral shows on `laptime` (−30.8% /
+    /// +16.4%). Against Ipopt/MA57 on an equal-iteration basis it is the
+    /// difference between a back-solve row 51% worse and one 18.9%
+    /// better.
+    ///
+    /// Full write-up: `dev-notes/ma57-batched-backsolve.md`.
+    pub fn batched_backsolve(&self) -> bool {
+        self.batched_backsolve
     }
 }
 
@@ -633,6 +693,37 @@ impl SparseSymLinearSolverInterface for Ma57SolverInterface {
     /// backend — see [`Self::options`] and gh#825.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
+    }
+
+    /// Answers from `ma57_batched_backsolve`, and the answer does not
+    /// depend on `nrhs`.
+    ///
+    /// feral's override is a *measurement*: below its BLAS-3 threshold
+    /// each column runs the same rank-1 cascade a single-RHS solve
+    /// would, so it can say `true` at narrow widths and mean it, and
+    /// `multi_solve_bitwise_matches_single_solve_at_the_documented_ceiling`
+    /// re-measures that on every run. This one is a **permission**.
+    /// MA57C's multi-RHS path blocks the substitution across columns —
+    /// it is not a loop over the single-RHS path at any width we have
+    /// measured — so the honest factual answer at every `nrhs > 1` is
+    /// `false`, and that is what an unconfigured backend returns. Saying
+    /// `true` here is the user electing to accept a ~1-ulp perturbation
+    /// of the iterate in exchange for fewer traversals of the factor.
+    /// [`Options::batched_backsolve`] carries the measurement and the
+    /// consequences.
+    ///
+    /// No width ceiling, deliberately. A ceiling on this backend would
+    /// be a guess about MA57's internal blocking rule that nothing in
+    /// this repository can check — CI cannot link CoinHSL — and an
+    /// unverifiable constant is the shape of defect feral's own
+    /// `FERAL_BITWISE_MULTI_SOLVE_MAX_NRHS` doc warns about. If someone
+    /// with an HSL licence establishes a width below which MA57C really
+    /// does reproduce the per-column result, that is a measurement worth
+    /// making, and `the_batched_and_per_column_answers_agree_to_tolerance`
+    /// in `tests/ma57_batched_backsolve.rs` is the probe it would
+    /// sharpen; until then the option is the whole rule.
+    fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+        self.options.batched_backsolve
     }
 
     fn initialize_structure(

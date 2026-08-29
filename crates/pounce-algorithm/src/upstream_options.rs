@@ -1531,6 +1531,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     )?;
     r.add_bounded_integer_option("ma57_small_pivot_flag", "Handling of small pivots", 0, 1, 0, "If set to 1, then when small entries defined by CNTL(2) are detected they are removed and the corresponding pivots placed at the end of the factorization. This can be particularly efficient if the matrix is highly rank deficient. This is ICNTL(16) in MA57.")?;
 
+    // ===== MA57 batched back-substitution (pounce extension; not in upstream Ipopt) =====
+    // Registered in the MA57 category, immediately after the ported
+    // options above, because it is an MA57 setting from a user's point
+    // of view even though upstream has no equivalent. Registered
+    // unconditionally, like every other `ma57_*` option: the registry is
+    // built without regard to the `ma57` cargo feature, and an option
+    // that appeared only in some builds would make `pounce
+    // --print-options` build-dependent.
+    r.add_bool_option("ma57_batched_backsolve", "Whether MA57 may answer several right-hand sides in one blocked back-substitution.", false, "pounce extension; not an upstream Ipopt option. Callers that batch right-hand sides purely to save time -- today the Sherman-Morrison-Woodbury correction block in the limited-memory quasi-Newton path -- ask the linear solver first whether its multi-RHS answer is bit-identical to solving the columns one at a time. MA57 blocks the substitution across columns, so it is not: the batched answer is tolerance-equal but differs in about the last bit. Setting this to \"yes\" says you accept that. It is a trajectory change, not just a speed-up: on gh#809's review model the same binary with and without the batch diverges in the last digit of the objective at iteration 20 and finishes at a different iteration count, and on a nonconvex problem a perturbation that size can select a different local optimum (gh#729 did exactly that on pooling_rt2stp, landing 25% worse while still reporting Optimal Solution Found). What you get for it, measured per iteration on that model: back-solve -32%, numeric factorization +18.5%, linear-algebra total -4.2% against a 3-5% replicate spread. Do not compare wall-clock across this option -- the runs walk different trajectories, so the difference is dominated by iteration count rather than by work removed. See dev-notes/ma57-batched-backsolve.md.")?;
+
     // ===== FeralSolverInterface::RegisterOptions (pounce extension; not in upstream Ipopt) =====
     // The FERAL pure-Rust backend has several optional knobs that are
     // not (yet) part of the upstream Ipopt linear-solver option set.

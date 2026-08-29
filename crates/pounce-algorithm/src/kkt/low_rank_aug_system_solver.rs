@@ -568,6 +568,12 @@ impl LowRankAugSystemSolver {
         // (`solve_many_into`) and MA57 (`ma57cd_` with `nrhs`) block the
         // triangular solves, and neither can do so one column at a time
         // (gh#729).
+        //
+        // Whether the batch is *taken* is a separate question, asked
+        // below. FERAL answers it from a measured width ceiling; MA57
+        // blocks at every width, so it declines unless
+        // `ma57_batched_backsolve` says otherwise, and by default the
+        // loop further down solves these columns one at a time.
         let mut k0 = 0usize;
         if !self.inner_has_factor && n_cols_us > 0 {
             let rhs_x_dyn: &dyn Vector = v_x.get_vector(0).as_ref();

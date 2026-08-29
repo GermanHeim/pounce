@@ -102,6 +102,20 @@ pub fn register_options_ma57(reg: &RegisteredOptions) -> Result<(), SolverExcept
          This is ICNTL(16) in MA57.",
     )?;
 
+    // pounce extension; upstream has no equivalent. Kept in step with the
+    // registration in `pounce-algorithm/src/upstream_options.rs`, which is
+    // the one production builds -- this function has no production caller
+    // and exists so a `pounce-hsl` consumer can register the family
+    // standalone. Two registries that disagree is doc drift with a
+    // behavioural tail: an unregistered option reads as unset, so MA57
+    // would silently decline the batch under a registry that omitted it.
+    reg.add_bool_option(
+        "ma57_batched_backsolve",
+        "Whether MA57 may answer several right-hand sides in one blocked back-substitution.",
+        false,
+        "pounce extension; not an upstream Ipopt option. Callers that batch right-hand sides purely to save time -- today the Sherman-Morrison-Woodbury correction block in the limited-memory quasi-Newton path -- ask the linear solver first whether its multi-RHS answer is bit-identical to solving the columns one at a time. MA57 blocks the substitution across columns, so it is not: the batched answer is tolerance-equal but differs in about the last bit. Setting this to \"yes\" says you accept that. It is a trajectory change, not just a speed-up: on gh#809's review model the same binary with and without the batch diverges in the last digit of the objective at iteration 20 and finishes at a different iteration count, and on a nonconvex problem a perturbation that size can select a different local optimum (gh#729 did exactly that on pooling_rt2stp, landing 25% worse while still reporting Optimal Solution Found). What you get for it, measured per iteration on that model: back-solve -32%, numeric factorization +18.5%, linear-algebra total -4.2% against a 3-5% replicate spread. Do not compare wall-clock across this option -- the runs walk different trajectories, so the difference is dominated by iteration count rather than by work removed. See dev-notes/ma57-batched-backsolve.md.",
+    )?;
+
     Ok(())
 }
 
@@ -123,6 +137,7 @@ mod tests {
             "ma57_block_size",
             "ma57_node_amalgamation",
             "ma57_small_pivot_flag",
+            "ma57_batched_backsolve",
         ] {
             assert!(
                 reg.get_option(name).is_some(),

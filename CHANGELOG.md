@@ -9,6 +9,35 @@ changes.
 
 ## [Unreleased]
 
+- **`ma57_batched_backsolve`: MA57 can now be let into the batched
+  back-substitution, and the cost of doing so is written down.** Under the
+  limited-memory quasi-Newton Hessian the Sherman-Morrison-Woodbury
+  correction offers the linear solver several right-hand sides at once, but
+  only to a backend that affirms its multi-RHS answer is bit-identical to
+  solving the columns one at a time — these columns feed an iterate whose
+  trajectory must not move (gh#729). FERAL affirms up to `nrhs = 16`; MA57
+  had no way to answer at all, so it inherited the conservative default and
+  the batch was unreachable on that backend, as was the pre-existing warm
+  batch below it. On MA57 the SMW columns have always been solved one
+  traversal of the factor at a time, which is part of why its back-solve row
+  measures worse than Ipopt's. The new option is the answer, and it is
+  **off by default** and stays off: MA57 blocks its substitution across
+  columns, so its batched result really is different — by about one ulp, and
+  measured on a 118276-row KKT system that is enough to move the objective's
+  last digit at iteration 20 and change the iteration count the run finishes
+  at. Turning it on is a trajectory change you are electing to accept, not a
+  free speed-up. What it buys, per iteration on that model: back-solve
+  −32.0%, numeric factorization +18.5%, linear-algebra total −4.2% against a
+  3–5% replicate spread — close to FERAL's own ratios, so the batch is not
+  worth more on MA57 than it is there. Do not compare wall-clock across the
+  option; the two settings walk different trajectories and the difference is
+  dominated by iteration count. Unlike FERAL's, the option carries no width
+  ceiling, because CoinHSL cannot be linked in CI and a ceiling nothing here
+  could re-derive is the shape of defect the fixture-sweep post-mortem is
+  about. Takes a `resto.` prefix like the rest of the family. Rationale and
+  measurements: `dev-notes/ma57-batched-backsolve.md`; user documentation:
+  the Options book page.
+
 - **`hessian_approximation=finite-difference`: the exact Hessian for models
   that have none.** A collocation model built from an FMU or CasADi supplies
   analytic first derivatives and no second ones, and until now that left only
