@@ -50,7 +50,8 @@ changes.
   So `feral_increase_quality=no` is the documented recovery — it solves both
   legs cleanly — and resolving this properly needs a *revertible* escalation,
   one that does not govern every later factorization, which FERAL's
-  `quality_level` cannot express today (it only ratchets up). Not to be confused
+  `quality_level` cannot express today (it only ratchets up). Filed upstream as
+  jkitchin/feral#192 and tracked as gh #857. Not to be confused
   with `feral_refine`, the other half of that commit and where its performance
   win lives: refinement makes no difference to either regressed leg.
   `dev-notes/second-opinion-promotions-in-the-sweep.md` carries the full

@@ -5101,8 +5101,9 @@ pub fn feral_config_from_options(
     // recovery for a model this rung costs. Resolving it properly needs a
     // *revertible* escalation — one that does not govern every later
     // factorization — which FERAL's ladder cannot express today (`quality_level`
-    // only ratchets up). See
-    // `dev-notes/second-opinion-promotions-in-the-sweep.md`.
+    // only ratchets up) -- filed upstream as jkitchin/feral#192 and tracked as
+    // gh#857, which is also where this option should be retired if the reset
+    // makes it moot. See `dev-notes/second-opinion-promotions-in-the-sweep.md`.
     if let Ok((v, true)) = options.get_bool_value("feral_increase_quality", "") {
         cfg.increase_quality = v;
     }

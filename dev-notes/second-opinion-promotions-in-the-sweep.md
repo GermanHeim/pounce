@@ -140,7 +140,12 @@ the trade in both directions.
 **What a real fix needs.** A *revertible* escalation — one that does not govern
 every later factorization, including a restoration sub-solve's. FERAL's
 `quality_level` cannot express that today: it only ratchets up, with no reset.
-That is the shape of the remaining work, and it is upstream of this repo.
+
+That is filed upstream as **jkitchin/feral#192** (a `reset_quality()`, or a
+scoped escalate-for-one-factor form), and tracked here as **gh#857**, which
+also carries the two things still owed on this side: re-running `2c4f25f1`'s
+`laptime` 126k benchmark, and retiring `feral_increase_quality` if the reset
+makes it moot.
 
 **One thing checked and worth knowing:** gh#590's badly-scaled LP grid
 (`issue_590_primal_noise_floor_component`, data scale `1e10` and `1e11`, six
