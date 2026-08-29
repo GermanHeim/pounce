@@ -2788,6 +2788,31 @@ fn run_convex_qp(
         class.name(),
         sol.iters,
     );
+    // gh #848: an indefinite QP whose claimed optimum the second-order screen
+    // refuted lands here as `NumericalFailure`, which the shared console
+    // vocabulary renders "INTERNAL ERROR: Unknown SolverReturn value." — a
+    // message that reads like a crash for what is actually a correct and
+    // deliberate refusal. Say what happened and where the answer is.
+    //
+    // This is a *refusal*, which is what `v0.10.0` did with the whole class
+    // before gh #786 admitted it; the intervening behaviour was to return the
+    // saddle under `Optimal`. `nonconvex_qp_ineq` is the corpus's own instance:
+    // `min x₀x₁ s.t. x₀ + x₁ ≥ 2` over `[0, 4]²`, where the engine settles on
+    // `(1, 1)` at `f = 1` — a *maximum* along the active constraint, since
+    // `f(1+t, 1−t) = 1 − t²` — while `(0, 2)` is feasible at `f = 0`.
+    if use_active_set && !ok && inertia == HessianInertia::Indefinite {
+        eprintln!(
+            "pounce: note: the active-set engine reached a point that is not a \
+             local minimum of this indefinite QP — a feasible direction of \
+             negative curvature leads to a strictly better point — so its \
+             first-order verdict was refused rather than reported as optimal \
+             (gh #848). Its `optimal` on an indefinite Hessian means first-order \
+             KKT plus no counterexample found, which is weaker than a local \
+             guarantee. Use solver_selection=nlp for one: the NLP filter \
+             line-search interior-point path is where `auto` sends this class, \
+             and it does give a local optimum."
+        );
+    }
     // gh #293 naive-caller guardrail: if the solve did not cleanly converge and
     // the objective curvature is tiny relative to the data, say so — the status
     // is honest but a naive caller might otherwise treat a truncated objective

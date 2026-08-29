@@ -366,9 +366,13 @@ def _indefinite_error(lam_min: float) -> ValueError:
         "Hessian and reports a silently-wrong 'optimal' at a saddle point "
         "without one. To solve an indefinite QP, pass method='active-set' — "
         "the pounce-qp parametric active-set engine handles indefinite "
-        "Hessians and returns a local solution. Pass check_psd=False to skip "
-        "this check (e.g. if you know P is PSD and want to avoid the O(n^3) "
-        "eigenvalue cost)."
+        "Hessians. Note what its 'optimal' means there: first-order KKT holds "
+        "and a negative-curvature screen found no feasible direction along "
+        "which it could exhibit a better point. That is a refutation rather "
+        "than a proof, so it is weaker than the local-minimum guarantee the "
+        "NLP path (pounce.minimize) gives on the same model. Pass "
+        "check_psd=False to skip this check (e.g. if you know P is PSD and "
+        "want to avoid the O(n^3) eigenvalue cost)."
     )
 
 

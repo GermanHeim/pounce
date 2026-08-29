@@ -9,6 +9,90 @@ changes.
 
 ## [Unreleased]
 
+- **`qp-active-set` no longer certifies a strict saddle, or an unbounded-below
+  QP, as `Optimal` (gh #848).** gh #112 added `check_psd` because `solve_qp`
+  "accepts an indefinite `P` and returns a silently-wrong `optimal`"; gh #786
+  scoped that guard away from `method='active-set'` on the premise that the
+  active-set engine returns "a **local** optimum, the same guarantee the NLP
+  filter-IPM gives on a nonconvex NLP". It did not give that guarantee, and a
+  refusal became a confident wrong answer — at `v0.10.0` `dispatch.rs` refused
+  the class outright, at HEAD it dispatched it:
+
+  ```text
+  P = [[1, 5], [5, 1]], c = 0, box [-1, 1]^2,   eigvalsh(P) = [-4, 6]
+  qp-active-set -> Optimal / Solve_Succeeded / success=True,  x = [0, 0], f = 0
+  but x = [1, -1] is feasible at f = -4
+  ```
+
+  Started essentially **at** the global minimum (`x0 = [0.99, -0.99]`,
+  `f = -3.92`) the engine still returned `f ≈ 0` and certified it — it moved
+  uphill and reported success — and the start point was ignored entirely, so no
+  "local optimum from `x0`" reading rescues it. No bound is active at the
+  returned point, so the reduced Hessian **is** `P`. Over 40 random indefinite
+  box QPs, 30 returned a point beaten by an explicitly exhibited feasible point
+  and 23 were not even local minima. `min −x₀² + ½x₁²` over `x₀ ≥ 0` came back
+  `Optimal`, `obj = 0`, `iters = 0`.
+
+  `verify_status` re-derives only **first-order** KKT, which is equivalent to
+  global optimality for a convex QP and merely necessary for an indefinite one;
+  no second-order test was added when the class was admitted. `pounce-qp`'s
+  inertia control is not that test and must not be read as it — it shifts the
+  KKT diagonal so each *factorization* has the right inertia, which is a
+  statement about the linear algebra at each iteration, not about the curvature
+  of `P` on feasible directions at the point finally returned.
+
+  **The screen refutes by exhibition rather than by a cone argument.** The
+  second-order necessary condition lives on the critical cone, and deciding
+  copositivity on a cone is not something to attempt inside a status check, so
+  `refute_indefinite_optimum` does not try: it looks for a direction of negative
+  curvature, then walks it and evaluates the objective. A feasible point with a
+  strictly lower objective is a refutation that needs no theory at all — the
+  issue's own first oracle. The consequence is what makes the design safe: the
+  direction search can be as heuristic as it likes, because a direction it
+  misses leaves the verdict where it was and a direction it finds is only ever
+  acted on after the walk has *proved* the point beatable. There is no false
+  demotion available to it, which is why the search is allowed to ignore the
+  general rows — the step length accounts for every bound and every row.
+
+  Two searches run, and both are load-bearing: an interior one for a saddle in
+  the middle of the box, and an unrestricted one that reaches a coordinate
+  sitting **on** a weakly active bound it may still leave. The unbounded model
+  is the second case entirely — `x₀` is at its bound, so an interior-only search
+  sees `P₁₁ = 1 > 0` and finds nothing while the whole defect lives along `+x₀`.
+  Mutation-checked: dropping the unrestricted half turns the on-bound legs red
+  and leaves the interior legs green.
+
+  The search is matrix-free (shifted power iteration, one `p_mul` per step), so
+  it carries **no dimension ceiling** — deliberately, since a ceiling that
+  silently skips the check is the shape of the companion defect on `check_psd`.
+  A refuted point makes the attempt inconclusive, which feeds the engine's
+  existing Ruiz-retry-after-failure path, so the reported saddle does not merely
+  lose its verdict: it comes back at the true global minimum `x = [-1, 1]`,
+  `f = -4`. A negative-curvature direction that is also a feasible recession
+  direction reaches `ray_certifies_unbounded`, whose gh #791 negative-curvature
+  branch existed and could never fire — its only call site is the `Unbounded`
+  arm of `verify_status`, which a claimed `Optimal` never reaches, and its unit
+  tests call it directly and stayed green. `min −x₀² + ½x₁²` now returns
+  `DualInfeasible`, matching what POUNCE's own NLP arm says about the same model
+  on the same binary.
+
+  **The docs now say what the verdict means.** `dispatch.rs`'s `NonconvexQp`
+  comment, `solve_qp_active_set_inertia`'s doc, and the `pounce.qp` guard
+  message all claimed a local-optimum guarantee and pointed users at this engine
+  as the remedy for the very failure they warn about. An `Optimal` on an
+  indefinite `P` now says what it is: first-order KKT holds and no second-order
+  counterexample was found — a refutation, not a proof, and strictly weaker than
+  the NLP path's local guarantee.
+
+  The convex arm is untouched: the caller's own `HessianInertia::Psd` claim is
+  the gate, so the screen never runs on the path every existing consumer uses.
+  `scripts/sweep-fixtures.sh` is empty across all 158 fixture-legs — which is
+  expected and is *not* evidence about this path, since no nonconvex-QP fixture
+  is routed to `qp-active-set` and `auto` still sends the class to the NLP arm.
+  That is CLAUDE.md's rule verbatim, and
+  `crates/pounce-convex/tests/issue848_indefinite_second_order.rs` is the
+  evidence that is.
+
 - **The `.nl` reader refuses non-finite numbers instead of silently dropping
   them (gh #847).** `str::parse::<f64>()` accepts `inf`, `-inf` and `nan`, and
   returns `inf` for any literal that overflows — `1e400` is a plausible thing
