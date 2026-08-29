@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+- **The convex QP arm's cost normalization no longer buys an `Optimal`
+  verdict** (gh #414, reopened). `pounce.solve_qp(P=diag(2, 2e8), c=(-2, -2e4))`
+  — `min (x₀−1)² + (10⁴x₁−1)²`, two variables, diagonal, unconstrained —
+  returned `status="optimal"`, `success=True` after 3 iterations at a point
+  whose `kkt_error`, on the same result object, was `2.499`, with `x` wrong by
+  `2.5e-4` relative. Through the CLI the same solve printed
+  `Optimal Solution Found` and `Overall NLP error 2.4991` in one report, and
+  `SolveSucceeded` in `--json-output`. `solver_selection=nlp` solved the
+  identical `.nl` exactly, and clarabel matches the closed form to `1.4e-16`.
+
+  Before handing a QP to the embedding, the convex arm divides the objective
+  data by `σ = 2^⌈log₂ max(‖P‖∞, ‖c‖∞)⌉` (gh #286, so the homogeneous `τ` stays
+  off the certificate boundary). The embedding's **absolute** stopping test
+  then runs in that metric, certifying `‖r‖ ≤ tol` on scaled data — `σ·tol` in
+  the caller's. Two things were wrong with that and both are now fixed:
+
+  - It reached the relaxation without passing the gate that decides whether a
+    relative test is admissible at all (`hsde::relative_stop_permitted`).
+    Inside the scaled metric the data looks `O(1)`, so the loop believed it was
+    running the strict test.
+  - `σ` is sized by the objective **coefficient** magnitude, while a
+    stationarity residual has to be small against the **gradient** scale
+    `‖Px*‖∞ ∨ ‖c‖∞`. The two differ by `‖x*‖`, unboundedly: here `σ = 2²⁸` and
+    the gradient scale is `2e4`.
+
+  The gh #324 re-check of a `σ`-path `Optimal` already measured the right
+  ratio, but was cut at a flat `1e-3` calibrated against gh #324's own
+  *cold-start* certificate, which is `O(1)` — five orders looser than this
+  family. It is now asked as an absolute test first, then a relative one gated
+  at the gradient scale and cut at `100·tol` rather than a constant. The
+  un-normalized re-solve that check already had behind it recovers every
+  reported instance in **one** iteration.
+
+  This also closes the residual the original report kept after the gh #418
+  equilibrated repair: that instance returned the right objective at
+  `kkt_error = 2.1e-4` under `success=True`, and now converges to
+  `kkt_error = 4.9e-9`, inside `tol`. A tightened `tol` is honoured rather than
+  absorbed (`1e-12` gave `rel x err 1.7e-6`, now `1.3e-13`).
+
+  The corpus could not see any of it: the returned *objective* is second-order
+  in the `x` error at an optimum, so at `x` wrong by `2.5e-4` the objective is
+  right to eight digits. Neither `scripts/sweep-fixtures.sh` (156 fixture-legs,
+  1 of which reaches the `σ` path) nor the 138-problem Maros-Mészáros set (0 of
+  which do) moves a single line under this change.
 - **Sensitivity: bound-multiplier derivatives are readable again under the
   gh #737 barrier ceiling, and `corrector_iter` works there** (gh #828).
   A strongly active bound whose constraint row carries a small Jacobian
