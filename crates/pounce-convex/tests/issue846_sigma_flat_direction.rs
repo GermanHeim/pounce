@@ -227,23 +227,19 @@ fn the_generated_family_returns_the_closed_form_everywhere() {
                 );
                 // The reference is the closed form; the *budget* is what an
                 // independent driver reaches on the same data, floored at
-                // `1e-4`. Neither number is a hedge. At `span = 11` the
-                // flattest curvature is `1e-2` in a spectrum reaching `1e9`
-                // and no driver gets below `1e-5` there, so a flat `1e-6`
-                // would fail on correct code — the mistake this whole issue is
-                // about, run in the other direction. `qp_hsde=no` is the
-                // issue's own oracle #6.
+                // `1e-5`. Neither number is a hedge: the worst member of this
+                // family comes back at `9.9e-7`, so the floor carries a factor
+                // of ten, and comparing against `qp_hsde=no` — the issue's own
+                // oracle #6 — is what keeps the assertion honest where the
+                // data itself is the limit rather than this guard.
                 //
-                // The floor is what the *worst* member costs, and it is worth
-                // naming rather than hiding: `n=9, span=6, top=1e13` comes back
-                // at `1.13e-5` where the direct driver reaches `1.1e-16`. That
-                // gap is **not** the `σ` chain — the chain hands up a point at
-                // `9.5e-7`, and gh #414's `verify_or_repair_optimum`, one layer
-                // above, judges it false in the equilibrated metric and
-                // substitutes its own genuine-by-that-measure retry at
-                // `1.13e-5`. Five orders below the `5.72e-1` this issue
-                // reports, through a different door, and left for whoever
-                // revisits that layer.
+                // The floor used to be `1e-4`, for a residual that is now
+                // fixed: `n=9, span=6, top=1e13` came back at `1.13e-5`
+                // against the direct driver's `1.1e-16`, and the gap was not
+                // the `σ` chain but gh #414's `verify_or_repair_optimum` one
+                // layer above, which took the first *genuine* candidate rather
+                // than the best one. It now ranks them by absolute KKT error,
+                // and that member reaches `1.1e-16` too.
                 let direct = solve_qp_ipm(
                     &prob,
                     &QpOptions {
@@ -252,7 +248,7 @@ fn the_generated_family_returns_the_closed_form_everywhere() {
                     },
                     backend,
                 );
-                let budget = (10.0 * abs_x_err(&direct.x, &exact)).max(1e-4);
+                let budget = (10.0 * abs_x_err(&direct.x, &exact)).max(1e-5);
                 let err = abs_x_err(&sol.x, &exact) / budget;
                 checked += 1;
                 if err > worst {
@@ -446,5 +442,87 @@ fn a_cone_carrying_problem_never_reaches_the_orthant_fallback() {
          (the orthant misreading gives {:.10e})",
         sol.obj,
         -0.5 * s * (g[0] * g[0] + g[1] * g[1])
+    );
+}
+
+/// gh #414's `verify_or_repair_optimum` must take the **best** genuine
+/// candidate, not the first one.
+///
+/// That guard sits one layer above the `σ` chain: when a claimed optimum fails
+/// `optimum_is_genuine`, it re-solves equilibrated and returns that retry if
+/// the retry is genuine. On this instance the retry *is* genuine and is still
+/// twelve times worse in `x` than the point it replaces, while a third
+/// candidate — the same equilibrated solve on the **direct** driver — is
+/// better than both on every measure at once:
+///
+/// ```text
+///   candidate                    kkt_error   equil. rel   genuine   |x-x*|inf
+///   the point handed in           1.30e2      4.77e-3       no       9.5e-7
+///   equilibrated HSDE retry       1.26e2      1.96e-10      yes      1.1e-5
+///   equilibrated DIRECT driver    1.22e-4     7.58e-24      yes      1.1e-16
+/// ```
+///
+/// Six orders of absolute KKT, fourteen of equilibrated relative, eleven of
+/// `x`, and it was never asked for. The choice is now made on absolute
+/// `kkt_error` in the caller's own coordinates — a ranking, not another
+/// threshold — over the genuine candidates only, so it cannot promote a point
+/// gh #414 exists to reject.
+#[test]
+fn the_repair_takes_the_best_genuine_candidate_not_the_first() {
+    // The family member that exposed it, verbatim.
+    let n = 9usize;
+    let (span, top) = (6.0, 1e13);
+    let e: Vec<f64> = (0..n)
+        .map(|i| top * 10f64.powf(-span * (n - 1 - i) as f64 / (n - 1) as f64))
+        .collect();
+    let t = [
+        -1.8190576992928982,
+        1.2812658958137035,
+        1.9588236287236214,
+        1.8292641211301088,
+        0.004131857305765152,
+        1.0691035818308592,
+        -1.0484796334058046,
+        -0.3830815851688385,
+        -0.24765135161578655,
+    ];
+    let prob = QpProblem {
+        n,
+        p_lower: (0..n).map(|i| Triplet::new(i, i, e[i])).collect(),
+        c: (0..n).map(|i| -e[i] * t[i]).collect(),
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![-1.0; n],
+        ub: vec![1.0; n],
+    };
+    let exact: Vec<f64> = t.iter().map(|v| v.clamp(-1.0, 1.0)).collect();
+    let opts = QpOptions::default();
+
+    let sol = solve_qp_ipm(&prob, &opts, backend);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    let err = abs_x_err(&sol.x, &exact);
+    assert!(
+        err < 1e-9,
+        "the repair should have reached the direct driver's answer (1.1e-16), \
+         got {err:.3e} — 1.1e-5 is the equilibrated HSDE retry, which is the \
+         first genuine candidate rather than the best"
+    );
+
+    // And it really is the direct driver's answer, not a coincidence: the same
+    // solve with the embedding off must agree.
+    let direct = solve_qp_ipm(
+        &prob,
+        &QpOptions {
+            use_hsde: false,
+            ..opts
+        },
+        backend,
+    );
+    assert_eq!(direct.status, QpStatus::Optimal);
+    assert!(
+        abs_x_err(&sol.x, &direct.x) < 1e-12,
+        "the repaired answer should coincide with the direct driver's"
     );
 }

@@ -968,14 +968,62 @@ where
         return sol;
     }
     let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend);
-    if retry.status == QpStatus::Optimal
-        && optimum_is_genuine(prob, &retry, opts.tol, opts.obj_constant)
-    {
+    let genuine = |c: &QpSolution| {
+        c.status == QpStatus::Optimal && optimum_is_genuine(prob, c, opts.tol, opts.obj_constant)
+    };
+    let err = |c: &QpSolution| c.kkt_residuals(prob).kkt_error();
+    // A retry accurate to `tol` in the caller's own coordinates is
+    // unimpeachable -- this function's own first test says so -- so stop here
+    // and pay nothing more. This is the common repair.
+    if genuine(&retry) && err(&retry) <= opts.tol {
         return retry;
     }
-    QpSolution {
-        status: QpStatus::NumericalFailure,
-        ..sol
+    // gh #846: otherwise the equilibrated *embedding* is not obviously the
+    // best answer available, and on an ill-conditioned box QP it measurably is
+    // not. Measured on a 9-variable diagonal box QP with `eig = [1e7 .. 1e13]`,
+    // where the closed form is `clamp(t, -1, 1)` and needs no solver:
+    //
+    // | candidate                  | kkt_error | equil. rel | genuine | ‖x−x*‖∞ |
+    // |----------------------------|-----------|------------|---------|---------|
+    // | the point handed in        | 1.30e2    | 4.77e-3    | no      | 9.5e-7  |
+    // | equilibrated HSDE retry    | 1.26e2    | 1.96e-10   | yes     | 1.1e-5  |
+    // | equilibrated DIRECT driver | 1.22e-4   | 7.58e-24   | yes     | 1.1e-16 |
+    //
+    // The retry is genuine, so it used to be returned unconditionally -- and
+    // it is *twelve times worse in x* than the point it replaced, while a
+    // third candidate that is better on every measure at once (six orders of
+    // absolute KKT, fourteen of equilibrated relative, eleven of `x`) was
+    // never asked for. The embedding's stopping test normalizes its gap by the
+    // objective's magnitude, which on data of this scale buys slack the direct
+    // driver's absolute test does not.
+    //
+    // So both are asked, and the choice is made on **absolute `kkt_error` in
+    // the caller's own coordinates** -- the caller's own definition of the
+    // thing, and a ranking rather than another threshold to calibrate. Only
+    // genuine candidates are eligible, so this cannot promote a point gh #414
+    // exists to reject; it only stops that guard from settling for the first
+    // acceptable answer when a better one is one solve away.
+    //
+    // The extra solve is on the repair path only, which is reached solely when
+    // a claimed optimum has already failed [`optimum_is_genuine`].
+    // `equilibrated_solve(.., use_hsde = false, ..)` is the same call this
+    // function's neighbour already makes to refute a spurious unboundedness
+    // certificate, on the same LP/QP-only entry point, so it carries no new
+    // exposure to cone-carrying problems.
+    let direct = equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend);
+    let best = [retry, direct]
+        .into_iter()
+        .filter(genuine)
+        .min_by(|a, b| err(a).total_cmp(&err(b)));
+    match best {
+        Some(c) => c,
+        // Neither could certify. The original verdict is demoted rather than
+        // upgraded: the solver has no certified answer, and saying so is the
+        // floor this function guarantees.
+        None => QpSolution {
+            status: QpStatus::NumericalFailure,
+            ..sol
+        },
     }
 }
 
