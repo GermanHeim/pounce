@@ -80,8 +80,15 @@ directory accumulates, so that is:
 # in a platform's build image, once per supported casadi minor
 pip install 'casadi==3.6.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
 pip install 'casadi==3.7.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
-./build.sh          # one wheel carrying both
+pip install 'casadi==3.8.*' && POUNCE_CASADI_STAGE_ONLY=1 ./build.sh
+./build.sh          # one wheel carrying all of them
 ```
+
+The minors staged here and the `casadi` bound in `pyproject.toml` are one
+statement made twice, and they have to agree. A minor inside the bound with
+no `_plugins/<minor>/` staged installs cleanly and then fails at `import
+pounce_casadi`, which is a worse failure than not resolving at all — pip has
+already told the user it worked. 3.8 was added to both together (gh#782).
 
 Per-platform build notes:
 
