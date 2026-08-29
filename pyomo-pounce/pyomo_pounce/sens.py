@@ -52,6 +52,7 @@ import threading
 import time
 import warnings
 from collections import namedtuple
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -303,6 +304,44 @@ def _row_index(names):
     return {nm: i for i, nm in enumerate(names)}
 
 
+class SolutionMap(Mapping):
+    """What `estimate()` returns: a read-only mapping {original var
+    data: estimated value}, keyed by the component data objects
+    themselves, by identity, the way `ComponentMap` keys them.
+
+    The keys and the identity index are the session's, shared by every
+    result, and each result carries only its own value vector, so
+    constructing one costs nothing per variable where building a
+    `ComponentMap` paid an insertion per variable per call. Item
+    assignment is not supported: a result describes one estimate, and
+    writing into it never changed anything downstream."""
+
+    __slots__ = ("_keys", "_index_of", "_values")
+
+    def __init__(self, keys, index_of, values):
+        self._keys = keys
+        self._index_of = index_of
+        self._values = values
+
+    def __getitem__(self, vd):
+        try:
+            return float(self._values[self._index_of[id(vd)]])
+        except KeyError:
+            raise KeyError(vd) from None
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def __len__(self):
+        return len(self._keys)
+
+    def __contains__(self, vd):
+        return id(vd) in self._index_of
+
+    def __repr__(self):
+        return f"SolutionMap({len(self._keys)} variables)"
+
+
 class _Session:
     def __init__(self, model, nl, solver, var_names, con_names, pins,
                  con_alias, var_row=None, con_row=None):
@@ -334,9 +373,59 @@ class _Session:
         self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
         self._columns = {}            # pin row -> full KKT-space column
         self._primal_rows = None      # full-x -> KKT row, lazily fetched
+        # The original model's variable data, in .col order, captured
+        # when the solve loads its solution back. A column the
+        # declared-parameter surgery created has no model counterpart
+        # and holds None. Resolving a name through find_component
+        # parses it through pyomo's component-UID lexer, ~2 s over a
+        # 62k-variable model, and every estimate() and
+        # gradient(target=None) call needs the whole list, so the one
+        # resolution the solve already performs is kept instead. The
+        # references are the solve's own objects: a caller who deletes
+        # and rebuilds model components after the solve invalidates
+        # this session like any other of its caches.
+        self.var_data = None
+        self._var_by_name = None      # var name -> data, built on demand
+        self._row_data = None         # user row name -> data, on demand
+        self._solution_keys = None    # (keys, id -> column), on demand
 
     def orig_var(self, name):
-        return self.model.find_component(name)
+        """The captured variable for a solver column's name, None for a
+        column with no model counterpart. Every caller iterates
+        `var_names`, so an unknown name is a caller bug and returns
+        None rather than a fallback resolution."""
+        by = self._var_by_name
+        if by is None:
+            by = dict(zip(self.var_names, self.var_data))
+            self._var_by_name = by
+        return by.get(name)
+
+    def user_row_data(self):
+        """The original model's constraint data per solve row, in .row
+        order, resolved once per session. A pin constraint has no
+        original counterpart and holds None."""
+        if self._row_data is None:
+            self._row_data = [self.model.find_component(nm)
+                              for nm in _user_row_names(self)]
+        return self._row_data
+
+    def solution_keys(self):
+        """The columns a solution map exposes: the captured variable
+        data with the surgery-created columns dropped, plus the
+        identity-to-column index a lookup uses. Built once per session;
+        every `estimate()` result shares them. The keys list holds the
+        strong references that keep the ids in the index unique: an id
+        is only unique among live objects, so the index is valid
+        exactly as long as the list that accompanies it."""
+        if self._solution_keys is None:
+            keys = []
+            index_of = {}
+            for i, vd in enumerate(self.var_data):
+                if vd is not None:
+                    index_of[id(vd)] = i
+                    keys.append(vd)
+            self._solution_keys = (keys, index_of)
+        return self._solution_keys
 
     def _primal_row_map(self):
         if self._primal_rows is None:
@@ -948,11 +1037,15 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
 
     # load the solution back onto the ORIGINAL model's variables (when the
     # solve ran on a clone; in the estimation-only path clone IS model and
-    # this simply refreshes the same variables)
+    # this simply refreshes the same variables), and keep the resolved
+    # objects: this is the one name resolution the session pays
+    var_data = []
     for name, val in zip(var_names, session.base_x):
         ov = model.find_component(name)
+        var_data.append(ov)
         if ov is not None:
             ov.set_value(float(val), skip_validation=True)
+    session.var_data = var_data
 
     # consistency check: declared residuals should reproduce the objective
     if session.res_rows:
@@ -1258,7 +1351,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
 
     perturb: pairs of (declared Param, new value) -- a list of tuples or a
     ComponentMap (plain dicts don't work: Pyomo components are unhashable).
-    Returns a ComponentMap {original var data: estimated value}. Values are
+    Returns a read-only `SolutionMap` {original var data: estimated
+    value}, keyed by the component data objects themselves. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
 
     mode selects what happens when the step leaves a variable bound.
@@ -1522,12 +1616,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
                 "'fix_relax' pins them and re-solves instead.")
         x_new = np.clip(x_new, lo, hi)
 
-    out = ComponentMap()
-    for name, val in zip(session.var_names, x_new):
-        ov = model.find_component(name)
-        if ov is not None:
-            out[ov] = float(val)
-    return out
+    keys, index_of = session.solution_keys()
+    return SolutionMap(keys, index_of, x_new)
 
 
 # ── step diagnostics ──────────────────────────────────────────────────────────
@@ -1986,13 +2076,14 @@ def estimate_report(model, perturb, max_iter=None,
 
     crossed = ComponentMap()
     for i in np.where((x_new < lo - eps) | (x_new > hi + eps))[0]:
-        ov = model.find_component(session.var_names[i])
+        ov = session.var_data[i]
         if ov is not None:
             crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
     crossed_rows = ComponentMap()
+    row_data = session.user_row_data()
     out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
     for j in np.where(live & out_of_bounds)[0]:
-        oc = model.find_component(row_names[j])
+        oc = row_data[j]
         if oc is not None:
             crossed_rows[oc] = float(
                 max(g_l[j] - g_pred[j], g_pred[j] - g_u[j]))
@@ -2110,8 +2201,9 @@ def active_set_changes(model, perturb, predictor_iter=16,
                if row is not None}
     out = []
     for frac, var_row, lower, pinned in segments:
-        name = session.var_names[full_of[var_row]]
-        comp = model.find_component(name)
+        full = full_of[var_row]
+        name = session.var_names[full]
+        comp = session.var_data[full]
         out.append(ActiveSetChange(
             fraction=float(frac),
             var=comp if comp is not None else name,

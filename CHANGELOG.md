@@ -9,6 +9,24 @@ changes.
 
 ## [Unreleased]
 
+- **`estimate()` and `gradient()` no longer re-parse variable names on
+  every call.** The sensitivity session now keeps the variable data
+  objects the solve resolves when it loads its solution back, in
+  column order, and every later query reads that list instead of
+  routing each solver column's name through pyomo's component-UID
+  parser per call. On a 62k-variable collocation model that parsing
+  was 2.2 s of a 3.4 s `estimate()` call. Constraint rows resolve the
+  same way, once per session, at the first report that needs them.
+
+- **`estimate()` returns a read-only `SolutionMap` instead of a
+  mutable `ComponentMap`.** Lookup, iteration, membership, length,
+  and `items()` are unchanged and still keyed by the component data
+  objects themselves. The keys and the identity index are shared per
+  session and each result carries only its value vector, so
+  constructing a result no longer pays one container insertion per
+  variable per call. Item assignment raises: writing into a result
+  never changed anything downstream.
+
 - **The corrector's operator is assembled at the predicted point.**
   `corrector_iter`'s iterations used to run against the factorization
   the solve left behind, evaluated at the base point. They now pay one
