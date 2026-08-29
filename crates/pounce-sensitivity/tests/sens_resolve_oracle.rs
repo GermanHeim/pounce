@@ -1284,3 +1284,75 @@ fn leg_oracle_the_released_start_reaches_the_same_correction() {
         }
     }
 }
+
+/// The released start reaches the re-solve, and the raw step it
+/// starts from does not.
+///
+/// `leg_oracle_the_released_start_reaches_the_same_correction` above
+/// compares two numbers this crate produced, so it cannot see a
+/// correction that is self-consistently wrong -- the class this file
+/// exists for. This one reads the outside number. Measured on the
+/// Kink fixture, `floor` 5.4e-5, `width` 3.0e-5, budget 2.17e-4:
+///
+/// ```text
+///   delta    raw released   corrected
+///   -1e-1      1.099e-1     3.372e-10
+///   -1e-2      1.094e-2     1.134e-8
+///   +1e-2      6.356e-5     1.329e-9
+///   +1e-1      6.356e-5     3.372e-10
+/// ```
+///
+/// The second column is what keeps this from being vacuous. On the
+/// holding side the all-released step is wrong by order `delta`,
+/// three orders past the budget, and the corrector still lands six
+/// orders inside it. On the releasing side the released direction is
+/// already exact, which is the option's whole claim.
+#[test]
+fn leg_oracle_the_released_start_reaches_the_resolve() {
+    let (s, seed) = base(Fx::Kink);
+    let (_mu, width) = mu_and_width(&s);
+    let base_x = s.converged().expect("converged").x.clone();
+    let floor = dist(&base_x, &oracle(Fx::Kink, &seed, 0.0));
+    let budget = 4.0 * floor.max(width);
+    let n_x = base_x.len();
+    let at = |step: &[Number]| -> Vec<Number> {
+        base_x.iter().zip(step.iter()).map(|(&b, &d)| b + d).collect()
+    };
+
+    for &delta in &[-1.0e-1, -1.0e-2, 1.0e-2, 1.0e-1] as &[Number] {
+        assert!(
+            delta.abs() > width,
+            "the oracle owns only steps above the barrier width: \
+             {delta:e} vs {width:e}",
+        );
+        let want = oracle(Fx::Kink, &seed, delta);
+        let (released, count) = s
+            .parametric_step_release_all(&[0], &[delta])
+            .expect("released step");
+        assert!(count > 0, "the kink fixture's bound is in the weak set");
+
+        let mut start = s.parametric_step_full(&[0], &[delta]).expect("full step");
+        start[..n_x].copy_from_slice(&released);
+        let (corrected, _) = s
+            .correct_step(&[0], &[delta], &start, 8)
+            .expect("corrector");
+        let err = dist(&at(&corrected[..n_x]), &want);
+        assert!(
+            err <= budget,
+            "delta={delta:e}: the corrected released start must reach the \
+             re-solve: off by {err:e}, budget {budget:e}",
+        );
+
+        // and the raw start it came from does not, on the side the
+        // perturbation holds -- otherwise the assert above is free
+        if delta < 0.0 {
+            let raw = dist(&at(&released), &want);
+            assert!(
+                raw > 10.0 * budget,
+                "delta={delta:e}: the raw released step should be wrong on \
+                 the holding side, else the correction proves nothing: \
+                 off by only {raw:e}",
+            );
+        }
+    }
+}

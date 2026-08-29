@@ -464,6 +464,28 @@ answer is the released one until the clamp truncates it, where
 `"directional"` decides it correctly, so the accuracy-first choice at
 small kink counts remains the default.
 
+On a **coupled** model the repair is only as good as the mode's reach,
+and the three differ. Measured on the coupled kink of
+`pyomo-pounce/tests/test_degeneracy.py`, holding side, exact answer
+`x = 0`, `y = 1`:
+
+| mode | `x` | `y` |
+|---|---|---|
+| `fix_relax` | 0 | 1 |
+| `linear` | 0 (clamped) | -3/7 |
+| `path` | 0 | 2/7 |
+
+`fix_relax` pins the crossing and re-solves, so it repairs the
+neighbour too. `linear` clamps the crossing coordinate only, and the
+neighbour keeps the released coupling -- that is the documented trade.
+`path` returns the crossing coordinate to its bound but leaves the
+neighbour at the one-sided value, which is **not** the trade the option
+advertises: `step_along_path` seeds its state from a *decided* working
+set, and `"release_all"` hands it an undecided one, so a row the
+perturbation actually holds still enters the walk as a row that leaves.
+Prefer `fix_relax` with `"release_all"` on a coupled model until that
+is resolved.
+
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
 at the record's first breakpoint, a 2% step toward the steady state
