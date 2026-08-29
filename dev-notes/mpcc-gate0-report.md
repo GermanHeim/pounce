@@ -15,12 +15,12 @@
 
 | field | value |
 |---|---|
-| pounce commit | `65f0fa7` (clean) |
+| pounce commit | `235956e` (clean) |
 | model-data revision | `93f01eeffb84c866` |
 | pounce version | 0.10.0 (Python extension, release build) |
 | discopt | absent — a cross-repository *design* dependency of gh#776, not a runtime dependency of this harness. No DiscOpt comparison was run. |
 | CCOpt | absent. Optional per gh#794; the pin a comparison would have used is `ccopt==0.4.1`. |
-| matrix | 11 cases × 2 scaling legs × 3 starts × 8 routes × 5 controls = 2560 records, 191 s |
+| matrix | 11 cases × 2 scaling legs × 3 starts × 8 routes × 5 controls = 2560 records, 188 s |
 | pinned options | `tol=1e-8`, `max_iter=300`, `bound_relax_factor=0`, `honor_original_bounds=yes` |
 | relaxation schedule | `tau = 1e0 … 1e-8`, ×0.1, one bisection allowed after a rejected stage |
 
@@ -267,7 +267,7 @@ for l1 in ("no", "yes"):
           "actual |c3|", abs(P().constraints(x)[2]))
 ```
 
-Output on `65f0fa7`:
+Output on `235956e`:
 
 ```
 no  Solve_Succeeded  1.818182e-09  [1.8e-09 1.8e-09]  reported viol 5.5e-26  actual |c3| 1.7e-29
