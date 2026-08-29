@@ -9,6 +9,406 @@ changes.
 
 ## [Unreleased]
 
+- **`feral_increase_quality`: a lever for the `increase_quality` rung, which
+  costs two solves on `square_flowsheet_resto` (gh #850, the underlying
+  regression).** `2c4f25f1` wired `FeralSolverInterface::increase_quality`,
+  which had returned a hard-coded `false`, through to FERAL's escalation ladder.
+  Ipopt calls `IncreaseQuality` when `PdFullSpaceSolver`'s refinement stalls and
+  every upstream backend that can escalate does, so wiring it looked like
+  restoring a missing rung.
+
+  The contract it restores is not the one the ladder satisfies. MA57 answers by
+  raising `pivtol` toward `pivtolmax` — strictly more conservative each time, so
+  keeping it raised for the rest of the solve can only make the factorization
+  safer. FERAL's ladder changes *which pivots are taken*, a lateral move in
+  trajectory terms, and it persists identically. On `square_flowsheet_resto` it
+  reroutes both legs into failure:
+
+  ```text
+    exact   Optimal/99   ->  RestorationFailed/131, shipped only because a
+                             second-opinion rung rescues it at 185 total
+    lbfgs   Optimal/178  ->  3000 iterations, at the cap, rescued by nothing
+  ```
+
+  The lbfgs leg is worse than the reported exact one and was found by the `2nd=`
+  column added below, which showed it failing with no ladder behind it.
+
+  **The default is unchanged, and that is a finding rather than a hedge.** The
+  rung also buys things nothing else supplies: the 12-variable model in
+  `watchdog_trial_is_not_a_divergence_verdict` ends `SolvedToAcceptableLevel` at
+  `obj = 3.7e-6` with it and at `obj = 3.42` against `f* = 0` without it — a
+  wrong-ish answer under a success-shaped status, which is worse than an honest
+  failure — plus 15–25% of the iterations on five fixture-legs. Nothing
+  separates the two sides: measured with a process-global firing cap the rung
+  fires exactly twice on `square_flowsheet_resto`, once in the main solve at
+  iteration 25 and once inside restoration at `76r`, and allowing **only the
+  first** still loses the leg, so scoping it out of restoration would not help;
+  nor does a count, since `deb7` and `square_flowsheet_resto` each fire it
+  exactly twice on their exact legs, one gaining 16% and the other losing its
+  verdict.
+
+  So `feral_increase_quality=no` is the documented recovery — it solves both
+  legs cleanly — and resolving this properly needs a *revertible* escalation,
+  one that does not govern every later factorization, which FERAL's
+  `quality_level` cannot express today (it only ratchets up). Filed upstream as
+  jkitchin/feral#192 and tracked as gh #857. Not to be confused
+  with `feral_refine`, the other half of that commit and where its performance
+  win lives: refinement makes no difference to either regressed leg.
+  `dev-notes/second-opinion-promotions-in-the-sweep.md` carries the full
+  measurement.
+
+- **A promoted second-opinion re-solve is now recorded, instead of reading as a
+  speed-up (gh #850).** When the base solve fails and a ladder rung recovers it,
+  the report's `status` and `statistics.iteration_count` both became the
+  *promoted rung's* and nothing else said the base solver had failed — so a
+  fixture that **lost** its baseline solve and is now only rescued by a retry
+  read in `scripts/sweep-fixtures.sh` as a large improvement:
+
+  ```text
+                                                  status              iters
+    v0.10.0, defaults                             SolveSucceeded       116
+    HEAD, defaults                                SolveSucceeded        54
+    HEAD, infeasibility_perturbed_start_retry=no  RestorationFailed    131
+  ```
+
+  `v0.10.0` does not have `infeasibility_perturbed_start_retry` — it rejects the
+  option outright — so that 116 is the *base solver* converging and HEAD's base
+  solver no longer does; the only thing between the user and a
+  `RestorationFailed` is a rung added in the same release. The sweep read it as
+  `116 → 54`, a 2× win. That is worse than a gap in the evidence: the sweep is
+  the repo's primary trajectory guard and CLAUDE.md makes it the *required*
+  evidence for a trajectory change, so a guard that converts a lost solve into a
+  recorded win produces positive evidence for the wrong conclusion. It is the
+  same shape of invisibility the engine column was added to close (gh #760).
+
+  `SecondOpinionOutcome` now carries `base_status`, `base_iteration_count` and
+  `rung_iteration_counts`, so the base solve survives a promotion; the JSON
+  report gained an additive `second_opinion` block (absent entirely when the
+  verdict opened no ladder, so its *presence* is itself the signal); and the
+  sweep gained a `2nd=` column built from it — `-`, `kept(n),tot=N`, or
+  `<rung>@<base status>/<base iters>,tot=N`.
+
+  **The column immediately found a second hidden fixture.**
+  `degenerate_start_hs008` is also solved only by a rung — its base solve
+  returns `InfeasibleProblemDetected` — and it reads `SolveSucceeded` at
+  `it=5`. Fifteen fixture-legs now carry a `2nd=` entry and every one of them
+  was reporting a fraction of its true cost: `square_flowsheet_resto` really
+  costs `131 + 54 = 185` against a reported 54, `degenerate_start_hs008` costs
+  30 against 5, and among the legs where the ladder promotes *nothing*,
+  `issue_508_infeasible_gap_1em4` costs 982 against a reported 441.
+
+  **The underlying regression on `square_flowsheet_resto` is made visible here,
+  not fixed.** gh #850 bisects it to `2c4f25f1` ("perf(feral): wire
+  increase_quality…"), and per CLAUDE.md a measured regression recorded as an
+  accepted cost needs an owner; `dev-notes/second-opinion-promotions-in-the-sweep.md`
+  records the measurement, the bisect and what is left to answer.
+
+  Note for anyone holding an older sweep baseline: the new column moves **every**
+  line, so a diff across this commit is not comparable field-by-field. Re-baseline
+  against a binary built at or after it.
+
+- **The PSD guard no longer switches itself off above `n = 1500` (gh #849).**
+  `_PSD_CHECK_AUTO_MAX_N = 1500` made the default `check_psd=None` skip the
+  check entirely for larger problems, so the convex QP interior-point engine —
+  the *guarded* engine — returned a silently-wrong `optimal` on an indefinite
+  `P` at **default settings**, with no option named and no warning:
+
+  ```text
+  P = I with P[0,0] = -3, c = 0, box [-1, 1];  true infimum -1.5
+  n = 1400, check_psd=None  ->  ValueError: P is not positive semidefinite
+  n = 1600, check_psd=None  ->  status='optimal', obj = 0.0
+  ```
+
+  The only thing that changed is `n` crossing a constant. The oracle is
+  arithmetic: `P` is diagonal, so `x = (1, 0, …, 0)` is feasible at `f = -1.5`,
+  and no bound is active at the returned `x = 0`, so the reduced Hessian is `P`
+  and the point is a strict saddle. The ceiling is pre-existing and was
+  documented, but gh #848 is what made it load-bearing — with the active-set
+  engine also certifying saddles there was, briefly, no engine and no default
+  setting on which an indefinite `P` above `n = 1500` was caught.
+
+  The trade-off the ceiling encoded was real: the check was a dense `O(n³)`
+  `eigvalsh` and a large sparse QP should not silently pay it. It is now paid
+  for properly instead — past the ceiling the same question is answered by an
+  **inertia count on a sparse factorization** (Sylvester's law: `P − σI = LDLᵀ`
+  has as many negative pivots as `P` has eigenvalues below `σ`), which is exact,
+  needs no iteration, and is *faster than the dense path it replaces*: 0.6 ms on
+  a 5000-variable Laplacian, and 0.24 s against `eigvalsh`'s 0.47 s even on a
+  fully dense 1600×1600. `λ_min` is then bisected on the same primitive, but
+  only on the failing branch and only to the three digits the error message
+  prints. It is the same test the Rust side already uses via
+  `Factorization::number_of_neg_evals`.
+
+  **Lanczos was tried first and the measurements rejected it**, which is worth
+  recording because it is the obvious choice. On this exact problem it is both
+  slower and wrong in a way that is hard to notice: a 5000-variable 1-D
+  Laplacian takes **9.3 s** to reach its smallest eigenvalue — a spectrum
+  clustered near zero is its worst case — and under any bounded iteration budget
+  it fails to refute `Laplacian − 4I`, a matrix whose eigenvalues are *all*
+  negative, because that matrix's extremes are clustered too. A guard that
+  misses a negative-definite Hessian is not a guard.
+
+  The new verdict is validated against the dense one on sixteen spectra at a
+  size where both are affordable — random indefinite, `AᵀA`, the zero matrix,
+  rank-one, rank-deficient, a 1-D Laplacian and that Laplacian shifted
+  negative-definite, `λ_min` at `±1e-10` straddling the guard's own tolerance,
+  and the same shapes at a `1e12` scale — and agrees on every one. The delicate
+  rows are the point: the rank-deficient and rank-one matrices carry
+  rounding-level negative eigenvalues that must **not** read as indefinite.
+
+  **A check that runs and cannot decide now warns rather than passing quietly.**
+  "No check was run" and "the check passed" must not be the same observable,
+  which is exactly what the old cliff made them.
+
+  The same cliff was in `pounce.jax` and `pounce.torch`, whose layers are
+  IPM-only by construction — an indefinite `P` gives them a saddle point, and
+  the implicit-function gradient taken through a non-KKT point is meaningless —
+  and it is gone from both. `check_psd=False` remains the explicit opt-out at
+  every size; asking for it is not the same as being given it silently.
+
+- **`qp-active-set` no longer certifies a strict saddle, or an unbounded-below
+  QP, as `Optimal` (gh #848).** gh #112 added `check_psd` because `solve_qp`
+  "accepts an indefinite `P` and returns a silently-wrong `optimal`"; gh #786
+  scoped that guard away from `method='active-set'` on the premise that the
+  active-set engine returns "a **local** optimum, the same guarantee the NLP
+  filter-IPM gives on a nonconvex NLP". It did not give that guarantee, and a
+  refusal became a confident wrong answer — at `v0.10.0` `dispatch.rs` refused
+  the class outright, at HEAD it dispatched it:
+
+  ```text
+  P = [[1, 5], [5, 1]], c = 0, box [-1, 1]^2,   eigvalsh(P) = [-4, 6]
+  qp-active-set -> Optimal / Solve_Succeeded / success=True,  x = [0, 0], f = 0
+  but x = [1, -1] is feasible at f = -4
+  ```
+
+  Started essentially **at** the global minimum (`x0 = [0.99, -0.99]`,
+  `f = -3.92`) the engine still returned `f ≈ 0` and certified it — it moved
+  uphill and reported success — and the start point was ignored entirely, so no
+  "local optimum from `x0`" reading rescues it. No bound is active at the
+  returned point, so the reduced Hessian **is** `P`. Over 40 random indefinite
+  box QPs, 30 returned a point beaten by an explicitly exhibited feasible point
+  and 23 were not even local minima. `min −x₀² + ½x₁²` over `x₀ ≥ 0` came back
+  `Optimal`, `obj = 0`, `iters = 0`.
+
+  `verify_status` re-derives only **first-order** KKT, which is equivalent to
+  global optimality for a convex QP and merely necessary for an indefinite one;
+  no second-order test was added when the class was admitted. `pounce-qp`'s
+  inertia control is not that test and must not be read as it — it shifts the
+  KKT diagonal so each *factorization* has the right inertia, which is a
+  statement about the linear algebra at each iteration, not about the curvature
+  of `P` on feasible directions at the point finally returned.
+
+  **The screen refutes by exhibition rather than by a cone argument.** The
+  second-order necessary condition lives on the critical cone, and deciding
+  copositivity on a cone is not something to attempt inside a status check, so
+  `refute_indefinite_optimum` does not try: it looks for a direction of negative
+  curvature, then walks it and evaluates the objective. A feasible point with a
+  strictly lower objective is a refutation that needs no theory at all — the
+  issue's own first oracle. The consequence is what makes the design safe: the
+  direction search can be as heuristic as it likes, because a direction it
+  misses leaves the verdict where it was and a direction it finds is only ever
+  acted on after the walk has *proved* the point beatable. There is no false
+  demotion available to it, which is why the search is allowed to ignore the
+  general rows — the step length accounts for every bound and every row.
+
+  Two searches run, and both are load-bearing: an interior one for a saddle in
+  the middle of the box, and an unrestricted one that reaches a coordinate
+  sitting **on** a weakly active bound it may still leave. The unbounded model
+  is the second case entirely — `x₀` is at its bound, so an interior-only search
+  sees `P₁₁ = 1 > 0` and finds nothing while the whole defect lives along `+x₀`.
+  Mutation-checked: dropping the unrestricted half turns the on-bound legs red
+  and leaves the interior legs green.
+
+  The search is matrix-free (shifted power iteration, one `p_mul` per step), so
+  it carries **no dimension ceiling** — deliberately, since a ceiling that
+  silently skips the check is the shape of the companion defect on `check_psd`.
+  A refuted point makes the attempt inconclusive, which feeds the engine's
+  existing Ruiz-retry-after-failure path, so the reported saddle does not merely
+  lose its verdict: it comes back at the true global minimum `x = [-1, 1]`,
+  `f = -4`. A negative-curvature direction that is also a feasible recession
+  direction reaches `ray_certifies_unbounded`, whose gh #791 negative-curvature
+  branch existed and could never fire — its only call site is the `Unbounded`
+  arm of `verify_status`, which a claimed `Optimal` never reaches, and its unit
+  tests call it directly and stayed green. `min −x₀² + ½x₁²` now returns
+  `DualInfeasible`, matching what POUNCE's own NLP arm says about the same model
+  on the same binary.
+
+  **The docs now say what the verdict means.** `dispatch.rs`'s `NonconvexQp`
+  comment, `solve_qp_active_set_inertia`'s doc, and the `pounce.qp` guard
+  message all claimed a local-optimum guarantee and pointed users at this engine
+  as the remedy for the very failure they warn about. An `Optimal` on an
+  indefinite `P` now says what it is: first-order KKT holds and no second-order
+  counterexample was found — a refutation, not a proof, and strictly weaker than
+  the NLP path's local guarantee.
+
+  The convex arm is untouched: the caller's own `HessianInertia::Psd` claim is
+  the gate, so the screen never runs on the path every existing consumer uses.
+  `scripts/sweep-fixtures.sh` is empty across all 158 fixture-legs — which is
+  expected and is *not* evidence about this path, since no nonconvex-QP fixture
+  is routed to `qp-active-set` and `auto` still sends the class to the NLP arm.
+  That is CLAUDE.md's rule verbatim, and
+  `crates/pounce-convex/tests/issue848_indefinite_second_order.rs` is the
+  evidence that is.
+
+- **The `.nl` reader refuses non-finite numbers instead of silently dropping
+  them (gh #847).** `str::parse::<f64>()` accepts `inf`, `-inf` and `nan`, and
+  returns `inf` for any literal that overflows — `1e400` is a plausible thing
+  for a model generator to write. The reader had no finiteness screen, and
+  `pounce_common::types::lower_bound_present` / `upper_bound_present` are
+  `is_finite() && ...`, so a non-finite bound was **indistinguishable from a
+  bound that was never declared** and was dropped. On a model whose feasible
+  region a lower bound makes empty, the sweep across that bound was `100`,
+  `1e18`, `1e300` all correctly infeasible and then `1e400` and `inf` both
+  `EXIT: Optimal Solution Found.` with exit code 0 — the transition sitting
+  exactly at the finiteness edge, not at any modelling scale. A `nan` was
+  worse: it reached the answer, and the solve reported `Objective: nan` under
+  `Solve_Succeeded`, rc 0.
+
+  This was not a tolerance opinion. POUNCE already refuses the same value on
+  another surface — `solve_qp` rejects a non-finite bound with a bespoke
+  `ValueError` — and Ipopt, which POUNCE ports, refuses it too ("Invalid
+  number"); the `.nl` path simply had not implemented the project's own
+  position.
+
+  Every number the reader parses is now screened: bounds (all five bound
+  kinds), numeric literals in expression bodies, and the coefficient/initial-
+  value lines that the `J`, `G`, `x` and `d` segments share. The quadratic-
+  recognition fast path reads `n` tokens separately from the general expression
+  parser, so it is screened too — a fix to one is not a fix to the other, and
+  `both_expression_paths_refuse_it_not_just_the_general_one` is what says so.
+  `NlProblem::from_expressions` gets the same screen, because the issue's
+  closing note is right that the two presence predicates are load-bearing
+  beyond the file reader: a caller building a model programmatically hit the
+  identical silent drop.
+
+  **One non-finite value per side is not an error, and the asymmetry is
+  load-bearing.** `.nl` states "no bound" with a bound *kind* (1 = upper only,
+  2 = lower only, 3 = free), so a non-finite number in a bound slot is a
+  corrupt value rather than a notation — except that `-inf` in a *lower* slot
+  and `+inf` in an *upper* one say exactly what the `±1e19` sentinel says, and
+  a writer that emits them means it. Those normalize to the sentinel.
+  Everything else is refused, `+inf` as a *lower* bound most of all: that is
+  the reported case, and it is an empty box, not an absent bound.
+
+  Nothing that exists is now refused: no `.nl` file in the repository contains
+  an `inf`/`nan` token or an overflowing literal, all 88 still read, and
+  `scripts/sweep-fixtures.sh` is unchanged across all 158 fixture-legs.
+
+- **The convex `σ` path no longer certifies a wrong `x` as `Optimal` on an
+  ill-conditioned box QP (gh #846).** A 6-variable diagonal box QP with
+  `eig = [1e3 ‥ 1e11]` on `[-1, 1]` is separable, so `x* = clamp(t, -1, 1)`
+  with no solver in the loop. At the **default** tolerance the cost-normalized
+  convex arm returned `x₀ = 0.831` against `1.0` under `EXIT: Optimal Solution
+  Found.`, and at `tol = 1e-6` it returned `0.039` — 96% wrong on a unit box.
+  Ipopt 3.14.19, cvxpy/Clarabel, cvxpy/SCS, the closed form, `solver_selection
+  =nlp` and `qp_hsde=no` all agree on the true minimiser. Over a generated
+  family the reporter measured **84 of 157** instances wrong under `Optimal`,
+  worst `‖x − x*‖∞ = 5.72e-1`.
+
+  Every test standing behind that verdict was an **aggregate**.
+  `normalized_optimum_is_genuine` divided each residual by one number for the
+  whole problem — `gscale = ‖Px‖∞ ∨ ‖c‖∞ = 4.0e10`, which belongs to the
+  *stiffest* coordinate and was then the denominator for every other one. The
+  binding violation is complementarity: `x₀` sat `2.9e-3` off its bound
+  carrying a multiplier of `6.3e3` insisting it was on it, and `18.2` over
+  `4.0e10` reads `4.5e-10`, comfortably inside the `100·tol` cut. The
+  objective could not see it either — `-1.17834000816e10` against
+  `-1.17834002580e10`, **a relative objective error of 1.5e-8 for a 17% error
+  in x₀** — which is why an objective-parity check rates this problem solved,
+  the substitute CLAUDE.md records `4c02817d` making for the fixture sweep on
+  this arm.
+
+  The relative arm is now asked **one orthant row at a time**. Complementarity
+  says one factor is at zero, so it is asked as exactly that: the slack is
+  negligible against the largest term that built it (`|hⱼ| ∨ |(Gx)ⱼ|`), *or*
+  the multiplier is negligible against the largest term in every stationarity
+  row it feeds. Neither factor needs a floor and neither is a product of unlike
+  units, which is what `|zⱼsⱼ| / (gscale ∨ pscale)` was. Componentwise the two
+  ratios read `2.9e-3` and `1.0` — and `2.9e-3` is not an abstraction, it *is*
+  the returned `x`'s error, because `zs/z = s` is the distance from the bound.
+
+  **`σ` turned out to be the amplifier, not the origin.** Rejecting the
+  normalized certificate only moved the answer from `1.6e-1` wrong to `2.9e-3`
+  wrong, because gh #324's fallback is the *same embedding* un-normalized and
+  the embedding's own stopping test normalizes the gap by the objective's
+  magnitude (`gap / (1 + |obj|)`): at `|obj| = 1.18e10` that licenses an
+  absolute gap of `118`, which on curvature `1e3` is `0.49` in `x`. Measured
+  across `mag = 1e7 ‥ 1e14` the embedding degrades from `1e9` up while the
+  direct driver behind Ruiz is accurate at every magnitude, so a `σ` answer
+  that fails the test twice now falls through to that driver, and its answer is
+  taken only when it passes the same test. When nothing certifies, the closest
+  claimed optimum by **absolute** `kkt_error` in the caller's own coordinates
+  is returned — a ranking, not another threshold. Under it the reported
+  instance is correct at every tolerance in the reported table and under a
+  ten-decade objective rescaling, which is argmin-invariant by identity and was
+  costing eight orders of accuracy per decade.
+
+  **The cone gate is the part a reviewer should look at hardest.** The direct
+  driver is an orthant-only entry point — Ruiz is a row scaling — so handing it
+  a QCQP reads `h − Gx ∈ K` as `h − Gx ≥ 0` row by row and answers a looser
+  problem. The first draft had no gate, and `scripts/sweep-fixtures.sh` caught
+  it: exactly one fixture moved, on both legs, `qcqp_columns_illcond`
+  `-364.2102538 → -210.5328764` at `SolveSucceeded`, where
+  `solver_selection=nlp` and `qp_hsde=no` both put the optimum at `-364.2102`.
+  Every orthant fixture stayed green, because none of them takes that branch.
+  With the gate the sweep diff is **empty across all 158 fixture-legs**, which
+  is the expected result: CLAUDE.md records that 1 of 79 fixtures reaches `σ`
+  and 0 of 138 Maros-Meszaros problems do, so an empty sweep is evidence of no
+  collateral damage and nothing more —
+  `crates/pounce-convex/tests/issue846_sigma_flat_direction.rs` is the evidence
+  about the path itself, including a conic leg with a closed-form oracle for
+  the branch the corpus reaches only through one fixture.
+
+  A companion arm asking the same question of the **stationarity** rows was
+  written, carried through the investigation, and then removed: on this family
+  it rejects nothing the complementarity arm does not, and removing it turned
+  no test red while removing complementarity turns four red. Nor is that an
+  accident of the fixtures — the same spectrum unconstrained, in a wide box it
+  never reaches, and under an equality row all come back exact to `3e-16`. The
+  failure needs an *active bound*, because the slack it spends is bought by the
+  objective-relative gap test and a gap is spent on the bound multipliers.
+  Recorded here rather than shipped as an unexercised guard.
+
+  `ipm.rs` also emitted no `info!`/`debug!`/`trace!` at all, so an accepted
+  normalized optimum and a rejected one were indistinguishable from outside.
+  The four `σ` decisions now log at `debug`.
+
+- **A sensitivity correction that leaves the model's domain no longer reports
+  itself as perfect (gh #845).** `corrector::run` normed its residual with a
+  fold over `f64::max`, and `f64::max` returns the *other* operand when one is
+  NaN — so an all-NaN residual normed to `0.0`, the smallest number the
+  stopping rule can see. The NaN iterate won `now < best_residual`, the next
+  pass could not improve on `0.0` and set `converged = true`, and the report
+  was filled from that point: `residual = 0.0`, all three of `stationarity`,
+  `feasibility` and `complementarity` `0.0`, and `improved() = true`, while the
+  step handed back was `[nan, nan]`. Downstream, `pyomo_pounce.sens.estimate`
+  gated its "the corrector barely moved" warning on
+  `residual > 0.5 * initial_residual`; `0.0 > 3.04` is false, so it returned
+  `{x: nan}` in silence.
+
+  `correct_step` puts a coordinate back inside its **declared bounds** before
+  evaluating, so a bound was protection. A variable kept inside a *function's*
+  domain by a **constraint** has no bound to be put back inside, and that is an
+  ordinary modelling pattern — `log`, `sqrt`, `1/x`, an Arrhenius `1/T`. A
+  perturbation whose predicted point crosses that edge sent the residual NaN.
+
+  The norm is now `residual_norm`, which returns infinity at a non-finite
+  entry: no residual at all, rather than the smallest one. A non-finite
+  residual at the point the iterations start from is a
+  `SensComputationFailed` naming the domain crossing, since there is nothing
+  there to correct; one that appears mid-loop ends the loop with the best
+  finite point and `improved() == false`. The returned step is screened for
+  finiteness besides, so no NaN reaches a caller wearing a report that says it
+  did not. The `pyomo-pounce` gate is now `not (residual <= 0.5 * initial)`,
+  which fires on a non-finite residual instead of comparing false.
+
+  The whole corrector surface is new in this cycle (`fb284574`), and
+  `cargo test -p pounce-sensitivity` was green throughout: this is a guard it
+  never had. `crates/pounce-sensitivity/tests/issue_845_nonfinite_residual.rs`
+  is the fixture — the issue's own `y = log(x)`, `x = 4 + p` model with `x`
+  declared unbounded, where `dp = -5` predicts `x = -1` — plus an in-domain leg
+  so "always fail" is not a passing fix, and a unit test on `residual_norm`
+  for the mid-loop branch the fixture cannot reach.
 - **`estimate()` and `gradient()` no longer re-parse variable names on
   every call.** The sensitivity session now keeps the variable data
   objects the solve resolves when it loads its solution back, in

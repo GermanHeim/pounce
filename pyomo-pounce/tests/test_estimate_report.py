@@ -410,12 +410,17 @@ def test_every_solver_route_reports_the_same():
     in-process sensitivity route the legacy plugin uses, so one session
     serves all three entry points and the report cannot depend on which
     one ran."""
-    from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+    from conftest import solver_routes
+
+    # The `pounce_v2` registration needs Pyomo 6.10.1+; where it is absent the
+    # remaining routes are still compared rather than the whole test skipped.
+    routes = solver_routes()
+    assert len(routes) >= 2, f"nothing to compare: {[n for n, _ in routes]}"
 
     reports = []
-    for solve in (lambda m: pyo.SolverFactory("pounce").solve(m),
-                  lambda m: pyo.SolverFactory("pounce_v2").solve(m),
-                  lambda m: SF2("pounce").solve(m)):
+    names = []
+    for name, solve in routes:
+        names.append(name)
         m = pyo.ConcreteModel()
         m.p = pyo.Param(initialize=1.0, mutable=True)
         m.x = pyo.Var(bounds=(0.0, 10.0), initialize=1.0)
@@ -425,12 +430,13 @@ def test_every_solver_route_reports_the_same():
         solve(m)
         reports.append(estimate_report(m, [(m.p, 4.0)]))
 
-    legacy, v2, contrib = reports
-    for other in (v2, contrib):
-        assert other.first == legacy.first == "y"
-        assert other.alpha == pytest.approx(legacy.alpha, rel=1e-12)
-        assert other.mu == pytest.approx(legacy.mu, rel=1e-12)
-        assert other.activity == legacy.activity
+    legacy, *rest = reports
+    assert legacy.first == "y"
+    for name, other in zip(names[1:], rest):
+        assert other.first == legacy.first, name
+        assert other.alpha == pytest.approx(legacy.alpha, rel=1e-12), name
+        assert other.mu == pytest.approx(legacy.mu, rel=1e-12), name
+        assert other.activity == legacy.activity, name
 
 
 def test_a_bound_the_step_crosses_is_never_missed():

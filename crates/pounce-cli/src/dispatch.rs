@@ -660,9 +660,27 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
 /// convex classes: `pounce-qp` handles an indefinite Hessian by construction
 /// (§4.5 inertia control), which is what `docs/src/choosing-a-solver.md` has
 /// always advertised, so a `NonconvexQp` is accepted here and dispatched to it
-/// for a *local* solution (gh #786). `auto` still sends that class to the NLP
-/// filter-IPM — the class is our inference, and the general path is the safer
-/// default for it — so this is reachable only by asking for the engine by name.
+/// (gh #786). `auto` still sends that class to the NLP filter-IPM — the class
+/// is our inference, and the general path is the safer default for it — so
+/// this is reachable only by asking for the engine by name.
+///
+/// **What the verdict on an indefinite QP does and does not mean (gh #848).**
+/// This comment used to say the engine returns "a *local* solution", reading
+/// §4.5 inertia control as a second-order guarantee. It is not one: inertia
+/// control shifts the KKT diagonal so each *factorization* has the right
+/// inertia, which makes the linear algebra work and says nothing about the
+/// curvature of `P` on the feasible directions at the point finally returned.
+/// On `P = [[1, 5], [5, 1]]` over `[-1, 1]²` the engine reported `Optimal` at
+/// the strict saddle `x = 0`, `f = 0`, where `x = (1, -1)` is feasible at
+/// `f = -4`.
+///
+/// The engine now screens a claimed optimum for negative curvature and, where
+/// it finds a feasible direction along which it can *exhibit* a strictly
+/// better point, refuses the verdict (`active_set::refute_indefinite_optimum`).
+/// That is a **refutation, not a proof**: an `Optimal` here means first-order
+/// KKT holds and no second-order counterexample was found, which is strictly
+/// weaker than the NLP filter-IPM's local guarantee. Say that, rather than
+/// claiming parity the engine does not have.
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,

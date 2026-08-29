@@ -99,20 +99,23 @@ def test_an_unknown_mode_is_refused():
 
 
 def test_fix_relax_reaches_the_same_answer_through_every_route():
-    from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+    from conftest import solver_routes
+
+    # The `pounce_v2` registration needs Pyomo 6.10.1+; where it is absent the
+    # remaining routes are still compared rather than the whole test skipped.
+    routes = solver_routes()
+    assert len(routes) >= 2, f"nothing to compare: {[n for n, _ in routes]}"
 
     out = []
-    for solve in (lambda mm: pyo.SolverFactory("pounce").solve(mm),
-                  lambda mm: pyo.SolverFactory("pounce_v2").solve(mm),
-                  lambda mm: SF2("pounce").solve(mm)):
+    for _name, solve in routes:
         m = linked()
         solve(m)
         out.append(estimate(m, [(m.p, -2.0)], mode="fix_relax"))
-    first, *rest = out
-    for other in rest:
+    (first, *rest) = out
+    for name, other in zip([n for n, _ in routes][1:], rest):
         vals_a = sorted(round(v, 9) for v in first.values())
         vals_b = sorted(round(v, 9) for v in other.values())
-        assert vals_a == vals_b
+        assert vals_a == vals_b, name
 
 
 def scaled_linked(p=1.0):

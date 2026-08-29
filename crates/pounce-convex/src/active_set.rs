@@ -153,9 +153,21 @@ where
 /// The active-set engine handles indefinite Hessians by construction: §4.5
 /// inertia control shifts the H block until the reduced KKT factor has the
 /// right inertia, so phase-2 descends on a locally convex model and the point
-/// it reaches satisfies the first-order conditions of the *original* QP. What
-/// it returns for an indefinite `P` is therefore a **local** solution, exactly
-/// as the NLP filter-IPM's `optimal` is local on a nonconvex NLP.
+/// it reaches satisfies the **first-order** conditions of the *original* QP.
+///
+/// That is where the guarantee stops, and it used to be overstated here as
+/// "a local solution, exactly as the NLP filter-IPM's `optimal` is local on a
+/// nonconvex NLP". Inertia control is a property of each *factorization*, not
+/// a second-order test at the point finally returned, and on
+/// `P = [[1, 5], [5, 1]]` over `[-1, 1]²` the engine reported `Optimal` at the
+/// strict saddle `x = 0` while `x = (1, -1)` is feasible at `f = -4` (gh #848).
+///
+/// A claimed optimum is now screened for negative curvature by
+/// [`refute_indefinite_optimum`], which refuses the verdict where it can
+/// *exhibit* a strictly better feasible point, and returns the unboundedness
+/// certificate where the direction is a feasible recession one. That is a
+/// **refutation, not a proof**: an `Optimal` on an indefinite `P` means
+/// first-order KKT holds and no counterexample was found.
 ///
 /// Two things this driver does for the convex case change under
 /// [`HessianInertia::Indefinite`]:
@@ -895,6 +907,17 @@ where
 
     let mut sol = back_translate(prob, &qsol);
     sol.status = verify_status(qsol.status, qsol.unbounded_ray.as_deref(), &sol, prob, opts);
+    // `verify_status` re-derives *first-order* KKT, which is equivalent to
+    // global optimality for a convex QP and merely necessary for an indefinite
+    // one. So an `Optimal` claimed under `HessianInertia::Indefinite` gets a
+    // second-order screen as well (gh #848). Nothing reaches it on the PSD path
+    // -- the caller's own claim is the gate -- so the convex arm pays nothing.
+    if inertia == HessianInertia::Indefinite && sol.status == QpStatus::Optimal {
+        if let Some(demoted) = refute_indefinite_optimum(prob, &sol, opts) {
+            debug_trace(|| format!("indefinite optimum refuted by exhibition -> {demoted:?}"));
+            sol.status = demoted;
+        }
+    }
     // The engine says infeasible and its own multipliers could not prove it.
     // Before demoting that to "the solver broke", spend one more solve on the
     // objective-free twin, whose multipliers *can* — see [`feasibility_probe`].
@@ -1388,6 +1411,294 @@ pub fn verify_status(
 /// Tolerances are relative to `‖d‖∞` because the ray is not normalized; the
 /// curvature test normalizes by `‖d‖∞²` instead, so it can be compared against
 /// the scale of `P`.
+/// Second-order screen on a claimed optimum of an **indefinite** QP, by
+/// **exhibiting a strictly better feasible point** (gh #848).
+///
+/// # What the engine actually proves
+///
+/// [`verify_status`] re-derives *first-order* KKT residuals. For a convex QP
+/// first-order KKT is equivalent to global optimality, so that guard was sound
+/// for every input the engine had ever been given. gh #786 then admitted
+/// indefinite Hessians on the premise that the engine returns "a local
+/// optimum, the same guarantee the NLP filter-IPM gives on a nonconvex NLP".
+/// For an indefinite `P` first-order KKT is necessary and **not sufficient**,
+/// no second-order test was added, and the result was a confident wrong
+/// answer where `v0.10.0` had refused the class outright:
+///
+/// ```text
+///   P = [[1, 5], [5, 1]], c = 0, box [-1, 1]^2,  eig(P) = [-4, 6]
+///   qp-active-set -> Optimal, x = [0, 0], f = 0
+///   but x = [1, -1] is feasible with f = -4
+/// ```
+///
+/// The start point was ignored entirely — begun at `x0 = [0.99, -0.99]`
+/// (`f = -3.92`) the engine still returned `f ≈ 0` and certified it, so it
+/// moved **uphill** and reported success. Across 40 random indefinite box QPs,
+/// 30 returned a point beaten by an explicitly exhibited feasible point and 23
+/// were not even local minima.
+///
+/// The engine's inertia control is not the missing test and must not be read
+/// as it: it shifts the KKT diagonal so the *factorization* has the right
+/// inertia, which makes the linear algebra work at each iteration. It says
+/// nothing about the curvature of `P` on the feasible directions at the point
+/// finally returned.
+///
+/// # Why this refutes by exhibition rather than by a cone argument
+///
+/// The second-order necessary condition lives on the *critical cone*, and
+/// deciding copositivity on a cone is not something to attempt inside a status
+/// check. So this does not try. It looks for a direction of negative curvature,
+/// then **walks along it and evaluates the objective**: a feasible point with a
+/// strictly lower objective is a refutation that needs no theory at all, and is
+/// the first of the four oracles the issue offers.
+///
+/// The consequence that makes this design safe is the important one: the search
+/// for a direction can be as heuristic as it likes. A direction it misses
+/// leaves the verdict where it already was; a direction it finds is only ever
+/// acted on after the walk has *proved* the point beatable. **There is no false
+/// demotion available to it.** That is why the free-set restriction below is
+/// allowed to ignore the general rows — the step length accounts for every
+/// bound and every row, so a direction that leaves the feasible region
+/// immediately yields a zero step and no refutation.
+///
+/// # The two verdicts
+///
+/// A negative-curvature direction that is also a feasible **recession**
+/// direction is not merely a better point, it is a certificate of
+/// unboundedness, and [`ray_certifies_unbounded`] already knows how to say so.
+/// That branch existed and could never fire: its only call site is the
+/// `Unbounded` arm of [`verify_status`], and on `min −x₀² + ½x₁², x₀ ≥ 0` the
+/// engine claims `Optimal` (`obj = 0`, `iters = 0`), so the arm that would
+/// consult it is never reached. Its unit tests call it directly and stayed
+/// green throughout. Reaching it from the `Optimal` side is what turns that
+/// model from `Solve_Succeeded` into the `Diverging_Iterates` the NLP arm
+/// reports on the same binary.
+///
+/// Anything else beatable is demoted to [`QpStatus::NumericalFailure`] — the
+/// same "we did not solve it" this function's neighbours already use when a
+/// claim does not survive re-derivation. It is not a satisfying verdict, but a
+/// point the solver can itself prove is not optimal must not go out labelled
+/// `Optimal`.
+///
+/// Returns `None` when nothing was refuted, which leaves the first-order
+/// verdict standing.
+fn refute_indefinite_optimum(
+    prob: &QpProblem,
+    sol: &QpSolution,
+    opts: &QpOptions,
+) -> Option<QpStatus> {
+    let n = prob.n;
+    if n == 0 || sol.x.len() != n || !sol.x.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let p_scale = prob
+        .p_lower
+        .iter()
+        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
+        .max(1.0);
+
+    // Two restrictions of the curvature search, and both are needed.
+    //
+    // The *interior* one -- coordinates strictly inside their bounds -- finds
+    // the curvature a saddle in the middle of the box carries, which is the
+    // reported `P = [[1, 5], [5, 1]]` case.
+    //
+    // The *unrestricted* one is what reaches a coordinate sitting **on** a
+    // bound that it may still leave. On `min −x₀² + ½x₁², x₀ ≥ 0` the engine
+    // returns `x = 0` with `iters = 0`; `x₀` is at its bound, so the interior
+    // search sees only `P₁₁ = 1 > 0` and finds nothing, while the whole defect
+    // lives along `+x₀`. The bound is *weakly* active there (the gradient
+    // vanishes, so its multiplier is zero) and the direction leaves it into
+    // the feasible region.
+    //
+    // Widening the search cannot widen what is *accepted*: a direction that
+    // points out of an active bound gets a zero step from
+    // [`max_feasible_step`] and refutes nothing, and both signs are tried, so
+    // the inward half of a one-sided cone is always among the candidates.
+    let margin = |v: f64| 1e-9 * (1.0 + v.abs());
+    let free: Vec<bool> = (0..n)
+        .map(|i| {
+            let (lo, hi) = (prob.lb_of(i), prob.ub_of(i));
+            sol.x[i] > lo + margin(lo) && sol.x[i] < hi - margin(hi)
+        })
+        .collect();
+    let all = vec![true; n];
+    let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(2);
+    if free.iter().any(|&f| f) {
+        candidates.extend(most_negative_curvature_direction(prob, &free, p_scale));
+    }
+    if !free.iter().all(|&f| f) {
+        candidates.extend(most_negative_curvature_direction(prob, &all, p_scale));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let f_at = |x: &[f64]| {
+        let mut px = vec![0.0; n];
+        prob.p_mul(x, &mut px);
+        0.5 * (0..n).map(|i| x[i] * px[i]).sum::<f64>()
+            + (0..n).map(|i| prob.c[i] * x[i]).sum::<f64>()
+    };
+    let f_cur = f_at(&sol.x);
+    if !f_cur.is_finite() {
+        return None;
+    }
+
+    for (d, sign) in candidates.iter().flat_map(|d| [(d, 1.0_f64), (d, -1.0)]) {
+        let dir: Vec<f64> = d.iter().map(|v| sign * v).collect();
+        // A feasible recession direction of negative curvature is the
+        // unboundedness certificate, not merely a better point.
+        if ray_certifies_unbounded(prob, &dir) {
+            return Some(QpStatus::DualInfeasible);
+        }
+        let Some(alpha) = max_feasible_step(prob, &sol.x, &dir) else {
+            continue;
+        };
+        if !(alpha > 0.0) {
+            continue;
+        }
+        let trial: Vec<f64> = (0..n).map(|i| sol.x[i] + alpha * dir[i]).collect();
+        let f_new = f_at(&trial);
+        // Strictly better by more than the solve's own tolerance, measured
+        // relative to the objective's own scale so this cannot fire on
+        // rounding at a genuine optimum.
+        if f_new.is_finite() && f_new < f_cur - opts.tol * (1.0 + f_cur.abs()) {
+            return Some(QpStatus::NumericalFailure);
+        }
+    }
+    None
+}
+
+/// A direction of negative curvature for `P` restricted to the free
+/// coordinates, or `None` if none was found.
+///
+/// Shifted power iteration: the dominant eigenvector of `(σI − P_F)` with
+/// `σ` a Gershgorin upper bound on `λ_max(P_F)` is the eigenvector of
+/// `λ_min(P_F)`. Matrix-free — one `p_mul` per iteration — so this costs
+/// `O(nnz)` per step and carries no dimension ceiling, which matters:
+/// a ceiling that silently skips the check is the shape of the companion
+/// defect on `check_psd`.
+///
+/// Heuristic on purpose. It can miss a direction, and missing leaves the
+/// verdict exactly where it was; it cannot cause a wrong demotion, because
+/// [`refute_indefinite_optimum`] acts only after walking the direction and
+/// finding a strictly better feasible point.
+fn most_negative_curvature_direction(
+    prob: &QpProblem,
+    free: &[bool],
+    p_scale: f64,
+) -> Option<Vec<f64>> {
+    let n = prob.n;
+    // Gershgorin bound over the free block. `p_lower` stores the lower
+    // triangle, so an off-diagonal entry contributes to both of its rows.
+    let mut diag = vec![0.0; n];
+    let mut off = vec![0.0; n];
+    for t in &prob.p_lower {
+        if !free[t.row] || !free[t.col] {
+            continue;
+        }
+        if t.row == t.col {
+            diag[t.row] += t.val;
+        } else {
+            off[t.row] += t.val.abs();
+            off[t.col] += t.val.abs();
+        }
+    }
+    let shift = (0..n)
+        .filter(|&i| free[i])
+        .fold(0.0_f64, |a, i| a.max(diag[i] + off[i]))
+        .max(p_scale);
+
+    // Deterministic start: no `rand` dependency, and a fixed vector makes the
+    // verdict reproducible run to run. Mixed signs so it is not orthogonal to
+    // the eigenvector on a symmetric fixture -- `[1, 1, ...]` is exactly the
+    // wrong choice for `P = [[1, 5], [5, 1]]`, whose negative eigenvector is
+    // `[1, -1]`.
+    let mut v: Vec<f64> = (0..n)
+        .map(|i| {
+            if free[i] {
+                let k = (i % 7) as f64;
+                (1.0 + k) * if i % 2 == 0 { 1.0 } else { -1.0 }
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let mut pv = vec![0.0; n];
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    for _ in 0..64 {
+        let nrm = v.iter().fold(0.0_f64, |a, x| a + x * x).sqrt();
+        if !(nrm > 0.0) || !nrm.is_finite() {
+            break;
+        }
+        for x in v.iter_mut() {
+            *x /= nrm;
+        }
+        pv.iter_mut().for_each(|x| *x = 0.0);
+        prob.p_mul(&v, &mut pv);
+        let q: f64 = (0..n).filter(|&i| free[i]).map(|i| v[i] * pv[i]).sum();
+        if best.as_ref().is_none_or(|(bq, _)| q < *bq) {
+            best = Some((q, v.clone()));
+        }
+        // v <- (shift I - P_F) v, kept inside the free block.
+        for i in 0..n {
+            v[i] = if free[i] { shift * v[i] - pv[i] } else { 0.0 };
+        }
+    }
+    let (q, vec) = best?;
+    // Comparable to `P`'s own scale, and far above the rounding floor of a
+    // genuinely zero curvature -- the same shape `ray_certifies_unbounded`
+    // uses for its own curvature test.
+    (q < -1e-8 * p_scale).then_some(vec)
+}
+
+/// How far `x` can move along `d` before leaving the feasible region, or
+/// `None` when it cannot move at all (an equality row the direction does not
+/// respect, or a row already tight that the direction points out of).
+///
+/// `Some(f64::INFINITY)` means nothing blocks the direction.
+fn max_feasible_step(prob: &QpProblem, x: &[f64], d: &[f64]) -> Option<f64> {
+    let n = prob.n;
+    let dn = d.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    if !(dn > 0.0) || !dn.is_finite() {
+        return None;
+    }
+    let slack = 1e-9 * dn;
+    // Equalities must be respected exactly; there is no step along a direction
+    // that moves off the affine set.
+    let mut ad = vec![0.0; prob.m_eq()];
+    for t in &prob.a {
+        ad[t.row] += t.val * d[t.col];
+    }
+    if ad.iter().any(|v| v.abs() > slack) {
+        return None;
+    }
+
+    let mut alpha = f64::INFINITY;
+    for i in 0..n {
+        let (lo, hi) = (prob.lb_of(i), prob.ub_of(i));
+        if d[i] > slack && hi < crate::qp::POS_INF {
+            alpha = alpha.min(((hi - x[i]) / d[i]).max(0.0));
+        }
+        if d[i] < -slack && lo > crate::qp::NEG_INF {
+            alpha = alpha.min(((lo - x[i]) / d[i]).max(0.0));
+        }
+    }
+    let mut gx = vec![0.0; prob.m_ineq()];
+    let mut gd = vec![0.0; prob.m_ineq()];
+    prob.g_mul(x, &mut gx);
+    for t in &prob.g {
+        gd[t.row] += t.val * d[t.col];
+    }
+    for j in 0..prob.m_ineq() {
+        if gd[j] > slack {
+            alpha = alpha.min(((prob.h[j] - gx[j]) / gd[j]).max(0.0));
+        }
+    }
+    Some(alpha)
+}
+
 fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     if d.len() != prob.n {
         return false;
