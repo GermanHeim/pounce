@@ -61,7 +61,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy.optimize import lsq_linear
 
-from .spec import ACTIVE_TOL, MpccCase
+from .spec import ACTIVE_TOL, MpccCase, pair_activity
 
 #: Largest biactive set the branch enumeration will attempt. Above it
 #: the classifier reports "not enumerated" rather than a class it did
@@ -72,9 +72,14 @@ _CLASSES = ("S", "M", "C", "W")
 
 
 def _sets(case: MpccCase, x: np.ndarray, tol: float):
+    """Index sets, using `spec.pair_activity`'s sqrt-aware threshold.
+
+    Reading membership with a fixed tolerance is what made this
+    classifier report `none` — not even weakly stationary — for points
+    that had reached the optimum to nine digits; see `pair_activity`.
+    """
     g, h = case.pair_values(x)
-    g_act = np.abs(g) <= tol
-    h_act = np.abs(h) <= tol
+    g_act, h_act = pair_activity(g, h, tol)
     return g, h, g_act, h_act
 
 

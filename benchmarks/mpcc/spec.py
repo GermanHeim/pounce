@@ -46,11 +46,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-#: Membership tolerance for "this pair side is zero" when the activity
-#: pattern is read off a returned point. Loose relative to `tol` on
-#: purpose: a converged interior-point solve parks an active row at
-#: O(mu/z), not at 0, and a threshold at solver tolerance would classify
-#: a genuinely active row as inactive on half the corpus.
+#: Floor on the membership tolerance for "this pair side is zero" when
+#: the activity pattern is read off a returned point. Loose relative to
+#: `tol` on purpose: a converged interior-point solve parks an active
+#: row at O(mu/z), not at 0, and a threshold at solver tolerance would
+#: classify a genuinely active row as inactive on half the corpus.
+#:
+#: It is a *floor*, not the tolerance -- see `pair_activity`.
 ACTIVE_TOL = 1e-6
 
 #: Benchmark classes. Every case carries exactly one, and the ladder is
@@ -129,6 +131,46 @@ class Affine:
 
     def rescale(self, d: np.ndarray) -> "Affine":
         return Affine(self.a * d, self.b)
+
+
+def pair_activity(
+    g: np.ndarray, h: np.ndarray, act_tol: float = ACTIVE_TOL
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Which side of each complementarity pair counts as zero at a point.
+
+    The threshold is ``max(act_tol, sqrt(|G_i H_i|))`` — per pair, from
+    the pair's own achieved complementarity — and **not** a fixed
+    ``act_tol``. The reason is the geometry of the constraint the solver
+    was actually given: ``G*H`` is quadratically flat at the corner, so a
+    solve that drives the product to ``eps`` leaves the pair sitting
+    ``sqrt(eps)`` away from it. At the default ``tol = 1e-8`` that is
+    ``1e-4``, a hundred times the floor here — so a fixed ``1e-6``
+    threshold reads a perfectly converged MPCC point as lying on
+    *neither* branch, reports "no active constraints", and then finds no
+    multipliers reproducing ``grad f``.
+
+    Measured before this rule existed: 12 of the corpus's 512
+    control-free observations — every ℓ₁ cell on `ralph2` and
+    `qpec_small` that reached the optimum to nine digits — came back
+    classified `none`, i.e. not even weakly stationary, purely from the
+    threshold. That is the same "absolute threshold on a scale-dependent
+    quantity" failure the rest of this harness is built to avoid; here
+    the scale is the square root of the achieved residual.
+
+    Both limbs behave correctly at the extremes: with ``G = 1`` and
+    ``H = 1e-9`` the threshold is ``3e-5``, so ``H`` is active and ``G``
+    is not; with ``G = H = 3e-5`` (the same product) both are, which is
+    the biactive reading and the right one. At an exactly complementary
+    point the product is zero and the threshold falls back to
+    ``act_tol``.
+
+    ``G`` and ``H`` are invariant under `MpccCase.rescale`, so the rule
+    is scale-invariant like everything else that reads them.
+    """
+    g = np.asarray(g, dtype=float)
+    h = np.asarray(h, dtype=float)
+    thresh = np.maximum(act_tol, np.sqrt(np.abs(g * h)))
+    return np.abs(g) <= thresh, np.abs(h) <= thresh
 
 
 def product(g: Affine, h: Affine) -> Quad:
@@ -293,9 +335,9 @@ class MpccCase:
     def regime(self, x: np.ndarray, tol: float = ACTIVE_TOL) -> List[str]:
         """Per-pair branch label at ``x``: ``G0``, ``H0``, ``both`` or ``none``."""
         g, h = self.pair_values(x)
+        gz_arr, hz_arr = pair_activity(g, h, tol)
         out = []
-        for gi, hi in zip(g, h):
-            gz, hz = abs(gi) <= tol, abs(hi) <= tol
+        for gz, hz in zip(gz_arr, hz_arr):
             out.append("both" if gz and hz else "G0" if gz else "H0" if hz else "none")
         return out
 

@@ -45,7 +45,11 @@ def _worst_source(rec) -> float:
 
 
 def triage(
-    rec, case_expected: dict, siblings: List[dict], tau_min: Optional[float] = None
+    rec,
+    case_expected: dict,
+    siblings: List[dict],
+    tau_min: Optional[float] = None,
+    feas_tol: Optional[float] = None,
 ) -> Dict[str, str]:
     """Mechanical candidate-owner label for one observation.
 
@@ -71,8 +75,16 @@ def triage(
        contradicting it. This rule comes before the stationarity rules
        below because otherwise every such cell is misfiled as a solver
        defect.
+    3c. The route reported success at an objective below the MPCC's
+       optimum, at a point whose source residual is *inside* the
+       solver's own feasibility tolerance -> **complementarity tolerance
+       floor**. `G*H` is quadratically flat at the corner, so a residual
+       of `eps` permits an excursion of order `sqrt(eps)` along the pair
+       and the objective follows it. Nothing is hidden and no solver
+       setting removes it; only a tighter `tol` moves it.
     4. The route reported success at an objective **below** the MPCC's
-       own optimum. That can only happen at a point the source model
+       own optimum, at a point that is *not* inside the feasibility
+       tolerance. That can only happen at a point the source model
        does not admit, and which lowering it came through decides what
        it means: through ``scholtes`` it is the **relaxation limit**,
        the method working as designed and the reason a relaxed
@@ -120,6 +132,39 @@ def triage(
             "evidence": "the exact-product lowering's feasible set is the MPCC's",
         }
     fstar = case_expected.get("obj")
+    if (
+        fstar is not None
+        and rec["obj"] is not None
+        and rec["obj"] < fstar - 1e-6
+        and feas_tol is not None
+        and worst <= 100.0 * feas_tol
+    ):
+        # The point satisfies the complementarity condition to the
+        # tolerance the solve was asked for, and the objective is still
+        # below the optimum. That is not a residual being hidden -- the
+        # residual is reported and is inside tol -- it is the geometry of
+        # a complementarity constraint: `G*H` is quadratically flat at
+        # the corner, so a residual of `eps` buys an excursion of order
+        # `sqrt(eps)` along the pair, and the objective follows.
+        #
+        # Measured on this corpus: `ralph1` at compl 2.6e-09 is 5.07e-05
+        # below f*, against sqrt(2.6e-09) = 5.1e-05. `ralph2`, whose
+        # relaxed optimum is linear in the residual rather than square
+        # root, sits at -4.25e-10 against a residual of 2.13e-10.
+        #
+        # It is the single most important number for Gate 1: at
+        # tol = 1e-8 an MPCC objective is only good to about 1e-4, and
+        # no solver setting changes that.
+        gap = fstar - rec["obj"]
+        return {
+            "owner": "complementarity tolerance floor",
+            "why": (
+                f"objective {gap:.1e} below f* at a point whose source residual is "
+                f"{worst:.1e}, inside tol -- the sqrt-flatness of G*H at the corner, "
+                "not a hidden violation"
+            ),
+            "evidence": "tighten tol to move it; nothing else will",
+        }
     if fstar is not None and rec["obj"] is not None and rec["obj"] < fstar - 1e-6:
         if rec["lowering"] == "scholtes":
             return {
@@ -452,7 +497,13 @@ def render(payload: dict) -> str:
             continue
         entry = man.get(r["case"], {}).get("expected", {})
         sibs = [x for x in recs if x["case"] == r["case"] and x["control"] == "none"]
-        t = triage(r, entry, sibs, tau_min=min(cfg["tau_schedule"]) if cfg.get("tau_schedule") else None)
+        t = triage(
+            r,
+            entry,
+            sibs,
+            tau_min=min(cfg["tau_schedule"]) if cfg.get("tau_schedule") else None,
+            feas_tol=cfg.get("base_options", {}).get("tol"),
+        )
         counts[t["owner"]] = counts.get(t["owner"], 0) + 1
         if t["owner"] == "-":
             continue

@@ -164,6 +164,41 @@ def _check_classifier_discriminates() -> List[str]:
     return fails
 
 
+def _check_activity_threshold_is_sqrt_aware() -> List[str]:
+    """A tol-converged MPCC point must classify, not read as `none`.
+
+    `spec.pair_activity`'s threshold is
+    ``max(act_tol, sqrt(|G_i H_i|))``. This pins why: perturb
+    `qpec_small`'s biactive pair off the corner by ``sqrt(1e-9)``, which
+    is exactly what a solve that drove the product to ``1e-9`` returns,
+    and the point must still classify as S-stationary. Replace the
+    threshold with a fixed ``act_tol`` and it reads regime
+    ``['H0', 'none']`` and class `none` — not even weakly stationary —
+    for a point that reached the optimum to nine digits.
+
+    The second row is the control: at an exactly complementary point the
+    product is zero, the threshold falls back to ``act_tol``, and the
+    rule changes nothing.
+    """
+    fails = []
+    case = C.make("qpec_small")
+    eps = 1e-9
+    x = np.array([1.0 - 1.3e-9, 1.0, float(np.sqrt(eps))])
+    got = classify(case, x)
+    if got["klass"] != "S":
+        fails.append(
+            "a point sqrt(1e-9) off qpec_small's biactive corner classifies "
+            f"{got['klass']!r} (regime {got['regime']}), not S — the pair "
+            "activity threshold is not sqrt-aware"
+        )
+    exact = classify(case, np.asarray(case.expected.x, float))
+    if exact["klass"] != "S":
+        fails.append(
+            f"control: qpec_small's exact solution classifies {exact['klass']!r}, not S"
+        )
+    return fails
+
+
 def _check_rescaling() -> List[str]:
     """``rescale`` must produce an algebraically equivalent MPCC.
 
@@ -357,6 +392,7 @@ CHECKS = (
     ("branch-enumeration oracle vs hand-derived optima", _check_oracle),
     ("expected points are feasible and correctly classified", _check_expected_points),
     ("classifier discriminates S / M / C", _check_classifier_discriminates),
+    ("pair activity threshold is sqrt-aware", _check_activity_threshold_is_sqrt_aware),
     ("rescaling is an equivalence", _check_rescaling),
     ("lowering feasible sets equal the MPCC's", _check_lowering_feasible_sets),
     ("manifest is current", _check_manifest),
