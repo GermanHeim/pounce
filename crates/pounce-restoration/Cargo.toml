@@ -10,11 +10,19 @@ description = "Restoration phase for POUNCE (port of Ipopt's Algorithm/Resto*): 
 keywords = ["ipopt", "restoration", "nlp", "optimization", "feasibility"]
 categories = ["mathematics", "algorithms"]
 
+[features]
+# Mirrors `pounce-cli`'s. The optional pounce-hsl dependency above is
+# there only to make this crate a *direct* dependent of it, so cargo
+# hands `build.rs` the `DEP_COINHSL_RPATH` its test binaries need.
+ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
+
 [dependencies]
 pounce-common.workspace = true
 pounce-linalg.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
+# Not called from this crate; see the `ma57` feature and `build.rs`.
+pounce-hsl = { workspace = true, optional = true }
 pounce-linsol.workspace = true
 tracing.workspace = true
 
