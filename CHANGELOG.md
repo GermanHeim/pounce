@@ -95,6 +95,54 @@ changes.
   @srikanth-gm, whose measurements on a 59 939-variable CasADi collocation
   model put POUNCE/MA57 within 1.6% of Ipopt/MA57 on wall time while spending
   41% more per iteration on back-solve; this addresses part of that row.
+- **The CasADi plugin builds and code-generates against CasADi 3.8, and the
+  CI pin that was hiding it is gone** (gh#782). 3.8.0 broke the plugin
+  parity job two ways on the day it shipped, and neither was what it looked
+  like.
+
+  *Code generation.* Through 3.7, CasADi decided whether to emit a
+  per-instance memory array for a function from `!codegen_mem_type().empty()`.
+  3.8 split that decision into a new virtual, `codegen_needs_mem()`, which
+  defaults to `false`. The plugin answered only the old question, so 3.8
+  stopped declaring the `<name>_mem` array while the plugin's emitted bodies
+  went on referring to it, and generated C failed to compile with `use of
+  undeclared identifier`. The plugin now answers the new question. It cannot
+  say `override` doing so — 3.7 declares no such virtual and `override`
+  there is a hard error — so nothing in the compiler checks that the member
+  binds to anything, which is the same unchecked-binding shape that produced
+  the defect. `casadi/tests/codegen_mem_compat/` is the check instead: it
+  extracts the declaration from the plugin source (not a copy, which would
+  drift) and compiles it against a mock base in all three shapes — virtual
+  absent, virtual present, virtual whose signature moved — asserting through
+  a base pointer which of them actually bind. Adding `override` turns the
+  3.7 leg red; deleting the member fails the extraction.
+
+  *The Linux link.* Not an ABI change in CasADi, which is what it appeared
+  to be. 3.8.0 added a `manylinux_2_28` wheel next to the `manylinux2014`
+  one, and pip chooses between them on the machine's glibc. Measured on the
+  published artifacts, the 2_28 build of 3.8.0 exports 855 `casadi::`
+  symbols spelled `__cxx11` and none spelled `Ss`; the manylinux2014 build
+  of **the same version** is exactly the other way round, as is 3.7.2, which
+  ships no 2_28 wheel at all. So the string ABI is a property of the wheel
+  the runner resolves, not of the release, and `casadi/Makefile`'s hardcoded
+  `CXX11_ABI ?= 0` could not have been right for both. It is now measured
+  from the installed `libcasadi.so`'s own exported symbols on Linux, and
+  left at 0 where the macro is inert (macOS libc++, Windows). The probe
+  looks for `__cxx11` **on casadi's symbols specifically**: libstdc++'s
+  transactional clones of `std::logic_error` carry that spelling in every
+  build, old ABI included, so the naive grep answers 1 for everything.
+  `make -C casadi abi-flags` now prints what was decided and from which
+  file.
+
+  With both fixed, `casadi==3.7.*` comes back out of `ci.yml` and the job
+  tracks CasADi releases again, which is what it is for. The wheel-smoke
+  step now pins to the exact version `build.sh` just built against rather
+  than to a version literal. One thing worth knowing while chasing an ABI
+  mismatch, now recorded in the Makefile: the plugin is a `-shared` link and
+  so builds clean against a CasADi it cannot talk to — the executable
+  `test_output_interleaving` is what turns the mismatch into a list of
+  names, and without it the first symptom is CasADi reporting `Plugin
+  'pounce' is not found` at dlopen.
 
 - **`ma57_batched_backsolve`: MA57 can now be let into the batched
   back-substitution, and the cost of doing so is written down.** Under the

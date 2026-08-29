@@ -9,7 +9,12 @@ description = "POUNCE as a CasADi nlpsol plugin"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-dependencies = ["casadi>=3.7,<3.8"]
+# One bound per CasADi minor this wheel can carry a plugin for. CasADi does
+# no version handshake, so the plugin is built per minor and `pounce_casadi`
+# dispatches on `casadi.__version__` at import; a minor outside this range
+# has no `_plugins/<minor>/` to find. 3.8 joined the range once the plugin
+# built and code-generated against it (gh#782).
+dependencies = ["casadi>=3.7,<3.9"]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"

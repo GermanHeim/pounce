@@ -87,10 +87,33 @@ DEFS := -DWITH_DL -DWITH_DEEPBIND -DUSE_CXX11 -DHAVE_MKSTEMPS \
         -DCASADI_VERSION=$(VER_MAJOR)$(VER_MINOR) \
         -DCASADI_IS_RELEASE=1
 
-# The pip wheels are built against the pre-C++11 libstdc++ string ABI.
-# Override with CXX11_ABI=1 for a CasADi you built yourself with the
-# modern ABI.
-CXX11_ABI ?= 0
+# Which libstdc++ string ABI the CasADi being built against uses. This is
+# NOT a property of the CasADi version, and assuming it was is what broke
+# every PR for a day (gh#782): casadi 3.8.0 added a `manylinux_2_28` wheel
+# alongside the `manylinux2014` one, and pip picks between them on the
+# machine's glibc. The 2_28 build of 3.8.0 exports 855 `casadi::` symbols
+# spelled with `__cxx11` and none with the old `Ss`; the manylinux2014
+# build of THE SAME VERSION is the other way round. So the answer changes
+# with the runner, not with the release, and it has to be measured.
+#
+# Measure it on casadi's own exported symbols. A bare `__cxx11` grep is
+# wrong: libstdc++'s transactional clones of `std::logic_error` carry that
+# spelling in every build, old ABI included (213 of them in the wheels
+# checked), so the naive probe answers 1 for everything.
+#
+# macOS is libc++, where the macro is inert; Windows has no libstdc++
+# either. Both keep the historical 0, and no probe runs.
+#
+# With no `nm` the probe yields 0, which is the value this file assumed
+# unconditionally until now — a wrong answer there is no more wrong than
+# before, and `make abi-flags` prints what was decided.
+ifeq ($(UNAME_S),Linux)
+  CASADI_SO   ?= $(firstword $(wildcard $(CASADI_LIB)/libcasadi.so $(CASADI_LIB)/libcasadi.so.*))
+  CXX11_ABI   ?= $(shell nm -D --defined-only "$(CASADI_SO)" 2>/dev/null \
+                   | grep -qE '_ZN6casadi.*__cxx11' && echo 1 || echo 0)
+else
+  CXX11_ABI ?= 0
+endif
 DEFS      += -D_GLIBCXX_USE_CXX11_ABI=$(CXX11_ABI)
 
 CXXFLAGS ?= -O2 -std=c++17 -fPIC -Wall
@@ -137,6 +160,7 @@ fetch-src:
 ## with DEFS above when a plugin fails to load.
 abi-flags:
 	@echo "installed casadi $(CASADI_VER) at $(CASADI_LIB)"
+	@echo "detected _GLIBCXX_USE_CXX11_ABI=$(CXX11_ABI)$(if $(filter Linux,$(UNAME_S)), (from $(CASADI_SO)), (not applicable on $(UNAME_S)))"
 	@$(PYTHON) -c "import casadi; print(casadi.CasadiMeta.compiler_flags())"
 
 $(PLUGIN): casadi_nlpsol_pounce.cpp pounce_runtime.hpp convexify_compat.hpp
@@ -157,6 +181,12 @@ install: all
 uninstall:
 	rm -f $(CASADI_LIB)/$(PLUGIN)
 
+# Worth knowing when an ABI mismatch is what you are chasing: this
+# executable, not the plugin, is the one that reports it. A `-shared` link
+# leaves undefined symbols to be resolved at load time and succeeds, so the
+# plugin builds clean against a CasADi it cannot talk to, and the first
+# symptom is CasADi's `Plugin 'pounce' is not found` at dlopen. Linking an
+# executable is what turns the same mismatch into a list of names.
 $(TEARTEST): $(TEARTEST).cpp $(PLUGIN)
 	$(CXX) $(CXXFLAGS) $(DEFS) $(INCLUDES) -o $@ $< \
 	  -L$(CASADI_LIB) -lcasadi $(RPATH)
@@ -170,12 +200,16 @@ examples: all
 	  CASADIPATH=$(CURDIR) $(PYTHON) $$f || exit 1; \
 	done
 
-## Compile `convexify_compat.hpp` against every spelling of CasADi's
-## convexify runtime helper (gh#668). Needs no CasADi and no solver
-## library -- mock declarations and a compiler -- so it runs anywhere,
-## and it covers the overload the installed CasADi does not exercise.
+## Compile the source-compatibility shims against every shape of CasADi
+## they have to survive: `convexify_compat.hpp` against both spellings of
+## the convexify runtime helper (gh#668), and the plugin's codegen memory
+## request against a base class that does and does not declare the virtual
+## it binds to (gh#782). Needs no CasADi and no solver library -- mock
+## declarations and a compiler -- so both run anywhere, and each covers the
+## branch the installed CasADi does not exercise.
 compat:
 	$(PYTHON) tests/convexify_compat/run.py
+	$(PYTHON) tests/codegen_mem_compat/run.py
 
 clean:
 	rm -f $(PLUGIN) $(TEARTEST)

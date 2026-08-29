@@ -578,24 +578,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # PINNED, deliberately against this job's own design (gh #782).
-      # Everything below derives the version it builds against from the
-      # installed wheel, so that a CasADi release bumps this job
-      # automatically. 3.8.0 (2026-08-25) exercised that and turned the job
-      # red on both runners in two independent ways: the Linux wheel appears
-      # to be built with the new libstdc++ ABI, against `casadi/Makefile`'s
-      # hardcoded `CXX11_ABI ?= 0`, so every `std::string`-taking symbol goes
-      # undefined at link; and macOS -- no dual-ABI there at all -- fails the
-      # code-generation check instead. Every PR opened that day failed this
-      # job regardless of its contents.
-      #
-      # `3.7.*` still tracks patch releases within the last known-good minor.
-      # Remove the pin when gh #782 is fixed; the auto-tracking is the point
-      # of the job and this pin is the thing standing in its way.
+      # Unpinned, which is the point of this job: everything below derives
+      # the version it builds against from the installed wheel, so a CasADi
+      # release bumps this job automatically and breaks here rather than in
+      # a user's build. 3.8.0 (2026-08-25) exercised that and cost a day of
+      # red PRs; both causes are fixed (gh #782) and the pin it needed is
+      # gone. What remains true is that a CasADi release can turn this job
+      # red on a PR that did not touch it -- that is the trade this job
+      # exists to make.
       - name: Install CasADi
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "casadi==3.7.*" numpy
+          python -m pip install casadi numpy
 
       # The tag has to match the installed wheel exactly; `make fetch-src`
       # derives it from `casadi.__version__` rather than pinning a literal,
@@ -649,10 +643,15 @@ jobs:
         run: |
           cd casadi/wheel && ./build.sh
           python -m venv /tmp/casadi-wheel-env
-          # Same pin as the install step above (gh #782): the wheel under
-          # test was built against 3.7, so resolving a newer CasADi here
-          # would test a pairing the build never produced.
-          /tmp/casadi-wheel-env/bin/pip install -q "casadi==3.7.*" dist/pounce_casadi-*.whl
+          # Pin to the exact CasADi `build.sh` just built against, whatever
+          # that resolved to. `build.sh` stages the plugin for the
+          # *installed* casadi, so resolving independently here would test a
+          # pairing the build never produced -- which is what the version
+          # literal that used to sit here was defending against, less
+          # precisely (gh #782).
+          ver=$(python -c "import casadi; print(casadi.__version__)")
+          echo "wheel was built against casadi $ver"
+          /tmp/casadi-wheel-env/bin/pip install -q "casadi==$ver" dist/pounce_casadi-*.whl
           /tmp/casadi-wheel-env/bin/python - <<'PY'
           import casadi as ca
           import pounce_casadi  # registers the plugin in-process
@@ -726,24 +725,29 @@ jobs:
           print("wheel solves with the build tree hidden, x* =", sol)
           PY
 
-  # Compile the convexify name shim against every spelling of CasADi's
-  # runtime helper (gh#668). Cheap and hermetic: no CasADi, no Rust, no
-  # link step — mock declarations and a compiler.
+  # Compile the source-compatibility shims against every shape of CasADi
+  # they have to survive. Cheap and hermetic: no CasADi, no Rust, no link
+  # step — mock declarations and a compiler.
   #
-  # This job exists because the job above cannot cover it. CasADi renamed
-  # `convexify_eval` to `casadi_convexify_eval` after 3.7.2, and any one
-  # CasADi declares exactly one of the two, so a build against a real
-  # CasADi compiles one overload of the shim and leaves the other
-  # unchecked — and it is the *unchecked* one that most users get, since
-  # the wheel ships plugins for 3.6 and 3.7 and both take the fallback.
-  # The mock is what lets one runner compile both.
+  # This job exists because the job above cannot cover either shim. A build
+  # against a real CasADi compiles exactly one branch of each, and it is
+  # routinely the *other* branch that users get:
+  #
+  #  - the convexify name shim (gh#668). CasADi renamed `convexify_eval` to
+  #    `casadi_convexify_eval` after 3.7.2, and any one CasADi declares one
+  #    of the two. The wheel ships plugins for 3.6 and 3.7, both of which
+  #    take the fallback, while this workflow builds against current.
+  #  - the codegen memory request (gh#782). It cannot be marked `override`
+  #    — 3.7 declares no such virtual — so nothing checks that it binds,
+  #    and when it silently stopped binding on 3.8 the symptom was a C
+  #    compile error inside generated code.
   #
   # Windows is here and nowhere else in this workflow: the Windows wheel is
   # built with MSVC, and MSVC's two-phase lookup is the likeliest of the
   # three to disagree about a dependent name that is not declared. That is
-  # the whole mechanism this shim rests on.
-  convexify-name-shim:
-    name: CasADi convexify name shim (${{ matrix.os }})
+  # the whole mechanism the convexify shim rests on.
+  casadi-source-compat:
+    name: CasADi source compat shims (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -759,6 +763,10 @@ jobs:
         if: runner.os != 'Windows'
         run: python3 casadi/tests/convexify_compat/run.py
 
+      - name: Compile against every codegen-memory shape
+        if: runner.os != 'Windows'
+        run: python3 casadi/tests/codegen_mem_compat/run.py
+
       # `cl` is only on PATH inside a developer shell, and vswhere ships with
       # every runner image, so no extra action is needed to find it.
       - name: Compile against every spelling (MSVC)
@@ -769,3 +777,4 @@ jobs:
           if not defined VSPATH (echo could not locate a Visual Studio install & exit /b 1)
           call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           python casadi\tests\convexify_compat\run.py --cxx cl
+          python casadi\tests\codegen_mem_compat\run.py --cxx cl

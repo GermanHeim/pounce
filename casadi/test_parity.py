@@ -13,6 +13,7 @@ number moved".
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,10 +28,39 @@ QUIET_IPOPT = {"ipopt": {"print_level": 0}, "print_time": False}
 failures = []
 
 
-def check(name, ok, detail=""):
+def check(name, ok, detail="", log=""):
     print(f"{'PASS' if ok else 'FAIL'}  {name}{'  — ' + detail if detail else ''}")
+    # Verbatim, indented, and never truncated. A check that carries a log
+    # carries it because the one-line summary cannot be trusted to contain
+    # the answer, and this output's only reader is a CI log.
+    for line in log.strip().splitlines():
+        print(f"      | {line}")
     if not ok:
         failures.append(name)
+
+
+def first_error(stderr):
+    """The line a compiler failure is actually about.
+
+    Deliberately not `splitlines()[-1]`, which is what this used to be:
+    clang finishes with `1 error generated.` and MSVC with a summary, so
+    the last line reports the *count* and discards the diagnostic. gh#782
+    is what that cost — a code generation break against CasADi 3.8 whose
+    CI log read, in full, `FAIL  generated C compiles — 1 error
+    generated.` The defect had to be reproduced locally to learn anything
+    at all about it, and the log it left behind was evidence of nothing
+    beyond its own existence.
+
+    Callers pass the whole of `stderr` to `check(log=...)` as well; this
+    is the summary that sits on the FAIL line, not a substitute for it.
+    """
+    lines = stderr.strip().splitlines()
+    for line in lines:
+        # `error:` covers gcc and clang; `error C2065:` is MSVC, which also
+        # writes `fatal error C1083:`.
+        if "error:" in line.lower() or re.search(r"\berror [A-Z]?\d+\b", line):
+            return line.strip()[:200]
+    return lines[0].strip()[:200] if lines else "(the compiler said nothing)"
 
 
 def close(a, b, tol=1e-6):
@@ -1106,7 +1136,8 @@ def test_codegen_matches_the_interpreted_solve():
         try:
             G = _compile_generated(S, d, "cg_plain")
         except subprocess.CalledProcessError as exc:
-            check("generated C compiles", False, exc.stderr.strip().splitlines()[-1][:120])
+            check("generated C compiles", False, first_error(exc.stderr),
+                  log=exc.stderr)
             return
         check("generated C compiles and links against libpounce_cinterface", True)
         got = G(x0=[0.5, 0.5], p=1.5, lbx=-ca.inf, ubx=ca.inf, lbg=-ca.inf, ubg=0,
@@ -1455,7 +1486,7 @@ def test_codegen_reproduces_the_finite_difference_hessian():
                 G = _compile_generated(S, d, f"cg_fd_{pattern}")
             except subprocess.CalledProcessError as exc:
                 check(f"codegen fd/{pattern} compiles", False,
-                      exc.stderr.strip().splitlines()[-1][:120])
+                      first_error(exc.stderr), log=exc.stderr)
                 continue
             check(f"codegen fd/{pattern} compiles", True)
             got = G(x0=[0.5, 0.5, 0.5], lbx=-ca.inf, ubx=ca.inf,
