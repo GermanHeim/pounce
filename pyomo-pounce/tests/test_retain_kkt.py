@@ -76,7 +76,7 @@ def test_retain_only_serves_of_queries():
 
 
 def test_retain_only_has_no_default_block():
-    # the truth table's middle row: factor kept, but covariance(model)
+    # the truth table's middle row: factor kept, but sens_covariance(model)
     # without of= has no default to reduce onto
     x, y, _ = linear_data()
     m = linear_model(x, y, declare=False)
@@ -191,7 +191,7 @@ def test_sens_release_kkt_frees_the_session():
 
 def test_sens_release_kkt_keeps_declarations_for_the_next_solve():
     # the declarations survive release: the next solve keeps its
-    # factor again and covariance(m) still has its default block
+    # factor again and sens_covariance(m) still has its default block
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)

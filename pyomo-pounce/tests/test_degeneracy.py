@@ -8,10 +8,10 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (
-    sens_active_set_changes,
     declare_sens_param,
-    sens_solution,
+    sens_active_set_changes,
     sens_jacobian,
+    sens_solution,
 )
 
 
@@ -282,7 +282,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     assert pyo.value(exact.y) == pytest.approx(1.0, abs=1e-6)
 
     for mode in ("fix_relax", "path"):
-        est = estimate(m, [(m.p, -1.0)], mode=mode, degeneracy="one_sided")
+        est = sens_solution(m, [(m.p, -1.0)], mode=mode, degeneracy="one_sided")
         assert est[m.x] == pytest.approx(0.0, abs=1e-4), f"mode={mode}"
         assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
             f"mode={mode}: the coupled neighbour has to follow the held "
@@ -291,7 +291,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     # The runnable before: a single linear map plus a clamp cannot do
     # this, which is why the mode matters rather than the option.
     with pytest.warns(UserWarning, match="linear step leaves"):
-        lossy = estimate(
+        lossy = sens_solution(
             m, [(m.p, -1.0)], mode="linear", degeneracy="one_sided")
     assert lossy[m.x] == pytest.approx(0.0, abs=1e-4), "the clamp gets x right"
     assert abs(lossy[m.y] - 1.0) > 0.5, (
@@ -299,7 +299,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
         f"got {lossy[m.y]}")
 
     # And the walk records the hold it took, at the kink's own fraction.
-    rec = active_set_changes(m, [(m.p, -1.0)], degeneracy="one_sided")
+    rec = sens_active_set_changes(m, [(m.p, -1.0)], degeneracy="one_sided")
     assert [(c.var, c.bound, c.action) for c in rec] == [
         (m.x, "lower", "reaches")], f"record: {rec}"
     assert rec[0].fraction == pytest.approx(0.0, abs=1e-3)
@@ -329,7 +329,7 @@ def test_one_sided_path_reholds_the_kink_under_user_scaling():
         m, options={"tol": 1e-10, "nlp_scaling_method": "user-scaling"})
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-4)
 
-    est = estimate(m, [(m.p, -1.0)], mode="path", degeneracy="one_sided")
+    est = sens_solution(m, [(m.p, -1.0)], mode="path", degeneracy="one_sided")
     assert est[m.x] == pytest.approx(0.0, abs=1e-4)
     assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
         f"the repair has to survive a change of variables, got {est[m.y]}")

@@ -1,4 +1,4 @@
-"""information(): the un-inverted sibling of covariance() (covariance
+"""sens_information(): the un-inverted sibling of sens_covariance() (covariance
 roadmap item 2). The Lagrangian form is built by tangent recovery
 (T = Zx inv(M), R = T'HT with the exact Hessian): machine precision
 for bound and equality activity, ~1e-6 under a binding inequality row
@@ -245,7 +245,7 @@ def singular_free_block():
 def test_singular_free_block_refuses_s():
     # the exact-Hessian free block is singular, so the pinned
     # parameter's conditional information S is undefined and
-    # information() must refuse rather than return a garbage Schur
+    # sens_information() must refuse rather than return a garbage Schur
     # complement. The same flat direction is the honest trigger for the
     # kkt_perturbations warning.
     m = singular_free_block()
@@ -259,7 +259,7 @@ def test_singular_free_block_refuses_s():
 
 
 def test_max_pdpert_refuses_the_same_factor_covariance_inverts():
-    """covariance() and information() invert the factor the sensitivity
+    """sens_covariance() and sens_information() invert the factor the sensitivity
     step inverts, and warned about the inertia correction without
     letting a caller stop on it. The cap is that caller declining."""
     m = singular_free_block()
@@ -318,7 +318,7 @@ def test_non_square_structure_refuses_lagrangian():
 
 
 def test_non_square_structure_scalar_falls_back():
-    # covariance()'s binding-row scalar cannot use the tangent route
+    # sens_covariance()'s binding-row scalar cannot use the tangent route
     # here; it must fall back to the factor subtraction and still warn
     # rather than crash or go silent
     x, y, X = linear_data()

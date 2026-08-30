@@ -419,7 +419,7 @@ def test_undeclared_param_in_bound_is_left_alone():
 
 def test_moved_bound_is_recorded_for_covariance():
     """A rewritten bound reads as the NL no-bound sentinel, so the value it
-    had is recorded; covariance()'s projection reads that instead."""
+    had is recorded; sens_covariance()'s projection reads that instead."""
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=2.0, mutable=True)
     m.x = pyo.Var(bounds=(0, m.p), initialize=1.0)
@@ -481,7 +481,7 @@ def test_indexed_var_bound_on_declared_param():
 
 
 def test_rewritten_bound_still_projects_in_covariance():
-    """A fitted Var capped by a declared Param still triggers covariance()'s
+    """A fitted Var capped by a declared Param still triggers sens_covariance()'s
     active-bound projection, even though its NL bound is now the no-bound
     sentinel (jkitchin/pounce#357 review)."""
     from pyomo_pounce import sens_covariance, declare_sens_fitted, declare_sens_residual

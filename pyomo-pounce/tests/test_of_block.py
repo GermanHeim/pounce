@@ -95,7 +95,7 @@ def test_of_rank_deficient_block_is_the_prediction_band():
     # the residual block has 25 coordinates against 2 degrees of
     # freedom: its marginal covariance is the hat-matrix prediction
     # band sigma^2 X (X'X)^-1 X', membership handling is bypassed,
-    # information() refuses toward covariance()
+    # sens_information() refuses toward sens_covariance()
     m, X = solved()
     H = X @ np.linalg.solve(X.T @ X, X.T)
     cov_r = sens_covariance(m, sigma_sq=SIGMA**2, of=m.r)

@@ -684,7 +684,7 @@ def test_issue_362_row_pinned_variable_projects():
 
 def test_explicit_bound_relax_refuses_covariance():
     """An explicit user bound_relax_factor wins over the sens solve's
-    forced 0 (options land after defaults), and covariance() then
+    forced 0 (options land after defaults), and sens_covariance() then
     refuses with the classifier's clean error instead of classifying
     slacks measured against relaxed bounds."""
     x, y, X = linear_data()
