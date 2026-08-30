@@ -21,8 +21,7 @@ pounce-observability.workspace = true
 # as the CLI and the Python / C frontends do). It lives in pounce-restoration
 # rather than pounce-algorithm because each rung has to rebuild the
 # restoration sub-IPM's factory provider, and that provider is defined there.
-# This is the one crate the lean default build gains over the pre-ladder
-# facade.
+# These are the direct dependencies added by the ladder and FBBT surfaces.
 pounce-restoration.workspace = true
 pounce-presolve.workspace = true
 

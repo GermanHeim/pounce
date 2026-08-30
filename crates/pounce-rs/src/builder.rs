@@ -458,15 +458,8 @@ impl<P: Problem + 'static> Nlp<P> {
                 ),
             ));
             fbbt_handle = Some(Rc::clone(&presolve));
-            let mut wrapped: Rc<RefCell<dyn TNLP>> = presolve;
-            if presolve_opts.linear_eq_reduction {
-                wrapped = Rc::new(RefCell::new(pounce_presolve::LinearEqElimTnlp::new(
-                    wrapped,
-                    presolve_opts,
-                )));
-            }
             app.set_presolve_already_applied(true);
-            wrapped
+            presolve
         } else {
             Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>
         };
@@ -720,9 +713,8 @@ impl<P: Problem> TNLP for Adapter<P> {
                 }
             }
             SparsityRequest::Values { values } => {
-                let Some(x) = x else {
-                    return false;
-                };
+                #[allow(clippy::expect_used)]
+                let x = x.expect("eval_jac_g(Values) without x");
                 if self.problem.jacobian(x, values) {
                     return true;
                 }

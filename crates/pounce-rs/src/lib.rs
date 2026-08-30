@@ -208,16 +208,18 @@ pub use pounce_nlp::tnlp::{
 // --- the solver driver ------------------------------------------------------
 pub use pounce_algorithm::application::IpoptApplication;
 
+// --- presolve ---------------------------------------------------------------
+pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+pub use pounce_presolve::fbbt::FbbtReport;
+
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
-pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
 pub use pounce_observability::{
     CollectorScope, IterCaptureGuard, ScopedIterCapture, collector_scope, init_subscriber,
     with_iter_capture,
 };
-pub use pounce_presolve::fbbt::FbbtReport;
 
 // --- the underlying crates, for anything not surfaced above -----------------
 pub use pounce_algorithm;

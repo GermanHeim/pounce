@@ -24,7 +24,8 @@ FBBT cannot help when:
 
 - The TNLP has no structural-expression representation. `.nl`-loaded
   problems (`NlTnlp`) expose one, and `pounce-rs` builder problems can opt in
-  with `Problem::constraint_expression`.
+  with `Problem::constraint_expression`. Python (`PyTnlp`) and C-callback
+  (`CCallbackTnlp`) problems still silently opt out.
 - The expression uses operators FBBT doesn't reason about
   (`Funcall` to AMPL imported functions, variable-exponent powers,
   `sin` / `cos` reverse pass). Those subtrees become opaque and
