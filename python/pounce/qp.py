@@ -521,13 +521,13 @@ def _indefinite_error(lam_min: float) -> ValueError:
         "Hessian and reports a silently-wrong 'optimal' at a saddle point "
         "without one. To solve an indefinite QP, pass method='active-set' — "
         "the pounce-qp parametric active-set engine handles indefinite "
-        "Hessians. Note what its 'optimal' means there: first-order KKT holds "
-        "and a negative-curvature screen found no feasible direction along "
-        "which it could exhibit a better point. That is a refutation rather "
-        "than a proof, so it is weaker than the local-minimum guarantee the "
-        "NLP path (pounce.minimize) gives on the same model. Pass "
-        "check_psd=False to skip this check (e.g. if you know P is PSD and "
-        "want to avoid the O(n^3) eigenvalue cost)."
+        "Hessians. Note what its 'optimal' means there: first-order KKT holds, "
+        "and where the second-order check concludes, the reduced Hessian on the "
+        "working set's null space is positive definite (gh #848). The check looks "
+        "within that working set, not across working sets, so it is weaker than "
+        "the local-minimum guarantee the NLP path (pounce.minimize) gives on the "
+        "same model. Pass check_psd=False to skip this check (e.g. if you know P "
+        "is PSD and want to avoid the O(n^3) eigenvalue cost)."
     )
 
 
@@ -924,9 +924,16 @@ def solve_qp(
 
     The guard is scoped to ``method="ipm"``. Under ``method="active-set"`` an
     indefinite ``P`` is **solved**, not refused — the active-set engine
-    controls the inertia of the reduced Hessian and returns a *local*
-    solution, the same guarantee the NLP filter-IPM gives on a nonconvex NLP
-    (gh #786). The check still runs there when enabled, and its finding is
+    controls the inertia of the reduced Hessian, and then tests the point it
+    reaches for second-order optimality before reporting it (gh #848). That
+    test is what makes ``"optimal"`` mean something here: inertia control
+    alone leaves the first-order conditions satisfied at a *saddle*, which is
+    the same failure this guard refuses on the IPM's behalf. An ``"optimal"``
+    from the active-set engine is a point with no feasible direction of
+    negative curvature on its working set's null space — a local minimum, not
+    a global one, and not proof against the degenerate case where a
+    zero-multiplier bound keeps a direction out of the null space that is
+    searched. The check still runs there when enabled, and its finding is
     what tells the engine to drive an indefinite Hessian; it just does not
     raise. Where it does *not* run — ``check_psd=False``, or the default
     ``None`` above the ``n <= 1500`` cap — the engine is driven exactly as it

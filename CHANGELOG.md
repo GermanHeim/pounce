@@ -411,19 +411,24 @@ changes.
   **The docs now say what the verdict means.** `dispatch.rs`'s `NonconvexQp`
   comment, `solve_qp_active_set_inertia`'s doc, and the `pounce.qp` guard
   message all claimed a local-optimum guarantee and pointed users at this engine
-  as the remedy for the very failure they warn about. An `Optimal` on an
-  indefinite `P` now says what it is: first-order KKT holds and no second-order
-  counterexample was found — a refutation, not a proof, and strictly weaker than
-  the NLP path's local guarantee.
+  as the remedy for the very failure they warn about. What this screen alone
+  earns is a refutation, not a proof: first-order KKT holds and no second-order
+  counterexample was found. The engine-side certification below strengthens
+  that where it concludes, and the docs state the joint verdict — see the
+  companion entry.
 
   The convex arm is untouched: the caller's own `HessianInertia::Psd` claim is
   the gate, so the screen never runs on the path every existing consumer uses.
-  `scripts/sweep-fixtures.sh` is empty across all 158 fixture-legs — which is
-  expected and is *not* evidence about this path, since no nonconvex-QP fixture
-  is routed to `qp-active-set` and `auto` still sends the class to the NLP arm.
-  That is CLAUDE.md's rule verbatim, and
+  `scripts/sweep-fixtures.sh` is empty across all 158 fixture-legs on
+  `solver_selection=auto`, which is expected and is *not* evidence about this
+  path — `auto` sends the nonconvex-QP class to the NLP arm, so the default
+  corpus never reaches the screen. That is CLAUDE.md's rule verbatim, and
   `crates/pounce-convex/tests/issue848_indefinite_second_order.rs` is the
-  evidence that is.
+  evidence that is. Forcing the arm does reach it, and the companion entry
+  below has those numbers: on `solver_selection=qp-active-set` 80 of the 158
+  legs reach the engine and this screen fires on one of them,
+  `nonconvex_qp_ineq`, which it demotes from a `SolveSucceeded` at the
+  constrained maximum to an `InternalError`.
 
 - **The `.nl` reader refuses non-finite numbers instead of silently dropping
   them (gh #847).** `str::parse::<f64>()` accepts `inf`, `-inf` and `nan`, and
@@ -584,6 +589,207 @@ changes.
   declared unbounded, where `dp = -5` predicts `x = -1` — plus an in-domain leg
   so "always fail" is not a passing fix, and a unit test on `residual_norm`
   for the mid-loop branch the fixture cannot reach.
+- **The active-set engine certifies second order itself, and escapes the
+  saddle instead of stopping on it** (gh #848). The companion entry above adds
+  a screen that *refutes* a bad verdict from outside the engine, by exhibiting
+  a better feasible point. This adds the check inside it, where the answer can
+  still be improved rather than only labelled. The two are not redundant, and
+  the entry above and `solve_qp_active_set_inertia`'s doc both say which class
+  each one reaches.
+
+  Every `QpStatus::Optimal` the engine produced was a *first-order* verdict —
+  vanishing projected gradient, sign-admissible working-set multipliers — and
+  §4.5 inertia control does not upgrade it, because shifting `H` to `H + δI`
+  makes the local model convex without moving the point. The doc comment on
+  `solve_qp_active_set_inertia` asserted otherwise ("what it returns for an
+  indefinite `P` is therefore a **local** solution, exactly as the NLP
+  filter-IPM's `optimal` is local on a nonconvex NLP"), and that claim was
+  repeated in `docs/src/choosing-a-solver.md`, `docs/src/python.md`, and three
+  places in the Python frontend. All are corrected.
+
+  `pounce-qp` now runs a second-order test at the point it is about to certify
+  and follows a witness off it, the classical nonconvex active-set move
+  (Nocedal-Wright §16.4). The test produces a **witness** — a direction `d`
+  with `A_W d = 0` and `dᵀHd < 0`, both checked explicitly — rather than
+  inferring from the inertia shift or a backend inertia count, because the
+  shift ladder fires on a singular reduced Hessian too and a singular reduced
+  Hessian is a *weak minimum* that must not be rejected. The witness is found
+  by shift-and-invert on the active-set KKT matrix, with the shift bisected
+  down from the ladder's own bracket: the ladder's `inertia_shift_factor = 100`
+  overshoots `|λ_min|` by up to two orders and flattens the spectrum, which is
+  why a first draft of this reusing the ladder's shift found nothing on
+  `diag(1, −1)`.
+
+  At a first-order point `∇q(x)ᵀd = 0`, so both signs of the witness descend
+  and the engine takes the one with more room. If nothing blocks it, the QP is
+  unbounded below and `d` is the certificate — which gives
+  `pounce-convex`'s `ray_certifies_unbounded` `dᵀPd < 0` branch (gh #791) its
+  first reachable producer; it had been written for exactly this case and
+  never reached, because every `Unbounded` the engine produced came from the
+  zero-curvature branch. Otherwise the step ends on a new row or bound, which
+  joins the working set, and the solve resumes; running out of escapes
+  downgrades to `IterationLimit` rather than staying `Optimal`.
+
+  `pounce-convex::verify_status` takes the finding as a new argument
+  (`QpStats::second_order`, a `SecondOrderVerdict`). It has to be told: that
+  function re-derives its verdict from the returned *point*, everything it
+  measures is a first-order residual, and the point is first-order clean by
+  construction — so without the channel it would have promoted the refuted
+  saddle straight back to `Optimal`, undoing the fix one layer up.
+  `crates/pounce-convex/tests/issue848_saddle_not_optimal.rs` pins that both
+  ways on the same point.
+
+  The unbounded exit — and only that one — answers to
+  `QpOptions::certify_recession_ray`. The SQP's unbounded-model fallback (gh
+  #423) sets that flag and re-solves precisely because a caller with nowhere
+  to go needs the δ-shifted proximal step rather than a recession verdict, and
+  an escape that ignored the flag sent the re-solve straight back `Unbounded`,
+  leaving the outer loop with no step at all — gh #419 verbatim, through a
+  door gh #423 had not closed. Caught by the fixture sweep, not by a unit
+  test: on `eigenb2` under `algorithm=active-set-sqp` (110 free variables, 55
+  equalities, nothing that can ever block a direction) 200 iterations at
+  `f = 1.6013` collapsed to 1 iteration at `f = 24.026` and
+  `Search_Direction_Becomes_Too_Small`. The *finding* still travels when the
+  flag declines the action, so a caller reading `stats.second_order` still
+  sees the point refuted. Blocked escapes run either way: they end on a new
+  row with a strictly lower objective and no certificate is involved.
+
+  The escape loop terminates on **measured objective progress**, not on the
+  working set growing. Growing it was the original argument and it is wrong:
+  the resume is a full solve and may drop what the escape pinned, and on an
+  indefinite `H` it does more than that — the inner loop's steps come from the
+  δ-shifted KKT of §4.5, whose model has the saddle as its *minimum*, so the
+  re-solve walks back uphill to the point the escape just left. That is
+  gh #848's "the start point is ignored entirely" met from the inside. Left
+  alone it spins the whole budget on one fixed point: on HS071's first step QP
+  all 20 escapes reported an identical working set, an identical direction,
+  `α = 1.4935` and `obj = −1.4116e-7`, each having stepped to `obj = −4.52e-2`
+  and been walked back. The guard stops after the first round without
+  progress, keeps the better of the two points, and returns `MaxIter`.
+
+  Costs nothing on the convex path: the test is gated on
+  `hessian_inertia != Psd`, which the convex driver never sets. `QpOptions`
+  gains `certify_second_order` (default `true`) plus `neg_curv_max_escapes`,
+  `neg_curv_probe_iters`, `neg_curv_shift_refinements` and `neg_curv_tol`;
+  the off switch is pinned by a test that asserts the saddle comes back
+  without it, so it is known to be a real switch rather than a field nothing
+  reads.
+
+  **Scope: standalone QP solves, not the SQP's step subproblem.** On by
+  default in `QpOptions::default()` — `solver_selection=qp-active-set`,
+  `pounce.qp.solve_qp(method="active-set")`, `ParametricActiveSetSolver` used
+  directly — which is every entry point gh #848 reports, and where the QP *is*
+  the question. Off by default in the new `QpOptions::sqp_subproblem()`, which
+  the SQP path uses, because there the QP is a *local model* built from the
+  current multiplier estimates and its second-order verdict is not the NLP's.
+  HS071 is the counterexample and it is not exotic: at iteration 0 the
+  multipliers are still zero, so `∇²L` is `∇²f`, whose reduced Hessian on the
+  working set's null space is negative (`dᵀHd = −4.046e-2`) at a point that is
+  a local minimum of the NLP. Started at `x*` that cost five outer iterations
+  where one sufficed, and from `x* + 1e-8·e₀` — which is every warm start,
+  gh #484 — the subproblem came back `QpIterationLimit` at iteration 0.
+  Modifying the Hessian rather than following the curvature is the textbook
+  answer for an SQP step (Nocedal-Wright §18.4); doing that is **gh #856**,
+  and until it lands `algorithm=active-set-sqp` can still report a constrained
+  *maximum* as `Solve_Succeeded`. That is a known and owned gap, not an
+  oversight — but it is deliberately **not pinned by a test**, and the reason
+  is worth recording. The obvious fixture for it, `nonconvex_qp.nl`, has three
+  first-order KKT points (`(1,1)` at `obj = 1`, and `(0,2)`/`(2,0)` at
+  `obj = 0`) and is exactly symmetric under swapping the two variables, so
+  which one an active-set method returns is a tie broken by the arithmetic
+  rather than a verdict fixed by the specification. macOS/arm64 breaks it
+  toward the maximum, ubuntu-latest/x86-64 toward an endpoint. A first draft
+  of the test asserted the macOS answer and went red on CI. A defect whose
+  manifestation is a tie cannot be pinned; it can only be described.
+
+  **New option `sqp_qp_certify_second_order`** (default `no`) turns it on for
+  the SQP subproblem from the CLI, AMPL, Pyomo and GAMS. It does not affect
+  standalone QP solves, which certify unconditionally. It is pinned end-to-end
+  by `crates/pounce-cli/tests/issue848_sqp_second_order_option.rs`, which
+  asserts the *objective* moves between the two settings. It does that on
+  `nonconvex_two_escapes.nl` rather than on `nonconvex_qp.nl`, per the tie
+  above: there the default's stopping point `A = (0,0)` is forced by exact
+  cancellation (the model is even in `x₁`, so `∂f/∂x₁` is zero bit-for-bit on
+  `x₁ = 0`) rather than chosen from equals, and the check moves the answer to
+  the global minimum `−6752.25`. The assertion is on the strict improvement,
+  not on either endpoint's exact value —
+  `convex_option_readers_match_the_registry` pins that the registry and the
+  reader agree on which values are legal, which is a different claim from
+  "setting it changes the answer", and it is the second claim that gh #677 and
+  the `sqp_qp_use_homotopy` no-op both failed.
+
+  **Fixture sweep** (`scripts/sweep-fixtures.sh`, both legs, four arms,
+  baselined against this release's other gh #848 change rather than against
+  0.10.0 — the two land together, so the interesting question is what *this*
+  half adds).
+
+  Two arms are byte-identical across all 158 fixture-legs. `solver_selection=auto`
+  is identical and is *uninformative rather than reassuring*: 42 of the 79
+  fixtures route to the convex arm, which is always `Psd`-gated, and the rest
+  to the NLP filter line-search, so the default corpus reaches the new code
+  zero times. `algorithm=active-set-sqp` at its default is identical too, and
+  that one **is** informative — it reaches the engine, and says the
+  certification is inert until asked for.
+
+  `solver_selection=qp-active-set` is the arm whose default behaviour this
+  changes. Forcing every fixture down it, 80 of the 158 legs reach
+  `active-set-QP-(pounce-qp)` and 78 are rejected as a class mismatch before a
+  solve. Exactly one line moves, on both legs:
+
+  ```text
+  nonconvex_qp_ineq   InternalError    it=1  obj=0.99999998
+                   -> SolveSucceeded   it=0  obj=-4.00000004e-08
+  ```
+
+  That is the two guards composing. `0.99999998` is the constrained *maximum*
+  of `min x₀·x₁ s.t. x₀ + x₁ ≥ 2`; the exhibition screen already refused to
+  call it `Optimal`, which is the `InternalError`, but refusing is all it could
+  do — it reports a verdict about a point, and the point was still the maximum,
+  still printed above the failure. The engine-side check escapes to the
+  minimum instead, and the screen then finds nothing to refute. The fixture is
+  gh #797's second one, fixed there on the NLP route and here on the QP route.
+  The two legs are bit-identical to each other on both binaries: the leg name
+  selects an *NLP* Hessian approximation and a standalone QP has an exact `H`
+  either way, so `lbfgs` is a duplicate here, not a second data point.
+
+  Three legs-worth of `InternalError` on that arm — `convex_qp_qscfxm1`,
+  `convex_qp_share1b`, `lp_degen2`, both legs each — are unchanged by this and
+  are not #848: they are PSD, so neither guard runs, and what they hit is the
+  documented rank-detection limitation on a degenerate LP forced down a route
+  `auto` would not choose.
+
+  `algorithm=active-set-sqp sqp_qp_certify_second_order=yes` **cannot be swept
+  against the baseline at all**, and the raw diff saying "158 lines moved" is
+  an artifact worth naming: the option does not exist on the baseline, which
+  rejects it with `OPTION_INVALID` and emits no JSON for any fixture. The
+  comparison that means something is option-off against option-on on the same
+  binary. Four fixtures move there, all on the `exact` leg — the `lbfgs` leg
+  cannot move, because `SqpHessianSource::Lbfgs` declares `Psd` and the check
+  never runs. `nonconvex_qp` `1 → 0`, `nonconvex_qcqp` `0 → −2` and
+  `nonconvex_two_escapes` `0 → −6752.25` are the rest of the gh #797 corpus,
+  the same defect on the same models. `eigena2` goes from `Internal_Error` at
+  iteration 0 with no objective to `Maximum_Iterations_Exceeded` at iteration 1
+  with a point: its warm-started subproblem exhausts the QP iteration budget,
+  and the cold-start retry that used to rescue it with a saddle now refuses to
+  certify one, so the honest budget verdict stands instead of a step that made
+  the next linearization's pinned KKT rank-deficient. Neither run converges;
+  400 with a point beats 500 with none. Nothing else moves.
+
+  Sitting behind `eigena2` is a gap this change did not open and does not
+  close: the cold-start and quasi-Newton retries in
+  `pounce-algorithm::sqp::sqp_alg` keep a retry only `if status ==
+  QpStatus::Optimal`, so an `Unbounded` verdict from a retry is discarded and
+  never reaches the gh #423 proximal fallback, which is gated on the *first*
+  solve's status. Filed as gh #855.
+
+  **Rust API (breaking):** `pounce_convex::verify_status` /
+  `pounce_rs::convex::verify_status` gains a third parameter,
+  `second_order: SecondOrderVerdict`, between `ray` and `sol`. Callers
+  composing `back_translate` + `verify_status` by hand pass
+  `qsol.stats.second_order`; `back_translate_verified` and
+  `solve_qp_active_set{,_inertia}` are unchanged. `SecondOrderVerdict` is
+  re-exported from both crates.
+
 - **`estimate()` and `gradient()` no longer re-parse variable names on
   every call.** The sensitivity session now keeps the variable data
   objects the solve resolves when it loads its solution back, in
