@@ -2151,6 +2151,14 @@ def estimate_report(model, perturb, max_iter=None,
 #: it without a model counterpart), `bound` is "lower" or "upper", and
 #: `action` is "reaches" when the variable arrives at the bound and is
 #: held there, "leaves" when it comes off it.
+#:
+#: A weakly active bound can be recorded as "reaches" at a fraction of
+#: essentially zero, which does not contradict the variable having been
+#: on that bound at the base point: what the working set gained there
+#: is the *hold*. Undecided, such a bound sits in the factorization as
+#: an order-one penalty that bends the step without enforcing anything,
+#: so a perturbation pressing into it is a breakpoint like any other
+#: (gh#852).
 ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 

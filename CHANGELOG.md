@@ -54,6 +54,57 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
+- **`mode="path"` takes a weakly active bound back instead of walking
+  out of the box (gh #852).** On the coupled kink
+  `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at
+  `p = 0`, a step to `p = -1` under `degeneracy="one_sided"` returned
+  `x = 0` — put there by the caller's clamp — with `y = 2/7` against
+  the re-solve's `1`. `fix_relax` got the same model right on the same
+  option, so this was not the one-sided trade: it was the walk finding
+  **no breakpoint at all** and leaving the crossing coordinate outside
+  its bound for a clamp that moves that coordinate and nothing coupled
+  to it.
+
+  `step_along_path` barred every base-active bound from its reach
+  scan. For a strongly active bound that is right and stays right —
+  its `σ` is order `1/mu`, its variable cannot move, and a Schur hold
+  on top would enforce the same bound twice through a near-singular
+  complement. A **weakly** active bound is the other thing entirely:
+  its `σ` is order *one*, a finite penalty that bends the direction
+  and enforces nothing, so a perturbation pressing into it walks the
+  variable straight out with nothing to stop it. The exclusion now
+  reads the activity classifier rather than the multiplier-against-
+  slack test, and a weak row is reachable: the walk holds it at the
+  fraction the variable arrives, and the coordinates behind it
+  re-optimize under the hold, which is what `fix_relax` was doing
+  differently.
+
+  A re-held weak row also **leaves the factorization**, the treatment
+  `initial_holds` already gets. While the hold stands the two are
+  indistinguishable — the hold takes the coordinate's movement to zero
+  and `σ` multiplies exactly that — so this half is invisible until
+  the hold *drops* one breakpoint later and the coordinate moves
+  again, where a stale order-one `σ` damps it: measured on a
+  three-breakpoint QP, `x` lands at 0.191 against the re-solve's 0.26,
+  wrong by 26% with every fraction in the record still correct.
+  `crates/pounce-sensitivity/tests/issue_852_path_reholds_a_weak_bound.rs`
+  is five tests on two models: one per branch the reach scan can now
+  take — weak-and-pressed-into, weak-and-left, strongly-active, and
+  the drop — plus one asserting the fixtures land in *different*
+  activity classes, so a model that drifts into its partner's class
+  cannot take the evidence with it. Each branch's entry in the file's
+  mutation table was run. A rule that branches is only tested by a
+  fixture per branch.
+
+  Reachable from `estimate(mode="path")` under
+  `degeneracy="one_sided"`, which is where it was found, and from
+  `parametric_step_path` / `parametric_step_path_decided` directly.
+  `degeneracy="directional"` never produced it: it holds exactly the
+  rows the perturbation holds. The CSTR figures in
+  `docs/src/sensitivity.md` are unchanged, re-measured across the fix
+  — there the thresholds' bound is one the step leaves, not one it
+  presses into.
+
 - **The active-set SQP no longer certifies a constrained maximum (gh #856).**
   `algorithm=active-set-sqp` on `nonconvex_qp.nl` — `min x₀x₁ s.t. x₀+x₁ = 2`,
   `0 ≤ x ≤ 4` — reported `f = 1` as `Solve_Succeeded`. On the feasible segment
