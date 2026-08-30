@@ -1221,3 +1221,64 @@ fn assert_close_scaled(what: &str, base: Number, scaled: Number, rtol: Number) {
         "{what}: moved with the row scaling -- {base:.17e} vs {scaled:.17e} (rel {err:e} > {rtol:e})",
     );
 }
+
+// ---------------------------------------------------------------
+// The all-released step -- the same three rows
+// ---------------------------------------------------------------
+
+/// [`slope`] over `parametric_step_release_all`, cancelling the
+/// affine constant the way [`derivative`] does.
+fn released_slope(s: &Solver, d_hi: Number, d_lo: Number) -> Vec<Number> {
+    let step_at = |d: Number| -> Vec<Number> {
+        let (v, released) = s
+            .parametric_step_release_all(&[0], &[d])
+            .unwrap_or_else(|e| panic!("released step at delta={d:e}: {e:?}"));
+        assert!(released > 0, "the fixture's kink must be in the weak set");
+        v
+    };
+    let hi = step_at(d_hi);
+    let lo = step_at(d_lo);
+    hi.iter()
+        .zip(lo.iter())
+        .map(|(&a, &b)| (a - b) / (d_hi - d_lo))
+        .collect()
+}
+
+/// The all-released step is one linear map with no decision in it,
+/// so its derivative is the releasing side's exact value on BOTH
+/// signs, and it gets the same rows the directional step has: unmoved
+/// by the change of variables, by the perturbation magnitude, and by
+/// a fixed variable ahead of the kink.
+#[test]
+fn leg_release_all_is_the_releasing_sides_map_in_every_frame() {
+    let plain = solved(None, false);
+    let scaled = solved(Some(D_PLAIN.to_vec()), false);
+    let fixed = solved(None, true);
+    let exact = exact_derivative(1.0);
+    for sign in [1.0, -1.0] {
+        for (s, what) in [(&plain, "plain"), (&scaled, "scaled"), (&fixed, "fixed")] {
+            assert_close(
+                &format!("released {what} (sign {sign})"),
+                &released_slope(s, sign * 1.0e-3, sign * 1.0e-6),
+                &exact,
+                1e-6,
+            );
+        }
+        for w in DELTAS.windows(2) {
+            let (hi, lo) = (sign * w[0], sign * w[1]);
+            assert_close(
+                &format!("released slope over [{lo:e}, {hi:e}]"),
+                &released_slope(&plain, hi, lo),
+                &exact,
+                1e-6,
+            );
+        }
+        let (hi, lo) = (sign * DELTAS[0], sign * DELTAS[DELTAS.len() - 1]);
+        assert_close(
+            &format!("released slope over the full span [{lo:e}, {hi:e}]"),
+            &released_slope(&plain, hi, lo),
+            &exact,
+            1e-6,
+        );
+    }
+}

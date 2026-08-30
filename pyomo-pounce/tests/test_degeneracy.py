@@ -263,6 +263,132 @@ def test_the_coupled_variable_follows_the_decided_side():
             f"target {target}, mode {mode}")
 
 
+def test_release_all_takes_the_released_direction_undecided():
+    """degeneracy="release_all" hands back the all-released step with
+    no decision: on the kink's holding side the raw step follows the
+    released direction to -1, where the true derivative is 0, and the
+    repair belongs to whatever runs next. Deterministic, unlike
+    "one_sided", whose holding-side answer depends on which side the
+    held factorization leans toward."""
+    m = kink()
+    down = sens_solution(m, [(m.p, -1.0)], degeneracy="release_all",
+                    clamp=False)
+    assert down[m.x] == pytest.approx(-1.0, abs=1e-4), (
+        "the released direction follows p through the bound")
+
+
+def test_release_all_is_repaired_by_every_mode():
+    """The releasing side is right in every mode, and the holding
+    side's violation is repaired by each mode's own machinery: pins
+    under fix_relax, the walk under path, and the clamp under linear.
+    On this one-variable fixture every repair is exact; what each
+    mode does to a coupled neighbor is pinned on `coupled_kink`
+    below."""
+    m = kink()
+    for mode in ("linear", "fix_relax", "path"):
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode,
+                      degeneracy="release_all")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            down = sens_solution(m, [(m.p, -1.0)], mode=mode,
+                            degeneracy="release_all")
+        assert up[m.x] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the releasing side's derivative is 1")
+        assert down[m.x] == pytest.approx(0.0, abs=1e-4), (
+            f"mode={mode}: the holding side repairs to the bound")
+
+
+def test_release_all_on_the_coupled_kink_pins_each_modes_repair():
+    """The AMBIGUOUS branch of the weak set, and the discriminating
+    per-coordinate pins. The releasing side equals the directional
+    decision in both coordinates in every mode, exactly what the
+    all-released direction should be there. On the holding side the
+    modes differ, and the numbers are re-solve-verified constants of
+    this fixture (dx/dp = 5/7 released, y = 2x + 1):
+
+    - fix_relax pins the crossing and re-solves, repairing both
+      coordinates, x to the bound and y to 1.
+    - path re-holds the weak bound at the fraction the walk finds the
+      direction pressing into it, and the coordinates behind it
+      re-optimize under the hold, so it reaches the same 1.
+    - linear clamps only the crossing coordinate: x repairs to the
+      bound and y keeps the released coupling, 1 + 2*(-5/7) = -3/7,
+      the neighbor damage the docstring and the book state. It is the
+      only mode left that damages the neighbor here, which is what
+      makes this fixture discriminating rather than a triple of the
+      same number.
+
+    `path` used to answer the one-sided 2/7 here, pinned as current
+    behavior rather than endorsed when this test was written. That was
+    gh#852, split out of this PR's own review: the walk barred every
+    base-active bound from its reach scan, so a perturbation pressing
+    into a weakly active one walked the variable out of its box with
+    no breakpoint, and a downstream clamp moved the crossing
+    coordinate and nothing coupled to it. The fix landed on
+    `step_along_path`, which is the surface BOTH the decided and the
+    undecided callers walk through, so it repaired `release_all` here
+    without this PR changing a line.
+    """
+    m = coupled_kink()
+    for mode in ("linear", "fix_relax", "path"):
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode,
+                      degeneracy="release_all")
+        assert up[m.x] == pytest.approx(5.0 / 7.0, abs=1e-4), (
+            f"mode={mode}: the released direction is exact when the "
+            "bound releases")
+        assert up[m.y] == pytest.approx(1.0 + 10.0 / 7.0, abs=1e-4), (
+            f"mode={mode}: the neighbor follows the released direction")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lin = sens_solution(m, [(m.p, -1.0)], degeneracy="release_all")
+        fix = sens_solution(m, [(m.p, -1.0)], mode="fix_relax",
+                       degeneracy="release_all")
+        pth = sens_solution(m, [(m.p, -1.0)], mode="path",
+                       degeneracy="release_all")
+    for est, mode in ((lin, "linear"), (fix, "fix_relax"),
+                      (pth, "path")):
+        assert est[m.x] == pytest.approx(0.0, abs=1e-4), (
+            f"mode={mode}: x repairs to the bound")
+    assert fix[m.y] == pytest.approx(1.0, abs=1e-4), (
+        "the pins re-solve, so the neighbor repairs too")
+    assert pth[m.y] == pytest.approx(1.0, abs=1e-4), (
+        "the walk re-holds the weak bound and re-optimizes behind it, "
+        "so the neighbor follows (gh#852); this pinned 2/7 before that "
+        "fix landed")
+    assert lin[m.y] == pytest.approx(1.0 - 10.0 / 7.0, abs=1e-4), (
+        "the clamp repairs only the crossing coordinate: the neighbor "
+        "keeps the released coupling, and linear is now the only mode "
+        "here that does")
+
+
+def test_release_all_at_a_clean_base_point_is_the_plain_step():
+    """Without a weakly active bound there is nothing to release and
+    every degeneracy option takes the same step, directional included."""
+    m = kink(p=2.0)
+    assert pyo.value(m.x) == pytest.approx(2.0, abs=1e-6), "interior"
+    a = sens_solution(m, [(m.p, 3.0)], degeneracy="release_all")
+    b = sens_solution(m, [(m.p, 3.0)], degeneracy="one_sided")
+    c = sens_solution(m, [(m.p, 3.0)], degeneracy="directional")
+    assert a[m.x] == pytest.approx(b[m.x], abs=1e-12)
+    assert a[m.x] == pytest.approx(c[m.x], abs=1e-12)
+
+
+def test_degeneracy_iter_warns_when_it_cannot_matter():
+    """The budget belongs to the directional decision: passing it under
+    another option warns and changes nothing, the bound_eps shape."""
+    m = kink()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        sens_solution(m, [(m.p, 1.0)], degeneracy="release_all",
+                 degeneracy_iter=8)
+    assert any("changes nothing" in str(x.message) for x in w), (
+        f"an inert budget should warn: {[str(x.message) for x in w]}")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        sens_solution(m, [(m.p, 1.0)], degeneracy_iter=8)
+    assert not any("changes nothing" in str(x.message) for x in w), (
+        "the directional decision reads the budget: no warning")
 def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     """gh#852. `degeneracy="one_sided"` gives up the choice of side at
     a kink; it does not give up feasibility. The walk used to find no
