@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+- **`solve_qp`'s PSD pre-check no longer masks the `P`-shape guard
+  (gh #862).** With `P` shaped `(7, 7)` while `c` fixes `n = 5`, the
+  default path raised a raw `IndexError` out of numpy — `index 5 is out
+  of bounds for axis 0 with size 5` — from inside `_min_eig_lower_coo`.
+  The precise message the frontend already contains for exactly this
+  case, `solve_qp: \`P\` has shape (7, 7) but must be (5, 5)`, was
+  reachable only by passing `check_psd=False`, which skips the
+  pre-check and lets `_validate` run. Two spellings of one malformed
+  input disagreed, and the default was the worse one.
+
+  The pre-check runs before `_build`, and `_build` is what calls
+  `_validate` — so the gh #113 shape guard was behind the guard that
+  needed it. `_lower_triangle_coo(P, n)` is handed the caller's `n`
+  while emitting index pairs from `P`'s own shape, and
+  `_min_eig_lower_coo` then writes them into an `(n, n)` workspace, so
+  only a `P` with **more rows than `n`** went out of bounds: `(3, 3)`,
+  `(4, 4)`, `(5, 7)` and `(7, 5)` all reached `_validate` intact, which
+  is what made the inconsistency visible rather than uniform. It became
+  reachable at default settings when 7bfb3821 (gh #849) made the PSD
+  guard always run instead of switching off above `n = 1500`.
+
+  The `P`-shape branch is now `_validate_p_shape`, called from
+  `_psd_verdict` before it reads `P` as well as from `_validate`. That
+  is one site covering every entry point that checks the Hessian before
+  it builds: `solve_qp` (both `method=`), `solve_qp_batch`,
+  `solve_qp_multi_rhs`, `solve_socp`, `QpFactorization` and
+  `QpSensitivity`. No solve changes — this only decides which exception
+  a rejected input gets. Severity is low by construction: it rejected
+  rather than returning a wrong answer; the rejection was opaque.
+  `python/tests/test_issue862_psd_precheck_masks_p_shape.py` asserts the
+  message across all seven entry points under both spellings of
+  `check_psd`, keeps the four sibling shapes pinned so a reordering
+  cannot fix the reported shape while regressing them, and checks that
+  the shape guard was placed *before* the PSD verdict rather than
+  instead of it — an indefinite `P` of the right shape is still refused.
+
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at
