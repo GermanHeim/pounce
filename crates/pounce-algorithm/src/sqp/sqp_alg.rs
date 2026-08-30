@@ -47,15 +47,17 @@ impl SqpAlgorithm {
     pub fn new(qp_solver: ParametricActiveSetSolver, opts: SqpOptions) -> Self {
         Self {
             qp_solver,
-            qp_opts: QpOptions::default(),
+            qp_opts: QpOptions::sqp_subproblem(),
             opts,
             iterates: None,
             filter: SqpFilter::new(),
         }
     }
 
-    /// Override the per-call QP-solver options. Defaults are the
-    /// `pounce_qp::QpOptions::default()` (which include the
+    /// Override the per-call QP-solver options. Defaults are
+    /// `pounce_qp::QpOptions::sqp_subproblem()` — `QpOptions::default()`
+    /// with second-order certification off, for the reason given there
+    /// (which include the
     /// `use_schur_updates = false` and `anti_cycling = Expand`
     /// from Phase 5a.2). Callers can pin tighter tolerances or
     /// flip `use_schur_updates = true` for warm-started workloads.

@@ -455,6 +455,23 @@ at 0.0018, and `fix_relax` reaches 0.0018 either way because its own
 release test happens to read the right sign there, a favorable read
 that `directional` replaces with a guarantee.
 
+Undecided is not the same as unenforced, though. Whichever side the
+thresholds lean toward, `path` under `"one_sided"` keeps every
+weakly active bound inside the box: a perturbation that presses into
+one is a breakpoint like any other, the walk takes the bound back
+there, and the coordinates coupled to it re-optimize behind the hold.
+Before that (gh#852) the walk saw no breakpoint at all on such a
+perturbation, and the variable left its box for a caller's clamp to
+put back — which moves the crossing coordinate and nothing else, so
+on `min (x - p)^2 + 0.1 (y - 1)^2` with `y = 2x + 1` and `x >= 0`,
+held at the kink `p = 0`, a step to `p = -1` came back with `x = 0`
+against a `y` of 2/7 where the answer is 1. What `"one_sided"` gives
+up at a kink is the choice of side, not feasibility; on that model
+`path` and `fix_relax` now both reproduce the re-solve, and `linear`
+is the one that still cannot, since a clamp is all it has. The CSTR
+figures above are unchanged by it: there the thresholds' bound is one
+the step leaves, not one it presses into.
+
 The cost is gated by the condition, and budgeted by
 `degeneracy_iter` (default 16): the released solve, one further
 back-solve per engaged row, and one more to recover the direction all

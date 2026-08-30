@@ -6002,7 +6002,8 @@ mod tests {
              sqp_qp_anti_cycling bland\n\
              sqp_qp_use_schur_updates yes\n\
              sqp_qp_max_schur_updates_before_refactor 12\n\
-             sqp_qp_use_homotopy yes\n",
+             sqp_qp_use_homotopy yes\n\
+             sqp_qp_certify_second_order yes\n",
         )
         .expect("every sqp_qp_* option must be registered (gh #360)");
 
@@ -6019,9 +6020,16 @@ mod tests {
         assert!(qp.use_schur_updates);
         assert_eq!(qp.max_schur_updates_before_refactor, 12);
         assert!(qp.use_homotopy);
+        // gh #848. Off by default on this path (see
+        // `QpOptions::sqp_subproblem`), so the value that proves the wire is
+        // live is `yes` — asserting the default would pass on a reader that
+        // never ran.
+        assert!(qp.certify_second_order);
 
-        // Untouched options must keep the pounce-qp defaults, not be
-        // overwritten with zeros by the "explicitly set" gate.
+        // Untouched options must keep the SQP subproblem base, not be
+        // overwritten with zeros by the "explicitly set" gate. That base is
+        // `QpOptions::default()` in every field but one; the exception is
+        // asserted below.
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
         app.initialize_with_options_str("algorithm active-set-sqp\n")
@@ -6040,6 +6048,11 @@ mod tests {
             qp.max_schur_updates_before_refactor,
             defaults.max_schur_updates_before_refactor
         );
+        // Off by default *on the SQP path*, and deliberately different from
+        // `QpOptions::default()` — which is what a standalone `solve_qp`
+        // gets, and where it is on. gh #848 / gh #856.
+        assert!(!qp.certify_second_order);
+        assert!(pounce_qp::QpOptions::default().certify_second_order);
     }
 
     /// The other direction of the gh #360 guard: every **registered**
@@ -6076,6 +6089,7 @@ mod tests {
         // round-trip assertions in the sister test.
         let mut read_by_the_reader = vec![
             "sqp_qp_anti_cycling".to_string(),
+            "sqp_qp_certify_second_order".to_string(),
             "sqp_qp_elastic_gamma".to_string(),
             "sqp_qp_feas_tol".to_string(),
             "sqp_qp_max_iter".to_string(),
