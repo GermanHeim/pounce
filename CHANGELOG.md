@@ -24,11 +24,20 @@ changes.
   needed it. `_lower_triangle_coo(P, n)` is handed the caller's `n`
   while emitting index pairs from `P`'s own shape, and
   `_min_eig_lower_coo` then writes them into an `(n, n)` workspace, so
-  only a `P` with **more rows than `n`** went out of bounds: `(3, 3)`,
-  `(4, 4)`, `(5, 7)` and `(7, 5)` all reached `_validate` intact, which
-  is what made the inconsistency visible rather than uniform. It became
-  reachable at default settings when 7bfb3821 (gh #849) made the PSD
-  guard always run instead of switching off above `n = 1500`.
+  what went out of bounds was **a nonzero in the lower triangle at a
+  row index ≥ `n`** — a condition on the fill, not on the shape alone.
+  `np.eye(7, 5)` has no nonzero past row 4 and reached `_validate`
+  intact; `np.ones((7, 5))` did not, on the same commit, for the same
+  shape. `(5, 7)` is safe under any fill, because the lower-triangle
+  filter caps the column at the row. That unevenness is what made the
+  inconsistency visible rather than uniform.
+
+  It was reachable at default settings for every `n ≤ 1500` for as long
+  as the shape guard and the pre-check have coexisted: the gate before
+  7bfb3821 (gh #849) was `check_psd or n <= _PSD_CHECK_AUTO_MAX_N`, and
+  the reported case has `n = 5`. What gh #849 changed is that it became
+  reachable **above** 1500 as well, by making the guard always run
+  instead of switching off there.
 
   The `P`-shape branch is now `_validate_p_shape`, called from
   `_psd_verdict` before it reads `P` as well as from `_validate`. That
@@ -40,10 +49,15 @@ changes.
   rather than returning a wrong answer; the rejection was opaque.
   `python/tests/test_issue862_psd_precheck_masks_p_shape.py` asserts the
   message across all seven entry points under both spellings of
-  `check_psd`, keeps the four sibling shapes pinned so a reordering
-  cannot fix the reported shape while regressing them, and checks that
-  the shape guard was placed *before* the PSD verdict rather than
-  instead of it — an indefinite `P` of the right shape is still refused.
+  `check_psd`, pins every wrong shape under **both** a diagonal and a
+  dense fill so a reordering cannot fix the reported case while
+  regressing the ones that already worked, and checks that the shape
+  guard was placed *before* the PSD verdict rather than instead of it —
+  an indefinite `P` of the right shape is still refused. On the parent
+  commit the file is 17 failed, 9 passed; the nine survivors are the
+  genuinely safe combinations — `(3, 3)`, `(4, 4)` and `(5, 7)` under
+  either fill, `(7, 5)` under the diagonal only, and the two positive
+  controls.
 
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink

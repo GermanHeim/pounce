@@ -4,7 +4,7 @@ The shape guard added for gh #113 lives in ``_validate``, which runs inside
 ``_build`` — *after* the PSD pre-check on every entry point that checks the
 Hessian before it builds the problem. The pre-check hands ``_lower_triangle_coo``
 the caller's ``n`` (from ``c``) while emitting index pairs from ``P``'s own
-shape, so a ``P`` with more rows than ``n`` wrote out of bounds inside
+shape, so those pairs were written into an ``(n, n)`` workspace inside
 ``_min_eig_lower_coo`` and surfaced as a raw ``IndexError`` from numpy::
 
     IndexError: index 5 is out of bounds for axis 0 with size 5
@@ -13,10 +13,16 @@ The same malformed input with ``check_psd=False`` — which skips the pre-check
 and lets ``_validate`` run — produced the precise, actionable message. Two
 spellings of one bad input disagreed, and the default was the worse one.
 
-Only ``P`` with **more rows than n** hit it: ``(3, 3)``, ``(4, 4)``, ``(5, 7)``
-and ``(7, 5)`` all reached ``_validate`` intact, which is what made the
-inconsistency visible rather than uniform. Those siblings are asserted here too,
-so a future reordering cannot fix the reported shape while regressing them.
+The condition is **a nonzero in the lower triangle at a row index >= n**, which
+is narrower than "a wrong shape" and narrower than "more rows than ``n``": the
+lower-triangle filter (``ri >= ci``) caps the column at the row, so ``(5, 7)``
+is safe for any fill, while ``(7, 5)`` and ``(7, 7)`` are safe only while
+nothing sits on row 5 or 6. That is why the fill matters and why both are
+parametrized below — ``np.eye(7, 5)`` reached ``_validate`` intact and
+``np.ones((7, 5))`` did not, on the same commit, for the same shape.
+
+The siblings that were genuinely safe are asserted here too, so a future
+reordering cannot fix the reported shape while regressing them.
 
 The fix validates the shape inside ``_psd_verdict`` before it reads ``P``, so
 the single message is what every entry point raises, under either spelling.
@@ -92,20 +98,32 @@ def test_the_two_spellings_agree(name):
     assert str(skipped.value) == str(checked.value)
 
 
-@pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 7), (7, 5), (7, 7)])
-def test_every_mis_shaped_P_is_rejected_uniformly(shape):
-    """The siblings that were already correct stay correct.
+def _diag(shape):
+    return np.eye(*shape) * 2.0
 
-    Only `(7, 7)` — more rows than `n` — reached numpy; the guard now speaks
-    for all of them, so a shape that is wrong in any direction gets the one
-    message naming what it is and what it must be.
+
+def _dense(shape):
+    return np.ones(shape)
+
+
+@pytest.mark.parametrize("fill", [_diag, _dense], ids=["diag", "dense"])
+@pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 7), (7, 5), (7, 7)])
+def test_every_mis_shaped_P_is_rejected_uniformly(shape, fill):
+    """Every wrong shape gets the one message, under either fill.
+
+    Both fills are here because the pre-check's blast radius depended on the
+    fill and not only on the shape: what reached numpy was a nonzero in the
+    lower triangle at a row index >= `n`. On the parent commit `np.eye(7, 5)`
+    had none — its nonzeros stop at `(4, 4)` — and reached `_validate` intact,
+    while `np.ones((7, 5))` raised `IndexError`. Parametrizing on the diagonal
+    alone therefore recorded `(7, 5)` as a case that already worked, which it
+    did not.
     """
-    P = np.eye(*shape) * 2.0
     with pytest.raises(
         ValueError,
         match=rf"`P` has shape \({shape[0]}, {shape[1]}\) but must be \(5, 5\)",
     ):
-        solve_qp(P=P, c=C)
+        solve_qp(P=fill(shape), c=C)
 
 
 def test_a_correctly_shaped_P_still_solves():
