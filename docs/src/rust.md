@@ -86,6 +86,8 @@ infeasibilities). With `presolve=yes` and `presolve_fbbt=yes`, implement
 so they stay **empty** if a solve aborts before finalizing — check `success`
 before indexing.
 
+Setting `presolve_fbbt=yes` without `presolve=yes` is a no-op.
+
 Each tape must exactly restate the corresponding value from `constraints()`.
 `try_solve` checks the starting point and box midpoint, but that sampling is not
 a proof: an undetected mismatch can cut off the optimum without a diagnostic.

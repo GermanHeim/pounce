@@ -58,6 +58,8 @@ assert!((sol.x[0] - 1.0).abs() < 1e-5 && (sol.x[1] - 2.0).abs() < 1e-5);
 For nonlinear bound tightening, expose each constraint as an `FbbtTape` and
 enable the existing presolve options:
 
+`presolve_fbbt=yes` is inactive unless `presolve=yes` is also set.
+
 ```rust
 impl Problem for P {
     fn constraint_expression(&self, _i: usize) -> Option<FbbtTape> {

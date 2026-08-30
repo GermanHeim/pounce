@@ -66,6 +66,7 @@ pub trait Problem {
 
     /// Optional FBBT expression for constraint `index`.
     /// The tape must exactly restate [`Self::constraints`] for that row.
+    /// It is used only when both `presolve=yes` and `presolve_fbbt=yes`.
     fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
         None
     }
@@ -832,6 +833,45 @@ mod tests {
         gradient_points: Rc<RefCell<Vec<f64>>>,
     }
 
+    struct PresolveProbe {
+        jacobian_calls: Rc<RefCell<usize>>,
+    }
+
+    impl Problem for PresolveProbe {
+        fn objective(&self, x: &[f64]) -> f64 {
+            (x[0] - 1.0).powi(2)
+        }
+        fn n_constraints(&self) -> usize {
+            1
+        }
+        fn constraints(&self, x: &[f64], out: &mut [f64]) {
+            out[0] = x[0];
+        }
+        fn jacobian(&self, _x: &[f64], jac: &mut [f64]) -> bool {
+            *self.jacobian_calls.borrow_mut() += 1;
+            jac[0] = 1.0;
+            true
+        }
+    }
+
+    fn run_presolve_probe(presolve: bool) -> (Solution, usize) {
+        let jacobian_calls = Rc::new(RefCell::new(0));
+        let mut nlp = Nlp::new(PresolveProbe {
+            jacobian_calls: Rc::clone(&jacobian_calls),
+        })
+        .var_bounds(&[0.0], &[2.0])
+        .constraint_bounds(&[0.5], &[INF])
+        .x0(&[1.0])
+        .option_int("max_iter", 0)
+        .option_int("print_level", 0);
+        if presolve {
+            nlp = nlp.option_str("presolve", "yes");
+        }
+        let solution = nlp.solve();
+        let calls = *jacobian_calls.borrow();
+        (solution, calls)
+    }
+
     impl Problem for DerivativeTestCircle {
         fn objective(&self, x: &[f64]) -> f64 {
             (x[0] - 0.25).powi(2)
@@ -943,6 +983,46 @@ mod tests {
             .var_bounds(&[-10.0], &[10.0])
             .constraint_bounds(&[-2.0e19], &[1.0])
             .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!(sol.fbbt_report.is_none());
+    }
+
+    #[test]
+    fn application_presolve_runs_without_builder_fbbt() {
+        let (without, calls_without) = run_presolve_probe(false);
+        let (with, calls_with) = run_presolve_probe(true);
+
+        assert!(without.fbbt_report.is_none());
+        assert!(with.fbbt_report.is_none());
+        assert!(
+            calls_with > calls_without,
+            "{calls_with} <= {calls_without}"
+        );
+    }
+
+    #[test]
+    fn fbbt_with_no_expression_tapes_is_a_noop() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("presolve", "yes")
+            .option_str("presolve_fbbt", "yes")
+            .solve();
+
+        assert!(sol.success, "status = {:?}", sol.status);
+        let report = sol.fbbt_report.expect("FBBT report");
+        assert_eq!(report.bound_updates, 0);
+        assert!(report.infeasibility_witness.is_none());
+    }
+
+    #[test]
+    fn fbbt_switch_without_presolve_is_a_noop() {
+        let sol = Nlp::new(CircleConstraint)
+            .var_bounds(&[-10.0], &[10.0])
+            .constraint_bounds(&[-INF], &[1.0])
+            .option_str("presolve_fbbt", "yes")
+            .solve();
+
         assert!(sol.success, "status = {:?}", sol.status);
         assert!(sol.fbbt_report.is_none());
     }
