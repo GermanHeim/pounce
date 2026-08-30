@@ -470,8 +470,8 @@ impl<P: Problem + 'static> Nlp<P> {
             crate::collector_scope()
         });
         let derivative_test_tnlp = Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>;
-        let status =
-            app.optimize_tnlp_with_derivative_test_tnlp(Rc::clone(&tnlp), derivative_test_tnlp);
+        let status = app
+            .optimize_tnlp_with_derivative_test_tnlp(Rc::clone(&tnlp), Some(derivative_test_tnlp));
         let stats = app.statistics();
         // Second-opinion ladder, on by default here as in the CLI and the
         // Python / C frontends: an `Infeasible_Problem_Detected` or an

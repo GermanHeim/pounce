@@ -877,15 +877,15 @@ impl IpoptApplication {
     }
 
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
-        let derivative_test_tnlp = Rc::clone(&tnlp);
-        self.optimize_tnlp_with_derivative_test_tnlp(tnlp, derivative_test_tnlp)
+        self.optimize_tnlp_with_derivative_test_tnlp(tnlp, None)
     }
 
-    /// Solve through `tnlp`, but run `derivative_test` against an unwrapped TNLP.
+    /// Solve through `tnlp`, optionally overriding the derivative-test target.
+    /// `None` tests the scaled and conditioned TNLP.
     pub fn optimize_tnlp_with_derivative_test_tnlp(
         &mut self,
         tnlp: Rc<RefCell<dyn TNLP>>,
-        derivative_test_tnlp: Rc<RefCell<dyn TNLP>>,
+        derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
@@ -911,6 +911,7 @@ impl IpoptApplication {
         // nothing automatic except the local-infeasibility ladder's third
         // rung, which only runs after a solve has already failed.
         let tnlp = self.install_start_conditioner(tnlp);
+        let derivative_test_tnlp = derivative_test_tnlp.as_ref().unwrap_or(&tnlp);
 
         if let Some(value) = self.unsupported_library_solver_selection() {
             use pounce_common::journalist::JournalCategory;
@@ -996,11 +997,8 @@ impl IpoptApplication {
             eprintln!("{warning}");
         }
 
-        // `derivative_test`: check the caller's analytic derivatives
-        // against finite differences before anything else runs — on the
-        // raw TNLP, before the presolve wrapper below changes its
-        // coordinates.
-        self.run_derivative_test(&derivative_test_tnlp);
+        // Test before presolve, using the requested coordinate space.
+        self.run_derivative_test(derivative_test_tnlp);
 
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route
@@ -1784,10 +1782,7 @@ impl IpoptApplication {
         }
     }
 
-    /// Run the derivative checker, if asked, against the **user's own**
-    /// TNLP — before presolve wraps it and before any scaling — so the
-    /// report is about the derivatives the caller wrote, in the caller's
-    /// own indices.
+    /// Run the derivative checker, if requested, against `tnlp`.
     ///
     /// Advisory, like upstream: a suspicious entry is reported and the
     /// solve continues. The report goes to stderr so it survives
@@ -5658,8 +5653,8 @@ mod tests {
     }
 
     use pounce_nlp::tnlp::{
-        BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
-        StartingPoint,
+        BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution,
+        SparsityRequest, StartingPoint,
     };
 
     struct Hs071Stub;
@@ -6627,6 +6622,60 @@ mod tests {
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
+    struct RecordingQuadratic {
+        gradient_points: Rc<RefCell<Vec<Number>>>,
+        objective_points: Rc<RefCell<Vec<Number>>>,
+        x_scaling: Number,
+    }
+
+    impl TNLP for RecordingQuadratic {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            ExactQuadratic.get_nlp_info()
+        }
+
+        fn get_bounds_info(&mut self, bounds: BoundsInfo<'_>) -> bool {
+            ExactQuadratic.get_bounds_info(bounds)
+        }
+
+        fn get_starting_point(&mut self, start: StartingPoint<'_>) -> bool {
+            ExactQuadratic.get_starting_point(start)
+        }
+
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            self.objective_points.borrow_mut().push(x[0]);
+            ExactQuadratic.eval_f(x, new_x)
+        }
+
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            self.gradient_points.borrow_mut().push(x[0]);
+            grad[0] = 2.0 * x[0];
+            true
+        }
+
+        fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            ExactQuadratic.eval_g(x, new_x, g)
+        }
+
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            ExactQuadratic.eval_jac_g(x, new_x, mode)
+        }
+
+        fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+            *req.obj_scaling = 1.0;
+            *req.use_x_scaling = true;
+            req.x_scaling[0] = self.x_scaling;
+            *req.use_g_scaling = false;
+            true
+        }
+
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
     fn derivative_test_verdict(extra: &str) -> pounce_nlp::derivative_test::DerivativeTestReport {
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
@@ -6682,5 +6731,55 @@ mod tests {
             "{:#?}",
             tolerant.lines,
         );
+    }
+
+    #[test]
+    fn ordinary_derivative_test_keeps_the_conditioned_start() {
+        let gradient_points = Rc::new(RefCell::new(Vec::new()));
+        let tnlp = Rc::new(RefCell::new(RecordingQuadratic {
+            gradient_points: Rc::clone(&gradient_points),
+            objective_points: Rc::new(RefCell::new(Vec::new())),
+            x_scaling: 1.0,
+        })) as Rc<RefCell<dyn TNLP>>;
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "derivative_test first-order\n\
+             start_point_perturbation 0.5\n\
+             hessian_approximation limited-memory\n\
+             max_iter 0\n\
+             print_level 0\n",
+        )
+        .unwrap();
+
+        let _ = app.optimize_tnlp(tnlp);
+
+        let first = gradient_points.borrow()[0];
+        assert!((first - 1.7666216164272852).abs() < 1e-12, "{first}");
+    }
+
+    #[test]
+    fn ordinary_derivative_test_keeps_variable_scaling() {
+        let objective_points = Rc::new(RefCell::new(Vec::new()));
+        let tnlp = Rc::new(RefCell::new(RecordingQuadratic {
+            gradient_points: Rc::new(RefCell::new(Vec::new())),
+            objective_points: Rc::clone(&objective_points),
+            x_scaling: 0.5,
+        })) as Rc<RefCell<dyn TNLP>>;
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "derivative_test first-order\n\
+             derivative_test_perturbation 0.5\n\
+             nlp_scaling_method user-scaling\n\
+             hessian_approximation limited-memory\n\
+             max_iter 0\n\
+             print_level 0\n",
+        )
+        .unwrap();
+
+        let _ = app.optimize_tnlp(tnlp);
+
+        assert_eq!(&objective_points.borrow()[..2], &[1.0, 2.0]);
     }
 }
