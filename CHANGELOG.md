@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+- **`degeneracy="release_all"`.** A third option beside `"directional"`
+  and `"one_sided"`, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`: every weakly active bound is released
+  undecided, at one back-solve and no directional QP. The bounds the
+  perturbation actually holds come back as bound crossings for the
+  mode or a correction to handle: `fix_relax` pins them, `path` walks
+  them, `linear` clamps each crossing coordinate and leaves its
+  neighbors carrying the released coupling. The trade is the
+  decision's cost, deterministic and independent of `degeneracy_iter`,
+  against downstream repair, and it is the option for a kinked base
+  point too large for the engagement's budget, where `"directional"`
+  pays the failed attempt and falls back to one-sided anyway. The
+  step itself is the new public
+  `pounce_sensitivity::Solver::parametric_step_release_all`, the
+  directional path's all-released solve returned undecided, and
+  `degeneracy_iter` warns when passed under an option that makes no
+  decision. To tell a passed budget from the default, the
+  `degeneracy_iter` parameter on all three entry points is now
+  declared as `None` and resolved to 16 inside, a visible signature
+  change with unchanged behavior for every existing call.
 - **A model with declared sens params solves as written: the per-solve
   clone is gone.** Every solve of a declared model used to deep-copy
   the whole model and re-run the sensitivity-toolbox surgery on the
