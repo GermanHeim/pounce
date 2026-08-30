@@ -9,6 +9,11 @@ changes.
 
 ## [Unreleased]
 
+- **Added FBBT support to `pounce-rs`.** `presolve_fbbt=yes` now runs
+  feasibility-based bound tightening when an `ExpressionProvider` is
+  available; `Solution::fbbt_report` exposes diagnostics and
+  `Problem::constraint_expression()` supplies constraint expression tapes.
+
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at
