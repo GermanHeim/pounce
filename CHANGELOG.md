@@ -9,6 +9,52 @@ changes.
 
 ## [Unreleased]
 
+- **A solve that the factorization escalation rerouted into a wall now
+  re-solves itself without it (gh #857).** `feral_increase_quality` is on by
+  default and is two-sided: it buys accuracy and 15-25% of the iterations on
+  several models, and it loses whole solves on others (gh #850). The losing
+  direction had no automatic recovery — the documented remedy was for the user
+  to notice, read the option, and re-run.
+
+  `feral_increase_quality_retry` (new, default on) is that re-run, taken
+  automatically. It is rung 4 of the second-opinion ladder, appended last, and
+  its gate is two conditions: the verdict is `Restoration_Failed` or
+  `Maximum_Iterations_Exceeded`, **and** the solve actually escalated at least
+  once. `Maximum_Iterations_Exceeded` opens no other rung, on the sound general
+  reasoning that the answer to a budget exit is a bigger budget — the exception
+  is exactly this, because when the escalation is what walked the trajectory
+  into the wall, a bigger budget re-runs the same wall.
+
+  It is a re-solve rather than a re-baselining of the escalation because
+  re-baselining was tried and refuted: feral's `reset_quality`
+  (jkitchin/feral#192) was plumbed and instrumented — 376 escalations against
+  376 matching resets on one solve — and recovers neither leg at either
+  boundary. The harm is the *destination*, not the duration; every static
+  `feral_pivtol` in {1e-6, 3.16e-5, 4.2e-4, 1e-2, 0.5} loses the
+  limited-memory leg from iteration 0 and only 1e-8 solves it. gh #857 was
+  filed as blocked on that upstream fix; it is not.
+
+  Across the 158-fixture-leg sweep it moves exactly one line: `lbfgs
+  square_flowsheet_resto` goes from `Maximum_Iterations_Exceeded` at the
+  3000-iteration cap to `Optimal` at 178, 3178 total. Of the 13 escalating
+  fixture-legs, that is the only one whose verdict is an unrecovered failure.
+  The cost is one extra solve on a run that was already going to report
+  failure; the one case worth naming is that a deliberately small `max_iter` on
+  an escalating model now spends a second budget before reporting.
+  `feral_increase_quality_retry=no` holds a capped run to the budget it was
+  given.
+
+- **The solver reports how many times it escalated the factorization
+  (gh #857).** New `quality_escalations` statistic, in the JSON report, the
+  Python `info` dict, the console summary (printed only when nonzero) and the
+  sweep's new `q=` column. It exists because an escalation left no trace
+  anywhere: not in status, objective, iteration count or engine, and the `q`
+  info-string flag misses every escalation that happens inside a restoration
+  sub-solve, because those rows carry no info column at all. On
+  `square_flowsheet_resto`'s exact leg that is one printed `q` against two
+  actual firings. The recovery rung above is not implementable without it.
+  Report-only: the 158-fixture-leg sweep is byte-identical with it in place.
+
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at

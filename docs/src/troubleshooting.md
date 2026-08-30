@@ -336,7 +336,7 @@ The recipe in plain English:
 ### The second-opinion ladder (what those extra solves in your log are)
 
 Before shipping a local-infeasibility verdict POUNCE re-solves the
-problem along up to three *different* trajectories and only keeps the
+problem along up to four *different* trajectories and only keeps the
 verdict if they agree. This is not a CLI feature — see
 [The ladder is not a CLI feature](#the-ladder-is-not-a-cli-feature)
 below — but the CLI is where you see it narrated:
@@ -360,15 +360,30 @@ linear-solver scaling or a different barrier strategy evaluates the same
 non-finite quantity again, so those two rungs are not evidence about it and
 would only burn solves.
 
-`Restoration_Failed` opens it as well, and likewise reaches only the third rung
-([pounce#815](https://github.com/jkitchin/pounce/issues/815)). Restoration
+`Restoration_Failed` opens it as well, and reaches rungs 3 and 4
+([pounce#815](https://github.com/jkitchin/pounce/issues/815),
+[pounce#857](https://github.com/jkitchin/pounce/issues/857)). Restoration
 failing is a report about the *path*: the iterate reached somewhere the
 restoration sub-problem could not work from. Rungs 1 and 2 vary the path from
 the same starting point and can arrive somewhere just as bad; rung 3 moves the
 point, which makes it a different sub-problem. Note that this is **not** a
 budget exit — a restoration failure typically stops far short of `max_iter`,
-so "give it more iterations" is not the available answer, which is why it
-qualifies where `Maximum_Iterations_Exceeded` does not.
+so "give it more iterations" is not the available answer.
+
+`Maximum_Iterations_Exceeded` reaches **rung 4 only**, and only when the solve
+actually escalated its factorization. A budget exit is normally not evidence of
+anything except a small budget, and the honest answer to it is a bigger budget,
+which is why no other rung opens on it. The exception is narrow and measured:
+`feral_increase_quality` reroutes the trajectory when the linear solver's
+refinement stalls, and where that reroute is what walked the solve into the
+wall, a bigger budget just re-runs the same wall.
+`square_flowsheet_resto` under `hessian_approximation=limited-memory` is the
+case — 3000 iterations at the cap with the escalation, 178 and `Optimal`
+without it. The gate is the `quality_escalations` statistic: a solve that never
+escalated is provably not a candidate and opens no rung at all, so this is not
+a blanket extra solve on every capped run. Turn it off with
+`feral_increase_quality_retry=no`, which holds a capped run to exactly the
+budget it was given.
 
 Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
 so a laddered run has several and only the last one is the verdict that
@@ -384,7 +399,7 @@ compare against `solution.status_upstream`, which carries that spelling;
 `solution.status` is the Rust enum-variant name (`Solve_Succeeded` vs
 `SolveSucceeded`) and does not match IPOPT's tables.
 
-The three rungs probe different things, and the distinction matters when
+The four rungs probe different things, and the distinction matters when
 you are reading a log:
 
 | rung | option | varies |
@@ -392,6 +407,30 @@ you are reading a log:
 | `feral_scaling=mc64` | `feral_infeasibility_scaling_retry` | the linear algebra |
 | `mu_strategy=adaptive` | `infeasibility_mu_strategy_retry` | the barrier trajectory |
 | `start_point_perturbation=1e-2` | `infeasibility_perturbed_start_retry` | where the trajectory starts |
+| `feral_increase_quality=no` | `feral_increase_quality_retry` | whether a stalled factorization was allowed to reroute the trajectory |
+
+Rung 4 is the odd one out in a second way: every other rung's gate is a
+property of the options the failing solve ran under, so the ladder can be
+assembled before the solve. Rung 4's gate is a *measurement of the solve that
+just failed* — it needs `quality_escalations >= 1`, and an escalation leaves no
+other trace, not in the status, the objective, the iteration count or the
+engine.
+
+**To switch the ladder off entirely you must name all four options** — there
+is no single master switch, and each option's own text says "set to no to keep
+behaviour bit-for-bit faithful to upstream IPOPT", which is true of that rung
+and not of the solver:
+
+```
+feral_infeasibility_scaling_retry no
+infeasibility_mu_strategy_retry   no
+infeasibility_perturbed_start_retry no
+feral_increase_quality_retry      no
+```
+
+Naming a subset leaves the remaining rungs live. This bit three of POUNCE's
+own regression tests when rung 4 was added, each of which had used
+`infeasibility_perturbed_start_retry=no` as shorthand for "no ladder".
 
 The first rung is evidence only when the trajectory is
 hypersensitive — two equally backward-stable scalings staying

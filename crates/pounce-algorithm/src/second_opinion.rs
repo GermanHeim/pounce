@@ -72,6 +72,26 @@ pub enum SecondOpinionTrigger {
     /// this is a statement about the trajectory the solve happened to take,
     /// not about the model; see [`SecondOpinionTrigger::for_status`].
     RestorationFailure,
+    /// `Maximum_Iterations_Exceeded` — **and only when the solve escalated
+    /// the linear solver's factorization quality at least once** (gh#857).
+    ///
+    /// This is the one trigger that is not a property of the verdict alone,
+    /// and the exception it carves out of the paragraph on
+    /// [`SecondOpinionTrigger::for_status`] is narrow on purpose. A budget
+    /// exit normally wants a bigger budget, not a different trajectory —
+    /// but a `feral_increase_quality` escalation *changes which pivots are
+    /// taken and never steps back down*, so when one fired, the wall the
+    /// solve hit may be the escalated trajectory's rather than the model's,
+    /// and a bigger budget re-runs the same wall. On
+    /// `square_flowsheet_resto`'s lbfgs leg the escalated path reaches 3000
+    /// iterations and the un-escalated one converges in 178.
+    ///
+    /// The escalation count is what keeps this from opening a ladder on
+    /// every budget exit; it comes from the `quality_escalations` statistic
+    /// and is checked in [`second_opinion_rungs`], not here — `for_status`
+    /// only sees a status. A solve that escalated zero times produces an
+    /// empty rung list and the driver returns before it narrates anything.
+    IterationLimit,
 }
 
 /// What the baseline options already provide, so a rung that would be a no-op
@@ -87,6 +107,27 @@ pub struct SecondOpinionAvailability {
     /// The baseline already displaces the start, so there is no displacement
     /// left for the third rung to add that the failing solve did not have.
     pub already_perturbed: bool,
+    /// `feral_increase_quality_retry` (gh#857), rung 4's own enable.
+    pub increase_quality_retry_enabled: bool,
+    /// The baseline already ran with `feral_increase_quality=no`, so rung 4
+    /// would re-run the solve that just failed.
+    pub already_no_increase_quality: bool,
+    /// How many times the failing solve's linear solver actually accepted an
+    /// `increase_quality` escalation — the `quality_escalations` statistic.
+    ///
+    /// The only entry here that is a *measurement of the solve* rather than
+    /// a reading of its options, and rung 4 is unimplementable without it:
+    /// an escalation moves no field a report carries, so "did this solve
+    /// take the rung that has a documented losing direction" cannot be
+    /// answered from the verdict. `0` means provably not a candidate, and
+    /// rung 4 is dropped — which is what stops a budget exit on a
+    /// never-escalating model from paying for an extra solve.
+    ///
+    /// It is a gate at `>= 1`, deliberately **not** a threshold. `deb7` and
+    /// `square_flowsheet_resto`'s base solve escalate exactly twice each on
+    /// their exact legs, one gaining the solve and one losing it, so no
+    /// count separates them; the verdict does.
+    pub baseline_quality_escalations: u64,
     /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy.
     /// `None` under `ScalingStrategy::External`, which drops rungs 2 and 3.
     ///
@@ -135,6 +176,26 @@ pub struct SecondOpinionAvailability {
 ///    — see [`SecondOpinionTrigger`]. Those two triggers open this rung and
 ///    nothing else, so they cost exactly one extra solve.
 ///
+/// 4. **`feral_increase_quality=no` — undo the factorization escalation**
+///    (`feral_increase_quality_retry`, on by default; gh#857). The only rung
+///    whose gate is a *measurement of the failing solve* rather than a
+///    reading of its options: it opens on a `Restoration_Failed` or a
+///    `Maximum_Iterations_Exceeded` **and** only when the solve's
+///    `quality_escalations` count is at least 1. `feral_increase_quality` is
+///    on by default and genuinely two-sided — it buys accuracy and 15–25% of
+///    the iterations on several fixture-legs and loses whole solves on others
+///    — and its losing direction previously had no automatic recovery at all.
+///    Measured on `square_flowsheet_resto`: the lbfgs leg escalates 25 times,
+///    hits the 3000-iteration cap, and converges in 178 with the rung off.
+///
+///    It is **appended**, not inserted, so a `Restoration_Failed` that rung 3
+///    already recovers (the gh#815 family, and this same fixture's exact leg)
+///    reaches promotion first and costs nothing new. The `>= 1` is a gate and
+///    not a threshold: `deb7` escalates exactly as many times as
+///    `square_flowsheet_resto`'s base solve and *gains* by it, so a count
+///    cannot separate the two — only the verdict can, and `deb7`'s is
+///    `Optimal`.
+///
 /// Rungs are **not** cumulative: the driver restores the baseline before each
 /// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
 /// earlier knob. That reset is load-bearing, not tidiness: on gh #524's
@@ -165,13 +226,45 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     // where stacking two of them threw the fix away. That undo is the
     // driver's job (`OptionSnapshot::apply` before each rung), not an
     // assignment here; see the note on `assignments`.
+    //
+    // Not on the iteration-limit trigger. That trigger is gated on a
+    // measurement (gh#857, rung 4 below) and exists to test one hypothesis —
+    // that the escalation is what walked the solve into the wall. Displacing
+    // the start of a solve that ran out of budget tests nothing: it starts a
+    // fresh trajectory with the same budget and the same escalating ladder
+    // waiting for it. Opening it here would put an extra solve on every
+    // escalating budget exit for no reason anyone has measured.
     if avail.baseline_scaling.is_some()
+        && avail.trigger != SecondOpinionTrigger::IterationLimit
         && avail.perturbed_start_retry_enabled
         && !avail.already_perturbed
     {
         rungs.push(SecondOpinionRung {
             label: "start_point_perturbation=1e-2",
             assignments: vec!["start_point_perturbation 1e-2\n".to_string()],
+        });
+    }
+    // 4. `feral_increase_quality=no` — undo the escalation (gh#857).
+    //
+    // Appended, never prepended. On a `Restoration_Failed` the rung above
+    // already recovers the gh#815 family *and* `square_flowsheet_resto`'s own
+    // exact leg, and it promotes and breaks before this one runs, so those
+    // solves cost nothing new. This rung is what is left when that fails, and
+    // it is the whole ladder on an `Maximum_Iterations_Exceeded`.
+    //
+    // The `>= 1` is the gate the trigger's doc describes: a solve that never
+    // escalated cannot have been rerouted by an escalation, so there is
+    // nothing here to test and no solve to spend.
+    if matches!(
+        avail.trigger,
+        SecondOpinionTrigger::RestorationFailure | SecondOpinionTrigger::IterationLimit
+    ) && avail.increase_quality_retry_enabled
+        && !avail.already_no_increase_quality
+        && avail.baseline_quality_escalations >= 1
+    {
+        rungs.push(SecondOpinionRung {
+            label: "feral_increase_quality=no",
+            assignments: vec!["feral_increase_quality no\n".to_string()],
         });
     }
     rungs
@@ -275,6 +368,26 @@ impl SecondOpinionTrigger {
             ApplicationReturnStatus::RestorationFailed => {
                 Some(SecondOpinionTrigger::RestorationFailure)
             }
+            // The exception to the paragraph above, and it is an exception
+            // to the *reason* rather than a change of mind about it
+            // (gh#857). "A re-solve would burn the same budget to reach the
+            // same wall" is true of a budget exit whose trajectory the
+            // ladder cannot change — and a `feral_increase_quality`
+            // escalation is precisely a trajectory the ladder *can* change,
+            // because it persists across every later factorization and one
+            // option removes it. Measured: `square_flowsheet_resto`'s lbfgs
+            // leg hits the 3000-iteration cap having escalated 25 times, and
+            // converges in 178 with the rung off.
+            //
+            // This returns `Some` for every budget exit; the escalation
+            // count is not visible here. `second_opinion_rungs` drops the
+            // rung when the count is zero and the driver returns on the
+            // empty list *before* narrating, so a non-escalating budget exit
+            // is unchanged — same statuses, same statistics, same console.
+            // `a_budget_exit_that_never_escalated_opens_no_rung` is the pin.
+            ApplicationReturnStatus::MaximumIterationsExceeded => {
+                Some(SecondOpinionTrigger::IterationLimit)
+            }
             _ => None,
         }
     }
@@ -285,6 +398,9 @@ impl SecondOpinionTrigger {
             SecondOpinionTrigger::LocalInfeasibility => "local infeasibility",
             SecondOpinionTrigger::InvalidNumber => "invalid number",
             SecondOpinionTrigger::RestorationFailure => "restoration failure",
+            SecondOpinionTrigger::IterationLimit => {
+                "iteration limit after a factorization escalation"
+            }
         }
     }
 }
@@ -302,7 +418,19 @@ impl SecondOpinionAvailability {
     /// unreachable from the string option, and if it ever arrives here there
     /// is no tag to write, so the rungs that need one are dropped rather than
     /// guessed at.
-    pub fn from_options(options: &OptionsList, trigger: SecondOpinionTrigger) -> Self {
+    /// `baseline_quality_escalations` is the failing solve's
+    /// `SolveStatistics::quality_escalations`, and it is a **required
+    /// parameter** rather than a defaulted setter for the reason gh#857
+    /// exists at all: the quantity is invisible everywhere else, so a caller
+    /// that forgot it would silently pass `0`, rung 4 would never open, and
+    /// the recovery would look like a rung that simply does not fire. A
+    /// missing argument is a compile error; a forgotten setter is a
+    /// regression nobody can see.
+    pub fn from_options(
+        options: &OptionsList,
+        trigger: SecondOpinionTrigger,
+        baseline_quality_escalations: u64,
+    ) -> Self {
         // Each of the three `*_retry` flags is read with its tag written out
         // as a literal rather than through a shared closure: `init_options_wiring`
         // proves every registered Initialization option is actually consumed by
@@ -342,6 +470,19 @@ impl SecondOpinionAvailability {
                 .get_numeric_value("start_point_perturbation", "")
                 .map(|(v, _found)| v > 0.0)
                 .unwrap_or(false),
+            increase_quality_retry_enabled: options
+                .get_bool_value("feral_increase_quality_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true),
+            // The rung would set `feral_increase_quality` to the value the
+            // failing solve already ran under, so it is a no-op re-solve.
+            // Read as a *value*, not as set-ness: the default is `yes`, so
+            // an unset option is not already-no.
+            already_no_increase_quality: options
+                .get_bool_value("feral_increase_quality", "")
+                .map(|(v, _found)| !v)
+                .unwrap_or(false),
+            baseline_quality_escalations,
             baseline_scaling,
             // `mu_strategy` has exactly two registered values, so "not
             // adaptive" is "monotone" and there is no third case to guess at.
@@ -368,6 +509,14 @@ mod scaling_retry_tests {
             already_mc64: false,
             already_adaptive: false,
             already_perturbed: false,
+            increase_quality_retry_enabled: true,
+            already_no_increase_quality: false,
+            // Zero, so that every test written before gh#857 keeps asserting
+            // exactly the ladder it asserted then: rung 4's gate is a count,
+            // and a solve that did not escalate cannot reach it. The tests
+            // that are about rung 4 raise it explicitly, which is also how
+            // they document that the count is the thing doing the work.
+            baseline_quality_escalations: 0,
             baseline_scaling: Some("auto"),
         }
     }
@@ -647,6 +796,108 @@ mod scaling_retry_tests {
         );
     }
 
+    /// gh#857 rung 4 on a restoration failure, and the ordering claim that
+    /// makes it cheap: it is **appended**, so the gh#815 rung still runs
+    /// first and still promotes first. `square_flowsheet_resto`'s exact leg
+    /// is exactly that case, and is why this rung costs it nothing.
+    #[test]
+    fn an_escalating_restoration_failure_appends_the_quality_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::RestorationFailure,
+            baseline_quality_escalations: 2,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["start_point_perturbation=1e-2", "feral_increase_quality=no",],
+        );
+    }
+
+    /// The whole ladder on a budget exit is rung 4, and it is there only
+    /// because the solve escalated.
+    #[test]
+    fn an_escalating_budget_exit_reaches_only_the_quality_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::IterationLimit,
+            baseline_quality_escalations: 25,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["feral_increase_quality=no"],
+        );
+        assert_eq!(rungs[0].assignments, ["feral_increase_quality no\n"]);
+    }
+
+    /// The other branch of rung 4's gate, and the one that keeps `for_status`
+    /// naming a trigger for every budget exit from costing anything. Without
+    /// this the change would put an extra solve on every
+    /// `Maximum_Iterations_Exceeded` in the corpus.
+    ///
+    /// An empty ladder is not merely "no rung ran": the driver returns
+    /// `unchanged` on an empty list *before* it narrates, so such a solve is
+    /// byte-identical to its pre-gh#857 self.
+    #[test]
+    fn a_budget_exit_that_never_escalated_opens_no_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::IterationLimit,
+            baseline_quality_escalations: 0,
+            ..avail()
+        });
+        assert!(
+            rungs.is_empty(),
+            "a budget exit with no escalation has nothing for the ladder to \
+             test, and must not pay for a solve: {:?}",
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+        );
+    }
+
+    /// The displacement rung does **not** open on a budget exit, even an
+    /// escalating one. It is evidence about a failed *path*, not about a
+    /// budget, and adding it here would double the cost of the recovery
+    /// while testing a hypothesis nobody has measured.
+    #[test]
+    fn a_budget_exit_does_not_reach_the_displacement_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::IterationLimit,
+            baseline_quality_escalations: 7,
+            ..avail()
+        });
+        assert!(
+            !rungs
+                .iter()
+                .any(|r| r.label == "start_point_perturbation=1e-2"),
+            "{:?}",
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+        );
+    }
+
+    /// Rung 4 turns off with its own option, like every other rung, and is
+    /// dropped when the baseline already ran with the escalation disabled —
+    /// where it would re-run the solve that just failed.
+    #[test]
+    fn the_quality_rung_is_droppable_and_never_a_no_op() {
+        let escalating = SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::IterationLimit,
+            baseline_quality_escalations: 3,
+            ..avail()
+        };
+        assert!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                increase_quality_retry_enabled: false,
+                ..escalating
+            })
+            .is_empty()
+        );
+        assert!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                already_no_increase_quality: true,
+                ..escalating
+            })
+            .is_empty()
+        );
+    }
+
     /// The status → trigger map is the whole opt-in surface, so pin both
     /// halves: the three verdicts that open a ladder, and a representative
     /// budget exit that must not. `MaximumIterationsExceeded` is the case the
@@ -668,7 +919,14 @@ mod scaling_retry_tests {
                 A::RestorationFailed,
                 Some(SecondOpinionTrigger::RestorationFailure),
             ),
-            (A::MaximumIterationsExceeded, None),
+            // gh#857: a budget exit now names a trigger, but naming one is
+            // not opening a ladder — the rung it names is gated on the
+            // escalation count, which `for_status` cannot see. The pair of
+            // tests below is what says the distinction holds.
+            (
+                A::MaximumIterationsExceeded,
+                Some(SecondOpinionTrigger::IterationLimit),
+            ),
             (A::MaximumCpuTimeExceeded, None),
             (A::SolveSucceeded, None),
             (A::SolvedToAcceptableLevel, None),

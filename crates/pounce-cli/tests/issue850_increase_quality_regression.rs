@@ -24,6 +24,17 @@
 //!   lbfgs   Optimal/178  ->  3000 iterations, at the cap, rescued by nothing
 //! ```
 //!
+//! The lbfgs line reads "rescued by nothing" as of gh#850, and gh#857 changed
+//! that: `feral_increase_quality_retry` re-solves it without the escalation
+//! and promotes `Optimal`/178 at 3178 total. That rung is on by default, so
+//! the lbfgs test below now passes `feral_increase_quality_retry=no` in order
+//! to still see the **base** solve's 3000 — which is what this file is about.
+//! The rung is the cost whether or not something later recovers it, and the
+//! recovery costs a second full budget to buy the same 178 iterations the
+//! option buys outright. `feral_increase_quality` remains on by default and
+//! remains the trade this file pins; `issue857_escalation_gated_quality_rung.rs`
+//! is where the recovery itself is pinned.
+//!
 //! The lbfgs leg is worse than the reported exact one and was found by the
 //! `2nd=` sweep column added alongside this: it showed the leg failing with no
 //! ladder behind it at all.
@@ -38,13 +49,29 @@
 //! success-shaped status, which is worse than an honest failure. It also buys
 //! 15–25% of the iterations on five fixture-legs.
 //!
-//! And nothing separates the two sides. Measured with a process-global firing
-//! cap, the rung fires exactly twice here — once in the main solve at iteration
-//! 25 and once inside restoration at `76r` — and allowing **only the first**
-//! still loses the leg, so scoping it out of restoration would not help. Nor
-//! does a count: `deb7` and `square_flowsheet_resto` each fire it exactly twice
-//! on their exact legs, one gaining 16% of its iterations and the other losing
-//! its verdict.
+//! And nothing separates the two sides. The rung fires exactly twice in this
+//! fixture's **base solve** on the exact leg — once in the main loop, printed
+//! as a `q` on the row labelled 26, and once inside restoration at `76r`,
+//! printed nowhere — and allowing **only the first** still loses the leg, so
+//! scoping it out of restoration would not help. Nor does a count: `deb7` and
+//! `square_flowsheet_resto` each fire it exactly twice on their exact legs,
+//! one gaining 16% of its iterations and the other losing its verdict.
+//!
+//! Read the scope on that "twice": it is the base solve. gh#857 added the
+//! `quality_escalations` statistic, which reproduces it independently and
+//! reports the rest — six process-wide on the exact leg once the
+//! second-opinion rung's own solve is counted, twenty-five per solve on the
+//! lbfgs leg. It is also what gh#857's recovery rung gates on, and it uses the
+//! count only as a `>= 1` admission test, for exactly the reason in the
+//! paragraph above.
+//!
+//! One correction this file owes its own text: FERAL's ladder is documented as
+//! scaling-then-pivot-threshold, but the scaling rung is **unreachable** as
+//! pounce ships — feral takes it only under `ScalingStrategy::Identity` and
+//! pounce defaults to `Auto`. Every escalation here is a `pivot_threshold`
+//! bump, the first 1e-8 → 1e-6, and no milder ladder helps: every static
+//! `feral_pivtol` in {1e-6, 3.16e-5, 4.2e-4, 1e-2, 0.5} loses the lbfgs leg
+//! from iteration 0.
 //!
 //! So the default stands, the option is the documented recovery, and what this
 //! file pins is the **trade itself** — that the rung is what costs the two
@@ -134,14 +161,24 @@ fn the_exact_leg_is_lost_to_the_rung_and_recovered_by_the_option() {
     );
 }
 
-/// The lbfgs leg, which is worse and which no ladder was rescuing: with the
-/// rung on it runs to the 3000-iteration cap. The L-BFGS path is not exotic
-/// coverage — the Python frontend and the CasADi plugin both select
-/// `limited-memory` on their own whenever no exact Lagrangian Hessian is
-/// available.
+/// The lbfgs leg, which is worse and which no ladder was rescuing when gh#850
+/// was filed: with the rung on, the base solve runs to the 3000-iteration cap.
+/// The L-BFGS path is not exotic coverage — the Python frontend and the CasADi
+/// plugin both select `limited-memory` on their own whenever no exact
+/// Lagrangian Hessian is available.
+///
+/// `feral_increase_quality_retry=no` is what keeps this measuring the *base*
+/// cost. gh#857 added a second-opinion rung that catches exactly this exit and
+/// re-solves without the escalation, so without the flag the run reports the
+/// promoted `Optimal`/178 and the regression this file exists to pin becomes
+/// invisible. Disabling the recovery is not disabling the subject: the rung
+/// under test is `feral_increase_quality`, which stays on here.
 #[test]
 fn the_limited_memory_leg_hits_the_cap_and_the_option_recovers_it() {
-    let (_out, exit, iters) = solve(&["hessian_approximation=limited-memory"]);
+    let (_out, exit, iters) = solve(&[
+        "hessian_approximation=limited-memory",
+        "feral_increase_quality_retry=no",
+    ]);
     assert!(
         iters >= 1000,
         "premise: with the rung on this leg is expected to run to the cap; it \

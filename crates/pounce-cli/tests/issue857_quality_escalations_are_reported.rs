@@ -176,11 +176,23 @@ fn with_the_rung_off_there_is_nothing_to_report() {
 /// on 3000 iterations of trajectory and an exact pin would fail on changes that
 /// have nothing to do with this field. The floor still separates "escalating
 /// heavily" from "not escalating", which is the whole claim.
+///
+/// `feral_increase_quality_retry=no` is load-bearing here, and for a reason
+/// worth stating rather than working around silently: the statistic this file
+/// is about belongs to **the solve that produced it**, and the JSON reports the
+/// *last* solve's. gh#857's own recovery rung catches this exact capped run,
+/// re-solves it with the escalation off, and promotes — so with the rung on,
+/// the reported count is the promoted solve's `0`, which is correct and is not
+/// what this test is measuring. The base solve is the subject; the rung has its
+/// own file (`issue857_escalation_gated_quality_rung.rs`).
 #[test]
 fn the_lbfgs_leg_reports_heavy_escalation_and_the_option_stops_it() {
     let (out, reported) = solve(
         "square_flowsheet_resto.nl",
-        &["hessian_approximation=limited-memory"],
+        &[
+            "hessian_approximation=limited-memory",
+            "feral_increase_quality_retry=no",
+        ],
     );
     assert!(
         reported >= 10,
