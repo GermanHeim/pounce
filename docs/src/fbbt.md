@@ -134,6 +134,12 @@ impl Problem for MyProblem {
 
 The builder returns the resulting `FbbtReport` on `Solution::fbbt_report`.
 
+The tape for row `i` must exactly restate `constraints(x)[i]`. A mismatch can
+tighten bounds around the wrong function and cut off the true optimum.
+`try_solve` rejects disagreements found at the starting point or box midpoint,
+but this is only a smoke check; a mismatch elsewhere may have no diagnostic.
+Generate the callback and tape from one expression source when possible.
+
 FBBT consumes the `pounce_nlp::expression_provider::ExpressionProvider`
 trait. Any TNLP can opt in by implementing:
 

@@ -65,6 +65,7 @@ pub trait Problem {
     fn constraints(&self, _x: &[f64], _out: &mut [f64]) {}
 
     /// Optional FBBT expression for constraint `index`.
+    /// The tape must exactly restate [`Self::constraints`] for that row.
     fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
         None
     }
@@ -350,7 +351,8 @@ impl<P: Problem + 'static> Nlp<P> {
     /// was called, [`NlpError::InvalidOption`] if an option was rejected,
     /// [`NlpError::Initialize`] if the application failed to initialize,
     /// [`NlpError::Presolve`] if presolve setup failed, and
-    /// [`NlpError::InvalidFbbtTape`] if an enabled FBBT tape is malformed.
+    /// [`NlpError::InvalidFbbtTape`] if an enabled FBBT tape is malformed or
+    /// disagrees with sampled values from [`Problem::constraints`].
     pub fn try_solve(self) -> Result<Solution, NlpError> {
         let n = self.n.ok_or(NlpError::UnknownVariableCount)?;
         let m = self.problem.n_constraints();
@@ -409,6 +411,9 @@ impl<P: Problem + 'static> Nlp<P> {
 
         let presolve_opts = pounce_presolve::PresolveOptions::from_options_list(app.options())
             .map_err(|e| NlpError::Presolve(e.to_string()))?;
+        let x_l = self.x_l.unwrap_or_else(|| vec![-INF; n]);
+        let x_u = self.x_u.unwrap_or_else(|| vec![INF; n]);
+        let x0 = self.x0.unwrap_or_else(|| vec![0.0; n]);
         let constraint_expressions = if presolve_opts.enabled && presolve_opts.fbbt {
             let mut tapes = Vec::with_capacity(m);
             for i in 0..m {
@@ -418,6 +423,7 @@ impl<P: Problem + 'static> Nlp<P> {
                 }
                 tapes.push(tape);
             }
+            validate_fbbt_tape_values(&self.problem, &tapes, &x0, &x_l, &x_u, m)?;
             tapes
         } else {
             Vec::new()
@@ -427,11 +433,11 @@ impl<P: Problem + 'static> Nlp<P> {
             problem: self.problem,
             n,
             m,
-            x_l: self.x_l.unwrap_or_else(|| vec![-INF; n]),
-            x_u: self.x_u.unwrap_or_else(|| vec![INF; n]),
+            x_l,
+            x_u,
             g_l: self.g_l,
             g_u: self.g_u,
-            x0: self.x0.unwrap_or_else(|| vec![0.0; n]),
+            x0,
             constraint_expressions,
             sol_x: Vec::new(),
             sol_obj: 0.0,
@@ -570,6 +576,68 @@ fn validate_fbbt_tape(
                 constraint,
                 reason: format!("variable index {variable} is outside 0..{n_variables}"),
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_fbbt_tape_values<P: Problem>(
+    problem: &P,
+    tapes: &[Option<FbbtTape>],
+    x0: &[f64],
+    x_l: &[f64],
+    x_u: &[f64],
+    n_constraints: usize,
+) -> Result<(), NlpError> {
+    let midpoint: Vec<_> = x_l
+        .iter()
+        .zip(x_u)
+        .zip(x0)
+        .map(|((&lo, &hi), &start)| {
+            if lo > -INF && hi < INF {
+                lo + 0.5 * (hi - lo)
+            } else {
+                start
+            }
+        })
+        .collect();
+
+    for (sample_name, point) in [("starting point", x0), ("box midpoint", &midpoint)] {
+        let mut values = vec![0.0; n_constraints];
+        problem.constraints(point, &mut values);
+        for (constraint, tape) in tapes.iter().enumerate() {
+            let Some(tape) = tape.as_ref().filter(|tape| !tape.is_empty()) else {
+                continue;
+            };
+            let actual = values[constraint];
+            if !actual.is_finite() {
+                continue;
+            }
+            let slots = pounce_presolve::fbbt::forward_pass(tape, point, point).map_err(|e| {
+                NlpError::InvalidFbbtTape {
+                    constraint,
+                    reason: format!("evaluation failed at {sample_name}: {e:?}"),
+                }
+            })?;
+            let range = pounce_presolve::fbbt::forward_result(&slots);
+            let scale = [actual, range.lo, range.hi]
+                .into_iter()
+                .filter(|value| value.is_finite())
+                .fold(1.0_f64, |scale, value| scale.max(value.abs()));
+            let tolerance = FD * scale;
+            let matches = range.contains(actual)
+                || (!range.is_empty()
+                    && actual >= range.lo - tolerance
+                    && actual <= range.hi + tolerance);
+            if !matches {
+                return Err(NlpError::InvalidFbbtTape {
+                    constraint,
+                    reason: format!(
+                        "constraints() returned {actual:.16e} but the tape returned [{:.16e}, {:.16e}] at the {sample_name}; the tape must exactly restate this constraint",
+                        range.lo, range.hi
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -743,6 +811,24 @@ mod tests {
         }
     }
 
+    struct MismatchedExpression;
+    impl Problem for MismatchedExpression {
+        fn objective(&self, x: &[f64]) -> f64 {
+            (x[0] - 3.0).powi(2)
+        }
+        fn n_constraints(&self) -> usize {
+            1
+        }
+        fn constraints(&self, x: &[f64], out: &mut [f64]) {
+            out[0] = x[0];
+        }
+        fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
+            Some(FbbtTape {
+                ops: vec![FbbtOp::Const(10.0), FbbtOp::Var(0), FbbtOp::Mul(0, 1)],
+            })
+        }
+    }
+
     struct DerivativeTestCircle {
         gradient_points: Rc<RefCell<Vec<f64>>>,
     }
@@ -813,6 +899,26 @@ mod tests {
             out_of_range,
             Err(NlpError::InvalidFbbtTape { constraint: 0, .. })
         ));
+    }
+
+    #[test]
+    fn fbbt_tape_mismatch_is_rejected_before_solving() {
+        let result = Nlp::new(MismatchedExpression)
+            .var_bounds(&[0.0], &[10.0])
+            .constraint_bounds(&[-INF], &[5.0])
+            .x0(&[0.0])
+            .option_str("presolve", "yes")
+            .option_str("presolve_fbbt", "yes")
+            .try_solve();
+
+        match result {
+            Err(NlpError::InvalidFbbtTape { constraint, reason }) => {
+                assert_eq!(constraint, 0);
+                assert!(reason.contains("box midpoint"), "{reason}");
+                assert!(reason.contains("5.0000000000000000e0"), "{reason}");
+            }
+            _ => panic!("mismatched FBBT tape was accepted"),
+        }
     }
 
     #[test]

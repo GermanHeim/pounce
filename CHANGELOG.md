@@ -13,6 +13,8 @@ changes.
   feasibility-based bound tightening when an `ExpressionProvider` is
   available; `Solution::fbbt_report` exposes diagnostics and
   `Problem::constraint_expression()` supplies constraint expression tapes.
+  Builder tapes are sampled against `constraints()` at the starting point and
+  box midpoint, and mismatches are rejected before presolve.
 
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
