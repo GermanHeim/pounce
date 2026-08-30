@@ -56,6 +56,56 @@ changes.
   suffixes, and the Rust crate's `parametric_step_*` surface. The book,
   the notebooks, the validation scripts, the `asnmpc_cstr` example and the
   tests moved in the same pass.
+- **`solve_qp`'s PSD pre-check no longer masks the `P`-shape guard
+  (gh #862).** With `P` shaped `(7, 7)` while `c` fixes `n = 5`, the
+  default path raised a raw `IndexError` out of numpy — `index 5 is out
+  of bounds for axis 0 with size 5` — from inside `_min_eig_lower_coo`.
+  The precise message the frontend already contains for exactly this
+  case, `solve_qp: \`P\` has shape (7, 7) but must be (5, 5)`, was
+  reachable only by passing `check_psd=False`, which skips the
+  pre-check and lets `_validate` run. Two spellings of one malformed
+  input disagreed, and the default was the worse one.
+
+  The pre-check runs before `_build`, and `_build` is what calls
+  `_validate` — so the gh #113 shape guard was behind the guard that
+  needed it. `_lower_triangle_coo(P, n)` is handed the caller's `n`
+  while emitting index pairs from `P`'s own shape, and
+  `_min_eig_lower_coo` then writes them into an `(n, n)` workspace, so
+  what went out of bounds was **a nonzero in the lower triangle at a
+  row index ≥ `n`** — a condition on the fill, not on the shape alone.
+  `np.eye(7, 5)` has no nonzero past row 4 and reached `_validate`
+  intact; `np.ones((7, 5))` did not, on the same commit, for the same
+  shape. `(5, 7)` is safe under any fill, because the lower-triangle
+  filter caps the column at the row. That unevenness is what made the
+  inconsistency visible rather than uniform.
+
+  It was reachable at default settings for every `n ≤ 1500` for as long
+  as the shape guard and the pre-check have coexisted: the gate before
+  7bfb3821 (gh #849) was `check_psd or n <= _PSD_CHECK_AUTO_MAX_N`, and
+  the reported case has `n = 5`. What gh #849 changed is that it became
+  reachable **above** 1500 as well, by making the guard always run
+  instead of switching off there.
+
+  The `P`-shape branch is now `_validate_p_shape`, called from
+  `_psd_verdict` before it reads `P` as well as from `_validate`. That
+  is one site covering every entry point that checks the Hessian before
+  it builds: `solve_qp` (both `method=`), `solve_qp_batch`,
+  `solve_qp_multi_rhs`, `solve_socp`, `QpFactorization` and
+  `QpSensitivity`. No solve changes — this only decides which exception
+  a rejected input gets. Severity is low by construction: it rejected
+  rather than returning a wrong answer; the rejection was opaque.
+  `python/tests/test_issue862_psd_precheck_masks_p_shape.py` asserts the
+  message across all seven entry points under both spellings of
+  `check_psd`, pins every wrong shape under **both** a diagonal and a
+  dense fill so a reordering cannot fix the reported case while
+  regressing the ones that already worked, and checks that the shape
+  guard was placed *before* the PSD verdict rather than instead of it —
+  an indefinite `P` of the right shape is still refused. On the parent
+  commit the file is 17 failed, 9 passed; the nine survivors are the
+  genuinely safe combinations — `(3, 3)`, `(4, 4)` and `(5, 7)` under
+  either fill, `(7, 5)` under the diagonal only, and the two positive
+  controls.
+
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at
