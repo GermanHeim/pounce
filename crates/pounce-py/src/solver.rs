@@ -583,6 +583,36 @@ impl PySolver {
         ))
     }
 
+    /// The all-released parametric step: `parametric_step_directional`'s
+    /// first back-solve returned as the answer, every weakly active
+    /// bound released and nothing decided. Returns `(dx,
+    /// released_count)`.
+    fn parametric_step_release_all<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, usize)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_release_all: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let (dx, released) = s
+            .inner
+            .parametric_step_release_all(&pins, &deltas)
+            .map_err(solver_error_to_py)?;
+        Ok((dx.into_pyarray_bound(py), released))
+    }
+
     /// Full KKT-space parametric step: like `parametric_step` but
     /// returns the whole compound vector `(x, s, y_c, y_d, z_l, z_u,
     /// v_l, v_u)` so multiplier sensitivities are available. Use

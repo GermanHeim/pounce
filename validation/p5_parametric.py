@@ -2,7 +2,7 @@
 
 A SECOND, independent sensitivity mechanism (distinct from P1's covariance):
 the parametric derivative of the solution and objective with respect to a
-model parameter p, delivered by pyomo_pounce's declare_sens_param / gradient
+model parameter p, delivered by pyomo_pounce's declare_sens_param / sens_jacobian
 (the sIPOPT computation from the held KKT factorization). Two things are
 checked against convention-free oracles:
 
@@ -30,7 +30,7 @@ import pyomo.environ as pyo
 from pyomo.opt import SolverFactory
 
 import pyomo_pounce
-from pyomo_pounce import declare_sens_param, gradient
+from pyomo_pounce import declare_sens_param, sens_jacobian
 from _common import abs_err, dump_result, setup_pounce
 
 setup_pounce()
@@ -86,8 +86,8 @@ def main():
     x2 = pyo.value(m.x2)
     obj = pyo.value(m.obj)
     dual_con = float(m.dual[m.con]) if m.con in m.dual else None
-    dx1_dp = gradient(m.x1, wrt=m.p)
-    dx2_dp = gradient(m.x2, wrt=m.p)
+    dx1_dp = sens_jacobian(m.x1, wrt=m.p)
+    dx2_dp = sens_jacobian(m.x2, wrt=m.p)
 
     # ── convention-free central-FD oracle, step-size sweep ─────────────────
     deltas = [1e-1, 5e-2, 2.5e-2, 1.25e-2, 6.25e-3]

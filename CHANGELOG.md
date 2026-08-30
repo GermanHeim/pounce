@@ -54,6 +54,142 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
+- **One naming rule for the `pyomo-pounce` sensitivity surface (gh #854).**
+  Three of the public names misled. `estimate()` sat beside a
+  parameter-estimation feature set (`declare_fitted`, `declare_residual`,
+  `covariance()`) and read as "estimate the parameters" when it meant the
+  opposite: evaluate the solution at perturbed parameter values.
+  `gradient()` returned a full Jacobian in its default form — `target=None`
+  with an indexed param gives the matrix `dx*/dp`, and its own docstring
+  said "the full Jacobian" — where the field reserves *gradient* for a
+  scalar's derivative. And `wrt=` meant two different things: the
+  differentiation denominator on `gradient()`, but the block the matrix is
+  *of* on `covariance()` and `information()`.
+
+  One rule now applies everywhere. `sens` marks the subsystem on every
+  public name: queries read `sens_`, answering from the sensitivity
+  session, and declarations read `declare_sens_`, registering a component
+  with it. Across all signatures `of=` marks what the answer is about and
+  `wrt=` marks the differentiation variable. `declare_sens_param` already
+  fit the rule and anchors the abbreviation.
+
+  | before | after |
+  |---|---|
+  | `estimate()` | `sens_solution()` |
+  | `estimate_report()` | `sens_solution_report()` |
+  | `gradient()` | `sens_jacobian()` |
+  | `covariance()` | `sens_covariance()` |
+  | `information()` | `sens_information()` |
+  | `active_set_changes()` | `sens_active_set_changes()` |
+  | `retain_kkt()` | `sens_retain_kkt()` |
+  | `release_kkt()` | `sens_release_kkt()` |
+  | `declare_fitted()` | `declare_sens_fitted()` |
+  | `declare_residual()` | `declare_sens_residual()` |
+  | `Gradient` | `Jacobian` |
+  | `EstimateReport` | `SolutionReport` |
+  | `gradient`'s `target=` | `of=` |
+  | `covariance`'s `wrt=` | `of=` |
+  | `information`'s `wrt=` | `of=` |
+
+  **Breaking, with no deprecation aliases**: nothing here is in a release
+  consumers pin against, and the diagnostic strings these functions emit
+  carry the new names too, so an alias would have left the messages
+  pointing at a name the caller never typed. Unchanged: the result classes
+  that already name their object (`SolutionMap`, `Covariance`,
+  `Information`, `ActiveSetChange`), `continuation` and `shift_map` (not
+  session queries), the option strings, the sIPOPT-compatible CLI
+  suffixes, and the Rust crate's `parametric_step_*` surface. The book,
+  the notebooks, the validation scripts, the `asnmpc_cstr` example and the
+  tests moved in the same pass.
+- **`degeneracy="release_all"`.** A third option beside `"directional"`
+  and `"one_sided"`, on `estimate()`, `estimate_report()` and
+  `active_set_changes()`: every weakly active bound is released
+  undecided, at one back-solve and no directional QP. The bounds the
+  perturbation actually holds come back as bound crossings for the
+  mode or a correction to handle: `fix_relax` pins them, `path` walks
+  them, `linear` clamps each crossing coordinate and leaves its
+  neighbors carrying the released coupling. The trade is the
+  decision's cost, deterministic and independent of `degeneracy_iter`,
+  against downstream repair, and it is the option for a kinked base
+  point too large for the engagement's budget, where `"directional"`
+  pays the failed attempt and falls back to one-sided anyway. The
+  step itself is the new public
+  `pounce_sensitivity::Solver::parametric_step_release_all`, the
+  directional path's all-released solve returned undecided, and
+  `degeneracy_iter` warns when passed under an option that makes no
+  decision. To tell a passed budget from the default, the
+  `degeneracy_iter` parameter on all three entry points is now
+  declared as `None` and resolved to 16 inside, a visible signature
+  change with unchanged behavior for every existing call.
+- **A model with declared sens params solves as written: the per-solve
+  clone is gone.** Every solve of a declared model used to deep-copy
+  the whole model and re-run the sensitivity-toolbox surgery on the
+  copy, a cost paid identically on the hundredth solve of an unchanged
+  model. `declare_sens_param` now inspects each declared Param once,
+  at declaration: a Param entering the model through one defining
+  equality (a single variable equal to the param, the shape a
+  parameterized initial condition already has) is recorded and pinned
+  as written, and a Param folded anywhere else is substituted in
+  place, once, with a warning naming the rewrite: its occurrences read
+  a new variable pinned by a new defining equality on the
+  `_pounce_sens_defs` block, constraints edited in place so their
+  names and activity are untouched. Solves construct no interface,
+  clone nothing, and rewrite nothing. A perturbed re-solve is: set the
+  param, solve. Declared fixed Vars are unfixed and pinned where they
+  stand. The call-time `sens_params` keyword keeps its solve-local
+  clone, and editing the model after declaration so a declared Param
+  leaks into new expressions is documented as unsupported rather than
+  hunted for at solve time.
+- **`solve_qp`'s PSD pre-check no longer masks the `P`-shape guard
+  (gh #862).** With `P` shaped `(7, 7)` while `c` fixes `n = 5`, the
+  default path raised a raw `IndexError` out of numpy — `index 5 is out
+  of bounds for axis 0 with size 5` — from inside `_min_eig_lower_coo`.
+  The precise message the frontend already contains for exactly this
+  case, `solve_qp: \`P\` has shape (7, 7) but must be (5, 5)`, was
+  reachable only by passing `check_psd=False`, which skips the
+  pre-check and lets `_validate` run. Two spellings of one malformed
+  input disagreed, and the default was the worse one.
+
+  The pre-check runs before `_build`, and `_build` is what calls
+  `_validate` — so the gh #113 shape guard was behind the guard that
+  needed it. `_lower_triangle_coo(P, n)` is handed the caller's `n`
+  while emitting index pairs from `P`'s own shape, and
+  `_min_eig_lower_coo` then writes them into an `(n, n)` workspace, so
+  what went out of bounds was **a nonzero in the lower triangle at a
+  row index ≥ `n`** — a condition on the fill, not on the shape alone.
+  `np.eye(7, 5)` has no nonzero past row 4 and reached `_validate`
+  intact; `np.ones((7, 5))` did not, on the same commit, for the same
+  shape. `(5, 7)` is safe under any fill, because the lower-triangle
+  filter caps the column at the row. That unevenness is what made the
+  inconsistency visible rather than uniform.
+
+  It was reachable at default settings for every `n ≤ 1500` for as long
+  as the shape guard and the pre-check have coexisted: the gate before
+  7bfb3821 (gh #849) was `check_psd or n <= _PSD_CHECK_AUTO_MAX_N`, and
+  the reported case has `n = 5`. What gh #849 changed is that it became
+  reachable **above** 1500 as well, by making the guard always run
+  instead of switching off there.
+
+  The `P`-shape branch is now `_validate_p_shape`, called from
+  `_psd_verdict` before it reads `P` as well as from `_validate`. That
+  is one site covering every entry point that checks the Hessian before
+  it builds: `solve_qp` (both `method=`), `solve_qp_batch`,
+  `solve_qp_multi_rhs`, `solve_socp`, `QpFactorization` and
+  `QpSensitivity`. No solve changes — this only decides which exception
+  a rejected input gets. Severity is low by construction: it rejected
+  rather than returning a wrong answer; the rejection was opaque.
+  `python/tests/test_issue862_psd_precheck_masks_p_shape.py` asserts the
+  message across all seven entry points under both spellings of
+  `check_psd`, pins every wrong shape under **both** a diagonal and a
+  dense fill so a reordering cannot fix the reported case while
+  regressing the ones that already worked, and checks that the shape
+  guard was placed *before* the PSD verdict rather than instead of it —
+  an indefinite `P` of the right shape is still refused. On the parent
+  commit the file is 17 failed, 9 passed; the nine survivors are the
+  genuinely safe combinations — `(3, 3)`, `(4, 4)` and `(5, 7)` under
+  either fill, `(7, 5)` under the diagonal only, and the two positive
+  controls.
+
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at

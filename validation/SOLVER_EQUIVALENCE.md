@@ -95,7 +95,7 @@ and would be identical for any solver that finds this optimum.
 ### Sensitivity / covariance — the load-bearing check
 
 The asymptotic parameter covariance is `cov = 2·σ²·(K⁻¹)_pp`, the parameter
-block of the inverse KKT matrix. We validate POUNCE's `pyomo_pounce.covariance()`
+block of the inverse KKT matrix. We validate POUNCE's `pyomo_pounce.sens_covariance()`
 against an **independent** reduced-Hessian oracle built from **PyNumero**
 (AMPL/ASL derivative evaluators — the same library IPOPT uses) assembled and
 factored with **scipy.sparse** — a toolchain with no code in common with
@@ -155,7 +155,7 @@ it is a limit of the *reference*:
 - The independent reference can only use **solver-reported multipliers**
   (‖λ‖ ≈ 5.5e6, accurate to ~1.5e-5), and that finite multiplier error is
   amplified by the conditioning (×‖λ‖, ×cond) into an unusable, indefinite
-  reduced Hessian. POUNCE's own `covariance()` instead uses the
+  reduced Hessian. POUNCE's own `sens_covariance()` instead uses the
   **machine-precision** multipliers from its converged factorization (which
   carried **no** inertia-correction perturbations here), so it is
   self-consistent where the from-scratch reference cannot be.
@@ -297,7 +297,7 @@ number, sign included, by three independent routes.
 
 **Why this problem.** This exercises a *different* sensitivity mechanism than
 P1's covariance — the parametric derivative of the solution and objective w.r.t.
-a model parameter, from `pyomo_pounce`'s `declare_sens_param`/`gradient` (the
+a model parameter, from `pyomo_pounce`'s `declare_sens_param`/`sens_jacobian` (the
 held-factorization sIPOPT computation). It is checked against a **convention-free
 finite-difference oracle** and against analytic values, closing the
 "subtly-off sensitivity" concern from a second direction.

@@ -688,8 +688,9 @@ class Pounce(Ipopt):
         """The sensitivity route, translated onto the v2 contract.
 
         `sens.sens_solve` solves in-process so that the converged KKT
-        factorization stays available for `gradient()` / `estimate()` /
-        `covariance()`, and returns a *legacy* SolverResults. The v2
+        factorization stays available for `sens_jacobian()` /
+        `sens_solution()` / `sens_covariance()`, and returns a *legacy*
+        SolverResults. The v2
         contract is a different object with a different status enum, and
         -- the substantive difference -- it hands the solution back
         through a solution loader that the caller may decline to load

@@ -236,9 +236,9 @@ def test_update_latency_excludes_the_replayed_event_ledger(monkeypatch, smoke_co
         return corrected
 
     monkeypatch.setattr(asnmpc.time, "perf_counter", fake_clock)
-    monkeypatch.setattr(asnmpc, "estimate_report", fake_report)
-    monkeypatch.setattr(asnmpc, "estimate", fake_estimate)
-    monkeypatch.setattr(asnmpc, "active_set_changes", fake_events)
+    monkeypatch.setattr(asnmpc, "sens_solution_report", fake_report)
+    monkeypatch.setattr(asnmpc, "sens_solution", fake_estimate)
+    monkeypatch.setattr(asnmpc, "sens_active_set_changes", fake_events)
     monkeypatch.setattr(asnmpc, "trajectory", fake_trajectory)
 
     got = asnmpc._corrected_update(
