@@ -451,6 +451,14 @@ pub struct StatisticsInfo {
     pub restoration_inner_iters: Index,
     pub restoration_outer_iters: Index,
     pub restoration_wall_secs: Number,
+    /// Successful linear-solver quality escalations over the whole solve,
+    /// restoration sub-solves included (gh#857). `0` on paths that never
+    /// escalate. `serde(default)` so a report written before this field
+    /// existed still deserializes — it reads as "no escalations", which
+    /// is wrong-but-harmless for an old file and correct for every new
+    /// one.
+    #[serde(default)]
+    pub quality_escalations: Index,
 }
 
 /// Builder collecting the inputs for a [`SolveReport`]. The CLI
@@ -544,6 +552,7 @@ impl ReportBuilder {
             restoration_inner_iters: src.restoration_inner_iters,
             restoration_outer_iters: src.restoration_outer_iters,
             restoration_wall_secs: src.restoration_wall_secs,
+            quality_escalations: src.quality_escalations,
         };
         if matches!(self.detail, ReportDetail::Full) {
             self.iterations = src.iterations.clone();
@@ -629,6 +638,7 @@ fn empty_stats() -> StatisticsInfo {
         restoration_inner_iters: 0,
         restoration_outer_iters: 0,
         restoration_wall_secs: 0.0,
+        quality_escalations: 0,
     }
 }
 

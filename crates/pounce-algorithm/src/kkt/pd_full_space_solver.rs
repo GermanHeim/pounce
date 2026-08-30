@@ -21,7 +21,7 @@ use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Barrier-diagonal replacements for one
@@ -69,6 +69,22 @@ pub struct PdFullSpaceSolver {
     /// Mirrors `augsys_improved_`. Set by quality-escalation; cleared
     /// each time the cached aug-system data changes.
     augsys_improved: bool,
+    /// Count of *successful* `AugSystemSolver::increase_quality()` calls
+    /// — escalations the backend accepted, i.e. exactly the ones that
+    /// print a `q` in the info-string column. Shared with the owning
+    /// [`crate::application::IpoptApplication`] and with the restoration
+    /// sub-solve's own `PdFullSpaceSolver`, so the tally spans one whole
+    /// solve rather than one algorithm instance (gh#857): the exact leg
+    /// of `square_flowsheet_resto` escalates once in the main loop and
+    /// once inside restoration, and a main-loop-only count would report
+    /// half of what rerouted the solve.
+    ///
+    /// Counts *pounce-side decisions*, not backend escalations. The two
+    /// differ: `LowRankAugSystemSolver::increase_quality` escalates its
+    /// inner and bypass backends per call by design, so a FERAL-side
+    /// tally reads about double this one. The decision is the number a
+    /// reader — and the second-opinion gate — is here for.
+    quality_escalations: Rc<Cell<u64>>,
     /// Mirrors upstream's `dummy_cache_` hit/miss. `false` ⇒ the next
     /// `solve_once` is operating on a *new* augmented matrix and must
     /// run the `ConsiderNewSystem` + perturbation-escalation path;
@@ -127,6 +143,7 @@ impl PdFullSpaceSolver {
             neg_curv_test_tol: 0.0,
             neg_curv_test_reg: true,
             augsys_improved: false,
+            quality_escalations: Rc::new(Cell::new(0)),
             matrix_considered: false,
             last_dep_tags: None,
             last_status: None,
@@ -141,6 +158,39 @@ impl PdFullSpaceSolver {
 
     pub fn aug_solver_mut(&mut self) -> &mut dyn AugSystemSolver {
         &mut *self.aug_solver
+    }
+
+    /// Ask the backend to escalate, recording the answer.
+    ///
+    /// The single place `increase_quality()` is called from, so the
+    /// tally cannot drift from the `augsys_improved` flag or from the
+    /// `q` info-string the two historical call sites both emit.
+    /// Returns what the backend returned.
+    fn escalate_aug_quality(&mut self) -> bool {
+        let improved = self.aug_solver.increase_quality();
+        if improved {
+            self.quality_escalations
+                .set(self.quality_escalations.get().saturating_add(1));
+        }
+        self.augsys_improved = improved;
+        improved
+    }
+
+    /// Successful quality escalations recorded so far — see
+    /// [`Self::quality_escalations`](#structfield.quality_escalations)
+    /// for what is and is not counted.
+    pub fn quality_escalations(&self) -> u64 {
+        self.quality_escalations.get()
+    }
+
+    /// Share this solver's escalation tally with `counter`, so a
+    /// restoration sub-solve's escalations land in the same total as the
+    /// main loop's. Any count already recorded here is folded in, which
+    /// makes the call order-independent; in practice it is made at build
+    /// time, before the first solve.
+    pub fn set_quality_escalation_counter(&mut self, counter: Rc<Cell<u64>>) {
+        counter.set(counter.get().saturating_add(self.quality_escalations.get()));
+        self.quality_escalations = counter;
     }
 
     /// Replace the underlying [`AugSystemSolver`] by passing the
@@ -745,7 +795,7 @@ impl PdFullSpaceSolver {
 
                     if !pretend_singular_last_time {
                         if !self.augsys_improved {
-                            self.augsys_improved = self.aug_solver.increase_quality();
+                            self.escalate_aug_quality();
                             if self.augsys_improved {
                                 data.borrow_mut().append_info_string("q");
                                 resolve_with_better_quality = true;
@@ -1535,7 +1585,7 @@ impl PdFullSpaceSolver {
             {
                 let mut assume_singular = true;
                 if !self.augsys_improved {
-                    self.augsys_improved = self.aug_solver.increase_quality();
+                    self.escalate_aug_quality();
                     if self.augsys_improved {
                         data.borrow_mut().append_info_string("q");
                         assume_singular = false;
