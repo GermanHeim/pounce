@@ -22,7 +22,7 @@ changes.
   a new variable pinned by a new defining equality on the
   `_pounce_sens_defs` block, constraints edited in place so their
   names and activity are untouched. Solves construct no interface,
-  clone nothing, and rewrite nothing; a perturbed re-solve is: set the
+  clone nothing, and rewrite nothing. A perturbed re-solve is: set the
   param, solve. Declared fixed Vars are unfixed and pinned where they
   stand. The call-time `sens_params` keyword keeps its solve-local
   clone, and editing the model after declaration so a declared Param

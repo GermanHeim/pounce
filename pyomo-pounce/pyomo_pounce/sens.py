@@ -28,20 +28,32 @@ covariance with no further information:
     covariance(m)                            # std errors, correlations,
                                              # identifiability diagnostics
 
-Mechanics: declared Params become pinned variables on a clone
-(pyomo.contrib.sensitivity_toolbox does the expression surgery), the clone
-is written to .nl and evaluated in-process via pounce.read_nl, and the
-pounce.Solver session's parametric_step answers gradient()/estimate()
-queries from the stored factorization -- the sIPOPT computation, with no
-suffixes and no upfront perturbation values.
+Mechanics: a declared Param should enter the model through one defining
+equality, a single variable equal to the param, the shape a
+parameterized initial condition already has. `declare_sens_param`
+records that row once, at declaration, and every solve then writes the
+model AS WRITTEN to .nl, evaluates it in-process via pounce.read_nl,
+and the pounce.Solver session's parametric_step answers
+gradient()/estimate() queries from the stored factorization by shifting
+the defining rows' right-hand sides -- the sIPOPT computation, with no
+suffixes, no upfront perturbation values, and no per-solve model copy.
 
-One deliberate divergence from pyomo.contrib.sensitivity_toolbox: a
-declared Param appearing in a Var's BOUND is rewritten as a constraint
-before the solve, so its sensitivity is real rather than zero. The
-toolbox substitutes declared Params in constraint expressions only, and
-leaves such a bound frozen at its pre-perturbation value. On the clone
-that is solved the bound is dropped, so m.x.ub reads None there and the
-NL carries the no-bound sentinel for that row.
+A declared Param without that form (folded into several expressions,
+in the objective, in a Var's bound) is rewritten in place, once, at
+declaration, with a warning: its occurrences are replaced by a new
+variable held by a new defining equality on the `_pounce_sens_defs`
+block, the affected constraints and objectives edited in place so
+their names and activity are untouched. A bound holding such a Param
+moves into a constraint over the substitute, so its sensitivity is
+real rather than zero; the moved bound is dropped from the Var, so
+m.x.ub reads None afterward and the NL carries the no-bound sentinel
+for that row. A declared FIXED Var is unfixed and held by a defining
+equality at its value, since the NL writer would otherwise substitute
+it out as a constant with no row to perturb.
+
+Call-time `sens_params` keep the older mechanics: their surgery
+(pyomo.contrib.sensitivity_toolbox) runs on a clone built for that one
+solve and thrown away.
 """
 import codecs
 import os
@@ -94,7 +106,7 @@ class _Registry:
         self.session = None
         # (param data, defining ConstraintData, d(row)/d(param)) per
         # declared param, recorded at declaration. The solve pins these
-        # rows as written; no clone and no surgery happen at solve time.
+        # rows as written. No clone and no surgery happen at solve time.
         self.pin_records = []
         # var name -> (lb, ub) for bounds the conforming rewrite moved
         # into constraints, recorded once at declaration
@@ -139,7 +151,7 @@ def declare_sens_param(*params):
     by a variable pinned by a new defining equality, with a warning
     naming what changed. Declaring a fixed Var unfixes it and pins it
     where it stands. The inspection and any rewrite happen here, in
-    this call; a solve never clones the model and never rewrites
+    this call. A solve never clones the model and never rewrites
     anything. Editing the model afterward so a declared Param leaks
     into new expressions is not detected and is unsupported."""
     by_model = {}
@@ -155,7 +167,7 @@ def declare_sens_param(*params):
 def _linear_coefficient(expr, wrt):
     """d(expr)/d(wrt) when it is a plain number, else None.
 
-    `wrt` may be a ParamData or a VarData; a param is substituted by a
+    `wrt` may be a ParamData or a VarData. A param is substituted by a
     throwaway variable first, since the differentiator works with
     respect to variables. The derivative must be constant, no variables
     and no mutable params in it, so a nonlinear or param-scaled entry
@@ -281,11 +293,12 @@ def _register_pins(model, reg, comps):
     names = ", ".join(c.name for c in rewrite)
     warnings.warn(
         f"declare_sens_param: {names} do not enter the model through a "
-        "single defining equality, so the model was rewritten in place: "
-        "each occurrence now reads a substituted variable pinned by a "
-        "new equality on the _pounce_sens_defs block. To declare "
-        "without rewriting, give the param one defining equality "
-        "(v == p) and use v in the expressions.")
+        "single defining equality, so the model was rewritten in "
+        "place: a folded Param's occurrences now read a substituted "
+        "variable pinned by a new equality on the _pounce_sens_defs "
+        "block, and a fixed Var is unfixed and pinned there at its "
+        "value. To declare without rewriting, give the param one "
+        "defining equality (v == p) and use v in the expressions.")
     blk = model.component(_DEFS)
     if blk is None:
         blk = pyo.Block()
@@ -294,9 +307,9 @@ def _register_pins(model, reg, comps):
         blk.pin = pyo.ConstraintList()
         blk.bound = pyo.ConstraintList()
 
-    # one substituted variable and one defining equality per rewritten
-    # param data; a declared FIXED Var needs no substitute, it is
-    # unfixed and pinned where it stands
+    # One substituted variable and one defining equality per rewritten
+    # param data. A declared FIXED Var needs no substitute: it is
+    # unfixed and pinned where it stands.
     sub = {}
     for comp in rewrite:
         for pd in _iter_data(comp):
@@ -304,7 +317,7 @@ def _register_pins(model, reg, comps):
                 if not pd.fixed:
                     raise ValueError(
                         f"declare_sens_param: {pd.name} is a Var that "
-                        "is not fixed; declare mutable Params or fixed "
+                        "is not fixed. Declare mutable Params or fixed "
                         "Vars.")
                 pd.unfix()
                 con = blk.pin.add(pd == float(pyo.value(pd)))
