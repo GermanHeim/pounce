@@ -787,6 +787,30 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     )?;
 
     r.add_bool_option(
+        "sqp_qp_certify_second_order",
+        "Check second-order optimality before certifying the SQP's nonconvex QP subproblem.",
+        false,
+        "SQP subproblem only (algorithm=active-set-sqp). Every `Optimal` the \
+         active-set engine returns is a *first-order* verdict — vanishing \
+         projected gradient, sign-admissible working-set multipliers — which \
+         a saddle point of an indefinite Hessian satisfies exactly. When true \
+         the engine also produces a direction `d` with `A_W d = 0` and \
+         `d'Hd < 0` before certifying, and follows it to the next blocking \
+         row (gh #848). Standalone QP solves \
+         (solver_selection=qp-active-set, pounce.qp.solve_qp) do that \
+         unconditionally and are not affected by this option: there the QP is \
+         the question. Here it is a *local model*, whose second-order verdict \
+         is not the NLP's — at iteration 0 the multipliers are still zero, so \
+         HS071 started at its own solution reports negative curvature and \
+         needs five iterations instead of one. Yes fixes real wrong answers \
+         on this path (a constrained maximum reported as Solve_Succeeded) and \
+         costs that; making it the default needs Hessian modification first \
+         (gh #856). The check is skipped outright when the Hessian is known \
+         positive semidefinite, so quasi-Newton runs pay nothing either way. \
+         Default no.",
+    )?;
+
+    r.add_bool_option(
         "sqp_qp_use_homotopy",
         "Trace the parametric homotopy on a cold convex-QP solve.",
         false,

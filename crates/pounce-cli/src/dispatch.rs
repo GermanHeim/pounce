@@ -118,8 +118,20 @@ pub enum ProblemClass {
     /// Quadratic objective with an indefinite (sense-adjusted) Hessian and
     /// **linear** constraints. `auto` falls through to the NLP solver for a
     /// local minimum; `solver_selection=qp-active-set` solves it directly with
-    /// the `pounce-qp` active-set engine, which controls the inertia of the
-    /// reduced Hessian and is documented to take an indefinite `H` (gh #786).
+    /// the `pounce-qp` active-set engine, which takes an indefinite `H`
+    /// (gh #786) and returns a *local* minimum.
+    ///
+    /// What "local minimum" means on that path is narrower than it reads, and
+    /// was narrower still before gh #848. The §4.5 inertia control shifts
+    /// `H -> H + delta*I` so the *local model* is convex; it does not move the
+    /// iterate, and at a saddle `g = 0` makes the shifted step zero. So the
+    /// engine used to stop there and certify `Optimal` on the first-order
+    /// evidence alone — vanishing projected gradient, sign-admissible
+    /// working-set multipliers — which a saddle, and the constrained *maximum*
+    /// of `min x0*x1` on `x0 + x1 = 2`, satisfy exactly. The engine now
+    /// exhibits a direction `d` with `A_W d = 0` and `d'Hd < 0` and follows it
+    /// before certifying, so an `Optimal` here is second-order. It is still
+    /// only local: nothing on this path rules out a better minimum elsewhere.
     ///
     /// The linear-constraints half of that is load-bearing, not descriptive:
     /// both consumers reach the model through
@@ -674,13 +686,19 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
 /// the strict saddle `x = 0`, `f = 0`, where `x = (1, -1)` is feasible at
 /// `f = -4`.
 ///
-/// The engine now screens a claimed optimum for negative curvature and, where
-/// it finds a feasible direction along which it can *exhibit* a strictly
-/// better point, refuses the verdict (`active_set::refute_indefinite_optimum`).
-/// That is a **refutation, not a proof**: an `Optimal` here means first-order
-/// KKT holds and no second-order counterexample was found, which is strictly
-/// weaker than the NLP filter-IPM's local guarantee. Say that, rather than
-/// claiming parity the engine does not have.
+/// Second-order evidence is now part of the verdict, from two guards that
+/// cover different classes (both described on
+/// [`pounce_convex::solve_qp_active_set_inertia`]). The engine certifies the
+/// reduced Hessian on its working set's null space and, where it finds a
+/// witness of negative curvature, escapes along it and returns the *better
+/// point* — so the fix is usually a better answer rather than a worse status.
+/// The driver then screens what comes back by exhibition, which reaches the
+/// degenerate-active-bound class the first cannot, and refuses a verdict only
+/// where it holds a strictly better feasible point in hand.
+///
+/// Local, still, and not even that in general: seeing past every working set
+/// is the NP-hard part of nonconvex QP. `sqp_qp_certify_second_order` turns
+/// the engine-side check off.
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,
