@@ -1006,6 +1006,18 @@ impl Solver {
     /// no-op: it costs the derivative evaluation and the residual
     /// evaluation, no back-solve, and reports the residual the
     /// caller's step leaves.
+    ///
+    /// Errors with [`SolverError::SensComputationFailed`] when the
+    /// barrier residual at that starting point is not finite, which is
+    /// what a predicted point outside the domain of one of the model's
+    /// functions gives (gh#845). A *declared bound* is protection here,
+    /// since the clamp above puts the coordinate back inside it; a
+    /// variable held in a function's domain by a **constraint** has no
+    /// bound to be put back inside, and an ordinary `log`, `sqrt` or
+    /// reciprocal is then reachable by a large enough perturbation.
+    /// There is no correction to make from such a point, so it is an
+    /// error rather than a report -- and never a step full of NaN
+    /// carrying `residual = 0.0` and `converged = true`.
     pub fn correct_step(
         &self,
         pin_constraint_indices: &[Index],
