@@ -142,6 +142,21 @@ are present, `SolverFactory("pounce").solve(m)` runs in-process and
 keeps the converged KKT factorization, so every query afterwards is a
 single backsolve.
 
+A declared `Param` should enter the model through one defining
+equality: a single variable equal to the param, the shape a
+parameterized initial condition already has (`m.x0 == m.x0_hat`). Such
+a model solves as written, on every solve, and the defining equality
+is the row the machinery perturbs. A declared `Param` without that
+form is rewritten in place once, at declaration, with a warning: its
+occurrences are replaced by a substituted variable held by a new
+defining equality, the affected rows edited in place so their names
+are untouched. Writing the defining equality yourself avoids the
+rewrite and is the recommended form. Editing the model after
+declaration so a declared `Param` appears in new expressions is
+unsupported: re-declare on the current model instead. Repeated solves
+of one declared model, the receding-horizon pattern, pay no
+per-solve model copy and no per-solve rewrite.
+
 ```python
 import pyomo.environ as pyo
 import pyomo_pounce
@@ -644,27 +659,29 @@ declare_sens_param(m.u_max)
 m.u = pyo.Var(m.t, bounds=(0, m.u_max))   # the cap, as a bound
 ```
 
-`pyomo.contrib.sensitivity_toolbox`, which supplies the expression
-surgery underneath, substitutes declared Params in *constraint*
-expressions only. A Param left in a bound is written to the `.nl` file
-as a constant at its pre-perturbation value, so the bound never moves
-and `sens_jacobian(m.u[t], wrt=m.u_max)` reads exactly `0.0` — a wrong
-answer that is indistinguishable from a legitimate insensitivity.
+A Param left in a bound would be written to the `.nl` file as a
+constant at its pre-perturbation value, so the bound would never move
+and `sens_jacobian(m.u[t], wrt=m.u_max)` would read exactly `0.0`, a
+wrong answer indistinguishable from a legitimate insensitivity.
 
 POUNCE rewrites such a bound as a constraint over the substituted
-variable before the solve, so both spellings of the same limit give the
+variable at declaration, so both spellings of the same limit give the
 same derivative. Expression bounds work too, e.g.
 `bounds=(0, 2 * m.p + 1)`. Two kinds of variable are deliberately left
 alone: **fixed** Vars, whose bounds the solver never enforces, and Vars
 on **deactivated** Blocks.
 
-This is a deliberate divergence from `sensitivity_calculation`, which
-still reports zero for the same model. Four things follow from it:
+This is a deliberate divergence from
+`pyomo.contrib.sensitivity_toolbox`'s `sensitivity_calculation`, which
+substitutes declared Params in constraint expressions only and still
+reports zero for the same model. Four things follow from it:
 
-- **The bound is dropped on the clone that is solved.** `m.x.ub` reads
-  `None` there and the NL row carries the reader's no-bound sentinel
-  `1e19` — finite, so an `isinf()` test will not catch it. The model you
-  wrote is never modified.
+- **The bound is dropped from the Var.** `m.x.ub` reads `None` after
+  the declaration and the NL row carries the reader's no-bound
+  sentinel `1e19`, which is finite, so an `isinf()` test will not
+  catch it. The moved bound lives on as a row of the
+  `_pounce_sens_defs` block, part of the declaration's in-place
+  rewrite.
 - **`sens_solution()` does not clamp against a rewritten bound**, and raises
   no clamp warning for it. That is correct rather than an oversight: the
   bound now moves with the perturbation, so the linear step already
@@ -750,8 +767,10 @@ With `warm_start_init_point=yes` (Python `True` works too) among the
 options, the initial multipliers come from the model's suffixes, the
 same ones the ASL path uses: `dual` for equality multipliers,
 `ipopt_zL_in` / `ipopt_zU_in` for bound multipliers, matched by
-component name (a constraint rewritten by the declared-parameter
-surgery is reached through its internal alias). Sign conventions are
+component name (the declaration's in-place rewrite keeps every
+constraint's name, so suffixes keyed by your own constraints match
+directly; only a call-time `sens_params` clone still goes through an
+internal alias). Sign conventions are
 handled: `dual` holds the AMPL marginal and `ipopt_zU_in` Ipopt's
 negative-at-upper value, and both are translated to the solver's
 internal conventions on the way in.

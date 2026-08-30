@@ -28,20 +28,33 @@ covariance with no further information:
     sens_covariance(m)                    # std errors, correlations,
                                           # identifiability diagnostics
 
-Mechanics: declared Params become pinned variables on a clone
-(pyomo.contrib.sensitivity_toolbox does the expression surgery), the clone
-is written to .nl and evaluated in-process via pounce.read_nl, and the
-pounce.Solver session's parametric_step answers sens_jacobian()/sens_solution()
-queries from the stored factorization -- the sIPOPT computation, with no
-suffixes and no upfront perturbation values.
+Mechanics: a declared Param should enter the model through one defining
+equality, a single variable equal to the param, the shape a
+parameterized initial condition already has. `declare_sens_param`
+records that row once, at declaration, and every solve then writes the
+model AS WRITTEN to .nl, evaluates it in-process via pounce.read_nl,
+and the pounce.Solver session's parametric_step answers
+sens_jacobian()/sens_solution() queries from the stored factorization by
+shifting the defining rows' right-hand sides -- the sIPOPT computation,
+with no suffixes, no upfront perturbation values, and no per-solve model
+copy.
 
-One deliberate divergence from pyomo.contrib.sensitivity_toolbox: a
-declared Param appearing in a Var's BOUND is rewritten as a constraint
-before the solve, so its sensitivity is real rather than zero. The
-toolbox substitutes declared Params in constraint expressions only, and
-leaves such a bound frozen at its pre-perturbation value. On the clone
-that is solved the bound is dropped, so m.x.ub reads None there and the
-NL carries the no-bound sentinel for that row.
+A declared Param without that form (folded into several expressions,
+in the objective, in a Var's bound) is rewritten in place, once, at
+declaration, with a warning: its occurrences are replaced by a new
+variable held by a new defining equality on the `_pounce_sens_defs`
+block, the affected constraints and objectives edited in place so
+their names and activity are untouched. A bound holding such a Param
+moves into a constraint over the substitute, so its sensitivity is
+real rather than zero; the moved bound is dropped from the Var, so
+m.x.ub reads None afterward and the NL carries the no-bound sentinel
+for that row. A declared FIXED Var is unfixed and held by a defining
+equality at its value, since the NL writer would otherwise substitute
+it out as a constant with no row to perturb.
+
+Call-time `sens_params` keep the older mechanics: their surgery
+(pyomo.contrib.sensitivity_toolbox) runs on a clone built for that one
+solve and thrown away.
 """
 import codecs
 import os
@@ -60,7 +73,7 @@ import pyomo.environ as pyo
 from pyomo.common.collections import ComponentMap
 from pyomo.contrib.sensitivity_toolbox.sens import SensitivityInterface
 from pyomo.core.base.constraint import Constraint
-from pyomo.core.expr import identify_mutable_parameters
+from pyomo.core.expr import identify_mutable_parameters, identify_variables
 from pyomo.core.expr.visitor import replace_expressions
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
@@ -71,6 +84,9 @@ from pyomo_pounce.scaling import (
 )
 
 _REG = "_pounce_sens"
+# the model block holding substituted variables and defining equalities
+# the in-place rewrite creates for non-conforming declared params
+_DEFS = "_pounce_sens_defs"
 
 
 # ── declaration ───────────────────────────────────────────────────────────────
@@ -89,6 +105,13 @@ class _Registry:
         self.residuals = []       # (container, group) pairs: sigma^2
         self.retain = False       # keep the factor with no declaration
         self.session = None
+        # (param data, defining ConstraintData, d(row)/d(param)) per
+        # declared param, recorded at declaration. The solve pins these
+        # rows as written. No clone and no surgery happen at solve time.
+        self.pin_records = []
+        # var name -> (lb, ub) numeric values at declaration, for
+        # bounds the in-place rewrite moved into constraints
+        self.moved_bounds = {}
 
     def __deepcopy__(self, memo):
         import copy
@@ -99,6 +122,10 @@ class _Registry:
         new.residuals = [(copy.deepcopy(r, memo), g)
                          for r, g in self.residuals]
         new.retain = self.retain
+        new.pin_records = [
+            (copy.deepcopy(p, memo), copy.deepcopy(c, memo), k)
+            for p, c, k in self.pin_records]
+        new.moved_bounds = dict(self.moved_bounds)
         return new
 
 
@@ -110,9 +137,286 @@ def declare_sens_param(*params):
     """Flag one or more mutable Params (or fixed Vars), scalar or indexed,
     as FIXED INPUTS for sensitivity: after a solve, sens_jacobian() and
     sens_solution() answer d(solution)/d(param) questions. No perturbed value
-    is required, or accepted."""
+    is required, or accepted.
+
+    A declared Param should enter the model through one defining
+    equality: a single variable equal to the param, the way an initial
+    condition pins a state. Such a model solves as written on every
+    solve, and the defining equality is the row the sensitivity
+    machinery pins. A declared Param that appears anywhere else (several
+    constraints, the objective, a variable bound) is rewritten in
+    place, once, at declaration: the param's occurrences are replaced
+    by a variable pinned by a new defining equality, with a warning
+    naming what changed. Declaring a fixed Var unfixes it and pins it
+    where it stands. The inspection and any rewrite happen here, in
+    this call. A solve never clones the model and never rewrites
+    anything. Editing the model afterward so a declared Param leaks
+    into new expressions is not detected and is unsupported."""
+    by_model = {}
     for param in params:
-        _registry(param.model()).params.append(param)
+        by_model.setdefault(id(param.model()), (param.model(), []))[1] \
+            .append(param)
+    # every component of the call is validated before anything is
+    # recorded or rewritten, so a raising declaration leaves every
+    # model exactly as it was
+    for _model, comps in by_model.values():
+        for comp in comps:
+            for pd in _iter_data(comp):
+                if pd.is_variable_type() and not pd.fixed:
+                    raise ValueError(
+                        f"declare_sens_param: {pd.name} is a Var that "
+                        "is not fixed. Declare mutable Params or fixed "
+                        "Vars.")
+                if not (pd.is_variable_type() or pd.is_parameter_type()):
+                    raise ValueError(
+                        f"declare_sens_param: {pd.name} is neither a "
+                        "Param nor a Var.")
+    for model, comps in by_model.values():
+        reg = _registry(model)
+        _register_pins(model, reg, comps)
+        reg.params.extend(comps)
+
+
+def _linear_coefficient(expr, wrt):
+    """d(expr)/d(wrt) when it is a plain number, else None.
+
+    `wrt` may be a ParamData or a VarData. A param is substituted by a
+    throwaway variable first, since the differentiator works with
+    respect to variables. The derivative must be constant, no variables
+    and no mutable params in it, so a nonlinear or param-scaled entry
+    reads as None and the caller treats the row as non-conforming."""
+    from pyomo.core.expr.calculus.derivatives import Modes, differentiate
+
+    target = wrt
+    if not wrt.is_variable_type():
+        dummy = pyo.Var()
+        dummy.construct()
+        expr = replace_expressions(expr, {id(wrt): dummy})
+        target = dummy
+    try:
+        d = differentiate(expr, wrt=target, mode=Modes.reverse_symbolic)
+    except Exception:
+        return None
+    if isinstance(d, (int, float)):
+        return float(d)
+    if any(True for _ in identify_variables(d)):
+        return None
+    if any(True for _ in identify_mutable_parameters(d)):
+        return None
+    try:
+        return float(pyo.value(d))
+    except (ValueError, TypeError):
+        return None
+
+
+def _defining_row(pd, cons, other_declared_ids):
+    """(ConstraintData, coefficient) when `cons` is one conforming
+    defining equality for param data `pd`, else None. The row must be
+    an equality over a single variable, linear in both the variable and
+    the param, with no other declared param in it."""
+    if len(cons) != 1:
+        return None
+    con = cons[0]
+    if not con.equality:
+        return None
+    parts = [con.body]
+    rhs = con.lower
+    if rhs is not None and not isinstance(rhs, (int, float)):
+        parts.append(rhs)
+    for part in parts:
+        for p in identify_mutable_parameters(part):
+            if id(p) in other_declared_ids and p is not pd:
+                return None
+    variables = list(identify_variables(con.body))
+    if len(variables) != 1:
+        return None
+    resid = con.body if rhs is None else con.body - rhs
+    coeff = _linear_coefficient(resid, pd)
+    if coeff is None or coeff == 0.0:
+        return None
+    vcoef = _linear_coefficient(resid, variables[0])
+    if vcoef is None or vcoef == 0.0:
+        return None
+    return con, coeff
+
+
+def _register_pins(model, reg, comps):
+    """Record each newly declared param's defining equality, rewriting
+    the model in place, once, for the params that have none. `comps`
+    arrive validated: every data is a mutable Param or a fixed Var, so
+    nothing below raises and a declaration either completes or leaves
+    the model untouched."""
+    datas = [(comp, list(_iter_data(comp))) for comp in comps]
+    declared_ids = set()
+    for comp in reg.params:
+        for pd in _iter_data(comp):
+            declared_ids.add(id(pd))
+    for _comp, ds in datas:
+        for pd in ds:
+            declared_ids.add(id(pd))
+
+    # every active constraint each new param data appears in, one walk
+    param_ids = {id(pd): pd for _comp, ds in datas for pd in ds
+                 if pd.is_parameter_type()}
+    hits = {i: [] for i in param_ids}
+    in_objective = set()
+    in_bound = set()
+    for con in model.component_data_objects(pyo.Constraint, active=True,
+                                            descend_into=True):
+        found = set()
+        for part in (con.body, con.lower, con.upper):
+            if part is None or isinstance(part, (int, float)):
+                continue
+            for p in identify_mutable_parameters(part):
+                if id(p) in param_ids:
+                    found.add(id(p))
+        for i in found:
+            hits[i].append(con)
+    for obj in model.component_data_objects(pyo.Objective, active=True,
+                                            descend_into=True):
+        for p in identify_mutable_parameters(obj.expr):
+            if id(p) in param_ids:
+                in_objective.add(id(p))
+    # a FIXED Var's bounds are never enforced, so a param sitting in
+    # one is no reason to rewrite anything
+    for v in model.component_data_objects(pyo.Var, active=True,
+                                          descend_into=True):
+        if v.fixed:
+            continue
+        for attr in ("_lb", "_ub"):
+            expr = getattr(v, attr, None)
+            if expr is None or isinstance(expr, (int, float)):
+                continue
+            for p in identify_mutable_parameters(expr):
+                if id(p) in param_ids:
+                    in_bound.add(id(p))
+
+    conforming = []   # [(pd, con, coeff), ...]
+    rewrite = []      # components needing the in-place rewrite
+    loud = []         # the subset whose reason is worth a warning
+    for comp, ds in datas:
+        records = []
+        noisy = False
+        for pd in ds:
+            if pd.is_variable_type():
+                records = None
+                noisy = True
+                break
+            if id(pd) in in_objective:
+                records = None
+                noisy = True
+                break
+            if id(pd) in in_bound:
+                # A bound spelling always takes the rewrite: the move
+                # to a constraint is how the perturbation reaches the
+                # bound at all. It is the documented mechanics for the
+                # documented `bounds=(0, m.p)` form, so it warns only
+                # when the constraint side is ALSO non-conforming.
+                records = None
+                row = _defining_row(pd, hits.get(id(pd), []),
+                                    declared_ids)
+                if hits.get(id(pd)) and row is None:
+                    noisy = True
+                break
+            found = _defining_row(pd, hits.get(id(pd), []), declared_ids)
+            if found is None:
+                records = None
+                noisy = True
+                break
+            records.append((pd, found[0], found[1]))
+        if records is None:
+            rewrite.append(comp)
+            if noisy:
+                loud.append(comp)
+        else:
+            conforming.extend(records)
+
+    reg.pin_records.extend(conforming)
+
+    if not rewrite:
+        return
+    if loud:
+        names = ", ".join(c.name for c in loud)
+        warnings.warn(
+            f"declare_sens_param: {names} do not enter the model "
+            "through a single defining equality, so the model was "
+            "rewritten in place: a folded Param's occurrences now read "
+            "a substituted variable pinned by a new equality on the "
+            "_pounce_sens_defs block, and a fixed Var is unfixed and "
+            "pinned there at its value. To declare without rewriting, "
+            "give the param one defining equality (v == p) and use v "
+            "in the expressions.")
+    blk = model.component(_DEFS)
+    if blk is None:
+        blk = pyo.Block()
+        model.add_component(_DEFS, blk)
+        blk.v = pyo.VarList()
+        blk.pin = pyo.ConstraintList()
+        blk.bound = pyo.ConstraintList()
+
+    # One substituted variable and one defining equality per rewritten
+    # param data. A declared FIXED Var needs no substitute: it is
+    # unfixed and pinned where it stands, and the solve refreshes its
+    # pin from the Var's current value so later set_value / fix calls
+    # keep tracking.
+    sub = {}
+    for comp in rewrite:
+        for pd in _iter_data(comp):
+            if pd.is_variable_type():
+                pd.unfix()
+                con = blk.pin.add(pd == float(pyo.value(pd)))
+                reg.pin_records.append((pd, con, -1.0))
+                continue
+            v = blk.v.add()
+            v.set_value(float(pyo.value(pd)))
+            sub[id(pd)] = v
+            con = blk.pin.add(v == pd)
+            # the defining row is `v - p == 0`, so d(row)/d(p) is -1
+            reg.pin_records.append((pd, con, -1.0))
+    if not sub:
+        return
+
+    # every occurrence outside the new defining rows reads the
+    # substitute: constraints and objectives are edited in place, so
+    # their names, activity and order are untouched
+    touched = {}
+    for i, cons in hits.items():
+        if i in sub:
+            for con in cons:
+                touched[id(con)] = con
+    for con in touched.values():
+        con.set_value(replace_expressions(con.expr, sub))
+    for obj in model.component_data_objects(pyo.Objective, active=True,
+                                            descend_into=True):
+        if any(id(p) in sub
+               for p in identify_mutable_parameters(obj.expr)):
+            obj.set_value(replace_expressions(obj.expr, sub))
+    # A bound holding a rewritten param moves into a constraint over
+    # the substitute, where the perturbation reaches it (gh#356). The
+    # numeric values at declaration are recorded for sens_covariance()'s
+    # activity test.
+    for v in model.component_data_objects(pyo.Var, active=True,
+                                          descend_into=True):
+        if v.fixed:
+            continue
+        for attr in ("_lb", "_ub"):
+            expr = getattr(v, attr, None)
+            if expr is None or isinstance(expr, (int, float)):
+                continue
+            if not any(id(p) in sub
+                       for p in identify_mutable_parameters(expr)):
+                continue
+            val = float(pyo.value(expr))
+            moved = replace_expressions(expr, sub)
+            lo, hi = reg.moved_bounds.get(v.name, (None, None))
+            if attr == "_lb":
+                v.setlb(None)
+                blk.bound.add(moved <= v)
+                reg.moved_bounds[v.name] = (val, hi)
+            else:
+                v.setub(None)
+                blk.bound.add(v <= moved)
+                reg.moved_bounds[v.name] = (lo, val)
 
 
 def declare_sens_fitted(*variables):
@@ -402,7 +706,18 @@ class _Session:
         # covers both an unset session and a solve that evaluated
         # nothing.
         self.base_obj = float("nan")
-        self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
+        # var name -> (lb, ub): the numeric values a moved bound had
+        # when it was moved, which is declaration time for declared
+        # params and this solve for a call-time clone. NOT refreshed
+        # when the bound's param later moves: a reader that needs the
+        # current bound must evaluate the moved row, not this record.
+        self.moved_bounds = {}
+        # d(row)/d(param) and the param's solve-time value, per declared
+        # param pinned through its own defining equality. Empty for the
+        # clone-and-surgery paths, whose rows carry the param value as
+        # the row's right-hand side.
+        self.pin_coefs = ComponentMap()
+        self.pin_bases = ComponentMap()
         self._columns = {}            # pin row -> full KKT-space column
         self._primal_rows = None      # full-x -> KKT row, lazily fetched
         # The original model's variable data, in .col order, captured
@@ -848,12 +1163,31 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         item if isinstance(item, tuple) else (item, None)
         for item in (residuals or [])]
 
-    if eff_params:
-        # pinned inputs need the sensitivity-toolbox surgery (on a clone)
+    if sens_params:
+        # Call-time declarations are solve-local, so their surgery runs
+        # on a clone built for this one call and thrown away, exactly
+        # as every solve once did.
         si = SensitivityInterface(model, clone_model=True)
         si.setup_sensitivity(eff_params)
         clone = si.model_instance
         moved_bounds = _reformulate_param_bounds(clone)
+    elif eff_params:
+        # Declared params: the model already carries a defining
+        # equality per param, as written or conformed at declaration,
+        # so it solves as written. No clone, no surgery.
+        si = None
+        clone = model
+        moved_bounds = dict(reg.moved_bounds)
+        # A declared fixed Var has no live Param behind its pin, so the
+        # pin is refreshed from the Var's current value here, every
+        # solve: set_value and fix both keep tracking, and a Var the
+        # caller re-fixed is unfixed again so the NL writer does not
+        # fold it out from under its own pin row.
+        for pdata, con, _k in reg.pin_records:
+            if pdata.is_variable_type():
+                if pdata.fixed:
+                    pdata.unfix()
+                con.set_value(pdata == float(pyo.value(pdata)))
     else:
         # estimation-only: nothing to pin, solve the model as written
         si = None
@@ -1022,6 +1356,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     con_row = _row_index(con_names)
 
     pins = ComponentMap()
+    pin_coefs = ComponentMap()
+    pin_bases = ComponentMap()
     if si is not None:
         block = clone.component(SensitivityInterface.get_default_block_name())
         for i, (var, clone_param, list_idx, comp_idx) in enumerate(
@@ -1031,6 +1367,19 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
             pins[orig_data] = con_row[con.name]
+    elif reg.pin_records:
+        for pdata, con, coeff in reg.pin_records:
+            row = con_row.get(con.name)
+            if row is None:
+                raise RuntimeError(
+                    f"sens: the defining equality {con.name} recorded "
+                    f"for declared param {pdata.name} is not among the "
+                    "solved model's rows, so it was deactivated or "
+                    "removed after declaration. Re-declare on the "
+                    "current model.")
+            pins[pdata] = row
+            pin_coefs[pdata] = float(coeff)
+            pin_bases[pdata] = float(pyo.value(pdata))
     # con_alias was built before the solve (the warm-start reader needs
     # it); the session stores the same map
 
@@ -1043,6 +1392,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     # pyo.value(objective) returns an instant after the solve
     session.base_obj = float(info.get("obj_val", float("nan")))
     session.moved_bounds = moved_bounds
+    session.pin_coefs = pin_coefs
+    session.pin_bases = pin_bases
 
     # fitted parameters: their rows in the primal vector
     session.fit_rows = ComponentMap()
@@ -1268,7 +1619,16 @@ def _perturbation_deltas(session, perturb):
                 newval, "__getitem__") else newval
             pin = _param_pin(session, pd)
             pin_idx.append(pin)
-            deltas.append(float(nv) - float(session.nl.g_l[pin]))
+            coeff = session.pin_coefs.get(pd)
+            if coeff is None:
+                # a surgery row `var == p`: the row's right-hand side IS
+                # the param's solve-time value
+                deltas.append(float(nv) - float(session.nl.g_l[pin]))
+            else:
+                # a defining equality as the user wrote it: moving the
+                # param by dp moves the row by coeff * dp, so the
+                # right-hand side shifts by the negative of that
+                deltas.append(-coeff * (float(nv) - session.pin_bases[pd]))
     return pin_idx, deltas
 
 
