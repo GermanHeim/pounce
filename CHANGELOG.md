@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+- **A model with declared sens params solves as written: the per-solve
+  clone is gone.** Every solve of a declared model used to deep-copy
+  the whole model and re-run the sensitivity-toolbox surgery on the
+  copy, a cost paid identically on the hundredth solve of an unchanged
+  model. `declare_sens_param` now inspects each declared Param once,
+  at declaration: a Param entering the model through one defining
+  equality (a single variable equal to the param, the shape a
+  parameterized initial condition already has) is recorded and pinned
+  as written, and a Param folded anywhere else is substituted in
+  place, once, with a warning naming the rewrite: its occurrences read
+  a new variable pinned by a new defining equality on the
+  `_pounce_sens_defs` block, constraints edited in place so their
+  names and activity are untouched. Solves construct no interface,
+  clone nothing, and rewrite nothing. A perturbed re-solve is: set the
+  param, solve. Declared fixed Vars are unfixed and pinned where they
+  stand. The call-time `sens_params` keyword keeps its solve-local
+  clone, and editing the model after declaration so a declared Param
+  leaks into new expressions is documented as unsupported rather than
+  hunted for at solve time.
 - **`solve_qp`'s PSD pre-check no longer masks the `P`-shape guard
   (gh #862).** With `P` shaped `(7, 7)` while `c` fixes `n = 5`, the
   default path raised a raw `IndexError` out of numpy — `index 5 is out
