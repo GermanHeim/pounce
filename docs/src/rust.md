@@ -80,9 +80,11 @@ converge is `Ok` with `success == false` and the reason in `status`.
 The returned `Solution` carries `success` / `status`, `x`, `objective`,
 `multipliers`, the constraint values `g`, the bound multipliers `z_l` / `z_u`,
 and `stats` (wall time, iteration count, evaluation counts, final
-infeasibilities). The vector fields are filled by `finalize_solution`, so they
-stay **empty** if a solve aborts before finalizing — check `success` before
-indexing.
+infeasibilities). With `presolve=yes` and `presolve_fbbt=yes`, implement
+`Problem::constraint_expression` with `FbbtTape` values to receive
+`Solution::fbbt_report`. The vector fields are filled by `finalize_solution`,
+so they stay **empty** if a solve aborts before finalizing — check `success`
+before indexing.
 
 To supply exact derivatives, implement `gradient` and `jacobian` and return
 `true`; returning `false` (the default) selects finite differences for that
