@@ -5,9 +5,9 @@ driver needs already exists on this side; this module is the wiring, not
 a second implementation:
 
 * the **model update** is writing the declared mutable ``Param``s;
-* the **tangent predictor** is :func:`pyomo_pounce.estimate`, which is
-  the sIPOPT parametric step against the retained KKT factor
-  (:func:`pyomo_pounce.retain_kkt`);
+* the **tangent predictor** is :func:`pyomo_pounce.sens_solution`,
+  which is the sIPOPT parametric step against the retained KKT factor
+  (:func:`pyomo_pounce.sens_retain_kkt`);
 * the **warm transfer** is the solved model's own ``Var`` values plus
   the ``dual`` / ``ipopt_zL_in`` / ``ipopt_zU_in`` suffixes, which the
   solver plugin already reads under ``warm_start_init_point=yes``;
@@ -49,9 +49,9 @@ from pounce import ContinuationStep, ContinuationTrace, StepController
 
 from pyomo_pounce.sens import (
     declare_sens_param,
-    estimate,
-    release_kkt,
-    retain_kkt,
+    sens_release_kkt,
+    sens_retain_kkt,
+    sens_solution,
 )
 
 __all__ = ["continuation", "shift_map"]
@@ -195,7 +195,7 @@ def continuation(
                 "parameter sensitivities"
             )
         declare_sens_param(*params)
-        retain_kkt(model)
+        sens_retain_kkt(model)
 
     opts = dict(options or {})
     trace = ContinuationTrace()
@@ -209,7 +209,7 @@ def continuation(
                 kind = "zero"
                 if predictor == "tangent":
                     # PREDICT: the sIPOPT parametric step against the
-                    # factor the previous solve retained. `estimate`
+                    # factor the previous solve retained. `sens_solution`
                     # measures the perturbation from the *solve* point,
                     # so it is correct to call it before writing the new
                     # parameter values.
@@ -221,7 +221,7 @@ def continuation(
                         for d in _param_data(p):
                             perturb.append((d, _value_for(p, d, val)))
                     try:
-                        predicted = estimate(model, perturb)
+                        predicted = sens_solution(model, perturb)
                     except Exception:
                         predicted = None
                     if predicted is not None:
@@ -272,7 +272,7 @@ def continuation(
             prev_point = point
     finally:
         if predictor == "tangent":
-            release_kkt(model)
+            sens_release_kkt(model)
 
     del prev_point
     return trace

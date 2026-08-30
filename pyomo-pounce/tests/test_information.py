@@ -13,10 +13,10 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401
 from pyomo_pounce import (
-    covariance,
-    declare_fitted,
-    declare_residual,
-    information,
+    sens_covariance,
+    declare_sens_fitted,
+    declare_sens_residual,
+    sens_information,
 )
 from pyomo_pounce.sens import _session_for
 
@@ -42,9 +42,9 @@ def linear_model(x, y):
         m.I, rule=lambda mm, i: mm.r[i] == float(y[i]) - mm.a
         - mm.b * float(x[i]))
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
-    declare_fitted(m.a)
-    declare_fitted(m.b)
-    declare_residual(m.r)
+    declare_sens_fitted(m.a)
+    declare_sens_fitted(m.b)
+    declare_sens_residual(m.r)
     return m
 
 
@@ -54,7 +54,7 @@ def test_information_is_the_reduced_hessian():
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
-    info = information(m)
+    info = sens_information(m)
     np.testing.assert_allclose(info.matrix, 2.0 * X.T @ X, rtol=1e-9)
     assert info[m.a] == pytest.approx(2.0 * N_LIN, rel=1e-9)
     ev, vecs = info.eigen()
@@ -74,8 +74,8 @@ def test_information_inverts_covariance():
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
-    info = information(m)
-    cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    info = sens_information(m)
+    cov = sens_covariance(m, sigma_sq=SIGMA_LIN**2)
     np.testing.assert_allclose(
         cov.matrix, 2.0 * SIGMA_LIN**2 * np.linalg.inv(info.matrix),
         rtol=1e-8)
@@ -85,8 +85,8 @@ def test_gauss_newton_matches_lagrangian_on_linear():
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
-    info_l = information(m)
-    info_gn = information(m, hessian="gauss-newton")
+    info_l = sens_information(m)
+    info_gn = sens_information(m, hessian="gauss-newton")
     np.testing.assert_allclose(info_gn.matrix, info_l.matrix, rtol=1e-8)
 
 
@@ -103,7 +103,7 @@ def test_pinned_parameter_returns_s_not_zeros():
     pyo.SolverFactory("pounce").solve(m)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        info = information(m)
+        info = sens_information(m)
     assert any("strongly active" in str(x_.message) for x_ in w)
     R = 2.0 * X.T @ X
     S_true = R[0, 0] - R[0, 1] ** 2 / R[1, 1]
@@ -115,7 +115,7 @@ def test_pinned_parameter_returns_s_not_zeros():
     # from (a slice-first implementation loses them)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        gn = information(m, hessian="gauss-newton")
+        gn = sens_information(m, hessian="gauss-newton")
     assert gn[m.a] == pytest.approx(S_true, rel=1e-9)
     assert gn[m.b] == pytest.approx(R[1, 1], rel=1e-9)
     assert gn[m.a, m.b] == 0.0
@@ -132,8 +132,8 @@ def test_binding_row_projects_information():
     pyo.SolverFactory("pounce").solve(m)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        info = information(m)
-        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+        info = sens_information(m)
+        cov = sens_covariance(m, sigma_sq=SIGMA_LIN**2)
     assert any("pins the fitted combination" in str(x_.message) for x_ in w)
     # info = 2 sigma^2 * pinv(cov) on the projected free block. The
     # 1e-6 tolerance is load-bearing, not conservative: the binding
@@ -168,9 +168,9 @@ def test_information_exact_under_objective_scaling():
     session = m.__dict__["_pounce_sens"].session
     assert abs(float(session.solver.nlp_scaling["obj"]) - 1.0) > 1e-6
     R = 2.0 * X.T @ X
-    np.testing.assert_allclose(information(m).matrix, R, rtol=1e-9)
+    np.testing.assert_allclose(sens_information(m).matrix, R, rtol=1e-9)
     np.testing.assert_allclose(
-        information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
+        sens_information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
 
 
 def test_a_fixed_variable_does_not_shift_information():
@@ -192,9 +192,9 @@ def test_a_fixed_variable_does_not_shift_information():
     assert sess.var_names.index("dead") < sess.var_names.index("a"), (
         "the fixed column must precede the fitted block to shift it")
     R = 2.0 * X.T @ X
-    np.testing.assert_allclose(information(m).matrix, R, rtol=1e-9)
+    np.testing.assert_allclose(sens_information(m).matrix, R, rtol=1e-9)
     np.testing.assert_allclose(
-        information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
+        sens_information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
 
 
 def test_all_pinned_returns_the_full_block_as_s():
@@ -210,8 +210,8 @@ def test_all_pinned_returns_the_full_block_as_s():
     R = 2.0 * X.T @ X
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        info = information(m)
-        gn = information(m, hessian="gauss-newton")
+        info = sens_information(m)
+        gn = sens_information(m, hessian="gauss-newton")
     assert sum("strongly active" in str(x_.message) for x_ in w) >= 2
     np.testing.assert_allclose(info.matrix, R, rtol=1e-9)
     np.testing.assert_allclose(gn.matrix, R, rtol=1e-9)
@@ -234,10 +234,10 @@ def singular_free_block():
         m.I, rule=lambda mm, i: mm.r[i] == float(y[i]) - mm.a1 - mm.a2
         - mm.b * float(x[i]))
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
-    declare_fitted(m.a1)
-    declare_fitted(m.a2)
-    declare_fitted(m.b)
-    declare_residual(m.r)
+    declare_sens_fitted(m.a1)
+    declare_sens_fitted(m.a2)
+    declare_sens_fitted(m.b)
+    declare_sens_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
     return m
 
@@ -254,7 +254,7 @@ def test_singular_free_block_refuses_s():
         with pytest.raises(
                 RuntimeError,
                 match="conditional information S is not defined"):
-            information(m)
+            sens_information(m)
     assert any("inertia-correction" in str(x_.message) for x_ in w)
 
 
@@ -266,7 +266,7 @@ def test_max_pdpert_refuses_the_same_factor_covariance_inverts():
     worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
     assert worst > 0.0, "this fixture is meant to be regularized"
 
-    for call in (covariance, information):
+    for call in (sens_covariance, sens_information):
         with pytest.raises(ValueError, match="max_pdpert"):
             call(m, max_pdpert=worst / 10.0)
 
@@ -274,10 +274,10 @@ def test_max_pdpert_refuses_the_same_factor_covariance_inverts():
     # it does on this model for its own reasons: covariance returns the
     # regularized matrix with its warning, and information refuses
     # because the free block is singular
-    covariance(m, max_pdpert=worst * 10.0)
+    sens_covariance(m, max_pdpert=worst * 10.0)
     with pytest.raises(RuntimeError,
                        match="conditional information S is not defined"):
-        information(m, max_pdpert=worst * 10.0)
+        sens_information(m, max_pdpert=worst * 10.0)
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
@@ -285,7 +285,7 @@ def test_covariance_max_pdpert_takes_the_option_surfaces_bounds(bad):
     m = singular_free_block()
     with pytest.raises(ValueError,
                        match="max_pdpert must be a positive number"):
-        covariance(m, max_pdpert=bad)
+        sens_covariance(m, max_pdpert=bad)
 
 
 def _non_square_model(x, y, cap=None):
@@ -312,8 +312,8 @@ def test_non_square_structure_refuses_lagrangian():
     m = _non_square_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
     with pytest.raises(RuntimeError, match="square estimation structure"):
-        information(m)
-    gn = information(m, hessian="gauss-newton")
+        sens_information(m)
+    gn = sens_information(m, hessian="gauss-newton")
     np.testing.assert_allclose(gn.matrix, 2.0 * X.T @ X, rtol=1e-9)
 
 
@@ -327,7 +327,7 @@ def test_non_square_structure_scalar_falls_back():
     pyo.SolverFactory("pounce").solve(m)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        covariance(m, sigma_sq=SIGMA_LIN**2)
+        sens_covariance(m, sigma_sq=SIGMA_LIN**2)
     assert any("Conditional information" in str(x_.message) for x_ in w)
 
 
@@ -336,20 +336,20 @@ def test_information_error_paths():
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
     with pytest.raises(ValueError, match="hessian"):
-        information(m, hessian="expected")
+        sens_information(m, hessian="expected")
     m2 = pyo.ConcreteModel()
     m2.x = pyo.Var(initialize=1.0)
     m2.obj = pyo.Objective(expr=(m2.x - 1) ** 2)
     with pytest.raises(RuntimeError, match="no sensitivity session"):
-        information(m2)
+        sens_information(m2)
     # gauss-newton without declared residuals
     m3 = pyo.ConcreteModel()
     m3.k = pyo.Var(initialize=1.0)
     m3.obj = pyo.Objective(expr=(m3.k - 2.0) ** 2)
-    declare_fitted(m3.k)
+    declare_sens_fitted(m3.k)
     pyo.SolverFactory("pounce").solve(m3)
     with pytest.raises(ValueError, match="residual"):
-        information(m3, hessian="gauss-newton")
+        sens_information(m3, hessian="gauss-newton")
     # a session with residuals declared but nothing fitted (with no
     # declarations at all there is no session and the error above
     # fires first instead)
@@ -358,10 +358,10 @@ def test_information_error_paths():
     m4.r = pyo.Var(initialize=0.0)
     m4.res = pyo.Constraint(expr=m4.r == 3.0 - m4.z)
     m4.obj = pyo.Objective(expr=m4.r ** 2)
-    declare_residual(m4.r)
+    declare_sens_residual(m4.r)
     pyo.SolverFactory("pounce").solve(m4)
     with pytest.raises(RuntimeError, match="no fitted parameters"):
-        information(m4)
+        sens_information(m4)
 
 
 def test_indefinite_detector():

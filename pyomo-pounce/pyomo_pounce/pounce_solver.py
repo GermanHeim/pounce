@@ -268,7 +268,7 @@ class POUNCE(ASL):
         # When the model declares sensitivity parameters
         # (pyomo_pounce.declare_sens_param), solve in-process through the
         # pounce.Solver session so the converged KKT factorization stays
-        # available for gradient()/estimate(). Otherwise the ordinary
+        # available for sens_jacobian()/sens_solution(). Otherwise the ordinary
         # ASL/CLI path runs. The model may arrive positionally or as the
         # `model` keyword.
         from pyomo_pounce.scaling import (

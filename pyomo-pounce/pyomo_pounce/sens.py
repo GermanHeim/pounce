@@ -5,33 +5,33 @@ values required -- then solve normally. The converged KKT factorization is
 kept, and every sensitivity is a cheap backsolve afterwards:
 
     import pyomo_pounce
-    from pyomo_pounce import declare_sens_param, gradient, estimate
+    from pyomo_pounce import declare_sens_param, sens_jacobian, sens_solution
 
     m.p = pyo.Param(initialize=2.0, mutable=True)
     declare_sens_param(m.p)
 
     pyo.SolverFactory("pounce").solve(m)     # normal solve
 
-    gradient(m.x, wrt=m.p)                   # dx*/dp (float)
-    gradient(m.x, wrt=m.p2)                  # containers -> Gradient object
-    gradient(m.c, wrt=m.p)                   # d(multiplier of c)/dp
-    estimate(m, [(m.p, 2.5)])                # perturbed-solution estimate,
-                                             # clamped to bounds, warns on clamp
+    sens_jacobian(m.x, wrt=m.p)         # dx*/dp (float)
+    sens_jacobian(m.x, wrt=m.p2)        # containers -> Jacobian object
+    sens_jacobian(m.c, wrt=m.p)         # d(multiplier of c)/dp
+    sens_solution(m, [(m.p, 2.5)])      # perturbed-solution estimate,
+                                        # clamped to bounds, warns on clamp
 
 Estimation models use the other two declarations: flag the FITTED
 variables and the residual container, solve once, and ask for the
 covariance with no further information:
 
-    declare_fitted(m.A); declare_fitted(m.k)
-    declare_residual(m.r)
-    pyo.SolverFactory("pounce").solve(m)     # one ordinary solve
-    covariance(m)                            # std errors, correlations,
-                                             # identifiability diagnostics
+    declare_sens_fitted(m.A); declare_sens_fitted(m.k)
+    declare_sens_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)  # one ordinary solve
+    sens_covariance(m)                    # std errors, correlations,
+                                          # identifiability diagnostics
 
 Mechanics: declared Params become pinned variables on a clone
 (pyomo.contrib.sensitivity_toolbox does the expression surgery), the clone
 is written to .nl and evaluated in-process via pounce.read_nl, and the
-pounce.Solver session's parametric_step answers gradient()/estimate()
+pounce.Solver session's parametric_step answers sens_jacobian()/sens_solution()
 queries from the stored factorization -- the sIPOPT computation, with no
 suffixes and no upfront perturbation values.
 
@@ -84,8 +84,8 @@ class _Registry:
     its own yet)."""
 
     def __init__(self):
-        self.params = []          # pinned inputs: gradient()/estimate()
-        self.fitted = []       # free fitted variables: covariance()
+        self.params = []      # pinned inputs: sens_jacobian/sens_solution
+        self.fitted = []       # free fitted variables: sens_covariance()
         self.residuals = []       # (container, group) pairs: sigma^2
         self.retain = False       # keep the factor with no declaration
         self.session = None
@@ -108,25 +108,25 @@ def _registry(model):
 
 def declare_sens_param(*params):
     """Flag one or more mutable Params (or fixed Vars), scalar or indexed,
-    as FIXED INPUTS for sensitivity: after a solve, gradient() and
-    estimate() answer d(solution)/d(param) questions. No perturbed value
+    as FIXED INPUTS for sensitivity: after a solve, sens_jacobian() and
+    sens_solution() answer d(solution)/d(param) questions. No perturbed value
     is required, or accepted."""
     for param in params:
         _registry(param.model()).params.append(param)
 
 
-def declare_fitted(*variables):
+def declare_sens_fitted(*variables):
     """Flag one or more FREE Vars (scalar or indexed) as fitted
     parameters of a least-squares problem: after one ordinary solve,
-    covariance() reports their asymptotic uncertainty. The variables stay
+    sens_covariance() reports their asymptotic uncertainty. The variables stay
     free in the solve; do not fix them."""
     for var in variables:
         _registry(var.model()).fitted.append(var)
 
 
-def declare_residual(*containers, group=None):
+def declare_sens_residual(*containers, group=None):
     """Flag one or more indexed Vars holding the fit residuals, one member
-    per data point. covariance() derives the residual count and the SSR
+    per data point. sens_covariance() derives the residual count and the SSR
     from them, so no data counts need to be passed. `group` is an
     arbitrary user string partitioning residuals into noise groups and
     applies to every container in the call: containers sharing a group
@@ -137,23 +137,23 @@ def declare_residual(*containers, group=None):
         _registry(container.model()).residuals.append((container, group))
 
 
-def retain_kkt(model):
+def sens_retain_kkt(model):
     """Keep the KKT factorization after the next solve with NOTHING
     declared (covariance roadmap item 4). The factor the solve computes
-    anyway is retained for post-solve queries, so `covariance(model,
-    wrt=block)` and `information(model, wrt=block)` work on any block
+    anyway is retained for post-solve queries, so `sens_covariance(model,
+    of=block)` and `sens_information(model, of=block)` work on any block
     without a declared default: the MHE case, where the arrival state
-    and the parameters are each queried by wrt= and neither is THE
-    fitted set. `covariance(model)` with no block stays an error (there
+    and the parameters are each queried by of= and neither is THE
+    fitted set. `sens_covariance(model)` with no block stays an error (there
     is no default to reduce onto), and a solve without this call and
     without declarations pays nothing, exactly as before.
 
     The retention policy in one place: the factor is kept if anything
-    is declared (declare_sens_param / declare_fitted /
-    declare_residual), or if retain_kkt() was called; and a
+    is declared (declare_sens_param / declare_sens_fitted /
+    declare_sens_residual), or if sens_retain_kkt() was called; and a
     Covariance/Information result whose lazy conditioned_on has not
     been read keeps the session alive through its pending computation
-    until first access. release_kkt(model) drops the held factor on
+    until first access. sens_release_kkt(model) drops the held factor on
     demand.
 
     Like any declaration, this routes the solve through the
@@ -165,18 +165,18 @@ def retain_kkt(model):
     _registry(model).retain = True
 
 
-def release_kkt(model):
+def sens_release_kkt(model):
     """Drop the held KKT factorization now, freeing its memory.
 
     The exit of the retention story, for the current factor only:
-    declarations and a prior retain_kkt() are untouched and apply to
+    declarations and a prior sens_retain_kkt() are untouched and apply to
     the NEXT solve, which keeps its factor again. After release the
     accessors raise their no-session error until another solve.
 
     Release drops the MODEL's hold, not a result's, and two kinds of
     result hold their own reference to the session: a Covariance or
     Information whose conditioned_on is still pending (until the
-    attribute is read), and a Gradient handed back by gradient()
+    attribute is read), and a Jacobian handed back by sens_jacobian()
     (which uses the session on every lookup). Such a result keeps
     working after the release, and keeps the factor in memory until
     it too is discarded.
@@ -204,7 +204,8 @@ def _reformulate_param_bounds(clone):
     Runs after `setup_sensitivity`, so the Param-to-Var map it needs is the
     one the surgery has already built. Returns {var name: (lb, ub)} of the
     numeric values the moved bounds had at the solve point, with None on the
-    side that was not moved. covariance() classifies these rows through the
+    side that was not moved. sens_covariance() classifies these rows
+    through the
     activity report: a moved bound is a single-coordinate constraint row
     and projects exactly as the original bound would, so no bound
     re-injection is needed anywhere.
@@ -235,7 +236,7 @@ def _reformulate_param_bounds(clone):
                        for p in identify_mutable_parameters(expr)):
                 continue
             # the numeric value the NL would have carried, kept so
-            # covariance() can still see where the bound was
+            # sens_covariance() can still see where the bound was
             moved.append((v, attr, float(pyo.value(expr)),
                           replace_expressions(expr, sub)))
 
@@ -305,7 +306,7 @@ def _row_index(names):
 
 
 class SolutionMap(Mapping):
-    """What `estimate()` returns: a read-only mapping {original var
+    """What `sens_solution()` returns: a read-only mapping {original var
     data: estimated value}, keyed by the component data objects
     themselves, by identity, the way `ComponentMap` keys them.
 
@@ -383,7 +384,7 @@ class _Session:
         self.con_names = con_names    # .row order = g-vector order
         # Reverse maps for the two orders above. Every query resolves a
         # component name to its row, and a list scan makes that O(n) per
-        # lookup -- quadratic for gradient(target=None).to_dataframe(),
+        # lookup -- quadratic for sens_jacobian(of=None).to_dataframe(),
         # which asks for every variable (gh #365). Built once here, or
         # reused from the caller when it has already built them.
         # `is None`, not truthiness: an unconstrained model's con_row is a
@@ -409,9 +410,9 @@ class _Session:
         # declared-parameter surgery created has no model counterpart
         # and holds None. Resolving a name through find_component
         # parses it through pyomo's component-UID lexer, 0.87 s
-        # accumulated inside one estimate() call on the 62k-variable
-        # double column (N=25 Radau collocation), and every estimate() and
-        # gradient(target=None) call needs the whole list, so the one
+        # accumulated inside one sens_solution() call on the 62k-variable
+        # double column (N=25 Radau collocation), and every sens_solution() and
+        # sens_jacobian(of=None) call needs the whole list, so the one
         # resolution the solve already performs is kept instead. The
         # references are the solve's own objects: a caller who deletes
         # and rebuilds model components after the solve invalidates
@@ -433,7 +434,7 @@ class _Session:
         """The columns a solution map exposes: the captured variable
         data with the surgery-created columns dropped, plus the
         identity-to-column index a lookup uses. Built once per session;
-        every `estimate()` result shares them. The keys list holds the
+        every `sens_solution()` result shares them. The keys list holds the
         strong references that keep the ids in the index unique: an id
         is only unique among live objects, so the index is valid
         exactly as long as the list that accompanies it."""
@@ -475,7 +476,7 @@ class _Session:
                 f"{what}: {self.var_names[full_idx]} was removed from the "
                 "solve as a fixed variable (its bounds are equal), so it "
                 "has no row in the KKT factor and no sensitivity "
-                "information. Give it distinct bounds to keep it in the "
+                "sens_information. Give it distinct bounds to keep it in the "
                 "solve.")
         return row
 
@@ -809,7 +810,8 @@ def _stream_solve(solver, x0, **solve_kwargs):
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
                residuals=None, options=None, capture=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
-    for gradient()/estimate()/covariance(). Called automatically by
+    for sens_jacobian()/sens_solution()/sens_covariance(). Called
+    automatically by
     SolverFactory('pounce').solve() when declarations are present; the
     keyword arguments are the explicit (call-time) form of the
     declarations and register the components exactly as the declare_*
@@ -889,11 +891,11 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # Pyomo convention is silence unless tee=True; print_level 0 makes
         # the engine emit nothing at all.
         prob.add_option("print_level", 0)
-    # covariance() classifies bound activity off this solve's iterate
+    # sens_covariance() classifies bound activity off this solve's iterate
     # (Solver.classify_activity), which requires slacks measured against
     # the user's own bounds: bound relaxation (default 1e-8) would shift
     # every slack the classifier reads. Set BEFORE the user options so
-    # an explicit bound_relax_factor still wins; covariance() then
+    # an explicit bound_relax_factor still wins; sens_covariance() then
     # refuses with its clean error rather than classifying shifted
     # slacks.
     prob.add_option("bound_relax_factor", 0.0)
@@ -994,7 +996,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # maxIterations / error) and load the final iterate, but drop
         # any session: a failed re-solve must not leave a prior
         # converged solve's factorization live, or
-        # gradient()/estimate()/covariance() would silently answer from
+        # sens_jacobian()/sens_solution()/sens_covariance() would
+        # silently answer from
         # the stale solve. With the session cleared they raise their
         # usual "no sensitivity session" error. Note the Feasible_Point_Found
         # asymmetry: the engine's on_converged callback fires only for
@@ -1079,7 +1082,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             warnings.warn(
                 "sens_solve: the declared residuals give SSR = "
                 f"{ssr:.6g} but the objective value is {float(obj_val):.6g}."
-                " covariance() assumes the objective is the plain sum of "
+                " sens_covariance() assumes the objective is the plain sum of "
                 "squares of the declared residuals; extra terms (weights, "
                 "regularization) will make the noise-variance estimate "
                 "wrong.")
@@ -1106,7 +1109,7 @@ def _param_pin(session, param_data):
     return session.pins[param_data]
 
 
-class Gradient:
+class Jacobian:
     """Derivatives d(target*)/d(param) for one or more targets/parameters.
     Targets are variables (primal sensitivities) or equality constraints
     (multiplier sensitivities).
@@ -1129,7 +1132,7 @@ class Gradient:
         # KKT vector, so it needs the var-x row -- the same translation
         # mult_entry already does for the y_c block
         return self._session.primal_row(
-            self._session.var_entry(td.name), f"gradient({td.name})")
+            self._session.var_entry(td.name), f"sens_jacobian({td.name})")
 
     @staticmethod
     def _convention_sign(td):
@@ -1143,7 +1146,7 @@ class Gradient:
         `parametric_step_full`'s y_c block, i.e. derivatives of POUNCE's
         internal Lagrange multiplier, whereas `m.dual[con]` holds the AMPL
         *marginal* `d obj / d b = -lambda` (gh #271). So d(dual)/d(param)
-        is the negation of the raw row -- without this, `gradient(m.con,
+        is the negation of the raw row -- without this, `sens_jacobian(m.con,
         wrt=m.p)` disagrees in sign with a finite difference of
         `m.dual[m.con]` taken across a re-solve.
         """
@@ -1184,7 +1187,7 @@ def _weakly_active(session):
     classifier could call neither active nor inactive. Empty when the
     solve relaxed its bounds, since the classifier cannot read shifted
     slacks. Cached because the factor is fixed per solve and
-    `gradient()` runs in tight loops.
+    `sens_jacobian()` runs in tight loops.
     """
     cached = getattr(session, "_weakly_active_cache", None)
     if cached is None:
@@ -1204,20 +1207,23 @@ def _weakly_active(session):
     return cached
 
 
-def gradient(target=None, *, wrt, max_pdpert=None):
-    """d(target*)/d(wrt).
+def sens_jacobian(of=None, *, wrt, max_pdpert=None):
+    """d(of*)/d(wrt).
 
-    target: a Var (primal sensitivity) or an equality Constraint (its
-    multiplier's sensitivity); data object or container; omit for all
-    model variables. wrt: a declared Param (data or container).
+    of: what the derivative is about (the target rows) -- a Var
+    (primal sensitivity) or an equality Constraint (its multiplier's
+    sensitivity); data object or container; omit for all model
+    variables. wrt: the differentiation variable, a declared Param
+    (data or container).
 
-    Scalar target and scalar wrt -> float. Anything else -> a Gradient
-    object: g[target, param], or g.to_dataframe() for the full Jacobian.
+    Scalar of and scalar wrt -> float. Anything else -> a Jacobian
+    object: g[target, param], or g.to_dataframe() for the full
+    Jacobian.
 
     At a degenerate base point the solution has two one-sided
     derivatives and this call has no direction to choose between them,
     so it returns the one-sided value the held factorization leans
-    toward and warns. `estimate()` computes the directional derivative
+    toward and warns. `sens_solution()` computes the directional derivative
     for the perturbation it is given.
 
     max_pdpert refuses rather than answering when the converged KKT
@@ -1225,26 +1231,26 @@ def gradient(target=None, *, wrt, max_pdpert=None):
     since every derivative here inverts that factor and a perturbed one
     answers for a nearby problem."""
     session = _session_for(wrt)
-    _check_margins(None, max_pdpert, "gradient")
-    _refuse_on_pdpert(session, max_pdpert, "gradient")
+    _check_margins(None, max_pdpert, "sens_jacobian")
+    _refuse_on_pdpert(session, max_pdpert, "sens_jacobian")
     weak = _weakly_active(session)
     if weak:
         warnings.warn(
-            "gradient: the base point is degenerate: "
+            "sens_jacobian: the base point is degenerate: "
             f"{[f'{nm} ({side})' for nm, side in weak]} sit on a bound "
             "with a multiplier of the same order as the slack, so the "
             "solution has two one-sided derivatives there and this "
-            "value is one side's. estimate() computes the directional "
+            "value is one side's. sens_solution() computes the directional "
             "derivative for the perturbation it is given.")
     params = list(_iter_data(wrt))
-    if target is None:
+    if of is None:
         targets = [v for v in session.var_data if v is not None]
     else:
-        targets = list(_iter_data(target))
-    if target is not None and not target.is_indexed() and len(params) == 1:
-        return Gradient(session, targets, params)._value(
+        targets = list(_iter_data(of))
+    if of is not None and not of.is_indexed() and len(params) == 1:
+        return Jacobian(session, targets, params)._value(
             targets[0], params[0])
-    return Gradient(session, targets, params)
+    return Jacobian(session, targets, params)
 
 
 def _perturbation_deltas(session, perturb):
@@ -1290,8 +1296,8 @@ def _bound_margin(session, bound_eps):
     """How far outside a bound a coordinate has to end to count as
     having left it.
 
-The refinement pins against this margin and `estimate()` clamps
-    against it. `estimate_report()` measures `crossed` against the same
+The refinement pins against this margin and `sens_solution()` clamps
+    against it. `sens_solution_report()` measures `crossed` against the same
     number whenever the caller sets one, since deciding it twice is
     what let `refine_stop == "settled"` come back beside a coordinate
     reported 2.0 outside its bound.
@@ -1313,7 +1319,7 @@ def _refuse_on_pdpert(session, max_pdpert, who):
 
     A non-zero entry means the factorization every sensitivity output
     inverts is not this problem's KKT matrix but a nearby one's, and how
-    nearby is what the entries measure. `EstimateReport.perturbations`
+    nearby is what the entries measure. `SolutionReport.perturbations`
     reports them either way, and this is the caller choosing to stop
     rather than to read them.
 
@@ -1365,7 +1371,7 @@ def _correct(session, pin_idx, deltas, step, corrector_iter):
     return np.asarray(out)[:n_x], dict(info)
 
 
-def estimate(model, perturb, clamp=True, mode="linear",
+def sens_solution(model, perturb, clamp=True, mode="linear",
              predictor_iter=16, degeneracy="directional", degeneracy_iter=16,
              corrector_iter=0, bound_eps=None, max_pdpert=None):
     """First-order estimate of the solution at perturbed parameter values.
@@ -1381,7 +1387,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     crossing variable and leaves every other one at its predictor value.
     "fix_relax" instead pins the crossing variable at its bound and
     re-solves, so the others move to stay consistent under the pin, which
-    is what `estimate_report`'s step fraction says the step needs. It
+    is what `sens_solution_report`'s step fraction says the step needs. It
     costs a dense solve and a backsolve per crossing and tracks a full
     re-solve far more closely. Where nothing crosses the two agree
     exactly.
@@ -1393,7 +1399,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
     the same active set it agrees with "fix_relax". At a change large
     enough that they disagree, "fix_relax" decides every change from
     a single step taken at the base point while "path" applies each
-    change at the fraction where it happens. `active_set_changes()`
+    change at the fraction where it happens. `sens_active_set_changes()`
     returns the record of those changes.
 
     predictor_iter bounds that work. Under "fix_relax" it caps the
@@ -1438,7 +1444,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
 
     bound_eps sets how far outside a variable bound a step has to end
     to count as having left it, which decides what mode="fix_relax"
-    pins, what `estimate_report()` reports in `crossed`, and what the
+    pins, what `sens_solution_report()` reports in `crossed`, and what the
     clamp below acts on. It is absolute, as the refinement's own test
     is. Unset, it is how far outside the solve itself was willing to
     settle, floored so an unrelaxed solve does not pin on roundoff. A
@@ -1452,11 +1458,12 @@ def estimate(model, perturb, clamp=True, mode="linear",
     factor carries an inertia correction larger than the value given.
     Every sensitivity output inverts that factor, so a perturbed one
     answers for a nearby problem rather than this one.
-    `estimate_report().perturbations` reports the same numbers for a
+    `sens_solution_report().perturbations` reports the same numbers for a
     caller who would rather read them than stop. It must be positive,
     as the CLI's sens_max_pdpert is, and the same argument is on
-    gradient(), estimate(), estimate_report(), active_set_changes(),
-    covariance() and information().
+    sens_jacobian(), sens_solution(), sens_solution_report(),
+    sens_active_set_changes(),
+    sens_covariance() and sens_information().
 
     clamp keeps its meaning in both modes: it clamps whatever is still
     outside a bound at the end. Under "fix_relax" the pins usually
@@ -1486,19 +1493,19 @@ def estimate(model, perturb, clamp=True, mode="linear",
 
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
-            "estimate: mode must be 'linear', 'fix_relax' or 'path', got "
+            "sens_solution: mode must be 'linear', 'fix_relax' or 'path', got "
             f"{mode!r}")
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
-            "estimate: degeneracy must be 'directional' or 'one_sided', "
+            "sens_solution: degeneracy must be 'directional' or 'one_sided', "
             f"got {degeneracy!r}")
-    _check_margins(bound_eps, max_pdpert, "estimate")
+    _check_margins(bound_eps, max_pdpert, "sens_solution")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
-            "estimate: bound_eps is the margin the fix_relax refinement "
+            "sens_solution: bound_eps is the margin the fix_relax refinement "
             f"pins against and mode={mode!r} runs no refinement, so it "
             "changes nothing here.")
-    _refuse_on_pdpert(session, max_pdpert, "estimate")
+    _refuse_on_pdpert(session, max_pdpert, "sens_solution")
 
     pin_idx, deltas = _perturbation_deltas(session, perturb)
 
@@ -1530,7 +1537,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
             if "directional derivative" not in str(e):
                 raise
             warnings.warn(
-                f"estimate: {e}. Falling back to the one-sided step, "
+                f"sens_solution: {e}. Falling back to the one-sided step, "
                 "the degeneracy='one_sided' behavior.")
             fell_back = True
     if degeneracy == "one_sided" or fell_back:
@@ -1555,14 +1562,14 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # residual warns instead of comparing false and passing in
         # silence. gh#845 was exactly that: the corrector normed an
         # all-NaN residual to 0.0, `0.0 > 0.5 * 6.09` was false, and
-        # `estimate()` returned {x: nan} with nothing said. The Rust
+        # `sens_solution()` returned {x: nan} with nothing said. The Rust
         # side no longer produces that number, and this side no longer
         # depends on it not doing so.
         if corrector is not None and not (
                 corrector["residual"] <= 0.5 * corrector[
                     "initial_residual"]):
             warnings.warn(
-                "estimate: the corrector spent "
+                "sens_solution: the corrector spent "
                 f"{corrector['iterations']} back-solve(s) and moved the "
                 f"residual from {corrector['initial_residual']:.2e} to "
                 f"{corrector['residual']:.2e}, measured from the point the "
@@ -1621,7 +1628,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
                        if n_changes >= predictor_iter else
                        "the path settled the active set here")
             warnings.warn(
-                f"estimate: {mode} {did} and "
+                f"sens_solution: {mode} {did} and "
                 f"still leaves the bounds for {names}, because {why}."
                 + (" The values were clamped, which breaks the constraints "
                    "the pins were solved against." if clamp else
@@ -1639,7 +1646,7 @@ def estimate(model, perturb, clamp=True, mode="linear",
         if clamped.any():
             names = [session.var_names[i] for i in np.where(clamped)[0]]
             warnings.warn(
-                "estimate: linear step leaves the variable bounds for "
+                "sens_solution: linear step leaves the variable bounds for "
                 f"{names}; values were clamped and the active set likely "
                 "changed, so the estimate is unreliable there. mode="
                 "'fix_relax' pins them and re-solves instead.")
@@ -1651,8 +1658,8 @@ def estimate(model, perturb, clamp=True, mode="linear",
 
 # ── step diagnostics ──────────────────────────────────────────────────────────
 
-class EstimateReport:
-    """What the linear step behind `estimate()` does about the bounds.
+class SolutionReport:
+    """What the linear step behind `sens_solution()` does about the bounds.
 
     Attributes
     ----------
@@ -1671,7 +1678,7 @@ class EstimateReport:
         Either "variable" or "constraint", naming what `first` is.
     crossed : ComponentMap
         Variable data to the distance by which the full step leaves
-        that variable's bound. These are the variables `estimate()`
+        that variable's bound. These are the variables `sens_solution()`
         clamps. Measured at the predicted point against both bounds, so
         on a relaxed solve an entry can be a coordinate the SOLVE left
         outside its bound rather than one the step carried past. The
@@ -1764,7 +1771,7 @@ class EstimateReport:
             ", regularized" if any(self.perturbations) else "",
             ", bounds relaxed" if self.bounds_relaxed else "",
         ])
-        return (f"EstimateReport(alpha={self.alpha:.6g}{where}, "
+        return (f"SolutionReport(alpha={self.alpha:.6g}{where}, "
                 f"crossed={n}, violation={self.violation:.3e}, "
                 f"mu={self.mu:.3e}{flags})")
 
@@ -1897,14 +1904,14 @@ def _user_row_names(session):
     return [back.get(nm, nm) for nm in session.con_names]
 
 
-def estimate_report(model, perturb, max_iter=None,
+def sens_solution_report(model, perturb, max_iter=None,
                     degeneracy="directional", degeneracy_iter=16,
                     corrector_iter=0, mode="linear", predictor_iter=16,
                     bound_eps=None, max_pdpert=None):
-    """Report what `estimate()`'s step does about the bounds.
+    """Report what `sens_solution()`'s step does about the bounds.
 
-    degeneracy and degeneracy_iter match `estimate()`'s arguments of
-    the same names, so the step measured here is the step `estimate()`
+    degeneracy and degeneracy_iter match `sens_solution()`'s arguments of
+    the same names, so the step measured here is the step `sens_solution()`
     takes for the same arguments, including the directional-derivative
     correction at a degenerate base point. degeneracy_iter budgets that
     correction's back-solves.
@@ -1916,8 +1923,8 @@ def estimate_report(model, perturb, max_iter=None,
     a DeprecationWarning rather than being ignored in silence, since the
     two readings differ and nothing else would say so.
 
-    mode and predictor_iter match `estimate()`'s arguments of the same
-    names, so the step measured here is the step `estimate()` takes for
+    mode and predictor_iter match `sens_solution()`'s arguments of the same
+    names, so the step measured here is the step `sens_solution()` takes for
     the same arguments. `violation` and `corrector` are properties of
     that step and move with the mode. Reporting the linear step's
     violation for a `fix_relax` estimate would describe a step the
@@ -1957,20 +1964,21 @@ def estimate_report(model, perturb, max_iter=None,
     factor carries an inertia correction larger than the value given.
     Every sensitivity output inverts that factor, so a perturbed one
     answers for a nearby problem rather than this one.
-    `estimate_report().perturbations` reports the same numbers for a
+    `sens_solution_report().perturbations` reports the same numbers for a
     caller who would rather read them than stop. It must be positive,
     as the CLI's sens_max_pdpert is, and the same argument is on
-    gradient(), estimate(), estimate_report(), active_set_changes(),
-    covariance() and information().
+    sens_jacobian(), sens_solution(), sens_solution_report(),
+    sens_active_set_changes(),
+    sens_covariance() and sens_information().
 
-    corrector_iter runs the same Newton iterations `estimate()` runs and
+    corrector_iter runs the same Newton iterations `sens_solution()` runs and
     reports what they did on the `corrector` attribute, without changing
     anything the rest of the report measures. Those describe the step
     handed to the corrector, which is what a caller comparing the two
     wants.
 
-    Takes the same perturbation argument `estimate()` takes and returns
-    an EstimateReport. Nothing about the estimate changes: this runs
+    Takes the same perturbation argument `sens_solution()` takes and returns
+    a SolutionReport. Nothing about the estimate changes: this runs
     the same step and measures it.
 
     The ratio test divides each bounded coordinate's distance to the
@@ -1992,27 +2000,28 @@ def estimate_report(model, perturb, max_iter=None,
 
     if mode not in ("linear", "fix_relax", "path"):
         raise ValueError(
-            "estimate_report: mode must be 'linear', 'fix_relax' or "
+            "sens_solution_report: mode must be 'linear', 'fix_relax' or "
             f"'path', got {mode!r}")
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
-            "estimate_report: degeneracy must be 'directional' or "
+            "sens_solution_report: degeneracy must be 'directional' or "
             f"'one_sided', got {degeneracy!r}")
-    _check_margins(bound_eps, max_pdpert, "estimate_report")
+    _check_margins(bound_eps, max_pdpert, "sens_solution_report")
     if bound_eps is not None and mode != "fix_relax":
         warnings.warn(
-            "estimate_report: bound_eps is the margin the fix_relax "
+            "sens_solution_report: bound_eps is the margin the fix_relax "
             f"refinement pins against and mode={mode!r} runs no "
             "refinement, so it changes nothing here.")
-    _refuse_on_pdpert(session, max_pdpert, "estimate_report")
+    _refuse_on_pdpert(session, max_pdpert, "sens_solution_report")
     if max_iter is not None:
         warnings.warn(
-            "estimate_report: max_iter no longer does anything here and is "
+            "sens_solution_report: max_iter no longer does anything "
+            "here and is "
             "ignored; it used to budget the directional decision, which "
             "degeneracy_iter budgets now. Pass degeneracy_iter instead.",
             DeprecationWarning, stacklevel=2)
     pin_idx, deltas = _perturbation_deltas(session, perturb)
-    # the same dispatch `estimate()` runs, so the step measured here is
+    # the same dispatch `sens_solution()` runs, so the step measured here is
     # the step it takes for these arguments
     fell_back = False
     refine_stop = None
@@ -2032,7 +2041,7 @@ def estimate_report(model, perturb, max_iter=None,
             if "directional derivative" not in str(e):
                 raise
             warnings.warn(
-                f"estimate_report: {e}. Falling back to the one-sided "
+                f"sens_solution_report: {e}. Falling back to the one-sided "
                 "step, the degeneracy='one_sided' behavior.")
             fell_back = True
     if degeneracy == "one_sided" or fell_back:
@@ -2135,7 +2144,7 @@ def estimate_report(model, perturb, max_iter=None,
         _, corrector = _correct(
             session, pin_idx, deltas, np.asarray(step), corrector_iter)
 
-    return EstimateReport(
+    return SolutionReport(
         alpha=alpha, first=first, first_kind=first_kind,
         crossed=crossed, crossed_rows=crossed_rows, violation=violation,
         mu=mu, activity=activity, row_activity=row_status,
@@ -2145,7 +2154,7 @@ def estimate_report(model, perturb, max_iter=None,
     )
 
 
-#: One active-set change along `estimate(mode="path")`'s path.
+#: One active-set change along `sens_solution(mode="path")`'s path.
 #: `fraction` is how far along the perturbation the change happens,
 #: `var` is the variable (its solve-space name when the solve created
 #: it without a model counterpart), `bound` is "lower" or "upper", and
@@ -2155,12 +2164,12 @@ ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 
 
-def active_set_changes(model, perturb, predictor_iter=16,
+def sens_active_set_changes(model, perturb, predictor_iter=16,
                        degeneracy="directional", degeneracy_iter=16,
                        max_pdpert=None):
-    """The active-set changes `estimate(mode="path")` applies, in order.
+    """The active-set changes `sens_solution(mode="path")` applies, in order.
 
-    Takes the same perturbation argument `estimate()` takes and returns
+    Takes the same perturbation argument `sens_solution()` takes and returns
     a list of `ActiveSetChange` entries, one per change, in the order
     the path applies them. Nothing about the estimate changes: this
     runs the same path and returns its record.
@@ -2172,9 +2181,9 @@ def active_set_changes(model, perturb, predictor_iter=16,
     and leaves between the predicted state and the measured one.
 
     A list of length `predictor_iter` means the cap stopped the path before
-    the target, the same condition `estimate()` warns about.
+    the target, the same condition `sens_solution()` warns about.
 
-    degeneracy and degeneracy_iter match `estimate()`'s arguments of the
+    degeneracy and degeneracy_iter match `sens_solution()`'s arguments of the
     same names. Under "directional" (the default), a weakly active bound
     the perturbation releases appears in the record as a departure at
     the fraction where its multiplier reaches zero: essentially zero at
@@ -2187,7 +2196,7 @@ def active_set_changes(model, perturb, predictor_iter=16,
 
     max_pdpert refuses rather than answering when the converged KKT
     factor carries an inertia correction larger than the value given.
-    This runs the same predictor `estimate(mode="path")` runs and
+    This runs the same predictor `sens_solution(mode="path")` runs and
     inverts the same factor, so it takes the same cap. There is no
     bound_eps here, since the path decides its changes from where a
     multiplier reaches zero and reads no margin.
@@ -2202,10 +2211,10 @@ def active_set_changes(model, perturb, predictor_iter=16,
 
     if degeneracy not in ("directional", "one_sided"):
         raise ValueError(
-            "active_set_changes: degeneracy must be 'directional' or "
+            "sens_active_set_changes: degeneracy must be 'directional' or "
             f"'one_sided', got {degeneracy!r}")
-    _check_margins(None, max_pdpert, "active_set_changes")
-    _refuse_on_pdpert(session, max_pdpert, "active_set_changes")
+    _check_margins(None, max_pdpert, "sens_active_set_changes")
+    _refuse_on_pdpert(session, max_pdpert, "sens_active_set_changes")
     pin_idx, deltas = _perturbation_deltas(session, perturb)
     if degeneracy == "directional":
         try:
@@ -2218,7 +2227,7 @@ def active_set_changes(model, perturb, predictor_iter=16,
             if "directional derivative" not in str(e):
                 raise
             warnings.warn(
-                f"active_set_changes: {e}. Falling back to the "
+                f"sens_active_set_changes: {e}. Falling back to the "
                 "one-sided record, the degeneracy='one_sided' behavior.")
             _, segments = session.solver.parametric_step_path(
                 pin_idx, deltas, predictor_iter)
@@ -2251,7 +2260,7 @@ class _ParamKeyed:
     """Lookup from a declared Param's data object to its row index.
     Keyed by id() because Pyomo components are unhashable."""
 
-    _who = "covariance"          # accessor name used in diagnostics
+    _who = "sens_covariance"          # accessor name used in diagnostics
 
     def __init__(self, params):
         self._params = list(params)
@@ -2319,10 +2328,10 @@ def _pin_eigenvector_signs(vecs):
 
 
 class Covariance(_ParamMatrix):
-    """Asymptotic parameter covariance, from covariance().
+    """Asymptotic parameter covariance, from sens_covariance().
 
     Keyed by the fitted variables' data objects (the free `Var`s
-    flagged with `declare_fitted`, not Pyomo `Param`s) in `params`
+    flagged with `declare_sens_fitted`, not Pyomo `Param`s) in `params`
     (declaration) order: cov[m.k1, m.k2] (either order),
     cov[m.k1] for a variance, cov.std_err[m.k1],
     cov.correlation[m.k1, m.k2]. `matrix` is the dense numpy array
@@ -2397,7 +2406,7 @@ def _estimation_counts(session):
     return n_var, int(np.count_nonzero(g_l == g_u))
 
 
-def _tangent_reduced_hessian(session, M, zcols, who="covariance"):
+def _tangent_reduced_hessian(session, M, zcols, who="sens_covariance"):
     """The reduced Hessian over the fitted block, by tangent recovery:
     the x-blocks of the K-inverse columns are T*M (each satisfies the
     equalities and has the fitted block as its own coordinates), so
@@ -2433,7 +2442,7 @@ def _tangent_reduced_hessian(session, M, zcols, who="covariance"):
 
 _WORDING = {
     # the default block IS the fitted set, and saying so is strictly
-    # more informative there; an arbitrary wrt block gets the
+    # more informative there; an arbitrary of= block gets the
     # block-relative nouns (review of gh #466)
     "fitted": {"member": "fitted parameter",
                "outside": "non-fitted variables",
@@ -2449,9 +2458,9 @@ _WORDING = {
 
 
 def _classify_fitted_block(session, params, rows, M, zcols,
-                           who="covariance", wording="fitted"):
-    """Membership and row handling shared by covariance() and
-    information(): item 1's classification at the reduced fitted
+                           who="sens_covariance", wording="fitted"):
+    """Membership and row handling shared by sens_covariance() and
+    sens_information(): item 1's classification at the reduced fitted
     block, the value-correction bookkeeping, and the binding-row
     normals, with the warnings both accessors owe their callers.
     Returns a namespace consumed by each accessor's own assembly."""
@@ -2692,16 +2701,16 @@ def _classify_fitted_block(session, params, rows, M, zcols,
 
 class Information(_ParamMatrix):
     """Observed or expected information over the fitted block, from
-    information(). Keyed like Covariance: info[m.k1, m.k2] (either
+    sens_information(). Keyed like Covariance: info[m.k1, m.k2] (either
     order), info[m.k1] for a diagonal entry; `matrix` is the dense
     numpy array in `params` (declaration) order. Natural units, no
     sigma^2 anywhere: for the homoscedastic Lagrangian case,
-    covariance() equals 2*sigma^2 * inv(information()) on the free
+    sens_covariance() equals 2*sigma^2 * inv(sens_information()) on the free
     block. eigen() supports identifiability diagnosis directly: a
     near-zero eigenvalue is a direction the data does not inform, and
     its eigenvector names the parameter combination."""
 
-    _who = "information"
+    _who = "sens_information"
 
     def __init__(self, params, matrix, conditioned_on=()):
         super().__init__(params, matrix)
@@ -2787,8 +2796,8 @@ def _nullspace(A):
     return vh[rank:].T
 
 
-def _resolve_wrt(session, wrt, who):
-    """Normalize wrt= into the block: an ordered list of variable data
+def _resolve_of(session, of, who):
+    """Normalize of= into the block: an ordered list of variable data
     objects with their full-x (.col) rows. Accepted forms: None (the
     declared fitted block, exactly the prior behavior), a Var component
     (scalar or indexed: every member), an indexed slice (m.x[2, :]), a
@@ -2796,13 +2805,13 @@ def _resolve_wrt(session, wrt, who):
     VarData, or an iterable mixing any of these. Duplicates are an
     error: a repeated coordinate makes the block singular by
     construction."""
-    if wrt is None:
+    if of is None:
         params = list(session.fit_rows.keys())
         if not params:
             raise RuntimeError(
                 f"{who}: no fitted parameters were declared; flag the "
-                "fitted variables with declare_fitted() before the "
-                "solve, or select a block explicitly with wrt=")
+                "fitted variables with declare_sens_fitted() before the "
+                "solve, or select a block explicitly with of=")
         return params, [session.fit_rows[p] for p in params]
 
     try:
@@ -2839,35 +2848,35 @@ def _resolve_wrt(session, wrt, who):
             return
         if isinstance(obj, str):
             raise TypeError(
-                f"{who}: wrt takes variables, not names; got {obj!r}")
+                f"{who}: of= takes variables, not names; got {obj!r}")
         try:
             it = iter(obj)                 # slice or plain iterable
         except TypeError:
             raise TypeError(
-                f"{who}: wrt element {obj!r} is not a Pyomo variable "
+                f"{who}: of= element {obj!r} is not a Pyomo variable "
                 "or an iterable of them") from None
         for el in it:
             yield from leaves(el)
 
     params, rows, seen = [], [], set()
-    for v in leaves(wrt):
+    for v in leaves(of):
         name = getattr(v, "name", None)
         if name is None:
             raise TypeError(
-                f"{who}: wrt element {v!r} is not a Pyomo variable")
+                f"{who}: of= element {v!r} is not a Pyomo variable")
         try:
             r = session.var_entry(name)
         except ValueError as e:
-            raise ValueError(f"{who}: wrt member {e}") from None
+            raise ValueError(f"{who}: of= member {e}") from None
         if id(v) in seen:
             raise ValueError(
-                f"{who}: wrt lists {name} twice; a repeated coordinate "
+                f"{who}: of= lists {name} twice; a repeated coordinate "
                 "makes the block singular by construction")
         seen.add(id(v))
         params.append(v)
         rows.append(r)
     if not params:
-        raise ValueError(f"{who}: wrt resolved to an empty block")
+        raise ValueError(f"{who}: of= resolved to an empty block")
     return params, rows
 
 
@@ -3025,12 +3034,12 @@ def _rank_deficient(A):
 
 class _SingularBlock(RuntimeError):
     """The requested block of the inverse KKT matrix is singular.
-    A dedicated type so callers that rescue this case (the wrt
+    A dedicated type so callers that rescue this case (the of=
     dependent-block paths) do not do control flow on message text
     (review of gh #466)."""
 
 
-def _minv(M, who="covariance"):
+def _minv(M, who="sens_covariance"):
     try:
         return np.linalg.inv(M)
     except np.linalg.LinAlgError as e:
@@ -3040,15 +3049,15 @@ def _minv(M, who="covariance"):
             "dependent (structurally unidentifiable)") from e
 
 
-def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
-               wrt=None, max_pdpert=None):
+def sens_covariance(model, sigma_sq=None, n_data=None,
+                    hessian="lagrangian", of=None, max_pdpert=None):
     """Asymptotic covariance of the fitted parameters of a
     least-squares problem, from ONE ordinary solve.
 
-    Workflow: declare the fitted variables with declare_fitted (they
+    Workflow: declare the fitted variables with declare_sens_fitted (they
     stay free), optionally declare the residual container(s) with
-    declare_residual, solve with SolverFactory('pounce'), then call
-    covariance(model) with no further information.
+    declare_sens_residual, solve with SolverFactory('pounce'), then call
+    sens_covariance(model) with no further information.
 
     ASSUMES the model objective is the plain sum of squared residuals.
     The parameter block of the inverse KKT matrix, obtained by one
@@ -3068,7 +3077,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     per pooled or labeled group as SSR_g / (n_g - n_params)); or the
     n_data= fallback (count of data points, with SSR taken from the
     SOLVE-TIME objective value on trust -- writing into the model
-    first, the receding-horizon pattern of estimate(), does not change
+    first, the receding-horizon pattern of sens_solution(), does not change
     the answer). With multiple labeled groups the heteroscedastic
     sandwich covariance is reported.
 
@@ -3085,7 +3094,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     must stay PSD, e.g. feeding an arrival-cost update in moving
     horizon estimation.
 
-    wrt= selects the block (covariance roadmap item 3): any of the
+    of= selects the block (covariance roadmap item 3): any of the
     solve's variables, not only the declared fitted ones, given as a
     Var (scalar or indexed), an indexed slice (m.x[2, :]), a
     (Var, iterable) pair, data objects, or a list mixing these; None
@@ -3151,35 +3160,35 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     """
     if hessian not in ("lagrangian", "gauss-newton"):
         raise ValueError(
-            "covariance: hessian must be 'lagrangian' or 'gauss-newton', "
+            "sens_covariance: hessian must be 'lagrangian' or 'gauss-newton', "
             f"got {hessian!r}")
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
     if session is None:
         raise RuntimeError(
-            "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()), or retain_kkt() for "
-            "wrt= queries with nothing declared, then solve with "
+            "no sensitivity session: declare_sens_fitted() (and optionally "
+            "declare_sens_residual()), or sens_retain_kkt() for "
+            "of= queries with nothing declared, then solve with "
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
     # the block: the declared fitted parameters by default, or any
-    # block of the solve's variables via wrt= (each call re-reduces
+    # block of the solve's variables via of= (each call re-reduces
     # onto its own argument, so one solve serves as many blocks as are
     # asked about, each getting that block's marginal)
-    params, rows = _resolve_wrt(session, wrt, "covariance")
+    params, rows = _resolve_of(session, of, "sens_covariance")
     n_params = len(params)
-    wording = "fitted" if wrt is None else "block"
+    wording = "fitted" if of is None else "block"
     # sigma estimation divides by the FIT's degrees of freedom, a
     # property of the solve, not of the block being asked about
     n_fit = len(session.fit_rows)
 
     # ── guardrails ────────────────────────────────────────────────────────
-    _check_margins(None, max_pdpert, "covariance")
-    _refuse_on_pdpert(session, max_pdpert, "covariance")
+    _check_margins(None, max_pdpert, "sens_covariance")
+    _refuse_on_pdpert(session, max_pdpert, "sens_covariance")
     pert = np.asarray(session.solver.kkt_perturbations)
     if pert.any():
         warnings.warn(
-            "covariance: the held KKT factor carries inertia-correction "
+            "sens_covariance: the held KKT factor carries inertia-correction "
             f"perturbations {pert.tolist()}, so the covariance is "
             "regularized rather than exact. Linearly dependent (structurally"
             " unidentifiable) parameters are the usual cause.")
@@ -3189,7 +3198,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     # factor rows. Keep the two apart -- they differ exactly when the
     # model has a fixed variable, and agree everywhere else.
     dim = session.solver.kkt_dim
-    krows = [session.primal_row(r, f"covariance({p.name})")
+    krows = [session.primal_row(r, f"sens_covariance({p.name})")
              for r, p in zip(rows, params)]
     zcols = []
     for r in krows:
@@ -3209,7 +3218,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     # give garbage, not an error).
     n_var, n_eq = _estimation_counts(session)
     deficient = None
-    if wrt is not None:
+    if of is not None:
         if n_params > n_var - n_eq:
             deficient = "count"
         elif _rank_deficient(M):
@@ -3228,7 +3237,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             cb = _classify_fitted_block(session, params, rows, M, zcols,
                                         wording=wording)
         except _SingularBlock:
-            if wrt is None:
+            if of is None:
                 raise
             deficient = "dependent"
             cb = None
@@ -3243,27 +3252,31 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     groups = dict(session.res_rows)
     if hessian == "gauss-newton" and not groups:
         raise ValueError(
-            "covariance: hessian='gauss-newton' needs declared residuals "
-            "(declare_residual()); the residual Jacobian is recovered from "
+            "sens_covariance: hessian='gauss-newton' needs declared residuals "
+            "(declare_sens_residual()); the residual Jacobian is "
+            "recovered from "
             "their rows. Without residual variables only the "
             "hessian='lagrangian' default is available.")
     if n_data is not None and (sigma_sq is not None or groups):
         warnings.warn(
-            "covariance: n_data is ignored because a higher-precedence noise "
+            "sens_covariance: n_data is ignored because a "
+            "higher-precedence noise "
             "source was given (sigma_sq, or the declared residuals).")
     if sigma_sq is not None:
         if isinstance(sigma_sq, dict):
             named = [g for g in groups if g is not None]
             if not named:
                 raise ValueError(
-                    "covariance: sigma_sq was given as a per-group dict but "
+                    "sens_covariance: sigma_sq was given as a "
+                    "per-group dict but "
                     "no named residual groups were declared; pass a scalar "
                     "sigma_sq, or declare grouped residuals with "
-                    "declare_residual(..., group=...)")
+                    "declare_sens_residual(..., group=...)")
             missing = [g for g in groups if g not in sigma_sq]
             if missing:
                 raise ValueError(
-                    "covariance: sigma_sq is missing an entry for residual "
+                    "sens_covariance: sigma_sq is missing an entry "
+                    "for residual "
                     f"group(s) {sorted(map(repr, missing))}")
             group_sigma = {g: float(sigma_sq[g]) for g in groups}
         else:
@@ -3271,17 +3284,18 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     elif groups:
         if n_fit == 0:
             raise ValueError(
-                "covariance: the noise variance must be estimated from "
+                "sens_covariance: the noise variance must be estimated from "
                 "the declared residuals, but no fitted parameters were "
                 "declared, so the degrees of freedom for the estimate "
                 "are unknown; pass sigma_sq= (known variance) or flag "
-                "the fitted parameters with declare_fitted()")
+                "the fitted parameters with declare_sens_fitted()")
         group_sigma = {}
         for g, rws in groups.items():
             n_g = len(rws)
             if n_g <= n_fit:
                 raise ValueError(
-                    f"covariance: residual group {g!r} has {n_g} members, "
+                    f"sens_covariance: residual group {g!r} has "
+                    f"{n_g} members, "
                     f"not more than the {n_fit} fitted parameters; "
                     "cannot estimate its noise variance")
             ssr_g = float(np.sum(session.base_x[rws] ** 2))
@@ -3289,14 +3303,15 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     elif n_data is not None:
         if n_fit == 0:
             raise ValueError(
-                "covariance: n_data= estimates the noise variance, but "
+                "sens_covariance: n_data= estimates the noise variance, but "
                 "no fitted parameters were declared, so the degrees of "
                 "freedom for the estimate are unknown; pass sigma_sq= "
                 "(known variance) or flag the fitted parameters with "
-                "declare_fitted()")
+                "declare_sens_fitted()")
         if n_data <= n_fit:
             raise ValueError(
-                f"covariance: n_data ({n_data}) must exceed the number of "
+                f"sens_covariance: n_data ({n_data}) must exceed the "
+                "number of "
                 f"fitted parameters ({n_fit})")
         # the objective value AT THE SOLVE, not evaluated on the live
         # model: pyo.value(objective) reads the model's current variable
@@ -3305,16 +3320,17 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         # rescale the covariance (gh #426)
         if not np.isfinite(session.base_obj):
             raise RuntimeError(
-                "covariance: the solve reported no usable objective value "
+                "sens_covariance: the solve reported no usable "
+                "objective value "
                 f"({session.base_obj}), so n_data= cannot estimate the "
                 "noise variance. Pass sigma_sq= (known variance), or "
-                "declare the residual container with declare_residual().")
+                "declare the residual container with declare_sens_residual().")
         ssr = session.base_obj
         group_sigma = {None: ssr / (n_data - n_fit)}
     else:
         raise ValueError(
-            "covariance: the noise variance is unknown; declare the "
-            "residual container(s) with declare_residual(), or pass "
+            "sens_covariance: the noise variance is unknown; declare the "
+            "residual container(s) with declare_sens_residual(), or pass "
             "sigma_sq= (known variance), or pass n_data= (data count, "
             "with the SSR taken from the solve-time objective value)")
 
@@ -3346,7 +3362,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         out = {}
         for g, rws in groups.items():
             # res_rows is full-x like fit_rows; zcols are factor rows
-            Zr = np.array([[zcols[j][session.primal_row(r, "covariance")]
+            Zr = np.array([[zcols[j][session.primal_row(r, "sens_covariance")]
                             for j in range(n_params)]
                            for r in rws])
             out[g] = Zr @ Mi                  # d r_g / d p
@@ -3362,7 +3378,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                   else "linearly dependent coordinates")
         if hessian == "gauss-newton" or not homoscedastic:
             raise RuntimeError(
-                f"covariance: the wrt block is rank-deficient "
+                f"sens_covariance: the of= block is rank-deficient "
                 f"({reason}), so the profiled Jacobians behind "
                 "hessian='gauss-newton' and per-group noise are not "
                 "defined; only the homoscedastic hessian='lagrangian' "
@@ -3373,7 +3389,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                    ("inactive", "unbounded", "fixed", "equality")]
         if flagged:
             warnings.warn(
-                f"covariance: block members {flagged} have bound "
+                f"sens_covariance: block members {flagged} have bound "
                 f"activity, but the block is rank-deficient ({reason}), "
                 "so the "
                 "membership handling (pinned parameters, binding rows) "
@@ -3385,7 +3401,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                    else group_sigma)
         return Covariance(
             params, cov, sig_out,
-            lambda: _conditioned_on(session, act, rows, "covariance"))
+            lambda: _conditioned_on(session, act, rows, "sens_covariance"))
 
     # Active-bound projection: the covariance is computed in the free
     # (off-bound) directions and embedded with zero rows/cols for the
@@ -3419,7 +3435,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                 Ginv = Zb @ np.linalg.inv(Zb.T @ G @ Zb) @ Zb.T
         except np.linalg.LinAlgError as e:
             raise RuntimeError(
-                "covariance: the Gauss-Newton matrix J^T J is singular; "
+                "sens_covariance: the Gauss-Newton matrix J^T J is singular; "
                 "the block members are linearly dependent in the "
                 "residual Jacobian") from e
         if homoscedastic:
@@ -3456,7 +3472,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                     Mc = Zb @ np.linalg.inv(Zb.T @ Rff @ Zb) @ Zb.T
             except np.linalg.LinAlgError as e:
                 raise RuntimeError(
-                    "covariance: the reduced Hessian restricted to the "
+                    "sens_covariance: the reduced Hessian restricted to the "
                     "free (off-bound, off-constraint) members is "
                     "singular; the remaining free block members are "
                     "linearly dependent"
@@ -3479,26 +3495,26 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     cov = 0.5 * (cov + cov.T)
     if np.diag(cov).min() < 0:
         warnings.warn(
-            "covariance: negative variance on the diagonal; the point is "
+            "sens_covariance: negative variance on the diagonal; the point is "
             "probably not a least-squares minimum.")
     sig_out = (next(iter(group_sigma.values()))
                if len(group_sigma) == 1 and None in group_sigma
                else group_sigma)
     return Covariance(
         params, cov, sig_out,
-        lambda: _conditioned_on(session, cb.act, rows, "covariance"))
+        lambda: _conditioned_on(session, cb.act, rows, "sens_covariance"))
 
 
-def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
+def sens_information(model, hessian="lagrangian", of=None, max_pdpert=None):
     """The information matrix of the fitted parameters: the reduced
     Hessian over the declared block, the un-inverted sibling of
-    covariance(), from the same single solve.
+    sens_covariance(), from the same single solve.
 
     Natural units and no sigma^2 anywhere (the core's convention;
-    covariance() carries the 2*sigma^2 on top): for a homoscedastic
-    Lagrangian fit, covariance() equals 2*sigma^2*inv(information())
+    sens_covariance() carries the 2*sigma^2 on top): for a homoscedastic
+    Lagrangian fit, sens_covariance() equals 2*sigma^2*inv(sens_information())
     on the free block. hessian= selects the form exactly as in
-    covariance(): "lagrangian" (default) is the observed information,
+    sens_covariance(): "lagrangian" (default) is the observed information,
     built by tangent recovery against the held factorization (the
     K-inverse columns' x-blocks are T*M, so T = Zx*inv(M) exactly and
     R = T'HT with the exact Lagrangian Hessian: machine precision for
@@ -3507,9 +3523,9 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     relative residue through its slack barrier). "gauss-newton" is the expected information 2*J'J, with J
     recovered over ALL fitted parameters and sliced afterwards, so the
     pinned rows exist to build their disposition from (requires
-    declared residuals, as in covariance()).
+    declared residuals, as in sens_covariance()).
 
-    Membership and warnings follow covariance() exactly (item 1's
+    Membership and warnings follow sens_covariance() exactly (item 1's
     table): a free parameter's row is the reduced Hessian; a strongly
     active parameter's block is S, the reduction onto the pinned set,
     NOT a zero row, because zero information is the opposite of what a
@@ -3521,14 +3537,14 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     finding that the point is not a minimum or the model is
     over-parameterized.
 
-    wrt= selects the block exactly as in covariance() (roadmap item
+    of= selects the block exactly as in sens_covariance() (roadmap item
     3): the declared fitted block by default, or any block of the
     solve's variables. A block that parameterizes the constraint
     manifold (size equal to the fit's degrees of freedom, the square
     structure above) gets the exact tangent construction; a smaller
     block reduces off the held factor with the item-1 corrections
     (that route's documented precision); a rank-deficient block
-    carries no information matrix and is refused toward covariance().
+    carries no information matrix and is refused toward sens_covariance().
     Strongly active variables outside the block come back as
     .conditioned_on.
 
@@ -3543,27 +3559,28 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     """
     if hessian not in ("lagrangian", "gauss-newton"):
         raise ValueError(
-            "information: hessian must be 'lagrangian' or 'gauss-newton', "
+            "sens_information: hessian must be 'lagrangian' or "
+            "'gauss-newton', "
             f"got {hessian!r}")
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
     if session is None:
         raise RuntimeError(
-            "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()), or retain_kkt() for "
-            "wrt= queries with nothing declared, then solve with "
+            "no sensitivity session: declare_sens_fitted() (and optionally "
+            "declare_sens_residual()), or sens_retain_kkt() for "
+            "of= queries with nothing declared, then solve with "
             "SolverFactory('pounce'), SolverFactory('pounce_v2') or the "
             "contrib SolverFactory('pounce') first")
-    params, rows = _resolve_wrt(session, wrt, "information")
+    params, rows = _resolve_of(session, of, "sens_information")
     n_params = len(params)
-    wording = "fitted" if wrt is None else "block"
+    wording = "fitted" if of is None else "block"
 
-    _check_margins(None, max_pdpert, "information")
-    _refuse_on_pdpert(session, max_pdpert, "information")
+    _check_margins(None, max_pdpert, "sens_information")
+    _refuse_on_pdpert(session, max_pdpert, "sens_information")
     pert = np.asarray(session.solver.kkt_perturbations)
     if pert.any():
         warnings.warn(
-            "information: the held KKT factor carries inertia-correction "
+            "sens_information: the held KKT factor carries inertia-correction "
             f"perturbations {pert.tolist()}, so the information is "
             "regularized rather than exact; the isotropic delta_w lands on "
             "the free block and survives the projection.")
@@ -3573,7 +3590,7 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     # as factor rows (gh #450): they differ exactly when the model has
     # a fixed variable, and agree everywhere else
     dim = session.solver.kkt_dim
-    krows = [session.primal_row(r, f"information({p.name})")
+    krows = [session.primal_row(r, f"sens_information({p.name})")
              for r, p in zip(rows, params)]
     zcols = []
     for r in krows:
@@ -3587,11 +3604,11 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
     n_var, n_eq = _estimation_counts(session)
     def _refuse_rank(reason):
         raise RuntimeError(
-            f"information: the wrt block is rank-deficient ({reason}), "
+            f"sens_information: the of= block is rank-deficient ({reason}), "
             "so it carries no information matrix; its covariance "
-            "(covariance(model, wrt=...)) is the meaningful object "
+            "(sens_covariance(model, of=...)) is the meaningful object "
             "for such a block")
-    if wrt is not None:
+    if of is not None:
         if n_params > n_var - n_eq:
             _refuse_rank("more coordinates than the fit has degrees "
                          "of freedom")
@@ -3603,9 +3620,9 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
             _refuse_rank("linearly dependent coordinates")
     try:
         cb = _classify_fitted_block(session, params, rows, M, zcols,
-                                    who="information", wording=wording)
+                                    who="sens_information", wording=wording)
     except _SingularBlock:
-        if wrt is None:
+        if of is None:
             raise
         _refuse_rank("linearly dependent coordinates")
     free, active = cb.free, cb.active
@@ -3614,17 +3631,18 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
         groups = dict(session.res_rows)
         if not groups:
             raise ValueError(
-                "information: hessian='gauss-newton' needs declared "
-                "residuals (declare_residual()); the residual Jacobian is "
+                "sens_information: hessian='gauss-newton' needs declared "
+                "residuals (declare_sens_residual()); the residual "
+                "Jacobian is "
                 "recovered from their rows. Without residual variables "
                 "only the hessian='lagrangian' default is available.")
-        Mi = _minv(M, "information")
+        Mi = _minv(M, "sens_information")
         R = np.zeros((n_params, n_params))
         for g, rws in groups.items():
             # slice LAST: J over the whole fitted block, so the pinned
             # rows exist for S below; res_rows is full-x like fit_rows,
             # zcols are factor rows (gh #450)
-            Zr = np.array([[zcols[j][session.primal_row(r, "information")]
+            Zr = np.array([[zcols[j][session.primal_row(r, "sens_information")]
                             for j in range(n_params)]
                            for r in rws])
             Jg = Zr @ Mi
@@ -3634,8 +3652,8 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
         if R is None:
             if n_var - n_eq == n_params:
                 R = _tangent_reduced_hessian(session, M, zcols,
-                                             "information")
-            elif wrt is not None:
+                                             "sens_information")
+            elif of is not None:
                 # a sub-block of the fitted set gets its marginal by
                 # Schur complement of the exact tangent R over the
                 # fitted block (never inverts a covariance, exact even
@@ -3644,12 +3662,12 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
                 # corrections, which is benign for free coordinates
                 # (no barrier term in the slice)
                 R = _subblock_information(session, rows,
-                                          n_var - n_eq, "information")
+                                          n_var - n_eq, "sens_information")
                 if R is None:
                     R = cb.R_corr
             else:
                 raise RuntimeError(
-                    "information: hessian='lagrangian' requires the "
+                    "sens_information: hessian='lagrangian' requires the "
                     "square estimation structure (the equality "
                     "constraints determine the non-fitted variables "
                     "given the fitted block); this model has "
@@ -3673,7 +3691,7 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
         info_mat[np.ix_(free, free)] = info_ff
         if hessian == "lagrangian" and _indefinite(info_ff):
             warnings.warn(
-                "information: the Lagrangian free block is indefinite "
+                "sens_information: the Lagrangian free block is indefinite "
                 "(returned as computed): the point is not a "
                 "least-squares minimum along some direction, or the "
                 "model is over-parameterized. "
@@ -3687,12 +3705,12 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
             # rank-gate the free block before the solve: whether LAPACK
             # raises on a singular system is BLAS-dependent (the CI
             # wheel job's fresh numpy returned garbage where the local
-            # build raised), the same non-determinism the wrt gates
+            # build raised), the same non-determinism the of= gates
             # exist for; the exception clause stays as the last resort.
-            # Applies on the DEFAULT path too, not only under wrt=: a
+            # Applies on the DEFAULT path too, not only under of=: a
             # numerically dependent free block now refuses where it
             # could previously return a large-but-meaningless S
-            # (CHANGELOG "Changed"). Diagonally scaled like the wrt
+            # (CHANGELOG "Changed"). Diagonally scaled like the of=
             # gates, so an ill-scaled but well-determined free block
             # keeps its answer (second review)
             R_FF = R[np.ix_(free, free)]
@@ -3707,7 +3725,7 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
                     singular = True
             if singular:
                 raise RuntimeError(
-                    "information: the free block is singular, so the "
+                    "sens_information: the free block is singular, so the "
                     "pinned parameters' conditional information S is not "
                     "defined; the free block members are linearly "
                     "dependent")
@@ -3717,4 +3735,4 @@ def information(model, hessian="lagrangian", wrt=None, max_pdpert=None):
 
     return Information(
         params, info_mat,
-        lambda: _conditioned_on(session, cb.act, rows, "information"))
+        lambda: _conditioned_on(session, cb.act, rows, "sens_information"))

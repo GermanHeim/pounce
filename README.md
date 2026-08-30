@@ -402,12 +402,12 @@ Four entry points cover the common workflows:
   suffixes and no upfront perturbation values:
 
   ```python
-  from pyomo_pounce import declare_sens_param, gradient, estimate
+  from pyomo_pounce import declare_sens_param, sens_jacobian, sens_solution
   declare_sens_param(m.p)
   SolverFactory("pounce").solve(m)     # keeps the KKT factorization
-  gradient(m.x, wrt=m.p)               # dx*/dp; constraints give dlambda/dp
-  estimate(m, [(m.p, 2.5)])            # perturbed-solution estimate
-  covariance(m)                        # estimation models: declare the fitted
+  sens_jacobian(m.x, wrt=m.p)          # dx*/dp; constraints give dlambda/dp
+  sens_solution(m, [(m.p, 2.5)])       # perturbed-solution estimate
+  sens_covariance(m)                   # estimation models: declare the fitted
                                        # vars and residuals, get the asymptotic
                                        # parameter covariance from one solve
   ```
