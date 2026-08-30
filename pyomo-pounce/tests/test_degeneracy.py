@@ -308,13 +308,26 @@ def test_release_all_on_the_coupled_kink_pins_each_modes_repair():
 
     - fix_relax pins the crossing and re-solves, repairing both
       coordinates, x to the bound and y to 1.
+    - path re-holds the weak bound at the fraction the walk finds the
+      direction pressing into it, and the coordinates behind it
+      re-optimize under the hold, so it reaches the same 1.
     - linear clamps only the crossing coordinate: x repairs to the
       bound and y keeps the released coupling, 1 + 2*(-5/7) = -3/7,
-      the neighbor damage the docstring and the book state.
-    - path returns x to its bound but leaves y at the one-sided 2/7
-      rather than the re-solve's 1, a measured behavior of the
-      decided path surface under an all-released start, pinned as
-      current behavior rather than endorsed.
+      the neighbor damage the docstring and the book state. It is the
+      only mode left that damages the neighbor here, which is what
+      makes this fixture discriminating rather than a triple of the
+      same number.
+
+    `path` used to answer the one-sided 2/7 here, pinned as current
+    behavior rather than endorsed when this test was written. That was
+    gh#852, split out of this PR's own review: the walk barred every
+    base-active bound from its reach scan, so a perturbation pressing
+    into a weakly active one walked the variable out of its box with
+    no breakpoint, and a downstream clamp moved the crossing
+    coordinate and nothing coupled to it. The fix landed on
+    `step_along_path`, which is the surface BOTH the decided and the
+    undecided callers walk through, so it repaired `release_all` here
+    without this PR changing a line.
     """
     m = coupled_kink()
     for mode in ("linear", "fix_relax", "path"):
@@ -339,12 +352,14 @@ def test_release_all_on_the_coupled_kink_pins_each_modes_repair():
             f"mode={mode}: x repairs to the bound")
     assert fix[m.y] == pytest.approx(1.0, abs=1e-4), (
         "the pins re-solve, so the neighbor repairs too")
+    assert pth[m.y] == pytest.approx(1.0, abs=1e-4), (
+        "the walk re-holds the weak bound and re-optimizes behind it, "
+        "so the neighbor follows (gh#852); this pinned 2/7 before that "
+        "fix landed")
     assert lin[m.y] == pytest.approx(1.0 - 10.0 / 7.0, abs=1e-4), (
         "the clamp repairs only the crossing coordinate: the neighbor "
-        "keeps the released coupling")
-    assert pth[m.y] == pytest.approx(2.0 / 7.0, abs=1e-4), (
-        "current behavior: the walk returns x but leaves the neighbor "
-        "at the one-sided value, not the re-solve's 1")
+        "keeps the released coupling, and linear is now the only mode "
+        "here that does")
 
 
 def test_release_all_at_a_clean_base_point_is_the_plain_step():
@@ -374,3 +389,73 @@ def test_degeneracy_iter_warns_when_it_cannot_matter():
         estimate(m, [(m.p, 1.0)], degeneracy_iter=8)
     assert not any("changes nothing" in str(x.message) for x in w), (
         "the directional decision reads the budget: no warning")
+def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
+    """gh#852. `degeneracy="one_sided"` gives up the choice of side at
+    a kink; it does not give up feasibility. The walk used to find no
+    breakpoint when the perturbation pressed into a weakly active
+    bound -- the factorization's order-one sigma bends the direction
+    without enforcing anything -- so `x` left its box and the clamp
+    put it back, moving `x` alone and leaving `y`, which the equality
+    ties to it, at the one-sided 2/7.
+
+    The three modes are not interchangeable here and the assertions
+    say so separately: `linear` is still lossy by construction, which
+    is what keeps this from passing vacuously, and `path` now agrees
+    with `fix_relax` and the re-solve."""
+    m = coupled_kink()
+    exact = coupled_kink(-1.0)
+    assert pyo.value(exact.x) == pytest.approx(0.0, abs=1e-6)
+    assert pyo.value(exact.y) == pytest.approx(1.0, abs=1e-6)
+
+    for mode in ("fix_relax", "path"):
+        est = estimate(m, [(m.p, -1.0)], mode=mode, degeneracy="one_sided")
+        assert est[m.x] == pytest.approx(0.0, abs=1e-4), f"mode={mode}"
+        assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the coupled neighbour has to follow the held "
+            f"bound, got {est[m.y]} (the pre-fix path value was 2/7)")
+
+    # The runnable before: a single linear map plus a clamp cannot do
+    # this, which is why the mode matters rather than the option.
+    with pytest.warns(UserWarning, match="linear step leaves"):
+        lossy = estimate(
+            m, [(m.p, -1.0)], mode="linear", degeneracy="one_sided")
+    assert lossy[m.x] == pytest.approx(0.0, abs=1e-4), "the clamp gets x right"
+    assert abs(lossy[m.y] - 1.0) > 0.5, (
+        f"linear's clamp cannot move y, expected it to stay near 2/7, "
+        f"got {lossy[m.y]}")
+
+    # And the walk records the hold it took, at the kink's own fraction.
+    rec = active_set_changes(m, [(m.p, -1.0)], degeneracy="one_sided")
+    assert [(c.var, c.bound, c.action) for c in rec] == [
+        (m.x, "lower", "reaches")], f"record: {rec}"
+    assert rec[0].fraction == pytest.approx(0.0, abs=1e-3)
+
+
+def test_one_sided_path_reholds_the_kink_under_user_scaling():
+    """The scaling leg for the same repair. Which branch the walk's
+    reach scan takes is a set membership plus the sign of a direction
+    entry, and both are meant to be properties of the model rather than
+    of the units it is written in — the invariance the crate's
+    `leg_scaling_*` legs assert for the weak set itself.
+
+    Under `x~ = d . x` the barrier diagonal carries `d^-2`, so a rule
+    that had leaned on a bare `Sigma` anywhere would move here and
+    nowhere else."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 10.0), initialize=0.5)
+    m.y = pyo.Var(bounds=(-50.0, 50.0), initialize=1.0)
+    m.link = pyo.Constraint(expr=m.y == 2 * m.x + 1)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2 + 0.1 * (m.y - 1.0) ** 2)
+    m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.scaling_factor[m.x] = 1000.0
+    m.scaling_factor[m.y] = 0.001
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(
+        m, options={"tol": 1e-10, "nlp_scaling_method": "user-scaling"})
+    assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-4)
+
+    est = estimate(m, [(m.p, -1.0)], mode="path", degeneracy="one_sided")
+    assert est[m.x] == pytest.approx(0.0, abs=1e-4)
+    assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
+        f"the repair has to survive a change of variables, got {est[m.y]}")

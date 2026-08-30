@@ -1599,8 +1599,16 @@ def estimate(model, perturb, clamp=True, mode="linear",
         # few percent off and leaves the estimate where it was.
         # Halving is a low bar that separates them cleanly, and saying
         # nothing would let the second case pass for the first.
-        if corrector is not None and corrector["residual"] > 0.5 * corrector[
-                "initial_residual"]:
+        # Written as `not (<=)` rather than `>`, so a non-finite
+        # residual warns instead of comparing false and passing in
+        # silence. gh#845 was exactly that: the corrector normed an
+        # all-NaN residual to 0.0, `0.0 > 0.5 * 6.09` was false, and
+        # `estimate()` returned {x: nan} with nothing said. The Rust
+        # side no longer produces that number, and this side no longer
+        # depends on it not doing so.
+        if corrector is not None and not (
+                corrector["residual"] <= 0.5 * corrector[
+                    "initial_residual"]):
             warnings.warn(
                 "estimate: the corrector spent "
                 f"{corrector['iterations']} back-solve(s) and moved the "
@@ -2204,6 +2212,14 @@ def estimate_report(model, perturb, max_iter=None,
 #: it without a model counterpart), `bound` is "lower" or "upper", and
 #: `action` is "reaches" when the variable arrives at the bound and is
 #: held there, "leaves" when it comes off it.
+#:
+#: A weakly active bound can be recorded as "reaches" at a fraction of
+#: essentially zero, which does not contradict the variable having been
+#: on that bound at the base point: what the working set gained there
+#: is the *hold*. Undecided, such a bound sits in the factorization as
+#: an order-one penalty that bends the step without enforcing anything,
+#: so a perturbation pressing into it is a breakpoint like any other
+#: (gh#852).
 ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 

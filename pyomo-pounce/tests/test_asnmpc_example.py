@@ -7,6 +7,16 @@ import numpy as np
 import pytest
 from pyomo.common.errors import ApplicationError
 
+# `pounce.examples.asnmpc_cstr` imports `pyomo_cvp`, which is an optional
+# extra (`pyomo-cvp==0.7.2` in python/pyproject.toml, installed by CI). Absent
+# it, this module used to raise ModuleNotFoundError during *collection*, which
+# fails the whole suite rather than reporting one unavailable environment.
+pytest.importorskip(
+    "pyomo_cvp",
+    reason="pounce.examples.asnmpc_cstr needs the optional pyomo-cvp extra "
+    "(pip install pyomo-cvp==0.7.2)",
+)
+
 import pounce.examples.asnmpc_cstr as asnmpc
 from pounce.examples.asnmpc_cstr import (
     BASE_STATE,
