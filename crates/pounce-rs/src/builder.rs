@@ -568,14 +568,21 @@ fn validate_fbbt_tape(
             reason: format!("operand reference at slot {slot} is not backward"),
         });
     }
-    for op in &tape.ops {
-        if let FbbtOp::Var(variable) = *op
-            && variable >= n_variables
-        {
-            return Err(NlpError::InvalidFbbtTape {
-                constraint,
-                reason: format!("variable index {variable} is outside 0..{n_variables}"),
-            });
+    for (slot, op) in tape.ops.iter().enumerate() {
+        match *op {
+            FbbtOp::Var(variable) if variable >= n_variables => {
+                return Err(NlpError::InvalidFbbtTape {
+                    constraint,
+                    reason: format!("variable index {variable} is outside 0..{n_variables}"),
+                });
+            }
+            FbbtOp::Const(value) if !value.is_finite() => {
+                return Err(NlpError::InvalidFbbtTape {
+                    constraint,
+                    reason: format!("non-finite constant at slot {slot}: {value}"),
+                });
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -899,6 +906,23 @@ mod tests {
             out_of_range,
             Err(NlpError::InvalidFbbtTape { constraint: 0, .. })
         ));
+
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let non_finite = Nlp::new(InvalidExpression(FbbtTape {
+                ops: vec![FbbtOp::Const(value)],
+            }))
+            .x0(&[0.0])
+            .option_str("presolve", "yes")
+            .option_str("presolve_fbbt", "yes")
+            .try_solve();
+            match non_finite {
+                Err(NlpError::InvalidFbbtTape { constraint, reason }) => {
+                    assert_eq!(constraint, 0);
+                    assert!(reason.contains("non-finite constant at slot 0"), "{reason}");
+                }
+                _ => panic!("non-finite FBBT constant was accepted"),
+            }
+        }
     }
 
     #[test]
