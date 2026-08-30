@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+- **A model with declared sens params solves as written: the per-solve
+  clone is gone.** Every solve of a declared model used to deep-copy
+  the whole model and re-run the sensitivity-toolbox surgery on the
+  copy, a cost paid identically on the hundredth solve of an unchanged
+  model. `declare_sens_param` now inspects each declared Param once,
+  at declaration: a Param entering the model through one defining
+  equality (a single variable equal to the param, the shape a
+  parameterized initial condition already has) is recorded and pinned
+  as written, and a Param folded anywhere else is substituted in
+  place, once, with a warning naming the rewrite: its occurrences read
+  a new variable pinned by a new defining equality on the
+  `_pounce_sens_defs` block, constraints edited in place so their
+  names and activity are untouched. Solves construct no interface,
+  clone nothing, and rewrite nothing; a perturbed re-solve is: set the
+  param, solve. Declared fixed Vars are unfixed and pinned where they
+  stand. The call-time `sens_params` keyword keeps its solve-local
+  clone, and editing the model after declaration so a declared Param
+  leaks into new expressions is documented as unsupported rather than
+  hunted for at solve time.
 - **`mode="path"` takes a weakly active bound back instead of walking
   out of the box (gh #852).** On the coupled kink
   `min (x - p)² + 0.1(y - 1)²` s.t. `y = 2x + 1`, `x ≥ 0`, held at

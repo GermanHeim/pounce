@@ -72,10 +72,13 @@ def test_the_solution_map_is_read_only_and_complete():
     one estimate."""
     m = solved()
     est = estimate(m, [(m.p, 1.5)])
-    assert len(est) == 3
+    # three model variables plus the substitute the in-place rewrite
+    # added for the folded param, itself an ordinary model variable
+    defs = m.component("_pounce_sens_defs")
+    assert len(est) == 4
     # component data is unhashable by design, so identity per position
     # is the membership check
-    expect = [m.x[0], m.x[1], m.x[2]]
+    expect = [m.x[0], m.x[1], m.x[2], defs.v[1]]
     assert all(a is b for a, b in zip(est, expect))
     assert [v for _k, v in est.items()] == [est[vd] for vd in expect]
     with pytest.raises(TypeError):
