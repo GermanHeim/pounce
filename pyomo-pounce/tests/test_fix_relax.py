@@ -1,4 +1,4 @@
-"""Tests for estimate(mode="fix_relax"): pin a crossing variable at its
+"""Tests for sens_solution(mode="fix_relax"): pin a crossing variable at its
 bound and re-solve, rather than clamping it and freezing the rest."""
 import warnings
 
@@ -6,7 +6,7 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import declare_sens_param, estimate, estimate_report
+from pyomo_pounce import declare_sens_param, sens_solution, sens_solution_report
 
 
 def linked(p=1.0):
@@ -42,8 +42,8 @@ def test_fix_relax_matches_a_resolve_where_the_clamp_does_not():
     exact_x, exact_y = resolve_at(-2.0)
 
     with pytest.warns(UserWarning, match="leaves the variable bounds"):
-        lin = estimate(m, [(m.p, -2.0)])
-    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+        lin = sens_solution(m, [(m.p, -2.0)])
+    fix = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
 
     # both put x on its bound
     assert lin[m.x] == pytest.approx(exact_x, abs=1e-6)
@@ -60,9 +60,9 @@ def test_fix_relax_matches_a_resolve_where_the_clamp_does_not():
 
 def test_the_modes_agree_when_nothing_crosses():
     m = solved()
-    lin = estimate(m, [(m.p, 1.1)])
-    fix = estimate(m, [(m.p, 1.1)], mode="fix_relax")
-    assert estimate_report(m, [(m.p, 1.1)]).alpha > 1.0
+    lin = sens_solution(m, [(m.p, 1.1)])
+    fix = sens_solution(m, [(m.p, 1.1)], mode="fix_relax")
+    assert sens_solution_report(m, [(m.p, 1.1)]).alpha > 1.0
     for v in (m.x, m.y):
         assert fix[v] == pytest.approx(lin[v], rel=1e-12)
 
@@ -73,12 +73,12 @@ def test_fix_relax_does_not_warn_about_clamping():
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        estimate(m, [(m.p, -2.0)], mode="fix_relax")
+        sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
 
 
 def test_the_report_and_fix_relax_agree_on_what_crosses():
     m = solved()
-    r = estimate_report(m, [(m.p, -2.0)])
+    r = sens_solution_report(m, [(m.p, -2.0)])
     assert r.first == "x"
     assert 0.0 < r.alpha < 1.0
     assert m.x in r.crossed
@@ -86,8 +86,8 @@ def test_the_report_and_fix_relax_agree_on_what_crosses():
     # the fraction the report says fits should cross nothing, and there
     # the two modes agree
     fits = 1.0 + r.alpha * (-2.0 - 1.0)
-    lin = estimate(m, [(m.p, fits)])
-    fix = estimate(m, [(m.p, fits)], mode="fix_relax")
+    lin = sens_solution(m, [(m.p, fits)])
+    fix = sens_solution(m, [(m.p, fits)], mode="fix_relax")
     for v in (m.x, m.y):
         assert fix[v] == pytest.approx(lin[v], abs=1e-6)
 
@@ -95,7 +95,7 @@ def test_the_report_and_fix_relax_agree_on_what_crosses():
 def test_an_unknown_mode_is_refused():
     m = solved()
     with pytest.raises(ValueError, match="mode must be"):
-        estimate(m, [(m.p, 2.0)], mode="newton")
+        sens_solution(m, [(m.p, 2.0)], mode="newton")
 
 
 def test_fix_relax_reaches_the_same_answer_through_every_route():
@@ -110,7 +110,7 @@ def test_fix_relax_reaches_the_same_answer_through_every_route():
     for _name, solve in routes:
         m = linked()
         solve(m)
-        out.append(estimate(m, [(m.p, -2.0)], mode="fix_relax"))
+        out.append(sens_solution(m, [(m.p, -2.0)], mode="fix_relax"))
     (first, *rest) = out
     for name, other in zip([n for n, _ in routes][1:], rest):
         vals_a = sorted(round(v, 9) for v in first.values())
@@ -137,7 +137,7 @@ def test_fix_relax_holds_under_user_scaling():
         m, options={"nlp_scaling_method": "user-scaling"})
     exact_x, exact_y = resolve_at(-2.0)
 
-    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(exact_x, abs=1e-6)
     assert fix[m.y] == pytest.approx(exact_y, abs=1e-6)
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
@@ -151,8 +151,8 @@ def test_scaling_does_not_change_the_answer():
     pyo.SolverFactory("pounce").solve(
         m, options={"nlp_scaling_method": "user-scaling"})
 
-    a = estimate(plain, [(plain.p, -2.0)], mode="fix_relax")
-    b = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+    a = sens_solution(plain, [(plain.p, -2.0)], mode="fix_relax")
+    b = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
     assert b[m.x] == pytest.approx(a[plain.x], abs=1e-6)
     assert b[m.y] == pytest.approx(a[plain.y], abs=1e-6)
 
@@ -178,7 +178,7 @@ def test_fix_relax_says_which_limit_stopped_it():
     The warning names that limit rather than the pass budget."""
     m = two_bounded()
     with pytest.warns(UserWarning, match="degrees of freedom"):
-        estimate(m, [(m.p, -5.0)], mode="fix_relax")
+        sens_solution(m, [(m.p, -5.0)], mode="fix_relax")
 
 
 def test_clamp_decides_what_happens_to_what_is_left_outside():
@@ -188,9 +188,9 @@ def test_clamp_decides_what_happens_to_what_is_left_outside():
     solved against, which is why the caller can turn it off."""
     m = two_bounded()
     with pytest.warns(UserWarning, match="clamped"):
-        clipped = estimate(m, [(m.p, -5.0)], mode="fix_relax", clamp=True)
+        clipped = sens_solution(m, [(m.p, -5.0)], mode="fix_relax", clamp=True)
     with pytest.warns(UserWarning, match="unclamped"):
-        raw = estimate(m, [(m.p, -5.0)], mode="fix_relax", clamp=False)
+        raw = sens_solution(m, [(m.p, -5.0)], mode="fix_relax", clamp=False)
 
     # clamped: inside the bounds, and the equality no longer holds
     assert clipped[m.x] == pytest.approx(0.0, abs=1e-9)
@@ -206,14 +206,14 @@ def test_predictor_iter_is_exposed_and_bounds_the_work():
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        full = estimate(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=16)
+        full = sens_solution(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=16)
     # one pass is enough for this model, so capping at 1 changes nothing
-    one = estimate(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=1)
+    one = sens_solution(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=1)
     assert one[m.x] == pytest.approx(full[m.x], rel=1e-12)
 
     # and a cap of zero pins nothing, leaving the plain step
     with pytest.warns(UserWarning):
-        none = estimate(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=0,
+        none = sens_solution(m, [(m.p, -2.0)], mode="fix_relax", predictor_iter=0,
                         clamp=False)
     assert none[m.x] < -1e-3
 
@@ -222,7 +222,7 @@ def test_fix_relax_is_quiet_when_it_holds_every_bound():
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        estimate(m, [(m.p, -2.0)], mode="fix_relax")
+        sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
 
 
 def test_an_absent_bound_does_not_widen_the_tolerance():
@@ -242,8 +242,8 @@ def test_an_absent_bound_does_not_widen_the_tolerance():
 
     # the step drives x below 0, which must still be caught
     with pytest.warns(UserWarning, match="leaves the variable bounds"):
-        estimate(m, [(m.p, -2.0)])
-    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+        sens_solution(m, [(m.p, -2.0)])
+    fix = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
 
@@ -282,8 +282,8 @@ def test_fix_relax_releases_a_bound_the_step_wants_to_leave():
     m = active_at_base()
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
 
-    lin = estimate(m, [(m.p, 3.0)])
-    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    lin = sens_solution(m, [(m.p, 3.0)])
+    fix = sens_solution(m, [(m.p, 3.0)], mode="fix_relax")
 
     # the plain step cannot leave the bound
     assert lin[m.x] == pytest.approx(0.0, abs=1e-6)
@@ -312,7 +312,7 @@ def test_a_release_holds_at_a_tight_tolerance():
     pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
 
-    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, 3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(5 / 3, abs=1e-8)
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-8)
 
@@ -321,7 +321,7 @@ def test_a_release_is_not_triggered_when_the_bound_should_stay():
     """A perturbation that pushes further INTO the bound must not
     release it: the multiplier grows rather than going negative."""
     m = active_at_base()
-    fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, -3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
 
@@ -357,11 +357,11 @@ def test_a_release_holds_under_user_scaling():
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
 
     # the plain step still cannot leave the bound, scaled or not
-    lin = estimate(m, [(m.p, 3.0)])
+    lin = sens_solution(m, [(m.p, 3.0)])
     assert lin[m.x] == pytest.approx(0.0, abs=1e-6)
 
     # and releasing it reaches the same re-solve the unscaled model does
-    fix = estimate(m, [(m.p, 3.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, 3.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(1.666667, abs=1e-5)
     assert fix[m.y] == pytest.approx(4.333333, abs=1e-5)
     assert fix[m.y] == pytest.approx(2 * fix[m.x] + 1, abs=1e-6)
@@ -395,7 +395,7 @@ def test_the_step_carries_the_barrier_correction():
     """
     m = nonlinear()
     pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-3})
-    got = estimate(m, [(m.p, 1.0 + 1e-3)])[m.x]
+    got = sens_solution(m, [(m.p, 1.0 + 1e-3)])[m.x]
     assert got == pytest.approx(1.046643388715, abs=5e-7)
 
 
@@ -406,7 +406,7 @@ def test_the_correction_is_below_notice_at_a_converged_tolerance():
     it stays small rather than to detect its absence."""
     m = nonlinear()
     pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-8})
-    got = estimate(m, [(m.p, 1.0 + 1e-3)])[m.x]
+    got = sens_solution(m, [(m.p, 1.0 + 1e-3)])[m.x]
     assert got == pytest.approx(1.046642776555, abs=1e-8)
 
 
@@ -414,7 +414,7 @@ def test_the_correction_does_not_move_a_converged_answer():
     """At a tight tolerance the term is O(mu) and must not disturb a
     step that was already right."""
     m = solved()
-    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(0.0, abs=1e-6)
     assert fix[m.y] == pytest.approx(1.0, abs=1e-6)
 
@@ -443,11 +443,11 @@ def test_a_release_and_a_pin_in_the_same_step():
         expr=(exact.x - exact.p) ** 2 + (exact.z - 2 * exact.p) ** 2)
     pyo.SolverFactory("pounce").solve(exact)
 
-    fix = estimate(m, [(m.p, 2.0)], mode="fix_relax")
+    fix = sens_solution(m, [(m.p, 2.0)], mode="fix_relax")
     assert fix[m.x] == pytest.approx(pyo.value(exact.x), abs=1e-5)
     assert fix[m.z] == pytest.approx(pyo.value(exact.z), abs=1e-5)
     # and the released bound really moved: the plain step cannot
-    lin = estimate(m, [(m.p, 2.0)], clamp=False)
+    lin = sens_solution(m, [(m.p, 2.0)], clamp=False)
     assert abs(lin[m.x] - fix[m.x]) > 1.0
 
 
@@ -462,8 +462,8 @@ def test_a_release_on_an_upper_bound():
     pyo.SolverFactory("pounce").solve(m)
     assert pyo.value(m.x) == pytest.approx(1.0, abs=1e-6), "on the upper bound"
 
-    fix = estimate(m, [(m.p, -3.0)], mode="fix_relax")
-    lin = estimate(m, [(m.p, -3.0)], clamp=False)
+    fix = sens_solution(m, [(m.p, -3.0)], mode="fix_relax")
+    lin = sens_solution(m, [(m.p, -3.0)], clamp=False)
     # the true answer is x = -3, interior
     assert fix[m.x] == pytest.approx(-3.0, abs=1e-5)
     assert lin[m.x] == pytest.approx(1.0, abs=1e-5), "the plain step is stuck"

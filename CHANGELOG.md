@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+- **One naming rule for the `pyomo-pounce` sensitivity surface (gh #854).**
+  Three of the public names misled. `estimate()` sat beside a
+  parameter-estimation feature set (`declare_fitted`, `declare_residual`,
+  `covariance()`) and read as "estimate the parameters" when it meant the
+  opposite: evaluate the solution at perturbed parameter values.
+  `gradient()` returned a full Jacobian in its default form — `target=None`
+  with an indexed param gives the matrix `dx*/dp`, and its own docstring
+  said "the full Jacobian" — where the field reserves *gradient* for a
+  scalar's derivative. And `wrt=` meant two different things: the
+  differentiation denominator on `gradient()`, but the block the matrix is
+  *of* on `covariance()` and `information()`.
+
+  One rule now applies everywhere. `sens` marks the subsystem on every
+  public name: queries read `sens_`, answering from the sensitivity
+  session, and declarations read `declare_sens_`, registering a component
+  with it. Across all signatures `of=` marks what the answer is about and
+  `wrt=` marks the differentiation variable. `declare_sens_param` already
+  fit the rule and anchors the abbreviation.
+
+  | before | after |
+  |---|---|
+  | `estimate()` | `sens_solution()` |
+  | `estimate_report()` | `sens_solution_report()` |
+  | `gradient()` | `sens_jacobian()` |
+  | `covariance()` | `sens_covariance()` |
+  | `information()` | `sens_information()` |
+  | `active_set_changes()` | `sens_active_set_changes()` |
+  | `retain_kkt()` | `sens_retain_kkt()` |
+  | `release_kkt()` | `sens_release_kkt()` |
+  | `declare_fitted()` | `declare_sens_fitted()` |
+  | `declare_residual()` | `declare_sens_residual()` |
+  | `Gradient` | `Jacobian` |
+  | `EstimateReport` | `SolutionReport` |
+  | `gradient`'s `target=` | `of=` |
+  | `covariance`'s `wrt=` | `of=` |
+  | `information`'s `wrt=` | `of=` |
+
+  **Breaking, with no deprecation aliases**: nothing here is in a release
+  consumers pin against, and the diagnostic strings these functions emit
+  carry the new names too, so an alias would have left the messages
+  pointing at a name the caller never typed. Unchanged: the result classes
+  that already name their object (`SolutionMap`, `Covariance`,
+  `Information`, `ActiveSetChange`), `continuation` and `shift_map` (not
+  session queries), the option strings, the sIPOPT-compatible CLI
+  suffixes, and the Rust crate's `parametric_step_*` surface. The book,
+  the notebooks, the validation scripts, the `asnmpc_cstr` example and the
+  tests moved in the same pass.
 - **`degeneracy="release_all"`.** A third option beside `"directional"`
   and `"one_sided"`, on `estimate()`, `estimate_report()` and
   `active_set_changes()`: every weakly active bound is released

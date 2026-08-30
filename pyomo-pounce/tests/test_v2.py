@@ -306,11 +306,11 @@ def _sens_model():
 
 def test_sens_route_solves_and_keeps_the_session(v2):
     """A model carrying `declare_sens_param` must route through the
-    in-process session on v2 too, so that `gradient()` works afterwards —
+    in-process session on v2 too, so that `sens_jacobian()` works afterwards —
     the whole point of the sensitivity path. Pointing `ipopt_v2` at the
     binary silently skips it."""
     pytest.importorskip("pounce")
-    from pyomo_pounce import gradient
+    from pyomo_pounce import sens_jacobian
 
     m = _sens_model()
     results = v2.solve(m)
@@ -319,7 +319,7 @@ def test_sens_route_solves_and_keeps_the_session(v2):
     # was retained by the in-process solve. `x` sits on its lower bound
     # here, so the constraint `x + 2y = p` pins dy/dp to exactly 1/2 --
     # a value that is checkable by hand rather than merely reproducible.
-    assert gradient(m.y, wrt=m.p) == pytest.approx(0.5, rel=1e-5)
+    assert sens_jacobian(m.y, wrt=m.p) == pytest.approx(0.5, rel=1e-5)
 
 
 def test_sens_route_matches_the_ordinary_route(v2):

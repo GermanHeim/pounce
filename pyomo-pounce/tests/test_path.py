@@ -1,6 +1,6 @@
-"""Tests for estimate(mode="path"): apply the perturbation a little at
+"""Tests for sens_solution(mode="path"): apply the perturbation a little at
 a time, changing the active set at the fraction where each change
-happens, and for active_set_changes(), the record of those changes."""
+happens, and for sens_active_set_changes(), the record of those changes."""
 import warnings
 
 import pytest
@@ -8,10 +8,10 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (
-    active_set_changes,
+    sens_active_set_changes,
     declare_sens_param,
-    estimate,
-    estimate_report,
+    sens_solution,
+    sens_solution_report,
 )
 
 
@@ -44,7 +44,7 @@ def resolve_at(newval):
 def test_path_matches_a_resolve_across_a_crossing():
     m = solved()
     exact_x, exact_y = resolve_at(-2.0)
-    est = estimate(m, [(m.p, -2.0)], mode="path")
+    est = sens_solution(m, [(m.p, -2.0)], mode="path")
     assert est[m.x] == pytest.approx(exact_x, abs=1e-6)
     assert est[m.y] == pytest.approx(exact_y, abs=1e-6)
     assert est[m.y] == pytest.approx(2 * est[m.x] + 1, abs=1e-6)
@@ -52,24 +52,24 @@ def test_path_matches_a_resolve_across_a_crossing():
 
 def test_path_agrees_with_fix_relax_where_they_settle_the_same_set():
     m = solved()
-    fix = estimate(m, [(m.p, -2.0)], mode="fix_relax")
-    path = estimate(m, [(m.p, -2.0)], mode="path")
+    fix = sens_solution(m, [(m.p, -2.0)], mode="fix_relax")
+    path = sens_solution(m, [(m.p, -2.0)], mode="path")
     for v in (m.x, m.y):
         assert path[v] == pytest.approx(fix[v], abs=1e-9)
 
 
 def test_the_modes_agree_when_nothing_crosses():
     m = solved()
-    lin = estimate(m, [(m.p, 1.1)])
-    path = estimate(m, [(m.p, 1.1)], mode="path")
+    lin = sens_solution(m, [(m.p, 1.1)])
+    path = sens_solution(m, [(m.p, 1.1)], mode="path")
     for v in (m.x, m.y):
         assert path[v] == pytest.approx(lin[v], rel=1e-12)
-    assert active_set_changes(m, [(m.p, 1.1)]) == []
+    assert sens_active_set_changes(m, [(m.p, 1.1)]) == []
 
 
 def test_the_record_names_the_crossing():
     m = solved()
-    rec = active_set_changes(m, [(m.p, -2.0)])
+    rec = sens_active_set_changes(m, [(m.p, -2.0)])
     assert len(rec) == 1
     c = rec[0]
     assert c.var is m.x
@@ -83,8 +83,8 @@ def test_the_first_fraction_matches_the_report_alpha():
     the same question with the same base direction, so they must give
     the same fraction."""
     m = solved()
-    r = estimate_report(m, [(m.p, -2.0)])
-    rec = active_set_changes(m, [(m.p, -2.0)])
+    r = sens_solution_report(m, [(m.p, -2.0)])
+    rec = sens_active_set_changes(m, [(m.p, -2.0)])
     assert rec[0].fraction == pytest.approx(r.alpha, rel=1e-9)
 
 
@@ -106,11 +106,11 @@ def test_path_releases_a_bound_the_perturbation_pulls_off():
     m = releasing()
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
 
-    path = estimate(m, [(m.p, 3.0)], mode="path")
+    path = sens_solution(m, [(m.p, 3.0)], mode="path")
     assert path[m.x] == pytest.approx(1.666667, abs=1e-5)
     assert path[m.y] == pytest.approx(2 * path[m.x] + 1, abs=1e-6)
 
-    rec = active_set_changes(m, [(m.p, 3.0)])
+    rec = sens_active_set_changes(m, [(m.p, 3.0)])
     assert len(rec) == 1
     c = rec[0]
     assert c.var is m.x
@@ -128,10 +128,10 @@ def test_a_bound_pushed_deeper_stays_and_records_nothing():
     zero and enforce the same bound twice."""
     m = releasing()
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-6), "bound is active"
-    path = estimate(m, [(m.p, -3.0)], mode="path")
+    path = sens_solution(m, [(m.p, -3.0)], mode="path")
     assert path[m.x] == pytest.approx(0.0, abs=1e-6)
     assert path[m.y] == pytest.approx(1.0, abs=1e-6)
-    assert active_set_changes(m, [(m.p, -3.0)]) == []
+    assert sens_active_set_changes(m, [(m.p, -3.0)]) == []
 
 
 def test_a_release_on_an_upper_bound():
@@ -143,9 +143,9 @@ def test_a_release_on_an_upper_bound():
     pyo.SolverFactory("pounce").solve(m)
     assert pyo.value(m.x) == pytest.approx(1.0, abs=1e-6), "on the upper bound"
 
-    path = estimate(m, [(m.p, -3.0)], mode="path")
+    path = sens_solution(m, [(m.p, -3.0)], mode="path")
     assert path[m.x] == pytest.approx(-3.0, abs=1e-5)
-    rec = active_set_changes(m, [(m.p, -3.0)])
+    rec = sens_active_set_changes(m, [(m.p, -3.0)])
     assert [(c.var, c.bound, c.action) for c in rec] == [
         (m.x, "upper", "leaves")]
 
@@ -179,11 +179,11 @@ def test_a_variable_reached_partway_can_leave_again():
     exact = crossing_qp(1.0)
     pyo.SolverFactory("pounce").solve(exact, options={"tol": 1e-10})
 
-    path = estimate(m, [(m.p, 1.0)], mode="path")
+    path = sens_solution(m, [(m.p, 1.0)], mode="path")
     assert path[m.x1] == pytest.approx(pyo.value(exact.x1), abs=1e-8)
     assert path[m.x2] == pytest.approx(pyo.value(exact.x2), abs=1e-8)
 
-    rec = active_set_changes(m, [(m.p, 1.0)])
+    rec = sens_active_set_changes(m, [(m.p, 1.0)])
     x2_events = [(c.action, c.fraction) for c in rec
                  if c.var is m.x2 and c.bound == "lower"]
     assert [a for a, _ in x2_events] == ["reaches", "leaves"], (
@@ -224,11 +224,11 @@ def test_a_released_bound_can_be_reached_again():
     exact = returning_qp(1.0)
     pyo.SolverFactory("pounce").solve(exact, options={"tol": 1e-10})
 
-    path = estimate(m, [(m.p, 1.0)], mode="path")
+    path = sens_solution(m, [(m.p, 1.0)], mode="path")
     assert path[m.x1] == pytest.approx(pyo.value(exact.x1), abs=1e-8)
     assert path[m.x2] == pytest.approx(pyo.value(exact.x2), abs=1e-8)
 
-    rec = active_set_changes(m, [(m.p, 1.0)])
+    rec = sens_active_set_changes(m, [(m.p, 1.0)])
     x1_upper = [c.action for c in rec
                 if c.var is m.x1 and c.bound == "upper"]
     assert x1_upper == ["leaves", "reaches"], (
@@ -240,10 +240,10 @@ def test_a_released_bound_can_be_reached_again():
 def test_the_cap_falls_back_to_the_clamp_with_a_warning():
     m = solved()
     with pytest.warns(UserWarning, match="predictor_iter may finish it"):
-        capped = estimate(m, [(m.p, -2.0)], mode="path", predictor_iter=0,
+        capped = sens_solution(m, [(m.p, -2.0)], mode="path", predictor_iter=0,
                           clamp=False)
     # with no changes allowed the whole perturbation is one plain step
-    lin = estimate(m, [(m.p, -2.0)], clamp=False)
+    lin = sens_solution(m, [(m.p, -2.0)], clamp=False)
     assert capped[m.x] == pytest.approx(lin[m.x], rel=1e-9)
 
 
@@ -251,11 +251,11 @@ def test_path_is_quiet_when_it_reaches_the_target():
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        estimate(m, [(m.p, -2.0)], mode="path")
-        active_set_changes(m, [(m.p, -2.0)])
+        sens_solution(m, [(m.p, -2.0)], mode="path")
+        sens_active_set_changes(m, [(m.p, -2.0)])
 
 
 def test_the_record_requires_a_session():
     m = linked()
     with pytest.raises(RuntimeError, match="no sensitivity session"):
-        active_set_changes(m, [(m.p, 2.0)])
+        sens_active_set_changes(m, [(m.p, 2.0)])

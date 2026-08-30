@@ -36,15 +36,15 @@ from pyomo.opt import TerminationCondition
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (
-    covariance,
-    declare_fitted,
-    declare_residual,
+    sens_covariance,
+    declare_sens_fitted,
+    declare_sens_residual,
     declare_sens_param,
-    estimate,
-    gradient,
-    information,
-    release_kkt,
-    retain_kkt,
+    sens_solution,
+    sens_jacobian,
+    sens_information,
+    sens_release_kkt,
+    sens_retain_kkt,
 )
 from pyomo_pounce.scaling import (
     problem_scaling,
@@ -289,9 +289,9 @@ def linear_model(x, y, scale=None, x_scale=None, dead=False, param=False):
         m.dead = pyo.Var(bounds=(2.0, 2.0), initialize=2.0)
         m.deadcon = pyo.Constraint(expr=m.dead * m.dead <= 1e6)
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
-    declare_fitted(m.a)
-    declare_fitted(m.b)
-    declare_residual(m.r)
+    declare_sens_fitted(m.a)
+    declare_sens_fitted(m.b)
+    declare_sens_residual(m.r)
     if param:
         declare_sens_param(m.shift)
     if scale is not None:
@@ -356,65 +356,65 @@ def test_estimates_are_unmoved_by_user_scaling():
 def test_covariance_matches_unscaled_ground_truth():
     scaled, plain, X = solve_pair()
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2).matrix,
-        covariance(plain, sigma_sq=SIGMA**2).matrix, rtol=1e-7)
+        sens_covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        sens_covariance(plain, sigma_sq=SIGMA**2).matrix, rtol=1e-7)
     # and against the closed form, so both runs being wrong the same
     # way cannot pass
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        sens_covariance(scaled, sigma_sq=SIGMA**2).matrix,
         SIGMA**2 * np.linalg.inv(X.T @ X), rtol=1e-6)
 
 
 def test_information_matches_unscaled_ground_truth():
     scaled, plain, X = solve_pair()
-    np.testing.assert_allclose(information(scaled).matrix,
-                               information(plain).matrix, rtol=1e-7)
-    np.testing.assert_allclose(information(scaled).matrix,
+    np.testing.assert_allclose(sens_information(scaled).matrix,
+                               sens_information(plain).matrix, rtol=1e-7)
+    np.testing.assert_allclose(sens_information(scaled).matrix,
                                2.0 * X.T @ X, rtol=1e-6)
     np.testing.assert_allclose(
-        information(scaled, hessian="gauss-newton").matrix,
+        sens_information(scaled, hessian="gauss-newton").matrix,
         2.0 * X.T @ X, rtol=1e-6)
 
 
-def test_wrt_blocks_match_unscaled_ground_truth():
+def test_of_blocks_match_unscaled_ground_truth():
     scaled, plain, X = solve_pair()
     C = SIGMA**2 * np.linalg.inv(X.T @ X)
-    cov_a = covariance(scaled, sigma_sq=SIGMA**2, wrt=[scaled.a])
+    cov_a = sens_covariance(scaled, sigma_sq=SIGMA**2, of=[scaled.a])
     assert cov_a[scaled.a] == pytest.approx(C[0, 0], rel=1e-6)
     # the rank-deficient residual block: the prediction band
     H = X @ np.linalg.solve(X.T @ X, X.T)
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2, wrt=scaled.r).matrix,
+        sens_covariance(scaled, sigma_sq=SIGMA**2, of=scaled.r).matrix,
         SIGMA**2 * H, rtol=1e-6, atol=1e-12)
     np.testing.assert_allclose(
-        information(scaled, wrt=[scaled.a, scaled.b]).matrix,
-        information(plain, wrt=[plain.a, plain.b]).matrix, rtol=1e-7)
+        sens_information(scaled, of=[scaled.a, scaled.b]).matrix,
+        sens_information(plain, of=[plain.a, plain.b]).matrix, rtol=1e-7)
 
 
 def test_classifier_statuses_match_unscaled():
     scaled, plain, _ = solve_pair()
-    assert (covariance(scaled, sigma_sq=SIGMA**2).conditioned_on
-            == covariance(plain, sigma_sq=SIGMA**2).conditioned_on)
+    assert (sens_covariance(scaled, sigma_sq=SIGMA**2).conditioned_on
+            == sens_covariance(plain, sigma_sq=SIGMA**2).conditioned_on)
 
 
-def test_gradient_and_estimate_match_unscaled():
+def test_sens_jacobian_and_sens_solution_match_unscaled():
     scaled, plain, _ = solve_pair(param=True)
     for target in ("a", "b"):
-        g_scaled = gradient(getattr(scaled, target), wrt=scaled.shift)
-        g_plain = gradient(getattr(plain, target), wrt=plain.shift)
+        g_scaled = sens_jacobian(getattr(scaled, target), wrt=scaled.shift)
+        g_plain = sens_jacobian(getattr(plain, target), wrt=plain.shift)
         assert g_scaled == pytest.approx(g_plain, abs=1e-6)
-    est_scaled = estimate(scaled, [(scaled.shift, 0.25)])
-    est_plain = estimate(plain, [(plain.shift, 0.25)])
+    est_scaled = sens_solution(scaled, [(scaled.shift, 0.25)])
+    est_plain = sens_solution(plain, [(plain.shift, 0.25)])
     assert est_scaled[scaled.a] == pytest.approx(est_plain[plain.a], abs=1e-6)
     assert est_scaled[scaled.b] == pytest.approx(est_plain[plain.b], abs=1e-6)
 
 
 def test_fixed_variable_composition_survives_user_scaling():
     scaled, plain, X = solve_pair(dead=True)
-    np.testing.assert_allclose(information(scaled).matrix,
+    np.testing.assert_allclose(sens_information(scaled).matrix,
                                2.0 * X.T @ X, rtol=1e-6)
-    np.testing.assert_allclose(information(scaled).matrix,
-                               information(plain).matrix, rtol=1e-7)
+    np.testing.assert_allclose(sens_information(scaled).matrix,
+                               sens_information(plain).matrix, rtol=1e-7)
 
 
 def test_retain_only_block_matches_unscaled():
@@ -430,7 +430,7 @@ def test_retain_only_block_matches_unscaled():
             m.I, rule=lambda mm, i: mm.r[i] == float(y[i]) - mm.a
             - mm.b * float(x[i]))
         m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
-        retain_kkt(m)          # no declarations: the retain-only path
+        sens_retain_kkt(m)          # no declarations: the retain-only path
         if scaled:
             m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
             m.scaling_factor[m.obj] = 1e-3
@@ -444,14 +444,14 @@ def test_retain_only_block_matches_unscaled():
     scaled, plain = build(True), build(False)
     try:
         np.testing.assert_allclose(
-            information(scaled, wrt=[scaled.a, scaled.b]).matrix,
-            information(plain, wrt=[plain.a, plain.b]).matrix, rtol=1e-7)
+            sens_information(scaled, of=[scaled.a, scaled.b]).matrix,
+            sens_information(plain, of=[plain.a, plain.b]).matrix, rtol=1e-7)
         np.testing.assert_allclose(
-            information(scaled, wrt=[scaled.a, scaled.b]).matrix,
+            sens_information(scaled, of=[scaled.a, scaled.b]).matrix,
             2.0 * X.T @ X, rtol=1e-6)
     finally:
-        release_kkt(scaled)
-        release_kkt(plain)
+        sens_release_kkt(scaled)
+        sens_release_kkt(plain)
 
 
 # ── variable factors on the sensitivity path (gh #486 stage 3) ───────────────
@@ -492,59 +492,59 @@ def test_estimates_are_unmoved_by_variable_scaling():
 def test_covariance_matches_unscaled_ground_truth_under_variable_scaling():
     scaled, plain, X = solve_pair(x_scale=X_SCALE)
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2).matrix,
-        covariance(plain, sigma_sq=SIGMA**2).matrix, rtol=1e-6)
+        sens_covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        sens_covariance(plain, sigma_sq=SIGMA**2).matrix, rtol=1e-6)
     # and against the closed form, so both runs being wrong the same
     # way cannot pass
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        sens_covariance(scaled, sigma_sq=SIGMA**2).matrix,
         SIGMA**2 * np.linalg.inv(X.T @ X), rtol=1e-6)
 
 
 def test_information_matches_unscaled_ground_truth_under_variable_scaling():
     scaled, plain, X = solve_pair(x_scale=X_SCALE)
-    np.testing.assert_allclose(information(scaled).matrix,
-                               information(plain).matrix, rtol=1e-6)
-    np.testing.assert_allclose(information(scaled).matrix,
+    np.testing.assert_allclose(sens_information(scaled).matrix,
+                               sens_information(plain).matrix, rtol=1e-6)
+    np.testing.assert_allclose(sens_information(scaled).matrix,
                                2.0 * X.T @ X, rtol=1e-6)
     # The Gauss-Newton form is built from the residual Jacobian rather
     # than the KKT factor, so it carries the substitution down its own
     # path and needs asserting separately.
     np.testing.assert_allclose(
-        information(scaled, hessian="gauss-newton").matrix,
+        sens_information(scaled, hessian="gauss-newton").matrix,
         2.0 * X.T @ X, rtol=1e-6)
 
 
-def test_wrt_blocks_match_unscaled_under_variable_scaling():
+def test_of_blocks_match_unscaled_under_variable_scaling():
     # The residual block is where a per-variable factor is most visible:
     # `r` carries a factor of its own, and the prediction band is a
     # rank-deficient block whose projection would not survive a missed
     # one.
     scaled, plain, X = solve_pair(x_scale=X_SCALE)
     C = SIGMA**2 * np.linalg.inv(X.T @ X)
-    assert covariance(scaled, sigma_sq=SIGMA**2,
-                      wrt=[scaled.a])[scaled.a] == pytest.approx(C[0, 0],
+    assert sens_covariance(scaled, sigma_sq=SIGMA**2,
+                      of=[scaled.a])[scaled.a] == pytest.approx(C[0, 0],
                                                                  rel=1e-6)
     H = X @ np.linalg.solve(X.T @ X, X.T)
     np.testing.assert_allclose(
-        covariance(scaled, sigma_sq=SIGMA**2, wrt=scaled.r).matrix,
+        sens_covariance(scaled, sigma_sq=SIGMA**2, of=scaled.r).matrix,
         SIGMA**2 * H, rtol=1e-5, atol=1e-10)
 
 
 def test_classifier_statuses_match_unscaled_under_variable_scaling():
     scaled, plain, _ = solve_pair(x_scale=X_SCALE)
-    assert (covariance(scaled, sigma_sq=SIGMA**2).conditioned_on
-            == covariance(plain, sigma_sq=SIGMA**2).conditioned_on)
+    assert (sens_covariance(scaled, sigma_sq=SIGMA**2).conditioned_on
+            == sens_covariance(plain, sigma_sq=SIGMA**2).conditioned_on)
 
 
-def test_gradient_and_estimate_match_unscaled_under_variable_scaling():
+def test_sens_jacobian_and_sens_solution_match_unscaled_under_variable_scaling():
     scaled, plain, _ = solve_pair(x_scale=X_SCALE, param=True)
     for target in ("a", "b"):
-        g_scaled = gradient(getattr(scaled, target), wrt=scaled.shift)
-        g_plain = gradient(getattr(plain, target), wrt=plain.shift)
+        g_scaled = sens_jacobian(getattr(scaled, target), wrt=scaled.shift)
+        g_plain = sens_jacobian(getattr(plain, target), wrt=plain.shift)
         assert g_scaled == pytest.approx(g_plain, abs=1e-6)
-    est_scaled = estimate(scaled, [(scaled.shift, 0.25)])
-    est_plain = estimate(plain, [(plain.shift, 0.25)])
+    est_scaled = sens_solution(scaled, [(scaled.shift, 0.25)])
+    est_plain = sens_solution(plain, [(plain.shift, 0.25)])
     assert est_scaled[scaled.a] == pytest.approx(est_plain[plain.a], abs=1e-6)
     assert est_scaled[scaled.b] == pytest.approx(est_plain[plain.b], abs=1e-6)
 
@@ -555,7 +555,7 @@ def test_fixed_variable_composition_survives_variable_scaling():
     # `x` block are different lengths -- the composition gh #450 is
     # about, now with a change of variables on top.
     scaled, plain, X = solve_pair(x_scale=X_SCALE, dead=True)
-    np.testing.assert_allclose(information(scaled).matrix,
+    np.testing.assert_allclose(sens_information(scaled).matrix,
                                2.0 * X.T @ X, rtol=1e-6)
-    np.testing.assert_allclose(information(scaled).matrix,
-                               information(plain).matrix, rtol=1e-6)
+    np.testing.assert_allclose(sens_information(scaled).matrix,
+                               sens_information(plain).matrix, rtol=1e-6)

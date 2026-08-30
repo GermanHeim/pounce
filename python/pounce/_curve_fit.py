@@ -991,9 +991,9 @@ def curve_fit(
     :class:`UserWarning` is emitted naming the pinned parameters; give a
     parameter a non-degenerate bound to obtain an uncertainty for it.
 
-    See also ``pyomo_pounce.covariance`` (in the ``pyomo-pounce`` package),
-    the counterpart surface for an estimation model written directly in
-    Pyomo rather than a ``f(x, *params)`` callable. It uses the same
+    See also ``pyomo_pounce.sens_covariance`` (in the ``pyomo-pounce``
+    package), the counterpart surface for an estimation model written
+    directly in Pyomo rather than a ``f(x, *params)`` callable. It uses the same
     scale-and-invert-the-reduced-Hessian recipe from the held KKT factor,
     but for nonlinear models reports the observed-information covariance
     (the exact Hessian) whereas ``curve_fit`` reports the Gauss-Newton

@@ -34,9 +34,9 @@ Predictor--corrector continuation over a parameter path (pounce#608):
 Parametric sensitivity (see pyomo_pounce.sens):
     declare_sens_param(m.p)      # flag parameters when building the model
     SolverFactory('pounce').solve(m)   # normal solve keeps the KKT factor
-    gradient(m.x, wrt=m.p)       # then sensitivities are cheap backsolves
-    estimate(m, [(m.p, 2.5)])
-    covariance(m, n_data=len(y)) # parameter covariance for least squares
+    sens_jacobian(m.x, wrt=m.p)  # then sensitivities are cheap backsolves
+    sens_solution(m, [(m.p, 2.5)])
+    sens_covariance(m, n_data=len(y))  # parameter covariance for least squares
 """
 from pyomo_pounce.block_init import (
     BlockAnalysisReport,
@@ -54,21 +54,21 @@ from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
     ActiveSetChange,
     Covariance,
-    EstimateReport,
-    Gradient,
-    active_set_changes,
-    covariance,
-    declare_fitted,
-    declare_residual,
-    declare_sens_param,
-    estimate,
-    estimate_report,
-    SolutionMap,
-    gradient,
-    information,
     Information,
-    release_kkt,
-    retain_kkt,
+    Jacobian,
+    SolutionMap,
+    SolutionReport,
+    declare_sens_fitted,
+    declare_sens_param,
+    declare_sens_residual,
+    sens_active_set_changes,
+    sens_covariance,
+    sens_information,
+    sens_jacobian,
+    sens_release_kkt,
+    sens_retain_kkt,
+    sens_solution,
+    sens_solution_report,
 )
 from pyomo_pounce.preflight import (
     PyomoPreflightReport,
@@ -112,22 +112,22 @@ __all__ = [
     "HAVE_V2_INTERFACE",
     "check_binary",
     "declare_sens_param",
-    "declare_fitted",
-    "declare_residual",
-    "release_kkt",
-    "retain_kkt",
-    "covariance",
+    "declare_sens_fitted",
+    "declare_sens_residual",
+    "sens_release_kkt",
+    "sens_retain_kkt",
+    "sens_covariance",
     "Covariance",
-    "gradient",
-    "estimate",
-    "estimate_report",
+    "sens_jacobian",
+    "sens_solution",
+    "sens_solution_report",
     "SolutionMap",
     "continuation",
     "shift_map",
-    "EstimateReport",
-    "active_set_changes",
+    "SolutionReport",
+    "sens_active_set_changes",
     "ActiveSetChange",
-    "Gradient",
+    "Jacobian",
     "preflight",
     "PyomoPreflightReport",
     "initialize_missing_values",
@@ -142,7 +142,7 @@ __all__ = [
     "BlockRepairPlan",
     "BlockOutcome",
     "InitOptions",
-    "information",
+    "sens_information",
     "Information",
     "structural_incidence",
 ]

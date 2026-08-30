@@ -14,9 +14,9 @@ Two things are validated:
 
   2. SENSITIVITY / COVARIANCE -- the part that matters most. A solver can
      nail the optimum and still compute a subtly-wrong covariance. We check
-     pounce's covariance() TWO independent ways:
+     pounce's sens_covariance() TWO independent ways:
 
-       (a) pyomo_pounce.covariance() -- pounce's held-factorization sIPOPT
+       (a) pyomo_pounce.sens_covariance() -- pounce's held-factorization sIPOPT
            computation.
        (b) an independent reference: reduced Hessian from PyNumero (AMPL/ASL
            derivatives) assembled and factored with scipy.sparse.
@@ -40,7 +40,8 @@ from pyomo.opt import SolverFactory
 from scipy.optimize import curve_fit
 
 import pyomo_pounce
-from pyomo_pounce import (covariance, declare_fitted, declare_residual)
+from pyomo_pounce import (declare_sens_fitted, declare_sens_residual,
+                          sens_covariance)
 from _common import (MAIN, abs_err, dump_result, rel_err, setup_pounce)
 from _covref import covariance_reference
 import _cho_import
@@ -68,10 +69,10 @@ def control_linear():
         return m
 
     m = build()
-    declare_fitted(m.b0, m.b1)
-    declare_residual(m.r)
+    declare_sens_fitted(m.b0, m.b1)
+    declare_sens_residual(m.r)
     SolverFactory("pounce").solve(m)
-    cov = covariance(m)
+    cov = sens_covariance(m)
     Cp = cov.matrix
     s2 = cov.sigma_sq
     # closed form
@@ -112,10 +113,10 @@ def control_nonlinear():
         return m
 
     m = build()
-    declare_fitted(m.A, m.k)
-    declare_residual(m.r)
+    declare_sens_fitted(m.A, m.k)
+    declare_sens_residual(m.r)
     SolverFactory("pounce").solve(m)
-    cov = covariance(m)
+    cov = sens_covariance(m)
     Cp = cov.matrix
     s2 = cov.sigma_sq
     popt, pcov = curve_fit(lambda t, A, k: A * np.exp(-k * t), t, y,
@@ -159,7 +160,7 @@ def main():
     n_vars = len(list(m.component_data_objects(pyo.Var, active=True)))
     n_cons = len(list(m.component_data_objects(pyo.Constraint, active=True)))
     for nm in cho.THETA_NAMES:
-        declare_fitted(getattr(m, nm))
+        declare_sens_fitted(getattr(m, nm))
     res = SolverFactory("pounce").solve(m)
     obj_p = pyo.value(m.obj)
     theta_p = {nm: float(pyo.value(getattr(m, nm))) for nm in cho.THETA_NAMES}
@@ -226,7 +227,7 @@ def main():
     # (2) covariance via pounce
     ndata = count_ndata(cho, m, batches)
     sigma_sq = obj_p / (ndata - len(cho.THETA_NAMES))
-    cov = covariance(m, sigma_sq=sigma_sq, hessian="lagrangian")
+    cov = sens_covariance(m, sigma_sq=sigma_sq, hessian="lagrangian")
     se_p = {nm: float(cov.std_err[getattr(m, nm)]) for nm in cho.THETA_NAMES}
     corr_p = np.array([[cov.correlation[getattr(m, a), getattr(m, b)]
                         for b in cho.THETA_NAMES] for a in cho.THETA_NAMES])
