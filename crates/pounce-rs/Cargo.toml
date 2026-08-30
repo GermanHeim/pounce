@@ -24,6 +24,7 @@ pounce-observability.workspace = true
 # This is the one crate the lean default build gains over the pre-ladder
 # facade.
 pounce-restoration.workspace = true
+pounce-presolve.workspace = true
 
 # Feature-gated facets (gh #561). Every one of these is already in the
 # dependency graph of the default build — pounce-algorithm pulls

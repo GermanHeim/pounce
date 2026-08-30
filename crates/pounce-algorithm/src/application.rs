@@ -877,6 +877,16 @@ impl IpoptApplication {
     }
 
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        let derivative_test_tnlp = Rc::clone(&tnlp);
+        self.optimize_tnlp_with_derivative_test_tnlp(tnlp, derivative_test_tnlp)
+    }
+
+    /// Solve through `tnlp`, but run `derivative_test` against an unwrapped TNLP.
+    pub fn optimize_tnlp_with_derivative_test_tnlp(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+        derivative_test_tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> ApplicationReturnStatus {
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
         // the core's scaling models the objective and the constraint
@@ -990,7 +1000,7 @@ impl IpoptApplication {
         // against finite differences before anything else runs — on the
         // raw TNLP, before the presolve wrapper below changes its
         // coordinates.
-        self.run_derivative_test(&tnlp);
+        self.run_derivative_test(&derivative_test_tnlp);
 
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route

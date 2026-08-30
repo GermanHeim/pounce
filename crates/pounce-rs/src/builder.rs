@@ -42,6 +42,7 @@ use crate::{
     ApplicationReturnStatus, BoundsInfo, IndexStyle, IpoptApplication, IpoptCq, IpoptData, NlpInfo,
     Solution as TnlpSolution, SolveStatistics, SparsityRequest, StartingPoint, TNLP,
 };
+use pounce_nlp::expression_provider::{ExpressionProvider, FbbtOp, FbbtTape};
 
 const FD: f64 = 1.4901161193847656e-8; // sqrt(f64::EPSILON)
 const INF: f64 = 2.0e19; // Ipopt's "infinity" bound sentinel
@@ -62,6 +63,11 @@ pub trait Problem {
 
     /// Constraint values `g(x)` into `out` (length `n_constraints`).
     fn constraints(&self, _x: &[f64], _out: &mut [f64]) {}
+
+    /// Optional FBBT expression for constraint `index`.
+    fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
+        None
+    }
 
     /// Objective gradient `∇f(x)` into `grad`; return `false` for finite
     /// differences.
@@ -132,6 +138,8 @@ pub struct Solution {
     /// `stats.iterations` holds the per-iteration trajectory and is
     ///  non-empty only when [`Nlp::capture_iterations`] was requested.
     pub stats: SolveStatistics,
+    /// FBBT diagnostics when presolve FBBT ran.
+    pub fbbt_report: Option<pounce_presolve::fbbt::FbbtReport>,
     /// What the second-opinion ladder did, or `None` if it never ran.
     pub second_opinion: Option<SecondOpinion>,
 }
@@ -164,6 +172,10 @@ pub enum NlpError {
     },
     /// `IpoptApplication::initialize` failed.
     Initialize(String),
+    /// Presolve setup failed.
+    Presolve(String),
+    /// An FBBT tape was invalid for this problem.
+    InvalidFbbtTape { constraint: usize, reason: String },
 }
 
 impl std::fmt::Display for NlpError {
@@ -178,6 +190,10 @@ impl std::fmt::Display for NlpError {
                 write!(f, "option {tag}={value} rejected: {reason}")
             }
             Self::Initialize(msg) => write!(f, "IpoptApplication::initialize failed: {msg}"),
+            Self::Presolve(msg) => write!(f, "presolve setup failed: {msg}"),
+            Self::InvalidFbbtTape { constraint, reason } => {
+                write!(f, "invalid FBBT tape for constraint {constraint}: {reason}")
+            }
         }
     }
 }
@@ -331,27 +347,13 @@ impl<P: Problem + 'static> Nlp<P> {
     ///
     /// # Errors
     /// [`NlpError::UnknownVariableCount`] if neither `var_bounds` nor `x0`
-    /// was called, [`NlpError::InvalidOption`] if an option was rejected, and
-    /// [`NlpError::Initialize`] if the application failed to initialize.
+    /// was called, [`NlpError::InvalidOption`] if an option was rejected,
+    /// [`NlpError::Initialize`] if the application failed to initialize,
+    /// [`NlpError::Presolve`] if presolve setup failed, and
+    /// [`NlpError::InvalidFbbtTape`] if an enabled FBBT tape is malformed.
     pub fn try_solve(self) -> Result<Solution, NlpError> {
         let n = self.n.ok_or(NlpError::UnknownVariableCount)?;
         let m = self.problem.n_constraints();
-        let adapter = Rc::new(RefCell::new(Adapter {
-            problem: self.problem,
-            n,
-            m,
-            x_l: self.x_l.unwrap_or_else(|| vec![-INF; n]),
-            x_u: self.x_u.unwrap_or_else(|| vec![INF; n]),
-            g_l: self.g_l,
-            g_u: self.g_u,
-            x0: self.x0.unwrap_or_else(|| vec![0.0; n]),
-            sol_x: Vec::new(),
-            sol_obj: 0.0,
-            sol_lambda: Vec::new(),
-            sol_g: Vec::new(),
-            sol_z_l: Vec::new(),
-            sol_z_u: Vec::new(),
-        }));
 
         let mut app = IpoptApplication::new();
         app.initialize()
@@ -405,12 +407,71 @@ impl<P: Problem + 'static> Nlp<P> {
                 })?;
         }
 
+        let presolve_opts = pounce_presolve::PresolveOptions::from_options_list(app.options())
+            .map_err(|e| NlpError::Presolve(e.to_string()))?;
+        let constraint_expressions = if presolve_opts.enabled && presolve_opts.fbbt {
+            let mut tapes = Vec::with_capacity(m);
+            for i in 0..m {
+                let tape = self.problem.constraint_expression(i);
+                if let Some(ref tape) = tape {
+                    validate_fbbt_tape(i, tape, n)?;
+                }
+                tapes.push(tape);
+            }
+            tapes
+        } else {
+            Vec::new()
+        };
+
+        let adapter = Rc::new(RefCell::new(Adapter {
+            problem: self.problem,
+            n,
+            m,
+            x_l: self.x_l.unwrap_or_else(|| vec![-INF; n]),
+            x_u: self.x_u.unwrap_or_else(|| vec![INF; n]),
+            g_l: self.g_l,
+            g_u: self.g_u,
+            x0: self.x0.unwrap_or_else(|| vec![0.0; n]),
+            constraint_expressions,
+            sol_x: Vec::new(),
+            sol_obj: 0.0,
+            sol_lambda: Vec::new(),
+            sol_g: Vec::new(),
+            sol_z_l: Vec::new(),
+            sol_z_u: Vec::new(),
+        }));
+
+        let mut fbbt_handle = None;
+        let tnlp: Rc<RefCell<dyn TNLP>> = if presolve_opts.enabled && presolve_opts.fbbt {
+            let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::clone(&adapter) as _;
+            let presolve = Rc::new(RefCell::new(
+                pounce_presolve::PresolveTnlp::with_expression_provider(
+                    Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>,
+                    provider,
+                    presolve_opts,
+                ),
+            ));
+            fbbt_handle = Some(Rc::clone(&presolve));
+            let mut wrapped: Rc<RefCell<dyn TNLP>> = presolve;
+            if presolve_opts.linear_eq_reduction {
+                wrapped = Rc::new(RefCell::new(pounce_presolve::LinearEqElimTnlp::new(
+                    wrapped,
+                    presolve_opts,
+                )));
+            }
+            app.set_presolve_already_applied(true);
+            wrapped
+        } else {
+            Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>
+        };
+
         let scope = self.capture_iterations.then(|| {
             app.enable_iter_history();
             crate::collector_scope()
         });
-        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&adapter) as _;
-        let status = app.optimize_tnlp(Rc::clone(&tnlp));
+        let derivative_test_tnlp = Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>;
+        let status =
+            app.optimize_tnlp_with_derivative_test_tnlp(Rc::clone(&tnlp), derivative_test_tnlp);
         let stats = app.statistics();
         // Second-opinion ladder, on by default here as in the CLI and the
         // Python / C frontends: an `Infeasible_Problem_Detected` or an
@@ -449,6 +510,7 @@ impl<P: Problem + 'static> Nlp<P> {
         let stats = ladder.statistics;
         drop(scope);
         let a = adapter.borrow();
+        let fbbt_report = fbbt_handle.as_ref().and_then(|p| p.borrow().fbbt_report());
         Ok(Solution {
             status,
             success: matches!(
@@ -462,6 +524,7 @@ impl<P: Problem + 'static> Nlp<P> {
             g: a.sol_g.clone(),
             z_l: a.sol_z_l.clone(),
             z_u: a.sol_z_u.clone(),
+            fbbt_report,
             stats,
             second_opinion,
         })
@@ -479,12 +542,45 @@ struct Adapter<P: Problem> {
     g_l: Vec<f64>,
     g_u: Vec<f64>,
     x0: Vec<f64>,
+    constraint_expressions: Vec<Option<FbbtTape>>,
     sol_x: Vec<f64>,
     sol_obj: f64,
     sol_lambda: Vec<f64>,
     sol_g: Vec<f64>,
     sol_z_l: Vec<f64>,
     sol_z_u: Vec<f64>,
+}
+
+fn validate_fbbt_tape(
+    constraint: usize,
+    tape: &FbbtTape,
+    n_variables: usize,
+) -> Result<(), NlpError> {
+    if let Some(slot) = tape.first_invalid_slot() {
+        return Err(NlpError::InvalidFbbtTape {
+            constraint,
+            reason: format!("operand reference at slot {slot} is not backward"),
+        });
+    }
+    for op in &tape.ops {
+        if let FbbtOp::Var(variable) = *op
+            && variable >= n_variables
+        {
+            return Err(NlpError::InvalidFbbtTape {
+                constraint,
+                reason: format!("variable index {variable} is outside 0..{n_variables}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl<P: Problem> ExpressionProvider for Adapter<P> {
+    fn constraint_expression(&self, index: usize) -> Option<FbbtTape> {
+        self.constraint_expressions
+            .get(index)
+            .and_then(Clone::clone)
+    }
 }
 
 impl<P: Problem> TNLP for Adapter<P> {
@@ -549,7 +645,9 @@ impl<P: Problem> TNLP for Adapter<P> {
                 }
             }
             SparsityRequest::Values { values } => {
-                let x = x.expect("eval_jac_g(Values) without x");
+                let Some(x) = x else {
+                    return false;
+                };
                 if self.problem.jacobian(x, values) {
                     return true;
                 }
@@ -609,6 +707,167 @@ mod tests {
         fn constraints(&self, x: &[f64], g: &mut [f64]) {
             g[0] = x[0] + x[1];
         }
+    }
+
+    struct CircleConstraint;
+    impl Problem for CircleConstraint {
+        fn objective(&self, x: &[f64]) -> f64 {
+            -x[0]
+        }
+        fn n_constraints(&self) -> usize {
+            1
+        }
+        fn constraints(&self, x: &[f64], out: &mut [f64]) {
+            out[0] = x[0] * x[0];
+        }
+        fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
+            Some(FbbtTape {
+                ops: vec![FbbtOp::Var(0), FbbtOp::PowInt(0, 2)],
+            })
+        }
+    }
+
+    struct InvalidExpression(FbbtTape);
+    impl Problem for InvalidExpression {
+        fn objective(&self, _x: &[f64]) -> f64 {
+            0.0
+        }
+        fn n_constraints(&self) -> usize {
+            1
+        }
+        fn constraints(&self, _x: &[f64], out: &mut [f64]) {
+            out[0] = 0.0;
+        }
+        fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
+            Some(self.0.clone())
+        }
+    }
+
+    struct DerivativeTestCircle {
+        gradient_points: Rc<RefCell<Vec<f64>>>,
+    }
+
+    impl Problem for DerivativeTestCircle {
+        fn objective(&self, x: &[f64]) -> f64 {
+            (x[0] - 0.25).powi(2)
+        }
+
+        fn n_constraints(&self) -> usize {
+            1
+        }
+
+        fn constraints(&self, x: &[f64], out: &mut [f64]) {
+            out[0] = x[0] * x[0];
+        }
+
+        fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
+            Some(FbbtTape {
+                ops: vec![FbbtOp::Var(0), FbbtOp::PowInt(0, 2)],
+            })
+        }
+
+        fn gradient(&self, x: &[f64], grad: &mut [f64]) -> bool {
+            self.gradient_points.borrow_mut().push(x[0]);
+            grad[0] = 2.0 * (x[0] - 0.25);
+            true
+        }
+    }
+
+    #[test]
+    fn fbbt_tightens_builder_bounds_and_reports() {
+        let sol = Nlp::new(CircleConstraint)
+            .var_bounds(&[-10.0], &[10.0])
+            .constraint_bounds(&[-2.0e19], &[1.0])
+            .option_str("presolve", "yes")
+            .option_str("presolve_fbbt", "yes")
+            .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        let report = sol.fbbt_report.expect("FBBT report");
+        assert!(report.bound_updates > 0);
+        assert!(report.total_tightening > 0.0);
+        assert!((sol.x[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn invalid_fbbt_tapes_are_rejected_before_solving() {
+        let malformed = Nlp::new(InvalidExpression(FbbtTape {
+            ops: vec![FbbtOp::Add(0, 0)],
+        }))
+        .x0(&[0.0])
+        .option_str("presolve", "yes")
+        .option_str("presolve_fbbt", "yes")
+        .try_solve();
+        assert!(matches!(
+            malformed,
+            Err(NlpError::InvalidFbbtTape { constraint: 0, .. })
+        ));
+
+        let out_of_range = Nlp::new(InvalidExpression(FbbtTape {
+            ops: vec![FbbtOp::Var(1)],
+        }))
+        .x0(&[0.0])
+        .option_str("presolve", "yes")
+        .option_str("presolve_fbbt", "yes")
+        .try_solve();
+        assert!(matches!(
+            out_of_range,
+            Err(NlpError::InvalidFbbtTape { constraint: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn fbbt_report_is_absent_when_not_enabled() {
+        let sol = Nlp::new(CircleConstraint)
+            .var_bounds(&[-10.0], &[10.0])
+            .constraint_bounds(&[-2.0e19], &[1.0])
+            .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!(sol.fbbt_report.is_none());
+    }
+
+    #[test]
+    fn fbbt_keeps_derivative_test_on_original_bounds() {
+        let gradient_points = Rc::new(RefCell::new(Vec::new()));
+        let sol = Nlp::new(DerivativeTestCircle {
+            gradient_points: Rc::clone(&gradient_points),
+        })
+        .var_bounds(&[-10.0], &[10.0])
+        .constraint_bounds(&[-2.0e19], &[1.0])
+        .x0(&[5.0])
+        .option_str("presolve", "yes")
+        .option_str("presolve_fbbt", "yes")
+        .option_str("derivative_test", "first-order")
+        .option_int("print_level", 0)
+        .solve();
+
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!(
+            sol.fbbt_report
+                .as_ref()
+                .is_some_and(|report| report.bound_updates > 0)
+        );
+        assert!(
+            gradient_points
+                .borrow()
+                .iter()
+                .any(|&x| (x - 5.0).abs() < 1e-12),
+            "derivative test did not use the original starting point"
+        );
+    }
+
+    #[test]
+    fn fbbt_infeasibility_is_reported() {
+        let sol = Nlp::new(CircleConstraint)
+            .var_bounds(&[-1.0], &[1.0])
+            .constraint_bounds(&[2.0], &[2.0e19])
+            .option_str("presolve", "yes")
+            .option_str("presolve_fbbt", "yes")
+            .solve();
+        assert!(!sol.success);
+        assert_eq!(
+            sol.fbbt_report.and_then(|r| r.infeasibility_witness),
+            Some(0)
+        );
     }
 
     #[test]

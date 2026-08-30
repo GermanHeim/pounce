@@ -211,11 +211,13 @@ pub use pounce_algorithm::application::IpoptApplication;
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
+pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
 pub use pounce_observability::{
     CollectorScope, IterCaptureGuard, ScopedIterCapture, collector_scope, init_subscriber,
     with_iter_capture,
 };
+pub use pounce_presolve::fbbt::FbbtReport;
 
 // --- the underlying crates, for anything not surfaced above -----------------
 pub use pounce_algorithm;
@@ -255,6 +257,7 @@ pub mod sqp;
 /// ```
 pub mod prelude {
     pub use crate::builder::{Nlp, NlpError, Problem, SecondOpinion};
+    pub use crate::{FbbtOp, FbbtReport, FbbtTape};
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
