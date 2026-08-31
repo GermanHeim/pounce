@@ -3194,6 +3194,19 @@ impl IpoptApplication {
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
 
+        // Invalidate the row-scaling record before anything can read it.
+        //
+        // It is written near the end of this function, from the NLP the
+        // solve actually built, so a solve that bails before that point
+        // leaves whatever the *previous* one recorded. The ℓ₁ outer loop
+        // calls this repeatedly and reads the flag after each call, so a
+        // stale `Some(false)` would let it mirror an original-units
+        // violation into the scaled family — the exact contract this flag
+        // exists to protect (gh#794 review round 2). Clearing it here
+        // makes the failure mode fail-closed: "not recorded" reads as
+        // "cannot mirror", never as "scaling was off".
+        self.row_scaling_active.set(None);
+
         // `print_user_options yes` — dump the OptionsList before the
         // solve. Mirrors `IpoptApplication::call_optimize` (upstream
         // calls `Jnlst().Printf(.., "%s", options_->PrintUserOptions())`).
@@ -5706,14 +5719,16 @@ fn original_space_feasibility(
         (b.is_finite() && !absent).then_some(b)
     };
 
+    // Accumulates into `max_violation` / `ok_tol` / `ok_acceptable`; a
+    // non-positive `viol` means the side is satisfied and contributes
+    // nothing. Returns nothing — every caller is a statement.
     let mut judge = |viol: Number, scale: Number| {
         if viol <= 0.0 {
-            return true;
+            return;
         }
         max_violation = max_violation.max(viol);
         ok_tol &= is_negligible(viol, scale, tol);
         ok_acceptable &= is_negligible(viol, scale, acceptable_tol);
-        true
     };
 
     for i in 0..m {
