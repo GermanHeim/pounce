@@ -115,9 +115,39 @@ note they all share the `pounce-` prefix under account `jkitchin`.
 4. Bump `CITATION.cff` to match: set `version:` to the new release version and
    `date-released:` to the release date. GitHub's "Cite this repository"
    widget reads these. (The `doi:` is the Zenodo *concept* DOI and stays put.)
-5. Run `scripts/publish-crates.sh --dry-run` to catch missing metadata, broken
-   links, or dirty-tree errors. This dry-runs every crate end-to-end, so any
-   breakage appears here, not three crates into the real release.
+5. Run `cargo package --workspace --exclude pounce-py --exclude
+   pounce-studio-pyo3 --exclude iter-diff --exclude pounce-wasm` to catch
+   missing metadata, broken links, or dirty-tree errors. It packages and then
+   compiles every publishable crate, so breakage appears here rather than
+   three crates into the real release.
+
+   **Do not use `scripts/publish-crates.sh --dry-run` for this**, even though
+   it exists and reads like the obvious choice. It stops at the *second*
+   crate, always, on a release commit:
+
+   ```
+   [2/20] cargo publish -p pounce-linalg --dry-run
+   error: failed to select a version for the requirement `pounce-common = "^0.11.0"`
+     candidate versions found which didn't match: 0.10.0, 0.9.0, 0.8.0, ...
+   ```
+
+   That is not a defect in the tree — it is what step 2 just did. `cargo
+   publish --dry-run` resolves each crate's dependencies against the **live**
+   crates.io index, and the whole point of a release commit is that the new
+   version is not there yet. Only the leaves (`pounce-common`,
+   `pounce-studio-core`) can ever pass. The failure is therefore expected and
+   carries no information, which is worse than useless: it trains you to skip
+   the step.
+
+   `cargo package --workspace` is the one that works, because it resolves
+   intra-workspace dependencies against the versions it is packaging locally
+   instead of against the index. Drop `--no-verify` — that flag skips the
+   compile, which is most of the value.
+
+   The same limitation applies to `release-crates.yml`'s `workflow_dispatch`
+   dry-run mode, which runs this same script: it will fail at crate 2 on a
+   release commit for the same reason. Its dry run is meaningful only when
+   run against a tree whose version is *already* published.
 
 ### Real release
 

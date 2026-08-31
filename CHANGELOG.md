@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.11.0] - 2026-08-31
+
 - **The negative-curvature escape now finds the witness it is asked for, on
   saddles whose curvature lies along a coordinate axis (gh #797 follow-up).**
   gh #797 added the second-order question and `neg_curv_escapes` to answer it;
@@ -17923,7 +17926,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/jkitchin/pounce/releases/tag/v0.11.0
 [0.10.0]: https://github.com/jkitchin/pounce/releases/tag/v0.10.0
 [0.9.0]: https://github.com/jkitchin/pounce/releases/tag/v0.9.0
 [0.8.0]: https://github.com/jkitchin/pounce/releases/tag/v0.8.0
