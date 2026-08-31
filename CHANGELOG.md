@@ -10,6 +10,54 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **An unconstrained ill-conditioned QP no longer returns a materially wrong
+  `x` under `Optimal` (gh #875).** `min ½(x₀−3)² + ½·10¹²(x₁−½)²` has
+  `x* = (3, ½)` by identity; the cost-normalized (`σ`) path returned
+  `x₀ = 0.027` in one iteration and printed `Dual infeasibility 5.50e+01` on
+  the line directly above `EXIT: Optimal Solution Found.`, so the report
+  contradicted itself. `qp_hsde=no` and Ipopt both return `(3, ½)`, and
+  tightening `tol` was not a workaround — `1e-4` through `1e-10` all returned
+  `0.027039`.
+
+  gh #846 fixed this class for models with an active bound by asking the
+  relative test one row at a time instead of over an aggregate scale, but it
+  asked it only of the **complementarity** rows: that loop runs over
+  `m_ineq()` and the finite entries of `lb`/`ub`, so on a model with neither
+  it reached the end and returned `true` having executed no test at all,
+  putting the verdict back on the bare aggregate. The sibling arm over the
+  **stationarity** rows — which exist whatever the constraint count is — had
+  been written during gh #846 and removed on the reasoning that it rejected
+  nothing complementarity did not. That was true of the fixtures it was
+  measured on, all of which had an active bound, and the doc comment recording
+  it went further and claimed the same spectrum unconstrained "comes back
+  exact to `3e-16`"; re-measured, it comes back wrong by `2.03e-02`. The arm
+  is restored as `sigma_stationarity_is_genuine` and both guards now run, each
+  covering a half of the KKT system the other cannot see.
+
+  Neither subsumes the other, and that is pinned: removing the complementarity
+  arm turns four tests red in `issue846_sigma_flat_direction.rs` and none in
+  the new `issue875_unconstrained_sigma_stationarity.rs`; removing the
+  stationarity arm turns five red in the new file and none in gh #846's. The
+  two accept-branch tests in the new file stay green under both mutations,
+  by construction.
+
+  Measured over a 72-instance unconstrained census (condition number
+  `1e2 ‥ 1e12` × objective magnitude `1e-3 ‥ 1e3` × `n` ∈ {2, 5} × rotated or
+  not), claimed-optimal-but-wrong goes from **32/72 to 17/72**. The split is
+  total and is stated as a limitation rather than a headline: all 15 repairs
+  are **separable** instances, and every **coupled** instance is bit-identical
+  to before — same `x`, same iteration count, same reported dual
+  infeasibility. A componentwise denominator is the largest term that built
+  the row, which is a *directional* scale and not a reduced one; rotate the
+  spectrum and the stiff mode appears in every row, so every denominator
+  collapses back to the aggregate. The coupled half is a larger and different
+  defect — `qp_hsde=no`, the destination a `σ` reject routes to, is itself
+  wrong on the worst of them — and is filed as gh #880 with the full census
+  table. `scripts/sweep-fixtures.sh`
+  moves **zero** of 180 fixture-legs, which per CLAUDE.md is the expected
+  result on this path (one fixture in the corpus reaches it) and is a
+  no-collateral-damage check, not evidence.
+
 - **The jax and torch QP layers no longer silently solve a zero-padded model
   when `P`'s shape disagrees with the rest of the problem (gh #874).**
   `7dc03c66` added `_validate_p_shape` for gh #862 and landed it in

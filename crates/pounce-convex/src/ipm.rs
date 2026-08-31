@@ -2375,14 +2375,109 @@ fn normalized_optimum_is_genuine(
     // residual. This gate is the gh #414-reopened fix; see the doc comment.
     let (gscale, pscale) = unscaled_residual_scales(prob, sol);
     let cut = sigma_path_rel_tol(tol);
+    let (rstat, dscale) = stationarity_rows(prob, sol);
     crate::hsde::relative_stop_permitted(gscale.max(pscale), tol)
         && unscaled_relative_kkt(prob, sol) <= cut
         // ... and the same question asked one row at a time, because
         // `gscale` and `pscale` are aggregates and an aggregate cannot see a
-        // flat direction (gh #846). Strictly a further conjunct: it can only
-        // turn an accept into a reject, and a reject costs one un-normalized
-        // re-solve.
-        && sigma_complementarity_is_genuine(prob, cone, sol, tol, cut)
+        // flat direction (gh #846, gh #875). Strictly two further conjuncts:
+        // they can only turn an accept into a reject, and a reject costs one
+        // un-normalized re-solve.
+        //
+        // Both halves of the KKT system are asked, because an aggregate is
+        // blind in both. Stationarity comes first: it is the only one of the
+        // two that has rows to test on a problem with no inequality rows and
+        // no bounds, which is the shape that left gh #875 open.
+        && sigma_stationarity_is_genuine(&rstat, &dscale, tol, cut)
+        && sigma_complementarity_is_genuine(prob, cone, sol, tol, cut, &dscale)
+}
+
+/// Row `i` of the stationarity equation, decomposed into the residual
+/// `rᵢ = (Px + c + Aᵀy + Gᵀz − z_lb + z_ub)ᵢ` and `dᵢ`, the largest single
+/// term that built it — the scale anything landing in that row has to be
+/// significant against.
+///
+/// Both σ-path componentwise guards ask about these same six terms —
+/// [`sigma_stationarity_is_genuine`] measures the row's own residual against
+/// `dᵢ`, [`sigma_complementarity_is_genuine`] measures a multiplier's
+/// contribution to the row against it — so the decomposition lives in one
+/// place. Two copies that drifted apart would disagree about the same row.
+fn stationarity_rows(prob: &QpProblem, sol: &QpSolution) -> (Vec<f64>, Vec<f64>) {
+    let n = prob.n;
+    let mut px = vec![0.0; n];
+    prob.p_mul(&sol.x, &mut px);
+    let mut aty = vec![0.0; n];
+    prob.at_mul(&sol.y, &mut aty);
+    let mut gtz = vec![0.0; n];
+    prob.gt_mul(&sol.z, &mut gtz);
+    (0..n)
+        .map(|i| {
+            let terms = [px[i], prob.c[i], -sol.z_lb[i], sol.z_ub[i], aty[i], gtz[i]];
+            let r = terms.iter().sum::<f64>();
+            let d = terms.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            (r, d)
+        })
+        .unzip()
+}
+
+/// The `σ` path's genuineness test asked of the **stationarity** rows, one row
+/// at a time (gh #875) — the sibling of [`sigma_complementarity_is_genuine`],
+/// and the arm that guard's doc comment used to say was unnecessary.
+///
+/// # Why it is not optional
+///
+/// [`sigma_complementarity_is_genuine`] loops over `prob.m_ineq()` and over
+/// the finite entries of `lb`/`ub`. On a problem with **neither** — an
+/// unconstrained QP — it returns `true` having executed no test at all, and
+/// [`normalized_optimum_is_genuine`] then rests on the aggregate
+/// `unscaled_relative_kkt <= cut` arm alone, which is the exact aggregate the
+/// componentwise guards exist to stop trusting.
+///
+/// The reported instance is two variables and nothing else:
+/// `min ½(x₀−3)² + ½·10¹²(x₁−½)²`, so `x* = (3, ½)` by identity. The `σ` path
+/// returned `x₀ = 0.027` — wrong by `2.97` on a coordinate whose optimum is
+/// `3` — in one iteration, and printed `Dual infeasibility 5.50e+01` on the
+/// line above `EXIT: Optimal Solution Found.`; `qp_hsde=no` and Ipopt both
+/// return `(3, ½)` exactly. Across the family the error is a clean function of
+/// condition number and independent of coefficient magnitude — `3e-4` at
+/// `cond = 1e6`, `1.5` at `1e10`, `3.0` (i.e. `x₀ ≈ 0`, 100% wrong) at `1e12`
+/// — while the *relative objective* error stays at `1e-11 ‥ 1e-16` throughout,
+/// which is the objective-parity blind spot CLAUDE.md names.
+///
+/// The aggregate cannot see it, and the printed norm does not even point at
+/// the guilty row. At that returned point row 1 carries `|r₁| = 55.0` against
+/// its own scale `5e11`, a relative `1.1e-10` and genuinely converged; row 0
+/// carries `|r₀| = 2.97` against its own scale `3`, a relative `0.99` and
+/// completely unconverged. The reported `‖r‖∞` is `55.0` — row **1**'s — and
+/// over `gscale = 5e11` it reads `1.1e-10` and sails through. The row that is
+/// wrong is invisible in the aggregate twice over: once because its residual
+/// is not the largest, and once because its scale is not the largest.
+///
+/// # The test
+///
+/// Row `i`'s residual against the largest single term that built it
+/// ([`stationarity_rows`]), after the same absolute arm the complementarity
+/// guard asks first: a residual already `tol`-small in the caller's own
+/// coordinates is stationary by the definition the caller was given. A
+/// non-finite residual compares false at both gates and so rejects, rather
+/// than being waved past as "small" — the gh #845 shape.
+///
+/// # What the old doc comment claimed
+///
+/// That the same spectrum "unconstrained, in a wide box it never reaches, and
+/// under an equality row all come back exact to `3e-16`", so that "the failure
+/// needs an **active bound**". Re-measured on that same `EIG`/`TGT` pair, two
+/// of the three shapes it named are wrong: unconstrained returns
+/// `|x−x*|∞ = 2.03e-02` via the `σ` path in one iteration, and only the
+/// wide-box shape comes back at `2.22e-16` — and it does so by taking the
+/// *direct* path, not the `σ` one. The claim that the arm below rejects
+/// nothing this one does not was true of the fixtures it was measured on, and
+/// those fixtures all had an active bound.
+fn sigma_stationarity_is_genuine(rstat: &[f64], dscale: &[f64], tol: f64, cut: f64) -> bool {
+    rstat
+        .iter()
+        .zip(dscale)
+        .all(|(&r, &d)| r.abs() <= tol || r.abs() <= cut * d)
 }
 
 /// The `σ` path's genuineness test, asked **one orthant row at a time**
@@ -2408,18 +2503,22 @@ fn normalized_optimum_is_genuine(
 /// error in x₀**, which is the objective-parity blind spot CLAUDE.md names,
 /// one level down from the fixture corpus.
 ///
-/// # Complementarity is the binding half, and that is measured
+/// # This is the bound half, and it is not the whole guard
 ///
-/// A companion arm asking the same question of the **stationarity** rows
-/// (`|rᵢ|` against the largest term that built row `i`) was written, kept
-/// through the whole investigation, and then removed, because on this family
-/// it rejects nothing the test below does not already reject. Removing it
-/// turned no test red; removing the test below turns four red. Nor is that an
-/// accident of the fixtures: the same spectrum *unconstrained*, in a wide box
-/// it never reaches, and under an equality row all come back exact to
-/// `3e-16`. The failure needs an **active bound**, because what buys the slack
-/// is the embedding's objective-relative gap test (`gap / (1 + |obj|)`) and a
-/// gap is spent on the bound multipliers. So this is where the guard belongs.
+/// On gh #846's family what buys the slack is the embedding's
+/// objective-relative gap test (`gap / (1 + |obj|)`), and a gap is spent on
+/// the bound multipliers — so an active bound is where *that* failure lives,
+/// and this is the arm that catches it. Removing this test turns four tests
+/// red.
+///
+/// It is **not** sufficient on its own, and the version of this comment that
+/// said so was wrong (gh #875). The loops below run over `prob.m_ineq()` and
+/// over the finite entries of `lb`/`ub`; a problem with neither reaches the
+/// end and returns `true` having tested nothing, which put an unconstrained
+/// ill-conditioned QP back on the bare aggregate and returned `x₀ = 0.027`
+/// for a true `3`. The stationarity arm this comment used to call redundant
+/// is [`sigma_stationarity_is_genuine`], it runs as a conjunct ahead of this
+/// one, and its doc comment carries the re-measurement.
 ///
 /// # The test
 ///
@@ -2460,24 +2559,11 @@ fn sigma_complementarity_is_genuine(
     sol: &QpSolution,
     tol: f64,
     cut: f64,
+    // Each variable row's stationarity denominator, the scale a multiplier
+    // landing in it has to be significant against, from [`stationarity_rows`].
+    dscale: &[f64],
 ) -> bool {
     let n = prob.n;
-    let mut px = vec![0.0; n];
-    prob.p_mul(&sol.x, &mut px);
-    let mut aty = vec![0.0; n];
-    prob.at_mul(&sol.y, &mut aty);
-    let mut gtz = vec![0.0; n];
-    prob.gt_mul(&sol.z, &mut gtz);
-    // Each variable row's stationarity denominator, the scale a multiplier
-    // landing in it has to be significant against.
-    let dscale: Vec<f64> = (0..n)
-        .map(|i| {
-            [px[i], prob.c[i], -sol.z_lb[i], sol.z_ub[i], aty[i], gtz[i]]
-                .iter()
-                .fold(0.0_f64, |m, v| m.max(v.abs()))
-        })
-        .collect();
-
     // Which inequality rows are orthant rows, and what each one's `Gx` is.
     let mut orthant = vec![false; prob.m_ineq()];
     for (off, kind) in cone.blocks() {
