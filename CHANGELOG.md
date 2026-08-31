@@ -11,6 +11,91 @@ changes.
 
 ### Fixed
 
+- **The active-set SQP arm no longer certifies a constrained maximum on the
+  repo's own fixture for the class (gh #873).** gh #856 gave that arm a
+  second-order escape so it would stop doing exactly this; on
+  `nonconvex_two_escapes.nl` it found the negative curvature every time
+  (`ev[0] = −0.9` against a `−2e-5` threshold) and then discarded it, returning
+  `0.0` — the point the fixture's own generator labels a *maximum* — with
+  `EXIT: Optimal Solution Found.`, while the default NLP arm on the same file
+  walked its documented ladder to the global `−6752.25`. pounce disagreed with
+  itself across two arms on a file it ships. It now returns `−6752.25` on both
+  the exact and limited-memory legs.
+
+  Three independent causes, each sufficient alone. **The ray was never
+  searched**: `exhibit_better_point` left its backtracking loop on feasibility
+  alone, so `alpha` never halved past the first feasible trial and `alpha`
+  starts at the far wall — but the profile along a curvature direction is not
+  monotone, and on that fixture the quartic term puts `f = +1.8` at the wall
+  and `−0.225` in the interior of the same ray. **The first acceptable point
+  was returned rather than the best**: the two signs of `±d` are scanned in a
+  fixed order and can be worth wildly different amounts, so on
+  `min −x₀² + x₁²` over `x₀ ∈ [−2, g]` the arm returned the near wall's `−g²`
+  and threw away the `−4` sitting in the other sign. Both are now scored and
+  the best is returned, which costs no extra evaluations. **And three absolute
+  thresholds on scale-dependent quantities** — the same class as gh #872 — in
+  the curvature test (`h_scale…max(1.0)`), the acceptance bar (an additive
+  `1e-10`), and the active-set test, which compared a bound's distance against
+  `constr_viol_tol`, an absolute distance in `x` units. Measured: the same
+  model rewritten in `u = S·x` units flipped from `−4` to the constrained
+  maximum `0.0` at `S ≤ 1e-1` purely because a genuinely inactive bound got
+  frozen into the working set; and `min k·x₀x₁ s.t. x₀ + x₁ = 2`, whose reduced
+  Hessian is `−k` and is as indefinite at `k = 1e-30` as at `k = 1`, returned
+  the constrained maximum `+k` from `k = 1e-8` down. Both now return the true
+  minimum at every scale tested, `k` down to `1e-30`.
+
+  A fourth cause was found by the fixture sweep rather than by the suite, while
+  validating the three above. **The refutation was held to the convergence
+  tolerance instead of the incumbent's own feasibility.** `exhibit_better_point`
+  admitted any trial inside `constr_viol_tol`, so once the ray was actually
+  searched it began accepting points that were better only because they were
+  *less feasible*. On `cresc4.nl`'s limited-memory leg the KKT point is feasible
+  to `2.2e-16` and the accepted trials violated the rows by `6e-7` — nine orders
+  worse, legal under `constr_viol_tol = 1e-6` — to gain `4.4e-7` of objective;
+  the arm restored feasibility, returned to the same point, and repeated until
+  `MAX_SECOND_ORDER_ESCAPES` capped it, taking 15 iterations to 45 for an
+  answer identical to 15 significant figures. That is gh #544's shape exactly,
+  and nothing in the suite could have seen it, because the suite asserts status
+  and objective. A trial must now be at least as feasible as the incumbent, to
+  within `1e-12` *relative* to its own row magnitudes and never looser than the
+  old bar. The honest cost: against a curved active constraint a straight
+  tangent probe leaves the feasible set at order `α²`, so on such a model the
+  exhibition declines rather than accepting a tolerance-feasible point — the
+  same structural limit as the unfixed item below, made visible instead of paid
+  for in iterations.
+
+  As in gh #872 all three floors are lowered **only** (`.min(1.0)`), so no
+  solve that succeeds today becomes newly refutable, and a refutation still has
+  to exhibit a strictly better feasible point before it changes any answer. A
+  strictly convex model at the same `k = 1e-20` is certified, not refuted, and
+  is pinned as the negative control — without it, "refute everything at tiny
+  scale" would pass every other test added here.
+
+  One test had to change its claim, which is worth stating rather than
+  burying. `issue848_sqp_second_order_option.rs` proved
+  `sqp_qp_certify_second_order` is read end to end — gh #677's lesson — by
+  showing the arm stopped at the ridge point `f = 0` with the option off and
+  reached `−6752.25` with it on. Repairing the *other* guard removed that gap:
+  the arm now reaches `−6752.25` either way. Measured over both legs of the
+  corpus — 180 fixture-legs — **no** fixture separates the two settings by
+  objective any more, and exactly **three** separate them by iteration count
+  (`nonconvex_qp` 3 → 1, `nonconvex_two_escapes` 5 → 4, `nonconvex_qcqp`
+  6 → 8), all three on the exact leg. Two independent guards catching the same models is the outcome to
+  want, but the test's discriminator is gone, so it now asserts that at least
+  one of those three responds at all — which still fails an option nothing
+  reads, and is deliberately weaker than what it replaced. The engine-level
+  claim is unaffected and still lives in `pounce-qp`'s own
+  `the_check_can_be_switched_off_and_then_the_saddle_comes_back`.
+
+  Two things deliberately not fixed. The exhibition walks a straight tangent
+  and tests the objective, so a maximum whose negative curvature lives entirely
+  in the `λ·∇²c` term stays un-refutable at any tolerance; that is a gap in
+  gh #856's coverage rather than a regression, `ipopt` 3.14.19 returns `0.0` on
+  the same family, and closing it needs a curved exhibition. And this arm caps
+  escapes with its own `MAX_SECOND_ORDER_ESCAPES = 8` and never reads
+  `neg_curv_escapes`, which is the NLP arm's — worth knowing, since it is why
+  the arm's answer was *constant* across that option.
+
 - **The QP second-order verdict no longer depends on the units the user chose
   for their variables (gh #872).** One model in two systems of units —
   `min ½(X₀/K)² + ½(X₁/K)² + 5(X₀/K)(X₁/K)` over `[−2K, 2K]²`, whose objective

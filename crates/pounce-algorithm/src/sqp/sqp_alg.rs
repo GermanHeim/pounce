@@ -1307,6 +1307,68 @@ fn exhibit_better_point<N: SqpProblemSpec>(
     }
     // Both signs: curvature is even, so `-d` descends wherever `d` does, and
     // only one of them may have room before a bound.
+    //
+    // Every feasible trial is *scored* and the best one is returned, rather
+    // than the first that clears the bar (gh#873). Two reasons, and the second
+    // is a defect the first exposed:
+    //
+    // 1. The profile along `d` is not monotone. `f(x + αd) ≈ f(x) + ½α²·dᵀ∇²f d`
+    //    only near `x`; on `nonconvex_two_escapes` the quartic term takes `f`
+    //    back to `+1.8` at the wall while the interior of the same ray reaches
+    //    `−0.225`. So the step length has to be searched, not guessed —
+    //    which is why the halving below now runs on *either* rejection and not
+    //    only on infeasibility, the mechanism that had the SQP arm certifying
+    //    that fixture's documented maximum at every `neg_curv_escapes`.
+    // 2. `sign` is scanned in a fixed order, so "first acceptable" made the
+    //    answer depend on it. On `min −x₀² + x₁²` with `x₀ ∈ [−2, g]` the `+d`
+    //    wall is worth `−g²` and the `−d` wall is worth `−4`; returning the
+    //    first meant a `g` small enough to clear the bar handed back `−g²` and
+    //    threw away the global minimum sitting in the other sign.
+    //
+    // Scoring costs nothing extra — the evaluations already happened — and the
+    // bound stays the 24 halvings per sign the loop always carried, spent once
+    // at convergence on a point already known to have negative curvature.
+    // The feasibility a refutation is held to is the *incumbent's*, not the
+    // convergence tolerance (gh#873, found by the fixture sweep).
+    //
+    // `constr_viol_tol` is the bar for calling a solve converged; using it here
+    // let the exhibition buy objective with infeasibility. Measured on
+    // `cresc4.nl` (lbfgs leg): the KKT point is feasible to 2.2e-16, and the
+    // trials this accepted violated the rows by 6e-7 — nine orders worse, but
+    // legal under `constr_viol_tol = 1e-6` — to gain 4.4e-7 of objective. The
+    // arm then restored feasibility and returned to the same point, eight
+    // times over, until `MAX_SECOND_ORDER_ESCAPES` capped it: 15 iterations
+    // became 45 for an answer identical to 15 significant figures. That is
+    // gh#544's shape exactly — the right answer, slowly — and it is the reason
+    // CLAUDE.md requires the sweep on a trajectory change.
+    //
+    // A point that proves the incumbent is not a local minimum has to be at
+    // least as feasible as the incumbent is. The slack is `1e-12` *relative to
+    // the trial's own row magnitudes*, so it is roundoff and not a distance in
+    // the units of `c`; and it is clamped at `constr_viol_tol`, so this bar is
+    // never looser than the one it replaces.
+    //
+    // The cost is honest and worth naming: against a *curved* active
+    // constraint a straight tangent probe leaves the feasible set at order
+    // `α²`, so on such a model the exhibition now declines rather than
+    // accepting a point that is only tolerance-feasible. That is the same
+    // structural limit as gh#873 D3 — this walks a straight line and tests the
+    // objective — made visible instead of paid for in iterations.
+    let viol_at = |nlp: &mut N, v: &[Number]| -> (Number, Number) {
+        let c = nlp.eval_c(v);
+        let mut viol = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for (j, &cj) in c.iter().enumerate() {
+            viol = viol
+                .max((bl_c[j] - cj).max(0.0))
+                .max((cj - bu_c[j]).max(0.0));
+            scale = scale.max(cj.abs());
+        }
+        (viol, scale)
+    };
+    let (viol_curr, _) = viol_at(nlp, x);
+
+    let mut best: Option<(Number, Vec<Number>)> = None;
     for sign in [1.0_f64, -1.0] {
         let mut alpha = f64::INFINITY;
         for i in 0..n {
@@ -1330,26 +1392,62 @@ fn exhibit_better_point<N: SqpProblemSpec>(
             let trial: Vec<Number> = (0..n)
                 .map(|i| (x[i] + sign * alpha * d[i]).clamp(xl[i], xu[i]))
                 .collect();
-            let viol = nlp
-                .eval_c(&trial)
-                .iter()
-                .enumerate()
-                .fold(0.0_f64, |a, (j, &cj)| {
-                    a.max((bl_c[j] - cj).max(0.0)).max((cj - bu_c[j]).max(0.0))
-                });
-            if viol <= constr_viol_tol {
+            let (viol, c_scale) = viol_at(nlp, &trial);
+            let feas_bar = viol_curr.max(1e-12 * c_scale).min(constr_viol_tol);
+            if viol <= feas_bar {
                 let f_trial = nlp.eval_f(&trial);
-                // Strictly better by more than the objective's own scale can
-                // round, so this cannot fire on noise at a genuine optimum.
-                if f_trial.is_finite() && f_trial < f_curr - 1e-10 * (1.0 + f_curr.abs()) {
-                    return Some(trial);
+                if f_trial.is_finite() && best.as_ref().is_none_or(|(b, _)| f_trial < *b) {
+                    best = Some((f_trial, trial));
                 }
-                break;
             }
             alpha *= 0.5;
         }
     }
-    None
+
+    // Strictly better by more than the objective's own scale can round, so
+    // this cannot fire on noise at a genuine optimum.
+    //
+    // The `1.0 +` is what made that "the objective's own scale" rather than an
+    // absolute `1e-10`, and it is itself scaled here (gh#873 D2, the same class
+    // as gh#872). On `min k·x₀x₁ s.t. x₀ + x₁ = 2` the true improvement is
+    // `64·k` (the corner `(9, −7)` against the stationary `(1, 1)`), so from
+    // `k ≈ 1e-12` down the whole model lived below the additive
+    // `1e-10` and every genuine refutation was rejected as noise — while the
+    // reduced Hessian is `−k`, as indefinite at `k = 1e-30` as at `k = 1`.
+    //
+    // Lowered only: `.min(1.0)` leaves the bar exactly as it was for any
+    // objective at or above unit scale, so this cannot make an existing solve
+    // newly refutable.
+    let (f_best, x_best) = best?;
+    let f_scale = f_curr.abs().max(f_best.abs());
+    let bar = 1e-10 * (f_scale.min(1.0) + f_curr.abs());
+    (f_best < f_curr - bar).then_some(x_best)
+}
+
+/// The activity tolerance for one bound or row, in that quantity's own units.
+///
+/// A raw `constr_viol_tol` is a distance in the units of `x` (for a bound) or
+/// of `c` (for a row), so using it directly is an absolute threshold on a
+/// scale-dependent quantity — gh#873 D2, the same class as gh#872. Confirmed
+/// as pure scaling by an exact change of variables `u = S·x` with the gap held
+/// fixed in `x` units: at `S = 1e-2` a `5e-7` gap crosses `tol`, and a bound
+/// with multiplier zero is frozen into the working set, closing the null space
+/// and the second-order verdict with it.
+///
+/// `scale` is the quantity and its own bounds; infinite entries are skipped,
+/// and everything left scales together under a change of units, so the ratio
+/// the test really wants is invariant.
+///
+/// Scaled **only downwards**, as in gh#872's `psd_band`: widening the test
+/// above unit scale would freeze bounds that are free today, which loses
+/// refutations rather than gaining them, and every refutation still has to
+/// exhibit a strictly better feasible point before it changes any answer.
+fn active_tol(tol: Number, scale: &[Number]) -> Number {
+    let s = scale
+        .iter()
+        .filter(|v| v.is_finite())
+        .fold(0.0_f64, |a, v| a.max(v.abs()));
+    tol * s.min(1.0)
 }
 
 /// A feasible direction of negative curvature at a *converged* first-order
@@ -1415,8 +1513,9 @@ fn negative_curvature_at_kkt_point(
     // this is the set the verdict was issued about.
     let mut rows: Vec<Vec<Number>> = Vec::new();
     for j in 0..m {
-        let lo_active = bl_c[j] > f64::NEG_INFINITY && (c_vals[j] - bl_c[j]).abs() <= tol;
-        let hi_active = bu_c[j] < f64::INFINITY && (bu_c[j] - c_vals[j]).abs() <= tol;
+        let t = active_tol(tol, &[c_vals[j], bl_c[j], bu_c[j]]);
+        let lo_active = bl_c[j] > f64::NEG_INFINITY && (c_vals[j] - bl_c[j]).abs() <= t;
+        let hi_active = bu_c[j] < f64::INFINITY && (bu_c[j] - c_vals[j]).abs() <= t;
         if lo_active || hi_active {
             let mut r = vec![0.0; n];
             // `pounce_linalg` triplets are **1-based** (see `triplet.rs`).
@@ -1429,8 +1528,9 @@ fn negative_curvature_at_kkt_point(
         }
     }
     for i in 0..n {
-        let on_lo = xl[i] > f64::NEG_INFINITY && (x[i] - xl[i]).abs() <= tol;
-        let on_hi = xu[i] < f64::INFINITY && (xu[i] - x[i]).abs() <= tol;
+        let t = active_tol(tol, &[x[i], xl[i], xu[i]]);
+        let on_lo = xl[i] > f64::NEG_INFINITY && (x[i] - xl[i]).abs() <= t;
+        let on_hi = xu[i] < f64::INFINITY && (xu[i] - x[i]).abs() <= t;
         if on_lo || on_hi {
             let mut r = vec![0.0; n];
             r[i] = 1.0;
@@ -1464,13 +1564,30 @@ fn negative_curvature_at_kkt_point(
             return None;
         }
         let lam_max = ev.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
-        let cut = 1e-9 * lam_max.max(1.0);
-        for (j, &lam) in ev.iter().enumerate() {
-            if lam.abs() <= cut {
-                z.extend_from_slice(&evec[j * n..(j + 1) * n]);
+        // Relative to `BᵀB`'s own spectral scale, with no absolute floor under
+        // it (gh#873 D2). `lam_max` is already that scale, so the `.max(1.0)`
+        // this carried made the rank cut absolute for small constraint
+        // normals: a row scaled down by a change of units then read as part of
+        // the null space, and the direction built from it does not respect the
+        // constraint it came from.
+        //
+        // `lam_max == 0` means every active row has a zero gradient, so none
+        // of them restricts anything and the whole space is free. The old
+        // `.max(1.0)` produced that answer as a side effect of the floor;
+        // stated here so removing the floor does not quietly change it into
+        // "no degrees of freedom", which would decline the refutation.
+        let cut = if lam_max > 0.0 { 1e-9 * lam_max } else { 0.0 };
+        if lam_max == 0.0 {
+            z.extend_from_slice(&evec[..n * n]);
+            n_dof = n;
+        } else {
+            for (j, &lam) in ev.iter().enumerate() {
+                if lam.abs() <= cut {
+                    z.extend_from_slice(&evec[j * n..(j + 1) * n]);
+                }
             }
+            n_dof = z.len() / n;
         }
-        n_dof = z.len() / n;
     }
     if n_dof == 0 {
         return None;
@@ -1506,12 +1623,13 @@ fn negative_curvature_at_kkt_point(
         return None;
     }
     // Relative to the Hessian's own scale, so this cannot fire on the
-    // rounding noise of a genuinely positive-semidefinite reduced Hessian.
-    let h_scale = hess_lag
-        .vals
-        .iter()
-        .fold(0.0_f64, |a, v| a.max(v.abs()))
-        .max(1.0);
+    // rounding noise of a genuinely positive-semidefinite reduced Hessian --
+    // and with no absolute floor under it (gh#873 D2, gh#872's sibling). The
+    // `.max(1.0)` this carried made the test absolute below unit Hessian
+    // scale, and `min k·x₀x₁ s.t. x₀ + x₁ = 2` then returned the constrained
+    // *maximum* `f = k` for every `k` from `1e-8` down -- a family whose
+    // reduced Hessian is `−k`, i.e. as indefinite at `k = 1e-30` as at `k = 1`.
+    let h_scale = hess_lag.vals.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
     if ev[0] >= -1e-8 * h_scale {
         return None;
     }
