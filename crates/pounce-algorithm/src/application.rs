@@ -241,6 +241,17 @@ pub struct IpoptApplication {
     /// solve's count. Read out into
     /// [`SolveStatistics::quality_escalations`] once the solve returns.
     quality_escalations: Rc<std::cell::Cell<u64>>,
+    /// The payload of the most recent `finalize_solution` POUNCE sent to the
+    /// user's TNLP, so a second-opinion retry that loses can put the winning
+    /// attempt's answer back (pounce#870).
+    ///
+    /// Written by [`finalize_via_orig_nlp`] and [`finalize_via_sqp`], which are
+    /// free functions and so take this as a sink rather than reaching for
+    /// `self`. Read only by [`Self::run_with_mu_strategy_fallback`].
+    last_finalize: RefCell<Option<FinalizeSnapshot>>,
+    /// The last `IterStats` sent to the user's `intermediate_callback`
+    /// (pounce#870), shared with the running `IpoptAlgorithm`.
+    last_iter_stats: Rc<RefCell<Option<pounce_nlp::tnlp::IterStats>>>,
     /// Phase 5c (§6) SQP warm-start input. When `Some`, the next
     /// `optimize_tnlp` call on the SQP path consumes the iterate
     /// instead of cold-starting; consumed once per solve, then
@@ -354,6 +365,8 @@ impl IpoptApplication {
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
+            last_finalize: RefCell::new(None),
+            last_iter_stats: Rc::new(RefCell::new(None)),
             sqp_warm_start: None,
             sqp_last_working_set: None,
             crossover_report: None,
@@ -2068,7 +2081,7 @@ impl IpoptApplication {
         // OrigIpoptNlp's lifting hooks. Failure here is silent
         // (we still return the algorithm's status) — the user
         // sees the right ApplicationReturnStatus regardless.
-        let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp);
+        let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp, &self.last_finalize);
 
         // Honor the opt-in status-fidelity gate on the SQP path too
         // (pounce#173), then emit the end-of-run summary with the final
@@ -2677,6 +2690,39 @@ impl IpoptApplication {
         let _ = self
             .options
             .set_string_value("mu_strategy", flipped, true, false);
+        // Floor the *answer*, not just the status (pounce#870).
+        //
+        // The promote-only-on-`Solve_Succeeded` rule below has always floored
+        // the status. It did not floor the point, and the point is what the
+        // caller consumes: `optimize_constrained` calls the user TNLP's
+        // `finalize_solution` once per attempt, so a retry that fails to
+        // promote still overwrites the answer with its own iterate, and the
+        // statistics with its own residuals. The result is a status describing
+        // one attempt attached to a point from another.
+        //
+        // Measured on a random corpus of 1200 nonconvex models, 20 of them
+        // (1.7%) returned a materially worse point under an unchanged status,
+        // the worst flipping sign: a `Maximum_Iterations_Exceeded` exit went
+        // from -2.38e7 to +7.89e7, and a `Solved_To_Acceptable_Level` one from
+        // -3.83e7 to +3.41e5 while its reported `final_kkt_error` rose to
+        // 2.85e-4 — 285x the `acceptable_tol` its own status names, so the
+        // report contradicted itself. The known example on record understated
+        // it by three orders: `autocorr_bern55-06` swapping -2304.0000278 for
+        // -2320.0000298 is the same defect at 0.07%.
+        //
+        // This is the floor idiom the rest of the codebase already uses for a
+        // bet it might lose — `honour_neg_curv_floor` (gh#797),
+        // `honour_decline_floor` (gh#534), `honour_best_acceptable_after_dual_
+        // guard` — applied to the one bet that was only half-floored.
+        //
+        // Not extended to `run_with_l1_fallback`, which carries the same
+        // caveat in its doc comment but is NOT the same call: its retry
+        // deliberately reports the l1-best least-infeasible point, which the
+        // option help calls informative in its own right. Changing that needs
+        // its own measurement.
+        let solution_floor = self.last_finalize.borrow().clone();
+        let certificate_floor = SolutionCertificate::of(&self.statistics.borrow());
+        let trace_floor = *self.last_iter_stats.borrow();
         let retry_status = self.optimize_constrained(Rc::clone(&tnlp));
         // Restore the user's original option-table view.
         let _ = self.options.set_string_value(
@@ -2689,10 +2735,55 @@ impl IpoptApplication {
             false,
         );
         if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
-            retry_status
-        } else {
-            first_status
+            return retry_status;
         }
+        // The bet lost. Put the first attempt's answer back, so the point and
+        // the statistics describe the same solve the returned status does.
+        //
+        // `finalize_solution` therefore runs once more than the number of
+        // attempts on this path. That is deliberate, and is the cheaper of the
+        // two corrections: withholding the retry's `finalize_solution` until it
+        // is known to promote would deprive a caller that watches the callback
+        // of the retry's progress, and buys nothing, since the retry's payload
+        // is discarded either way.
+        if let Some(floor) = solution_floor {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] the mu_strategy_fallback retry did not promote \
+                 ({:?} is not Solve_Succeeded); restoring the first attempt's \
+                 solution and statistics alongside its status (pounce#870).",
+                retry_status);
+            floor.replay(&tnlp);
+            certificate_floor.restore_into(&mut self.statistics.borrow_mut());
+            // Third sink: the per-iteration trace. Consumers accumulate that
+            // themselves from `intermediate_callback` — the CasADi plugin
+            // pushes into its own vectors and clears once per `nlpsol` call —
+            // so POUNCE cannot rewind it, and both attempts concatenate into
+            // one trace. Restoring the certificate without touching the trace
+            // leaves the reported numbers describing attempt 1 while the trace
+            // ends on the retry, which breaks the invariant
+            // `casadi/test_parity.py` states outright: "The final numbers and
+            // the end of the trace are the same quantities, and must not come
+            // from two different places."
+            //
+            // Re-emitting the winning attempt's final row restores it. It is
+            // the trace analogue of `FinalizeSnapshot::replay` above, and it
+            // makes the property hold by construction rather than by hoping a
+            // consumer resets on an attempt boundary — nothing in the callback
+            // contract marks one, and gh#634 is what happens when a consumer
+            // has to guess the scope of a trace.
+            //
+            // The row is a real iterate that was already sent once, not a
+            // synthesized one, so a trace still contains only points the solver
+            // actually visited.
+            if let Some(stats) = trace_floor {
+                let _ = tnlp.borrow_mut().intermediate_callback(
+                    stats,
+                    &TnlpIpoptData::default(),
+                    &TnlpIpoptCq::default(),
+                );
+            }
+        }
+        first_status
     }
 
     /// Phase-3 ℓ₁-exact penalty-barrier outer loop.
@@ -3416,6 +3507,7 @@ impl IpoptApplication {
         let mut alg = IpoptAlgorithm::new(data, cq, bundle)
             .with_nlp(Rc::clone(&nlp_handle))
             .with_tnlp(Rc::clone(&tnlp));
+        alg.last_iter_stats_sink = Some(Rc::clone(&self.last_iter_stats));
         // Mint a fresh restoration factory per inner solve if a
         // provider is configured (pounce#10 Phase 3). Falls back to
         // the legacy one-shot `restoration_factory` slot when no
@@ -3755,7 +3847,14 @@ impl IpoptApplication {
         // value stashed in `final_objective` above (the algorithm-side
         // `eval_f` returns `f * obj_scale_factor`).
         if solver_status != SolverReturn::InvalidProblemDefinition {
-            match finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp) {
+            match finalize_via_orig_nlp(
+                &nlp_handle,
+                &alg,
+                solver_status,
+                app_status,
+                &tnlp,
+                &self.last_finalize,
+            ) {
                 Ok(f_unscaled) => {
                     self.statistics.borrow_mut().final_objective = f_unscaled;
                 }
@@ -5416,12 +5515,120 @@ fn set_dense(v: &mut dyn pounce_linalg::Vector, vals: &[Number]) -> bool {
     }
 }
 
+/// An owned copy of a [`Solution`] payload already delivered to the user's
+/// TNLP, enough to deliver it again.
+///
+/// Exists because a losing second-opinion retry has to be undoable. The status
+/// a retry earns is already floored — `run_with_mu_strategy_fallback` returns
+/// `first_status` unless the retry promotes — but the *point* was not, and the
+/// user consumes the point. See that function for what went wrong without this.
+#[derive(Debug, Clone)]
+struct FinalizeSnapshot {
+    status: SolverReturn,
+    x: Vec<Number>,
+    z_l: Vec<Number>,
+    z_u: Vec<Number>,
+    g: Vec<Number>,
+    lambda: Vec<Number>,
+    obj_value: Number,
+}
+
+/// The `final_*` half of [`SolveStatistics`] — the numbers that describe the
+/// answer and the certificate attached to it.
+///
+/// Deliberately **not** the whole struct. `SolveStatistics` mixes two kinds of
+/// number and they float back differently when a second-opinion retry loses:
+///
+/// * the `final_*` fields describe *the point being reported*, so they have to
+///   agree with the status reported beside them. A `Solved_To_Acceptable_Level`
+///   carrying a `final_kkt_error` two orders above `acceptable_tol` is
+///   self-contradictory, and that is pounce#870.
+/// * `iteration_count`, the evaluation counts, the timers, the restoration
+///   tallies and `quality_escalations` describe *what the invocation did*.
+///   Both attempts really ran, so rewinding those would under-report the work
+///   actually spent — a different falsehood, not a fix. `deb7` at
+///   `max_iter=100` is the case that caught this: rewinding the counter made
+///   the run claim an iteration count belonging to only one of its two solves
+///   (`issue857_escalation_gated_quality_rung.rs`).
+///
+/// So the certificate is floored and the cost is not.
+#[derive(Debug, Clone, Copy)]
+struct SolutionCertificate {
+    objective: Number,
+    scaled_objective: Number,
+    dual_inf: Number,
+    constr_viol: Number,
+    compl: Number,
+    kkt_error: Number,
+    unscaled_dual_inf: Number,
+    unscaled_constr_viol: Number,
+    unscaled_compl: Number,
+    unscaled_kkt_error: Number,
+    kkt_error_above_noise: Number,
+    mu: Number,
+}
+
+impl SolutionCertificate {
+    fn of(s: &pounce_nlp::solve_statistics::SolveStatistics) -> Self {
+        Self {
+            objective: s.final_objective,
+            scaled_objective: s.final_scaled_objective,
+            dual_inf: s.final_dual_inf,
+            constr_viol: s.final_constr_viol,
+            compl: s.final_compl,
+            kkt_error: s.final_kkt_error,
+            unscaled_dual_inf: s.final_unscaled_dual_inf,
+            unscaled_constr_viol: s.final_unscaled_constr_viol,
+            unscaled_compl: s.final_unscaled_compl,
+            unscaled_kkt_error: s.final_unscaled_kkt_error,
+            kkt_error_above_noise: s.final_kkt_error_above_noise,
+            mu: s.final_mu,
+        }
+    }
+
+    fn restore_into(&self, s: &mut pounce_nlp::solve_statistics::SolveStatistics) {
+        s.final_objective = self.objective;
+        s.final_scaled_objective = self.scaled_objective;
+        s.final_dual_inf = self.dual_inf;
+        s.final_constr_viol = self.constr_viol;
+        s.final_compl = self.compl;
+        s.final_kkt_error = self.kkt_error;
+        s.final_unscaled_dual_inf = self.unscaled_dual_inf;
+        s.final_unscaled_constr_viol = self.unscaled_constr_viol;
+        s.final_unscaled_compl = self.unscaled_compl;
+        s.final_unscaled_kkt_error = self.unscaled_kkt_error;
+        s.final_kkt_error_above_noise = self.kkt_error_above_noise;
+        s.final_mu = self.mu;
+    }
+}
+
+impl FinalizeSnapshot {
+    /// Re-deliver this payload to `tnlp`, overwriting whatever a later attempt
+    /// captured there.
+    fn replay(&self, tnlp: &Rc<RefCell<dyn TNLP>>) {
+        tnlp.borrow_mut().finalize_solution(
+            Solution {
+                status: self.status,
+                x: &self.x,
+                z_l: &self.z_l,
+                z_u: &self.z_u,
+                g: &self.g,
+                lambda: &self.lambda,
+                obj_value: self.obj_value,
+            },
+            &TnlpIpoptData::default(),
+            &TnlpIpoptCq::default(),
+        );
+    }
+}
+
 fn finalize_via_orig_nlp(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     alg: &IpoptAlgorithm,
     solver_status: SolverReturn,
     _app_status: ApplicationReturnStatus,
     tnlp: &Rc<RefCell<dyn TNLP>>,
+    sink: &RefCell<Option<FinalizeSnapshot>>,
 ) -> Result<Number, ()> {
     let curr = alg.data.borrow().curr.clone().ok_or(())?;
     // Lift compressed x_var → full-x (length `info.n`) so the user
@@ -5468,19 +5675,17 @@ fn finalize_via_orig_nlp(
         .borrow_mut()
         .eval_f(&x_vec, true)
         .unwrap_or(Number::NAN);
-    tnlp.borrow_mut().finalize_solution(
-        Solution {
-            status: solver_status,
-            x: &x_vec,
-            z_l: &z_l,
-            z_u: &z_u,
-            g: &g_final,
-            lambda: &lambda,
-            obj_value: f_final,
-        },
-        &TnlpIpoptData::default(),
-        &TnlpIpoptCq::default(),
-    );
+    let snap = FinalizeSnapshot {
+        status: solver_status,
+        x: x_vec,
+        z_l,
+        z_u,
+        g: g_final,
+        lambda,
+        obj_value: f_final,
+    };
+    snap.replay(tnlp);
+    *sink.borrow_mut() = Some(snap);
     Ok(f_final)
 }
 
@@ -5635,6 +5840,7 @@ fn finalize_via_sqp(
     res: &crate::sqp::SqpResult,
     solver_status: pounce_nlp::SolverReturn,
     tnlp: &Rc<RefCell<dyn TNLP>>,
+    sink: &RefCell<Option<FinalizeSnapshot>>,
 ) -> Result<Number, ()> {
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
@@ -5700,19 +5906,17 @@ fn finalize_via_sqp(
         .borrow_mut()
         .eval_f(&x_vec, true)
         .unwrap_or(Number::NAN);
-    tnlp.borrow_mut().finalize_solution(
-        pounce_nlp::tnlp::Solution {
-            status: solver_status,
-            x: &x_vec,
-            z_l: &z_l,
-            z_u: &z_u,
-            g: &g_final,
-            lambda: &lambda,
-            obj_value: f_final,
-        },
-        &TnlpIpoptData::default(),
-        &TnlpIpoptCq::default(),
-    );
+    let snap = FinalizeSnapshot {
+        status: solver_status,
+        x: x_vec,
+        z_l,
+        z_u,
+        g: g_final,
+        lambda,
+        obj_value: f_final,
+    };
+    snap.replay(tnlp);
+    *sink.borrow_mut() = Some(snap);
     Ok(f_final)
 }
 
