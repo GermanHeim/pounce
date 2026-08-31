@@ -470,10 +470,22 @@ neither explains it) — but no issue is opened here.
 **A separate candidate this turned up**, recorded rather than filed:
 `recalc_y=yes` can take a point whose unscaled KKT error is `2.7e-02`
 and report `Solve_Succeeded`, because the re-estimated multipliers
-inflate `s_d` and the strict gate reads the quotient. The option is off
-by default and upstream Ipopt behaves the same way, so this is not a
-regression and not on this PR's path; it is worth its own issue, and the
-four rows above are its reproducer.
+inflate `s_d` and the strict gate reads the quotient. What makes it
+worth an issue rather than a footnote is the direction: an option whose
+purpose is *better* multipliers converts an honest failure into a false
+success, and it does so through a feedback loop — the estimate changes
+the denominator the estimate is judged against.
+
+Not a regression, and off by default. Both halves of the mechanism are
+documented ports of upstream — `optimality_error_scaling` of
+`IpIpoptCalculatedQuantities.cpp:3663-3700`, `recalc_y` of the
+`recalc_y_` block in `IpIpoptAlg.cpp:AcceptTrialPoint` — so upstream
+Ipopt would be expected to do the same thing here. **Expected, not
+measured**: no Ipopt was run against these models, and until one is, "so
+does upstream" is an inference from shared provenance and not a result.
+An issue should establish it rather than assume it, because if upstream
+*does not* reproduce it the finding is a POUNCE porting defect and a
+much sharper one. The four rows above are the reproducer either way.
 
 ### P3 — `presolve_licq_action=auto_l1` did nothing
 
