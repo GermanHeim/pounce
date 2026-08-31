@@ -253,7 +253,7 @@ six iterations.
 | complementarity tolerance floor | 61 | the `sqrt(tol)` section above |
 | source formulation | 36 | `infeasible_pair`: failing is the correct answer |
 | scaling | 14 | boundary item 5 |
-| POUNCE candidate | 8 | finding P2 |
+| POUNCE candidate | 8 | finding P2 — since confirmed against Ipopt 3.14.19, which solves the reproducer POUNCE fails |
 
 ### Nothing is assigned to DiscOpt
 
@@ -320,14 +320,45 @@ including all 11 ℓ₁ integration tests. The change is confined to solves
 that opt into the wrapper, so the CLI fixture corpus — which never sets
 the option — is untouched by construction.
 
-### P2 — a biactive pair breaks a cold exact-product solve. **Not fixed; covered.**
+### P2 — a biactive pair breaks a cold exact-product solve. **A POUNCE defect: upstream Ipopt solves it.**
 
 Eight of the 576 observations, and all of them the same exit. On
 `qpec_small` from `origin` and `upper_left` at unit scaling, the
 `ncp_eq` family ends in `Error_In_Step_Computation`; so does `direct` on
 `qpec_small/skew/upper_right` and on `ralph1/unit/origin`. Both
-exact-product lowerings are affected at similar rates, so this is a
-property of the reformulation class, not of one route.
+exact-product lowerings are affected at similar rates, so it is not a
+property of one route.
+
+**It is also not a property of the reformulation class, and an earlier
+draft of this section said it was.** That claim was never tested against
+another solver; it was inferred from the biactive pair's vanishing row
+gradient, which is real but does not stop an interior-point method
+converging. Ipopt 3.14.19 was then run on the identical model — same
+lowering, same start, same options, exact Hessian on both sides:
+
+| `qpec_small/unit/origin`, `ncp_eq` | Ipopt 3.14.19 | POUNCE |
+|---|---:|---:|
+| iterations | 58 | 118 |
+| exit | **`Optimal Solution Found`** | **`Error in step computation`** |
+| objective | `4.545e-10` | — |
+| **unscaled** overall NLP error | **`7.523e-09`** | **`1.644e+02`** |
+| Lagrangian Hessian evaluations | 58 | 119 |
+
+Upstream converges to a genuinely stationary point — `7.5e-09` unscaled,
+inside the `tol = 1e-8` the run asked for — where POUNCE exits through
+the gh#274 gate with an unscaled residual of `164`. The Hessian
+evaluation counts are given because an L-BFGS/exact mismatch would have
+explained the gap and does not: both solved with exact second
+derivatives. (Ipopt reports 5 Hessian nonzeros to POUNCE's 6 because it
+detects the structural zero the harness's dense lower triangle keeps.)
+
+So the eight cells are a **POUNCE defect with a three-variable
+reproducer**, not a boundary of the method, and the "POUNCE candidate"
+label the mechanical triage gave them is right. What the corpus could
+not tell on its own — because it only ever ran one solver — is that
+another implementation of the same algorithm does not have the problem.
+Gate 0's own comparator rule is what was missing here, applied to POUNCE
+rather than to DiscOpt.
 
 The mechanism is identified exactly. The solve reaches
 `x = (1.0, 1.0, 4.8e-09)` — the exact solution — with objective
@@ -380,22 +411,30 @@ gap with a reachable answer, and the eighth is correct behaviour that
 should never be "fixed". Lumping them together is the mistake this
 report's own rule about branch coverage exists to prevent.
 
-**Why it is not fixed here.** Three reasons, in order of weight:
+**Why it is not fixed *in this PR*** — which is a different claim from
+the one this section used to make, and a much weaker one. It is a real
+defect and it should be filed and fixed; it is not this PR's to fix.
 
-1. **The supported route already covers it, measured.**
+1. **The supported route covers the corpus meanwhile, measured.**
    `scholtes_then_ncp` clears all eight cells and returns
    MPCC-feasible points on them (`1.9e-12`, `4.9e-11`, `5.7e-28`).
    The restart ladder absorbs the fragility — its 8 restarts are exactly
-   these cells — rather than surfacing it. The route table above is the
-   evidence; no cell of the corpus is left unsolved.
+   these cells — rather than surfacing it. So Gate 0's recommendation
+   does not depend on the fix landing first. That is a reason to file
+   rather than to rush, not a reason to close.
 
-2. **A solver-side fix means loosening a gate that exists to prevent a
-   wrong answer.** gh#274 requires the full acceptable-level triplet
-   before a near-feasible restoration re-entry may claim acceptability,
-   *because* an earlier, looser version reported a diverging iterate as
-   solved: `min -exp(x) s.t. x >= 0` re-enters restoration with
+2. **The obvious fix is the wrong one, and that is measured too** (see
+   below). gh#274 requires the full acceptable-level triplet before a
+   near-feasible restoration re-entry may claim acceptability, *because*
+   an earlier, looser version reported a diverging iterate as solved:
+   `min -exp(x) s.t. x >= 0` re-enters restoration with
    `inf_pr = 1.7e-10` and `inf_du = 8.8e+47`, and Pyomo maps
-   `Solved_To_Acceptable_Level` into the solved family.
+   `Solved_To_Acceptable_Level` into the solved family. Relaxing that
+   gate to admit these cells is not the fix — upstream does not reach
+   the gate at all, it converges. **The defect is upstream of the gate,
+   in whatever makes POUNCE's dual residual grow to `164` over 118
+   iterations on a model Ipopt finishes in 58.** A fix that only changed
+   the exit verdict would be treating the symptom.
 
    **Re-estimating the multipliers is not the discriminator, and this
    was measured rather than reasoned.** The obvious candidate — re-solve
@@ -435,13 +474,15 @@ report's own rule about branch coverage exists to prevent.
    So the gh#274 gate is refusing these correctly, and the honest exit is
    the one POUNCE already takes.
 
-3. **It is a core-IPM termination change and would need the fixture
-   sweep and an owner.** Every model that reaches this gate is in its
-   blast radius; `scripts/sweep-fixtures.sh` over both legs is the
+3. **It is a core-IPM change and needs the fixture sweep and an owner.**
+   Whatever diverges here is in the step computation or the multiplier
+   update, so its blast radius is every model, not merely those reaching
+   the gh#274 gate; `scripts/sweep-fixtures.sh` over both legs is the
    minimum evidence, and a measured regression there needs an issue and
-   an owner of its own. That does not belong in a benchmark PR, and
-   nothing in this corpus establishes the acceptance criterion such a
-   change would have to meet.
+   an owner of its own. That does not belong in a benchmark PR — but the
+   acceptance criterion this corpus could not supply now exists, and it
+   is exact: **`qpec_small/unit/origin` under `ncp_eq` must converge,
+   and the comparator is Ipopt's 58 iterations to an unscaled `7.5e-09`.**
 
 What a future fix would have to establish, stated so it does not have to
 be re-derived — and narrowed by the `recalc_y` measurement above, which
@@ -476,16 +517,28 @@ purpose is *better* multipliers converts an honest failure into a false
 success, and it does so through a feedback loop — the estimate changes
 the denominator the estimate is judged against.
 
-Not a regression, and off by default. Both halves of the mechanism are
-documented ports of upstream — `optimality_error_scaling` of
-`IpIpoptCalculatedQuantities.cpp:3663-3700`, `recalc_y` of the
-`recalc_y_` block in `IpIpoptAlg.cpp:AcceptTrialPoint` — so upstream
-Ipopt would be expected to do the same thing here. **Expected, not
-measured**: no Ipopt was run against these models, and until one is, "so
-does upstream" is an inference from shared provenance and not a result.
-An issue should establish it rather than assume it, because if upstream
-*does not* reproduce it the finding is a POUNCE porting defect and a
-much sharper one. The four rows above are the reproducer either way.
+Not a regression, off by default, and **upstream Ipopt 3.14.19 does the
+same thing — measured, not inferred.** On `qpec_small/unit/origin` under
+`ncp_eq`, with `recalc_y=yes` and everything else as above:
+
+| `recalc_y` | iters | exit | objective | scaled overall | **unscaled overall** | `Σ‖λ‖₁` |
+|---|---:|---|---:|---:|---:|---:|
+| `no` | 58 | `Optimal Solution Found` | `4.545e-10` | `4.262e-10` | `7.523e-09` | `8.96e+07` |
+| `yes` | 8 | `Optimal Solution Found` | `4.765e-06` | `1.428e-10` | **`2.636e-03`** | `1.48e+10` |
+
+The multiplier mass is the mechanism, visible directly: `recalc_y`
+multiplies `Σ‖λ‖₁` by 165, `s_d` rises with it, the scaled aggregate the
+strict gate reads falls to `1.4e-10`, and the unscaled residual it is
+covering for *worsens* by six orders. Upstream stops at iteration 8 on a
+point four orders worse in objective than the one it reaches without the
+option, and calls both `Optimal Solution Found`.
+
+So this one is shared design behaviour rather than a porting defect, and
+the priority is correspondingly lower — but "upstream does it too" is now
+a measurement, and the direction is still wrong: an option that exists to
+*improve* the multipliers converts an honest convergence into a false
+one. Worth an issue upstream as much as here; the rows above are the
+reproducer.
 
 ### P3 — `presolve_licq_action=auto_l1` did nothing
 
