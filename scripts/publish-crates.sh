@@ -9,7 +9,14 @@
 #
 # Usage:
 #   scripts/publish-crates.sh                 # publish all, real upload
-#   scripts/publish-crates.sh --dry-run       # cargo publish --dry-run on each
+#   scripts/publish-crates.sh --dry-run       # cargo publish --dry-run on each.
+#                                             # NOT a release pre-flight: on a
+#                                             # release commit this always fails at
+#                                             # crate 2, because --dry-run resolves
+#                                             # deps against the live index and the
+#                                             # new version is not published yet.
+#                                             # Use `cargo package --workspace`.
+#                                             # See dev-notes/cargo-release.md step 5.
 #   scripts/publish-crates.sh --start-from pounce-algorithm
 #                                             # resume after a mid-batch failure
 #   SLEEP=600 scripts/publish-crates.sh       # override per-crate sleep (default 0)
