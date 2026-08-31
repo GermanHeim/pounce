@@ -64,6 +64,66 @@ changes.
   asserts the index spaces really do diverge before trusting the leg.
 
 ### Fixed
+- **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
+  coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,
+  `normalized_optimum_is_genuine` decides whether the rescaled answer may be
+  returned. Both of its componentwise guards — stationarity and
+  complementarity — hold row `i`'s residual against `dᵢ`, the largest single
+  term that built it. On a **diagonal** `P` that ratio *is* the relative error
+  in `xᵢ`, so the rule is exact and gh #875's fix worked. Rotate the same
+  spectrum and the stiff mode enters every row, every denominator collapses to
+  one aggregate number, and the guard rejects nothing — the same
+  `reduced`-vs-`directional` distinction CLAUDE.md draws for the sensitivity
+  classifier (gh #763) and for constraint rows (gh #804), here in the convex
+  arm.
+
+  The fix adds a third, strictly further conjunct that asks the question as a
+  **distance** rather than a ratio: `sigma_forward_error_is_small` takes one
+  affine-scaling Newton step from the returned point,
+
+      (P + Gᵀ Σ_row G + Σ_bnd) Δ = −(Px + c)
+
+  by conjugate gradients, and requires `‖Δ‖∞ ≤ cut · max(1, ‖x‖∞)`. A norm of
+  a vector is basis-free, so unlike a per-row ratio it does not care how the
+  spectrum is oriented. The right-hand side is `−(Px + c)` and **not** the
+  stationarity residual: eliminating `Δz`/`Δs` cancels the multiplier term
+  exactly, which matters because trusting the returned multipliers is what let
+  the defect through in the first place — a non-complementary point (bound
+  multipliers of order 1 on bounds with slack 10) reads a stationarity residual
+  of `2e-6` while sitting `0.42` from the optimum. The multipliers are trusted
+  for stiffness (`Σ`) and never for complementarity.
+
+  Measured on a 72-instance census (`cond` `1e2 ‥ 1e12` × magnitude
+  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not),
+  claimed-optimal-but-wrong falls **17/72 → 9/72**:
+
+  | `cond` | before | after | worst relative error after |
+  |---|---|---|---|
+  | `1e2`  | 0/12 | 0/12 | 6.4e-08 |
+  | `1e4`  | 0/12 | 0/12 | 6.3e-08 |
+  | `1e6`  | 2/12 | 0/12 | 3.8e-09 |
+  | `1e8`  | 3/12 | 0/12 | 1.1e-08 |
+  | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) |
+  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) |
+
+  Two carve-outs, stated rather than papered over. At `cond = 1e12` the
+  estimator's own arithmetic floor is `ε·cond ≈ 1e-4`, so it under-reports by
+  roughly 30× and cannot reject reliably; independently, `qp_hsde=no` — the
+  destination a `σ` reject routes to — is *itself* wrong there, so rejecting
+  harder would not help. That is sub-problem 2 of gh #880 and is out of scope
+  here. And under an equality row the operator above is the wrong one (`A` has
+  no barrier diagonal; the honest form is the full saddle system), so the arm
+  declines rather than guessing.
+
+  `crates/pounce-convex/tests/issue880_coupled_sigma_forward_error.rs` (15
+  tests) and `forward_error_operator_tests` in `ipm.rs` (13) pin it, with a
+  mutation table that was **run**: five of the eight mutations leave every
+  integration test green, because they change the arm's verdict without
+  changing the answer the cascade finally reaches — which is why the four
+  structural pieces are pinned by calling the arm directly. `sweep-fixtures.sh`
+  moves zero of 182 fixture-legs, the expected result given that one fixture in
+  the corpus reaches the `σ` path at all.
+
 - **FBBT no longer cuts feasible points three separate ways (gh #877).** The
   2026-08-31 adversarial audit (seam F) found three independent unsoundnesses
   in the bound-tightening engine. `git diff 3ed5eaa0...9f16f80b --

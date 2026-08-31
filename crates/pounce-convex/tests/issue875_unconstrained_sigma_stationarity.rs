@@ -52,13 +52,22 @@
 //! instances, and every rotated instance is bit-identical to the baseline
 //! (same `x`, same iteration count, same reported dual infeasibility).
 //!
-//! The coupled half is a **larger and different** defect, not a weaker form of
-//! this one: `qp_hsde=no` — the destination a `σ` reject routes to — is itself
-//! wrong on the worst of them (`1.39` and `1.04` relative error at
-//! `cond = 1e12`), so rejecting harder could not have fixed it. It is gh #880,
-//! which carries the full census table; do not read a green run of this file
-//! as covering it, and when #880 is fixed replace this paragraph with the
-//! coupled coverage rather than deleting it.
+//! The coupled half was a **larger and different** defect, not a weaker form of
+//! this one, and it is gh #880 — fixed separately, in
+//! `tests/issue880_coupled_sigma_forward_error.rs`, which carries the full
+//! census table. What closed it is not a better ratio but a different *kind* of
+//! quantity: `sigma_forward_error_is_small` measures the affine-scaling Newton
+//! step `‖Δ‖∞` — a norm of a vector, so basis-free, where any per-row ratio
+//! (this file's included) is not. Over the same 72-instance census the two
+//! fixes together take claimed-optimal-but-wrong from **32/72 → 17/72 → 9/72**,
+//! and the remaining 9 are `cond ≥ 1e10`, where the estimator's own arithmetic
+//! floor is `ε·cond`.
+//!
+//! So a green run of *this* file still does not cover the coupled arm, for the
+//! same reason it never did — every fixture below is separable, and the
+//! componentwise rule it pins is exactly the one that goes blind under a
+//! rotation. Read the two files as covering the two halves, and add a coupled
+//! case to #880's file rather than here.
 //!
 //! **The fixture corpus.** `scripts/sweep-fixtures.sh` moves **zero** of 180
 //! fixture-legs across this change, which per CLAUDE.md is the expected

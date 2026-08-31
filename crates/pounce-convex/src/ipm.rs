@@ -2390,6 +2390,10 @@ fn normalized_optimum_is_genuine(
         // no bounds, which is the shape that left gh #875 open.
         && sigma_stationarity_is_genuine(&rstat, &dscale, tol, cut)
         && sigma_complementarity_is_genuine(prob, cone, sol, tol, cut, &dscale)
+        // ... and then the same question asked as a *distance*, because both
+        // of the above are per-row ratios and a per-row ratio cannot see a
+        // coupled spectrum (gh #880). Also strictly a further conjunct.
+        && sigma_forward_error_is_small(prob, sol, cut)
 }
 
 /// Row `i` of the stationarity equation, decomposed into the residual
@@ -2478,6 +2482,314 @@ fn sigma_stationarity_is_genuine(rstat: &[f64], dscale: &[f64], tol: f64, cut: f
         .iter()
         .zip(dscale)
         .all(|(&r, &d)| r.abs() <= tol || r.abs() <= cut * d)
+}
+
+/// The `σ` path's genuineness test asked as a **forward error bound** — how far
+/// the returned `x` can be from the true minimizer — instead of as a ratio
+/// between a residual and a term of its own row (gh #880).
+///
+/// # Why the two componentwise arms are not enough
+///
+/// [`sigma_stationarity_is_genuine`] and [`sigma_complementarity_is_genuine`]
+/// both hold row `i`'s residual against `dᵢ`, the largest single term that
+/// built that row ([`stationarity_rows`]). That is a **directional** scale, not
+/// a **reduced** one — the same distinction CLAUDE.md draws for the sensitivity
+/// classifier (`reduced/diagonal`, gh #763) and for its constraint rows
+/// (`reduced/directional`, gh #804), one crate over.
+///
+/// On a **diagonal** `P` the distinction does not bite: row `i`'s stationarity
+/// residual is `eᵢ(xᵢ − x*ᵢ)` and `dᵢ` is of order `eᵢ|x*ᵢ|`, so the ratio *is*
+/// the relative error in `xᵢ` and the test is exact. That is the entire
+/// separable half of gh #875, and it is why that fix measured as total there.
+/// Rotate the same spectrum and the stiff mode appears in **every** row: every
+/// denominator becomes the stiff mode's contribution, all `n` of them collapse
+/// back to one number, and the componentwise refinement buys nothing over the
+/// aggregate it was introduced to replace. The guard is present, is evaluated,
+/// and rejects nothing.
+///
+/// Measured on gh #880's 72-instance census (`cond 1e2 ‥ 1e12` × `mag
+/// 1e-3 ‥ 1e3` × `n ∈ {2,5}` × rotated or not, with `P = Q diag(e) Qᵀ` and
+/// `c = −P t`, so `x* = t` by construction): after gh #875 the separable half
+/// is 0/36 wrong and the coupled half is **17/36 wrong, every one bit-identical
+/// to the pre-#875 baseline** — same `x`, same iteration count, same reported
+/// dual infeasibility. Over those 17 the componentwise stationarity ratio tops
+/// out at `6.9e-9`, three orders *below* the `cut` it is compared against.
+///
+/// # The test
+///
+/// `x − x*` is not a per-row quantity, so no per-row denominator can bound it.
+/// Solve for it instead. `Δ` is the **affine-scaling** Newton step — the step
+/// the iteration itself would take toward `μ = 0` from the returned point:
+///
+/// ```text
+///     (P + Gᵀ Σ_row G + Σ_bnd) Δ = −(Px + c)
+/// ```
+///
+/// where `Σ` is the barrier diagonal implied by the returned multipliers and
+/// their slacks (`zⱼ/sⱼ`), the same operator the interior-point iteration's
+/// own Newton system carries, reducing to exactly `P` when nothing is active.
+/// `‖Δ‖∞` over `max(1, ‖x‖∞)` is then a *relative distance to the optimum*,
+/// which is basis-free by construction: it is a norm of a vector, not a ratio
+/// of two coordinates, so rotating the problem rotates `Δ` and leaves `‖Δ‖`
+/// alone. It is compared against the same `cut` the other arms use.
+///
+/// ## The right-hand side is `−(Px + c)`, not the stationarity residual
+///
+/// Eliminating `Δz` and `Δs` from the Newton system leaves
+/// `(P + GᵀΣG)Δ = −r_d + Gᵀz − GᵀΣ r_p`, and `r_d = Px + c + Gᵀz`, so the
+/// multiplier term cancels exactly: the right-hand side is `−(Px + c)`, with
+/// `r_p ≡ 0` because the slack is recovered as `h − Gx` rather than read back.
+/// The cancellation is not a simplification, it is the point. **The returned
+/// multipliers are not trusted to be complementary, only to say how stiff each
+/// row is.** Using `r_d` instead — the obvious choice, and the one this arm
+/// shipped with first — makes the estimate agree with a point that is wrong in
+/// `x` but self-consistent in its own multipliers, which is precisely the
+/// shape the `σ` cascade's second candidate takes: measured on gh #880's
+/// box-constrained coupled instance the un-normalized re-solve returns
+/// `x = (2.064, −0.748)`, displaced 1.56 along the soft eigenvector, with
+/// `O(1)` bound multipliers on bounds whose slack is `~10`. Those multipliers
+/// absorb the whole gradient, `‖r_d‖ = 2e-6`, and an `r_d`-based estimate
+/// reads `9.9e-8` and accepts an answer that is 31% wrong. The affine-scaling
+/// form reads `1.1` and rejects.
+///
+/// The corollary is that an *active* bound must read as **stiff**: there
+/// `−(Px + c)` is legitimately large and only `Σ → ∞` holds `Δ` down. See
+/// [`barrier_ratio`], and `an_active_bound_is_stiff_not_free` in
+/// `tests/issue880_coupled_sigma_forward_error.rs`.
+///
+/// On the census the estimate tracks the true error to a few percent across
+/// nine orders of magnitude, and the two populations separate by **22×**:
+/// the largest correct instance reads `6.4e-8` and the smallest wrong one
+/// `1.4e-6`, with `cut = 1e-6` at the default `tol` sitting between them. The
+/// threshold is therefore not tuned — `cut` is what the other two arms already
+/// use, and the quantity it now gates is the one the census calls "wrong".
+///
+/// # Solved matrix-free, and why an under-solve is the safe direction
+///
+/// Conjugate gradients on `p_mul`/`g_mul` — the operator is positive definite
+/// wherever `P` is PD, and PSD otherwise — capped at
+/// [`FORWARD_ERROR_CG_ITERS`], with no factorization and no dimension ceiling
+/// (the same shape as gh #871's null-space search). CG starts at `Δ = 0` and
+/// builds `‖Δ_k‖` upward, so a cap that stops early, a `pᵀMp ≤ 0` breakout on a
+/// singular `P`, and an LP's `P = 0` all **under**-estimate the error. An
+/// under-estimate accepts, which is the status quo: this conjunct can only ever
+/// turn an accept into a reject, never the reverse. What that costs is stated
+/// in [`normalized_optimum_is_genuine`] — one un-normalized re-solve — and what
+/// it buys is bounded by the same fact: on a large, viciously conditioned
+/// problem CG will not have converged inside the cap and the guard quietly
+/// stops working rather than misfiring.
+///
+/// # What it does not cover
+///
+/// **Equality rows.** `A` restricts motion exactly rather than through a
+/// diagonal, so bounding `Δ` under equalities is the saddle system and not this
+/// operator; using this operator anyway would over-estimate the error and
+/// reject points that are fine. The guard declines on `m_eq() > 0` and the
+/// other two arms stand there exactly as they did.
+///
+/// **`cond ≥ 1e12`.** Rejecting is only useful if there is somewhere correct to
+/// route to, and at `cond = 1e12` the un-normalized path this rejects *into* is
+/// itself wrong (gh #880 sub-problem 2, still open). Six of the census's 17
+/// stay wrong after this fix, with a different wrong answer. That is not a
+/// regression and not a fix; it is the guard doing its job into a destination
+/// that cannot yet serve it.
+fn sigma_forward_error_is_small(prob: &QpProblem, sol: &QpSolution, cut: f64) -> bool {
+    // Equalities need the saddle system, not a diagonal; see the doc comment.
+    if prob.m_eq() > 0 {
+        return true;
+    }
+    let n = prob.n;
+    if n == 0 {
+        return true;
+    }
+    // `−(Px + c)`: the affine-scaling right-hand side, which is the
+    // stationarity residual with the inequality and bound multipliers taken
+    // back out. See the doc comment — trusting them is what let a
+    // non-complementary point read as converged.
+    let mut rhs = vec![0.0; n];
+    prob.p_mul(&sol.x, &mut rhs);
+    for (r, ci) in rhs.iter_mut().zip(&prob.c) {
+        *r = -(*r + ci);
+    }
+    if rhs.iter().any(|v| !v.is_finite()) {
+        // Not "small", but it is the gh #845 shape and the stationarity arm
+        // already rejects on it. Nothing to add here.
+        return true;
+    }
+    // A `None` anywhere is "no usable stiffness", which declines; see
+    // [`barrier_ratio`] for why that is the accepting direction here.
+    let (Some(sigma_bnd), Some(sigma_row)) = (
+        barrier_diagonal_bounds(prob, sol),
+        barrier_diagonal_rows(prob, sol),
+    ) else {
+        return true;
+    };
+    let delta = match forward_error_step(prob, &rhs, &sigma_bnd, &sigma_row) {
+        Some(d) => d,
+        None => return true,
+    };
+    let dnorm = delta.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let xnorm = sol.x.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+    dnorm.is_finite() && dnorm <= cut * xnorm
+}
+
+/// Iterations of conjugate gradients [`sigma_forward_error_is_small`] spends
+/// estimating the forward error. Sized so the guard is free on the small,
+/// badly-scaled models the `σ` path actually sees (the census tops out at
+/// `n = 5`, and CG is exact in `n` steps there) while staying bounded on a
+/// large one. Stopping early under-estimates, which accepts; see the doc
+/// comment on the caller.
+const FORWARD_ERROR_CG_ITERS: usize = 64;
+
+/// `zⱼ/sⱼ` for one block — the barrier stiffness the returned multiplier and
+/// its slack imply — or `None` where they imply nothing usable.
+///
+/// **`None` is not zero, and the difference is the whole of the safe
+/// direction.** [`sigma_forward_error_is_small`]'s right-hand side is
+/// `−(Px + c)`, which at an *active* bound is large and is held down only by
+/// that bound's `Σ`. So a `Σ` that reads too **small** inflates `‖Δ‖` and
+/// rejects a correct answer, which is the one direction this guard may not err
+/// in; a `Σ` that reads too large only shrinks `‖Δ‖`, accepts, and leaves the
+/// status quo. Substituting `0` for an unusable ratio — the obvious
+/// defensive-looking choice, and what the first draft of this arm did — is
+/// therefore exactly backwards: it declares an active bound *free*. The arm
+/// declines on `None` instead, which accepts.
+///
+/// Unusable means a non-positive or non-finite slack (an iterate at or past
+/// its bound, where the diagonal model does not apply at all) or a ratio that
+/// is not a finite non-negative number. A missing bound is not unusable: it
+/// contributes `0` because it genuinely contributes nothing.
+fn barrier_ratio(z: f64, slack: f64) -> Option<f64> {
+    if !(slack > 0.0) || !slack.is_finite() {
+        return None;
+    }
+    let s = z / slack;
+    (s.is_finite() && s >= 0.0).then_some(s)
+}
+
+/// `Σ_bnd`, the barrier diagonal the returned bound multipliers imply:
+/// `z_lb ᵢ/(xᵢ − lbᵢ) + z_ub ᵢ/(ubᵢ − xᵢ)`, with an absent bound contributing
+/// nothing and any *present* bound whose ratio is unusable aborting the whole
+/// estimate — see [`barrier_ratio`].
+fn barrier_diagonal_bounds(prob: &QpProblem, sol: &QpSolution) -> Option<Vec<f64>> {
+    (0..prob.n)
+        .map(|i| {
+            let mut s = 0.0;
+            let lb = prob.lb_of(i);
+            if lb > -crate::qp::BOUND_INF {
+                s += barrier_ratio(sol.z_lb[i], sol.x[i] - lb)?;
+            }
+            let ub = prob.ub_of(i);
+            if ub < crate::qp::BOUND_INF {
+                s += barrier_ratio(sol.z_ub[i], ub - sol.x[i])?;
+            }
+            s.is_finite().then_some(s)
+        })
+        .collect()
+}
+
+/// `Σ_row`, the same quantity for the inequality rows: `zⱼ/sⱼ` with the slack
+/// recovered as `sⱼ = hⱼ − (Gx)ⱼ` rather than read back, so the primal
+/// residual of the eliminated Newton system is zero by construction.
+fn barrier_diagonal_rows(prob: &QpProblem, sol: &QpSolution) -> Option<Vec<f64>> {
+    let m = prob.m_ineq();
+    if m == 0 {
+        return Some(Vec::new());
+    }
+    let mut gx = vec![0.0; m];
+    prob.g_mul(&sol.x, &mut gx);
+    (0..m)
+        .map(|j| barrier_ratio(sol.z[j], prob.h[j] - gx[j]))
+        .collect()
+}
+
+/// Conjugate gradients on `(P + Gᵀ Σ_row G + Σ_bnd) Δ = r`, from `Δ = 0`.
+///
+/// Returns `None` when the operator is not usable as a positive-definite one
+/// (a non-positive curvature sample, a non-finite intermediate) — the caller
+/// reads that as "no evidence", which accepts. Every early exit is on the
+/// under-estimating side; see [`sigma_forward_error_is_small`].
+fn forward_error_step(
+    prob: &QpProblem,
+    r: &[f64],
+    sigma_bnd: &[f64],
+    sigma_row: &[f64],
+) -> Option<Vec<f64>> {
+    let n = prob.n;
+    let m = prob.m_ineq();
+    let mut scratch_row = vec![0.0; m];
+    let mut scratch_col = vec![0.0; n];
+    // `y ← M v`, with `M = P + Gᵀ Σ_row G + diag(Σ_bnd)`.
+    let apply =
+        |v: &[f64], y: &mut [f64], scratch_row: &mut Vec<f64>, scratch_col: &mut Vec<f64>| {
+            // `p_mul` is `y += P v`, not `y = P v`, and `y` is reused across CG
+            // iterations — zero it first or the operator accumulates.
+            y.iter_mut().for_each(|s| *s = 0.0);
+            prob.p_mul(v, y);
+            for (yi, (vi, si)) in y.iter_mut().zip(v.iter().zip(sigma_bnd)) {
+                *yi += si * vi;
+            }
+            if m > 0 {
+                scratch_row.iter_mut().for_each(|s| *s = 0.0);
+                prob.g_mul(v, scratch_row);
+                for (s, sig) in scratch_row.iter_mut().zip(sigma_row) {
+                    *s *= sig;
+                }
+                scratch_col.iter_mut().for_each(|s| *s = 0.0);
+                prob.gt_mul(scratch_row, scratch_col);
+                for (yi, ci) in y.iter_mut().zip(scratch_col.iter()) {
+                    *yi += ci;
+                }
+            }
+        };
+
+    let mut x = vec![0.0; n];
+    let mut res = r.to_vec();
+    let mut p = res.clone();
+    let mut rs = res.iter().map(|v| v * v).sum::<f64>();
+    if !rs.is_finite() {
+        return None;
+    }
+    if rs == 0.0 {
+        return Some(x);
+    }
+    let mut mp = vec![0.0; n];
+    for _ in 0..FORWARD_ERROR_CG_ITERS.min(n.saturating_mul(4).max(1)) {
+        apply(&p, &mut mp, &mut scratch_row, &mut scratch_col);
+        let denom = p.iter().zip(&mp).map(|(a, b)| a * b).sum::<f64>();
+        if !denom.is_finite() || denom <= 0.0 {
+            // Singular or indefinite along `p`: stop with what we have, which
+            // is an under-estimate. `x` is still a valid Krylov iterate.
+            break;
+        }
+        let alpha = rs / denom;
+        if !alpha.is_finite() {
+            break;
+        }
+        for (xi, pi) in x.iter_mut().zip(&p) {
+            *xi += alpha * pi;
+        }
+        for (ri, mpi) in res.iter_mut().zip(&mp) {
+            *ri -= alpha * mpi;
+        }
+        let rs2 = res.iter().map(|v| v * v).sum::<f64>();
+        if !rs2.is_finite() {
+            break;
+        }
+        if rs2 <= 0.0 {
+            break;
+        }
+        let beta = rs2 / rs;
+        for (pi, ri) in p.iter_mut().zip(&res) {
+            *pi = ri + beta * *pi;
+        }
+        rs = rs2;
+    }
+    if x.iter().all(|v| v.is_finite()) {
+        Some(x)
+    } else {
+        None
+    }
 }
 
 /// The `σ` path's genuineness test, asked **one orthant row at a time**
@@ -5152,6 +5464,305 @@ mod non_finite_guard_tests {
             assert_eq!(demote_unusable(keep, &bad, f64::NAN), keep);
             assert_eq!(demote_unusable(keep, &good, 1.0), keep);
         }
+    }
+}
+
+#[cfg(test)]
+mod forward_error_operator_tests {
+    //! gh #880: the arithmetic corners of [`super::barrier_ratio`], which no
+    //! integration test in `tests/issue880_coupled_sigma_forward_error.rs`
+    //! reaches. A converged interior point stops at a slack of order `μ`, so
+    //! the non-positive-slack branch is defensive by construction — and a
+    //! defensive branch with no test is a branch that has never run.
+    //!
+    //! What it defends is stated in full on `barrier_ratio`: this arm's
+    //! right-hand side is `−(Px + c)`, so a `Σ` that reads too *small*
+    //! inflates `‖Δ‖` and rejects a correct answer. Every case below is
+    //! therefore about which unusable input maps to `None` (decline, accept)
+    //! rather than to `0` (declare an active bound free, reject).
+
+    use super::barrier_ratio;
+
+    /// The ordinary case: an interior slack, `Σ = z/s` verbatim.
+    #[test]
+    fn an_interior_slack_is_the_plain_ratio() {
+        assert_eq!(barrier_ratio(2.0, 8.0), Some(0.25));
+    }
+
+    /// A tight slack is *stiff*, and nothing clamps it. This is the case the
+    /// guard depends on at an active bound.
+    #[test]
+    fn a_tight_slack_is_stiff_and_unclamped() {
+        assert_eq!(barrier_ratio(1.0, 1e-12), Some(1e12));
+    }
+
+    /// A zero slack — an exactly active bound — is `None`, not `0`. `0` there
+    /// says "this bound is not holding anything", which is the reverse of the
+    /// truth and rejects correct answers.
+    #[test]
+    fn an_exactly_active_bound_declines_rather_than_reading_as_free() {
+        assert_eq!(barrier_ratio(1.0, 0.0), None);
+    }
+
+    /// A slack driven *negative* by rounding is the same case, not a different
+    /// one: it is an active bound the arithmetic overshot.
+    #[test]
+    fn a_negative_slack_declines_too() {
+        assert_eq!(barrier_ratio(1.0, -1e-30), None);
+        assert_eq!(barrier_ratio(1.0, f64::NAN), None);
+    }
+
+    /// A slack so small the ratio overflows carries no stiffness *number*,
+    /// only the knowledge that it is enormous — which is `None`, because an
+    /// infinity in the operator turns the CG residual into a `NaN` and the
+    /// verdict into a coin flip.
+    #[test]
+    fn an_overflowing_ratio_declines() {
+        assert_eq!(barrier_ratio(1e300, f64::MIN_POSITIVE), None);
+    }
+
+    /// A junk or wrong-signed multiplier is no evidence about stiffness, and
+    /// no evidence declines. `0` here would again read as "free".
+    #[test]
+    fn a_junk_multiplier_declines() {
+        assert_eq!(barrier_ratio(f64::NAN, 1.0), None);
+        assert_eq!(barrier_ratio(-1.0, 1.0), None);
+        assert_eq!(barrier_ratio(f64::INFINITY, 1.0), None);
+    }
+
+    /// A genuinely zero multiplier on an interior bound is *not* junk: the
+    /// bound holds nothing and contributes nothing, and `Some(0.0)` is the
+    /// correct answer rather than a decline.
+    #[test]
+    fn an_inactive_bound_contributes_zero() {
+        assert_eq!(barrier_ratio(0.0, 10.0), Some(0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // `sigma_forward_error_is_small` called directly.
+    //
+    // Three parts of it are invisible from outside the crate, because the `σ`
+    // cascade's later candidates are also correct on the fixtures that reach
+    // it: deleting `Σ_bnd`, deleting `Gᵀ Σ_row G`, or deleting the `‖x‖` scale
+    // changes the *verdict* without changing the *answer* the caller finally
+    // gets, and removing the `m_eq` early return does the same. Measured, not
+    // assumed: each of those four mutations leaves every integration test in
+    // `tests/issue880_coupled_sigma_forward_error.rs` green. So the arm is
+    // called here directly, on hand-built points whose true optimum is known
+    // in closed form.
+    // -----------------------------------------------------------------------
+
+    use super::{QpProblem, QpSolution, QpStatus, sigma_forward_error_is_small};
+    use crate::Triplet;
+
+    /// A point, its multipliers, and nothing the solver had to produce.
+    fn at(
+        prob: &QpProblem,
+        x: Vec<f64>,
+        z_lb: Vec<f64>,
+        z_ub: Vec<f64>,
+        z: Vec<f64>,
+    ) -> QpSolution {
+        QpSolution {
+            status: QpStatus::Optimal,
+            y: vec![0.0; prob.b.len()],
+            x,
+            z,
+            z_lb,
+            z_ub,
+            obj: 0.0,
+            iters: 0,
+            iterates: vec![],
+        }
+    }
+
+    /// `min ½x² − 3x` subject to `x ≤ 1`, expressed as a bound. The minimiser
+    /// is the bound, `x = 1`, held there by `z_ub = 2`.
+    fn active_bound_qp() -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 1.0)],
+            c: vec![-3.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![1.0],
+        }
+    }
+
+    /// **`Σ_bnd` is load-bearing.** At `x = 1` the right-hand side `−(Px + c)`
+    /// is `2` — the multiplier, in full — and the only thing that makes `Δ`
+    /// small is the bound's own stiffness `z/s`. Delete `Σ_bnd` from the
+    /// operator and `Δ = 2/P = 2`, so a correct answer is rejected.
+    #[test]
+    fn an_active_bound_is_held_down_by_its_own_sigma() {
+        let prob = active_bound_qp();
+        // A converged interior point sits `μ/z` short of the bound.
+        let (mu, z) = (1e-9, 2.0);
+        let sol = at(&prob, vec![1.0 - mu / z], vec![0.0], vec![z], vec![]);
+        assert!(
+            sigma_forward_error_is_small(&prob, &sol, 1e-6),
+            "the exact constrained minimiser was rejected; without Σ_bnd the \
+             estimate is the whole multiplier, ‖Δ‖ = 2"
+        );
+    }
+
+    /// The same model with the bound written as an inequality **row**, which
+    /// is the shape `Σ_row` covers and the shape the cascade actually hands
+    /// this arm once bounds are expanded.
+    #[test]
+    fn an_active_row_is_held_down_by_its_own_sigma() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 1.0)],
+            c: vec![-3.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0)],
+            h: vec![1.0],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY],
+        };
+        let (mu, z) = (1e-9, 2.0);
+        let sol = at(&prob, vec![1.0 - mu / z], vec![0.0], vec![0.0], vec![z]);
+        assert!(
+            sigma_forward_error_is_small(&prob, &sol, 1e-6),
+            "the exact constrained minimiser was rejected; without Gᵀ Σ_row G \
+             the estimate is the whole multiplier, ‖Δ‖ = 2"
+        );
+    }
+
+    /// The same point with the bound's multiplier zeroed — the shape a
+    /// dropped `Σ` produces — must be **rejected**, so the two tests above are
+    /// pinning the operator and not merely the tolerance.
+    #[test]
+    fn the_same_point_without_the_stiffness_is_rejected() {
+        let prob = active_bound_qp();
+        let sol = at(&prob, vec![1.0 - 5e-10], vec![0.0], vec![0.0], vec![]);
+        assert!(
+            !sigma_forward_error_is_small(&prob, &sol, 1e-6),
+            "with no stiffness anywhere the estimate is ‖Δ‖ = 2 and this must \
+             reject; if it accepts, the arm is inert rather than passing"
+        );
+    }
+
+    /// **The `‖x‖` scale is load-bearing.** `min ½(x − 10⁶)²` solved to a
+    /// *relative* `1e-9` leaves `‖Δ‖ = 1e-3`, three orders above a bare `cut`
+    /// of `1e-6` and three below `cut·‖x‖`. The verdict has to be relative or
+    /// every large-`x` model is rejected for being large.
+    #[test]
+    fn the_verdict_is_relative_to_x() {
+        let t = 1e6;
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 1.0)],
+            c: vec![-t],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY],
+        };
+        let sol = at(&prob, vec![t - 1e-3], vec![0.0], vec![0.0], vec![]);
+        assert!(
+            sigma_forward_error_is_small(&prob, &sol, 1e-6),
+            "x = 1e6 − 1e-3 is right to 1e-9 relative and was rejected"
+        );
+        // …and the same absolute error at x ≈ 1 is genuinely a failure.
+        let small = QpProblem {
+            c: vec![-1.0],
+            ..prob.clone()
+        };
+        let sol = at(&small, vec![1.0 - 1e-3], vec![0.0], vec![0.0], vec![]);
+        assert!(
+            !sigma_forward_error_is_small(&small, &sol, 1e-6),
+            "the scale must not swallow a genuine 1e-3 error at x ≈ 1"
+        );
+    }
+
+    /// **The operator is applied afresh each CG iteration.** `p_mul` is
+    /// `y += P v`, not `y = P v`, and `mp` is reused across iterations, so
+    /// omitting the zeroing makes the operator accumulate — which corrupts the
+    /// residual update from the second iteration on and *under*-estimates
+    /// `‖Δ‖`, the accepting direction. It takes four coupled variables to see:
+    /// at `n ≤ 2` conjugate gradients finishes before the pollution can reach
+    /// the `x` update, which is why no fixture in
+    /// `tests/issue880_coupled_sigma_forward_error.rs` catches this.
+    ///
+    /// The point below sits `6.2e-7` from the minimiser of a well-conditioned
+    /// (`cond ≈ 16`) integer Hessian; correct CG reproduces the direct solve to
+    /// the last digit, the accumulating one reads `2.8e-8`, a 22× under-count,
+    /// and a `cut` of `1e-7` lies between them.
+    #[test]
+    fn the_operator_does_not_accumulate_across_cg_iterations() {
+        // Lower triangle of `MᵀM + I`, so symmetric positive definite by
+        // construction rather than by a spectral assertion.
+        let p_lower = vec![
+            Triplet::new(0, 0, 27.0),
+            Triplet::new(1, 0, 16.0),
+            Triplet::new(1, 1, 18.0),
+            Triplet::new(2, 0, 7.0),
+            Triplet::new(2, 1, -3.0),
+            Triplet::new(2, 2, 24.0),
+            Triplet::new(3, 0, -19.0),
+            Triplet::new(3, 1, -11.0),
+            Triplet::new(3, 2, -12.0),
+            Triplet::new(3, 3, 24.0),
+        ];
+        // At `x = 0` the right-hand side is exactly `−c`, so the step is
+        // `P⁻¹ (2, −1, 3, 3)ᵀ · 1e-6` and nothing about the point is implicit.
+        let prob = QpProblem {
+            n: 4,
+            p_lower,
+            c: vec![2e-6, -1e-6, 3e-6, 3e-6],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY; 4],
+            ub: vec![f64::INFINITY; 4],
+        };
+        let sol = at(&prob, vec![0.0; 4], vec![0.0; 4], vec![0.0; 4], vec![]);
+        assert!(
+            !sigma_forward_error_is_small(&prob, &sol, 1e-7),
+            "‖Δ‖ is 6.2e-7 here and must be rejected against a cut of 1e-7; an \
+             accumulating operator reads 2.8e-8 and accepts"
+        );
+        // …and the same point is accepted one order the other side of it, so
+        // the assertion above is about the magnitude and not about the arm
+        // rejecting everything.
+        assert!(sigma_forward_error_is_small(&prob, &sol, 1e-5));
+    }
+
+    /// **The `m_eq > 0` decline.** `A` restricts motion exactly rather than
+    /// through a diagonal, so this arm's operator is the wrong one under an
+    /// equality and would reject points that are fine: at the minimiser of
+    /// `½x₀² + ½x₁²` on `x₀ + x₁ = 2` the right-hand side `−(Px + c)` is
+    /// `(−1, −1)`, entirely carried by the equality multiplier that the
+    /// operator has no term for, so `‖Δ‖ = 1`. The arm declines instead.
+    #[test]
+    fn an_equality_row_makes_the_arm_decline() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![0.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![2.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY; 2],
+            ub: vec![f64::INFINITY; 2],
+        };
+        let sol = at(&prob, vec![1.0, 1.0], vec![0.0; 2], vec![0.0; 2], vec![]);
+        assert!(
+            sigma_forward_error_is_small(&prob, &sol, 1e-6),
+            "the exact minimiser under an equality row was rejected; the \
+             m_eq early return is what keeps this arm out of a system it does \
+             not model"
+        );
     }
 }
 
