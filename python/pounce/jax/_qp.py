@@ -62,7 +62,7 @@ import numpy as np
 from jax.scipy.linalg import block_diag
 
 from .. import _pounce
-from ..qp import _check_psd
+from ..qp import _check_psd, _validate_p_shape
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
@@ -86,7 +86,34 @@ def _guard_psd(P, n, check_psd=None):
     implicit-function gradient taken through a non-KKT point is meaningless.
     The check now scales (:func:`pounce.qp._psd_verdict_coo` answers it by an
     inertia count rather than a dense ``eigvalsh`` once ``n`` is large), so
-    size no longer decides whether the precondition is verified."""
+    size no longer decides whether the precondition is verified.
+
+    Shape is validated first, and **unconditionally** — before the
+    ``check_psd is False`` early return below (gh #874). ``check_psd`` is a
+    statement about whether the caller wants the *definiteness* precondition
+    verified; it is not permission to build a different model than the one
+    that was passed. gh #862's ordering argument applies here verbatim: the
+    guard writes ``P``'s own index pairs into an ``(n, n)`` workspace, so an
+    oversized ``P`` indexed out of bounds and surfaced as a raw numpy
+    ``IndexError`` from inside ``_min_eig_lower_coo`` — naming an array the
+    caller never created.
+
+    An *undersized* ``P`` was worse, because nothing raised at all: the model
+    was silently zero-padded to ``(n, n)`` and solved. ``P = 2·I₃`` against a
+    length-5 ``c`` returned ``[-0.5, -0.5, -0.5, -1, -1]``, the exact optimum
+    of the padded 5x5 problem — a different problem, answered confidently.
+    On these two frontends that is worse than on the plain path, because both
+    are differentiable layers: ``_kkt_backward`` inverts the padded KKT system,
+    so the gradients flowing into a training loop are the padded model's
+    gradients, with no exception anywhere to notice.
+
+    ``7dc03c66`` added :func:`pounce.qp._validate_p_shape` for exactly this and
+    landed it in ``qp.py`` alone, so its commit message's claim to cover "every
+    entry point that checks the Hessian before it builds" was false as written.
+    Calling the shared function here rather than re-deriving the check keeps
+    the three frontends' error text identical.
+    """
+    _validate_p_shape(P, n)
     if check_psd is False:
         return
     _check_psd(*_to_coo_lower(np.asarray(P)), n)
@@ -518,13 +545,20 @@ def solve_qp(
 
     ``check_psd`` controls the host-side PSD guard on ``P`` (issue #112),
     with the same semantics as :func:`pounce.qp.solve_qp`: ``None`` (the
-    default) checks only when ``n <= 1500``, ``True`` always checks, and
-    ``False`` skips the per-forward O(n^3) eigenvalue check — useful when
+    default) and ``True`` both check, and ``False`` skips the per-forward
+    check — useful when
     ``P`` is PSD by construction (e.g. ``LLᵀ + εI`` in an OptNet layer).
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     c = jnp.asarray(c, dtype=jnp.float64)
     n = c.shape[0]
+    # Shape is static at trace time, so reject a mis-shaped `P` here rather
+    # than letting `_guard_psd` raise from inside the host callback, where jax
+    # rewraps a plain `ValueError` as `JaxRuntimeError: INTERNAL: CpuCallback
+    # error` with the real message buried in a nested traceback (gh #874).
+    # `_guard_psd` keeps its own copy: it is the choke point the class-based
+    # layers reach, and it has to hold whatever the entry point did.
+    _validate_p_shape(P, n)
     G0 = jnp.zeros((0, n)) if G is None else jnp.asarray(G, dtype=jnp.float64)
     h0 = jnp.zeros((0,)) if h is None else jnp.asarray(h, dtype=jnp.float64)
     A0 = jnp.zeros((0, n)) if A is None else jnp.asarray(A, dtype=jnp.float64)
@@ -592,14 +626,22 @@ def solve_qp_batch(
     not change the solution or its gradients — only the iteration count.
 
     ``check_psd``: PSD-guard control for the shared ``P`` (one check covers
-    the whole batch) — ``None`` auto (``n <= 1500``), ``True`` force,
-    ``False`` skip; same semantics as :func:`pounce.qp.solve_qp`.
+    the whole batch) — ``None`` and ``True`` both check,
+    ``False`` skips; same semantics as :func:`pounce.qp.solve_qp`.
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     cs = jnp.asarray(c, dtype=jnp.float64)
     if cs.ndim != 2:
         raise ValueError(f"solve_qp_batch: `c` must be 2-D (B, n), got {cs.shape}")
     b_sz, n = cs.shape
+
+    # Shape is static at trace time, so reject a mis-shaped `P` here rather
+    # than letting `_guard_psd` raise from inside the host callback, where jax
+    # rewraps a plain `ValueError` as `JaxRuntimeError: INTERNAL: CpuCallback
+    # error` with the real message buried in a nested traceback (gh #874).
+    # `_guard_psd` keeps its own copy: it is the choke point the class-based
+    # layers reach, and it has to hold whatever the entry point did.
+    _validate_p_shape(P, n)
 
     G0 = jnp.zeros((0, n)) if G is None else jnp.asarray(G, dtype=jnp.float64)
     A0 = jnp.zeros((0, n)) if A is None else jnp.asarray(A, dtype=jnp.float64)
@@ -850,8 +892,8 @@ def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None,
     ``P, c, G, h, A, b`` via cone-aware OptNet implicit differentiation
     (``diag`` → the cones' arrow operators).
 
-    ``check_psd`` controls the host-side PSD guard on ``P`` — ``None`` auto
-    (``n <= 1500``), ``True`` force, ``False`` skip; same semantics as
+    ``check_psd`` controls the host-side PSD guard on ``P`` — ``None`` and ``True``
+    both check, ``False`` skips; same semantics as
     :func:`pounce.qp.solve_qp`.
     """
     P = jnp.asarray(P, dtype=jnp.float64)

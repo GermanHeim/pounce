@@ -10,6 +10,51 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **The jax and torch QP layers no longer silently solve a zero-padded model
+  when `P`'s shape disagrees with the rest of the problem (gh #874).**
+  `7dc03c66` added `_validate_p_shape` for gh #862 and landed it in
+  `python/pounce/qp.py` alone, so its commit message's claim to cover "every
+  entry point that checks the Hessian before it builds" was false as written —
+  both differentiable frontends run their own `_guard_psd`, which reaches
+  `_check_psd` with the shape already discarded. `P = 2·I₃` against a length-5
+  `c` returned `[-0.5, -0.5, -0.5, -1, -1]` from both, which is the exact
+  optimum of the **zero-padded** 5x5 model: a different problem, answered
+  confidently and with no exception anywhere. An oversized `P` failed the other
+  way, with the raw `IndexError: index 3 is out of bounds for axis 0 with
+  size 3` from inside numpy — verbatim the string `7dc03c66` was written to
+  eliminate.
+
+  These are the worse place for it to happen, because both are differentiable
+  layers: `_kkt_backward` inverts the padded KKT system, so the gradients
+  reaching a training loop are the padded model's gradients and the user gets a
+  silently wrong descent direction. Both frontends now call the shared
+  `_validate_p_shape`, so all three give one identical message; the jax layer
+  also validates at its entry point, where the shape is static, rather than
+  letting the error surface from inside a host callback as
+  `JaxRuntimeError: INTERNAL: CpuCallback error` with the real message buried
+  in a nested traceback. The check runs **above** the `check_psd is False`
+  early return: `check_psd` says whether the caller wants the *definiteness*
+  precondition verified, and is not permission to solve a different model than
+  the one passed.
+
+  Making the shared helper reachable from a traced frontend required one
+  change inside it: `_mat_shape` read the shape through `np.asarray`, which
+  raises `TracerArrayConversionError` on a jax tracer, so the first draft of
+  this fix broke every `jit`/`grad` call carrying a *correct* `P`. It now
+  reads `.shape` off anything that has one — a tracer answers that exactly as
+  a concrete array does — and falls back to `np.asarray` only for shape-less
+  input such as a nested list.
+
+- **`check_psd`'s documented default was wrong in six places.** The public
+  docstrings for `pounce.qp.solve_qp` and the jax/torch `solve_qp`,
+  `solve_qp_batch` and layer classes all still said `None` "runs the check only
+  when `n <= 1500`", and `pounce.qp.solve_qp` additionally told the reader the
+  guard does not run "above the `n <= 1500` cap" and to "pass `check_psd=True`
+  on a large QP you know to be indefinite". gh #849 removed that cliff: the
+  check now always runs, and `1500` is only the dense/sparse crossover *inside*
+  it. Found while fixing gh #874, in the same functions; the advice was
+  actively misleading, since following it changed nothing.
+
 
 - **The active-set SQP arm no longer certifies a constrained maximum on the
   repo's own fixture for the class (gh #873).** gh #856 gave that arm a

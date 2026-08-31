@@ -635,13 +635,22 @@ def _maybe_check_psd(P, c, check_psd) -> None:
 def _mat_shape(mat):
     """``(n_rows, n_cols)`` of a sparse-or-dense matrix, or ``None`` for a
     ``None`` matrix or a dense array that is not 2-D (``_coo`` raises a clear
-    error for the latter)."""
+    error for the latter).
+
+    Reads ``.shape`` off anything that carries one and only falls back to
+    ``np.asarray`` for shape-less input (a nested list). That order is
+    load-bearing, not a micro-optimization: gh #874 runs this on the jax
+    frontend's *trace-time* path, where ``P`` is a ``jax`` tracer whose shape
+    is known but whose value is not, and ``np.asarray`` on a tracer raises
+    ``TracerArrayConversionError``. A tracer answers ``.shape`` exactly as a
+    concrete array does, so the shape check works under ``jit``/``grad``."""
     if mat is None:
         return None
-    if hasattr(mat, "tocoo") and hasattr(mat, "shape"):  # scipy sparse
-        return tuple(mat.shape)
-    sh = np.asarray(mat).shape
-    return sh if len(sh) == 2 else None
+    if hasattr(mat, "shape"):  # numpy, scipy sparse, jax/torch tensors, tracers
+        sh = tuple(mat.shape)
+    else:
+        sh = np.asarray(mat).shape
+    return tuple(sh) if len(sh) == 2 else None
 
 
 def _validate_p_shape(P, n: int) -> None:
@@ -953,10 +962,12 @@ def solve_qp(
 
     ``check_psd`` guards against an indefinite (nonconvex) ``P``, which the
     convex IPM would otherwise accept and report a silently-wrong
-    ``"optimal"`` for (issue #112). ``None`` (the default) runs the check
-    only when ``n <= 1500`` so a large sparse QP is not slowed by the
-    O(n^3) eigenvalue solve; pass ``True`` to always check or ``False`` to
-    never check.
+    ``"optimal"`` for (issue #112). ``None`` (the default) and ``True``
+    both run it; pass ``False`` to skip it. The default used to check only
+    when ``n <= 1500``, so on a larger model the guarantee quietly lapsed with
+    no option named and no warning — gh #849 replaced that cliff with a check
+    that scales, and ``1500`` is now only the dense/sparse crossover *inside*
+    the check, not a size at which it stops running.
 
     The guard is scoped to ``method="ipm"``. Under ``method="active-set"`` an
     indefinite ``P`` is **solved**, not refused — the active-set engine
@@ -971,10 +982,9 @@ def solve_qp(
     zero-multiplier bound keeps a direction out of the null space that is
     searched. The check still runs there when enabled, and its finding is
     what tells the engine to drive an indefinite Hessian; it just does not
-    raise. Where it does *not* run — ``check_psd=False``, or the default
-    ``None`` above the ``n <= 1500`` cap — the engine is driven exactly as it
-    was before, so pass ``check_psd=True`` on a large QP you know to be
-    indefinite.
+    raise. Where it does *not* run — that is, ``check_psd=False``,
+    the only way to turn it off — the engine is driven exactly as it was
+    before.
 
     ``tau`` and ``tau_max`` (``method="ipm"`` only) bound the
     fraction-to-boundary parameter: an interior-point step covers at most that
