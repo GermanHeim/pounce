@@ -44,6 +44,38 @@ changes.
   `feral_increase_quality_retry=no` holds a capped run to the budget it was
   given.
 
+  The same gate also **stands the µ-strategy stall retry down**, which is what
+  keeps the rung from being a third solve rather than a second.
+  `mu_strategy_fallback` fires unconditionally on
+  `Maximum_Iterations_Exceeded`, so an escalating budget exit was paying for
+  two rescue solves and using one: on `square_flowsheet_resto`'s
+  limited-memory leg, 3000 capped iterations, then a second full 3000 under
+  the flipped schedule that escalated 25 times again and ended no better, and
+  only then the rung's 178 — 6178 real iterations to reach an answer 3178 of
+  them reach. The flip is a *blind* second opinion; the escalation is a
+  *measured* one, and flipping µ on top of a trajectory FERAL rerouted holds
+  the knob that is implicated and varies the one that is not. Measured both
+  ways on that leg: `mu_strategy=adaptive` alone still gives 3000 with 25
+  escalations, and `feral_increase_quality=no` gives 178 under either
+  schedule. Wall clock on the fixture: 1.96 s to 1.00 s.
+
+  Scoped to `Maximum_Iterations_Exceeded`, the one status the rung opens on —
+  a `Solved_To_Acceptable_Level` exit opens no escalation rung, so declining
+  there would drop a retry with nothing in its place. Gated on
+  `feral_increase_quality_retry`, so setting it to `no` restores the pre-857
+  behaviour on both sides at once. The fallback cannot instead fold the
+  escalation off *into* its own retry: the FERAL backend factory is minted
+  from an options snapshot the caller takes before `solve()` runs, so writing
+  `feral_increase_quality` from inside it never reaches the retry's linear
+  solver, while `mu_strategy` is read per-solve and does.
+
+  The 158-fixture-leg sweep is **byte-identical** across this change, and that
+  is the point rather than a reassurance: `it=`, `q=`, the objective and the
+  engine all belong to the promoted solve, so a wasted intermediate solve
+  leaves no trace in the sweep or the JSON report. The only visible trace is
+  the count of per-solve summary blocks on the console, which is what
+  `the_mu_flip_stands_down_when_the_escalation_rung_is_open` asserts.
+
 - **The solver reports how many times it escalated the factorization
   (gh #857).** New `quality_escalations` statistic, in the JSON report, the
   Python `info` dict, the console summary (printed only when nonzero) and the

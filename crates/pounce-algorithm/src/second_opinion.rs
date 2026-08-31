@@ -196,6 +196,17 @@ pub struct SecondOpinionAvailability {
 ///    cannot separate the two — only the verdict can, and `deb7`'s is
 ///    `Optimal`.
 ///
+///    Opening this rung also stands the µ-strategy stall retry down
+///    (`Application::run_with_mu_strategy_fallback`), which is what keeps it
+///    from being a third solve. That retry fires unconditionally on
+///    `Maximum_Iterations_Exceeded`, so before gh#857 this fixture's lbfgs leg
+///    paid 3000 capped iterations, then a second full 3000 under the flipped
+///    schedule that escalated 25 times again and ended no better, and only
+///    then reached this rung's 178. The flip is blind and the escalation is
+///    measured; skipping it takes the run from three solves to two, changing
+///    no reported number — which is also why the fixture sweep is
+///    byte-identical across that change.
+///
 /// Rungs are **not** cumulative: the driver restores the baseline before each
 /// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
 /// earlier knob. That reset is load-bearing, not tidiness: on gh #524's

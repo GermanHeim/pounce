@@ -314,3 +314,111 @@ fn the_exact_leg_is_unchanged_because_the_new_rung_is_last() {
         "the promoted rung's own count, unchanged from before gh#857"
     );
 }
+
+/// Every `Number of Iterations....:` line — one per solve the run performed,
+/// and the only place the cost of a *declined* verdict is visible at all. The
+/// JSON report and the sweep both carry the promoted solve's numbers, so a
+/// wasted intermediate solve leaves no trace in either.
+fn solve_count(out: &str) -> usize {
+    out.lines()
+        .filter(|l| l.starts_with("Number of Iterations"))
+        .count()
+}
+
+/// The μ-strategy stall retry stands down for this rung (gh#857 follow-up).
+///
+/// Before this, an escalating budget exit paid for **two** rescue solves and
+/// used one. `run_with_mu_strategy_fallback` fires unconditionally on
+/// `Maximum_Iterations_Exceeded`, so this fixture's lbfgs leg ran its 3000
+/// iterations, then a second full 3000 with `mu_strategy` flipped — which
+/// escalated 25 times all over again and ended no better — and only then
+/// reached rung 4, which converges it in 178. 6178 real iterations to produce
+/// an answer 3178 of them reach, and the sweep cannot see any of it: `it=`,
+/// `q=` and the objective all belong to the promoted solve.
+///
+/// The flip is a *blind* second opinion — it varies the barrier schedule and
+/// hopes. The escalation is a *measured* one: FERAL reroutes which pivots are
+/// taken and never steps back down, so flipping μ on top of it holds the knob
+/// that is implicated and varies the one that is not. Measured both ways on
+/// this leg: `mu_strategy=adaptive` alone still gives 3000 with 25
+/// escalations, and `feral_increase_quality=no` gives 178 under *either* μ
+/// strategy.
+///
+/// Declined rather than folded into the flip because the FERAL backend factory
+/// is minted from an options snapshot the caller takes *before* `solve()`:
+/// writing `feral_increase_quality` from inside the fallback is too late to
+/// reach the retry's linear solver, while `mu_strategy` is read per-solve and
+/// is not. That layer can only choose whether to spend the solve, not what to
+/// spend it on.
+#[test]
+fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
+    let run = solve(
+        "square_flowsheet_resto.nl",
+        &["hessian_approximation=limited-memory"],
+    );
+    assert_eq!(
+        solve_count(&run.out),
+        2,
+        "the capped base solve and rung 4, and nothing between them — a third \
+         block here is the μ flip back, burning a full budget on a trajectory \
+         the escalation still governs:\n{}",
+        run.out
+    );
+    assert_eq!(run.iterations, 178, "{}", run.out);
+}
+
+/// The switch is one switch. `feral_increase_quality_retry=no` removes rung 4
+/// **and** the stand-down above, so a user who turns it off gets exactly the
+/// pre-gh#857 behaviour on both sides: the μ flip runs, and the escalating
+/// verdict stands.
+///
+/// This is the branch that keeps the stand-down from being a silent removal of
+/// the flip. It is also the arm that measures what the flip was worth here:
+/// two solves, 6000 iterations, and the same `Maximum_Iterations_Exceeded`.
+#[test]
+fn turning_the_rung_off_gives_the_mu_flip_back() {
+    let run = solve(
+        "square_flowsheet_resto.nl",
+        &[
+            "hessian_approximation=limited-memory",
+            "feral_increase_quality_retry=no",
+        ],
+    );
+    assert_eq!(
+        solve_count(&run.out),
+        2,
+        "with the rung off the base solve is followed by the μ flip, which is \
+         what this option's `no` has always meant:\n{}",
+        run.out
+    );
+    assert!(
+        ladder_lines(&run.out).is_empty(),
+        "and the second solve is the flip, not a ladder rung:\n{}",
+        run.out
+    );
+    assert_eq!(run.iterations, 3000);
+}
+
+/// The stand-down is scoped to the status rung 4 opens on.
+///
+/// `run_with_mu_strategy_fallback` also retries `Solved_To_Acceptable_Level`,
+/// and `SecondOpinionTrigger::for_status` maps that status to **no trigger at
+/// all** — so declining the flip there would drop a retry with nothing in its
+/// place. The exact leg is the control for the other half: it exits
+/// `Restoration_Failed`, which is not retry-worthy for the flip in the first
+/// place, so the ladder is reached exactly as before and rung 3 still
+/// promotes at 54.
+#[test]
+fn the_stand_down_does_not_reach_the_exact_leg() {
+    let run = solve("square_flowsheet_resto.nl", &[]);
+    assert!(
+        run.out.contains("EXIT: Optimal Solution Found"),
+        "{}",
+        run.out
+    );
+    assert_eq!(
+        run.iterations, 54,
+        "rung 3 still rescues the exact leg, unchanged:\n{}",
+        run.out
+    );
+}

@@ -2597,6 +2597,71 @@ impl IpoptApplication {
         if !retry_worthy {
             return first_status;
         }
+        // gh#857: decline the flip when the solve that just failed escalated
+        // the factorization and an escalation-off re-solve is enabled.
+        //
+        // The mu flip is a *blind* second opinion: it changes the barrier
+        // schedule and hopes. A `feral_increase_quality` escalation is a
+        // *measured* fact about the run that just failed -- FERAL reroutes
+        // which pivots are taken and never steps back down, so every
+        // iteration after the first escalation, restoration sub-solves
+        // included, ran on a trajectory the defaults do not describe. Flipping
+        // `mu_strategy` while leaving that in place is not a controlled
+        // experiment: it varies the knob that is not implicated and holds the
+        // one that is.
+        //
+        // It is not free either. On `square_flowsheet_resto`'s lbfgs leg the
+        // flip escalates 25 times all over again, burns a second full
+        // 3000-iteration budget, and ends no better than the first -- after
+        // which rung 4 of the second-opinion ladder converges the model in 178
+        // with the escalation off. That is 6178 real iterations to reach an
+        // answer that 3178 reach without the flip, and the flip contributes
+        // nothing to it. Measured both ways: `mu_strategy=adaptive` alone
+        // still gives 3000 with 25 escalations, and `feral_increase_quality=no`
+        // gives 178 under *either* mu strategy.
+        //
+        // Why decline rather than fold the escalation off into this retry: the
+        // backend factory is minted from an options snapshot taken by the
+        // caller *before* `solve()`, so writing `feral_increase_quality` here
+        // is too late to reach the retry's linear solver. `mu_strategy` is read
+        // per-solve from the option table and is not; that asymmetry is why
+        // this layer can only choose whether to spend the solve, not what to
+        // spend it on.
+        //
+        // Restricted to `Maximum_Iterations_Exceeded`, which is exactly the
+        // status rung 4 opens on. A `Solved_To_Acceptable_Level` exit opens no
+        // escalation rung, so declining there would drop a retry with nothing
+        // in its place. Gated on `feral_increase_quality_retry`, so setting
+        // that option to `no` restores the historical behaviour on both sides
+        // at once: no rung 4, and no decline here.
+        //
+        // The one place the stand-down is not paired with the rung is the
+        // multi-start paths (`solve_nlp_batch`, the CLI's `minima` search),
+        // which deliberately do not drive the ladder -- a failed start there is
+        // routine and extra solves per start multiply. Those paths lose the
+        // flip on an escalating budget exit and gain nothing back, which is the
+        // one behaviour change here that is not a strict improvement. It is the
+        // same trade they already take on every other rung, and for the same
+        // reason: an escalating capped start is one of many, and doubling its
+        // cost to re-run the trajectory the escalation governs is the worse end
+        // of it.
+        if matches!(
+            first_status,
+            ApplicationReturnStatus::MaximumIterationsExceeded
+        ) && self.quality_escalations.get() >= 1
+            && self
+                .options
+                .get_bool_value("feral_increase_quality_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true)
+            && self
+                .options
+                .get_bool_value("feral_increase_quality", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true)
+        {
+            return first_status;
+        }
         // Flip the strategy for one retry. The parser maps "adaptive" →
         // Adaptive and every other value (incl. unset) → Monotone, so the
         // opposite of an explicit "adaptive" is "monotone" and the
