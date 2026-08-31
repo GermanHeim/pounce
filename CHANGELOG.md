@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.11.0] - 2026-08-31
+
 - **Added FBBT support to `pounce-rs`.** `presolve_fbbt=yes` now runs
   feasibility-based bound tightening when an `ExpressionProvider` is
   available; `Solution::fbbt_report` exposes diagnostics and
@@ -17881,7 +17884,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/jkitchin/pounce/releases/tag/v0.11.0
 [0.10.0]: https://github.com/jkitchin/pounce/releases/tag/v0.10.0
 [0.9.0]: https://github.com/jkitchin/pounce/releases/tag/v0.9.0
 [0.8.0]: https://github.com/jkitchin/pounce/releases/tag/v0.8.0
