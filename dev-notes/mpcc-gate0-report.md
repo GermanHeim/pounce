@@ -501,17 +501,47 @@ defect and it should be filed and fixed; it is not this PR's to fix.
    line said it did.** On the `.nl`/CLI path, at default options, this
    same model exits `Solved_To_Acceptable_Level` after 9 restoration
    iterations with an unscaled dual infeasibility of `7.897e+04` — i.e.
-   *through* that gate, not refused by it. The acceptable-level triplet
-   is evaluated on `s_d`-normalised quantities, and `s_d` here is ~1e15,
-   so the triplet passes. Reproduced locally; it is not a claim about
-   one machine.
+   *through* that gate, not refused by it. Reproduced locally; it is not
+   a claim about one machine.
 
-   That is the gh#274 failure mode itself, on a model this report ships
-   as a reproducer: `Solved_To_Acceptable_Level`, which Pyomo maps into
-   the solved family, at a dual residual of `7.9e+04`. The gate refuses
-   the `-exp(x)` case it was built for and does not refuse this one,
-   because that case has nothing cancelling (`dual_inf / D ≈ 1`) while
-   this one has a huge `D`.
+   **Why it passes is worth getting right, because the obvious answer is
+   wrong.** It is not that the acceptable-level triplet reads
+   `s_d`-normalised quantities: the three component tests read the
+   *unscaled* residuals (`current_is_acceptable_with_state` calls
+   `curr_unscaled_dual_infeasibility_max` and its siblings), exactly as
+   `acceptable_dual_inf_tol`'s own help text specifies. Both halves of
+   the test pass on their own terms:
+
+   | test | quantity | threshold | |
+   |---|---:|---:|---|
+   | aggregate | **scaled** `8.234e-11` | `acceptable_tol` `1e-6` | passes — this one *is* `s_d`-normalised, and `s_d ≈ 1e15` |
+   | dual component | **unscaled** `7.897e+04` | `acceptable_dual_inf_tol` `1e10` | passes — on the threshold's size, not on any normalisation |
+
+   So there is **no implementation defect here to fix**. POUNCE reports
+   `Solved_To_Acceptable_Level` because a point with an unscaled dual
+   infeasibility of `7.9e+04` *is* acceptable under the registered
+   defaults, and those defaults are upstream Ipopt's. `acceptable_tol` is
+   documented as applying to the scaled overall error and
+   `acceptable_dual_inf_tol` to the unscaled dual infeasibility at `1e10`;
+   both are implemented as documented.
+
+   That does not make the outcome harmless — it is still
+   `Solved_To_Acceptable_Level`, which Pyomo maps into the solved family,
+   at a dual residual of `7.9e+04`. But it relocates the question from
+   "what is broken" to "is `acceptable_dual_inf_tol = 1e10` the right
+   default", which is a policy choice with a blast radius of every
+   acceptable-level exit in the solver, and a deliberate deviation from
+   upstream if changed. Refusing this point needs *either* threshold
+   moved: the aggregate would refuse it if read unscaled (`7.9e+04` is not
+   `≤ 1e-6`), and the component would refuse it at any threshold below
+   `7.9e+04`. Both are decisions, not repairs.
+
+   One thing that *is* a gap rather than a policy: `kkt_fidelity_tol`
+   (gh#173) exists for precisely this shape — "the scaled convergence test
+   passes but the user-space duals have drifted" — and it only ever
+   downgrades `Solve_Succeeded`. An exit that is already
+   `Solved_To_Acceptable_Level` is outside its reach, so the one guard
+   built for this case cannot be aimed at it even by a caller who opts in.
 
 3. **It is a core-IPM change and needs the fixture sweep and an owner.**
    The verdict is reached on an `s_d`-normalised aggregate, so the blast
