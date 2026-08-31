@@ -9,6 +9,112 @@ changes.
 
 ## [Unreleased]
 
+- **A solve that the factorization escalation rerouted into a wall now
+  re-solves itself without it (gh #857).** `feral_increase_quality` is on by
+  default and is two-sided: it buys accuracy and 15-25% of the iterations on
+  several models, and it loses whole solves on others (gh #850). The losing
+  direction had no automatic recovery — the documented remedy was for the user
+  to notice, read the option, and re-run.
+
+  `feral_increase_quality_retry` (new, default on) is that re-run, taken
+  automatically. It is rung 4 of the second-opinion ladder, appended last, and
+  its gate is two conditions: the verdict is `Restoration_Failed`,
+  `Maximum_Iterations_Exceeded` or `Infeasible_Problem_Detected`, **and** the
+  solve actually escalated at least once. `Maximum_Iterations_Exceeded` opens no other rung, on the sound general
+  reasoning that the answer to a budget exit is a bigger budget — the exception
+  is exactly this, because when the escalation is what walked the trajectory
+  into the wall, a bigger budget re-runs the same wall.
+
+  It is a re-solve rather than a re-baselining of the escalation because
+  re-baselining was tried and refuted: feral's `reset_quality`
+  (jkitchin/feral#192) was plumbed and instrumented — 376 escalations against
+  376 matching resets on one solve — and recovers neither leg at either
+  boundary. The harm is the *destination*, not the duration; every static
+  `feral_pivtol` in {1e-6, 3.16e-5, 4.2e-4, 1e-2, 0.5} loses the
+  limited-memory leg from iteration 0 and only 1e-8 solves it. gh #857 was
+  filed as blocked on that upstream fix; it is not.
+
+  Across the 158-fixture-leg sweep it moves exactly one line: `lbfgs
+  square_flowsheet_resto` goes from `Maximum_Iterations_Exceeded` at the
+  3000-iteration cap to `Optimal` at 178, 3178 total. Of the 13 escalating
+  fixture-legs, that is the only one whose verdict is an unrecovered failure.
+  The cost is one extra solve on a run that was already going to report
+  failure; the one case worth naming is that a deliberately small `max_iter` on
+  an escalating model now spends a second budget before reporting.
+  `feral_increase_quality_retry=no` holds a capped run to the budget it was
+  given.
+
+  `Infeasible_Problem_Detected` is on that trigger list because the escalation
+  can manufacture one, and a false infeasibility verdict is the worst thing it
+  does: a wrong answer on a feasible model, reported as a verdict rather than
+  as a failure. That is the shape `square_flowsheet_resto`'s limited-memory
+  leg takes on linux/x86_64 — same 3000 iterations and same 25 escalations as
+  on macOS/aarch64, different exit — and the three pre-existing infeasibility
+  rungs all fail to rescue it. Six sweep lines move for it, all of them models
+  that are genuinely infeasible and where the rung therefore confirms the
+  verdict at the price of one more solve: `infeasible_square_scaled_1em4` 61 to
+  78 total iterations on the exact leg, `issue_508_infeasible_gap_1em4` 982 to
+  1423. No status, objective, iteration count or engine moves on any of them.
+  The escalation gate is what bounds that cost — of the eight NLP-arm
+  infeasibility fixture-legs, four escalated and take the rung and four never
+  escalated and are untouched.
+
+  The ladder is a library feature and not a CLI one, so the fourth rung also
+  appears in `info["second_opinion"]["tried"]` for a Python caller whose model
+  ends `Infeasible_Problem_Detected` having escalated — which the one-variable
+  `x² + 1 = 0` in `python/tests/test_second_opinion.py` does, on both
+  platforms. Turning the whole ladder off therefore means naming
+  `feral_increase_quality_retry=no` alongside the other three rung switches,
+  and that test's `LADDER_OFF` now does. It also *derives* the rung list it
+  expects from a ladder-free base solve rather than writing the count down:
+  whether a given model escalates at all is a property of the platform's
+  arithmetic and not of the model, and gh #857's own CLI fixture `deb7`
+  escalates twice on macOS/aarch64 and zero times on linux/x86_64. A test that
+  writes such a count down is red on one of the two, which is how this was
+  found.
+
+  The same gate also **stands the µ-strategy stall retry down**, which is what
+  keeps the rung from being a third solve rather than a second.
+  `mu_strategy_fallback` fires unconditionally on
+  `Maximum_Iterations_Exceeded`, so an escalating budget exit was paying for
+  two rescue solves and using one: on `square_flowsheet_resto`'s
+  limited-memory leg, 3000 capped iterations, then a second full 3000 under
+  the flipped schedule that escalated 25 times again and ended no better, and
+  only then the rung's 178 — 6178 real iterations to reach an answer 3178 of
+  them reach. The flip is a *blind* second opinion; the escalation is a
+  *measured* one, and flipping µ on top of a trajectory FERAL rerouted holds
+  the knob that is implicated and varies the one that is not. Measured both
+  ways on that leg: `mu_strategy=adaptive` alone still gives 3000 with 25
+  escalations, and `feral_increase_quality=no` gives 178 under either
+  schedule. Wall clock on the fixture: 1.96 s to 1.00 s.
+
+  Scoped to `Maximum_Iterations_Exceeded`, the one status the rung opens on —
+  a `Solved_To_Acceptable_Level` exit opens no escalation rung, so declining
+  there would drop a retry with nothing in its place. Gated on
+  `feral_increase_quality_retry`, so setting it to `no` restores the pre-857
+  behaviour on both sides at once. The fallback cannot instead fold the
+  escalation off *into* its own retry: the FERAL backend factory is minted
+  from an options snapshot the caller takes before `solve()` runs, so writing
+  `feral_increase_quality` from inside it never reaches the retry's linear
+  solver, while `mu_strategy` is read per-solve and does.
+
+  The 158-fixture-leg sweep is **byte-identical** across the stand-down, and that
+  is the point rather than a reassurance: `it=`, `q=`, the objective and the
+  engine all belong to the promoted solve, so a wasted intermediate solve
+  leaves no trace in the sweep or the JSON report. The only visible trace is
+  the count of per-solve summary blocks on the console, which is what
+  `the_mu_flip_stands_down_when_the_escalation_rung_is_open` asserts.
+
+- **The solver reports how many times it escalated the factorization
+  (gh #857).** New `quality_escalations` statistic, in the JSON report, the
+  Python `info` dict, the console summary (printed only when nonzero) and the
+  sweep's new `q=` column. It exists because an escalation left no trace
+  anywhere: not in status, objective, iteration count or engine, and the `q`
+  info-string flag misses every escalation that happens inside a restoration
+  sub-solve, because those rows carry no info column at all. On
+  `square_flowsheet_resto`'s exact leg that is one printed `q` against two
+  actual firings. The recovery rung above is not implementable without it.
+  Report-only: the 158-fixture-leg sweep is byte-identical with it in place.
 - **A flaky CLI test is made deterministic (no user-facing change).**
   `crates/pounce-cli/tests/issue850_second_opinion_is_recorded.rs` built
   its `.sol` and `.json` output paths from the fixture name and the

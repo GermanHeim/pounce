@@ -178,11 +178,27 @@ fn string(json: &str, key: &str) -> Option<String> {
 const PROMOTING: &str = "square_flowsheet_resto.nl";
 
 /// The premise, asserted rather than assumed: this fixture's base solver really
-/// does fail, and the ladder really is what rescues it. Turning the rung off is
-/// how the report separates the two.
+/// does fail, and the ladder really is what rescues it. Turning the rungs off
+/// is how the report separates the two.
+///
+/// Note the plural. This test disables **every** rung the fixture's verdict
+/// can reach, which as of gh#857 is two: the displacement rung it was written
+/// against, and `feral_increase_quality_retry`, which opens on the same
+/// `Restoration_Failed` and recovers this leg by a different route (undoing
+/// the factorization escalation that produced the failure in the first place —
+/// see `issue850_increase_quality_regression.rs`). Leaving that one on turns
+/// "the base solver alone" into "the base solver plus one rung", and the
+/// premise reads `SolveSucceeded`. A rung added later that also catches
+/// `Restoration_Failed` belongs in this list for the same reason.
 #[test]
 fn the_base_solver_alone_does_not_solve_this_fixture() {
-    let json = report(PROMOTING, &["infeasibility_perturbed_start_retry=no"]);
+    let json = report(
+        PROMOTING,
+        &[
+            "infeasibility_perturbed_start_retry=no",
+            "feral_increase_quality_retry=no",
+        ],
+    );
     let status = string(&json, "status").expect("a status");
     assert_eq!(
         status, "RestorationFailed",
