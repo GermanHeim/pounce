@@ -95,6 +95,21 @@
 # whose only moving field is the engine is a routing change and is exactly as
 # reportable as a moved iteration count.
 #
+# THE q= COLUMN (gh#857). Successful linear-solver quality escalations over the
+# whole solve, restoration sub-solves included. Same argument as the engine
+# column, one level down: an escalation changes WHICH PIVOTS the factorization
+# takes and, with the FERAL backend, never steps back down, so it governs every
+# later factorization in the solve -- a restoration sub-solve's included. Status,
+# objective, iteration count and engine can all be unchanged while that differs.
+# gh#857 is the case for the column: the escalation rung costs
+# square_flowsheet_resto both legs and buys iterations on deb7 and
+# pooling_rt2stp, and none of it was visible in a report until this field
+# existed -- the regression had to be found by instrumenting a build.
+#
+# A baseline binary predating the field reports no escalations, so against one
+# the column reads 0 everywhere; those lines move by exactly one field, which
+# is the intended signal and not a regression.
+#
 # Usage:
 #   scripts/sweep-fixtures.sh <pounce-binary> <outfile> [extra solver opts...]
 #
@@ -179,12 +194,20 @@ else:
         len(so.get("tried", [])),
         so.get("total_iteration_count", 0),
     )
-print("%-6s %-40s %-9s %-32s it=%-6s 2nd=%-46s obj=%s" % (
+# Successful linear-solver quality escalations (gh#857). An escalation
+# reroutes the rest of the solve -- FERAL's ladder changes which pivots are
+# taken and never steps back down -- so a line that moves ONLY here has
+# changed how the KKT systems were factorized while reaching the same
+# answer, which is a trajectory change and is reportable as one. Defaults
+# to 0 rather than "?" so a baseline binary predating the field reads as
+# "did not report any" instead of moving every line in the diff.
+print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s obj=%s" % (
     sys.argv[3],
     sys.argv[2],
     sys.argv[4],
     s.get("status"),
     st.get("iteration_count", "?"),
+    st.get("quality_escalations", 0),
     second,
     "%.10g" % obj if obj is not None else "none",
 ))

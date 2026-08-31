@@ -226,6 +226,21 @@ pub struct IpoptApplication {
     /// custom factories plugged through [`Self::set_linear_backend_factory`]
     /// and the HSL MA57 backend leave the sink empty.
     linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// Shared tally of successful linear-solver quality escalations for
+    /// the current solve (gh#857). Handed to every `AlgorithmBuilder`
+    /// this application mints — [`Self::algorithm_builder_from_options`]
+    /// and [`Self::algorithm_builder_snapshot`] — which is how the
+    /// restoration sub-solve counts into the same total: each frontend
+    /// builds the restoration provider's inner builder from
+    /// `algorithm_builder_from_options`, so it receives this same `Rc`
+    /// without any frontend having to know the counter exists.
+    ///
+    /// Reset at the top of every solve, beside the linear-solver summary
+    /// sink and for the same reason: a second-opinion retry, or two
+    /// back-to-back `optimize_tnlp` calls, must not inherit the previous
+    /// solve's count. Read out into
+    /// [`SolveStatistics::quality_escalations`] once the solve returns.
+    quality_escalations: Rc<std::cell::Cell<u64>>,
     /// Phase 5c (§6) SQP warm-start input. When `Some`, the next
     /// `optimize_tnlp` call on the SQP path consumes the iterate
     /// instead of cold-starting; consumed once per solve, then
@@ -338,6 +353,7 @@ impl IpoptApplication {
             convex_routing_available: false,
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            quality_escalations: Rc::new(std::cell::Cell::new(0)),
             sqp_warm_start: None,
             sqp_last_working_set: None,
             crossover_report: None,
@@ -2394,7 +2410,10 @@ impl IpoptApplication {
     }
 
     fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
-        let mut builder = AlgorithmBuilder::default();
+        let mut builder = AlgorithmBuilder {
+            quality_escalation_counter: Some(Rc::clone(&self.quality_escalations)),
+            ..AlgorithmBuilder::default()
+        };
         apply_sqp_options(&self.options, &mut builder.sqp);
         apply_qp_subproblem_options(&self.options, &mut builder.sqp_qp);
         builder
@@ -2586,6 +2605,71 @@ impl IpoptApplication {
             _ => false,
         };
         if !retry_worthy {
+            return first_status;
+        }
+        // gh#857: decline the flip when the solve that just failed escalated
+        // the factorization and an escalation-off re-solve is enabled.
+        //
+        // The mu flip is a *blind* second opinion: it changes the barrier
+        // schedule and hopes. A `feral_increase_quality` escalation is a
+        // *measured* fact about the run that just failed -- FERAL reroutes
+        // which pivots are taken and never steps back down, so every
+        // iteration after the first escalation, restoration sub-solves
+        // included, ran on a trajectory the defaults do not describe. Flipping
+        // `mu_strategy` while leaving that in place is not a controlled
+        // experiment: it varies the knob that is not implicated and holds the
+        // one that is.
+        //
+        // It is not free either. On `square_flowsheet_resto`'s lbfgs leg the
+        // flip escalates 25 times all over again, burns a second full
+        // 3000-iteration budget, and ends no better than the first -- after
+        // which rung 4 of the second-opinion ladder converges the model in 178
+        // with the escalation off. That is 6178 real iterations to reach an
+        // answer that 3178 reach without the flip, and the flip contributes
+        // nothing to it. Measured both ways: `mu_strategy=adaptive` alone
+        // still gives 3000 with 25 escalations, and `feral_increase_quality=no`
+        // gives 178 under *either* mu strategy.
+        //
+        // Why decline rather than fold the escalation off into this retry: the
+        // backend factory is minted from an options snapshot taken by the
+        // caller *before* `solve()`, so writing `feral_increase_quality` here
+        // is too late to reach the retry's linear solver. `mu_strategy` is read
+        // per-solve from the option table and is not; that asymmetry is why
+        // this layer can only choose whether to spend the solve, not what to
+        // spend it on.
+        //
+        // Restricted to `Maximum_Iterations_Exceeded`, which is exactly the
+        // status rung 4 opens on. A `Solved_To_Acceptable_Level` exit opens no
+        // escalation rung, so declining there would drop a retry with nothing
+        // in its place. Gated on `feral_increase_quality_retry`, so setting
+        // that option to `no` restores the historical behaviour on both sides
+        // at once: no rung 4, and no decline here.
+        //
+        // The one place the stand-down is not paired with the rung is the
+        // multi-start paths (`solve_nlp_batch`, the CLI's `minima` search),
+        // which deliberately do not drive the ladder -- a failed start there is
+        // routine and extra solves per start multiply. Those paths lose the
+        // flip on an escalating budget exit and gain nothing back, which is the
+        // one behaviour change here that is not a strict improvement. It is the
+        // same trade they already take on every other rung, and for the same
+        // reason: an escalating capped start is one of many, and doubling its
+        // cost to re-run the trajectory the escalation governs is the worse end
+        // of it.
+        if matches!(
+            first_status,
+            ApplicationReturnStatus::MaximumIterationsExceeded
+        ) && self.quality_escalations.get() >= 1
+            && self
+                .options
+                .get_bool_value("feral_increase_quality_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true)
+            && self
+                .options
+                .get_bool_value("feral_increase_quality", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true)
+        {
             return first_status;
         }
         // Flip the strategy for one retry. The parser maps "adaptive" →
@@ -3064,6 +3148,9 @@ impl IpoptApplication {
                 debug_assert!(false, "linsol summary sink mutex poisoned");
             }
         }
+        // Same reasoning for the quality-escalation tally (gh#857): the
+        // number belongs to this solve, not to whatever ran before it.
+        self.quality_escalations.set(0);
 
         // Build adapter + Nlp. Honor `fixed_variable_treatment` (default
         // `make_parameter`; pounce additionally implements `relax_bounds`,
@@ -3633,6 +3720,10 @@ impl IpoptApplication {
             stats.restoration_inner_iters = alg.resto_inner_iters;
             stats.restoration_outer_iters = alg.resto_outer_iters;
             stats.restoration_wall_secs = alg.resto_wall_secs;
+            // gh#857. Read off the shared cell rather than the algorithm's
+            // own `PdFullSpaceSolver`, so restoration sub-solves — which
+            // run their own solver instance — are included.
+            stats.quality_escalations = self.quality_escalations.get() as Index;
             stats.iterations = captured_iters;
             // A refused starting point does not produce a valid iterate.
             // Leave final objective/residual fields at their NaN defaults.
@@ -3852,6 +3943,10 @@ impl IpoptApplication {
     /// + prefix` and falls back to the outer setting.
     pub fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
         let mut builder = AlgorithmBuilder::new();
+        // gh#857: share this application's escalation tally. Every
+        // frontend builds the restoration provider's inner builder from
+        // this method, so restoration escalations aggregate here too.
+        builder.quality_escalation_counter = Some(Rc::clone(&self.quality_escalations));
 
         // `mehrotra_algorithm` is parsed first so its cascading
         // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
@@ -5239,13 +5334,17 @@ pub fn feral_config_from_options(
     // exact legs, one gaining 16% of its iterations and the other losing its
     // verdict.
     //
-    // So the default stands and `feral_increase_quality=no` is the documented
-    // recovery for a model this rung costs. Resolving it properly needs a
-    // *revertible* escalation — one that does not govern every later
-    // factorization — which FERAL's ladder cannot express today (`quality_level`
-    // only ratchets up) -- filed upstream as jkitchin/feral#192 and tracked as
-    // gh#857, which is also where this option should be retired if the reset
-    // makes it moot. See `dev-notes/second-opinion-promotions-in-the-sweep.md`.
+    // So the default stands, and the losing direction now recovers itself:
+    // `feral_increase_quality_retry` (gh#857) re-solves once with this off when
+    // a solve that actually escalated ends `Restoration_Failed` or
+    // `Maximum_Iterations_Exceeded`.
+    //
+    // It is a re-solve rather than a *revertible* escalation because the
+    // revertible one was tried. jkitchin/feral#192 landed as `reset_quality`,
+    // was plumbed here and instrumented (376 escalations, 376 matching resets
+    // on one solve), and recovers neither leg at either re-baselining boundary
+    // -- the harm is the destination, not the duration. See
+    // `dev-notes/second-opinion-promotions-in-the-sweep.md`.
     if let Ok((v, true)) = options.get_bool_value("feral_increase_quality", "") {
         cfg.increase_quality = v;
     }

@@ -120,7 +120,7 @@ impl SecondOpinionOutcome {
     }
 }
 
-/// Re-solve a failed solve along up to three different trajectories, and
+/// Re-solve a failed solve along up to four different trajectories, and
 /// promote one only if it converges.
 ///
 /// Call this *after* a solve that returned a failing status, passing that
@@ -133,7 +133,7 @@ impl SecondOpinionOutcome {
 /// silently.
 ///
 /// **Not for multi-start drivers.** A failed start is routine in a multi-start
-/// search, and paying up to three extra solves per failed start multiplies
+/// search, and paying up to four extra solves per failed start multiplies
 /// cost for no benefit — `solve_nlp_batch` and the CLI's `minima` search
 /// deliberately do not call this.
 pub fn run_second_opinion_ladder(
@@ -146,7 +146,11 @@ pub fn run_second_opinion_ladder(
     let Some(trigger) = SecondOpinionTrigger::for_status(status) else {
         return SecondOpinionOutcome::unchanged(status, statistics);
     };
-    let avail = SecondOpinionAvailability::from_options(app.options(), trigger);
+    let avail = SecondOpinionAvailability::from_options(
+        app.options(),
+        trigger,
+        statistics.quality_escalations.max(0) as u64,
+    );
     let rungs = second_opinion_rungs(avail);
     if rungs.is_empty() {
         return SecondOpinionOutcome::unchanged(status, statistics);
@@ -250,7 +254,7 @@ pub fn run_second_opinion_ladder(
     }
 }
 
-/// The three options the rungs write, captured well enough to put back.
+/// The four options the rungs write, captured well enough to put back.
 ///
 /// `Option<String>` / `Option<f64>` is "was it set", not "what does it read
 /// as": an unset `feral_scaling` still *reads* as a resolved strategy, and
@@ -260,6 +264,12 @@ struct OptionSnapshot {
     feral_scaling: Option<String>,
     mu_strategy: Option<String>,
     start_point_perturbation: Option<Number>,
+    /// gh#857's rung. A `bool` and not a `String`: it is registered as a
+    /// bool option, and `Option<bool>` here is still "was it set" — the
+    /// default is `yes`, so writing back a resolved `yes` on a knob the
+    /// caller never touched would pin it against a future default change,
+    /// which is the same class of bug the `mu_strategy` note above records.
+    feral_increase_quality: Option<bool>,
 }
 
 impl OptionSnapshot {
@@ -277,10 +287,14 @@ impl OptionSnapshot {
                 .get_numeric_value("start_point_perturbation", "")
                 .ok()
                 .and_then(|(v, found)| found.then_some(v)),
+            feral_increase_quality: opts
+                .get_bool_value("feral_increase_quality", "")
+                .ok()
+                .and_then(|(v, found)| found.then_some(v)),
         }
     }
 
-    /// Restore the three knobs to the baseline's **set-ness**, not merely
+    /// Restore the four knobs to the baseline's **set-ness**, not merely
     /// its values: a knob the caller left unset is `unset_value`d, never
     /// written back as whatever it resolved to. Called before every rung
     /// as well as once at the end, so `&self`.
@@ -308,6 +322,14 @@ impl OptionSnapshot {
             }
             None => {
                 opts.unset_value("start_point_perturbation");
+            }
+        }
+        match self.feral_increase_quality {
+            Some(v) => {
+                let _ = opts.set_bool_value("feral_increase_quality", v, true, true);
+            }
+            None => {
+                opts.unset_value("feral_increase_quality");
             }
         }
     }
@@ -755,7 +777,7 @@ mod tests {
     #[test]
     fn each_rung_starts_from_the_baseline() {
         let mut app = IpoptApplication::new();
-        // A baseline that sets none of the three knobs — the common case, and
+        // A baseline that sets none of the four knobs — the common case, and
         // the only one in which the old write-back was observable.
         let baseline = OptionSnapshot::take(&app);
         let rungs = second_opinion_rungs(SecondOpinionAvailability {
@@ -766,6 +788,13 @@ mod tests {
             already_mc64: false,
             already_adaptive: false,
             already_perturbed: false,
+            increase_quality_retry_enabled: true,
+            already_no_increase_quality: false,
+            // A local-infeasibility ladder never reaches rung 4 whatever this
+            // reads, but it is set to 0 to keep this test about the three
+            // rungs it names; `each_restoration_rung_starts_from_the_baseline`
+            // is where the fourth knob's set-ness is checked.
+            baseline_quality_escalations: 0,
             baseline_scaling: Some("auto"),
         });
         assert_eq!(rungs.len(), 3, "{:?}", rung_labels(&rungs));
@@ -797,6 +826,75 @@ mod tests {
                  start_point_perturbation] is wrong",
             );
         }
+    }
+
+    /// The same set-ness contract for the ladder gh#857 opens, which is the
+    /// only one that reaches the fourth knob.
+    ///
+    /// Worth its own test rather than a row in the one above because no
+    /// single trigger produces all four rungs: rungs 1 and 2 are gated on
+    /// `LocalInfeasibility` and rung 4 on a restoration failure or a budget
+    /// exit. A four-row table would have had to assert a ladder the code
+    /// cannot build.
+    #[test]
+    fn each_restoration_rung_starts_from_the_baseline() {
+        let mut app = IpoptApplication::new();
+        let baseline = OptionSnapshot::take(&app);
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::RestorationFailure,
+            scaling_retry_enabled: true,
+            mu_retry_enabled: true,
+            perturbed_start_retry_enabled: true,
+            already_mc64: false,
+            already_adaptive: false,
+            already_perturbed: false,
+            increase_quality_retry_enabled: true,
+            already_no_increase_quality: false,
+            baseline_quality_escalations: 2,
+            baseline_scaling: Some("auto"),
+        });
+        assert_eq!(rungs.len(), 2, "{:?}", rung_labels(&rungs));
+
+        let expected = [
+            ("start_point_perturbation=1e-2", [true, false]),
+            ("feral_increase_quality=no", [false, true]),
+        ];
+        for (rung, (label, want)) in rungs.iter().zip(expected) {
+            assert_eq!(rung.label, label);
+            baseline.apply(&mut app);
+            for a in &rung.assignments {
+                app.options_mut().read_from_str(a, true).unwrap();
+            }
+            let opts = app.options();
+            let got = [
+                matches!(
+                    opts.get_numeric_value("start_point_perturbation", ""),
+                    Ok((_, true))
+                ),
+                matches!(
+                    opts.get_bool_value("feral_increase_quality", ""),
+                    Ok((_, true))
+                ),
+            ];
+            assert_eq!(
+                got, want,
+                "rung `{label}`: set-ness of [start_point_perturbation, \
+                 feral_increase_quality] is wrong — the snapshot must undo \
+                 the previous rung, and must undo it to *unset*",
+            );
+        }
+
+        // And the restore at the end puts the fourth knob back to unset,
+        // which is what stops a ladder from leaving `feral_increase_quality`
+        // pinned to `no` for every later solve of the same application.
+        baseline.apply(&mut app);
+        assert!(
+            matches!(
+                app.options().get_bool_value("feral_increase_quality", ""),
+                Ok((_, false))
+            ),
+            "the ladder left feral_increase_quality set"
+        );
     }
 
     fn rung_labels(

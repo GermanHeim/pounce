@@ -291,9 +291,19 @@ pub struct FeralConfig {
     /// factorization, or must decline the rung (gh #850).
     ///
     /// `true` here — the library default — because a caller that has no other
-    /// recourse when a factorization cannot deliver wants the ladder. The NLP
-    /// binding sets it `false`; `feral_config_from_options` explains why, and
-    /// `feral_increase_quality` is the option that turns it back on.
+    /// recourse when a factorization cannot deliver wants the ladder, and the
+    /// NLP binding **leaves it there**: `feral_config_from_options` overrides
+    /// this field only when `feral_increase_quality` was explicitly set, and
+    /// that option's own default is `yes`.
+    ///
+    /// This doc read "the NLP binding sets it `false`" until gh#857, which is
+    /// what gh#850 originally proposed and not what shipped — gh#850 landed the
+    /// escalation on by default with an option to decline it, because it is
+    /// two-sided (it buys 15–25% of the iterations on `deb7` and loses whole
+    /// solves on `square_flowsheet_resto`). `feral_config_from_options` carries
+    /// the measurement; `feral_increase_quality` is the option that turns it
+    /// off, and `feral_increase_quality_retry` is the rung that undoes it
+    /// automatically when it is what walked a solve into a wall.
     pub increase_quality: bool,
     /// How many correction steps feral's inner refinement may take per
     /// back-solve, when [`Self::refine`] is on. Passed straight through

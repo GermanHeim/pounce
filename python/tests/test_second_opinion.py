@@ -5,7 +5,7 @@ embedding POUNCE did not get it — which was backwards. A caller reaching the
 solver from a modelling layer is the one most likely to hand over an
 uninitialized starting point, an uninitialized decision variable arrives as a
 zero, and the origin is exactly where a squared slack or a homogeneous
-quadratic loses rank. These tests pin the four things that move when the
+quadratic loses rank. These tests pin the things that move when the
 ladder becomes a library feature.
 """
 
@@ -49,7 +49,22 @@ LADDER_OFF = {
     "feral_infeasibility_scaling_retry": "no",
     "infeasibility_mu_strategy_retry": "no",
     "infeasibility_perturbed_start_retry": "no",
+    # Rung 4 (gh#857). It is the conditional rung — see `_expected_rungs` —
+    # but "the whole ladder off" has to name it regardless, or the one model
+    # here that does escalate still pays for a solve with the ladder off.
+    "feral_increase_quality_retry": "no",
 }
+
+#: The rungs the ladder always has, in order.
+FIXED_RUNGS = [
+    "feral_scaling=mc64",
+    "mu_strategy=adaptive",
+    "start_point_perturbation=1e-2",
+]
+
+#: Rung 4, which undoes a linear-solver quality escalation the base solve
+#: made (gh#857).
+QUALITY_RUNG = "feral_increase_quality=no"
 
 
 def _solve(obj, n=1, m=1, x0=(0.5,), **options):
@@ -64,6 +79,31 @@ def _solve(obj, n=1, m=1, x0=(0.5,), **options):
     return prob.solve(list(x0))
 
 
+def _expected_rungs(*, without=()):
+    """The rung list this platform should produce, measured rather than
+    written down.
+
+    Rung 4 opens only when the base solve escalated the linear solver's pivot
+    quality at least once — undoing an escalation that never happened is a
+    re-run of the solve that just failed. Whether a given model escalates is
+    a property of the platform's arithmetic and not of the model: gh#857's
+    own CLI fixture `deb7` escalates twice on macOS/aarch64 and zero times on
+    linux/x86_64, and a test that writes a count down instead of measuring it
+    is red on one of the two. `NoRealSolution` happens to escalate once on
+    both, so the four-rung branch is the one taken here — but that is the
+    measurement's answer, not this test's premise.
+
+    The base solve is run with the ladder off, so its `quality_escalations`
+    is the base solve's own count and not the last rung's (the counter resets
+    per solve).
+    """
+    _, base = _solve(NoRealSolution(), **LADDER_OFF)
+    rungs = list(FIXED_RUNGS)
+    if base["quality_escalations"] >= 1:
+        rungs.append(QUALITY_RUNG)
+    return [r for r in rungs if r not in without]
+
+
 def test_a_converged_solve_pays_nothing():
     """The common path. `second_opinion` is `None`, so no extra solve ran."""
     _, info = _solve(Quadratic(), m=0, x0=(0.0,))
@@ -71,16 +111,12 @@ def test_a_converged_solve_pays_nothing():
     assert info["second_opinion"] is None
 
 
-def test_an_infeasible_verdict_is_re_solved_three_ways_before_it_ships():
+def test_an_infeasible_verdict_is_re_solved_every_way_before_it_ships():
     _, info = _solve(NoRealSolution())
     assert info["status_msg"] == "Infeasible_Problem_Detected"
     so = info["second_opinion"]
     assert so is not None, "the ladder did not run — this is the CLI-only bug"
-    assert so["tried"] == [
-        "feral_scaling=mc64",
-        "mu_strategy=adaptive",
-        "start_point_perturbation=1e-2",
-    ]
+    assert so["tried"] == _expected_rungs()
     # Nothing recovers a problem that has no solution, and the original
     # verdict is the one that ships.
     assert so["promoted_by"] is None
@@ -90,10 +126,14 @@ def test_an_infeasible_verdict_is_re_solved_three_ways_before_it_ships():
 
 def test_each_rung_can_be_turned_off_independently():
     _, info = _solve(NoRealSolution(), infeasibility_mu_strategy_retry="no")
-    assert info["second_opinion"]["tried"] == [
-        "feral_scaling=mc64",
-        "start_point_perturbation=1e-2",
-    ]
+    assert info["second_opinion"]["tried"] == _expected_rungs(
+        without=("mu_strategy=adaptive",)
+    )
+    # Rung 4 carries its own switch too, and this is the arm that pins it:
+    # dropping it leaves exactly the three fixed rungs on every platform,
+    # whether or not the base solve escalated.
+    _, info = _solve(NoRealSolution(), feral_increase_quality_retry="no")
+    assert info["second_opinion"]["tried"] == FIXED_RUNGS
 
 
 def test_turning_the_whole_ladder_off_restores_upstream_behaviour():
