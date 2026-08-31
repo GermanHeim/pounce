@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+- **The negative-curvature escape now finds the witness it is asked for, on
+  saddles whose curvature lies along a coordinate axis (gh #797 follow-up).**
+  gh #797 added the second-order question and `neg_curv_escapes` to answer it;
+  the gate worked, but the *search* behind it declined often enough that the
+  defect it was written to fix stayed reachable. At default options
+  `min ½(x₀² − 1.05·x₁²)` on `[-2, 2]²` from the origin reported
+  `Optimal Solution Found` at the saddle, objective `0`, against a true minimum
+  of `-2.1` — and the same model with its two variables *renamed* answered
+  `-2.1`, because what actually decided the outcome was the overlap between the
+  negative-curvature eigenvector and the probe's fixed seed. Measured over
+  diagonal indefinite models with one negative eigenvalue, 114 of 300 (28–45%
+  per dimension, n = 2..6) certified the saddle.
+
+  Two compounding causes, both now fixed in
+  `PdFullSpaceSolver::negative_curvature_direction`:
+
+  - The shift ladder climbs by ×10 and stopped at the first rung that factored,
+    so it could overshoot `|λ_min|` by a decade. On the model above it rejects
+    `δ = 1` and takes `δ = 10`, leaving eigenvalues `(11, 8.95)` — a ratio of
+    0.81, at which inverse iteration separates almost nothing. The ladder now
+    keeps its bracket and bisects it geometrically
+    (`NEG_CURV_SHIFT_REFINEMENTS`, 8 rungs, a decade down to ~2%), then
+    re-factors at the tightened shift.
+  - Only three inverse iterations ran, amplifying the negative direction by
+    `1.9×` on that spectrum. `NEG_CURV_INVERSE_ITERS` is now 20, matching the
+    QP arm's `neg_curv_probe_iters`.
+
+  Both are individually sufficient on the regression fixture and are kept
+  together deliberately — a wider spectrum starves 20 iterations too, and an
+  exact shift still needs iterations to converge. The declining branch also no
+  longer returns in silence: it logs that a shift *was* required, so "the
+  reduced Hessian is positive definite here" is no longer indistinguishable
+  from "no witness was found".
+
+  `crates/pounce-qp/src/negcurv.rs` (gh #848) had already been given both
+  treatments for the same reason on the QP arm; this brings the NLP arm level.
+  Found by the adversary agent while probing the PRs merged 2026-08-24..31.
+  The full CLI fixture corpus is **unmoved on both legs** (79 fixtures × exact
+  and limited-memory), so this is not a trajectory change on anything the
+  corpus covers — no fixture reaches the declining branch, which is why nothing
+  saw it. `neg_curv_escapes=0` still reports the first-order certificate.
+
 - **Added FBBT support to `pounce-rs`.** `presolve_fbbt=yes` now runs
   feasibility-based bound tightening when an `ExpressionProvider` is
   available; `Solution::fbbt_report` exposes diagnostics and
