@@ -9,6 +9,60 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
+  (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
+  `dlambda/dp`, but the objective was rejected — `ValueError: obj: not a
+  variable of the solved model` — so there was no route to the derivative of
+  the objective with respect to a declared parameter at all. That is one of the
+  most commonly wanted sensitivity quantities: outer-loop optimization,
+  design-of-experiments scoring, "which parameter is my objective most exposed
+  to".
+
+  ```python
+  sens_jacobian(m.obj, wrt=m.p1)   # df/dp1
+  ```
+
+  Both halves of
+
+      df/dp = df/dp|_x + sum_i (df/dx_i)(dx_i/dp)
+
+  are included, and they fall out of a single contraction rather than being
+  assembled from separate blocks. `declare_sens_param` has already rewritten a
+  declared parameter into a variable pinned by a defining equality, so `p` is an
+  ordinary coordinate of the solve: the objective gradient carries `df/dp|_x` in
+  `p`'s own slot and the derivative column carries `dp/dp = 1` there. That
+  matters for correctness, not elegance — on `min (x - p)^2 + 3 p^2` subject to
+  `x + y == 5` the optimum sits at `x = p`, every `df/dx_i` is zero, and a
+  chain-rule-only reading returns `0` instead of `6p`. Nothing about that `0`
+  looks wrong.
+
+  Deliberately **not** added, per the issue: a flat-block `get_dfds_dcds`
+  equivalent, or raw `grad_p c` / `grad_p f` partials. POUNCE's convention —
+  pass the Pyomo object, get a number — cannot be misindexed by construction,
+  and the total derivative is the quantity with obvious demand and no new index
+  convention.
+
+  Only the **active** objective of the solved model is accepted; a deactivated
+  one left on the model from another formulation is refused by name rather than
+  answered with the solved objective's gradient.
+
+  The three dimensions `crates/pounce-sensitivity/tests/sens_invariance_legs.rs`
+  defends are covered for the new accessor in
+  `pyomo-pounce/tests/test_issue_878_objective_total_derivative.py`. Every
+  expected value there is computed **without a solver** — in closed form or by
+  hand — so none of it is a number POUNCE produced; a live Ipopt re-solve
+  confirms the closed forms on top of that, and is skipped where Ipopt is
+  absent rather than required. They are not rows in the Rust legs:
+  the accessor is in the Pyomo layer, because `pounce-sensitivity`'s `Solver`
+  exposes no objective gradient, and rows there would test a path that does not
+  exist. Leg 3's dimension is the one that bites here — `df/dp` is a scalar
+  contracted over the whole step, so contracting a full-x gradient with a var-x
+  step would pair every `df/dx_i` with a neighbouring variable's sensitivity
+  from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
+  asserts the index spaces really do diverge before trusting the leg.
+
 ### Fixed
 - **FBBT no longer cuts feasible points three separate ways (gh #877).** The
   2026-08-31 adversarial audit (seam F) found three independent unsoundnesses
@@ -392,58 +446,6 @@ changes.
   *about*. New `back_translate_verified_inertia` takes the claim;
   `back_translate_verified` keeps its signature and its `Psd` behaviour, under
   which the screen never runs and costs nothing.
-- **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
-  (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
-  `dlambda/dp`, but the objective was rejected — `ValueError: obj: not a
-  variable of the solved model` — so there was no route to the derivative of
-  the objective with respect to a declared parameter at all. That is one of the
-  most commonly wanted sensitivity quantities: outer-loop optimization,
-  design-of-experiments scoring, "which parameter is my objective most exposed
-  to".
-
-  ```python
-  sens_jacobian(m.obj, wrt=m.p1)   # df/dp1
-  ```
-
-  Both halves of
-
-      df/dp = df/dp|_x + sum_i (df/dx_i)(dx_i/dp)
-
-  are included, and they fall out of a single contraction rather than being
-  assembled from separate blocks. `declare_sens_param` has already rewritten a
-  declared parameter into a variable pinned by a defining equality, so `p` is an
-  ordinary coordinate of the solve: the objective gradient carries `df/dp|_x` in
-  `p`'s own slot and the derivative column carries `dp/dp = 1` there. That
-  matters for correctness, not elegance — on `min (x - p)^2 + 3 p^2` subject to
-  `x + y == 5` the optimum sits at `x = p`, every `df/dx_i` is zero, and a
-  chain-rule-only reading returns `0` instead of `6p`. Nothing about that `0`
-  looks wrong.
-
-  Deliberately **not** added, per the issue: a flat-block `get_dfds_dcds`
-  equivalent, or raw `grad_p c` / `grad_p f` partials. POUNCE's convention —
-  pass the Pyomo object, get a number — cannot be misindexed by construction,
-  and the total derivative is the quantity with obvious demand and no new index
-  convention.
-
-  Only the **active** objective of the solved model is accepted; a deactivated
-  one left on the model from another formulation is refused by name rather than
-  answered with the solved objective's gradient.
-
-  The three dimensions `crates/pounce-sensitivity/tests/sens_invariance_legs.rs`
-  defends are covered for the new accessor in
-  `pyomo-pounce/tests/test_issue_878_objective_total_derivative.py`. Every
-  expected value there is computed **without a solver** — in closed form or by
-  hand — so none of it is a number POUNCE produced; a live Ipopt re-solve
-  confirms the closed forms on top of that, and is skipped where Ipopt is
-  absent rather than required. They are not rows in the Rust legs:
-  the accessor is in the Pyomo layer, because `pounce-sensitivity`'s `Solver`
-  exposes no objective gradient, and rows there would test a path that does not
-  exist. Leg 3's dimension is the one that bites here — `df/dp` is a scalar
-  contracted over the whole step, so contracting a full-x gradient with a var-x
-  step would pair every `df/dx_i` with a neighbouring variable's sensitivity
-  from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
-  asserts the index spaces really do diverge before trusting the leg.
-
 - **A `mu_strategy_fallback` retry that loses now gives back the answer it
   displaced, not just the status (pounce#870).** The retry re-solves under the
   flipped barrier schedule and promotes only on `Solve_Succeeded`; otherwise the
