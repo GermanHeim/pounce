@@ -29,10 +29,10 @@ from pyomo.dae import ContinuousSet, DerivativeVar
 from pyomo.opt import TerminationCondition
 from pyomo_cvp import declare_profile
 from pyomo_pounce import (
-    active_set_changes,
     declare_sens_param,
-    estimate,
-    estimate_report,
+    sens_active_set_changes,
+    sens_solution,
+    sens_solution_report,
 )
 
 import pyomo_pounce  # noqa: F401 -- registers SolverFactory("pounce")
@@ -659,7 +659,7 @@ def _corrected_update(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         started = time.perf_counter()
-        report = estimate_report(
+        report = sens_solution_report(
             background,
             perturbation,
             mode=mode,
@@ -668,7 +668,7 @@ def _corrected_update(
             degeneracy_iter=config.degeneracy_iter,
             corrector_iter=corrector_iter,
         )
-        values = estimate(
+        values = sens_solution(
             background,
             perturbation,
             mode=mode,
@@ -689,7 +689,7 @@ def _corrected_update(
         if policy in ("path", "guarded_path"):
             events = tuple(
                 _event_label(event)
-                for event in active_set_changes(
+                for event in sens_active_set_changes(
                     background,
                     perturbation,
                     predictor_iter=config.predictor_iter,
@@ -812,7 +812,7 @@ def _diagnostics(
     full_solve_latency_s: float | None,
     events: tuple[str, ...],
 ) -> CorrectionDiagnostics:
-    """Translate an EstimateReport into a durable event record."""
+    """Translate an SolutionReport into a durable event record."""
     corrector = report.corrector or {}
     return CorrectionDiagnostics(
         accepted=accepted,
@@ -1263,7 +1263,7 @@ def directional_degeneracy_experiment(
         (base.model.zc0, full_state[0]),
         (base.model.zt0, full_state[1]),
     ]
-    record = active_set_changes(
+    record = sens_active_set_changes(
         base.model,
         full_perturbation,
         predictor_iter=cfg.predictor_iter,
@@ -1291,7 +1291,7 @@ def directional_degeneracy_experiment(
         ]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            one_sided = estimate(
+            one_sided = sens_solution(
                 held.model,
                 perturbation,
                 mode="path",
@@ -1299,7 +1299,7 @@ def directional_degeneracy_experiment(
                 predictor_iter=cfg.predictor_iter,
                 corrector_iter=0,
             )
-            directional = estimate(
+            directional = sens_solution(
                 held.model,
                 perturbation,
                 mode="path",
@@ -1308,7 +1308,7 @@ def directional_degeneracy_experiment(
                 predictor_iter=cfg.predictor_iter,
                 corrector_iter=0,
             )
-            report = estimate_report(
+            report = sens_solution_report(
                 held.model,
                 perturbation,
                 mode="path",
@@ -1319,7 +1319,7 @@ def directional_degeneracy_experiment(
             )
             events = tuple(
                 _event_label(event)
-                for event in active_set_changes(
+                for event in sens_active_set_changes(
                     held.model,
                     perturbation,
                     predictor_iter=cfg.predictor_iter,

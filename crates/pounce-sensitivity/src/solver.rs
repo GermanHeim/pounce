@@ -1169,6 +1169,42 @@ impl Solver {
         ))
     }
 
+    /// The all-released step: the plain parametric step solved with
+    /// every weakly active bound's row released, and nothing decided.
+    ///
+    /// This is [`Self::parametric_step_directional`]'s first
+    /// back-solve returned as the answer instead of refined. The
+    /// caller trades the engagement's budget for whatever violations
+    /// the released direction carries at weak bounds the perturbation
+    /// actually holds, which come back as crossings for the mode's
+    /// clamp, pins, or path segments, or for a correction, to handle.
+    /// A clean base point takes the plain step. Returns the direction
+    /// over the model's variables and the number of rows released.
+    pub fn parametric_step_release_all(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+    ) -> Result<(Vec<Number>, usize), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let weak = self.weakly_active_bounds()?;
+        let ctx = self.bound_context(None)?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
+        let mut d = vec![0.0; state.backsolver.dim()];
+        // solve_released is the whole mechanism: an empty released set
+        // is the plain solve, and shift = false matches the
+        // directional path's all-released solve, whose rationale lives
+        // on `solve_released_inner`.
+        if !state
+            .backsolver
+            .solve_released(&released, &rhs_plain, &mut d)
+        {
+            return Err(SolverError::BacksolveFailed);
+        }
+        Ok((d[..ctx.n_x].to_vec(), released.len()))
+    }
+
     /// The eq. 14 directional derivative, decided by pounce-qp over
     /// the weak rows the direction engages.
     ///

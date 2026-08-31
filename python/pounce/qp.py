@@ -587,6 +587,13 @@ def _psd_verdict(P, c, check_psd):
     if check_psd is False:
         return None
     n = np.asarray(c, dtype=np.float64).ravel().shape[0]
+    # Before reading `P`, not after: the guard builds an (n, n) workspace out
+    # of `P`'s own indices, so a mis-shaped `P` could reach numpy as an
+    # `IndexError` instead of the message `_validate` is written to give
+    # (gh #862). `_validate` runs later, in `_build` — too late to be the one
+    # that speaks on any entry point that checks the Hessian before it
+    # builds, which is all of them.
+    _validate_p_shape(P, n)
     verdict = _psd_verdict_coo(*_lower_triangle_coo(P, n), n)
     if verdict is None:
         warnings.warn(
@@ -629,6 +636,29 @@ def _mat_shape(mat):
     return sh if len(sh) == 2 else None
 
 
+def _validate_p_shape(P, n: int) -> None:
+    """Reject a ``P`` that is not ``(n, n)``, where ``n`` comes from ``c``.
+
+    Split out of :func:`_validate` because it also has to run *before* the
+    PSD guard, not only before the solve. The guard reads ``P``'s own index
+    pairs and writes them into an ``(n, n)`` workspace
+    (:func:`_lower_triangle_coo` -> :func:`_min_eig_lower_coo`), so a nonzero
+    in the lower triangle at a row index ``>= n`` indexed out of bounds and
+    surfaced as a raw ``IndexError`` from numpy — the precise message below
+    was unreachable on the default path, and only ``check_psd=False`` (which
+    skips the guard and lets :func:`_validate` run) produced it. See gh #862;
+    the guard being masked is the gh #113 shape check going missing.
+
+    That condition is about the *fill*, not only the shape, which is why the
+    check here is on the shape alone: ``np.eye(7, 5)`` has no nonzero past
+    row 4 and used to reach :func:`_validate` intact, while ``np.ones((7, 5))``
+    did not. Rejecting on shape catches both, and catches them before the
+    guard can read either."""
+    psh = _mat_shape(P)
+    if psh is not None and psh != (n, n):
+        raise ValueError(f"solve_qp: `P` has shape {psh} but must be ({n}, {n})")
+
+
 def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
     """Reject malformed inputs up front with a precise ``ValueError`` instead
     of a misleading solver status (issue #113): a shape mismatch otherwise
@@ -653,9 +683,7 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
     _finite("lb", lb, allow_inf=True)
     _finite("ub", ub, allow_inf=True)
 
-    psh = _mat_shape(P)
-    if psh is not None and psh != (n, n):
-        raise ValueError(f"solve_qp: `P` has shape {psh} but must be ({n}, {n})")
+    _validate_p_shape(P, n)
 
     for mname, mat, vname, vec in (("A", A, "b", b), ("G", G, "h", h)):
         sh = _mat_shape(mat)

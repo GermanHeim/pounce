@@ -1,4 +1,4 @@
-"""Tests for estimate(corrector_iter=...): Newton iterations on the
+"""Tests for sens_solution(corrector_iter=...): Newton iterations on the
 barrier system after the step, against an operator assembled at the
 predicted point."""
 import warnings
@@ -7,7 +7,7 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import declare_sens_param, estimate
+from pyomo_pounce import declare_sens_param, sens_solution
 
 
 def curved(p=1.0):
@@ -60,10 +60,10 @@ def pinning():
 
 
 def corrector_of(m, perturb, corrector_iter=8, mode="linear"):
-    """What the corrector did, from the report `estimate_report` builds."""
+    """What the corrector did, from the report `sens_solution_report` builds."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rep = pyomo_pounce.estimate_report(
+        rep = pyomo_pounce.sens_solution_report(
             m, perturb, corrector_iter=corrector_iter, mode=mode)
     return rep.corrector
 
@@ -102,7 +102,7 @@ def resolve_at(newval):
 def estimated(m, newval, **kw):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        est = estimate(m, [(m.p, newval)], **kw)
+        est = sens_solution(m, [(m.p, newval)], **kw)
     return est[m.x], est[m.y]
 
 
@@ -198,11 +198,11 @@ def test_a_release_the_step_hides_is_corrected_partway():
     # base point holds, and only a mode that releases can follow
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        corrected = estimate(m, [(m.p, 2.0)], corrector_iter=6)[m.x]
+        corrected = sens_solution(m, [(m.p, 2.0)], corrector_iter=6)[m.x]
         msgs = [str(x.message) for x in w]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        plain = estimate(m, [(m.p, 2.0)])[m.x]
+        plain = sens_solution(m, [(m.p, 2.0)])[m.x]
     assert not any("corrector spent" in x for x in msgs), (
         f"the residual genuinely falls here, so no warning: {msgs}")
     assert abs(corrected - tx) < abs(plain - tx) / 2, (
@@ -223,7 +223,7 @@ def test_the_corrector_reaches_a_bound_the_step_arrives_at():
     # answer is x on its lower bound at 0
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        corrected = estimate(m, [(m.p, -4.0)], corrector_iter=6)[m.x]
+        corrected = sens_solution(m, [(m.p, -4.0)], corrector_iter=6)[m.x]
         msgs = [str(x.message) for x in w]
     assert corrected == pytest.approx(0.0, abs=1e-8), (
         f"the corrector should land on the bound, got {corrected}")
@@ -231,12 +231,12 @@ def test_the_corrector_reaches_a_bound_the_step_arrives_at():
         f"a correction that worked must not warn: {msgs}")
 
 
-def test_estimate_report_carries_what_the_corrector_did():
+def test_sens_solution_report_carries_what_the_corrector_did():
     m = solved()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        plain = pyomo_pounce.estimate_report(m, [(m.p, 1.6)])
-        rep = pyomo_pounce.estimate_report(m, [(m.p, 1.6)], corrector_iter=8)
+        plain = pyomo_pounce.sens_solution_report(m, [(m.p, 1.6)])
+        rep = pyomo_pounce.sens_solution_report(m, [(m.p, 1.6)], corrector_iter=8)
     assert plain.corrector is None
     c = rep.corrector
     assert c is not None

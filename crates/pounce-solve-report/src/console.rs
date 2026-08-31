@@ -576,6 +576,21 @@ pub fn print_summary(
             },
         );
     }
+    // gh#857. Printed only when the linear solver actually escalated, so a
+    // summary from a solve that never did stays byte-identical to
+    // upstream's — the same rule the restoration split above follows.
+    // Worth a line of its own because an escalation is not visible
+    // anywhere else in a default-verbosity run: it reroutes the rest of
+    // the solve (FERAL's ladder changes which pivots are taken and never
+    // steps back down), and until this line a reader comparing two runs
+    // had no way to tell that apart from an ordinary trajectory
+    // difference.
+    if stats.quality_escalations > 0 {
+        println!(
+            "Number of linear solver quality escalations          = {}",
+            stats.quality_escalations,
+        );
+    }
     println!(
         "Total seconds in POUNCE                              = {:.3}",
         stats.total_wallclock_time_secs

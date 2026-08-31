@@ -228,8 +228,8 @@ being applied.
 This works on both solve paths: the ordinary ASL/subprocess solve and
 the in-process path taken when the model carries [sensitivity
 declarations](sensitivity.md) — including the accessors themselves.
-`covariance()`, `information()`, `gradient()`, `estimate()` and
-`estimate_report()` read the
+`sens_covariance()`, `sens_information()`, `sens_jacobian()`,
+`sens_solution()` and `sens_solution_report()` read the
 solver's KKT factorization directly rather than through the scaling
 layer, so they carry the factors through their own natural-units
 translation and answer in your model's units on a variable-scaled solve

@@ -158,6 +158,36 @@ pub struct SolveStatistics {
     /// solve was restoration?" without running with high print_level.
     pub restoration_wall_secs: Number,
 
+    /// Successful linear-solver quality escalations over the whole solve
+    /// — the main loop's and every restoration sub-solve's — i.e. the
+    /// count of `q` flags in the info-string column (gh#857).
+    ///
+    /// An escalation is not an error and not, on its own, a problem: it
+    /// is how the IPM answers a factorization that will not deliver.
+    /// But with the FERAL backend it *reroutes the rest of the solve*,
+    /// because that backend's ladder changes which pivots are taken and
+    /// never steps back down, so a run that ends badly having escalated
+    /// is a different animal from one that ends badly without. Before
+    /// this counter the two were indistinguishable in a report, which is
+    /// why gh#857's regression had to be found by instrumenting a build.
+    ///
+    /// `0` on the SQP and convex paths, which never escalate, and on any
+    /// run whose backend declines to (`increase_quality` returning
+    /// `false` is not counted — this counts escalations that *happened*,
+    /// not escalations that were asked for).
+    ///
+    /// **On a laddered run this is the promoted solve's count, not the
+    /// base solve's** — the same rule `iteration_count` follows, and the
+    /// same trap. It is a sharp edge here because `feral_increase_quality_retry`
+    /// promotes a re-solve that by construction escalated zero times, so
+    /// a run whose base solve escalated twenty-five times reports `0`
+    /// once the recovery lands. That is not a lost number: the ladder
+    /// block records the base verdict alongside it, and
+    /// `feral_increase_quality_retry=no` reproduces the base solve
+    /// outright. The rung's own gate reads the base statistics inside the
+    /// driver, before any promotion, so the gate is unaffected.
+    pub quality_escalations: Index,
+
     // ---- Active-set SQP subproblem counters. ----
     //
     // Populated by `IpoptApplication::optimize_sqp_tnlp`; both stay 0
@@ -254,6 +284,7 @@ impl Default for SolveStatistics {
             restoration_inner_iters: 0,
             restoration_outer_iters: 0,
             restoration_wall_secs: 0.0,
+            quality_escalations: 0,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
             iterations: Vec::new(),

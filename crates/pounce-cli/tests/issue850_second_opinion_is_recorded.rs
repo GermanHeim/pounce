@@ -63,22 +63,65 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
-/// Solve `name` and return its JSON report as untyped text.
+/// The `.sol` and `.json` paths for ONE `report` call, unique per call
+/// rather than per (fixture, options).
 ///
-/// The output paths carry the *options* as well as the fixture name. Three
-/// tests here solve `PROMOTING` — with the rung on, with it off, and for the
-/// cost check — and cargo runs them on parallel threads, so a filename keyed
-/// on the fixture alone has them overwriting each other's report and reading
-/// whichever landed last. That is a race in the test, and it showed up as
-/// exactly one intermittently-red assertion.
-fn report(name: &str, extra: &[&str]) -> String {
+/// Three tests here solve `PROMOTING` — with the rung on, with it off, and
+/// for the cost check — and cargo runs them on parallel threads. Keying the
+/// name on the options was the first attempt at separating them, and it is
+/// one case short: `a_promotion_records_what_the_base_solve_did` and
+/// `the_true_cost_is_recorded_not_just_the_promoted_rungs` both pass no
+/// options at all, so both resolved to `pounce_850_square_flowsheet_resto_nl`
+/// and raced anyway. The symptom is not a wrong verdict but a missing one —
+/// the loser reads a half-written file, `string(&json, "status")` finds no
+/// key, and the assertion reads `left: None`. Seen on CI 2026-08-30.
+///
+/// The counter makes it per call by construction, so a fourth test on the
+/// same fixture and options cannot reintroduce it. The pid is for the other
+/// half: these files live in the shared temp dir and outlive the run, so a
+/// name that repeats across runs lets `json.exists()` be satisfied by a
+/// previous run's leftover while this run's solve is still writing.
+///
+/// Split out of `report` so the property can be asserted directly rather
+/// than waited for — see `two_calls_with_the_same_arguments_get_own_paths`.
+/// A timing bug that only opens under load is not something a green test run
+/// is evidence about.
+fn out_paths(name: &str, extra: &[&str]) -> (PathBuf, PathBuf) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+
     let dir = std::env::temp_dir();
     let tag: String = format!("{name}{}", extra.join("_"))
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let sol = dir.join(format!("pounce_850_{tag}.sol"));
-    let json = dir.join(format!("pounce_850_{tag}.json"));
+    let unique = format!(
+        "{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    (
+        dir.join(format!("pounce_850_{tag}_{unique}.sol")),
+        dir.join(format!("pounce_850_{tag}_{unique}.json")),
+    )
+}
+
+/// Two `report` calls that agree on every argument must still write to
+/// different files. This is the race above, stated as a property instead of
+/// a symptom: on the scheme this replaces the paths were a pure function of
+/// `(name, extra)`, so this assertion fails there by construction, which a
+/// re-run of the flaky test could never establish.
+#[test]
+fn two_calls_with_the_same_arguments_get_own_paths() {
+    let (sol_a, json_a) = out_paths(PROMOTING, &[]);
+    let (sol_b, json_b) = out_paths(PROMOTING, &[]);
+    assert_ne!(json_a, json_b, "two calls shared a JSON path");
+    assert_ne!(sol_a, sol_b, "two calls shared a .sol path");
+}
+
+/// Solve `name` and return its JSON report as untyped text.
+fn report(name: &str, extra: &[&str]) -> String {
+    let (sol, json) = out_paths(name, extra);
     let out = Command::new(pounce_exe())
         .arg(fixture(name))
         .arg(&sol)
@@ -92,7 +135,11 @@ fn report(name: &str, extra: &[&str]) -> String {
         "no JSON written for {name}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read_to_string(&json).expect("read json")
+    let text = std::fs::read_to_string(&json).expect("read json");
+    // Unique names would otherwise leave one pair per test per run behind.
+    let _ = std::fs::remove_file(&json);
+    let _ = std::fs::remove_file(&sol);
+    text
 }
 
 /// Pull `"key": <number>` out of the JSON text. Enough for this file, and it
@@ -131,11 +178,27 @@ fn string(json: &str, key: &str) -> Option<String> {
 const PROMOTING: &str = "square_flowsheet_resto.nl";
 
 /// The premise, asserted rather than assumed: this fixture's base solver really
-/// does fail, and the ladder really is what rescues it. Turning the rung off is
-/// how the report separates the two.
+/// does fail, and the ladder really is what rescues it. Turning the rungs off
+/// is how the report separates the two.
+///
+/// Note the plural. This test disables **every** rung the fixture's verdict
+/// can reach, which as of gh#857 is two: the displacement rung it was written
+/// against, and `feral_increase_quality_retry`, which opens on the same
+/// `Restoration_Failed` and recovers this leg by a different route (undoing
+/// the factorization escalation that produced the failure in the first place —
+/// see `issue850_increase_quality_regression.rs`). Leaving that one on turns
+/// "the base solver alone" into "the base solver plus one rung", and the
+/// premise reads `SolveSucceeded`. A rung added later that also catches
+/// `Restoration_Failed` belongs in this list for the same reason.
 #[test]
 fn the_base_solver_alone_does_not_solve_this_fixture() {
-    let json = report(PROMOTING, &["infeasibility_perturbed_start_retry=no"]);
+    let json = report(
+        PROMOTING,
+        &[
+            "infeasibility_perturbed_start_retry=no",
+            "feral_increase_quality_retry=no",
+        ],
+    );
     let status = string(&json, "status").expect("a status");
     assert_eq!(
         status, "RestorationFailed",

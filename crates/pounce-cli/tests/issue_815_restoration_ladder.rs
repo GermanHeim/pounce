@@ -102,13 +102,24 @@ fn a_restoration_failure_opens_the_ladder_and_the_displaced_start_recovers_it() 
     );
 }
 
-/// Turning rung 3 off leaves the restoration failure with no ladder at all,
-/// rather than falling back to the two rungs that are not evidence about it.
-/// This is also the escape hatch for a caller who wants upstream's
-/// one-solve-one-verdict behaviour.
+/// Turning off every rung a restoration failure can reach leaves it with no
+/// ladder at all, rather than falling back to the two rungs that are not
+/// evidence about it. This is also the escape hatch for a caller who wants
+/// upstream's one-solve-one-verdict behaviour.
+///
+/// "Every rung" is two as of gh#857, which added
+/// `feral_increase_quality_retry` — it opens on the same
+/// `Restoration_Failed` and recovers this fixture by a different route, so
+/// leaving it on announces a one-rung ladder and promotes. Rungs 1 and 2
+/// remain gated on local infeasibility, and the assertions below still prove
+/// that. A rung added later that catches this trigger belongs in this list;
+/// the test is the escape hatch, so it has to name the whole hatch.
 #[test]
 fn the_ladder_can_be_switched_off() {
-    let log = run(&["infeasibility_perturbed_start_retry=no"]);
+    let log = run(&[
+        "infeasibility_perturbed_start_retry=no",
+        "feral_increase_quality_retry=no",
+    ]);
     assert!(
         log.contains("EXIT: Restoration Failed!"),
         "still fails in restoration:\n{log}"

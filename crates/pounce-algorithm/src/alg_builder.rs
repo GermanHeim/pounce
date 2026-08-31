@@ -442,6 +442,20 @@ pub struct AlgorithmBuilder {
     /// The Schur solver falls back to the standard solver transparently when
     /// the partition is unsuitable. Set via [`Self::set_kkt_schur`].
     pub kkt_schur: Option<(Vec<usize>, pounce_feral::FeralConfig)>,
+    /// Shared tally of successful linear-solver quality escalations, handed
+    /// to the assembled
+    /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
+    /// by [`Self::build_with_backend`]. `None` leaves that solver with its
+    /// own private counter, which is what every test double and every
+    /// direct builder user gets.
+    ///
+    /// The point of sharing it is the restoration sub-solve: its inner
+    /// algorithm is assembled from a *clone* of this builder
+    /// (`resto_inner_solver::run_inner_resto`), so a `Some` here makes the
+    /// sub-solve's escalations land in the same total as the main loop's.
+    /// gh#857's exact leg escalates once in each, and counting only the
+    /// main loop would report half the trajectory change.
+    pub quality_escalation_counter: Option<Rc<std::cell::Cell<u64>>>,
 }
 
 /// Knobs read off `OptionsList` and baked into
@@ -1195,6 +1209,7 @@ impl Default for AlgorithmBuilder {
             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
             init: InitOptions::default(),
             kkt_schur: None,
+            quality_escalation_counter: None,
         }
     }
 }
@@ -1317,6 +1332,12 @@ impl AlgorithmBuilder {
         // nothing for a run that does not set it.
         pd_solver.neg_curv_test_tol = self.refinement.neg_curv_test_tol;
         pd_solver.neg_curv_test_reg = self.refinement.neg_curv_test_reg;
+        // gh#857: share the escalation tally with the caller, so the
+        // restoration sub-solve built from a clone of this builder counts
+        // into the same total.
+        if let Some(counter) = self.quality_escalation_counter.as_ref() {
+            pd_solver.set_quality_escalation_counter(Rc::clone(counter));
+        }
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         search_dir.fast_step_computation = self.fast_step_computation;
@@ -1768,6 +1789,7 @@ mod tests {
                             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
                             init: InitOptions::default(),
                             kkt_schur: None,
+                            quality_escalation_counter: None,
                         }
                         .build();
                     }

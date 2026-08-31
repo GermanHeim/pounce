@@ -36,7 +36,7 @@ because the information is not in the iterate.
 
 Three parts of POUNCE already pay for this:
 
-1. **Sensitivity.** `covariance()` classifies each constraint as STRONGLY
+1. **Sensitivity.** `sens_covariance()` classifies each constraint as STRONGLY
    ACTIVE / WEAKLY ACTIVE / **AMBIGUOUS (loosely converged)** / UNIDENTIFIED
    (see [Sensitivity Analysis](sensitivity.md)). The AMBIGUOUS class exists
    because the interior iterate cannot decide. Crossover collapses it.
@@ -239,7 +239,8 @@ the sensitivity path factors with it or classifies against it.
 
 The correction is applied at the consumer boundary, not on the live
 iterate: the relaxed bounds are still what the algorithm ran against, and
-nothing about the solve moves. It covers `covariance()`, `information()`,
+nothing about the solve moves. It covers `sens_covariance()`,
+`sens_information()`,
 `classify_activity()`, `compute_reduced_hessian`, the parametric steps,
 and the `SensSolve` builder, because all of them read the one held
 factor.

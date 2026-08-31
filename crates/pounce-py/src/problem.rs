@@ -1379,6 +1379,13 @@ pub(crate) fn build_info_dict<'py>(
     info.set_item("restoration_calls", stats.restoration_calls)?;
     info.set_item("restoration_outer_iters", stats.restoration_outer_iters)?;
     info.set_item("restoration_inner_iters", stats.restoration_inner_iters)?;
+    // gh#857. Same category of signal: an escalation reroutes the rest of
+    // the solve, so two runs with the same objective and iteration count
+    // are not the same run if this differs. Exposed here because the
+    // Python frontend selects `limited-memory` on its own whenever no
+    // exact Lagrangian Hessian is available, and the lbfgs leg is where
+    // gh#857's regression is worst.
+    info.set_item("quality_escalations", stats.quality_escalations)?;
 
     // Converged barrier parameter μ. Thread this into the next
     // warm-started solve's `mu_init` / `warm_start_target_mu` to seed

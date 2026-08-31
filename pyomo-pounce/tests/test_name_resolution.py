@@ -4,7 +4,7 @@ variable exactly once, when the solve loads its solution back.
 Every later query reads the captured objects: routing a name through
 `find_component` parses it through pyomo's component-UID lexer, and
 doing that per variable per call accumulated 0.87 s inside one
-`estimate()` call on the 62k-variable double column (N=25 Radau
+`sens_solution()` call on the 62k-variable double column (N=25 Radau
 collocation), timed on the method itself.
 """
 import warnings
@@ -14,7 +14,7 @@ import pytest
 import pyomo.environ as pyo
 from pyomo.core.base.block import BlockData
 
-from pyomo_pounce import declare_sens_param, estimate, gradient
+from pyomo_pounce import declare_sens_param, sens_solution, sens_jacobian
 
 
 def solved():
@@ -43,26 +43,26 @@ def _counting():
         BlockData, "find_component", autospec=True, side_effect=real)
 
 
-def test_estimate_resolves_no_names():
-    """An `estimate()` call parses no component names: the session
+def test_sens_solution_resolves_no_names():
+    """An `sens_solution()` call parses no component names: the session
     holds the solve's own variable objects. The parent resolved one
     name per solver column per call."""
     m = solved()
     with _counting() as fc:
-        est = estimate(m, [(m.p, 1.5)])
+        est = sens_solution(m, [(m.p, 1.5)])
     assert fc.call_count == 0, (
-        f"estimate resolved {fc.call_count} names through find_component")
+        f"sens_solution resolved {fc.call_count} names through find_component")
     assert est[m.x[0]] == pytest.approx(1.5)
 
 
-def test_gradient_resolves_no_names():
-    """`gradient(target=None)` walks every variable through the same
+def test_sens_jacobian_resolves_no_names():
+    """`sens_jacobian(of=None)` walks every variable through the same
     captured list."""
     m = solved()
     with _counting() as fc:
-        g = gradient(wrt=m.p)
+        g = sens_jacobian(wrt=m.p)
     assert fc.call_count == 0, (
-        f"gradient resolved {fc.call_count} names through find_component")
+        f"sens_jacobian resolved {fc.call_count} names through find_component")
     assert g[m.x[0], m.p] == pytest.approx(1.0)
 
 
@@ -71,11 +71,14 @@ def test_the_solution_map_is_read_only_and_complete():
     Mapping interface and rejects item assignment: a result describes
     one estimate."""
     m = solved()
-    est = estimate(m, [(m.p, 1.5)])
-    assert len(est) == 3
+    est = sens_solution(m, [(m.p, 1.5)])
+    # three model variables plus the substitute the in-place rewrite
+    # added for the folded param, itself an ordinary model variable
+    defs = m.component("_pounce_sens_defs")
+    assert len(est) == 4
     # component data is unhashable by design, so identity per position
     # is the membership check
-    expect = [m.x[0], m.x[1], m.x[2]]
+    expect = [m.x[0], m.x[1], m.x[2], defs.v[1]]
     assert all(a is b for a, b in zip(est, expect))
     assert [v for _k, v in est.items()] == [est[vd] for vd in expect]
     with pytest.raises(TypeError):
@@ -84,13 +87,13 @@ def test_the_solution_map_is_read_only_and_complete():
         est[m.p]
 
 
-def test_estimate_keys_are_the_models_own_variables():
+def test_sens_solution_keys_are_the_models_own_variables():
     """The solve runs on a clone, and the returned map must be keyed by
     the ORIGINAL model's data objects, identically, not by name-alikes:
     ComponentMap hashes by identity, so membership is the identity
     test."""
     m = solved()
-    est = estimate(m, [(m.p, 1.2)])
+    est = sens_solution(m, [(m.p, 1.2)])
     for i in range(3):
         assert m.x[i] in est
 
@@ -119,17 +122,17 @@ def test_the_report_resolves_row_names_only_for_a_crossing():
     """A report with nothing crossed resolves no names at all, and the
     first report that carries a crossed row resolves exactly the
     solve's row names, once per session: later reports and every
-    active_set_changes() call resolve nothing."""
-    from pyomo_pounce import active_set_changes, estimate_report
+    sens_active_set_changes() call resolve nothing."""
+    from pyomo_pounce import sens_active_set_changes, sens_solution_report
     from pyomo_pounce.sens import _REG
 
     m = solved()
     with _counting() as fc:
-        estimate_report(m, [(m.p, 1.5)])
+        sens_solution_report(m, [(m.p, 1.5)])
     assert fc.call_count == 0, (
         f"nothing crossed, so nothing resolves: {fc.call_count}")
     with _counting() as fc:
-        active_set_changes(m, [(m.p, 1.5)])
+        sens_active_set_changes(m, [(m.p, 1.5)])
     assert fc.call_count == 0, (
         f"the record resolves nothing: {fc.call_count}")
 
@@ -138,13 +141,13 @@ def test_the_report_resolves_row_names_only_for_a_crossing():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with _counting() as fc:
-            rep = estimate_report(m, [(m.p, 2.0)])
+            rep = sens_solution_report(m, [(m.p, 2.0)])
         assert len(rep.crossed_rows), "the fixture must cross its row"
         assert fc.call_count == len(session.con_names), (
             f"the first crossing resolves the row names once: "
             f"{fc.call_count} of {len(session.con_names)}")
         with _counting() as fc:
-            estimate_report(m, [(m.p, 2.0)])
+            sens_solution_report(m, [(m.p, 2.0)])
     assert fc.call_count == 0, (
         f"a later report resolves nothing: {fc.call_count}")
 
@@ -157,7 +160,7 @@ def test_a_deepcopied_result_answers_for_its_own_keys():
     import copy
 
     m = solved()
-    est = estimate(m, [(m.p, 1.5)])
+    est = sens_solution(m, [(m.p, 1.5)])
     cp = copy.deepcopy(est)
     new_keys = list(cp)
     assert new_keys[0] is not m.x[0]
@@ -173,9 +176,9 @@ def test_solution_maps_compare_by_contents_without_hashing_keys():
     raises on unhashable component data; the identity-index equality
     returns the bool ComponentMap returned."""
     m = solved()
-    a = estimate(m, [(m.p, 1.5)])
-    b = estimate(m, [(m.p, 1.5)])
-    c = estimate(m, [(m.p, 1.6)])
+    a = sens_solution(m, [(m.p, 1.5)])
+    b = sens_solution(m, [(m.p, 1.5)])
+    c = sens_solution(m, [(m.p, 1.6)])
     assert a == a
     assert a == b
     assert not (a == c)

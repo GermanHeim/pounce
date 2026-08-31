@@ -44,8 +44,15 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// The fixture solves on the second-opinion rung, which would hide the
-/// failing path this file is about — so the ladder is switched off.
+/// The fixture solves on a second-opinion rung, which would hide the failing
+/// path this file is about — so the ladder is switched off.
+///
+/// Both rungs a `Restoration_Failed` can reach have to be named: the gh#815
+/// displacement rung, and gh#857's `feral_increase_quality_retry`, which opens
+/// on the same verdict and recovers this fixture by undoing the factorization
+/// escalation. Leaving either on promotes a `Solve_Succeeded` and there is no
+/// restoration-terminating solve left to measure. A rung added later that
+/// catches this trigger belongs here too.
 fn run_to_restoration_failure() -> String {
     let mut model = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     model.push("tests");
@@ -57,6 +64,7 @@ fn run_to_restoration_failure() -> String {
         .arg(&model)
         .arg(&sol)
         .arg("infeasibility_perturbed_start_retry=no")
+        .arg("feral_increase_quality_retry=no")
         .output()
         .expect("spawn pounce");
     let _ = std::fs::remove_file(&sol);
