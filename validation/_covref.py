@@ -9,7 +9,7 @@ AMPL Solver Library interface (the same evaluators IPOPT uses); the KKT
 matrix is assembled and factored with scipy.sparse. Constraint multipliers
 are taken from the model's dual suffix (a solution property).
 
-This oracle matches pounce's covariance() to ~5e-16 on a linear regression
+This oracle matches pounce's sens_covariance() to ~5e-16 on a linear regression
 and ~1e-7 on a well-conditioned nonlinear fit (see p1_cho.py). It is exact
 in the mu->0 / well-conditioned limit; on a severely ill-conditioned reduced
 Hessian it loses precision because the only multipliers available to it are

@@ -7,7 +7,7 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import declare_sens_param, estimate, gradient
+from pyomo_pounce import declare_sens_param, sens_solution, sens_jacobian
 
 FD_H = 1e-5
 
@@ -43,10 +43,10 @@ def solved():
     return m
 
 
-def test_gradient_matches_finite_difference(solved):
+def test_sens_jacobian_matches_finite_difference(solved):
     m = solved
     for pname in ("p", "q"):
-        g = gradient(m.x, wrt=getattr(m, pname))
+        g = sens_jacobian(m.x, wrt=getattr(m, pname))
         assert isinstance(g, float)
         hi = build(**{pname: pyo.value(getattr(m, pname)) + FD_H})
         lo = build(**{pname: pyo.value(getattr(m, pname)) - FD_H})
@@ -56,9 +56,9 @@ def test_gradient_matches_finite_difference(solved):
         assert g == pytest.approx(fd, abs=1e-4)
 
 
-def test_multiplier_gradient_matches_finite_difference(solved):
+def test_sens_jacobian_multiplier_matches_finite_difference(solved):
     m = solved
-    g = gradient(m.tie, wrt=m.p)
+    g = sens_jacobian(m.tie, wrt=m.p)
     hi = solve_plain(build(p=2.0 + FD_H))
     lo = solve_plain(build(p=2.0 - FD_H))
     fd = (hi.dual[hi.tie] - lo.dual[lo.tie]) / (2 * FD_H)
@@ -68,15 +68,15 @@ def test_multiplier_gradient_matches_finite_difference(solved):
         "and pyomo duals")
 
 
-def test_estimate_matches_resolve(solved):
+def test_sens_solution_matches_resolve(solved):
     m = solved
-    est = estimate(m, [(m.p, 2.2), (m.q, 0.9)])
+    est = sens_solution(m, [(m.p, 2.2), (m.q, 0.9)])
     mt = solve_plain(build(p=2.2, q=0.9))
     assert est[m.x] == pytest.approx(pyo.value(mt.x), abs=5e-3)
     assert est[m.y] == pytest.approx(pyo.value(mt.y), abs=5e-3)
 
 
-def test_estimate_baseline_is_the_solve_point():
+def test_sens_solution_baseline_is_the_solve_point():
     # the receding-horizon pattern: the caller writes the new value into
     # the Param before asking. The delta is against the solve point, so
     # the estimate matches the one asked before the write; previously the
@@ -85,28 +85,28 @@ def test_estimate_baseline_is_the_solve_point():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
     m.p.set_value(2.2)
-    est = estimate(m, [(m.p, 2.2)])
+    est = sens_solution(m, [(m.p, 2.2)])
     mt = solve_plain(build(p=2.2))
     assert est[m.x] == pytest.approx(pyo.value(mt.x), abs=5e-3)
     assert est[m.y] == pytest.approx(pyo.value(mt.y), abs=5e-3)
 
 
-def test_estimate_clamps_and_warns(solved):
+def test_sens_solution_clamps_and_warns(solved):
     m = solved
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        est = estimate(m, [(m.p, 8.0)])       # drives x past its bound of 3
+        est = sens_solution(m, [(m.p, 8.0)])       # drives x past its bound of 3
     assert any("clamped" in str(wi.message) for wi in w)
     assert est[m.x] <= 3.0 + 1e-9
 
 
-def test_gradient_object_for_containers(solved):
+def test_sens_jacobian_object_for_containers(solved):
     m = solved
-    G = gradient(m.x, wrt=m.p)          # scalar -> float
+    G = sens_jacobian(m.x, wrt=m.p)          # scalar -> float
     assert isinstance(G, float)
-    Gall = gradient(wrt=m.p)            # all variables
+    Gall = sens_jacobian(wrt=m.p)            # all variables
     assert Gall[m.x] == pytest.approx(G)
-    df_cols = gradient(wrt=m.q).to_dataframe()
+    df_cols = sens_jacobian(wrt=m.q).to_dataframe()
     assert "x" in df_cols.index
 
 
@@ -115,7 +115,7 @@ def test_plain_solve_unaffected():
     res = pyo.SolverFactory("pounce").solve(m)
     assert pyo.value(m.obj) == pytest.approx(1.2653, abs=1e-3)
     with pytest.raises(RuntimeError, match="no sensitivity session"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
 
 def test_resolve_and_clone_are_clean():
@@ -131,10 +131,10 @@ def test_resolve_and_clone_are_clean():
         m = build()
         declare_sens_param(m.p)
         pyo.SolverFactory("pounce").solve(m)
-        g1 = gradient(m.x, wrt=m.p)
+        g1 = sens_jacobian(m.x, wrt=m.p)
         m.p = 2.5
         pyo.SolverFactory("pounce").solve(m)     # re-solve re-clones
-        g2 = gradient(m.x, wrt=m.p)
+        g2 = sens_jacobian(m.x, wrt=m.p)
         clone = m.clone()
     finally:
         logging.getLogger("pyomo").removeHandler(h)
@@ -179,7 +179,7 @@ def test_keyword_model_solve_uses_declared_path():
     m = build()
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(model=m)
-    assert gradient(m.x, wrt=m.p) is not None
+    assert sens_jacobian(m.x, wrt=m.p) is not None
 
 
 def test_explicit_sens_params_form_equals_declared():
@@ -188,11 +188,11 @@ def test_explicit_sens_params_form_equals_declared():
     m1 = build()
     declare_sens_param(m1.p)
     pyo.SolverFactory("pounce").solve(m1)
-    g_declared = gradient(m1.x, wrt=m1.p)
+    g_declared = sens_jacobian(m1.x, wrt=m1.p)
 
     m2 = build()                          # no declarations
     pyo.SolverFactory("pounce").solve(m2, sens_params=[m2.p])
-    g_explicit = gradient(m2.x, wrt=m2.p)
+    g_explicit = sens_jacobian(m2.x, wrt=m2.p)
     assert g_explicit == pytest.approx(g_declared, rel=1e-9)
 
 
@@ -291,12 +291,12 @@ def test_nonconvergence_returns_mapped_results():
     )
     assert res.solver.status != pyo.SolverStatus.ok
     with pytest.raises(RuntimeError, match="no sensitivity session"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
 
 def test_failed_resolve_clears_prior_session():
     """A converged solve leaves a live session; a failed re-solve of the
-    same model must drop it, or gradient() would silently answer from
+    same model must drop it, or sens_jacobian() would silently answer from
     the stale factorization."""
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=2.0, mutable=True)
@@ -306,20 +306,20 @@ def test_failed_resolve_clears_prior_session():
     m.obj = pyo.Objective(expr=(m.x - 1) ** 2 + (m.y - 0.5) ** 2)
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
-    assert gradient(m.x, wrt=m.p) is not None      # session is live
+    assert sens_jacobian(m.x, wrt=m.p) is not None      # session is live
 
     m.bad = pyo.Constraint(expr=m.x == m.x + 1.0)  # 0 == 1
     pyo.SolverFactory("pounce").solve(m)
     with pytest.raises(RuntimeError, match="no sensitivity session"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
 
 def test_all_three_declarations_coexist():
-    """declare_sens_param + declare_fitted + declare_residual on one
+    """declare_sens_param + declare_sens_fitted + declare_sens_residual on one
     model: one solve serves both the sensitivity and the covariance
     queries from the same held factorization."""
     import numpy as np
-    from pyomo_pounce import declare_fitted, declare_residual, covariance
+    from pyomo_pounce import declare_sens_fitted, declare_sens_residual, sens_covariance
     rng = np.random.default_rng(7)
     tt = np.linspace(0, 3, 20)
     y = 2.0 * np.exp(-1.3 * tt) + 0.05 * rng.standard_normal(20)
@@ -334,13 +334,13 @@ def test_all_three_declarations_coexist():
                            - mm.A * pyo.exp(-mm.k * float(tt[i])))
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
     declare_sens_param(m.shift)
-    declare_fitted(m.A, m.k)
-    declare_residual(m.r)
+    declare_sens_fitted(m.A, m.k)
+    declare_sens_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
 
-    g = gradient(m.A, wrt=m.shift)          # sensitivity family
+    g = sens_jacobian(m.A, wrt=m.shift)          # sensitivity family
     assert np.isfinite(g) and g != 0.0
-    cov = covariance(m)                     # estimation family
+    cov = sens_covariance(m)                     # estimation family
     assert cov.std_err[m.A] > 0 and cov.std_err[m.k] > 0
     assert abs(cov.correlation[m.A, m.k]) < 1.0
 
@@ -371,14 +371,14 @@ def _bounded(ub=None, lb=None, sense=-1.0, x0=1.0):
 ])
 def test_upper_bound_on_declared_param_is_differentiable(ub, dxdp, pnew, xnew):
     m = _bounded(ub=ub)
-    assert gradient(m.x, wrt=m.p) == pytest.approx(dxdp, abs=1e-6)
-    assert estimate(m, [(m.p, pnew)])[m.x] == pytest.approx(xnew, abs=1e-6)
+    assert sens_jacobian(m.x, wrt=m.p) == pytest.approx(dxdp, abs=1e-6)
+    assert sens_solution(m, [(m.p, pnew)])[m.x] == pytest.approx(xnew, abs=1e-6)
 
 
 def test_lower_bound_on_declared_param_is_differentiable():
     m = _bounded(lb=lambda m: m.p, sense=1.0, x0=3.0)
-    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
-    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+    assert sens_jacobian(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert sens_solution(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
 
 
 def test_bound_as_constraint_is_unchanged():
@@ -390,8 +390,8 @@ def test_bound_as_constraint_is_unchanged():
     m.obj = pyo.Objective(expr=-m.x)
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
-    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
-    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+    assert sens_jacobian(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert sens_solution(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
 
 
 def test_undeclared_param_in_bound_is_left_alone():
@@ -419,7 +419,7 @@ def test_undeclared_param_in_bound_is_left_alone():
 
 def test_moved_bound_is_recorded_for_covariance():
     """A rewritten bound reads as the NL no-bound sentinel, so the value it
-    had is recorded; covariance()'s projection reads that instead."""
+    had is recorded; sens_covariance()'s projection reads that instead."""
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=2.0, mutable=True)
     m.x = pyo.Var(bounds=(0, m.p), initialize=1.0)
@@ -446,7 +446,7 @@ def test_fixed_var_bound_is_not_rewritten():
     declare_sens_param(m.p)
     res = pyo.SolverFactory("pounce").solve(m)
     assert res.solver.termination_condition == pyo.TerminationCondition.optimal
-    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert sens_jacobian(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_deactivated_block_var_is_not_rewritten():
@@ -477,14 +477,14 @@ def test_indexed_var_bound_on_declared_param():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
     for i in m.I:
-        assert gradient(m.x[i], wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+        assert sens_jacobian(m.x[i], wrt=m.p) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_rewritten_bound_still_projects_in_covariance():
-    """A fitted Var capped by a declared Param still triggers covariance()'s
+    """A fitted Var capped by a declared Param still triggers sens_covariance()'s
     active-bound projection, even though its NL bound is now the no-bound
     sentinel (jkitchin/pounce#357 review)."""
-    from pyomo_pounce import covariance, declare_fitted, declare_residual
+    from pyomo_pounce import sens_covariance, declare_sens_fitted, declare_sens_residual
     m = pyo.ConcreteModel()
     m.I = pyo.RangeSet(5)
     m.cap = pyo.Param(initialize=1.0, mutable=True)
@@ -493,19 +493,19 @@ def test_rewritten_bound_still_projects_in_covariance():
     m.res = pyo.Constraint(m.I, rule=lambda mm, i: mm.r[i] == 3.0 - mm.A)
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
     declare_sens_param(m.cap)
-    declare_fitted(m.A)
-    declare_residual(m.r)
+    declare_sens_fitted(m.A)
+    declare_sens_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
 
     session = m.__dict__["_pounce_sens"].session
     assert session.nl.x_u[session.var_entry(m.A.name)] >= 1e19
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        covariance(m)
+        sens_covariance(m)
     assert any("strongly active" in str(x.message) for x in w)
     # and the projected answer, not just the warning: identical to what the
     # same model gives with the bound left alone
-    assert covariance(m).std_err[m.A] == 0.0
+    assert sens_covariance(m).std_err[m.A] == 0.0
 
 
 def test_both_bounds_rewritten_are_both_recorded():
@@ -523,16 +523,16 @@ def test_both_bounds_rewritten_are_both_recorded():
     lo_rec, hi_rec = session.moved_bounds[m.x.name]
     assert lo_rec == pytest.approx(-1.0)
     assert hi_rec == pytest.approx(2.0)
-    assert gradient(m.x, wrt=m.hi) == pytest.approx(1.0, abs=1e-6)
+    assert sens_jacobian(m.x, wrt=m.hi) == pytest.approx(1.0, abs=1e-6)
 
 
 # ── name -> row maps (jkitchin/pounce#365) ───────────────────────────────────
 #
 # Every name-to-row lookup used to be a `list.index` scan, which made
-# gradient(target=None).to_dataframe() O(n^2) in the variable count. These
+# sens_jacobian(of=None).to_dataframe() O(n^2) in the variable count. These
 # are pure unit tests on _Session: no solve, so they pin the lookup contract
 # without needing the solver. The value-correctness of the fan-out path is
-# already covered by test_gradient_object_for_containers.
+# already covered by test_sens_jacobian_object_for_containers.
 
 def _fake_session(names, cons, row_offset=1000, **kw):
     from pyomo_pounce.sens import _Session
@@ -743,13 +743,11 @@ def test_warm_start_partial_seed_solves_clean():
             == pyo.TerminationCondition.optimal)
 
 
-def test_warm_start_dual_lands_on_the_aliased_row():
-    """The alias path end to end, against a map a REAL surgery block
-    produced: a declared Param inside a constraint makes the surgery
-    replace it on the clone, and the dual must land on the replaced
-    row. The synthetic-map unit test cannot see a broken
-    _replaced_aliases, and the partial-seed test cannot tell a broken
-    alias from working defaults (both solve optimal)."""
+def test_warm_start_dual_lands_on_the_rewritten_row():
+    """A declared Param inside a constraint is substituted in place at
+    declaration: the constraint keeps its identity and its name, so a
+    dual suffix keyed by it lands on its own row directly, with no
+    alias in between."""
     from pyomo_pounce.sens import _warm_start_from_suffixes, _row_index
     m = pyo.ConcreteModel()
     m.p = pyo.Param(initialize=2.0, mutable=True)
@@ -758,16 +756,17 @@ def test_warm_start_dual_lands_on_the_aliased_row():
     m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
     m.obj = pyo.Objective(expr=m.y + (m.x - 1) ** 4)
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
-    declare_sens_param(m.p)
+    with pytest.warns(UserWarning, match="rewritten in place"):
+        declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
     session = m.__dict__["_pounce_sens"].session
-    assert "c" in session.con_alias, "surgery should have replaced m.c"
-    clone_name = session.con_alias["c"]
+    assert session.con_alias == {}, "in-place rewrite leaves no alias"
+    assert m.c.active, "the row is edited, not replaced"
     m.dual[m.c] = 2.5
     warm = _warm_start_from_suffixes(
         m, session.var_names, session.con_names, session.nl,
         session.con_alias)
-    row = _row_index(session.con_names)[clone_name]
+    row = _row_index(session.con_names)["c"]
     assert warm["lagrange"][row] == -2.5
     assert not np.isnan(warm["lagrange"][row])
 
@@ -827,8 +826,8 @@ def test_a_fixed_variable_does_not_shift_the_factor_rows():
     pinned by its own bounds and enters neither objective nor active
     set.
 
-    Before the fix `gradient` returned d(y)/dp where d(x)/dp was asked
-    for -- a plausible number, silently wrong -- while `estimate` and
+    Before the fix `sens_jacobian` returned d(y)/dp where d(x)/dp was asked
+    for -- a plausible number, silently wrong -- while `sens_solution` and
     `covariance` failed loudly (a broadcast error and a bogus
     "structurally unidentifiable" respectively).
     """
@@ -845,18 +844,18 @@ def test_a_fixed_variable_does_not_shift_the_factor_rows():
         "the fixed column must precede a queried variable to shift it")
 
     for m in (base, fixed):
-        assert gradient(m.x, wrt=m.p) == pytest.approx(
-            gradient(base.x, wrt=base.p), rel=1e-9)
-        assert gradient(m.y, wrt=m.p) == pytest.approx(
-            gradient(base.y, wrt=base.p), rel=1e-9)
-        est = estimate(m, [(m.p, 2.1)])
+        assert sens_jacobian(m.x, wrt=m.p) == pytest.approx(
+            sens_jacobian(base.x, wrt=base.p), rel=1e-9)
+        assert sens_jacobian(m.y, wrt=m.p) == pytest.approx(
+            sens_jacobian(base.y, wrt=base.p), rel=1e-9)
+        est = sens_solution(m, [(m.p, 2.1)])
         assert est[m.x] == pytest.approx(
-            estimate(base, [(base.p, 2.1)])[base.x], rel=1e-9)
+            sens_solution(base, [(base.p, 2.1)])[base.x], rel=1e-9)
 
     # and the answer is right, not merely consistent: finite difference
-    g_fd = (estimate(fixed, [(fixed.p, 2.0 + FD_H)])[fixed.x]
-            - estimate(fixed, [(fixed.p, 2.0 - FD_H)])[fixed.x]) / (2 * FD_H)
-    assert gradient(fixed.x, wrt=fixed.p) == pytest.approx(g_fd, rel=1e-6)
+    g_fd = (sens_solution(fixed, [(fixed.p, 2.0 + FD_H)])[fixed.x]
+            - sens_solution(fixed, [(fixed.p, 2.0 - FD_H)])[fixed.x]) / (2 * FD_H)
+    assert sens_jacobian(fixed.x, wrt=fixed.p) == pytest.approx(g_fd, rel=1e-6)
 
 
 def test_a_removed_fixed_variable_is_refused_not_mis_read():
@@ -865,4 +864,4 @@ def test_a_removed_fixed_variable_is_refused_not_mis_read():
     explicit refusal, not the neighbouring column."""
     m = _fixed_var_pair(True)
     with pytest.raises(ValueError, match="removed from the solve"):
-        gradient(m.dead, wrt=m.p)
+        sens_jacobian(m.dead, wrt=m.p)

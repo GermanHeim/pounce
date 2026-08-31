@@ -1,9 +1,9 @@
 # Covariance and information: design notes
 
 This document records the design of pyomo-pounce's parameter
-uncertainty subsystem as it stands: `covariance()` and
-`information()`, the declaration surface that feeds them, the `wrt=`
-block selection both accessors take, and `retain_kkt()`. Everything
+uncertainty subsystem as it stands: `sens_covariance()` and
+`sens_information()`, the declaration surface that feeds them, the `of=`
+block selection both accessors take, and `sens_retain_kkt()`. Everything
 is computed from ONE ordinary solve: the solver factorizes the KKT
 matrix to solve the NLP, the subsystem keeps that factorization, and
 every question below is a backsolve or a Hessian product against
@@ -22,32 +22,32 @@ $S = H_{AA} - H_{AF} H_{FF}^{-1} H_{FA}$ the reduction onto $A$.
 
 ## The declaration surface
 
-- `declare_fitted(vars)`: free variables become the fitted
+- `declare_sens_fitted(vars)`: free variables become the fitted
   parameters, the default block.
-- `declare_residual(container, group=)`: indexed variables holding
+- `declare_sens_residual(container, group=)`: indexed variables holding
   the residuals, one member per data point; residual count and SSR
   are derived, never passed. Groups partition residuals into noise
   populations; distinct groups get their own variances and switch
   the covariance to the heteroscedastic sandwich.
 - `declare_sens_param(params)`: pinned inputs for
-  `gradient()`/`estimate()`; shares the session, out of scope here.
-- `retain_kkt(model)`: keep the factorization with nothing declared,
-  for problems where every question arrives as an explicit `wrt=`.
-- `release_kkt(model)`: drop the held factorization now, freeing its
+  `sens_jacobian()`/`sens_solution()`; shares the session, out of scope here.
+- `sens_retain_kkt(model)`: keep the factorization with nothing declared,
+  for problems where every question arrives as an explicit `of=`.
+- `sens_release_kkt(model)`: drop the held factorization now, freeing its
   memory; declarations and the retain flag still apply to the next
   solve.
 
-| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+| setup | factor kept | `sens_covariance(model)` | `sens_covariance(model, of=T)` |
 |---|---|---|---|
 | nothing | no | error | error |
-| `declare_fitted(S)` | yes | over S | over T |
-| `retain_kkt()` only | yes | error, no default | over T |
-| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+| `declare_sens_fitted(S)` | yes | over S | over T |
+| `sens_retain_kkt()` only | yes | error, no default | over T |
+| `sens_retain_kkt()` + `declare_sens_fitted(S)` | yes | over S | over T |
 
 One more rule completes retention: a `Covariance` or `Information` result whose
 `conditioned_on` has not been read keeps the session, and with it the
-factor, alive until first access, as does a live `Gradient` (it reads
-the factor on every lookup); `release_kkt` drops the model's hold, not
+factor, alive until first access, as does a live `Jacobian` (it reads
+the factor on every lookup); `sens_release_kkt` drops the model's hold, not
 an outstanding result's.
 
 Explicit call-time forms (`solve(m, fitted=..., residuals=...)`) are
@@ -77,8 +77,8 @@ wherever both appear.
 
 ## The block and its covariance
 
-`wrt=` selects the block; omitted, it is the declared fitted set and
-the accessors behave exactly as before `wrt=` existed. `wrt=`
+`of=` selects the block; omitted, it is the declared fitted set and
+the accessors behave exactly as before `of=` existed. `of=`
 accepts the following forms, normalized to an ordered list; a
 repeated member is an error, since a duplicated coordinate makes the
 block singular by construction:
@@ -111,7 +111,7 @@ Sigma is a property of the fit, never of the block:
   at the solve so later writes into the model cannot silently
   rescale the covariance.
 
-Both ESTIMATION routes divide by `n - n_fit`, so under `retain_kkt()`
+Both ESTIMATION routes divide by `n - n_fit`, so under `sens_retain_kkt()`
 alone there is no fit to take degrees of freedom from: with nothing
 declared fitted they raise rather than divide by `n`, which would
 bias every variance low by `n/(n - p)`. Retain-only therefore needs
@@ -141,7 +141,7 @@ per-group Jacobians in both modes.
 
 ## Tangent recovery: the exact reduced Hessian
 
-`information()` returns the reduced Hessian over the block, natural
+`sens_information()` returns the reduced Hessian over the block, natural
 units, no sigma anywhere, so for a homoscedastic fit covariance
 equals `2 sigma^2 inv(information)` on the free block. The x blocks
 of the K-inverse columns are `T M`: each column satisfies the
@@ -173,7 +173,7 @@ Lagrangian form routes over block shapes as follows:
 | proper sub-block of a square fitted set | Schur complement of the exact tangent R over the fitted block: free outside members profiled out, pinned ones conditioned on; no covariance inverted, a pinned member costs no digits |
 | other within-count EXPLICIT block | corrected reduction off the factor; benign for free coordinates, whose slice carries no barrier term |
 | default fitted block outside the square structure | raises an error suggesting `hessian="gauss-newton"`, which does not need the structure |
-| rank-deficient | no information matrix exists; raises an error pointing to `covariance()` |
+| rank-deficient | no information matrix exists; raises an error pointing to `sens_covariance()` |
 
 Fitted-level binding rows decline the Schur route with a warning:
 their projection does not compose simply with marginalization.
@@ -241,7 +241,7 @@ The table gives what each accessor returns for a block member,
 given the classification. Both return a matrix over the whole block; the
 columns are the row member $i$ gets in each:
 
-| status | `s` | `z` | `Σ` as `μ → 0` | $i$ in | `covariance()` row | `information()` row |
+| status | `s` | `z` | `Σ` as `μ → 0` | $i$ in | `sens_covariance()` row | `sens_information()` row |
 |---|---|---|---|---|---|---|
 | inactive | `O(1)` | `→ 0` | `μ/s² → 0` | $F$ | $2\sigma^2 (H_{FF}^{-1})_{iF}$ | $H_{iF}$ |
 | strongly active | `→ 0` | `O(1)` | `z²/μ → ∞` | $A$ | $0$ | $S_{iA}$ |
@@ -278,7 +278,7 @@ remaining dispositions do not fit a table row:
   over-parameterized.
 - Diagnostics name what they touch: fitted parameters on the default
   block, block members and variables outside the block under an
-  explicit `wrt=`, every message prefixed by the accessor.
+  explicit `of=`, every message prefixed by the accessor.
 
 ## Rank and singularity guards
 
@@ -290,11 +290,11 @@ build-dependent, so no structural condition is guarded by catching
   has degrees of freedom) and then by a rank test on M
   (dependence detectable in floating point; a duplicated design
   point is the canonical case), each path with its own message.
-- A rank-deficient block is the trajectory-band case: `covariance()`
+- A rank-deficient block is the trajectory-band case: `sens_covariance()`
   returns the homoscedastic Lagrangian marginal `2 sigma^2 M`, the
   confidence band on the fitted trajectory (observation noise added
   on top makes it a prediction band), with membership handling
-  bypassed; `information()`,
+  bypassed; `sens_information()`,
   per-group noise, and Gauss-Newton raise, since the latter two
   profile Jacobians through `inv(M)`.
 - The singular free block inside the S computation is rank-gated the

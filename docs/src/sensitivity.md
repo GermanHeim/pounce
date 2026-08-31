@@ -99,8 +99,8 @@ let result = SensSolve::new(vec![2, 3])
 
 Every eigendecomposition POUNCE hands back — the reduced Hessian's
 here and through the CLI and Python wrappers, the QP one from
-`QpSensitivity.reduced_hessian`, and `covariance().eigen()` /
-`information().eigen()` in `pyomo-pounce` — returns **sign-pinned**
+`QpSensitivity.reduced_hessian`, and `sens_covariance().eigen()` /
+`sens_information().eigen()` in `pyomo-pounce` — returns **sign-pinned**
 eigenvectors: the largest-magnitude component of each column is
 positive, ties broken by the earliest row. `v` and `-v` are equally
 valid eigenvectors, so without a convention the direction you read
@@ -142,26 +142,41 @@ are present, `SolverFactory("pounce").solve(m)` runs in-process and
 keeps the converged KKT factorization, so every query afterwards is a
 single backsolve.
 
+A declared `Param` should enter the model through one defining
+equality: a single variable equal to the param, the shape a
+parameterized initial condition already has (`m.x0 == m.x0_hat`). Such
+a model solves as written, on every solve, and the defining equality
+is the row the machinery perturbs. A declared `Param` without that
+form is rewritten in place once, at declaration, with a warning: its
+occurrences are replaced by a substituted variable held by a new
+defining equality, the affected rows edited in place so their names
+are untouched. Writing the defining equality yourself avoids the
+rewrite and is the recommended form. Editing the model after
+declaration so a declared `Param` appears in new expressions is
+unsupported: re-declare on the current model instead. Repeated solves
+of one declared model, the receding-horizon pattern, pay no
+per-solve model copy and no per-solve rewrite.
+
 ```python
 import pyomo.environ as pyo
 import pyomo_pounce
-from pyomo_pounce import declare_sens_param, gradient, estimate
+from pyomo_pounce import declare_sens_param, sens_jacobian, sens_solution
 
 m.p = pyo.Param(initialize=2.0, mutable=True)
 declare_sens_param(m.p)                 # a flag, not a perturbation
 
 pyo.SolverFactory("pounce").solve(m)    # ordinary solve
 
-gradient(m.x, wrt=m.p)                  # dx*/dp (float)
-gradient(m.con, wrt=m.p)                # d(multiplier of con)/dp
-G = gradient(m.z, wrt=m.r)              # containers -> Gradient object
+sens_jacobian(m.x, wrt=m.p)                  # dx*/dp (float)
+sens_jacobian(m.con, wrt=m.p)                # d(multiplier of con)/dp
+G = sens_jacobian(m.z, wrt=m.r)              # containers -> Jacobian object
 G[m.z[1], m.r[2]]; G.to_dataframe()     # element access / full Jacobian
-estimate(m, [(m.p, 2.5)])               # first-order solution estimate at
+sens_solution(m, [(m.p, 2.5)])               # first-order solution estimate at
                                         # new values, clamped to bounds
 ```
 
-`gradient` returns exact first-order derivatives (unit-perturbation
-backsolves, no finite differencing); `estimate` combines the stored
+`sens_jacobian` returns exact first-order derivatives (unit-perturbation
+backsolves, no finite differencing); `sens_solution` combines the stored
 derivative columns for arbitrary perturbed values after the fact. Its
 perturbation is measured from the solve point, not the Param's current
 value, so writing a measurement into the Param before asking (the
@@ -174,9 +189,9 @@ where the active set changes along it, covered in
 [Applying the change a little at a time](#applying-the-change-a-little-at-a-time-modepath)
 below. There is one exception to the warning, a bound written on a declared Param, covered in
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
-below. `estimate_report()` measures the same step and reports where the
+below. `sens_solution_report()` measures the same step and reports where the
 active set changes along it, covered in
-[What the step did about the bounds](#what-the-step-did-about-the-bounds-estimate_report). Multiplier sensitivities are available for equality constraints.
+[What the step did about the bounds](#what-the-step-did-about-the-bounds-sens_solution_report). Multiplier sensitivities are available for equality constraints.
 Models without declarations solve through the ordinary AMPL/CLI path,
 unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
@@ -185,7 +200,7 @@ parameters; the first-move gradient IS the NMPC feedback gain).
 
 ### Bending the estimate around a bound: `mode="fix_relax"`
 
-`estimate()` takes the linear step, and where that step leaves a
+`sens_solution()` takes the linear step, and where that step leaves a
 variable's bound it clamps the value and warns. Clamping is all the
 linear step can do, and it costs more than the one variable: every
 other variable keeps the value the step gave it, computed on the
@@ -201,8 +216,8 @@ that bound so the variable can move. Each adds a row to the held
 factorization and re-solves, so the other variables move with it:
 
 ```python
-estimate(m, [(m.setpoint, 3.0)])                      # clamps
-estimate(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
+sens_solution(m, [(m.setpoint, 3.0)])                      # clamps
+sens_solution(m, [(m.setpoint, 3.0)], mode="fix_relax")    # pins and re-solves
 ```
 
 Both halves matter and they fail differently. On a model where
@@ -232,7 +247,7 @@ than re-solving.
 
 `bound_eps` sets how far outside a variable bound a step has to end to
 count as having left it, and so decides what a pass pins, what
-`estimate()` clamps, and what `crossed` reports. It is absolute, as the
+`sens_solution()` clamps, and what `crossed` reports. It is absolute, as the
 refinement's own test is. Unset, it is how far outside the solve itself
 was willing to settle, so nothing moves for a caller who does not set
 it. A constraint row keeps its own floor, and a bound is released when
@@ -243,7 +258,7 @@ passing it under `linear` or `path` warns.
 `max_pdpert` refuses rather than answering when the converged factor
 carries an inertia correction above the value given, since every
 sensitivity output inverts that factor and a perturbed one answers for
-a nearby problem. `estimate_report().perturbations` reports the same
+a nearby problem. `sens_solution_report().perturbations` reports the same
 numbers for a caller who would rather read them.
 
 `predictor_iter` caps the passes, and is a safety limit rather than a budget.
@@ -253,7 +268,7 @@ crossings than passes the limit, not the violations, decided where the
 loop stopped. On the CSTR of notebook 36 that put the pin count at
 exactly the budget for every budget tried, and at 100 pins (half that
 problem's degrees of freedom) the refined step came back 8.6 times
-worse than the unrefined one (gh#732). `estimate()`'s warning now names
+worse than the unrefined one (gh#732). `sens_solution()`'s warning now names
 which stopping condition was reached rather than inferring it from the
 pin count.
 
@@ -293,7 +308,7 @@ step holds every bound at once, so the pin is refused rather than
 returned from a singular system. And the refinement ending further
 outside the bounds than the step it started from, which returns the
 unrefined step instead — repairing an active set has to beat not
-repairing it. In each case `estimate()` warns, names the variables
+repairing it. In each case `sens_solution()` warns, names the variables
 still outside, and says which of the three it was. `clamp` then decides
 what happens to them, exactly as under `linear`.
 
@@ -332,15 +347,15 @@ leaves it again. That last kind is what no decision at the base point
 can represent: a variable can arrive at a bound partway through the
 change and depart before the end.
 
-`active_set_changes()` returns that record, which is the part no other
-mode produces. It takes the same perturbation argument `estimate()`
+`sens_active_set_changes()` returns that record, which is the part no other
+mode produces. It takes the same perturbation argument `sens_solution()`
 takes:
 
 ```python
-from pyomo_pounce import active_set_changes, estimate
+from pyomo_pounce import sens_active_set_changes, sens_solution
 
-estimate(m, [(m.setpoint, 3.0)], mode="path")
-for c in active_set_changes(m, [(m.setpoint, 3.0)]):
+sens_solution(m, [(m.setpoint, 3.0)], mode="path")
+for c in sens_active_set_changes(m, [(m.setpoint, 3.0)]):
     print(c.fraction, c.var.name, c.bound, c.action)
 ```
 
@@ -397,12 +412,13 @@ sides. The thresholds that
 decide activity elsewhere have no answer at a kink, since the two
 quantities they compare are the same size.
 
-`degeneracy` on `estimate()`, `estimate_report()`, and
-`active_set_changes()` selects what happens then:
+`degeneracy` on `sens_solution()`, `sens_solution_report()`, and
+`sens_active_set_changes()` selects what happens then:
 
 ```python
-estimate(m, [(m.p, 2.5)], degeneracy="directional")   # the default
-estimate(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
+sens_solution(m, [(m.p, 2.5)], degeneracy="directional")   # the default
+sens_solution(m, [(m.p, 2.5)], degeneracy="one_sided")     # the thresholds' answer
+sens_solution(m, [(m.p, 2.5)], degeneracy="release_all")   # released, undecided
 ```
 
 `"directional"` decides each weakly active bound for the
@@ -445,6 +461,51 @@ solve sits inside the ambiguous band rather than exactly at the kink,
 releases at the fraction where its multiplier reaches zero rather
 than at the start. The record then carries that departure at its
 measured fraction.
+
+`"release_all"` releases every weakly active bound undecided, at one
+back-solve and no QP: the step is the all-released direction, and a
+weak bound the perturbation actually holds comes back as a bound
+crossing for whatever runs next. `fix_relax` pins it, `path` walks it
+and records a return to the bound along the path rather than a
+decision at the base point, and `linear` clamps the crossing
+coordinate, which repairs that coordinate alone and leaves its
+neighbors carrying the released coupling. The trade is the decision's
+cost against downstream repair, and the cost is deterministic and
+independent of `degeneracy_iter`, which makes this the option for a
+kinked base point too large for the engagement's budget, where
+`"directional"` pays the failed attempt and falls back to one-sided
+anyway. At an exact kink under `mode="linear"` the holding side's
+answer is the released one until the clamp truncates it, where
+`"directional"` decides it correctly, so the accuracy-first choice at
+small kink counts remains the default.
+
+On a **coupled** model the repair is only as good as the mode's reach,
+and the three differ. Measured on the coupled kink of
+`pyomo-pounce/tests/test_degeneracy.py`, holding side, exact answer
+`x = 0`, `y = 1`:
+
+| mode | `x` | `y` |
+|---|---|---|
+| `fix_relax` | 0 | 1 |
+| `path` | 0 | 1 |
+| `linear` | 0 (clamped) | -3/7 |
+
+`fix_relax` pins the crossing and re-solves, so it repairs the
+neighbour too. `path` re-holds the weak bound at the fraction the walk
+finds the direction pressing into it, and the coordinates behind it
+re-optimize under the hold, so it reaches the same answer. `linear`
+clamps the crossing coordinate only, and the neighbour keeps the
+released coupling -- that is the documented trade, and on a coupled
+model `linear` is the mode it costs something.
+
+`path` answered the one-sided 2/7 here until gh#852, which was split
+out of this option's own review: `step_along_path` barred every
+base-active bound from its reach scan, so a perturbation pressing into
+a weakly active one walked the variable out of its box with no
+breakpoint to stop it, and only a downstream clamp put it back --
+moving the crossing coordinate and nothing coupled to it. The repair
+landed in the walk itself, which both the decided and the undecided
+callers go through, so `"release_all"` inherited it.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
@@ -493,10 +554,10 @@ part in the decision. Detection also returns
 nothing on a solve with relaxed bounds, where the classifier cannot
 read the slacks.
 
-`gradient()` cannot take a side, since it is asked for a derivative
+`sens_jacobian()` cannot take a side, since it is asked for a derivative
 without a direction, so at a degenerate base point it warns, names
 the variables and bounds, and returns the one-sided value. The
-direction-aware answer is `estimate()`'s.
+direction-aware answer is `sens_solution()`'s.
 
 ### Refining the step: `corrector_iter`
 
@@ -511,8 +572,8 @@ chord iteration contracts at the rate the distance between its
 operator and the true Jacobian sets, and the predicted point is where
 the truth is. Under a `limited-memory` solve the quasi-Newton matrix
 is kept, since no exact Hessian exists to evaluate elsewhere.
-`corrector_iter` is how many iterations to run, on `estimate()` and
-`estimate_report()`, and it stops early when an iteration fails to
+`corrector_iter` is how many iterations to run, on `sens_solution()` and
+`sens_solution_report()`, and it stops early when an iteration fails to
 improve the residual, so it is a budget rather than a count. It
 defaults to zero.
 
@@ -561,9 +622,9 @@ iteration.
 
 So a budget past the crossing count the correction carries buys little,
 and at large perturbations it can return an estimate no better than the
-step it was handed. `estimate()` warns when a correction ends without
+step it was handed. `sens_solution()` warns when a correction ends without
 at least halving the residual, so an uncorrected step is never passed
-off as a corrected one, and `estimate_report(corrector_iter=...)`
+off as a corrected one, and `sens_solution_report(corrector_iter=...)`
 carries the iterations spent, the residual before and after, and that
 residual split into stationarity, feasibility and complementarity. The
 three carry different units and different consequences: a correction
@@ -571,17 +632,17 @@ can leave the model's equations nearly satisfied and the multipliers
 complementary while the Lagrangian's gradient is far from zero, and
 only the first two say whether the values can be acted on.
 
-### What the step did about the bounds: `estimate_report()`
+### What the step did about the bounds: `sens_solution_report()`
 
 The clamp warning names the variables it clamped and stops there.
-`estimate_report()` takes the same perturbation argument `estimate()`
+`sens_solution_report()` takes the same perturbation argument `sens_solution()`
 takes and measures the same step, so a caller can see how far along the
 perturbation the active set changes:
 
 ```python
-from pyomo_pounce import estimate_report
+from pyomo_pounce import sens_solution_report
 
-r = estimate_report(m, [(m.setpoint, 3.0)])
+r = sens_solution_report(m, [(m.setpoint, 3.0)])
 r.alpha          # fraction of the perturbation that fits before a
                  # bound is reached; inf when none lies in the way
 r.first          # which variable or constraint is reached there
@@ -599,9 +660,9 @@ pins every crossing it sees, so the pin count says nothing about which
 limit was reached and this is the only thing that does.
 
 `mode` and `predictor_iter` select which step is measured and match
-`estimate()`'s arguments of the same names. `violation` and `corrector`
+`sens_solution()`'s arguments of the same names. `violation` and `corrector`
 are properties of the step, so a `fix_relax` estimate needs
-`estimate_report(mode="fix_relax")` to be described by its own numbers
+`sens_solution_report(mode="fix_relax")` to be described by its own numbers
 rather than the linear step's.
 
 Under `"fix_relax"` and `"path"` the step stops at the bound, so
@@ -644,34 +705,36 @@ declare_sens_param(m.u_max)
 m.u = pyo.Var(m.t, bounds=(0, m.u_max))   # the cap, as a bound
 ```
 
-`pyomo.contrib.sensitivity_toolbox`, which supplies the expression
-surgery underneath, substitutes declared Params in *constraint*
-expressions only. A Param left in a bound is written to the `.nl` file
-as a constant at its pre-perturbation value, so the bound never moves
-and `gradient(m.u[t], wrt=m.u_max)` reads exactly `0.0` — a wrong
-answer that is indistinguishable from a legitimate insensitivity.
+A Param left in a bound would be written to the `.nl` file as a
+constant at its pre-perturbation value, so the bound would never move
+and `sens_jacobian(m.u[t], wrt=m.u_max)` would read exactly `0.0`, a
+wrong answer indistinguishable from a legitimate insensitivity.
 
 POUNCE rewrites such a bound as a constraint over the substituted
-variable before the solve, so both spellings of the same limit give the
+variable at declaration, so both spellings of the same limit give the
 same derivative. Expression bounds work too, e.g.
 `bounds=(0, 2 * m.p + 1)`. Two kinds of variable are deliberately left
 alone: **fixed** Vars, whose bounds the solver never enforces, and Vars
 on **deactivated** Blocks.
 
-This is a deliberate divergence from `sensitivity_calculation`, which
-still reports zero for the same model. Four things follow from it:
+This is a deliberate divergence from
+`pyomo.contrib.sensitivity_toolbox`'s `sensitivity_calculation`, which
+substitutes declared Params in constraint expressions only and still
+reports zero for the same model. Four things follow from it:
 
-- **The bound is dropped on the clone that is solved.** `m.x.ub` reads
-  `None` there and the NL row carries the reader's no-bound sentinel
-  `1e19` — finite, so an `isinf()` test will not catch it. The model you
-  wrote is never modified.
-- **`estimate()` does not clamp against a rewritten bound**, and raises
+- **The bound is dropped from the Var.** `m.x.ub` reads `None` after
+  the declaration and the NL row carries the reader's no-bound
+  sentinel `1e19`, which is finite, so an `isinf()` test will not
+  catch it. The moved bound lives on as a row of the
+  `_pounce_sens_defs` block, part of the declaration's in-place
+  rewrite.
+- **`sens_solution()` does not clamp against a rewritten bound**, and raises
   no clamp warning for it. That is correct rather than an oversight: the
   bound now moves with the perturbation, so the linear step already
   respects it to first order.
-- **`covariance()`'s bound-active projection still fires.** The value
+- **`sens_covariance()`'s bound-active projection still fires.** The value
   the bound held at the solve point is recorded and read back for the
-  activity test, so a `declare_fitted` variable capped by a declared
+  activity test, so a `declare_sens_fitted` variable capped by a declared
   Param is still projected and still warns.
 - **It costs a row.** A simple bound is handled directly in the barrier;
   a general inequality costs a slack and a Jacobian row. A model with
@@ -702,7 +765,7 @@ can reach `1e27` against Jacobian entries of `1`.
 At that point the constraint rows through the variable stop being
 representable against its own diagonal, and before
 [#737](https://github.com/jkitchin/pounce/issues/737) the whole
-derivative column read `0.00000` — `estimate()` returned the baseline
+derivative column read `0.00000` — `sens_solution()` returned the baseline
 value, and nothing warned. `Σ` is now capped at the stiffness those rows
 can still be seen against, so the equality is enforced again and the
 column reads what the model says. The cap is a ceiling and not a
@@ -750,8 +813,10 @@ With `warm_start_init_point=yes` (Python `True` works too) among the
 options, the initial multipliers come from the model's suffixes, the
 same ones the ASL path uses: `dual` for equality multipliers,
 `ipopt_zL_in` / `ipopt_zU_in` for bound multipliers, matched by
-component name (a constraint rewritten by the declared-parameter
-surgery is reached through its internal alias). Sign conventions are
+component name (the declaration's in-place rewrite keeps every
+constraint's name, so suffixes keyed by your own constraints match
+directly; only a call-time `sens_params` clone still goes through an
+internal alias). Sign conventions are
 handled: `dual` holds the AMPL marginal and `ipopt_zU_in` Ipopt's
 negative-at-upper value, and both are translated to the solver's
 internal conventions on the way in.
@@ -789,19 +854,20 @@ fitted variables (they stay free) and the residual container while
 building the model, solve, and ask:
 
 ```python
-from pyomo_pounce import covariance, declare_fitted, declare_residual
+from pyomo_pounce import (declare_sens_fitted, declare_sens_residual,
+                          sens_covariance)
 
 m.A = pyo.Var(); m.k = pyo.Var()        # the fitted parameters, free
-declare_fitted(m.A, m.k)
+declare_sens_fitted(m.A, m.k)
 
 m.r = pyo.Var(m.I)                      # residuals, one per data point
 m.res = pyo.Constraint(m.I, rule=...)   # r[i] == y[i] - model(A, k, t[i])
-declare_residual(m.r)
+declare_sens_residual(m.r)
 
 m.obj = pyo.Objective(expr=sum(m.r[i]**2 for i in m.I))
 pyo.SolverFactory("pounce").solve(m)    # one solve
 
-cov = covariance(m)                     # no further information needed
+cov = sens_covariance(m)                     # no further information needed
 
 cov[m.A, m.k]               # covariance entry (either order)
 cov.std_err[m.k]            # standard error of one parameter
@@ -823,14 +889,14 @@ The noise variance comes from, in order of precedence: `sigma_sq=`
 (known measurement variance); the declared residuals (estimated as
 `SSR / (n - n_params)`, with both numbers derived from the container);
 or the `n_data=` fallback for models without explicit residuals, whose
-SSR is the objective value *at the solve* — like `estimate()`'s
+SSR is the objective value *at the solve* — like `sens_solution()`'s
 baseline, writing into the model afterwards (a measurement, a warm
 start for the next horizon) does not move the answer. The
 solve warns if the declared residuals do not reproduce the objective
 value (weights or regularization terms would silently corrupt the
 estimate).
 
-**Groups.** `declare_residual(m.r_conc, group="conc")` partitions
+**Groups.** `declare_sens_residual(m.r_conc, group="conc")` partitions
 residuals into noise groups by arbitrary user strings: containers
 sharing a group (or all ungrouped containers) pool into one estimated
 variance; distinct groups get their own (`cov.sigma_sq` becomes a
@@ -849,8 +915,8 @@ pin down, and the corresponding `cov.correlation` entries approach
 **the largest-magnitude component of each eigenvector is positive**,
 ties broken by the earliest position in `cov.params` — so the
 direction reproduces across machines instead of coming back as
-whatever LAPACK's build chose. `information().eigen()` is the same.
-`covariance` warns when the held factor carries
+whatever LAPACK's build chose. `sens_information().eigen()` is the same.
+`sens_covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
 parameterization) and when the covariance diagonal comes out negative
 (not a least-squares minimum).
@@ -875,9 +941,9 @@ is kept unprojected with an explicit warning.
 To classify honestly, the declaration-triggered solve sets
 `bound_relax_factor = 0` (slacks must measure distance to your own
 bounds). This applies to every solve routed through the sensitivity
-session, not only ones that end in `covariance()`. If you need the
+session, not only ones that end in `sens_covariance()`. If you need the
 relaxation, pass `bound_relax_factor` explicitly in `options=`: your
-value wins, and `covariance()` then refuses with a clear error rather
+value wins, and `sens_covariance()` then refuses with a clear error rather
 than classifying against shifted slacks.
 
 The AMBIGUOUS class is the one this machinery cannot argue away: the
@@ -915,7 +981,7 @@ block from the held KKT factor and scale it by `2 sigma^2` with
 **nonlinear** models: `curve_fit` factors the **Gauss-Newton** Hessian
 (`pcov = 2 sigma^2 (J^T J)^-1`, the expected-information / scipy /
 `pycse.nlinfit` convention, always positive semidefinite), while
-`covariance()` here feeds the **exact Lagrangian Hessian** through the
+`sens_covariance()` here feeds the **exact Lagrangian Hessian** through the
 `.nl` bridge, so it reports the **observed-information** covariance —
 the full reduced Hessian including the residual-curvature term that
 Gauss-Newton drops. The two are identical for linear models and in the
@@ -925,13 +991,13 @@ is uniquely "correct": Gauss-Newton is the conventional, robust default
 (it cannot produce a negative variance); observed information is the
 honest local curvature of the objective you actually solved (Efron &
 Hinkley 1978) but can go indefinite — which is what the negative-variance
-warning above is telling you. `covariance()` offers both: the default
+warning above is telling you. `sens_covariance()` offers both: the default
 `hessian="lagrangian"` inverts the exact reduced Hessian of the
-Lagrangian, and `covariance(m, hessian="gauss-newton")` rebuilds the
+Lagrangian, and `sens_covariance(m, hessian="gauss-newton")` rebuilds the
 expected-information form from the residual Jacobian, recovered from
 the same backsolves at no extra solve (declared residuals required).
 Reach for it when the numbers must match scipy/`nls`, when
-`covariance()` warns about a negative diagonal, or when the covariance
+`sens_covariance()` warns about a negative diagonal, or when the covariance
 must stay positive semidefinite by construction, e.g. feeding an
 arrival-cost update in moving horizon estimation.
 The other difference is the input surface.
@@ -940,14 +1006,14 @@ callable model `f(x, *params)` and data arrays: it chooses a starting
 point, offers robust losses, per-point `sigma` weights, confidence
 intervals, prediction bands, `dpopt/ddata`, and out-of-core streaming,
 and it *projects* the covariance onto the active-constraint nullspace
-when a parameter sits on a bound. `covariance()` is the post-solve
+when a parameter sits on a bound. `sens_covariance()` is the post-solve
 primitive for a model you have **already written in Pyomo** — residuals
 as constraints, arbitrary surrounding structure — where you want the
 covariance of the fit as posed without re-expressing it as
 `f(x, *params)`. Use `curve_fit` when the fit is naturally a
-model-plus-data call; use `covariance()` to interrogate an existing
+model-plus-data call; use `sens_covariance()` to interrogate an existing
 Pyomo estimation model. Both project a bound-active fitted parameter
-onto the active-constraint nullspace: `covariance()` reports the
+onto the active-constraint nullspace: `sens_covariance()` reports the
 covariance conditional on the active bound (zero variance in the
 pinned direction, computed by inverting the free block of the
 information matrix) and still warns, since boundary asymptotics are
@@ -964,7 +1030,7 @@ so it is still detected and still projected.
 workflow: multi-experiment data management, bootstrap resampling, and
 likelihood-ratio confidence regions, at the price of restructuring the
 problem into its experiment framework, with covariance computed by
-finite differences or an ipopt re-solve. `covariance()` is a
+finite differences or an ipopt re-solve. `sens_covariance()` is a
 post-solve primitive: the model as written, one declaration per
 component, the asymptotic covariance and identifiability diagnostics
 from the factorization the solve already produced. Use parmest for
@@ -1123,13 +1189,13 @@ step path: it is a misleading answer to a direct question.
 
 ## The information matrix
 
-`information(model)` is the un-inverted sibling of `covariance()`: the
+`sens_information(model)` is the un-inverted sibling of `sens_covariance()`: the
 reduced Hessian over the declared fitted block, from the same single
 solve, in natural units with no `sigma^2` anywhere. For a homoscedastic
-Lagrangian fit, `covariance()` equals `2*sigma^2*inv(information())` on
+Lagrangian fit, `sens_covariance()` equals `2*sigma^2*inv(sens_information())` on
 the free block. `hessian=` selects the observed (`"lagrangian"`,
 default) or expected (`"gauss-newton"`) form exactly as in
-`covariance()`.
+`sens_covariance()`.
 
 The Lagrangian form is built by tangent recovery against the held
 factorization rather than by inverting the covariance back: the
@@ -1142,7 +1208,7 @@ pinned parameters where a subtract-the-barrier route loses
 exception: it couples through its slack barrier and leaves ~1e-6
 relative residue at practical barrier parameters.
 
-Membership and warnings follow `covariance()`. One disposition is
+Membership and warnings follow `sens_covariance()`. One disposition is
 opposite by design: a strongly active (pinned) parameter's entry is
 `S`, the reduction onto the pinned set, NOT a zero row — zero
 information is the opposite of what a pinned parameter carries —
@@ -1157,9 +1223,9 @@ near-zero eigenvalue is a direction the data does not inform; its
 eigenvector's sign follows the project-wide
 [convention](#eigenvector-sign-convention).
 
-## Choosing the block: wrt=
+## Choosing the block: of=
 
-Both accessors take `wrt=` to reduce onto any block of the solve's
+Both accessors take `of=` to reduce onto any block of the solve's
 variables off the held factor, post-solve; the declared fitted block is
 the default, so omitting it is exactly the prior behavior. Accepted
 forms: a Var (scalar or indexed, every member), an indexed slice
@@ -1167,10 +1233,10 @@ forms: a Var (scalar or indexed, every member), an indexed slice
 these.
 
 ```python
-cov = covariance(m)                      # the fitted block, as before
-cov_a = covariance(m, wrt=[m.a])         # one parameter's marginal
-band = covariance(m, wrt=m.r)            # a predicted trajectory
-info_a = information(m, wrt=[m.a])
+cov = sens_covariance(m)                      # the fitted block, as before
+cov_a = sens_covariance(m, of=[m.a])          # one parameter's marginal
+band = sens_covariance(m, of=m.r)             # a predicted trajectory
+info_a = sens_information(m, of=[m.a])
 ```
 
 Each call re-reduces onto its own argument, so one solve serves as many
@@ -1182,12 +1248,12 @@ exactly with the corresponding entries of the default answer.
 
 A rank-deficient block, one with more coordinates than the fit has
 degrees of freedom or with linearly dependent coordinates (a
-duplicated design point), is the trajectory-band case: `covariance()`
+duplicated design point), is the trajectory-band case: `sens_covariance()`
 returns its (rank-deficient) marginal, `2 sigma^2 M`, the confidence
 band on the fitted trajectory (add the observation noise for a
 prediction band), with the membership handling bypassed, and
-`information()` raises an error pointing to `covariance()`, since such
-a block carries no information matrix. For `information()`,
+`sens_information()` raises an error pointing to `sens_covariance()`, since such
+a block carries no information matrix. For `sens_information()`,
 a block that parameterizes the constraint manifold (size equal to the
 degrees of freedom) gets the exact tangent construction; a sub-block of
 the fitted set gets its marginal as a Schur complement of the exact
@@ -1205,49 +1271,49 @@ same classification the block members get, applied per candidate as a
 singleton block, so it is scale-invariant; only near-bound variables
 pay the extra backsolve.
 
-## Keeping and releasing the factor: retain_kkt(), release_kkt()
+## Keeping and releasing the factor: sens_retain_kkt(), sens_release_kkt()
 
 The solve factors the KKT matrix to solve the NLP; the only question is
 whether that factor is kept for post-solve queries. Any declaration
-keeps it. `retain_kkt(model)` keeps it with no declaration at all,
-which is what `wrt=` queries with nothing declared need: the MHE case,
-where the arrival state and the parameters are each queried by `wrt=`
+keeps it. `sens_retain_kkt(model)` keeps it with no declaration at all,
+which is what `of=` queries with nothing declared need: the MHE case,
+where the arrival state and the parameters are each queried by `of=`
 and neither is THE fitted set. It defaults off, so a solve with no
 sensitivity pays nothing.
 
 ```python
-retain_kkt(m)
+sens_retain_kkt(m)
 SolverFactory("pounce").solve(m)
-arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
-params = information(m, wrt=[m.k1, m.k2])
-release_kkt(m)          # done asking: give the memory back now
+arrival = sens_covariance(m, sigma_sq=s2, of=m.x[:, t0])
+params = sens_information(m, of=[m.k1, m.k2])
+sens_release_kkt(m)          # done asking: give the memory back now
 ```
 
-| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+| setup | factor kept | `sens_covariance(model)` | `sens_covariance(model, of=T)` |
 |---|---|---|---|
 | nothing | no | error | error |
-| `declare_fitted(S)` | yes | over S | over T |
-| `retain_kkt()` only | yes | error, no default | over T |
-| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+| `declare_sens_fitted(S)` | yes | over S | over T |
+| `sens_retain_kkt()` only | yes | error, no default | over T |
+| `sens_retain_kkt()` + `declare_sens_fitted(S)` | yes | over S | over T |
 
 The retention policy in one place: the factor is kept if anything is
-declared or `retain_kkt()` was called, and a `Covariance` or
+declared or `sens_retain_kkt()` was called, and a `Covariance` or
 `Information` result whose lazy `conditioned_on` has not been read
 keeps the session alive through its pending computation until first
-access. `release_kkt(model)` is the exit: it drops the model's hold
+access. `sens_release_kkt(model)` is the exit: it drops the model's hold
 on the factor immediately, freeing the memory, while declarations and
 the retain flag still apply to the next solve. Release drops the
 model's hold, not a result's: a `Covariance` or `Information` with a
-pending `conditioned_on`, and a `Gradient` (which reads the factor on
+pending `conditioned_on`, and a `Jacobian` (which reads the factor on
 every lookup), each hold their own reference, so they keep working
 across the release and keep the factor in memory until they are
-discarded. Noise is a separate question: `retain_kkt()` keeps the
+discarded. Noise is a separate question: `sens_retain_kkt()` keeps the
 factor, not a noise model, and with nothing declared fitted the
 degrees of freedom for a noise ESTIMATE are unknown, so
-`covariance()` under retain-only needs `sigma_sq=`; the estimation
+`sens_covariance()` under retain-only needs `sigma_sq=`; the estimation
 routes (declared residuals, `n_data=`) raise an error saying so.
 
-Like any declaration, `retain_kkt()` routes the solve through the
+Like any declaration, `sens_retain_kkt()` routes the solve through the
 in-process sensitivity path, whose `solve()` surface is not
 keyword-identical to the ordinary subprocess path (for example,
 `load_solutions=False` is not honored there). Adding it to an
@@ -1397,8 +1463,8 @@ tolerance, platform, Python version, and whether a warm-up was excluded.  Re-run
 timing on the target controller hardware; notebook wall-clock values are
 evidence for the recorded machine, not portable deadlines.
 
-The online sensitivity timing includes both the applied `estimate()` and the
-separate `estimate_report()` replay needed for the residual diagnostics; the
+The online sensitivity timing includes both the applied `sens_solution()` and the
+separate `sens_solution_report()` replay needed for the residual diagnostics; the
 current public API computes their predictor and corrector work separately.
 The active-set event-ledger replay is excluded from that timer and reported as
 diagnostic work.  Because the illustrative path-budget guard reads that ledger,

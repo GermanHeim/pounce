@@ -1,6 +1,6 @@
 """Tests for degeneracy="directional": the directional-derivative QP
-at a weakly active base point, in every estimate() mode, and the
-gradient() warning at a kink."""
+at a weakly active base point, in every sens_solution() mode, and the
+sens_jacobian() warning at a kink."""
 import warnings
 
 import pytest
@@ -8,10 +8,10 @@ import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (
-    active_set_changes,
     declare_sens_param,
-    estimate,
-    gradient,
+    sens_active_set_changes,
+    sens_jacobian,
+    sens_solution,
 )
 
 
@@ -36,8 +36,8 @@ def test_directional_is_right_on_both_sides_in_every_mode():
     m = kink()
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-4), "on the bound"
     for mode in MODES:
-        up = estimate(m, [(m.p, 1.0)], mode=mode)
-        down = estimate(m, [(m.p, -1.0)], mode=mode, clamp=False)
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode)
+        down = sens_solution(m, [(m.p, -1.0)], mode=mode, clamp=False)
         assert up[m.x] == pytest.approx(1.0, abs=1e-4), (
             f"mode={mode}: the releasing side's derivative is 1")
         assert down[m.x] == pytest.approx(0.0, abs=1e-4), (
@@ -50,8 +50,8 @@ def test_one_sided_is_wrong_on_at_least_one_side():
     answer under mode="linear" is wrong. This is the runnable before,
     and what keeps the test above from passing vacuously."""
     m = kink()
-    up = estimate(m, [(m.p, 1.0)], degeneracy="one_sided", clamp=False)
-    down = estimate(m, [(m.p, -1.0)], degeneracy="one_sided", clamp=False)
+    up = sens_solution(m, [(m.p, 1.0)], degeneracy="one_sided", clamp=False)
+    down = sens_solution(m, [(m.p, -1.0)], degeneracy="one_sided", clamp=False)
     up_right = abs(up[m.x] - 1.0) < 1e-4
     down_right = abs(down[m.x] - 0.0) < 1e-4
     assert not (up_right and down_right), (
@@ -64,11 +64,11 @@ def test_the_record_shows_the_kink_resolving_essentially_at_zero():
     the residual multiplier the solve left reaches zero, tiny but not
     stamped 0.0."""
     m = kink()
-    rec = active_set_changes(m, [(m.p, 1.0)])
+    rec = sens_active_set_changes(m, [(m.p, 1.0)])
     assert [(c.var, c.bound, c.action) for c in rec] == [
         (m.x, "lower", "leaves")], f"record: {rec}"
     assert rec[0].fraction == pytest.approx(0.0, abs=1e-3)
-    assert active_set_changes(m, [(m.p, -1.0)]) == [], (
+    assert sens_active_set_changes(m, [(m.p, -1.0)]) == [], (
         "held through the whole change, nothing to record")
 
 
@@ -88,11 +88,11 @@ def test_a_bound_inside_the_band_releases_where_its_multiplier_ends():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-8})
 
-    # in the ambiguous band, which the gradient warning certifies
+    # in the ambiguous band, which the sens_jacobian warning certifies
     with pytest.warns(UserWarning, match="degenerate"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
-    rec = active_set_changes(m, [(m.p, 1.0)])
+    rec = sens_active_set_changes(m, [(m.p, 1.0)])
     assert [(c.var, c.bound, c.action) for c in rec] == [
         (m.x, "lower", "leaves")], f"record: {rec}"
     # The fraction is the zero crossing of the multiplier the solve
@@ -104,7 +104,7 @@ def test_a_bound_inside_the_band_releases_where_its_multiplier_ends():
     frac = rec[0].fraction
     assert 1e-6 < frac < 1e-2, f"release at {frac}"
 
-    est = estimate(m, [(m.p, 1.0)], mode="path")
+    est = sens_solution(m, [(m.p, 1.0)], mode="path")
     assert est[m.x] == pytest.approx(1.0, abs=1e-4)
 
 
@@ -138,11 +138,11 @@ def test_a_fixed_variable_does_not_shift_the_detection():
         "the fixed column must be out of the factor")
 
     with pytest.warns(UserWarning, match=r"x \(lower\)"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
     for mode in MODES:
-        up = estimate(m, [(m.p, 1.0)], mode=mode)
-        down = estimate(m, [(m.p, -1.0)], mode=mode, clamp=False)
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode)
+        down = sens_solution(m, [(m.p, -1.0)], mode=mode, clamp=False)
         assert up[m.x] == pytest.approx(1.0, abs=1e-4), f"mode={mode}"
         assert down[m.x] == pytest.approx(0.0, abs=1e-4), f"mode={mode}"
         assert up[m.y] == pytest.approx(1.0, abs=1e-4), (
@@ -168,10 +168,10 @@ def test_the_decision_is_invariant_to_the_perturbation_scale():
     m = kink()
     base_val = pyo.value(m.x)
     for mode in MODES:
-        tiny_down = estimate(m, [(m.p, -1e-10)], mode=mode, clamp=False)
+        tiny_down = sens_solution(m, [(m.p, -1e-10)], mode=mode, clamp=False)
         assert tiny_down[m.x] - base_val == pytest.approx(0.0, abs=1e-12), (
             f"mode={mode}: the holding side holds at any scale")
-        tiny_up = estimate(m, [(m.p, 1e-10)], mode=mode, clamp=False)
+        tiny_up = sens_solution(m, [(m.p, 1e-10)], mode=mode, clamp=False)
         moved = tiny_up[m.x] - base_val
         if mode == "path":
             assert -1e-12 <= moved <= 1e-10 + 1e-12, (
@@ -181,10 +181,10 @@ def test_the_decision_is_invariant_to_the_perturbation_scale():
                 f"mode={mode}: the releasing side releases at any scale")
 
 
-def test_gradient_warns_at_a_kink_and_not_at_a_clean_point():
+def test_sens_jacobian_warns_at_a_kink_and_not_at_a_clean_point():
     m = kink()
     with pytest.warns(UserWarning, match="one-sided"):
-        gradient(m.x, wrt=m.p)
+        sens_jacobian(m.x, wrt=m.p)
 
     clean = pyo.ConcreteModel()
     clean.p = pyo.Param(initialize=1.0, mutable=True)
@@ -194,7 +194,7 @@ def test_gradient_warns_at_a_kink_and_not_at_a_clean_point():
     pyo.SolverFactory("pounce").solve(clean, options={"tol": 1e-10})
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        gradient(clean.x, wrt=clean.p)
+        sens_jacobian(clean.x, wrt=clean.p)
 
 
 def test_a_clean_base_point_is_identical_under_both_settings():
@@ -207,8 +207,8 @@ def test_a_clean_base_point_is_identical_under_both_settings():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
     for mode in MODES:
-        a = estimate(m, [(m.p, 1.5)], mode=mode)
-        b = estimate(m, [(m.p, 1.5)], mode=mode, degeneracy="one_sided")
+        a = sens_solution(m, [(m.p, 1.5)], mode=mode)
+        b = sens_solution(m, [(m.p, 1.5)], mode=mode, degeneracy="one_sided")
         for v in (m.x, m.y):
             assert a[v] == b[v], f"mode={mode}: clean point must be identical"
 
@@ -219,17 +219,17 @@ def test_an_exhausted_budget_falls_back_with_a_warning():
     so."""
     m = kink()
     with pytest.warns(UserWarning, match="one-sided step"):
-        fell = estimate(m, [(m.p, -1.0)], degeneracy_iter=0, clamp=False)
-    plain = estimate(m, [(m.p, -1.0)], degeneracy="one_sided", clamp=False)
+        fell = sens_solution(m, [(m.p, -1.0)], degeneracy_iter=0, clamp=False)
+    plain = sens_solution(m, [(m.p, -1.0)], degeneracy="one_sided", clamp=False)
     assert fell[m.x] == plain[m.x]
 
 
 def test_an_unknown_degeneracy_value_is_refused():
     m = kink()
     with pytest.raises(ValueError, match="degeneracy must be"):
-        estimate(m, [(m.p, 1.0)], degeneracy="qp")
+        sens_solution(m, [(m.p, 1.0)], degeneracy="qp")
     with pytest.raises(ValueError, match="degeneracy must be"):
-        active_set_changes(m, [(m.p, 1.0)], degeneracy="ignore")
+        sens_active_set_changes(m, [(m.p, 1.0)], degeneracy="ignore")
 
 
 def coupled_kink(p=0.0):
@@ -256,13 +256,139 @@ def test_the_coupled_variable_follows_the_decided_side():
 
     for target, mode in ((0.5, "fix_relax"), (0.5, "path"), (-0.5, "path")):
         exact = coupled_kink(target)
-        est = estimate(m, [(m.p, target)], mode=mode, clamp=False)
+        est = sens_solution(m, [(m.p, target)], mode=mode, clamp=False)
         assert est[m.x] == pytest.approx(pyo.value(exact.x), abs=1e-4), (
             f"target {target}, mode {mode}")
         assert est[m.y] == pytest.approx(pyo.value(exact.y), abs=1e-4), (
             f"target {target}, mode {mode}")
 
 
+def test_release_all_takes_the_released_direction_undecided():
+    """degeneracy="release_all" hands back the all-released step with
+    no decision: on the kink's holding side the raw step follows the
+    released direction to -1, where the true derivative is 0, and the
+    repair belongs to whatever runs next. Deterministic, unlike
+    "one_sided", whose holding-side answer depends on which side the
+    held factorization leans toward."""
+    m = kink()
+    down = sens_solution(m, [(m.p, -1.0)], degeneracy="release_all",
+                    clamp=False)
+    assert down[m.x] == pytest.approx(-1.0, abs=1e-4), (
+        "the released direction follows p through the bound")
+
+
+def test_release_all_is_repaired_by_every_mode():
+    """The releasing side is right in every mode, and the holding
+    side's violation is repaired by each mode's own machinery: pins
+    under fix_relax, the walk under path, and the clamp under linear.
+    On this one-variable fixture every repair is exact; what each
+    mode does to a coupled neighbor is pinned on `coupled_kink`
+    below."""
+    m = kink()
+    for mode in ("linear", "fix_relax", "path"):
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode,
+                      degeneracy="release_all")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            down = sens_solution(m, [(m.p, -1.0)], mode=mode,
+                            degeneracy="release_all")
+        assert up[m.x] == pytest.approx(1.0, abs=1e-4), (
+            f"mode={mode}: the releasing side's derivative is 1")
+        assert down[m.x] == pytest.approx(0.0, abs=1e-4), (
+            f"mode={mode}: the holding side repairs to the bound")
+
+
+def test_release_all_on_the_coupled_kink_pins_each_modes_repair():
+    """The AMBIGUOUS branch of the weak set, and the discriminating
+    per-coordinate pins. The releasing side equals the directional
+    decision in both coordinates in every mode, exactly what the
+    all-released direction should be there. On the holding side the
+    modes differ, and the numbers are re-solve-verified constants of
+    this fixture (dx/dp = 5/7 released, y = 2x + 1):
+
+    - fix_relax pins the crossing and re-solves, repairing both
+      coordinates, x to the bound and y to 1.
+    - path re-holds the weak bound at the fraction the walk finds the
+      direction pressing into it, and the coordinates behind it
+      re-optimize under the hold, so it reaches the same 1.
+    - linear clamps only the crossing coordinate: x repairs to the
+      bound and y keeps the released coupling, 1 + 2*(-5/7) = -3/7,
+      the neighbor damage the docstring and the book state. It is the
+      only mode left that damages the neighbor here, which is what
+      makes this fixture discriminating rather than a triple of the
+      same number.
+
+    `path` used to answer the one-sided 2/7 here, pinned as current
+    behavior rather than endorsed when this test was written. That was
+    gh#852, split out of this PR's own review: the walk barred every
+    base-active bound from its reach scan, so a perturbation pressing
+    into a weakly active one walked the variable out of its box with
+    no breakpoint, and a downstream clamp moved the crossing
+    coordinate and nothing coupled to it. The fix landed on
+    `step_along_path`, which is the surface BOTH the decided and the
+    undecided callers walk through, so it repaired `release_all` here
+    without this PR changing a line.
+    """
+    m = coupled_kink()
+    for mode in ("linear", "fix_relax", "path"):
+        up = sens_solution(m, [(m.p, 1.0)], mode=mode,
+                      degeneracy="release_all")
+        assert up[m.x] == pytest.approx(5.0 / 7.0, abs=1e-4), (
+            f"mode={mode}: the released direction is exact when the "
+            "bound releases")
+        assert up[m.y] == pytest.approx(1.0 + 10.0 / 7.0, abs=1e-4), (
+            f"mode={mode}: the neighbor follows the released direction")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lin = sens_solution(m, [(m.p, -1.0)], degeneracy="release_all")
+        fix = sens_solution(m, [(m.p, -1.0)], mode="fix_relax",
+                       degeneracy="release_all")
+        pth = sens_solution(m, [(m.p, -1.0)], mode="path",
+                       degeneracy="release_all")
+    for est, mode in ((lin, "linear"), (fix, "fix_relax"),
+                      (pth, "path")):
+        assert est[m.x] == pytest.approx(0.0, abs=1e-4), (
+            f"mode={mode}: x repairs to the bound")
+    assert fix[m.y] == pytest.approx(1.0, abs=1e-4), (
+        "the pins re-solve, so the neighbor repairs too")
+    assert pth[m.y] == pytest.approx(1.0, abs=1e-4), (
+        "the walk re-holds the weak bound and re-optimizes behind it, "
+        "so the neighbor follows (gh#852); this pinned 2/7 before that "
+        "fix landed")
+    assert lin[m.y] == pytest.approx(1.0 - 10.0 / 7.0, abs=1e-4), (
+        "the clamp repairs only the crossing coordinate: the neighbor "
+        "keeps the released coupling, and linear is now the only mode "
+        "here that does")
+
+
+def test_release_all_at_a_clean_base_point_is_the_plain_step():
+    """Without a weakly active bound there is nothing to release and
+    every degeneracy option takes the same step, directional included."""
+    m = kink(p=2.0)
+    assert pyo.value(m.x) == pytest.approx(2.0, abs=1e-6), "interior"
+    a = sens_solution(m, [(m.p, 3.0)], degeneracy="release_all")
+    b = sens_solution(m, [(m.p, 3.0)], degeneracy="one_sided")
+    c = sens_solution(m, [(m.p, 3.0)], degeneracy="directional")
+    assert a[m.x] == pytest.approx(b[m.x], abs=1e-12)
+    assert a[m.x] == pytest.approx(c[m.x], abs=1e-12)
+
+
+def test_degeneracy_iter_warns_when_it_cannot_matter():
+    """The budget belongs to the directional decision: passing it under
+    another option warns and changes nothing, the bound_eps shape."""
+    m = kink()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        sens_solution(m, [(m.p, 1.0)], degeneracy="release_all",
+                 degeneracy_iter=8)
+    assert any("changes nothing" in str(x.message) for x in w), (
+        f"an inert budget should warn: {[str(x.message) for x in w]}")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        sens_solution(m, [(m.p, 1.0)], degeneracy_iter=8)
+    assert not any("changes nothing" in str(x.message) for x in w), (
+        "the directional decision reads the budget: no warning")
 def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     """gh#852. `degeneracy="one_sided"` gives up the choice of side at
     a kink; it does not give up feasibility. The walk used to find no
@@ -282,7 +408,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     assert pyo.value(exact.y) == pytest.approx(1.0, abs=1e-6)
 
     for mode in ("fix_relax", "path"):
-        est = estimate(m, [(m.p, -1.0)], mode=mode, degeneracy="one_sided")
+        est = sens_solution(m, [(m.p, -1.0)], mode=mode, degeneracy="one_sided")
         assert est[m.x] == pytest.approx(0.0, abs=1e-4), f"mode={mode}"
         assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
             f"mode={mode}: the coupled neighbour has to follow the held "
@@ -291,7 +417,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
     # The runnable before: a single linear map plus a clamp cannot do
     # this, which is why the mode matters rather than the option.
     with pytest.warns(UserWarning, match="linear step leaves"):
-        lossy = estimate(
+        lossy = sens_solution(
             m, [(m.p, -1.0)], mode="linear", degeneracy="one_sided")
     assert lossy[m.x] == pytest.approx(0.0, abs=1e-4), "the clamp gets x right"
     assert abs(lossy[m.y] - 1.0) > 0.5, (
@@ -299,7 +425,7 @@ def test_one_sided_path_keeps_the_coupled_kink_inside_its_box():
         f"got {lossy[m.y]}")
 
     # And the walk records the hold it took, at the kink's own fraction.
-    rec = active_set_changes(m, [(m.p, -1.0)], degeneracy="one_sided")
+    rec = sens_active_set_changes(m, [(m.p, -1.0)], degeneracy="one_sided")
     assert [(c.var, c.bound, c.action) for c in rec] == [
         (m.x, "lower", "reaches")], f"record: {rec}"
     assert rec[0].fraction == pytest.approx(0.0, abs=1e-3)
@@ -329,7 +455,7 @@ def test_one_sided_path_reholds_the_kink_under_user_scaling():
         m, options={"tol": 1e-10, "nlp_scaling_method": "user-scaling"})
     assert pyo.value(m.x) == pytest.approx(0.0, abs=1e-4)
 
-    est = estimate(m, [(m.p, -1.0)], mode="path", degeneracy="one_sided")
+    est = sens_solution(m, [(m.p, -1.0)], mode="path", degeneracy="one_sided")
     assert est[m.x] == pytest.approx(0.0, abs=1e-4)
     assert est[m.y] == pytest.approx(1.0, abs=1e-4), (
         f"the repair has to survive a change of variables, got {est[m.y]}")
