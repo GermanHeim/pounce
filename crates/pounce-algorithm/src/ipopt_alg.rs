@@ -437,6 +437,12 @@ pub struct IpoptAlgorithm {
     lbfgs_ls_restarts_used: usize,
     /// gh #797 — escapes spent so far this solve.
     neg_curv_escapes_used: usize,
+    /// Sink for the last `IterStats` handed to the user's
+    /// `intermediate_callback` (pounce#870). A second-opinion retry that loses
+    /// needs it, so that the trace a consumer accumulated can be made to end
+    /// on the iterate actually reported. Set by `IpoptApplication`; `None`
+    /// everywhere else.
+    pub last_iter_stats_sink: Option<Rc<RefCell<Option<IterStats>>>>,
     /// gh #797 — the certified stationary point the escape left. It is a strict
     /// certificate, so it is the floor the continuation must beat *with a
     /// certificate of its own* to be preferred.
@@ -613,6 +619,7 @@ impl IpoptAlgorithm {
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
             neg_curv_escapes: DEFAULT_NEG_CURV_ESCAPES,
             neg_curv_escapes_used: 0,
+            last_iter_stats_sink: None,
             lbfgs_ls_failure_restarts: DEFAULT_LBFGS_LS_FAILURE_RESTARTS,
             lbfgs_ls_restarts_used: 0,
             neg_curv_floor: None,
@@ -2214,6 +2221,11 @@ impl IpoptAlgorithm {
             return true;
         };
         let stats = self.build_iter_stats();
+        // Record exactly what the callback is about to receive, so a losing
+        // retry can re-emit the winning attempt's final row (pounce#870).
+        if let Some(sink) = self.last_iter_stats_sink.as_ref() {
+            *sink.borrow_mut() = Some(stats);
+        }
         // The live-inspector context is for iterates of the *user's*
         // problem only. During restoration the iterate belongs to the
         // feasibility subproblem and is not even the same length, so no
