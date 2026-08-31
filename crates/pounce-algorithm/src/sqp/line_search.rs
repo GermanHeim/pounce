@@ -129,9 +129,28 @@ pub(crate) const KAPPA_SOC: Number = 0.99;
 /// separate trust region.
 pub(crate) const SOC_MAX_STEP_GROWTH: Number = 2.0;
 
-/// `‖v‖_∞`.
+/// `‖v‖_∞`, **propagating `NaN` rather than swallowing it** (gh #876).
+///
+/// `f64::max` is defined to *ignore* `NaN`, so the obvious
+/// `fold(0.0, f64::max)` reports the ∞-norm of an all-`NaN` vector as a
+/// perfect `0.0`. Every convergence and acceptance test in this arm is a
+/// comparison of such a norm against a tolerance, and `0.0 <= tol` passes —
+/// so the reduction turns a fully diverged iterate into a declaration of
+/// optimality. `pounce-convex` learned this as gh #222 and has carried a
+/// short-circuiting `inf_norm` since; gh #845 fixed a third instance in
+/// `pounce-sensitivity`. This is the SQP arm's copy.
+///
+/// `NaN` short-circuits, so the norm is genuinely `NaN` and every `<= tol`
+/// test against it is false — which is the correct answer.
 pub(crate) fn inf_norm(v: &[Number]) -> Number {
-    v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
+    let mut m = 0.0_f64;
+    for &x in v {
+        if x.is_nan() {
+            return Number::NAN;
+        }
+        m = m.max(x.abs());
+    }
+    m
 }
 
 /// Adapt `ν` against the QP multiplier magnitude and run Armijo

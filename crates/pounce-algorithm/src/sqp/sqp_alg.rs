@@ -322,6 +322,32 @@ impl SqpAlgorithm {
             final_stationarity = kkt.stationarity;
             final_constr_viol = kkt.constr_viol;
 
+            // Non-finite residuals mean the iterate itself is garbage, and
+            // every gate below this point — the convergence test, the
+            // gh #856 negative-curvature escape installed on it, the filter,
+            // the merit function — is a comparison against a tolerance that
+            // a `NaN` cannot inform. Stop here and say so, mirroring the
+            // interior-point arm's `if !nlp_err.is_finite()` screen
+            // (`ipopt_alg.rs`) so the two arms give the same verdict on the
+            // same condition (gh #876).
+            if !kkt.stationarity.is_finite() || !kkt.constr_viol.is_finite() {
+                let obj = nlp.eval_f(&iter.x);
+                self.iterates = Some(iter.clone());
+                return Ok(SqpResult {
+                    x: iter.x,
+                    lambda_g: iter.lambda_g,
+                    lambda_x: iter.lambda_x,
+                    obj,
+                    status: SqpStatus::InvalidNumber,
+                    n_iter: outer,
+                    n_qp_solves,
+                    n_qp_working_set_changes,
+                    final_stationarity,
+                    final_constr_viol,
+                    working_set: iter.working,
+                });
+            }
+
             #[cfg(test)]
             if self.opts.print_level >= 1 {
                 tracing::debug!(target: "pounce::sqp",
@@ -1657,7 +1683,15 @@ pub(crate) fn check_kkt(
 ) -> KktError {
     // Constraint violation: max(0, bl - c, c - bu) on every row,
     // plus bound violation on every variable.
+    //
+    // `NaN` propagates rather than reducing away (gh #876). `f64::max`
+    // ignores `NaN`, so `(bl - c).max(0.0)` on a non-finite `c` is `0.0` and
+    // a diverged iterate scores as perfectly feasible. The same reduction on
+    // the stationarity rows below is the site the issue reports; both are
+    // fixed, because either one alone still lets `check_kkt` return a clean
+    // `KktError` from garbage.
     let mut viol = 0.0_f64;
+    let mut nonfinite = false;
     for i in 0..m {
         let lo = if bl_c[i] > NLP_LOWER_BOUND_INF {
             (bl_c[i] - c_vals[i]).max(0.0)
@@ -1669,9 +1703,11 @@ pub(crate) fn check_kkt(
         } else {
             0.0
         };
+        nonfinite |= !c_vals[i].is_finite();
         viol = viol.max(lo).max(hi);
     }
     for i in 0..n {
+        nonfinite |= !iter.x[i].is_finite();
         let lo = if xl[i] > NLP_LOWER_BOUND_INF {
             (xl[i] - iter.x[i]).max(0.0)
         } else {
@@ -1705,10 +1741,167 @@ pub(crate) fn check_kkt(
     for (s, &lx) in stat.iter_mut().zip(iter.lambda_x.iter()) {
         *s -= lx;
     }
-    let stat_max = stat.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+    let stat_max = crate::sqp::line_search::inf_norm(&stat);
+
+    // An iterate or a constraint value that is not finite makes every residual
+    // computed from it meaningless, whichever way the arithmetic happens to
+    // reduce: `+inf - inf` is `NaN`, but `(bl - inf).max(0.0)` is a tidy `0.0`
+    // and `inf.abs()` is a large number that at least fails `<= tol`. Reporting
+    // `NaN` for both is the honest answer and the one the caller's `<= tol`
+    // gates already handle correctly.
+    if nonfinite {
+        return KktError {
+            stationarity: Number::NAN,
+            constr_viol: Number::NAN,
+        };
+    }
 
     KktError {
         stationarity: stat_max,
         constr_viol: viol,
+    }
+}
+
+#[cfg(test)]
+mod kkt_nan_tests {
+    //! gh #876 — `check_kkt` must not launder a non-finite iterate into a
+    //! clean `KktError`.
+    //!
+    //! The caller's convergence gate is
+    //! `kkt.stationarity <= stationarity_tol && kkt.constr_viol <= constr_viol_tol`,
+    //! so anything `check_kkt` reports as `0.0` is reported as converged. Both
+    //! of its reductions used to swallow `NaN`:
+    //!
+    //! * `stat.iter().map(|s| s.abs()).fold(0.0_f64, f64::max)` — `f64::max`
+    //!   is defined to *ignore* `NaN`, so an all-`NaN` stationarity vector
+    //!   reduced to `0.0`. This is the site gh #876 reports, and the third
+    //!   instance of the same shape in this workspace: gh #222 fixed it in
+    //!   `pounce-convex`, gh #845 in `pounce-sensitivity`.
+    //! * `viol.max(lo).max(hi)` where `lo = (bl - c).max(0.0)` — the same
+    //!   definition one layer earlier, so a `NaN` constraint value scored as
+    //!   *perfectly feasible* before the outer `max` ever saw it. The issue
+    //!   does not name this one; fixing only the reported site would still
+    //!   have left `constr_viol` reading `0.0` on a diverged iterate.
+    //!
+    //! ## Which branch each test reaches
+    //!
+    //! Per this repo's gh #756 lesson, a guard is only evidence about the
+    //! branch its fixture reaches, so the four tests below are chosen to land
+    //! in four different places: a `NaN` arriving through `c_vals`, one
+    //! arriving through `x`, one arriving through the *duals* (where `x` and
+    //! `c` are both finite and only the stationarity row is poisoned — the
+    //! `inf_norm` fix, not the `nonfinite` flag), and an ordinary finite
+    //! iterate that must be completely unaffected.
+    //!
+    //! ## Mutation table
+    //!
+    //! | revert | red |
+    //! |---|---|
+    //! | `inf_norm` back to `fold(0.0, f64::max)` | `a_nan_dual_poisons_only_stationarity`, `inf_norm_tests::a_nan_entry_propagates_rather_than_reducing_away` |
+    //! | drop the `nonfinite` flag | `a_nan_constraint_value_is_not_perfect_feasibility`, `a_nan_iterate_is_not_perfect_feasibility` |
+    //! | both | all four of the above |
+    //!
+    //! Measured, both directions: each mutation turns exactly the listed
+    //! tests red and leaves the others — including
+    //! `a_finite_iterate_is_measured_exactly_as_before` — green. Neither half
+    //! subsumes the other, which is why both are here.
+
+    use super::*;
+    use crate::sqp::qp_assembly::Triplet;
+    use pounce_common::types::Index;
+
+    /// `min x0` s.t. one row `c(x) = x0`, no bounds — the smallest shape that
+    /// exercises every accumulation in `check_kkt`.
+    fn setup(x: Vec<Number>, c: Vec<Number>, lam_g: Vec<Number>) -> KktError {
+        let n = x.len();
+        let m = c.len();
+        let iter = SqpIterates {
+            x,
+            lambda_g: lam_g,
+            lambda_x: vec![0.0; n],
+            working: None,
+        };
+        let jac = Triplet {
+            n_rows: m,
+            n_cols: n,
+            irow: (1..=m as i32).map(|i| i as Index).collect(),
+            jcol: vec![1 as Index; m],
+            vals: vec![1.0; m],
+        };
+        check_kkt(
+            n,
+            m,
+            &iter,
+            &vec![1.0; n],
+            &c,
+            &vec![0.0; m],
+            &vec![0.0; m],
+            &vec![NLP_LOWER_BOUND_INF; n],
+            &vec![NLP_UPPER_BOUND_INF; n],
+            &jac,
+        )
+    }
+
+    #[test]
+    fn a_finite_iterate_is_measured_exactly_as_before() {
+        // x0 = 2 against the equality row c = x0 = 0: violation 2, and
+        // stationarity ∇f + Jᵀλ = 1 + 1·(-1) = 0.
+        let k = setup(vec![2.0], vec![2.0], vec![-1.0]);
+        assert_eq!(k.constr_viol, 2.0);
+        assert_eq!(k.stationarity, 0.0);
+    }
+
+    #[test]
+    fn a_nan_constraint_value_is_not_perfect_feasibility() {
+        let k = setup(vec![0.0], vec![Number::NAN], vec![-1.0]);
+        assert!(
+            k.constr_viol.is_nan(),
+            "a NaN constraint value reported constr_viol = {}, which clears \
+             every tolerance the caller compares it against",
+            k.constr_viol
+        );
+        assert!(k.stationarity.is_nan());
+    }
+
+    #[test]
+    fn a_nan_iterate_is_not_perfect_feasibility() {
+        let k = setup(vec![Number::NAN], vec![0.0], vec![-1.0]);
+        assert!(k.constr_viol.is_nan());
+        assert!(k.stationarity.is_nan());
+    }
+
+    /// The dual-side branch: `x` and `c` are both finite, so the `nonfinite`
+    /// flag stays false and nothing but `inf_norm` stands between a `NaN`
+    /// multiplier and a stationarity residual of `0.0`. This is the test that
+    /// the `nonfinite` flag alone does **not** cover.
+    #[test]
+    fn a_nan_dual_poisons_only_stationarity() {
+        let k = setup(vec![0.0], vec![0.0], vec![Number::NAN]);
+        assert!(
+            k.stationarity.is_nan(),
+            "a NaN multiplier reduced to stationarity = {}",
+            k.stationarity
+        );
+        // Feasibility genuinely holds at this x, and saying so is correct —
+        // the flag is about the *primal* iterate, not about the duals.
+        assert_eq!(k.constr_viol, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod inf_norm_tests {
+    use crate::sqp::line_search::inf_norm;
+
+    #[test]
+    fn a_nan_entry_propagates_rather_than_reducing_away() {
+        assert!(inf_norm(&[1.0, f64::NAN, 2.0]).is_nan());
+        assert!(inf_norm(&[f64::NAN]).is_nan());
+    }
+
+    #[test]
+    fn finite_vectors_are_unchanged() {
+        assert_eq!(inf_norm(&[]), 0.0);
+        assert_eq!(inf_norm(&[-3.0, 1.0, 2.0]), 3.0);
+        assert_eq!(inf_norm(&[f64::INFINITY, 1.0]), f64::INFINITY);
     }
 }

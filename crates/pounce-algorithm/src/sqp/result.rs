@@ -54,6 +54,21 @@ pub enum SqpStatus {
     /// the local model only and falls back to
     /// [`QpStepFailed`](Self::QpStepFailed).
     Unbounded,
+    /// The KKT residuals at the current iterate are not finite: an iterate
+    /// or a constraint value went `NaN`/`±inf`, so nothing computed from it
+    /// means anything. Maps to `Invalid_Number_Detected`, which is what the
+    /// interior-point arm already reports for the same condition
+    /// (`ipopt_alg.rs`, `if !nlp_err.is_finite()`).
+    ///
+    /// This exists because the alternative is worse than an unhelpful
+    /// status. `check_kkt` reduced its residuals with `fold(0.0, f64::max)`,
+    /// and `f64::max` *ignores* `NaN` — so an all-`NaN` stationarity vector
+    /// reduced to a perfect `0.0`, cleared `<= tol`, and the arm reported
+    /// `Optimal` with `Objective nan` printed one line above it (gh #876).
+    /// Making the residuals honest already stops the false `Optimal`; naming
+    /// the condition is what stops it being reported as a *budget* problem
+    /// the user could fix by raising `max_iter`.
+    InvalidNumber,
 }
 
 impl fmt::Display for SqpStatus {
@@ -66,6 +81,7 @@ impl fmt::Display for SqpStatus {
             SqpStatus::QpStepFailed => write!(f, "qp-step-failed"),
             SqpStatus::QpIterationLimit => write!(f, "qp-iteration-limit"),
             SqpStatus::Unbounded => write!(f, "unbounded"),
+            SqpStatus::InvalidNumber => write!(f, "invalid-number"),
         }
     }
 }

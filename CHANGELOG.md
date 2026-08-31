@@ -10,6 +10,49 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **A `NaN` iterate on the active-set SQP arm is no longer reported as an
+  optimal solution (gh #876).** `unbounded_cubic.nl` under
+  `algorithm=active-set-sqp hessian_approximation=limited-memory` printed
+  `Objective nan`, then `Overall NLP error 0.0000000000000000e+00`, then
+  `EXIT: Optimal Solution Found.` — a perfect KKT error beside a `nan`
+  objective, with success declared on the strength of the zero.
+
+  `f64::max` is defined to *ignore* `NaN`, so `fold(0.0, f64::max)` over an
+  all-`NaN` vector is `0.0`, and `0.0 <= tol` passes. `check_kkt` reduced
+  **both** of its residuals that way: the stationarity rows through the fold
+  the issue names, and the constraint violation one layer earlier through
+  `(bl - c).max(0.0)`, which turns a `NaN` row into a tidy "perfectly
+  feasible" `0.0` before the outer `max` ever sees it — so fixing only the
+  reported site would have left `constr_viol` lying. Both are fixed, and the
+  in-crate mutation table shows neither half covers the other's tests. The
+  SQP arm's `inf_norm` now short-circuits on `NaN`, matching the
+  `pounce-convex` helper that has done so since gh #222; gh #845 was the
+  second instance of the shape, in `pounce-sensitivity`, and this is the
+  third.
+
+  A non-finite iterate or constraint value now terminates the arm with a new
+  `SqpStatus::InvalidNumber`, mapping to `Invalid_Number_Detected` — the same
+  verdict the interior-point arm has always given for the same condition
+  (`ipopt_alg.rs`, `if !nlp_err.is_finite()`), so the two arms cannot disagree
+  about what a `NaN` iterate means.
+
+  Sweeps: the default arm is **unmoved on all 180 fixture-legs**; the SQP arm
+  moves exactly **two**, both limited-memory, both unbounded models.
+  `unbounded_cubic` `SolveSucceeded`/it=9 → `InvalidNumberDetected`/it=8 is
+  the reported defect. `unbounded_exp` `MaximumIterationsExceeded`/it=200 →
+  `InvalidNumberDetected`/it=3 is a second manifestation the issue does not
+  mention: its iterates went to `±inf` rather than `NaN`, and `inf` survives a
+  `max`-fold intact, so it failed the tolerance honestly and then ground out
+  197 further iterations on an iterate that had stopped meaning anything.
+
+  Scope: `Invalid_Number_Detected` is not the same claim as
+  `Diverging_Iterates`. The *exact* leg of `unbounded_cubic` still reports the
+  latter, because its step QP certifies a recession ray (gh #388); an L-BFGS
+  matrix is positive definite by construction, so the limited-memory leg never
+  can. Giving the SQP arm its own `diverging_iterates_tol` guard, so both legs
+  reach the same verdict on an unbounded model, is a trajectory change and was
+  not attempted here.
+
 - **An unconstrained ill-conditioned QP no longer returns a materially wrong
   `x` under `Optimal` (gh #875).** `min ½(x₀−3)² + ½·10¹²(x₁−½)²` has
   `x* = (3, ½)` by identity; the cost-normalized (`σ`) path returned
