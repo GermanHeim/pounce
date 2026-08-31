@@ -54,6 +54,33 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
+- **A flaky CLI test is made deterministic (no user-facing change).**
+  `crates/pounce-cli/tests/issue850_second_opinion_is_recorded.rs` built
+  its `.sol` and `.json` output paths from the fixture name and the
+  options, so two tests that solve the same fixture with **no** options —
+  `a_promotion_records_what_the_base_solve_did` and
+  `the_true_cost_is_recorded_not_just_the_promoted_rungs` — both landed on
+  `pounce_850_square_flowsheet_resto_nl.json` in the shared temp dir.
+  Cargo runs them on parallel threads, so the loser read a half-written
+  file: not a wrong verdict but a missing one, `string(&json, "status")`
+  finding no key and the assertion reading `left: None`. Observed on CI on
+  2026-08-30, on a branch whose Rust tree was byte-identical to `main`'s.
+
+  Keying on the options was the first attempt at this and the helper's own
+  doc comment described it as the fix; it is one case short, which is why
+  the paths are now unique per **call** — a pid and a counter — rather than
+  per (fixture, options). The pid covers the other half: these files
+  outlive the run, so a repeating name lets `json.exists()` be satisfied by
+  a previous run's leftover while this run is still writing. The files are
+  removed after they are read.
+
+  The path construction is split into `out_paths` so the property can be
+  asserted rather than waited for: `two_calls_with_the_same_arguments_get_own_paths`
+  fails on the previous scheme **by construction**, since the paths were a
+  pure function of the arguments there. A timing window that only opens
+  under load is not something a green run is evidence about, and 25 local
+  re-runs of the old code reproduced nothing.
+
 - **One naming rule for the `pyomo-pounce` sensitivity surface (gh #854).**
   Three of the public names misled. `estimate()` sat beside a
   parameter-estimation feature set (`declare_fitted`, `declare_residual`,
