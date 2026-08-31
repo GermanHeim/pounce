@@ -698,6 +698,10 @@ class _Session:
         self.pins = pins              # ComponentMap: param data -> pin row
         self.con_alias = con_alias    # original con name -> clone row name
         self.base_x = None
+        # Cached `grad_x f` at the solved point (gh#878). Evaluated at most
+        # once per session; `sens_jacobian(m.obj, wrt=...)` over an indexed
+        # parameter would otherwise re-evaluate it per column.
+        self._obj_grad = None
         # Objective value at the solve. NaN, not None, is the "never
         # computed" sentinel: that is the convention the engine itself
         # uses for info["obj_val"] (pounce-py's problem.rs seeds
@@ -808,6 +812,44 @@ class _Session:
             if row is not None:
                 out[full_idx] = dx_var[row]
         return out
+
+    def objective_gradient(self):
+        """`grad_x f` at the solved point, in full-x (`.col`) order."""
+        if self._obj_grad is None:
+            if self.base_x is None:
+                raise ValueError(
+                    "sens_jacobian(objective): the solve recorded no primal "
+                    "point, so the objective gradient cannot be evaluated")
+            self._obj_grad = np.asarray(self.nl.gradient(self.base_x),
+                                        dtype=float)
+        return self._obj_grad
+
+    def total_objective_derivative(self, col):
+        """`df/dp` for the KKT derivative column `col` (gh#878).
+
+        The chain rule is
+
+            df/dp  =  df/dp|_x  +  sum_i (df/dx_i)(dx_i/dp)
+
+        and both terms fall out of a single contraction here, because a
+        declared sensitivity parameter is not a `Param` by the time the
+        solve sees it. `declare_sens_param` rewrites every occurrence into
+        a variable pinned by a defining equality, so `p` is an ordinary
+        coordinate of full-x: `objective_gradient()` carries `df/dp|_x` in
+        `p`'s own slot, and the step carries `dp/dp = 1` there. Contracting
+        the two therefore picks up the explicit partial and the implicit
+        sum in one product, with no separate `grad_p f` term to assemble
+        and no second index convention to get wrong.
+
+        Written as a dot product over **full-x**, not the factor's var-x:
+        `scatter_x` is what reconciles them, and a model carrying one fixed
+        variable is where the two diverge. Contracting a full-x gradient
+        with a var-x step would silently pair `df/dx_i` with a NEIGHBOURING
+        variable's sensitivity from the first fixed variable on -- gh#450
+        and gh#672 finding 1, the same defect twice. `sens_invariance_legs`
+        leg 3 is the guard.
+        """
+        return float(self.objective_gradient() @ self.scatter_x(col))
 
     def column(self, pin_idx):
         """Full KKT-space derivative column for a unit perturbation."""
@@ -1462,8 +1504,9 @@ def _param_pin(session, param_data):
 
 class Jacobian:
     """Derivatives d(target*)/d(param) for one or more targets/parameters.
-    Targets are variables (primal sensitivities) or equality constraints
-    (multiplier sensitivities).
+    Targets are variables (primal sensitivities), equality constraints
+    (multiplier sensitivities), or the objective (the total derivative
+    df/dp).
 
     Access with g[target_data, param_data] (either order); when one side is
     a single component, g[data] works. to_dataframe() gives the full
@@ -1475,6 +1518,27 @@ class Jacobian:
         self._params = list(params)
         self._tset = set(id(t) for t in self._targets)
         self._pset = set(id(p) for p in self._params)
+
+    def _check_objective(self, td):
+        """The objective target must be the one this session solved.
+
+        Without this a second, deactivated objective left on the model --
+        the ordinary way a script switches between formulations -- reads
+        as a valid target and is answered with the gradient of the
+        objective that *was* solved, under the name of the one that was
+        not. Cheap to check, and the failure it prevents is silent.
+        """
+        active = [o for o in self._session.model.component_data_objects(
+            pyo.Objective, active=True, descend_into=True)]
+        if not any(o is td for o in active):
+            raise ValueError(
+                f"{td.name}: not the active objective of the solved model. "
+                "sens_jacobian(of=<Objective>) differentiates the objective "
+                "the solve minimized; " + (
+                    f"this model's is {active[0].name}."
+                    if len(active) == 1 else
+                    f"this model has {len(active)} active objectives "
+                    f"({[o.name for o in active]})."))
 
     def _entry(self, td):
         if td.ctype is Constraint:
@@ -1505,6 +1569,12 @@ class Jacobian:
 
     def _value(self, td, pd):
         col = self._session.column(_param_pin(self._session, pd))
+        if td.ctype is pyo.Objective:
+            # Not a row of the factor at all: `df/dp` is a scalar contracted
+            # over the whole step, so it has no `_entry` and no convention
+            # sign to apply (gh#878).
+            self._check_objective(td)
+            return self._session.total_objective_derivative(col)
         return self._convention_sign(td) * float(col[self._entry(td)])
 
     def __getitem__(self, key):
@@ -1562,10 +1632,21 @@ def sens_jacobian(of=None, *, wrt, max_pdpert=None):
     """d(of*)/d(wrt).
 
     of: what the derivative is about (the target rows) -- a Var
-    (primal sensitivity) or an equality Constraint (its multiplier's
-    sensitivity); data object or container; omit for all model
+    (primal sensitivity), an equality Constraint (its multiplier's
+    sensitivity), or the model's Objective (the TOTAL derivative
+    df/dp, gh#878); data object or container; omit for all model
     variables. wrt: the differentiation variable, a declared Param
     (data or container).
+
+    The objective target answers
+
+        df/dp = df/dp|_x + sum_i (df/dx_i)(dx_i/dp)
+
+    -- the quantity an outer loop, a design-of-experiments score or a
+    "which parameter is my objective most exposed to" question wants.
+    Both halves are included: a parameter that appears in the objective
+    contributes its explicit partial as well as its effect through the
+    solution. Only the active objective of the solved model is accepted.
 
     Scalar of and scalar wrt -> float. Anything else -> a Jacobian
     object: g[target, param], or g.to_dataframe() for the full

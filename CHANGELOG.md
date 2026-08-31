@@ -392,10 +392,122 @@ changes.
   *about*. New `back_translate_verified_inertia` takes the claim;
   `back_translate_verified` keeps its signature and its `Psd` behaviour, under
   which the screen never runs and costs nothing.
+- **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
+  (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
+  `dlambda/dp`, but the objective was rejected — `ValueError: obj: not a
+  variable of the solved model` — so there was no route to the derivative of
+  the objective with respect to a declared parameter at all. That is one of the
+  most commonly wanted sensitivity quantities: outer-loop optimization,
+  design-of-experiments scoring, "which parameter is my objective most exposed
+  to".
+
+  ```python
+  sens_jacobian(m.obj, wrt=m.p1)   # df/dp1
+  ```
+
+  Both halves of
+
+      df/dp = df/dp|_x + sum_i (df/dx_i)(dx_i/dp)
+
+  are included, and they fall out of a single contraction rather than being
+  assembled from separate blocks. `declare_sens_param` has already rewritten a
+  declared parameter into a variable pinned by a defining equality, so `p` is an
+  ordinary coordinate of the solve: the objective gradient carries `df/dp|_x` in
+  `p`'s own slot and the derivative column carries `dp/dp = 1` there. That
+  matters for correctness, not elegance — on `min (x - p)^2 + 3 p^2` subject to
+  `x + y == 5` the optimum sits at `x = p`, every `df/dx_i` is zero, and a
+  chain-rule-only reading returns `0` instead of `6p`. Nothing about that `0`
+  looks wrong.
+
+  Deliberately **not** added, per the issue: a flat-block `get_dfds_dcds`
+  equivalent, or raw `grad_p c` / `grad_p f` partials. POUNCE's convention —
+  pass the Pyomo object, get a number — cannot be misindexed by construction,
+  and the total derivative is the quantity with obvious demand and no new index
+  convention.
+
+  Only the **active** objective of the solved model is accepted; a deactivated
+  one left on the model from another formulation is refused by name rather than
+  answered with the solved objective's gradient.
+
+  The three dimensions `crates/pounce-sensitivity/tests/sens_invariance_legs.rs`
+  defends are covered for the new accessor in
+  `pyomo-pounce/tests/test_issue_878_objective_total_derivative.py`. Every
+  expected value there is computed **without a solver** — in closed form or by
+  hand — so none of it is a number POUNCE produced; a live Ipopt re-solve
+  confirms the closed forms on top of that, and is skipped where Ipopt is
+  absent rather than required. They are not rows in the Rust legs:
+  the accessor is in the Pyomo layer, because `pounce-sensitivity`'s `Solver`
+  exposes no objective gradient, and rows there would test a path that does not
+  exist. Leg 3's dimension is the one that bites here — `df/dp` is a scalar
+  contracted over the whole step, so contracting a full-x gradient with a var-x
+  step would pair every `df/dx_i` with a neighbouring variable's sensitivity
+  from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
+  asserts the index spaces really do diverge before trusting the leg.
+
+- **A `mu_strategy_fallback` retry that loses now gives back the answer it
+  displaced, not just the status (pounce#870).** The retry re-solves under the
+  flipped barrier schedule and promotes only on `Solve_Succeeded`; otherwise the
+  original status is returned. That rule floored the **status** and not the
+  **point**. `optimize_constrained` calls `finalize_solution` once per attempt,
+  so a losing retry still overwrote the reported solution with its own iterate
+  and the statistics with its own residuals — leaving a status that described
+  one solve attached to a point from another.
+
+  On a 19-variable nonconvex QP with `cond(P) = 1.2e3`, stock POUNCE reported
+  `Solved_To_Acceptable_Level` at objective `+3.41e5` while the attempt that
+  earned that status was at `-3.83e7`; the reported `final_kkt_error` was
+  `2.85e-4`, 285x the `acceptable_tol` the status names, so the report
+  contradicted itself. Over a random corpus of 1200 nonconvex models, 20 (1.7%)
+  returned a materially worse point under an unchanged status, the worst
+  flipping sign (`-2.38e7` to `+7.89e7` under `Maximum_Iterations_Exceeded`).
+  The behaviour was known and its scale understated by three orders: the
+  example on record is `autocorr_bern55-06` swapping `-2304.0000278` for
+  `-2320.0000298`, the same defect at 0.07%.
+
+  **Three sinks, all floored.** A losing retry leaks into consumer-visible state
+  three ways, and restoring only some of them trades one inconsistency for
+  another. The finalize payload and the certificate statistics are restored
+  directly. The per-iteration *trace* is accumulated by the consumer — the
+  CasADi plugin pushes into its own vectors and clears once per `nlpsol` call,
+  so both attempts concatenate and POUNCE cannot rewind it — so the winning
+  attempt's final row is re-emitted through `intermediate_callback` instead,
+  which is the trace analogue of replaying the finalize payload. That makes
+  `casadi/test_parity.py`'s stated invariant hold by construction: "The final
+  numbers and the end of the trace are the same quantities, and must not come
+  from two different places." The re-emitted row is a real iterate that was
+  already sent once, not a synthesized one.
+
+  The fix is the floor idiom the codebase already uses wherever it places a bet
+  it might lose — `honour_neg_curv_floor` (gh#797), `honour_decline_floor`
+  (gh#534), `honour_best_acceptable_after_dual_guard` — applied to the one bet
+  that was only half-floored. The answer reaches callers through **two**
+  independent sinks and both are restored: `self.statistics`, which the CLI's
+  report and console read, and `TNLP::finalize_solution`, which `pounce-py`, the
+  C interface and any Rust caller read. Each is pinned by its own test file, and
+  neither file can see the other's half — dropping the `finalize_solution`
+  restore leaves the entire CLI suite green while `pounce.minimize` returns the
+  losing retry's point again.
+
+  `finalize_solution` consequently runs once more than the number of attempts
+  when a retry loses. Not extended to `run_with_l1_fallback`, which carries the
+  same caveat but whose retry deliberately reports the l1-best least-infeasible
+  point; changing that needs its own measurement.
+
+  **The certificate is floored; the cost is not.** `SolveStatistics` mixes two
+  kinds of number. The `final_*` fields describe the point being reported and
+  must agree with the status beside it, so they are restored. `iteration_count`,
+  the evaluation counts, the timers and the restoration tallies describe what
+  the *invocation* did — both attempts really ran — so rewinding those would
+  under-report the work actually spent, which is a different falsehood rather
+  than a fix. A first version of this change restored the whole struct and made
+  `deb7` at `max_iter=100` claim an iteration count belonging to only one of its
+  two solves; `issue857_escalation_gated_quality_rung.rs` caught it.
+
+  With the restore narrowed that way the 81-fixture, two-leg sweep is
+  **completely unmoved**.
 
 
 ## [0.11.0] - 2026-08-31
-
 - **The negative-curvature escape now finds the witness it is asked for, on
   saddles whose curvature lies along a coordinate axis (gh #797 follow-up).**
   gh #797 added the second-order question and `neg_curv_escapes` to answer it;
@@ -10142,7 +10254,6 @@ CPU-time-limited, so that is wall-clock noise, not a behaviour change.
 Note `brainpc0` *is* gate-blocked and does trip the rule, while
 `brainpc1/3/5/7` do not. That is the distinction the static row-count
 floor could not draw: all five have the same row count.
-
 
 
 ### Added — per-variable scaling reaches the solver
