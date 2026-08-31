@@ -27,9 +27,10 @@ import argparse
 import dataclasses
 import datetime
 import json
+import math
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import cases as C
 from . import manifest as M
@@ -124,17 +125,58 @@ def smoke_checks(records: List[dict]) -> List[str]:
     for r in records:
         by_case.setdefault(r["case"], []).append(r)
 
+    # 0. The run has to contain solved cells at all.
+    #
+    #    Every property below is quantified over *successful* records and
+    #    skips the rest, which is right -- a route is allowed to fail, and
+    #    several are expected to. But it means a run in which nothing
+    #    succeeded satisfies all of them vacuously and reports a pass. A
+    #    harness that cannot tell "every property held" from "there was
+    #    nothing to check" is not asserting anything (gh#794 review).
+    feasible = [r for r in records if r["case"] != "infeasible_pair"]
+    if feasible and not any(r["ok"] for r in feasible):
+        fails.append(
+            "no feasible smoke case was solved by any route: the properties "
+            "below would all pass vacuously"
+        )
+
     # 1. The infeasible case must never be reported as a solved MPCC.
+    #
+    #    Any success here is wrong, not merely a success at a
+    #    source-feasible point: `infeasible_pair` has no feasible point at
+    #    all, so a route that completes on it is reporting on its own
+    #    reformulation. The earlier form of this check only fired when the
+    #    returned point was *near-feasible*, so a confident success at a
+    #    large source violation -- the worse failure -- passed silently.
     for r in by_case.get("infeasible_pair", []):
         if not r["ok"]:
             continue
-        s = r["source"]
-        worst = max(s["row_viol"], s["bound_viol"], s["sign_viol"], s["compl_max"])
-        if worst <= 1e-6:
+        src = r.get("source") or {}
+        worst = (
+            max(src["row_viol"], src["bound_viol"], src["sign_viol"], src["compl_max"])
+            if src
+            else float("nan")
+        )
+        fails.append(
+            f"infeasible_pair/{r['route']}/{r['start']}: reported "
+            f"{r['status_msg']} on a provably infeasible MPCC "
+            f"(worst source residual {worst:.2e})"
+        )
+
+    # 1b. The supported route must actually complete the feasible corpus.
+    #
+    #     `scholtes_then_ncp` is what the gate recommends, so its coverage
+    #     is a property and not a statistic: if it stops solving a case
+    #     the recommendation is stale, and no other check here would say
+    #     so -- they are all conditioned on success.
+    supported = [
+        r for r in records if r["route"] == "scholtes_then_ncp" and r["case"] != "infeasible_pair"
+    ]
+    for r in supported:
+        if not r["ok"]:
             fails.append(
-                f"infeasible_pair/{r['route']}/{r['start']}: returned a point "
-                f"that is source-feasible to {worst:.2e} on a provably "
-                "infeasible MPCC"
+                f"{r['case']}/{r['start']}: the supported route "
+                f"scholtes_then_ncp did not complete ({r['status_msg']})"
             )
 
     # 2. A successful exact-product route must return a source-feasible
@@ -145,8 +187,14 @@ def smoke_checks(records: List[dict]) -> List[str]:
             continue
         if r["case"] == "infeasible_pair":
             continue
-        s = r["source"]
-        worst = max(s["row_viol"], s["bound_viol"], s["sign_viol"], s["compl_max"])
+        src = r.get("source") or {}
+        if not src:
+            fails.append(
+                f"{r['case']}/{r['route']}/{r['start']}: reported success with "
+                "no source measurement"
+            )
+            continue
+        worst = max(src["row_viol"], src["bound_viol"], src["sign_viol"], src["compl_max"])
         if worst > 1e-5:
             fails.append(
                 f"{r['case']}/{r['route']}/{r['start']}: exact-product route "
@@ -184,6 +232,126 @@ def smoke_checks(records: List[dict]) -> List[str]:
         if k not in seen:
             fails.append(f"benchmark class {k!r} produced no records")
 
+    return fails
+
+
+# --------------------------------------------------------------------
+# result contract
+# --------------------------------------------------------------------
+
+
+def _jsonable(o: Any) -> Any:
+    """Recursively replace non-finite floats with ``None``.
+
+    ``NaN`` and ``Infinity`` are not JSON. Python's encoder emits them
+    as bare literals by default, which every strict parser rejects --
+    so a result file full of them is not readable by the consumers this
+    contract exists for. They arise honestly: a solve that returned no
+    point has no KKT residuals to report (`nlp.final_*`, 40 records in
+    the full sweep), and `validation.biactive_distance` is undefined
+    where no pair is biactive (12).
+
+    ``null`` is the representation, because "not available" is exactly
+    what it means, and the schema admits it only on the fields where
+    that is a real outcome.
+    """
+    if isinstance(o, dict):
+        return {k: _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    # numpy scalars and anything else `default=float` would have caught.
+    try:
+        if hasattr(o, "item"):
+            v = o.item()
+            if isinstance(v, float):
+                return v if math.isfinite(v) else None
+            return v
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return o
+
+
+_RECORD_REQUIRED = (
+    "case", "klass", "scaling", "start", "route", "control", "lowering",
+    "ok", "status", "status_msg", "obj", "source", "nlp", "iters",
+    "outer_stages", "accepted_stages", "rejected_stages",
+)
+
+_SOURCE_REQUIRED = (
+    "row_viol", "bound_viol", "sign_viol", "compl_max", "compl_min", "compl_sum",
+)
+
+
+def contract_checks(payload: dict) -> List[str]:
+    """The emitted artifact really is the contract `schema.json` states.
+
+    Checked here rather than left to a consumer, because the result
+    contract *is* a Gate 0 deliverable: a sweep that writes an
+    unparseable or under-populated artifact has not produced the thing
+    it was run to produce, and exiting 0 on one is the failure mode this
+    guards.
+
+    Three properties, in the order a consumer meets them:
+
+    1. the payload survives a strict JSON round trip -- no `NaN`, no
+       `Infinity`, both of which Python will happily write and no
+       conforming parser will read back;
+    2. every record carries the keys the schema marks required;
+    3. `source` is fully populated exactly when a point was returned.
+       An empty `source` beside a returned point would mean the
+       original-space measurement silently did not happen, which is the
+       one thing the source/NLP separation exists to prevent.
+
+    When `jsonschema` is importable the committed schema is applied in
+    full on top of these; it is not a dependency of the harness, so its
+    absence is reported rather than passed over in silence.
+    """
+    fails: List[str] = []
+
+    try:
+        text = json.dumps(payload, allow_nan=False)
+    except ValueError as exc:
+        return [f"payload is not strict JSON: {exc}"]
+
+    def _reject(c: str) -> float:
+        raise ValueError(f"non-JSON literal {c!r} in emitted payload")
+
+    try:
+        json.loads(text, parse_constant=_reject)
+    except ValueError as exc:
+        fails.append(str(exc))
+
+    for i, r in enumerate(payload.get("records", [])):
+        where = f"record {i} ({r.get('case')}/{r.get('route')}/{r.get('start')})"
+        for k in _RECORD_REQUIRED:
+            if k not in r:
+                fails.append(f"{where}: missing required key {k!r}")
+        src = r.get("source", {})
+        if r.get("x") is None:
+            if src:
+                fails.append(
+                    f"{where}: returned no point but carries source measurements"
+                )
+        else:
+            missing = [k for k in _SOURCE_REQUIRED if k not in src]
+            if missing:
+                fails.append(
+                    f"{where}: returned a point but source is missing {missing}"
+                )
+
+    try:
+        import jsonschema  # type: ignore
+    except ImportError:
+        return fails
+
+    schema_path = os.path.join(_HERE, "schema.json")
+    with open(schema_path) as fh:
+        schema = json.load(fh)
+    validator = jsonschema.Draft7Validator(schema)
+    for err in sorted(validator.iter_errors(payload), key=lambda e: list(e.path))[:20]:
+        fails.append("schema: " + "/".join(str(p) for p in err.path) + f": {err.message}")
     return fails
 
 
@@ -304,8 +472,11 @@ def main(argv=None) -> int:
         },
         "records": records,
     }
+    # Sanitize before writing, then refuse to write anything a strict
+    # parser could not read back (gh#794 review).
+    payload = _jsonable(payload)
     with open(out, "w") as fh:
-        json.dump(payload, fh, indent=1, default=float)
+        json.dump(payload, fh, indent=1, default=float, allow_nan=False)
         fh.write("\n")
     print(f"wrote {out} ({len(records)} records, {wall:.1f}s)", file=sys.stderr)
 
@@ -314,8 +485,12 @@ def main(argv=None) -> int:
         print(f"wrote {rep}", file=sys.stderr)
 
     fails = list(mfails)
+    # The artifact's own validity is not a smoke-only concern: a run that
+    # writes an unreadable or under-populated result file has failed at
+    # the thing it exists to produce, whatever mode it ran in.
+    fails += contract_checks(payload)
     if args.smoke:
-        fails += smoke_checks(records)
+        fails += smoke_checks(payload["records"])
     if fails:
         print("\nFAILED:", file=sys.stderr)
         for f in fails:

@@ -406,6 +406,128 @@ def _check_validators_are_scale_invariant() -> List[str]:
     return sorted(set(fails))
 
 
+def _synthetic_record(**over) -> dict:
+    """A minimally-populated record, shaped like the real contract."""
+    rec = {
+        "case": "regular_strict",
+        "klass": "regular",
+        "scaling": "unit",
+        "start": "origin",
+        "route": "ncp_eq",
+        "control": "none",
+        "lowering": "prod_eq",
+        "ok": True,
+        "status": 0,
+        "status_msg": "Solve_Succeeded",
+        "obj": 0.0,
+        "x": [0.0, 0.0],
+        "source": {
+            "row_viol": 0.0,
+            "bound_viol": 0.0,
+            "sign_viol": 0.0,
+            "compl_max": 0.0,
+            "compl_min": 0.0,
+            "compl_sum": 0.0,
+        },
+        "stationarity": {"klass": "S"},
+        "validation": {},
+        "nlp": {},
+        "iters": 1,
+        "outer_stages": 1,
+        "accepted_stages": 1,
+        "rejected_stages": 0,
+    }
+    rec.update(over)
+    return rec
+
+
+def _check_smoke_rejects_false_success() -> List[str]:
+    """`smoke_checks` must reject *any* success on `infeasible_pair`.
+
+    The earlier form only fired when the returned point was nearly
+    source-feasible, so the worse failure -- a confident success at a
+    large source violation -- passed silently. Both shapes are checked
+    here; a rule that catches only the near-feasible one is not a rule
+    about false success (gh#794 review).
+    """
+    from .run import smoke_checks
+
+    fails: List[str] = []
+    near = _synthetic_record(case="infeasible_pair", klass="infeasible")
+    far = _synthetic_record(
+        case="infeasible_pair",
+        klass="infeasible",
+        source={
+            "row_viol": 3.7,
+            "bound_viol": 0.0,
+            "sign_viol": 1.2,
+            "compl_max": 9.4,
+            "compl_min": 0.0,
+            "compl_sum": 9.4,
+        },
+    )
+    for label, rec in (("near-feasible", near), ("far-from-feasible", far)):
+        got = [f for f in smoke_checks([rec]) if "infeasible_pair" in f]
+        if not got:
+            fails.append(
+                f"smoke_checks accepted a {label} success on infeasible_pair"
+            )
+    return fails
+
+
+def _check_smoke_rejects_an_all_failed_run() -> List[str]:
+    """A run in which nothing solved must not report a pass.
+
+    Every other property is quantified over successful records, so a
+    set with every route at `ok=False` satisfies them all vacuously.
+    Before this check such a set returned `[]` -- an empty failure list,
+    i.e. success (gh#794 review).
+    """
+    from .run import smoke_checks
+
+    dead = [
+        _synthetic_record(
+            case=c,
+            klass=k,
+            route=rt,
+            ok=False,
+            status=2,
+            status_msg="Infeasible_Problem_Detected",
+            x=None,
+            source={},
+            obj=None,
+            stationarity={},
+        )
+        for c, k in (
+            ("regular_strict", "regular"),
+            ("scholtes4", "biactive"),
+            ("ralph1", "degenerate"),
+            ("infeasible_pair", "infeasible"),
+            ("qpec_small", "selector"),
+            ("bard1", "macmpec"),
+        )
+        for rt in R.ROUTES
+    ]
+    got = smoke_checks(dead)
+    if not got:
+        return [
+            "smoke_checks passed a run in which every route failed on every "
+            "case: the properties are all vacuous there"
+        ]
+    # Look for the vacuity failure specifically. Other rules also fire on
+    # this input -- the supported-route coverage check among them -- so a
+    # merely non-empty result would leave this test passing with the
+    # vacuity guard deleted, which is the exact weakness it exists to
+    # rule out.
+    if not any("vacuous" in f for f in got):
+        return [
+            "smoke_checks flagged an all-failed run, but not for vacuity: "
+            "the guard that distinguishes 'every property held' from "
+            "'there was nothing to check' is not firing"
+        ]
+    return []
+
+
 CHECKS = (
     ("benchmark classes covered", _check_classes),
     ("each class has a source-level validator", _check_class_validators),
@@ -419,6 +541,8 @@ CHECKS = (
     ("rescaling is an equivalence", _check_rescaling),
     ("lowering feasible sets equal the MPCC's", _check_lowering_feasible_sets),
     ("manifest is current", _check_manifest),
+    ("smoke rejects false success on the infeasible case", _check_smoke_rejects_false_success),
+    ("smoke rejects an all-failed run", _check_smoke_rejects_an_all_failed_run),
 )
 
 

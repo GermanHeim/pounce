@@ -21,7 +21,13 @@ changes.
 
   Two things were wrong and both are fixed. The reported violation is now
   the violation of the rows **you** declared, measured at the returned
-  point. And the verdict — both the ρ-escalation loop's stopping test and
+  point, and reported in `final_unscaled_constr_viol` — the original-units
+  field family, which is where that measurement belongs. (`final_constr_viol`
+  and the other `final_*` fields are the internally-scaled residuals; they
+  carry the same number only when no row scaling is active, which is the
+  case in which the two families are defined to agree. Read
+  `final_unscaled_constr_viol` if you are checking ℓ₁ feasibility
+  programmatically.) And the verdict — both the ρ-escalation loop's stopping test and
   the honest-infeasibility upgrade — is now judged on that same quantity
   against the tolerances you set (`tol` for a strict success,
   `acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative),

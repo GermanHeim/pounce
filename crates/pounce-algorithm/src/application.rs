@@ -140,6 +140,18 @@ pub struct IpoptApplication {
     /// the JSON report — can undo the substitution. `None` when no
     /// variable scaling was applied.
     variable_scaling: RefCell<Option<Vec<Number>>>,
+    /// Whether the most recent `optimize_constrained` ran with per-row
+    /// constraint scaling active (`c_scale_vec`/`d_scale_vec` present).
+    ///
+    /// Read by [`Self::run_l1_penalty_outer_loop`], which measures the
+    /// user's rows in the model's own units and so may only write that
+    /// number into the `final_unscaled_*` family. `SolveStatistics`
+    /// documents `final_*` as the internally-scaled residuals and
+    /// `final_unscaled_*` as the same quantities in original units,
+    /// *equal when no scaling is active* — so the measurement may be
+    /// mirrored into the scaled family exactly when this is `false`
+    /// (gh#794 review). `None` when no solve has run.
+    row_scaling_active: std::cell::Cell<Option<bool>>,
     /// Whether the submitted TNLP has already been explicitly wrapped by the
     /// caller's presolve layer.
     presolve_already_applied: bool,
@@ -348,6 +360,7 @@ impl IpoptApplication {
             options: OptionsList::with_registered(Rc::clone(&reg)),
             least_square_init_report: None,
             variable_scaling: RefCell::new(None),
+            row_scaling_active: std::cell::Cell::new(None),
             presolve_already_applied: false,
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
@@ -2935,10 +2948,17 @@ impl IpoptApplication {
                 .get_nlp_info()
                 .map(|i| i.m as usize)
                 .unwrap_or(0);
+            // The success flag decides whether `g_inner` is a measurement
+            // or a zero-filled buffer. Dropping it would let a TNLP whose
+            // final `eval_g` fails fabricate feasibility: every row would
+            // read `0`, `original_space_feasibility` would return a
+            // violation of zero, and that would flow into both the exit
+            // status and the reported residuals. Gate it exactly as the
+            // ρ-escalation measurement above does, so an evaluation
+            // failure produces `None` and follows the documented
+            // `l1_slack_tol` fallback instead (gh#794 review).
             let mut g_inner = vec![0.0; m];
-            if m > 0 {
-                let _ = tnlp.borrow_mut().eval_g(&x_trunc, false, &mut g_inner);
-            }
+            let g_evaluated = m == 0 || tnlp.borrow_mut().eval_g(&x_trunc, false, &mut g_inner);
 
             // gh#794 P1. Everything below used to argue from `Σ(p + n)`,
             // the sum of the augmented slacks, judged against
@@ -2969,15 +2989,19 @@ impl IpoptApplication {
             // keeps its other job unchanged — it is the BNW steering
             // signal for ρ escalation inside the loop above, which is
             // what it is the right quantity for.
-            let feas = original_space_feasibility(
-                &tnlp,
-                &x_trunc,
-                &g_inner,
-                self.nlp_lower_bound_inf(),
-                self.nlp_upper_bound_inf(),
-                self.user_tol(),
-                self.user_acceptable_tol(),
-            );
+            let feas = g_evaluated
+                .then(|| {
+                    original_space_feasibility(
+                        &tnlp,
+                        &x_trunc,
+                        &g_inner,
+                        self.nlp_lower_bound_inf(),
+                        self.nlp_upper_bound_inf(),
+                        self.user_tol(),
+                        self.user_acceptable_tol(),
+                    )
+                })
+                .flatten();
 
             // The reported constraint violation must be the user's, not
             // the augmented problem's. Without this the KKT block of a
@@ -2986,15 +3010,42 @@ impl IpoptApplication {
             // rewrite: the NLP error's primal term enters undivided, so
             // the aggregate is never below the constraint violation, and
             // the other two components are unaffected by the wrapper.
+            //
+            // `f.max_violation` is measured on the inner TNLP's own rows
+            // and bounds, so it is in the model's **original units**. That
+            // decides which field family may carry it. `SolveStatistics`
+            // documents `final_*` as the max-norms in the internally
+            // scaled NLP space and `final_unscaled_*` as the same
+            // residuals with the scaling divided back out — equal only
+            // when no scaling is active — and `docs/src/python.md` states
+            // the same contract to Python callers. Writing an
+            // original-units number into `final_constr_viol` would break
+            // it on any run with `nlp_scaling_method` engaged (gh#794
+            // review).
+            //
+            // So the unscaled family always takes the measurement, and
+            // the scaled family mirrors it exactly when per-row scaling
+            // did not engage — the case in which the contract requires
+            // the two to agree anyway. Under active row scaling the
+            // scaled fields keep what the inner solve reported; the
+            // converted number is not available here, because the
+            // augmented problem's row-scale factors belong to an NLP that
+            // `optimize_constrained` has already dropped. The status
+            // decision below does not read these fields — it reads
+            // `feas` directly — so an active-scaling run is judged on the
+            // user's rows either way.
             if let Some(f) = feas.as_ref() {
+                let scaled_may_mirror = self.row_scaling_active.get() == Some(false);
                 let mut stats = self.statistics.borrow_mut();
-                stats.final_constr_viol = f.max_violation;
                 stats.final_unscaled_constr_viol = f.max_violation;
-                stats.final_kkt_error = stats.final_kkt_error.max(f.max_violation);
-                stats.final_kkt_error_above_noise =
-                    stats.final_kkt_error_above_noise.max(f.max_violation);
                 stats.final_unscaled_kkt_error =
                     stats.final_unscaled_kkt_error.max(f.max_violation);
+                if scaled_may_mirror {
+                    stats.final_constr_viol = f.max_violation;
+                    stats.final_kkt_error = stats.final_kkt_error.max(f.max_violation);
+                    stats.final_kkt_error_above_noise =
+                        stats.final_kkt_error_above_noise.max(f.max_violation);
+                }
             }
 
             let inner_claimed_success = matches!(
@@ -3896,6 +3947,18 @@ impl IpoptApplication {
                 // scaling is active.
                 stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
+                // Record whether per-row scaling actually engaged, so a
+                // wrapper that measures the user's rows in the model's own
+                // units knows which field family may carry that number.
+                // `curr_unscaled_primal_infeasibility_max` treats both
+                // vectors absent as "scaled == unscaled"; the ℓ₁ outer loop
+                // relies on the same equivalence (gh#794 review).
+                {
+                    let nlp_ref = nlp_handle.borrow();
+                    self.row_scaling_active.set(Some(
+                        nlp_ref.c_scale_vec().is_some() || nlp_ref.d_scale_vec().is_some(),
+                    ));
+                }
                 stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
                 stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
 

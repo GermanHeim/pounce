@@ -146,7 +146,7 @@ solution — cannot be quoted tighter than `sqrt(tol)` without tightening
    `1.0e-08` = `tau_min` in every continuation cell that ran the
    schedule out, and on `ralph2` exactly `-2 tau_min` in the objective.
    This is the method behaving as designed, and it is why the supported
-   route finishes on an exact product. 126 of the 549 triaged
+   route finishes on an exact product. 126 of the 576 triaged
    observations carry this label.
 
 2. **Below `tau = 1e-8` is untested**, and so is any schedule shape
@@ -243,7 +243,7 @@ six iterations.
 
 ## Ownership of the observed gaps
 
-549 observations triaged mechanically (rules in
+576 observations triaged mechanically (rules in
 `benchmarks/mpcc/report.py`). **No observation is unassigned.**
 
 | owner | observations | what it means |
@@ -322,7 +322,7 @@ the option — is untouched by construction.
 
 ### P2 — a biactive pair breaks a cold exact-product solve. **Not fixed; covered.**
 
-Eight of the 549 observations, and all of them the same exit. On
+Eight of the 576 observations, and all of them the same exit. On
 `qpec_small` from `origin` and `upper_left` at unit scaling, the
 `ncp_eq` family ends in `Error_In_Step_Computation`; so does `direct` on
 `qpec_small/skew/upper_right` and on `ralph1/unit/origin`. Both

@@ -543,6 +543,11 @@ def render(payload: dict) -> str:
     w("| owner | observations |\n|---|---:|\n")
     for k in sorted(counts):
         w(f"| {'converged, nothing to assign' if k == '-' else k} | {counts[k]} |\n")
+    # Total, computed from the same counts the rows came from. Written
+    # out because the prose around this table quotes it, and a
+    # hand-carried total drifts from the rows it claims to sum — which is
+    # what happened to the first draft of this report (gh#794 review).
+    w(f"| **total** | **{sum(counts.values())}** |\n")
     w("\n")
     return out.getvalue()
 
