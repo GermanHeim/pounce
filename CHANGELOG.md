@@ -11,6 +11,7 @@ changes.
 
 
 ## [0.11.0] - 2026-08-31
+
 - **The negative-curvature escape now finds the witness it is asked for, on
   saddles whose curvature lies along a coordinate axis (gh #797 follow-up).**
   gh #797 added the second-order question and `neg_curv_escapes` to answer it;
