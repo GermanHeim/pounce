@@ -1629,11 +1629,17 @@ fn refute_indefinite_optimum(
     if n == 0 || sol.x.len() != n || !sol.x.iter().all(|v| v.is_finite()) {
         return None;
     }
-    let p_scale = prob
-        .p_lower
-        .iter()
-        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
-        .max(1.0);
+    // `P`'s own scale, with no absolute floor under it. The `.max(1.0)` this
+    // carried was gh#872's third stacked floor, and on a small-scale `P` it did
+    // more than widen a tolerance: it is also the Gershgorin `shift` floor in
+    // `most_negative_curvature_direction`, where flooring at `1` on a `P` whose
+    // entries are `~1e-10` makes `sigma*I - P` numerically a multiple of the
+    // identity and the shifted power iteration cannot separate anything.
+    let p_scale = p_inf_scale(prob);
+    if p_scale <= 0.0 {
+        // No `P` entries at all: an LP has no curvature to refute.
+        return None;
+    }
 
     // Two restrictions of the curvature search, and both are needed.
     //
@@ -1874,6 +1880,18 @@ fn blocking_rows(prob: &QpProblem, x: &[f64], d: &[f64]) -> Vec<(bool, usize)> {
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Largest magnitude of any stored `P` entry -- the scale every curvature
+/// tolerance in this module is measured against.
+///
+/// Deliberately **not** floored at `1.0`. A curvature threshold is in the units
+/// of `P`, so an absolute floor turns it into a threshold on a scale-dependent
+/// quantity: a pure change of variable units rescales `P` and nothing else, and
+/// past `||P|| ~ 1e-8` every one of this module's tests stops firing (gh#872).
+/// Zero means an `H`-free model, which the callers screen for.
+fn p_inf_scale(prob: &QpProblem) -> f64 {
+    prob.p_lower.iter().fold(0.0_f64, |a, t| a.max(t.val.abs()))
 }
 
 /// A direction of negative curvature for `P` restricted to the free
@@ -2282,11 +2300,7 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     // against `P`'s own scale — the same shape as the frontend's `check_psd`
     // tolerance.
     let curvature: f64 = (0..prob.n).map(|i| d[i] * pd[i]).sum::<f64>() / (dn * dn);
-    let p_scale = prob
-        .p_lower
-        .iter()
-        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
-        .max(1.0);
+    let p_scale = p_inf_scale(prob);
     if curvature < -1e-8 * p_scale {
         return true;
     }

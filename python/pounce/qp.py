@@ -496,7 +496,15 @@ def _psd_verdict_coo(pr, pc, pv, n: int):
     if not pr:  # no Hessian entries → LP, trivially PSD
         return True, 0.0
     scale = max(abs(v) for v in pv)
-    tol_abs = -1e-8 * max(scale, 1.0)
+    # Relative to ``P``'s own scale, with no absolute floor under it. The
+    # ``max(scale, 1.0)`` this carried was gh#872's fourth stacked floor: it
+    # made the screen absolute for ``scale < 1``, so a *strongly* indefinite
+    # ``P`` (measured ratio ``|lambda_min| / lambda_max = 0.667``) whose entries
+    # happened to be ``~1e-10`` read as PSD and was handed to an engine that
+    # assumes PSD. Round-off in the factor is ``eps * scale ~ 1e-16 * scale``,
+    # eight orders below this, so the relative form is what the docstring above
+    # already claims this tolerance is.
+    tol_abs = -1e-8 * scale
     if n <= _PSD_CHECK_DENSE_MAX_N:
         lam_min = _min_eig_lower_coo(pr, pc, pv, n)
         return lam_min >= tol_abs, lam_min

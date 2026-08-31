@@ -11,6 +11,48 @@ changes.
 
 ### Fixed
 
+- **The QP second-order verdict no longer depends on the units the user chose
+  for their variables (gh #872).** One model in two systems of units —
+  `min ½(X₀/K)² + ½(X₁/K)² + 5(X₀/K)(X₁/K)` over `[−2K, 2K]²`, whose objective
+  *values* and whose minimum of `−16` are identical for every `K` — was solved
+  correctly up to `K = 1e4` and returned `0.0` from `K = 1e5` on, with
+  `Number of Iterations: 0`, `Overall NLP error: 0.0` and
+  `EXIT: Optimal Solution Found.` The Hessian `K⁻²·[[1,5],[5,1]]` is *strongly*
+  indefinite at every scale (`|λ_min|/λ_max = 2/3`), so nothing here was near
+  the round-off the tolerances were meant to absorb.
+
+  The causal gate was `dispatch::PSD_TOL`, a fixed `1e-9` serving both as the
+  classifier's band and as the diagonal shift its inertia certificate factors:
+  at `‖H‖∞ ~ 1e-10` the shift *dominates* `H`, so the certificate was reading
+  `1e-9·I` and was vacuous. It is now scaled by `‖H‖∞`, and deliberately only
+  downwards — widening the band on a large `H` would hand the convex engine
+  Hessians it correctly rejects today, trading one wrong answer for another.
+  Four further absolute floors, each of which independently re-blocked the
+  rescue once the classifier was fixed, got the same treatment: `negcurv.rs`'s
+  shift-ladder start and its witness threshold, `pounce-convex`'s `p_scale`
+  (where the `.max(1.0)` also flattened the shifted power iteration's spectrum
+  on a small `P`, so it was not merely a widened tolerance), and
+  `pounce.qp`'s `check_psd` screen, which read a strongly indefinite `P` as PSD
+  and handed it to an engine that assumes PSD. `solver_selection=qp-active-set`
+  now returns `−16` from `K = 1` through `K = 1e8`.
+
+  Two carve-outs, both stated rather than fixed. The NLP arm keeps its own copy
+  of the constant (`NEG_CURV_DELTA_MIN`), whose shift lands on `W + Σ` rather
+  than on `H` and so is not the same change; on this model the NLP arm agrees
+  with upstream `ipopt`, which also returns `0.0`, so `auto` is unchanged here.
+  And the fixture corpus was **uniform in the dimension this acts on** — 48 of
+  the 49 fixtures reaching the classifier sit at `‖H‖∞ ≥ 1`, where the clamp
+  makes the change a no-op — so the clean two-leg sweep was near-tautological
+  evidence, and two small-scale fixtures (one indefinite, one PD) were added to
+  make the corpus able to see it at all.
+
+- **`sqp_qp_certify_second_order`'s registered help said standalone QP solves
+  "do that unconditionally and are not affected by this option" (gh #872).**
+  They are affected: the standalone default is `yes`, but an explicit `no`
+  reaches that path too and turns the certification off, taking gh #871's
+  fixture from `−1` to a saddle certified as `Optimal Solution Found`. The
+  inverse of gh #677 — an option read on a path documented as not reading it.
+
 - **The QP active-set second-order refutation now survives an equality row
   (gh #871).** `refute_indefinite_optimum` is the third guard in the gh #848
   stack: it walks a direction of negative curvature and demotes a claimed
