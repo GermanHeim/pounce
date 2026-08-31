@@ -9,6 +9,48 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The QP active-set second-order refutation now survives an equality row
+  (gh #871).** `refute_indefinite_optimum` is the third guard in the gh #848
+  stack: it walks a direction of negative curvature and demotes a claimed
+  optimum only after exhibiting a strictly better feasible point. Every
+  `QpProblem` in both gh #848 test files has `a: vec![]`, and
+  `max_feasible_step` opens with a hard rejection of any direction carrying an
+  equality component — so on `min −x₀² s.t. x₀+x₁+x₂ = 0` over `[0,1]×[−1,1]²`
+  the search returned `e₀`, `A e₀ = 1`, and the origin went out `Optimal` at
+  `f = 0` against a true minimum of `−1`. From Python at defaults the same
+  model with the box opened is **unbounded below** and came back
+  `status='optimal'`, `f = 0`, rather than `dual_infeasible`. Three changes:
+
+  - the curvature search now also runs on `P` restricted to `null(A)` — the
+    operator the screen is actually about — and every direction it finds is
+    projected onto that null space before the feasible-step test, matrix-free
+    (CG on `A Aᵀ` with iterative refinement), so it carries no dimension
+    ceiling;
+  - power-iteration dust below `1e-7 ‖d‖∞` is pruned. `max_feasible_step`'s
+    slack is `1e-9 ‖d‖∞`, *below* the iteration's own noise floor, so a dust
+    component in a coordinate sitting on a bound read as a real move out of it
+    and drove the step to zero;
+  - a direction that a bound or row stops dead is no longer a dead end. The
+    blocking row joins the working set and the search runs again inside the
+    smaller null space, breadth-first with a node budget — ordinary active-set
+    logic, and the difference between refuting `min −x₀²` at the vertex
+    `(0, −1, 1)` and certifying it.
+
+  Every derived direction is re-checked for negative curvature before it is
+  used and the base direction is still tried first and unchanged, so nothing
+  the screen refuted before can stop being refuted. `solver_selection=auto`
+  routes this class to the NLP arm and was never affected.
+
+- **`back_translate_verified` could not apply the second-order screen at all
+  (gh #871).** Nothing in a `pounce_qp::QpSolution` records what the caller
+  claimed about `P`, so the supported read-back entry point ran the two
+  first-order guards and silently skipped the one the nonconvex claim is
+  *about*. New `back_translate_verified_inertia` takes the claim;
+  `back_translate_verified` keeps its signature and its `Psd` behaviour, under
+  which the screen never runs and costs nothing.
+
 
 ## [0.11.0] - 2026-08-31
 
