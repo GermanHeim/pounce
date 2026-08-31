@@ -169,11 +169,46 @@ pyo.SolverFactory("pounce").solve(m)    # ordinary solve
 
 sens_jacobian(m.x, wrt=m.p)                  # dx*/dp (float)
 sens_jacobian(m.con, wrt=m.p)                # d(multiplier of con)/dp
+sens_jacobian(m.obj, wrt=m.p)                # df/dp, the total derivative
 G = sens_jacobian(m.z, wrt=m.r)              # containers -> Jacobian object
 G[m.z[1], m.r[2]]; G.to_dataframe()     # element access / full Jacobian
 sens_solution(m, [(m.p, 2.5)])               # first-order solution estimate at
                                         # new values, clamped to bounds
 ```
+
+### The objective: `df/dp`
+
+`of=` the model's `Objective` gives the **total** derivative of the
+objective with respect to a declared parameter,
+
+```
+df/dp  =  df/dp|_x  +  sum_i (df/dx_i)(dx_i/dp)
+```
+
+which is the quantity an outer-loop optimization, a design-of-experiments
+score, or a "which parameter is my objective most exposed to" question
+actually wants. It is one number per parameter, on the same convention as
+the rest of the call: pass the Pyomo object, get a float.
+
+Both halves are included. A parameter that appears *in* the objective
+contributes its explicit partial as well as its effect through the
+solution — on `min (x - p)^2 + 3 p^2` subject to `x + y == 5`, where the
+optimum sits at `x = p`, the whole answer is the explicit partial and a
+chain-rule-only reading would return `0` instead of `6p`. Nothing about
+that `0` looks wrong, which is why
+`pyomo-pounce/tests/test_issue_878_objective_total_derivative.py` carries a
+fixture whose implicit half vanishes.
+
+This works because `declare_sens_param` has already rewritten the
+parameter into a variable pinned by a defining equality, so `p` is an
+ordinary coordinate of the solve: the objective gradient carries
+`df/dp|_x` in `p`'s own slot and the derivative column carries `dp/dp = 1`
+there. One contraction picks up both terms, with no second index
+convention to get wrong.
+
+Only the **active** objective of the solved model is accepted; a
+deactivated one left on the model from another formulation is refused by
+name rather than answered with the solved objective's gradient.
 
 `sens_jacobian` returns exact first-order derivatives (unit-perturbation
 backsolves, no finite differencing); `sens_solution` combines the stored
