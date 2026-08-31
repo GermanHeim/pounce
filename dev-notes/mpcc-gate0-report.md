@@ -341,11 +341,44 @@ fails the acceptable-level tolerances (nlp_err 4.049e-5); reporting
 ErrorInStepComputation rather than Solved_To_Acceptable_Level (gh#274).
 ```
 
-The diverging dual is not a numerical accident. At a biactive pair the
-equality row `G_i H_i = 0` has gradient `H_i ∇G_i + G_i ∇H_i`, and both
-terms vanish together there: no bounded multiplier exists in the limit.
-Measured on the cell that does converge, the biactive product row
-carries a multiplier of `1.5e+11` against a row gradient of `3.2e-05`.
+At a biactive pair the equality row `G_i H_i = 0` has gradient
+`H_i ∇G_i + G_i ∇H_i`, and both terms vanish together there. Measured on
+the cell that does converge, the biactive product row carries a
+multiplier of `1.5e+11` against a row gradient of `3.2e-05`.
+
+**The eight cells are not one phenomenon, and an earlier draft of this
+section said they were.** That draft read the vanishing row gradient as
+"no bounded multiplier exists in the limit". That inference is wrong: a
+row whose gradient vanishes imposes no first-order restriction, so its
+multiplier is *arbitrary* rather than nonexistent — `λ · 0 = 0` for every
+`λ`, including `0`. Checking the KKT system directly at each solution
+splits the eight:
+
+| cells | best dual residual over sign-feasible multipliers | what it means |
+|---|---|---|
+| 7 — all `qpec_small` | **`0`**, at `λ = 0` exactly | the lowered NLP *has* a KKT point here; POUNCE does not reach it |
+| 1 — `ralph1/unit/origin/direct` | **`0.707`** | no sign-feasible multiplier exists; failing is correct |
+
+`qpec_small`'s solution `(1, 1, 0)` has `∇f = 0` exactly — the case
+factory's own docstring says so, and says the zero multiplier vector is
+admissible — and the biactive product row's gradient is exactly
+`(0, 0, 0)`. So `λ = 0` satisfies stationarity with residual `0`. The
+solver reaches that point (`cv 3.5e-19`, objective `2.2e-16` against
+`f* = 0`) and then fails on a dual residual of `164` carried by
+multipliers that blew up along the barrier path. What is wrong is the
+multiplier estimate, not the point, and not the existence of an answer.
+
+`ralph1` is the opposite and its docstring already said so: the origin is
+M-stationary but **not** S-stationary, and NLP KKT is S-stationarity, so
+no sign-feasible multiplier exists. Solving for one, the best achievable
+residual is `0.707` — three orders above any tolerance in play. (An
+*unsigned* least-squares fit reaches `4e-16` there, which is why sign
+feasibility has to be part of the test and not an afterthought.)
+
+The consequence for the ledger below: seven of the eight are a POUNCE
+gap with a reachable answer, and the eighth is correct behaviour that
+should never be "fixed". Lumping them together is the mistake this
+report's own rule about branch coverage exists to prevent.
 
 **Why it is not fixed here.** Three reasons, in order of weight:
 
@@ -362,11 +395,45 @@ carries a multiplier of `1.5e+11` against a row gradient of `3.2e-05`.
    *because* an earlier, looser version reported a diverging iterate as
    solved: `min -exp(x) s.t. x >= 0` re-enters restoration with
    `inf_pr = 1.7e-10` and `inf_du = 8.8e+47`, and Pyomo maps
-   `Solved_To_Acceptable_Level` into the solved family. Distinguishing
-   that from our case needs a discriminator — ours has a *flat, finite*
-   objective where the unbounded case's objective diverges alongside the
-   dual — plus a definition of flatness, a window, and an interaction
-   with `acceptable_progress_kappa`'s existing machinery.
+   `Solved_To_Acceptable_Level` into the solved family.
+
+   **Re-estimating the multipliers is not the discriminator, and this
+   was measured rather than reasoned.** The obvious candidate — re-solve
+   for the multipliers at the returned point and test the residual that
+   gives — is a mechanism POUNCE already ships, as `recalc_y` (the
+   least-squares estimate of `IpLeastSquareMults`, applied once the
+   iterate is feasible enough). Turning it on does flip every one of
+   these cells to `Solve_Succeeded`. It should not be taken:
+
+   | cell (with `recalc_y=yes`) | scaled `final_kkt_error` | **unscaled** `final_kkt_error` |
+   |---|---:|---:|
+   | `ralph1/unit/origin/direct` | `4.607e-10` | **`2.659e-02`** |
+   | `qpec_small/unit/origin` | `1.091e-09` | `5.066e-08` |
+   | `qpec_small/unit/upper_left` | `3.384e-11` | **`4.228e-03`** |
+   | `qpec_small/skew/upper_right` | `1.664e-09` | **`6.179e-05`** |
+
+   Three of the four are not stationary in the model's own units, by
+   three to six orders, and they pass anyway: the re-estimated
+   multipliers are enormous, `s_d` grows with them, and the *scaled*
+   aggregate the strict gate reads is that residual divided by `s_d`.
+   The verdict is normalised by the very quantity that is wrong. That is
+   the P1 failure class — a status that passes because it is measured
+   against the wrong denominator — and it is what this report would be
+   recommending if it took the obvious route.
+
+   The reason the estimate can do this is the vanishing gradient itself.
+   At the exact solution the product row's gradient is exactly zero and
+   `λ = 0` is the only bounded answer; a hair off it, the gradient is
+   `~1e-9`, and a multiplier of `~1e9` on that row reproduces any vector
+   you like. So an *unbounded* least-squares multiplier fit does not test
+   stationarity near a biactive pair — it manufactures it. (Drafted here
+   as the recommended fix on exactly that mistake, and caught by checking
+   the unscaled column.) A test that would work has to bound the
+   multipliers, or read the unscaled residual, and neither is what
+   `recalc_y` does.
+
+   So the gh#274 gate is refusing these correctly, and the honest exit is
+   the one POUNCE already takes.
 
 3. **It is a core-IPM termination change and would need the fixture
    sweep and an owner.** Every model that reaches this gate is in its
@@ -377,14 +444,36 @@ carries a multiplier of `1.5e+11` against a row gradient of `3.2e-05`.
    change would have to meet.
 
 What a future fix would have to establish, stated so it does not have to
-be re-derived: a discriminator between "converged primal, unbounded
-multiplier" and "diverging iterate" that is checkable at the gate;
-evidence it does not relabel any `-exp(x)`-shaped case; and a fixture
-sweep across both legs showing what else moves. gh#794's
-issue-splitting rule is satisfied for filing this — minimal model,
-commit-stamped comparators, kill-switch evidence (`upstream_heuristics`
-moves 3 of the cells, `no_scaling` moves others, neither explains it) —
-but no issue is opened here.
+be re-derived — and narrowed by the `recalc_y` measurement above, which
+rules out the first thing anyone will try:
+
+- a discriminator between "converged primal, unbounded multiplier" and
+  "diverging iterate" that is checkable at the gate **and that a
+  multiplier of `1e9` on a `1e-9` gradient cannot satisfy**. An
+  unbounded least-squares multiplier fit is not one; nor is anything
+  read off the `s_d`-normalised aggregate, since `s_d` is itself a
+  function of the multipliers being estimated. The unscaled residual is
+  the quantity that stays honest here, and on these cells it refuses
+  three of the four outright;
+- evidence it does not relabel any `-exp(x)`-shaped case;
+- and a fixture sweep across both legs showing what else moves.
+
+The cheaper half of that is already available: `recalc_y=yes` is a
+one-option experiment that reproduces the wrong answer on demand, so any
+proposed fix can be checked against it before it is written.
+
+gh#794's issue-splitting rule is satisfied for filing this — minimal
+model, commit-stamped comparators, kill-switch evidence
+(`upstream_heuristics` moves 3 of the cells, `no_scaling` moves others,
+neither explains it) — but no issue is opened here.
+
+**A separate candidate this turned up**, recorded rather than filed:
+`recalc_y=yes` can take a point whose unscaled KKT error is `2.7e-02`
+and report `Solve_Succeeded`, because the re-estimated multipliers
+inflate `s_d` and the strict gate reads the quotient. The option is off
+by default and upstream Ipopt behaves the same way, so this is not a
+regression and not on this PR's path; it is worth its own issue, and the
+four rows above are its reproducer.
 
 ### P3 — `presolve_licq_action=auto_l1` did nothing
 
