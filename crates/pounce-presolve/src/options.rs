@@ -417,8 +417,12 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
         "When yes, runs interval-arithmetic propagation through each \
          constraint's expression DAG to tighten variable bounds before \
          the IPM starts (issue #62). Off by default — only TNLPs that \
-         implement the `ExpressionProvider` trait (currently: `.nl` \
-         files via pounce-cli's `NlTnlp`) participate; others are no-op.",
+         implement the `ExpressionProvider` trait participate; others \
+         are a no-op. Two producers do: `.nl` files via pounce-cli's \
+         `NlTnlp`, and the pounce-rs builder, for a `Problem` that \
+         implements `constraint_expression`. A hand-written tape must \
+         restate its constraint and must not carry slots the root's \
+         value does not depend on (see docs/src/fbbt.md).",
     )?;
 
     reg.add_lower_bounded_number_option(

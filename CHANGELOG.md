@@ -10,6 +10,85 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **FBBT no longer cuts feasible points three separate ways (gh #877).** The
+  2026-08-31 adversarial audit (seam F) found three independent unsoundnesses
+  in the bound-tightening engine. `git diff 3ed5eaa0...9f16f80b --
+  crates/pounce-presolve/` is empty: all three shipped in 0.10.0. What PR #864
+  changed was **reachability** — it accepted hand-written tapes through the
+  `pounce-rs` builder, and the `.nl` translator had been holding two unstated
+  invariants by construction (reachable slots only, `PowInt`'s `n` capped at
+  64). `validate_fbbt_tape` enforced neither.
+
+  **F-3, the severe one: a wrong answer under `Solve_Succeeded`.**
+  `reverse_pass` propagated bounds out of *every* tape slot, including ones
+  the root's value does not depend on. A tape that exactly restates
+  `constraints()` at its root but carries an unused `ln(x)` slot turned a
+  one-variable LP with optimum `x = -10` into `x = -9.99e-9` — wrong by the
+  entire feasible range, `success = true`, `infeasibility_witness: None`, no
+  diagnostic. The certification margin does not help; it guards infeasibility
+  verdicts only, never applied tightenings. Dead slots are routine when a
+  producer emits one tape per row from a shared CSE pool, which is the usage
+  the tape format is sold on.
+
+  Reachability alone would not have fixed it: `f64::NAN.powi(0) == 1.0`, so
+  `ln(x)^0 == 1` is a tautology whose `Ln` slot *is* reachable from the root
+  and still carries no information about `x` — it cut `x = -5` just the same.
+  `reverse_pass` now computes influence on the root's **value**
+  (`influencing_slots`), cutting the dependency edge at `PowInt(_, 0)`, and
+  skips the rest. The control case is the point of the rule: `ln(x) <= 5`
+  still tightens `x` to `x > 0`, because there the root does depend on the
+  slot.
+
+  **F-2: non-finite endpoints survived the outward rounding.** `round_down` /
+  `round_up` passed them through, so an overflowed interval degenerated to
+  the *point* `[inf, inf]` and the reverse pass emptied every operand:
+  `exp(x) >= 1` on `[800, 900]`, `x + y >= 1` on `[1e308, 1.5e308]²`, and
+  even a **free row** on `[1e200, 2e200]²` all reported
+  `infeasibility_witness = Some(0)` on feasible problems. `inf - inf` also
+  leaked a `NaN` interval to the root. Both now round outward correctly
+  (`next_down(+inf) == f64::MAX`, `next_up(-inf) == f64::MIN`), and a `NaN`
+  endpoint — arithmetic destroyed the value — widens to the matching
+  infinity rather than to `EMPTY`, which would have claimed infeasibility.
+
+  **F-1: `n`-th roots were `powf(1.0/n)` plus a one-ULP pad.** `1.0/n` is
+  relatively 5.55e-17 low for non-power-of-two `n`, and `powf` computes
+  `exp(ln(x)·(1/n))`, so the root is short by `|ln z| · 5.55e-17` — 10 ULP at
+  `z = 2^90`, far more than one. `x³ == 1073741824` on `x ∈ [0, 2000]`
+  returned `[1023.99999999999955, 1023.99999999999977]`, cutting the exact
+  `x = 1024` and reporting `infeasibility_witness = Some(0)` on a feasible,
+  well-scaled problem. Roots are now a `powf` seed plus a Newton correction,
+  verified against the forward pass's own `powi` by walking ULPs (capped,
+  with a relative fallback) so the enclosure brackets the true root by
+  construction rather than by a guessed pad.
+
+  Related, and found in the same probe: `PowInt`'s `n` is a `u32` and the
+  interval code wrote `n as i32`, which **wraps** — `u32::MAX as i32 == -1`,
+  turning `xⁿ` into `1/x`, a different function, smaller than 1 where the
+  true value is astronomically large. `interval::powi` now takes `u32` and
+  converts with a checked `i32::try_from`, falling back to `powf`.
+  `validate_fbbt_tape` deliberately still does **not** cap `n`: the defect
+  was the conversion, and a cap would reject tapes that are now handled
+  correctly.
+
+  Both switches (`presolve`, `presolve_fbbt`) default to `no`, so no shipping
+  default path changes and no fixture sweep is owed. Pinned by
+  `crates/pounce-presolve/tests/issue877_fbbt_unsound_tightening.rs` (12
+  cases, with each side of the influence rule reached by a different fixture
+  per CLAUDE.md's gh #756 rule — the control case that must still tighten is
+  the actual test) and
+  `crates/pounce-rs/tests/issue877_fbbt_dead_slot_wrong_answer.rs`, which
+  pins the end-to-end wrong answer rather than only the box.
+
+  Also from the same finding: the soundness section of `docs/src/fbbt.md`
+  claimed FBBT "cannot drop a feasible point" without stating the tape
+  contract that claim rests on (F-4) — it now states both halves and names
+  this issue as what happens when they are violated; the in-binary
+  `presolve_fbbt` help still said `.nl`-only (F-5); the "must exactly restate"
+  check accepts a `sqrt(eps)` (~1.5e-8) relative mismatch at the two points it
+  samples, which the docs now say instead of promising exactness (F-6); and
+  the builder passed the derivative-test TNLP override unconditionally, so
+  the `None` arm was never exercised — it is now passed only when presolve
+  actually wraps the adapter (F-7).
 - **A `NaN` iterate on the active-set SQP arm is no longer reported as an
   optimal solution (gh #876).** `unbounded_cubic.nl` under
   `algorithm=active-set-sqp hessian_approximation=limited-memory` printed

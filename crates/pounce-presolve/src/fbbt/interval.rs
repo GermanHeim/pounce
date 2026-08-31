@@ -208,28 +208,28 @@ impl Interval {
         if n % 2 == 1 {
             // Odd → monotone increasing.
             Self {
-                lo: round_down(powi(a, n as i32)),
-                hi: round_up(powi(b, n as i32)),
+                lo: round_down(powi(a, n)),
+                hi: round_up(powi(b, n)),
             }
         } else if a >= 0.0 {
             // Even, fully non-negative → monotone increasing.
             Self {
-                lo: round_down(powi(a, n as i32)),
-                hi: round_up(powi(b, n as i32)),
+                lo: round_down(powi(a, n)),
+                hi: round_up(powi(b, n)),
             }
         } else if b <= 0.0 {
             // Even, fully non-positive → monotone decreasing in
             // magnitude; powers are non-negative with the smaller
             // |.| inside the interval.
             Self {
-                lo: round_down(powi(b, n as i32)),
-                hi: round_up(powi(a, n as i32)),
+                lo: round_down(powi(b, n)),
+                hi: round_up(powi(a, n)),
             }
         } else {
             // Even, straddles zero → minimum is at 0, max at the
             // extreme with larger |.|.
-            let ha = powi(a, n as i32);
-            let hb = powi(b, n as i32);
+            let ha = powi(a, n);
+            let hb = powi(b, n);
             Self {
                 lo: 0.0,
                 hi: round_up(ha.max(hb)),
@@ -342,20 +342,72 @@ impl Interval {
 // -------- Rounding helpers --------
 
 /// Outward round on the low end: nudge `x` one ULP toward `-∞`.
-/// Identity on infinities and NaN.
+///
+/// Non-finite endpoints are **not** identities (gh #877 F-2). The
+/// `is_finite` guard this used to carry made an *overflowed* computation
+/// look like an exact one: `exp([800, 900])` and `[1e200, 2e200]²` both
+/// evaluate to `+∞` at **both** endpoints, and passing those through
+/// unchanged yields the degenerate point `[+∞, +∞]` — an interval
+/// asserting that the value is exactly positive infinity, when what
+/// actually happened is that a finite value exceeded `f64::MAX`. The
+/// reverse pass then intersects that against the row's bound, finds it
+/// empty, and reports a false infeasibility on a feasible model. `exp(x) ≥
+/// 1` on `x ∈ [800, 900]` did exactly that, and so did a **free** row
+/// (`g ∈ [-∞, +∞]`) on an overflowing box.
+///
+/// `next_down` is already correct on every case; the guard was what broke
+/// it. `next_down(+∞) == f64::MAX`, which is the sound low bound for
+/// "something at least `f64::MAX`". `next_down(-∞) == -∞`, so a genuinely
+/// unbounded endpoint is still an identity.
+///
+/// `NaN` maps to `-∞`. A `NaN` here is `∞ - ∞` or `0 · ∞` — arithmetic that
+/// destroyed the value rather than a value that is out of range — so the
+/// only sound enclosure is all of ℝ. Passing it through instead makes
+/// `Interval::new` read the endpoint as `EMPTY`, i.e. *infeasible*, which is
+/// the strongest possible claim from the least possible information; `exp(x)
+/// − exp(x) ≤ 1` on `[800, 900]` reported `infeasibility_witness = Some(0)`.
 pub(crate) fn round_down(x: Number) -> Number {
-    if x.is_finite() { x.next_down() } else { x }
+    if x.is_nan() {
+        Number::NEG_INFINITY
+    } else {
+        x.next_down()
+    }
 }
 
 /// Outward round on the high end: nudge `x` one ULP toward `+∞`.
+///
+/// See [`round_down`] for why non-finite endpoints are handled rather than
+/// passed through (gh #877 F-2). `next_up(+∞) == +∞` and
+/// `next_up(-∞) == f64::MIN`, both sound.
 pub(crate) fn round_up(x: Number) -> Number {
-    if x.is_finite() { x.next_up() } else { x }
+    if x.is_nan() {
+        Number::INFINITY
+    } else {
+        x.next_up()
+    }
 }
 
 /// `x^n` for non-negative `n`, with `0^0 = 1` (Rust's `f64::powi`
 /// convention).
-fn powi(x: Number, n: i32) -> Number {
-    x.powi(n)
+///
+/// Takes `u32` and converts *checked* rather than with `as i32`, which
+/// wraps (gh #877). `n = u32::MAX` became `-1`, so `x^4294967295` was
+/// computed as `1/x` — not an over- or under-approximation of the intended
+/// power but a different function, and one that is smaller than 1 where the
+/// true value is astronomically larger. `validate_fbbt_tape` does not bound
+/// `n` (the `.nl` translator's own cap of 64 is what kept this unreachable
+/// until hand-written tapes were accepted), and it deliberately still does
+/// not: a cap would be a workaround for a wrapping conversion, and every
+/// `u32` exponent has a correct answer once the conversion is right.
+pub(crate) fn powi(x: Number, n: u32) -> Number {
+    match i32::try_from(n) {
+        Ok(k) => x.powi(k),
+        // Beyond `i32::MAX` the result saturates for every base: `|x| < 1`
+        // underflows to 0, `|x| == 1` stays ±1, `|x| > 1` overflows to ±∞.
+        // `n as f64` is exact for every `u32`, so `powf` gets the sign of a
+        // negative base right (it has an integral exponent).
+        Err(_) => x.powf(n as Number),
+    }
 }
 
 // -------- Trigonometric image bounds --------
