@@ -265,23 +265,43 @@ fn a_solve_that_never_escalates_says_nothing() {
     );
 }
 
-/// The pair that keeps this from being read as a defect detector.
+/// The other side of the trade, and the reason the gh#857 gate consults the
+/// *verdict* rather than the count.
 ///
-/// `deb7` escalates exactly as often as `square_flowsheet_resto`'s base solve
-/// and is *faster* for it. Same count, opposite outcome — which is the
+/// On macOS/aarch64 `deb7` escalates exactly as often as
+/// `square_flowsheet_resto`'s base solve — twice — and is *faster* for it:
+/// 147 iterations to `Optimal`. Same count, opposite outcome, which is the
 /// measured reason `feral_increase_quality` is an option rather than a flipped
-/// default, and the reason the second-opinion gate in gh#857 has to consult
-/// the *verdict* and not the count alone.
+/// default.
+///
+/// **The count is not asserted, because it is not portable.** On
+/// linux/x86_64 the same fixture reaches `Optimal` in 143 iterations having
+/// escalated **zero** times. Nothing is wrong on either machine: an
+/// escalation fires when the interior-point refinement stalls, which is a
+/// floating-point-level property of the trajectory, so whether a given model
+/// trips it is exactly the kind of thing that differs across targets. Pinning
+/// `deb7 == 2` here pinned one machine's arithmetic, and that is the same
+/// mistake `issue857_escalation_gated_quality_rung.rs`'s module header
+/// documents for the other fixture.
+///
+/// What *is* portable is the claim the gate rests on, and it is asserted
+/// below: `deb7` reaches `Optimal`, so no rung opens on it whatever its count
+/// — 0 or 2 or twenty. A count-only gate could not say that. The exact
+/// macOS figures above stay in prose, where a number that describes one
+/// platform belongs.
 #[test]
-fn the_same_count_buys_a_solve_here_and_costs_one_there() {
+fn the_verdict_and_not_the_count_is_what_excludes_a_winning_solve() {
     let (out, deb7) = solve("deb7.nl", &[]);
     assert!(
         out.contains("EXIT: Optimal Solution Found"),
         "deb7 is the gaining side of the trade and should still solve:\n{out}"
     );
-    assert_eq!(
-        deb7, 2,
-        "deb7 escalates twice, the same as square_flowsheet_resto's base \
-         solve, and gains by it:\n{out}"
+    assert!(
+        !out.lines()
+            .any(|l| l.starts_with("pounce:")
+                && (l.contains("re-solving") || l.contains("re-solve"))),
+        "and an `Optimal` verdict opens no second-opinion rung, however many \
+         times the solve escalated ({deb7} here) — which is precisely what a \
+         gate on the count alone could not deliver:\n{out}"
     );
 }

@@ -59,6 +59,20 @@ changes.
   infeasibility fixture-legs, four escalated and take the rung and four never
   escalated and are untouched.
 
+  The ladder is a library feature and not a CLI one, so the fourth rung also
+  appears in `info["second_opinion"]["tried"]` for a Python caller whose model
+  ends `Infeasible_Problem_Detected` having escalated — which the one-variable
+  `x² + 1 = 0` in `python/tests/test_second_opinion.py` does, on both
+  platforms. Turning the whole ladder off therefore means naming
+  `feral_increase_quality_retry=no` alongside the other three rung switches,
+  and that test's `LADDER_OFF` now does. It also *derives* the rung list it
+  expects from a ladder-free base solve rather than writing the count down:
+  whether a given model escalates at all is a property of the platform's
+  arithmetic and not of the model, and gh #857's own CLI fixture `deb7`
+  escalates twice on macOS/aarch64 and zero times on linux/x86_64. A test that
+  writes such a count down is red on one of the two, which is how this was
+  found.
+
   The same gate also **stands the µ-strategy stall retry down**, which is what
   keeps the rung from being a third solve rather than a second.
   `mu_strategy_fallback` fires unconditionally on

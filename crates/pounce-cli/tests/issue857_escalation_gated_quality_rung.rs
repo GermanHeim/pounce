@@ -244,22 +244,31 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
 /// - and it has escalated **zero** times by iteration 100, so rung 4's gate
 ///   is the only thing standing between it and an extra solve.
 ///
-/// `deb7` is the fixture rather than a never-escalating one because it *does*
-/// escalate — once by iteration 110 and twice by 120 — so the escalation path
-/// is reachable on this exact model under these exact options, and the count
-/// is provably the operative difference rather than an accident of which
-/// model was picked. `the_same_count_buys_a_solve_here_and_costs_one_there`
-/// in `issue857_quality_escalations_are_reported.rs` measures the other end
-/// of the same run.
+/// `deb7` is the fixture rather than a never-escalating one because on the
+/// machine this was measured on it *does* escalate — once by iteration 110
+/// and twice by 120 — so the escalation path is reachable on this exact
+/// model under these exact options, and the count is provably the operative
+/// difference rather than an accident of which model was picked.
+///
+/// That last paragraph is macOS/aarch64 talking. On linux/x86_64 `deb7`
+/// reaches `Optimal` in 143 iterations having escalated **zero** times, so
+/// the escalation is not reachable there at all and the fixture is a
+/// never-escalating one after all. Only the assertions below are portable —
+/// both platforms agree that by iteration 100 nothing has escalated and no
+/// rung opens — which is why the count itself is deliberately not asserted
+/// anywhere in this file.
+/// `the_verdict_and_not_the_count_is_what_excludes_a_winning_solve` in
+/// `issue857_quality_escalations_are_reported.rs` measures the other end
+/// of the same run, and carries the same warning.
 ///
 /// The matching *one* branch is on `square_flowsheet_resto`, not here, and
-/// that is forced rather than chosen: no cap on `deb7` produces a surviving
-/// budget exit that escalated, because the μ-strategy stall retry recovers
-/// it to `Optimal` at 108 from `max_iter=110` on — past the first escalation
-/// and before the cap can hold. Conversely no cap on `square_flowsheet_resto`
-/// produces a budget exit that has *not* escalated: even at `max_iter=5` its
-/// internal retry escalates twice. One fixture per branch is the most this
-/// corpus allows.
+/// that is forced rather than chosen: on the machine above, no cap on `deb7`
+/// produces a surviving budget exit that escalated, because the μ-strategy
+/// stall retry recovers it to `Optimal` at 108 from `max_iter=110` on — past
+/// the first escalation and before the cap can hold. Conversely no cap on
+/// `square_flowsheet_resto` produces a budget exit that has *not* escalated:
+/// even at `max_iter=5` its internal retry escalates twice. One fixture per
+/// branch is the most this corpus allows.
 ///
 /// Without this branch the change would add a second full solve to every
 /// capped run in the corpus, and

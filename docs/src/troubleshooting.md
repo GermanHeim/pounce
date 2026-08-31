@@ -439,9 +439,11 @@ infeasibility_perturbed_start_retry no
 feral_increase_quality_retry      no
 ```
 
-Naming a subset leaves the remaining rungs live. This bit three of POUNCE's
-own regression tests when rung 4 was added, each of which had used
-`infeasibility_perturbed_start_retry=no` as shorthand for "no ladder".
+Naming a subset leaves the remaining rungs live. This bit four of POUNCE's
+own regression tests when rung 4 was added — three Rust ones that had used
+`infeasibility_perturbed_start_retry=no` as shorthand for "no ladder", and
+the Python `test_turning_the_whole_ladder_off_restores_upstream_behaviour`,
+whose "whole ladder" was a dict of the other three.
 
 The first rung is evidence only when the trajectory is
 hypersensitive — two equally backward-stable scalings staying

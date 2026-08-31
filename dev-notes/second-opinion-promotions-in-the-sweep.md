@@ -331,11 +331,26 @@ rung's flag:
 | `issue850_second_opinion_is_recorded.rs::the_base_solver_alone_does_not_solve_this_fixture` | a bare `Restoration_Failed` on the exact leg | `infeasibility_perturbed_start_retry=no` |
 | `issue_815_restoration_ladder.rs::the_ladder_can_be_switched_off` | the escape hatch, asserting nothing is announced | `infeasibility_perturbed_start_retry=no` |
 | `issue_819_restoration_iteration_count.rs::run_to_restoration_failure` | a solve that actually terminates in restoration, to count its `r` rows | `infeasibility_perturbed_start_retry=no` |
+| `python/tests/test_second_opinion.py::test_turning_the_whole_ladder_off_restores_upstream_behaviour` | `second_opinion is None`, i.e. no ladder ran | a `LADDER_OFF` dict naming the other three |
 
 Rung 4 opens on `Restoration_Failed` too, so "the base solver alone" quietly
 became "the base solver plus one rung", the escape hatch stopped being an
 escape hatch, and the run gh#819 measures stopped terminating in restoration.
-All three now pass both flags.
+All four now name every flag.
+
+The Python one is worth a second look, because it did not fail where it was
+written. Widening rung 4's trigger to `Infeasible_Problem_Detected` is what
+reached it, and it went red on linux/x86_64 while staying green on
+macOS/aarch64 — not because the models differ but because *the arithmetic
+does*, and rung 4's gate is a measurement. Two sibling tests in that file
+wrote the rung list down as three literal strings and had to be re-anchored
+on a list derived from a ladder-free base solve's `quality_escalations`. The
+general rule: **a pin on the ladder's shape is a pin on a count the platform
+gets to choose**, so derive it. `deb7` escalates twice on macOS/aarch64 and
+zero times on linux/x86_64 under identical options; the same trap took
+`issue857_quality_escalations_are_reported.rs`'s `deb7` arm, which now
+asserts the portable claim (an `Optimal` verdict opens no rung, whatever the
+count) instead of the count.
 
 **There is no ladder-wide switch, and that is the defect these four expose.**
 The ladder is disabled a rung at a time — `feral_infeasibility_scaling_retry`,
