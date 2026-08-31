@@ -22,10 +22,10 @@ References: Belotti, Cafieri, Lee, Liberti (2010).
 
 FBBT cannot help when:
 
-- The TNLP has no structural-expression representation. Today only
-  `.nl`-loaded problems (`NlTnlp`) expose one. Python (`PyTnlp`),
-  C-callback (`CCallbackTnlp`), and Rust closure-based problems
-  silently opt out.
+- The TNLP has no structural-expression representation. `.nl`-loaded
+  problems (`NlTnlp`) expose one, and `pounce-rs` builder problems can opt in
+  with `Problem::constraint_expression`. Python (`PyTnlp`) and C-callback
+  (`CCallbackTnlp`) problems still silently opt out.
 - The expression uses operators FBBT doesn't reason about
   (`Funcall` to AMPL imported functions, variable-exponent powers,
   `sin` / `cos` reverse pass). Those subtrees become opaque and
@@ -121,6 +121,25 @@ reverse propagation through them — they don't pollute the rest of
 the constraint.
 
 ## Extending support to new TNLP sources
+
+Builder users implement the optional hook and enable both `presolve` and
+`presolve_fbbt`:
+
+```rust
+impl Problem for MyProblem {
+    fn constraint_expression(&self, i: usize) -> Option<pounce_rs::FbbtTape> {
+        Some(tapes[i].clone())
+    }
+}
+```
+
+The builder returns the resulting `FbbtReport` on `Solution::fbbt_report`.
+
+The tape for row `i` must exactly restate `constraints(x)[i]`. A mismatch can
+tighten bounds around the wrong function and cut off the true optimum.
+`try_solve` rejects disagreements found at the starting point or box midpoint,
+but this is only a smoke check; a mismatch elsewhere may have no diagnostic.
+Generate the callback and tape from one expression source when possible.
 
 FBBT consumes the `pounce_nlp::expression_provider::ExpressionProvider`
 trait. Any TNLP can opt in by implementing:

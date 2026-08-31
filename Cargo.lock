@@ -1107,6 +1107,7 @@ dependencies = [
  "pounce-linsol",
  "pounce-nlp",
  "pounce-observability",
+ "pounce-presolve",
  "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",

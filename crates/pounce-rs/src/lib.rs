@@ -208,6 +208,10 @@ pub use pounce_nlp::tnlp::{
 // --- the solver driver ------------------------------------------------------
 pub use pounce_algorithm::application::IpoptApplication;
 
+// --- presolve ---------------------------------------------------------------
+pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+pub use pounce_presolve::fbbt::FbbtReport;
+
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
@@ -255,6 +259,7 @@ pub mod sqp;
 /// ```
 pub mod prelude {
     pub use crate::builder::{Nlp, NlpError, Problem, SecondOpinion};
+    pub use crate::{FbbtOp, FbbtReport, FbbtTape};
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
