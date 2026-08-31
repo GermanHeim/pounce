@@ -229,8 +229,9 @@ construction and by measurement.
 ### Part B: rung 4, gated on that count
 
 `feral_increase_quality_retry` (default on) re-solves once with
-`feral_increase_quality=no` when a solve ends `Restoration_Failed` or
-`Maximum_Iterations_Exceeded` **and** escalated at least once.
+`feral_increase_quality=no` when a solve ends `Restoration_Failed`,
+`Maximum_Iterations_Exceeded` or `Infeasible_Problem_Detected` **and**
+escalated at least once.
 
 The `Maximum_Iterations_Exceeded` half required opening a trigger that
 `SecondOpinionTrigger::for_status` deliberately refused, on the sound
@@ -262,11 +263,55 @@ did before.
     2nd=feral_increase_quality=no@Maximum_Iterations_Exceeded/3000,tot=3178
 ```
 
-That is the whole collateral: of the 13 escalating legs, this is the only one
-whose verdict is an unrecovered `Restoration_Failed` or budget exit. The row
-in the table above that read `lbfgs square_flowsheet_resto |
-MaximumIterationsExceeded/3000 | Optimal/178` is now
-`Optimal/178 automatically, 3178 total`.
+That is the whole collateral of the budget-exit half: of the 13 escalating
+legs, this is the only one whose verdict is an unrecovered
+`Restoration_Failed` or budget exit. The row in the table above that read
+`lbfgs square_flowsheet_resto | MaximumIterationsExceeded/3000 | Optimal/178`
+is now `Optimal/178 automatically, 3178 total`.
+
+### The third trigger, and the platform that made it necessary
+
+`Infeasible_Problem_Detected` joined the trigger set after CI disagreed with
+the development machine about this fixture. On linux/x86_64 the same
+limited-memory leg spends the same 3000 iterations and takes the same 25
+escalations and then exits `Infeasible_Problem_Detected` rather than at the
+cap — a **false infeasibility verdict on a feasible model**, which is a
+strictly worse failure mode than a budget exit because it is a wrong answer
+reported as a verdict. Rungs 1–3 all run on it (that status has opened a
+ladder since long before gh#857) and all three fail: `mc64` returns
+`Restoration_Failed`, `mu_strategy=adaptive` and the perturbed start return
+`Infeasible_Problem_Detected`. Rung 4 recovers it, and did not open, because
+the trigger set named only the two statuses macOS produces.
+
+The lesson is the branch rule in a new dimension: a corpus can be uniform in
+the *platform* it was measured on, and a gate written from that corpus names
+the shapes one platform's arithmetic produces. Nothing about the defect is
+platform-specific — it is the same escalation on the same trajectory — only
+which terminal status the walk into the wall ends at.
+
+**That trigger is not free, and the six lines it moves are the price.** All
+six are infeasibility fixtures that escalated, and all six are models that
+really are infeasible, so the rung confirms the verdict at the cost of one
+more solve:
+
+```
+- exact infeasible_square_scaled_1em4 InfeasibleProblemDetected it=17  q=4 2nd=kept(3),tot=61
++ exact infeasible_square_scaled_1em4 InfeasibleProblemDetected it=17  q=4 2nd=kept(4),tot=78
+- exact issue_508_infeasible_gap_1em2 InfeasibleProblemDetected it=114 q=1 2nd=kept(3),tot=290
++ exact issue_508_infeasible_gap_1em2 InfeasibleProblemDetected it=114 q=1 2nd=kept(4),tot=404
+- exact issue_508_infeasible_gap_1em4 InfeasibleProblemDetected it=441 q=3 2nd=kept(3),tot=982
++ exact issue_508_infeasible_gap_1em4 InfeasibleProblemDetected it=441 q=3 2nd=kept(4),tot=1423
+```
+
+plus the same three on the `lbfgs` leg. No status, objective, `it=`, `q=` or
+engine moves on any of them — only the rung count and the ladder total.
+
+**The gate is what bounds it, and both of its branches are in the corpus.** Of
+the eight NLP-arm infeasibility fixture-legs, four escalated and take the rung;
+`infeasible_equalities`, `issue_372_infeasible_bounds` and
+`degenerate_start_infeasible` never escalated and are untouched at three rungs.
+Both branches are pinned in
+`crates/pounce-cli/tests/issue857_escalation_gated_quality_rung.rs`.
 
 **The cost, stated plainly.** One extra solve on a run that was already going
 to report failure — with one case worth naming, because it is the only

@@ -41,6 +41,32 @@
 //! exactly as many times as this fixture's base solve and *gains* by it. The
 //! count cannot separate the two; the verdict can.
 //!
+//! # Why the lbfgs arms name an explicit `max_iter`
+//!
+//! Left to run free, this fixture's lbfgs leg does not reach the same verdict
+//! on every platform. On macOS/aarch64 it exhausts the 3000-iteration default
+//! and exits `Maximum_Iterations_Exceeded`; on linux/x86_64 it spends the same
+//! 3000 iterations with the same 25 escalations and then exits
+//! `Infeasible_Problem_Detected` — a **wrong answer on a feasible model**,
+//! and one the three pre-existing infeasibility rungs all fail to rescue.
+//! That divergence is what the first cut of this file was reading as its
+//! trigger, so the tests were green here and red on CI without either
+//! platform being wrong about anything the rung is for.
+//!
+//! Capping at 500 removes the divergence from the test's path: the cap fires
+//! long before the point the two platforms part company, the base solve exits
+//! `Maximum_Iterations_Exceeded` with `quality_escalations >= 1` on both, and
+//! what is left under assertion is the mechanism — the gate opened, the rung
+//! promoted, the μ flip stood down — rather than a particular free-run
+//! trajectory. The iteration counts are asserted against the cap for the same
+//! reason: `< 500` says "this is the recovered solve", `>= 500` says "this one
+//! ran out", and neither pins a number that is a property of one machine.
+//!
+//! The divergence itself is not a test artifact, and rung 4 now names
+//! `LocalInfeasibility` in its trigger set because of it: without that, the
+//! escalation the rung exists to undo is the direct cause of a wrong answer on
+//! linux and the rung never opens to undo it.
+//!
 //! # Appended, not prepended
 //!
 //! On a `Restoration_Failed` the gh#815 displacement rung runs first and
@@ -50,6 +76,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -71,13 +98,20 @@ struct Run {
 }
 
 fn solve(model: &str, extra: &[&str]) -> Run {
+    // Two pairs of tests below drive the same model with the same options and
+    // differ only in what they assert, so the option string is not a unique
+    // name. The harness runs them concurrently; without the counter they race
+    // on one `.json` and one reads the other's report.
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tag: String = format!("{model}_{}", extra.join("_"))
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let dir = std::env::temp_dir();
-    let sol = dir.join(format!("pounce_857g_{tag}.sol"));
-    let json = dir.join(format!("pounce_857g_{tag}.json"));
+    let pid = std::process::id();
+    let sol = dir.join(format!("pounce_857g_{pid}_{seq}_{tag}.sol"));
+    let json = dir.join(format!("pounce_857g_{pid}_{seq}_{tag}.json"));
     let out = Command::new(pounce_exe())
         .arg(fixture(model))
         .arg(&sol)
@@ -125,7 +159,7 @@ fn ladder_lines(out: &str) -> Vec<&str> {
 fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
     let run = solve(
         "square_flowsheet_resto.nl",
-        &["hessian_approximation=limited-memory"],
+        &["hessian_approximation=limited-memory", "max_iter=500"],
     );
     assert!(
         run.out.contains("Maximum Number of Iterations Exceeded"),
@@ -154,11 +188,12 @@ fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
         "{}",
         run.out
     );
-    assert_eq!(
-        run.iterations, 178,
-        "the promoted rung is the un-escalated solve, which converges in 178 \
-         iterations — the same trajectory a user gets by setting \
-         feral_increase_quality=no by hand:\n{}",
+    assert!(
+        run.iterations < 500,
+        "the promoted rung is the un-escalated solve, which converges well \
+         inside the cap the base solve ran out of — the same trajectory a \
+         user gets by setting feral_increase_quality=no by hand (178 \
+         iterations here at the time of writing):\n{}",
         run.out
     );
 }
@@ -172,6 +207,7 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
         "square_flowsheet_resto.nl",
         &[
             "hessian_approximation=limited-memory",
+            "max_iter=500",
             "feral_increase_quality_retry=no",
         ],
     );
@@ -186,7 +222,11 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
          narrate:\n{}",
         run.out
     );
-    assert_eq!(run.iterations, 3000);
+    assert!(
+        run.iterations >= 500,
+        "and the verdict that stands is the capped one:\n{}",
+        run.out
+    );
 }
 
 /// **The other branch of the gate**, and the reason `for_status` naming a
@@ -354,7 +394,7 @@ fn solve_count(out: &str) -> usize {
 fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
     let run = solve(
         "square_flowsheet_resto.nl",
-        &["hessian_approximation=limited-memory"],
+        &["hessian_approximation=limited-memory", "max_iter=500"],
     );
     assert_eq!(
         solve_count(&run.out),
@@ -364,7 +404,11 @@ fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
          the escalation still governs:\n{}",
         run.out
     );
-    assert_eq!(run.iterations, 178, "{}", run.out);
+    assert!(
+        run.iterations < 500,
+        "and the promoted answer is the rung's, not a capped one:\n{}",
+        run.out
+    );
 }
 
 /// The switch is one switch. `feral_increase_quality_retry=no` removes rung 4
@@ -381,6 +425,7 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
         "square_flowsheet_resto.nl",
         &[
             "hessian_approximation=limited-memory",
+            "max_iter=500",
             "feral_increase_quality_retry=no",
         ],
     );
@@ -396,7 +441,12 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
         "and the second solve is the flip, not a ladder rung:\n{}",
         run.out
     );
-    assert_eq!(run.iterations, 3000);
+    assert!(
+        run.iterations >= 500,
+        "both solves ran the budget out, and the second one's verdict is what \
+         is reported:\n{}",
+        run.out
+    );
 }
 
 /// The stand-down is scoped to the status rung 4 opens on.
@@ -420,5 +470,71 @@ fn the_stand_down_does_not_reach_the_exact_leg() {
         run.iterations, 54,
         "rung 3 still rescues the exact leg, unchanged:\n{}",
         run.out
+    );
+}
+
+/// The `LocalInfeasibility` trigger, and both branches of the gate on it.
+///
+/// A false infeasibility verdict is the worst thing the escalation can cause —
+/// it is a wrong answer on a feasible model, reported as a verdict rather than
+/// a failure — and it is the shape `square_flowsheet_resto`'s lbfgs leg takes
+/// on linux/x86_64 (see the module header). So rung 4 opens on it, under the
+/// same `quality_escalations >= 1` gate as the other two triggers.
+///
+/// The cost is real and is not hypothetical: on a model that is *genuinely*
+/// infeasible the rung cannot recover anything, and re-solving to find that
+/// out costs roughly what the base solve cost. Across the fixture corpus that
+/// is six moved lines, `infeasible_square_scaled_1em4` 61 → 78 total
+/// iterations on the exact leg and `issue_508_infeasible_gap_1em4` 982 →
+/// 1423 — no status, objective or engine moves anywhere. That is the price of
+/// not believing an infeasibility verdict the escalation may have manufactured,
+/// and it is paid on purpose.
+///
+/// The gate is what keeps it from being paid everywhere. Of the eight NLP-arm
+/// infeasibility fixture-legs in the corpus, four escalated and take the rung;
+/// four never escalated and are untouched at three rungs. The second test
+/// below is that branch, and it is the test — not a duplicate of the first.
+#[test]
+fn an_escalating_infeasibility_verdict_opens_the_quality_rung() {
+    let run = solve("infeasible_square_scaled_1em4.nl", &[]);
+    let lines = ladder_lines(&run.out);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("local infeasibility — re-solving along 4 different trajectories")),
+        "the escalating infeasibility verdict should open all four rungs:\n{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("feral_increase_quality=no re-solve did not recover")),
+        "{lines:#?}"
+    );
+    assert!(
+        run.out.contains("it survived 4 independent re-solve(s)"),
+        "this model really is infeasible, so the rung confirms the verdict \
+         rather than overturning it — the verdict itself must not move:\n{}",
+        run.out
+    );
+}
+
+/// The other branch: an infeasibility verdict reached without a single
+/// factorization escalation has nothing for this rung to undo, and pays
+/// nothing for it.
+#[test]
+fn an_infeasibility_verdict_that_never_escalated_keeps_three_rungs() {
+    let run = solve("issue_372_infeasible_bounds.nl", &[]);
+    let lines = ladder_lines(&run.out);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("local infeasibility — re-solving along 3 different trajectories")),
+        "no escalation, so the ladder is the pre-gh#857 three:\n{lines:#?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("feral_increase_quality=no")),
+        "{lines:#?}"
     );
 }

@@ -179,9 +179,34 @@ pub struct SecondOpinionAvailability {
 /// 4. **`feral_increase_quality=no` — undo the factorization escalation**
 ///    (`feral_increase_quality_retry`, on by default; gh#857). The only rung
 ///    whose gate is a *measurement of the failing solve* rather than a
-///    reading of its options: it opens on a `Restoration_Failed` or a
-///    `Maximum_Iterations_Exceeded` **and** only when the solve's
-///    `quality_escalations` count is at least 1. `feral_increase_quality` is
+///    reading of its options: it opens on a `Restoration_Failed`, a
+///    `Maximum_Iterations_Exceeded` or an `Infeasible_Problem_Detected`
+///    **and** only when the solve's `quality_escalations` count is at
+///    least 1.
+///
+///    The infeasibility trigger was added after the other two, and the
+///    reason is worth keeping: `square_flowsheet_resto`'s lbfgs leg does
+///    **not** exit the same way on every platform. On macOS/arm64 it runs
+///    to the 3000-iteration cap and exits `Maximum_Iterations_Exceeded`;
+///    on linux/x86_64 the same 3000 iterations with the same 25
+///    escalations end `Infeasible_Problem_Detected` instead — a *wrong
+///    answer* on a feasible model, and one the three infeasibility rungs
+///    above do not recover. The verdict an escalation-rerouted trajectory
+///    produces is not a property of the escalation, so pinning the rung to
+///    two of the three shapes left the fix firing on one platform and not
+///    the other.
+///
+///    Unlike the other two triggers this one is **not** free, and the
+///    difference is worth stating: a `Restoration_Failed` or a budget exit
+///    is a failure either way, so the rung's cost lands only on runs that
+///    were already going to report one, whereas a *genuine* infeasibility
+///    verdict is a correct answer and the rung can only confirm it. Six
+///    fixture-legs pay exactly that — one extra solve, e.g.
+///    `issue_508_infeasible_gap_1em4` 982 → 1423 total iterations, with no
+///    status, objective, iteration count or engine moving. The `>= 1` gate
+///    is what bounds it: of the eight NLP-arm infeasibility fixture-legs,
+///    four escalated and take the rung and four are untouched.
+///    `feral_increase_quality` is
 ///    on by default and genuinely two-sided — it buys accuracy and 15–25% of
 ///    the iterations on several fixture-legs and loses whole solves on others
 ///    — and its losing direction previously had no automatic recovery at all.
@@ -268,7 +293,9 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     // nothing here to test and no solve to spend.
     if matches!(
         avail.trigger,
-        SecondOpinionTrigger::RestorationFailure | SecondOpinionTrigger::IterationLimit
+        SecondOpinionTrigger::RestorationFailure
+            | SecondOpinionTrigger::IterationLimit
+            | SecondOpinionTrigger::LocalInfeasibility
     ) && avail.increase_quality_retry_enabled
         && !avail.already_no_increase_quality
         && avail.baseline_quality_escalations >= 1
@@ -838,6 +865,58 @@ mod scaling_retry_tests {
             ["feral_increase_quality=no"],
         );
         assert_eq!(rungs[0].assignments, ["feral_increase_quality no\n"]);
+    }
+
+    /// The third shape an escalation-rerouted trajectory takes, and the one
+    /// that is platform-dependent.
+    ///
+    /// `square_flowsheet_resto`'s lbfgs leg runs 3000 iterations and escalates
+    /// 25 times on both macOS/arm64 and linux/x86_64, and then exits
+    /// `Maximum_Iterations_Exceeded` on the first and
+    /// `Infeasible_Problem_Detected` on the second — a wrong answer on a
+    /// feasible model that the un-escalated solve reaches in 178 iterations.
+    /// Rung 4 opened on two of the three shapes until that divergence turned
+    /// up in CI, which meant the gh#857 fix recovered the model on one
+    /// platform and not the other.
+    ///
+    /// Appended here too, so the three infeasibility rungs still run and still
+    /// promote first: this is what is left when they do not.
+    #[test]
+    fn an_escalating_infeasibility_verdict_appends_the_quality_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::LocalInfeasibility,
+            baseline_quality_escalations: 25,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            [
+                "feral_scaling=mc64",
+                "mu_strategy=adaptive",
+                "start_point_perturbation=1e-2",
+                "feral_increase_quality=no",
+            ],
+        );
+    }
+
+    /// And the gate holds on that trigger too: a local-infeasibility verdict
+    /// from a solve that never escalated opens the same three rungs it opened
+    /// before gh#857, and pays for no fourth.
+    #[test]
+    fn an_infeasibility_verdict_that_never_escalated_gets_no_quality_rung() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::LocalInfeasibility,
+            baseline_quality_escalations: 0,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            [
+                "feral_scaling=mc64",
+                "mu_strategy=adaptive",
+                "start_point_perturbation=1e-2",
+            ],
+        );
     }
 
     /// The other branch of rung 4's gate, and the one that keeps `for_status`

@@ -385,6 +385,17 @@ a blanket extra solve on every capped run. Turn it off with
 `feral_increase_quality_retry=no`, which holds a capped run to exactly the
 budget it was given.
 
+Rung 4 also opens on `Infeasible_Problem_Detected`, under the same escalation
+gate, and for the same reason read one step further: the reroute can produce a
+*false* infeasibility verdict, which is worse than a budget exit because it is
+a wrong answer on a feasible model reported as a verdict rather than as a
+failure. The same `square_flowsheet_resto` limited-memory leg exits that way on
+linux/x86_64 — identical iteration count and identical escalation count,
+different verdict — and rungs 1–3 all fail to rescue it. On a model that really
+is infeasible the rung cannot recover anything and the extra solve only
+confirms the verdict, which is a real cost paid on purpose; the escalation gate
+is what limits it to the runs where the escalation is a candidate explanation.
+
 Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
 so a laddered run has several and only the last one is the verdict that
 shipped — if you are parsing pounce's output, read `Status:` and ignore the

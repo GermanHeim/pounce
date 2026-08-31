@@ -18,9 +18,9 @@ changes.
 
   `feral_increase_quality_retry` (new, default on) is that re-run, taken
   automatically. It is rung 4 of the second-opinion ladder, appended last, and
-  its gate is two conditions: the verdict is `Restoration_Failed` or
-  `Maximum_Iterations_Exceeded`, **and** the solve actually escalated at least
-  once. `Maximum_Iterations_Exceeded` opens no other rung, on the sound general
+  its gate is two conditions: the verdict is `Restoration_Failed`,
+  `Maximum_Iterations_Exceeded` or `Infeasible_Problem_Detected`, **and** the
+  solve actually escalated at least once. `Maximum_Iterations_Exceeded` opens no other rung, on the sound general
   reasoning that the answer to a budget exit is a bigger budget — the exception
   is exactly this, because when the escalation is what walked the trajectory
   into the wall, a bigger budget re-runs the same wall.
@@ -43,6 +43,21 @@ changes.
   an escalating model now spends a second budget before reporting.
   `feral_increase_quality_retry=no` holds a capped run to the budget it was
   given.
+
+  `Infeasible_Problem_Detected` is on that trigger list because the escalation
+  can manufacture one, and a false infeasibility verdict is the worst thing it
+  does: a wrong answer on a feasible model, reported as a verdict rather than
+  as a failure. That is the shape `square_flowsheet_resto`'s limited-memory
+  leg takes on linux/x86_64 — same 3000 iterations and same 25 escalations as
+  on macOS/aarch64, different exit — and the three pre-existing infeasibility
+  rungs all fail to rescue it. Six sweep lines move for it, all of them models
+  that are genuinely infeasible and where the rung therefore confirms the
+  verdict at the price of one more solve: `infeasible_square_scaled_1em4` 61 to
+  78 total iterations on the exact leg, `issue_508_infeasible_gap_1em4` 982 to
+  1423. No status, objective, iteration count or engine moves on any of them.
+  The escalation gate is what bounds that cost — of the eight NLP-arm
+  infeasibility fixture-legs, four escalated and take the rung and four never
+  escalated and are untouched.
 
   The same gate also **stands the µ-strategy stall retry down**, which is what
   keeps the rung from being a third solve rather than a second.
@@ -69,7 +84,7 @@ changes.
   `feral_increase_quality` from inside it never reaches the retry's linear
   solver, while `mu_strategy` is read per-solve and does.
 
-  The 158-fixture-leg sweep is **byte-identical** across this change, and that
+  The 158-fixture-leg sweep is **byte-identical** across the stand-down, and that
   is the point rather than a reassurance: `it=`, `q=`, the objective and the
   engine all belong to the promoted solve, so a wasted intermediate solve
   leaves no trace in the sweep or the JSON report. The only visible trace is
