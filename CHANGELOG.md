@@ -54,6 +54,12 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
+- **Added FBBT support to `pounce-rs`.** `presolve_fbbt=yes` now runs
+  feasibility-based bound tightening when an `ExpressionProvider` is
+  available; `Solution::fbbt_report` exposes diagnostics and
+  `Problem::constraint_expression()` supplies constraint expression tapes.
+  Builder tapes are sampled against `constraints()` at the starting point and
+  box midpoint, and mismatches are rejected before presolve.
 - **A solve that the factorization escalation rerouted into a wall now
   re-solves itself without it (gh #857).** `feral_increase_quality` is on by
   default and is two-sided: it buys accuracy and 15-25% of the iterations on

@@ -109,12 +109,13 @@ Per-platform build notes:
 - **macOS** — x86_64 and arm64. The Makefile rewrites the plugin's reference
   to `libpounce_cinterface` to `@rpath` and adds `@loader_path`, because Rust
   stamps a cdylib's install name with its absolute *build* path; without that
-  the staged plugin loads only on the build machine. CI asserts this on the
-  `macos-latest` leg of the `CasADi plugin parity` job — `otool -L` must read
-  `@rpath/libpounce_cinterface.dylib`, never an absolute path — and then hides
-  the build tree and re-solves through the installed wheel, since a plugin
+  the staged plugin loads only on the build machine. CI used to assert this on the
+  `macos-latest` leg of the `CasADi plugin parity` job — `otool -L` had to
+  read `@rpath/libpounce_cinterface.dylib`, never an absolute path — and then
+  hid the build tree and re-solved through the installed wheel, since a plugin
   that only *appears* relocatable passes every other test on the build
-  machine.
+  machine. **That leg is gone; `ci.yml` is Linux-only now**, so both checks
+  are yours to run by hand on a Mac before a release.
 
   Watch the platform tag on macOS: it takes its OS version from
   `MACOSX_DEPLOYMENT_TARGET`, which defaults to the *building* machine's.

@@ -55,6 +55,35 @@ assert!(sol.success);
 assert!((sol.x[0] - 1.0).abs() < 1e-5 && (sol.x[1] - 2.0).abs() < 1e-5);
 ```
 
+For nonlinear bound tightening, expose each constraint as an `FbbtTape` and
+enable the existing presolve options:
+
+`presolve_fbbt=yes` is inactive unless `presolve=yes` is also set.
+
+```rust
+impl Problem for P {
+    fn constraint_expression(&self, _i: usize) -> Option<FbbtTape> {
+        Some(FbbtTape { ops: vec![
+            FbbtOp::Var(0), FbbtOp::Var(1), FbbtOp::Add(0, 1),
+        ] })
+    }
+}
+
+let sol = Nlp::new(P)
+    .var_bounds(&[0.0, 0.0], &[10.0, 10.0])
+    .constraint_bounds(&[3.0], &[3.0])
+    .option_str("presolve", "yes")
+    .option_str("presolve_fbbt", "yes")
+    .solve();
+assert!(sol.fbbt_report.is_some());
+```
+
+`constraint_expression(i)` must exactly restate the value written by
+`constraints()` for row `i`; otherwise FBBT can cut off the true optimum.
+`try_solve` compares the two at the starting point and box midpoint and reports
+sampled mismatches as `NlpError::InvalidFbbtTape`. This is a smoke check, not a
+proof of equivalence, so generate both forms from one source when possible.
+
 Anything you don't implement is provided automatically. Missing gradients and
 Jacobians are approximated with finite differences, while the Hessian defaults
 to a limited-memory (L-BFGS) approximation. This keeps simple problems concise
@@ -85,6 +114,7 @@ let sol = Nlp::new(P)
 - bound multipliers (`z_l` and `z_u`)
 - solve statistics (`stats`): wall time, iteration count, evaluation counts,
   and final infeasibilities
+- optional FBBT diagnostics (`fbbt_report`)
 
 The vector fields remain empty if the solve aborts before finalization. Opt in
 to the full per-iteration trajectory (`stats.iterations`) with

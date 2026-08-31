@@ -1525,8 +1525,8 @@ structurally. All are off by default — set the master switch first:
 wrap a callback TNLP manually.
 The wrapper postsolves before `finalize_solution`, so callback payloads remain
 in the submitted TNLP's original variable and constraint space. Bare callback
-TNLPs do not expose an expression provider, so `presolve_fbbt=yes` remains a
-no-op for this library entry point.
+TNLPs do not expose an expression provider. The `pounce-rs` builder can opt in
+through `Problem::constraint_expression`.
 
 | Option                                  | Default | Meaning                                                                        |
 |-----------------------------------------|---------|--------------------------------------------------------------------------------|

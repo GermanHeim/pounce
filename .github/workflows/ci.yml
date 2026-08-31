@@ -555,21 +555,24 @@ jobs:
   # installed version. CasADi performs no version handshake of its own, so
   # a mismatch here is what the build is meant to catch.
   #
-  # macOS is in the matrix because a Linux-only leg proved too little. The
-  # plugin's link step differs by platform, and one defect lived entirely in
-  # that difference: Rust stamps a cdylib's `LC_ID_DYLIB` with its absolute
-  # build path, dyld resolves an absolute install name without consulting the
-  # rpath list, and the plugin therefore loaded only while the build tree
-  # survived at that exact path. It was found by hand on macOS, after CI had
-  # been green on the commit that introduced it. The `otool` step below is the
-  # assertion that would have caught it.
+  # This job is Linux-only. It used to carry a macOS leg, and that leg was
+  # not decorative: the plugin's link step differs by platform, and one
+  # defect lived entirely in that difference. Rust stamps a cdylib's
+  # `LC_ID_DYLIB` with its absolute build path, dyld resolves an absolute
+  # install name without consulting the rpath list, and the plugin therefore
+  # loaded only while the build tree survived at that exact path. It was
+  # found by hand on macOS, after CI had been green on the commit that
+  # introduced it; the leg's `otool -L` assertion and its build-tree-hidden
+  # wheel check are the two steps that went with it. Nothing in CI now
+  # covers a Darwin link step, so a repeat of that defect surfaces in a
+  # user's build. `make -C casadi test` on a Mac is the manual substitute.
   casadi-plugin:
     name: CasADi plugin parity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -602,24 +605,6 @@ jobs:
 
       - name: Build the plugin
         run: make -C casadi
-
-      # The plugin must reach the solver library through the rpath list, not
-      # through a path that only exists on the machine that built it. An
-      # absolute reference here still passes every test on this runner — the
-      # build tree is right there — and fails the moment the plugin is
-      # installed, packaged, or moved, reported by CasADi as the thoroughly
-      # unhelpful `Plugin 'pounce' is not found`.
-      - name: Install name is relocatable (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          ref=$(otool -L casadi/libcasadi_nlpsol_pounce.dylib \
-                | grep pounce_cinterface | awk '{print $1}')
-          echo "plugin references: $ref"
-          test "$ref" = "@rpath/libpounce_cinterface.dylib" || {
-            echo "::error::plugin references '$ref', not @rpath/…;"\
-                 "dyld will ignore the rpath list and the plugin will only"\
-                 "load on this machine, from this build tree."
-            exit 1; }
 
       # 50 checks: primal, both multiplier sets and lam_p against Ipopt;
       # Opti; stats and the per-iteration trace; live iteration callbacks
@@ -701,30 +686,6 @@ jobs:
           assert (impl, abi) == ("py3", "none"), tag
           PY
 
-      # The wheel is supposed to carry its own copy of the solver library and
-      # find it beside itself, so it must keep working with the build tree
-      # gone. Before the install-name fix it did work here — but only because
-      # `cp` preserves `LC_ID_DYLIB`, so the copy answered to the absolute
-      # path the plugin was still asking for. Hiding the original is what
-      # tells those two situations apart.
-      - name: Wheel is relocatable, not coincidentally co-located (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          lib=target/release/libpounce_cinterface.dylib
-          mv "$lib" "$lib.hidden"
-          trap 'mv "$lib.hidden" "$lib"' EXIT
-          /tmp/casadi-wheel-env/bin/python - <<'PY'
-          import casadi as ca
-          import pounce_casadi
-          x = ca.MX.sym("x", 2)
-          S = ca.nlpsol("S", "pounce",
-                        {"x": x, "f": (1 - x[0])**2 + 100*(x[1] - x[0]**2)**2},
-                        {"print_time": False, "pounce": {"print_level": 0}})
-          sol = S(x0=[0.5, 0.5])["x"].full().ravel()
-          assert abs(sol[0] - 1) < 1e-6 and abs(sol[1] - 1) < 1e-6, sol
-          print("wheel solves with the build tree hidden, x* =", sol)
-          PY
-
   # Compile the source-compatibility shims against every shape of CasADi
   # they have to survive. Cheap and hermetic: no CasADi, no Rust, no link
   # step — mock declarations and a compiler.
@@ -742,17 +703,21 @@ jobs:
   #    and when it silently stopped binding on 3.8 the symptom was a C
   #    compile error inside generated code.
   #
-  # Windows is here and nowhere else in this workflow: the Windows wheel is
-  # built with MSVC, and MSVC's two-phase lookup is the likeliest of the
-  # three to disagree about a dependent name that is not declared. That is
-  # the whole mechanism the convexify shim rests on.
+  # This job is Linux-only. It used to run on macOS and Windows too, and the
+  # Windows leg was the load-bearing one: the Windows wheel is built with
+  # MSVC, and MSVC's two-phase lookup is the likeliest of the three to
+  # disagree about a dependent name that is not declared -- which is the
+  # whole mechanism the convexify shim rests on. gcc accepting both spellings
+  # is therefore weaker evidence than the leg it replaced. A shim regression
+  # that only MSVC can see now reaches the Windows wheel build in
+  # release-pounce.yml, or a user.
   casadi-source-compat:
     name: CasADi source compat shims (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -760,21 +725,7 @@ jobs:
           python-version: "3.11"
 
       - name: Compile against every spelling
-        if: runner.os != 'Windows'
         run: python3 casadi/tests/convexify_compat/run.py
 
       - name: Compile against every codegen-memory shape
-        if: runner.os != 'Windows'
         run: python3 casadi/tests/codegen_mem_compat/run.py
-
-      # `cl` is only on PATH inside a developer shell, and vswhere ships with
-      # every runner image, so no extra action is needed to find it.
-      - name: Compile against every spelling (MSVC)
-        if: runner.os == 'Windows'
-        shell: cmd
-        run: |
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
-          if not defined VSPATH (echo could not locate a Visual Studio install & exit /b 1)
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          python casadi\tests\convexify_compat\run.py --cxx cl
-          python casadi\tests\codegen_mem_compat\run.py --cxx cl
