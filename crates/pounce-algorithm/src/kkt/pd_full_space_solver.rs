@@ -403,6 +403,88 @@ impl PdFullSpaceSolver {
             return None;
         }
 
+        // Step 2b: tighten the shift by bisecting the bracket the ladder just
+        // produced. `delta_x` factored and `delta_x / NEG_CURV_DELTA_FACTOR`
+        // did not, so `|λ_min|` lies between them — but the ladder climbs by
+        // a factor of ten, so the rung it lands on can overshoot `|λ_min|` by
+        // up to that much, and the shifted spectrum the inverse iteration
+        // below runs against is then barely separated.
+        //
+        // On `min ½(x₀² − 1.05·x₁²)` over `[−2, 2]²` from the origin the ladder
+        // rejects `δ = 1` and takes `δ = 10`, giving eigenvalues `(11, 8.95)`;
+        // three back-solves amplify the negative direction by `(11/8.95)³ ≈ 1.9`,
+        // which does not make the Rayleigh quotient negative from a seed whose
+        // component along it is small. The probe then declines and the solve
+        // certifies a saddle as `Solve_Succeeded`. That is gh#797's own defect,
+        // and it reached 28–45% of diagonal indefinite models — with the answer
+        // depending on *which coordinate* carried the negative curvature, since
+        // that is what decides the fixed seed's overlap with the eigenvector.
+        //
+        // `crates/pounce-qp/src/negcurv.rs` (gh#848) already brackets and
+        // bisects for exactly this reason; this is the same treatment on the
+        // NLP arm's own ladder.
+        if delta_x > NEG_CURV_DELTA_MIN {
+            let mut lo = delta_x / NEG_CURV_DELTA_FACTOR;
+            let mut hi = delta_x;
+            for _ in 0..NEG_CURV_SHIFT_REFINEMENTS {
+                if deadline_exceeded(data) {
+                    break;
+                }
+                let mid = (lo * hi).sqrt();
+                if !(mid > lo && mid < hi) {
+                    break;
+                }
+                let coeffs = neg_curv_coeffs(&b, mid);
+                let rhs = AugSysRhs {
+                    rhs_x: &*seed.x,
+                    rhs_s: &*seed.s,
+                    rhs_c: &*zero_c,
+                    rhs_d: &*zero_d,
+                };
+                let mut aug_sol = AugSysSol {
+                    sol_x: &mut *sol.x,
+                    sol_s: &mut *sol.s,
+                    sol_c: &mut *sol.y_c,
+                    sol_d: &mut *sol.y_d,
+                };
+                match self
+                    .aug_solver
+                    .solve(&coeffs, &rhs, &mut aug_sol, true, num_neg_evals)
+                {
+                    ESymSolverStatus::Success => hi = mid,
+                    ESymSolverStatus::WrongInertia | ESymSolverStatus::Singular => lo = mid,
+                    _ => break,
+                }
+            }
+            // Land on the tightest shift known to factor, so the cached factor
+            // the inverse iteration re-solves against is that one and `sol`
+            // holds its first iterate.
+            if hi < delta_x {
+                delta_x = hi;
+                let coeffs = neg_curv_coeffs(&b, delta_x);
+                let rhs = AugSysRhs {
+                    rhs_x: &*seed.x,
+                    rhs_s: &*seed.s,
+                    rhs_c: &*zero_c,
+                    rhs_d: &*zero_d,
+                };
+                let mut aug_sol = AugSysSol {
+                    sol_x: &mut *sol.x,
+                    sol_s: &mut *sol.s,
+                    sol_c: &mut *sol.y_c,
+                    sol_d: &mut *sol.y_d,
+                };
+                if self
+                    .aug_solver
+                    .solve(&coeffs, &rhs, &mut aug_sol, true, num_neg_evals)
+                    != ESymSolverStatus::Success
+                {
+                    self.invalidate_aug_cache();
+                    return None;
+                }
+            }
+        }
+
         // Step 3: inverse iteration against that factor. Every candidate is
         // measured; the best Rayleigh quotient wins.
         // `make_new_zeroed` allocates but does not initialize (see the note on
@@ -467,6 +549,21 @@ impl PdFullSpaceSolver {
         self.invalidate_aug_cache();
 
         if !(best_curvature < 0.0) {
+            // Not the same statement as "the reduced Hessian is positive
+            // definite here", which is the `delta_x == 0.0` branch above and
+            // says so. Reaching this line means a shift WAS needed — the
+            // reduced Hessian is indefinite, singular, or the constraint block
+            // is rank deficient — and the iteration simply did not produce a
+            // witness. The caller cannot tell those apart, and until gh#797's
+            // follow-up this declined without a word, so a solve that
+            // certified a saddle left no trace of having tried.
+            tracing::debug!(target: "pounce::kkt",
+                "negative-curvature probe: a shift of {:.3e} was needed, so the \
+                 reduced Hessian is NOT positive definite here, but {} inverse \
+                 iterations produced no direction of negative curvature \
+                 (best Rayleigh quotient {:.3e}); declining the escape and \
+                 reporting the stationary point uncertified (gh#797)",
+                delta_x, NEG_CURV_INVERSE_ITERS, best_quotient);
             return None;
         }
         // Rescale to unit inf-norm so the caller's step length is expressed in
@@ -1937,11 +2034,28 @@ const NEG_CURV_DELTA_FACTOR: Number = 10.0;
 /// gh #797 shape — pays exactly one factorization and stops.
 const NEG_CURV_MAX_FACTORIZATIONS: usize = 30;
 /// Inverse-iteration steps (the first is the factorization's own solve, the
-/// rest are back-solves against the cached factor). Three is enough to
-/// separate `λ_min` from `λ_2` at the ladder's resolution, and every
-/// candidate is measured anyway, so an extra step can only improve the
-/// answer, never invalidate it.
-const NEG_CURV_INVERSE_ITERS: usize = 3;
+/// rest are back-solves against the cached factor). Every candidate is
+/// measured, so an extra step can only improve the answer, never invalidate
+/// it.
+///
+/// This was three, on the reasoning that three "is enough to separate `λ_min`
+/// from `λ_2` at the ladder's resolution". That is only true when the shift is
+/// close to `|λ_min|`, and the bare ×10 ladder does not deliver that: landing a
+/// decade high leaves a spectral ratio near one, where each back-solve buys
+/// almost no separation. Measured on `min ½(x₀² − 1.05·x₁²)` over `[−2, 2]²`,
+/// three steps amplify the negative direction by 1.9× and the probe declines;
+/// the solve then reports `Solve_Succeeded` at the saddle. The bracket
+/// bisection in [`PdFullSpaceSolver::negative_curvature_direction`] fixes the
+/// shift, and this raises the iteration budget so a merely *awkward* spectrum
+/// is not fatal either. `crates/pounce-qp/src/negcurv.rs` uses 20 for the same
+/// search, and the cost is one back-solve per step against a factor that has
+/// already been computed.
+const NEG_CURV_INVERSE_ITERS: usize = 20;
+/// Geometric bisections of the `[δ/factor, δ]` bracket the ladder leaves, to
+/// stop a decade-wide overshoot from starving the inverse iteration above.
+/// Mirrors `neg_curv_shift_refinements` on the QP arm (gh#848); each costs one
+/// factorization, and eight takes a decade-wide bracket to about 2%.
+const NEG_CURV_SHIFT_REFINEMENTS: usize = 8;
 
 /// Write a deterministic, index-dependent seed into `v`, returning `false`
 /// when the vector is not dense (the restoration inner IPM's compound
