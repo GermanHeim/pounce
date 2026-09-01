@@ -131,6 +131,60 @@ eigendecomposition; `sens_bound_eps=…` tunes the bound refinement. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 
+### The analysis layer: `pounce.sensitivity`
+
+`solve_with_sens` answers one perturbation. The `pounce.sensitivity`
+subpackage is the whole analysis surface — the step in every mode, what
+the step did about the bounds, the active-set events along a path, and
+the estimation statistics — over a session that is *a solved NL plus the
+factorization it left behind*:
+
+```python
+import pounce
+from pounce.sensitivity import solve_for_sensitivity, solution, covariance
+
+nl = pounce.read_nl("model.nl")
+sess = solve_for_sensitivity(nl, pins={"p": 4})     # 4 is p's pin row
+
+solution(sess, [4], [0.05])                         # the moved solution
+solution(sess, [4], [0.05], mode="fix_relax")       # bounds respected
+solution_report(sess, [4], [0.05])                  # what it did about them
+active_set_changes(sess, [4], [0.05])               # the events, in order
+```
+
+Estimation statistics need the fitted parameters' `.col` columns and the
+residual variables' columns, which is what `declare_sens_fitted` and
+`declare_sens_residual` resolve to on the Pyomo side:
+
+```python
+sess = solve_for_sensitivity(nl, fit_rows={"a": 0}, res_rows={None: [1, 2, 3]})
+cov = covariance(sess)          # cov["a"], cov.std_err["a"], cov.eigen()
+inf = information(sess)         # the reduced Hessian it inverts
+```
+
+A parameter is addressed by the **full-g row** of the defining equality
+it is pinned by; a fitted parameter or residual by its **full-x
+column**. Keys are opaque — they order the result and label it — so
+results come back keyed by whatever the caller keyed the session with
+(names here, Pyomo component data under `pyomo_pounce`).
+
+Two index-space warnings that a caller working in raw rows owns, and
+that a modelling layer would otherwise hide:
+
+- `.col` order is **full-x**; the factor's `x` block is **var-x**, which
+  drops every variable the solve removed as fixed (`lb == ub` under the
+  default `fixed_variable_treatment=make_parameter`). Route every factor
+  index through `session.primal_row()`, which raises rather than
+  returning a neighbouring variable's answer (gh#450).
+- `fit_rows` and `res_rows` hold **variable columns**, not constraint
+  rows, including for the residuals.
+
+`pyomo_pounce` is a caller of this package, not a reimplementation of
+it: `sens_solution`, `sens_solution_report`, `sens_active_set_changes`,
+`sens_covariance` and `sens_information` resolve Pyomo components to
+rows and hand the same session to the same functions. A fix here reaches
+both.
+
 ## Pyomo
 
 `pyomo_pounce` wraps the same machinery in a declare-then-query

@@ -1,0 +1,231 @@
+"""`pounce.sensitivity` against models built with no modelling layer.
+
+The point of these: every number here used to be reachable only through
+`pyomo_pounce`, so the whole surface was untestable without Pyomo
+installed and unusable from a `.nl` file, the CLI or CasADi. Nothing in
+this file imports Pyomo, and `test_the_core_does_not_import_pyomo`
+asserts that stays true.
+
+The fixtures are small enough to have closed-form answers, so these are
+checks against arithmetic done by hand rather than against a previous
+run of the same code.
+"""
+import numpy as np
+import pytest
+
+import pounce
+from pounce.sensitivity import (
+    active_set_changes,
+    covariance,
+    information,
+    solution,
+    solution_report,
+    solve_for_sensitivity,
+)
+
+P0 = 2.0
+
+
+def parametric_model(fixed_variable=False):
+    """min (x - p)^2 + 3 p^2  s.t.  x + y == 5,  p == P0.
+
+    With `p` held at P0 the optimum is x = P0, y = 5 - P0, so
+    dx/dp = 1, dy/dp = -1 and df/dp = 6 p -- the example from gh#878,
+    where a chain-rule-only reading of df/dp returns 0 because every
+    df/dx_i vanishes at the optimum.
+
+    `fixed_variable` inserts an equal-bounds variable AHEAD of `p`, so
+    the solve removes it and full-x stops agreeing with the factor's
+    var-x from that column on (gh#450).
+    """
+    if fixed_variable:
+        v = pounce.NlExpr.vars(4)                   # x, y, z, p
+        return pounce.build_nl_problem(
+            n=4,
+            objective=(v[0] - v[3]) ** 2 + 3.0 * v[3] ** 2 + v[2] ** 2,
+            constraints=[v[0] + v[1], v[3]],
+            g_l=[5.0, P0], g_u=[5.0, P0],
+            x_l=[-50.0, -50.0, 1.0, -100.0],
+            x_u=[10.0, 50.0, 1.0, 100.0],
+            x0=[0.0, 0.0, 1.0, P0],
+            var_names=["x", "y", "z", "p"],
+            con_names=["c1", "pin_p"],
+        )
+    v = pounce.NlExpr.vars(3)                       # x, y, p
+    return pounce.build_nl_problem(
+        n=3,
+        objective=(v[0] - v[2]) ** 2 + 3.0 * v[2] ** 2,
+        constraints=[v[0] + v[1], v[2]],
+        g_l=[5.0, P0], g_u=[5.0, P0],
+        x_l=[-50.0, -50.0, -100.0], x_u=[10.0, 50.0, 100.0],
+        x0=[0.0, 0.0, P0],
+        var_names=["x", "y", "p"], con_names=["c1", "pin_p"],
+    )
+
+
+def parametric_session(**kw):
+    return solve_for_sensitivity(parametric_model(**kw), pins={"p": 1},
+                                 options={"print_level": 0})
+
+
+# ── the step ─────────────────────────────────────────────────────────────────
+
+def test_the_step_matches_the_analytic_derivative():
+    sess = parametric_session()
+    np.testing.assert_allclose(sess.base_x, [P0, 5.0 - P0, P0], atol=1e-8)
+
+    delta = 0.1
+    x_new = solution(sess, [1], [delta])
+    np.testing.assert_allclose(
+        x_new, [P0 + delta, 5.0 - P0 - delta, P0 + delta], atol=1e-8)
+
+
+def test_the_total_objective_derivative_carries_the_explicit_partial():
+    """df/dp = 6p, not the 0 a chain-rule-only reading gives (gh#878)."""
+    sess = parametric_session()
+    df_dp = sess.total_objective_derivative(sess.column(1))
+    assert df_dp == pytest.approx(6.0 * P0, abs=1e-7)
+    # every df/dx_i IS zero at the optimum, which is what makes the
+    # explicit partial the whole answer here
+    step = sess.scatter_x(np.asarray(
+        pounce.Solver.parametric_step(sess.solver, [1], [1.0])))
+    assert sess.objective_gradient()[:2] @ step[:2] == pytest.approx(0.0,
+                                                                    abs=1e-7)
+
+
+def test_results_are_keyed_by_variable_name_with_no_modelling_layer():
+    """`crossed` comes back keyed by `.col` name, not by a component."""
+    sess = parametric_session()
+    # p driven to 12 pushes x past its upper bound of 10
+    rep = solution_report(sess, [1], [10.0], mode="linear")
+    assert isinstance(rep.crossed, dict)
+    assert list(rep.crossed) == ["x"], "x is the only variable that can bind"
+    assert all(isinstance(k, str) for k in rep.crossed)
+
+
+def test_active_set_changes_names_the_variable_that_moves():
+    sess = parametric_session()
+    changes = active_set_changes(sess, [1], [10.0])
+    assert changes, "driving p to 12 must push x onto its upper bound"
+    assert [c.var for c in changes] == ["x"]
+    assert [(c.bound, c.action) for c in changes] == [("upper", "reaches")]
+
+
+# ── the index spaces (gh#450) ────────────────────────────────────────────────
+
+def test_a_fixed_variable_makes_full_x_and_var_x_diverge():
+    """The precondition for the next test: without it the two spaces
+    coincide and reading one as the other cannot be caught."""
+    sess = parametric_session(fixed_variable=True)
+    assert sess._primal_row_map() == [0, 1, None, 2], (
+        "the solve should have removed z, shifting p's factor row")
+    with pytest.raises(ValueError, match="fixed variable"):
+        sess.primal_row(2, "test")
+
+
+def test_the_step_is_right_across_a_removed_variable():
+    """Reading a full-x index as a factor row returns a NEIGHBOURING
+    variable's sensitivity -- plausible and wrong. p sits one column
+    past the removed z, so that is exactly what this would show."""
+    sess = parametric_session(fixed_variable=True)
+    delta = 0.1
+    x_new = solution(sess, [1], [delta])
+    np.testing.assert_allclose(
+        x_new, [P0 + delta, 5.0 - P0 - delta, 1.0, P0 + delta], atol=1e-8)
+    assert sess.total_objective_derivative(
+        sess.column(1)) == pytest.approx(6.0 * P0, abs=1e-7)
+
+
+# ── the statistics ───────────────────────────────────────────────────────────
+
+T = np.array([1.0, 2.0, 3.0])
+Y = np.array([2.1, 3.9, 6.2])
+
+
+def estimation_session():
+    """Fit y = a t to three points, residuals carried as variables.
+
+    Ordinary linear least squares, so a-hat, the residual variance and
+    var(a) all have closed forms to check against.
+    """
+    v = pounce.NlExpr.vars(4)                        # a, r0, r1, r2
+    nl = pounce.build_nl_problem(
+        n=4,
+        objective=pounce.NlExpr.sum([v[1] ** 2, v[2] ** 2, v[3] ** 2]),
+        constraints=[v[1 + i] - v[0] * float(T[i]) for i in range(3)],
+        g_l=[-y for y in Y], g_u=[-y for y in Y],
+        x_l=[-50.0] * 4, x_u=[50.0] * 4,
+        x0=[1.0, 0.0, 0.0, 0.0],
+        var_names=["a", "r[0]", "r[1]", "r[2]"],
+        con_names=["res0", "res1", "res2"],
+    )
+    return solve_for_sensitivity(nl, fit_rows={"a": 0},
+                                 res_rows={None: [1, 2, 3]},
+                                 options={"print_level": 0})
+
+
+def test_covariance_matches_the_least_squares_closed_form():
+    sess = estimation_session()
+    a_hat = float(T @ Y) / float(T @ T)
+    assert sess.base_x[0] == pytest.approx(a_hat, abs=1e-9)
+
+    resid = T * sess.base_x[0] - Y
+    sigma_sq = float(resid @ resid) / (len(T) - 1)     # n - #fitted
+    cov = covariance(sess)
+    assert cov["a"] == pytest.approx(sigma_sq / float(T @ T), rel=1e-9)
+    assert cov.std_err["a"] == pytest.approx(np.sqrt(cov["a"]), rel=1e-12)
+    assert cov.sigma_sq == pytest.approx(sigma_sq, rel=1e-9)
+
+
+def test_information_is_the_hessian_the_covariance_inverts():
+    """`pcov = 2 sigma^2 inv(H_S)`, so H_S is 2 sum(t^2) here."""
+    sess = estimation_session()
+    assert information(sess)["a"] == pytest.approx(2.0 * float(T @ T),
+                                                   rel=1e-9)
+
+
+def test_an_explicit_block_overrides_the_declared_one():
+    sess = estimation_session()
+    cov = covariance(sess, ["r[0]"], [1])
+    assert cov.params == ["r[0]"]
+    assert cov["r[0]"] > 0.0
+
+
+# ── the caller's own name in diagnostics ─────────────────────────────────────
+
+def test_who_names_the_caller_in_diagnostics():
+    sess = parametric_session()
+    with pytest.raises(ValueError, match=r"^solution: mode must be"):
+        solution(sess, [1], [0.1], mode="nonsense")
+    with pytest.raises(ValueError, match=r"^sens_solution: mode must be"):
+        solution(sess, [1], [0.1], mode="nonsense", who="sens_solution")
+
+
+def test_hints_name_the_callers_own_declarations():
+    """The message points at how the CALLER declares residuals, because
+    a message naming the wrong layer's spelling is worse than none."""
+    sess = parametric_session()
+    with pytest.raises(RuntimeError, match=r"fit_rows="):
+        covariance(sess)
+    with pytest.raises(RuntimeError, match=r"declare_sens_fitted\(\)"):
+        covariance(sess, hints={"fitted": "declare_sens_fitted()",
+                                "residual": "declare_sens_residual()",
+                                "residual_group": "..."})
+
+
+# ── the packaging claim itself ───────────────────────────────────────────────
+
+def test_the_core_does_not_import_pyomo():
+    """The reason this package exists. Run in a subprocess so an earlier
+    test that imported Pyomo cannot mask a real import here."""
+    import subprocess
+    import sys
+
+    code = ("import sys, pounce.sensitivity;"
+            "assert 'pyomo' not in sys.modules, sorted("
+            "m for m in sys.modules if m.startswith('pyomo'));"
+            "print('clean')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True)
+    assert out.returncode == 0, out.stderr
+    assert "clean" in out.stdout

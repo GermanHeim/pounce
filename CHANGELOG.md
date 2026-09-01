@@ -63,6 +63,77 @@ changes.
   from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
   asserts the index spaces really do diverge before trusting the leg.
 
+- **`pounce.sensitivity`: the sensitivity analysis layer is now pounce's, and
+  `pyomo_pounce` is one of its callers.** Every numeric behind
+  `sens_solution()`, `sens_solution_report()`, `sens_active_set_changes()`,
+  `sens_covariance()` and `sens_information()` lived in
+  `pyomo-pounce/pyomo_pounce/sens.py` and was reachable only with Pyomo
+  installed and a Pyomo model in hand — so a `.nl`, CLI or CasADi user had the
+  linear step and the reduced Hessian and nothing else: no fix-relax, no path
+  mode, no corrector, no activity classification, no covariance,
+  no identifiability.
+
+  None of that code was Pyomo-shaped. Measured before the move, 82 of its 100
+  functions contained no Pyomo reference in executable code at all, the
+  headline five (`sens_covariance` at 454 lines, `sens_solution` at 312,
+  `_classify_fitted_block` at 240, `sens_information` at 231,
+  `sens_active_set_changes` at 96) contained **zero**, and
+  `sens_solution_report`'s only two were the `ComponentMap()` it built its
+  answer in. It already worked in row indices and numpy; it was packaged
+  Pyomo-first, not written that way.
+
+  2 400 lines moved to `pounce/sensitivity/`, addressed by row:
+
+  ```python
+  import pounce
+  from pounce.sensitivity import solve_for_sensitivity, solution, covariance
+
+  nl   = pounce.read_nl("model.nl")
+  sess = solve_for_sensitivity(nl, pins={"p": 4})
+  solution(sess, [4], [0.05], mode="fix_relax")
+  ```
+
+  `SensSession` is the seam: a solved NL plus its held factor, keyed by
+  whatever the caller keys it with. `pyomo_pounce._Session` subclasses it and
+  supplies three hooks — `var_key`, `user_row_data`, `new_keymap` — so a Pyomo
+  caller still gets `ComponentMap`s of component data back and a bare-NL caller
+  gets `.col` names. `who=` keeps each wrapper's own function name in the
+  messages its users see, and a `hints` mapping keeps the declarations those
+  messages point at spelled the caller's way (`declare_sens_residual()` for
+  Pyomo, `res_rows=` for everyone else), so no diagnostic now names an API the
+  reader is not using.
+
+  The Pyomo API is unchanged — same functions, same arguments, same result
+  types (`Covariance`, `Information`, `SolutionReport`, `ActiveSetChange` are
+  re-exported from the core), same messages. Its 500 tests pass untouched
+  apart from five imports of internals that moved.
+
+  `python/tests/test_sensitivity_core.py` is the point of the exercise: twelve
+  tests, no Pyomo, checked against closed forms rather than against a previous
+  run — the parametric step against `dx/dp = 1`, `df/dp` against `6p` on the
+  gh#878 model where a chain-rule-only reading returns 0, the covariance
+  against the linear least-squares formula, and the information matrix against
+  `2 sum(t^2)`. Two of them exist because this refactor created a package
+  boundary exactly where full-x meets var-x: a fixture with an equal-bounds
+  variable placed AHEAD of the parameter makes the two spaces genuinely
+  diverge (`primal_row_map() == [0, 1, None, 2]`) and pins the step across it,
+  since reading one space as the other returns a neighbouring variable's
+  answer — plausible, wrong, and gh#450 twice already.
+
+  Two duplications are gone with it. `_NlBridge` is now
+  `pounce.sensitivity.NlBridge`, used by both. And `_curve_fit.py` and the
+  covariance code each carried their own SVD nullspace basis, same formula and
+  same rank tolerance written twice; both now call
+  `pounce._stats_util.nullspace`. Their *covariance* routines are deliberately
+  NOT merged: `curve_fit` reads `inv(H_S)` straight off the factor because its
+  parameters are the decision variables and `K = H_S`, while
+  `pounce.sensitivity` recovers a tangent map because its fitted block sits
+  inside a larger model with equalities. Same word, different computation.
+
+  `pyomo-pounce` now requires `pounce-solver>=0.11.0`, the release this lands
+  in. An older wheel imports but every sensitivity entry point raises
+  `ImportError`, so the floor is a hard requirement.
+
 ### Documentation
 
 - **The comparison against `pyomo.contrib.sensitivity_toolbox` is now in one

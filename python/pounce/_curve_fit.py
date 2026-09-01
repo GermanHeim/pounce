@@ -34,6 +34,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from ._stats_util import nullspace as _nullspace
+
 from ._pounce import Solver
 from ._minimize import (
     _DEFAULT_ACCEPTABLE_TOL,
@@ -1775,11 +1777,7 @@ def _projected_covariance(M, s2, active_mask, A_gen, n):
     if not rows:                                        # nothing binds
         return s2 * np.linalg.pinv(M)
     A = np.vstack(rows)
-    # orthonormal nullspace basis of A via SVD (rank-robust).
-    _, sv, Vt = np.linalg.svd(A)
-    tol = max(A.shape) * np.finfo(float).eps * (sv[0] if sv.size else 0.0)
-    rank = int((sv > tol).sum())
-    Z = Vt[rank:].T                                     # (n, n - rank)
+    Z = _nullspace(A)                                   # (n, n - rank)
     if Z.shape[1] == 0:                                 # active set pins x fully
         return np.zeros((n, n))
     return s2 * Z @ np.linalg.pinv(Z.T @ M @ Z) @ Z.T

@@ -17,7 +17,11 @@ authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
 # API changes.
 dependencies = [
     "pyomo>=6.0",
-    "pounce-solver>=0.9.0",
+    # 0.11.0 is the first release carrying `pounce.sensitivity`, which
+    # holds every numeric this package's sens_* functions call. An older
+    # wheel imports but every sensitivity entry point raises ImportError,
+    # so the floor is a hard requirement, not a preference.
+    "pounce-solver>=0.11.0",
     "numpy",
     "pandas",
 ]
@@ -31,10 +35,13 @@ classifiers = [
 
 [project.optional-dependencies]
 # The `pyomo.contrib.solver` (v2) interface registered by
-# `pyomo_pounce.v2`. Both floors here are strictly tighter than the base
-# dependencies, and neither applies to the legacy
+# `pyomo_pounce.v2`. Neither floor here applies to the legacy
 # SolverFactory('pounce') plugin -- which is why the base stays where it
-# is and this is an extra: `pip install pyomo-pounce[pyomo-v2]`.
+# is and this is an extra: `pip install pyomo-pounce[pyomo-v2]`. The
+# `pyomo` floor is strictly tighter than the base one; the
+# `pounce-solver` one is now subsumed by the base `>=0.11.0` and is kept
+# because it records WHY the v2 route needs it, which stays true and
+# would be needed again if the base floor ever moved back.
 #
 # NAME: this extra must NOT be called `v2`, and more generally must never
 # parse as a PEP 440 version. An extra emits `; extra == "<name>"` into the
