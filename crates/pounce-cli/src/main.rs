@@ -2274,7 +2274,20 @@ fn lp_declines_to_nlp(
 ) -> bool {
     use pounce_convex::QpStatus;
     allow_nlp_fallback
-        && class == pounce_cli::dispatch::ProblemClass::Lp
+        // gh #535 gated this on `Lp`. A convex QP that fails to certify is
+        // the same situation and has the same answer -- it is also a valid
+        // NLP, and the general path routinely certifies the badly-scaled and
+        // degenerate models the interior path stalls on. `scaled_feasible_a`
+        // is the case: 20 orders of Jacobian spread, and the convex arm needs
+        // 3596 iterations where the NLP arm takes 22. The convex arm already
+        // says so itself -- it emits the gh #293 scaling warning on that model
+        // before returning IterationLimit -- so declining is a verdict it has
+        // already reasoned its way to.
+        && matches!(
+            class,
+            pounce_cli::dispatch::ProblemClass::Lp
+                | pounce_cli::dispatch::ProblemClass::ConvexQp
+        )
         && matches!(
             status,
             QpStatus::OptimalInaccurate | QpStatus::IterationLimit | QpStatus::NumericalFailure
@@ -2804,11 +2817,11 @@ fn run_convex_qp(
         eprintln!(
             "pounce: note: the convex ({}) solve did not certify a KKT point \
              after {} iterations in {elapsed:.3}s (KKT error {:.2e} against \
-             tol {:.1e}); an LP is also a valid NLP, so it is being re-solved \
-             on the general NLP interior-point path, which certifies the \
-             degenerate, rank-deficient LPs the interior path stalls on (gh \
-             #133). Use solver_selection=qp-ipm to see the convex result \
-             instead.",
+             tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
+             being re-solved on the general NLP interior-point path, which \
+             certifies the degenerate, rank-deficient and badly-scaled models \
+             the interior path stalls on (gh #133, gh #535). Use \
+             solver_selection=qp-ipm to see the convex result instead.",
             class.name(),
             sol.iters,
             res.kkt_error(),
@@ -3865,13 +3878,24 @@ mod lp_nlp_fallback_tests {
         ));
     }
 
-    /// The issue scopes the fallback to `P = 0`. A convex QP that stalls is a
-    /// different and unmeasured population, so no status reroutes it — nor
-    /// does any class the convex QP driver never sees.
+    /// gh #535 scoped the fallback to `P = 0` because a convex QP that stalls
+    /// was "a different and unmeasured population". It has been measured
+    /// since: `scaled_feasible_a` is a convex QP with 20 orders of Jacobian
+    /// spread on which the convex arm needs 3596 iterations and the NLP arm
+    /// 22, and the convex arm emits the gh #293 scaling warning on it before
+    /// returning `IterationLimit`. So `ConvexQp` reroutes too.
+    ///
+    /// `ConvexQcqp` deliberately does NOT: the conic arm has its own failure
+    /// modes and no measurement behind it, which is the same reason `Lp` was
+    /// alone to begin with. Widen it when there is a fixture that says so.
     #[test]
-    fn only_the_lp_class_reroutes() {
-        for class in [
+    fn only_the_convex_qp_classes_reroute() {
+        assert!(lp_declines_to_nlp(
             ProblemClass::ConvexQp,
+            QpStatus::IterationLimit,
+            true
+        ));
+        for class in [
             ProblemClass::ConvexQcqp,
             ProblemClass::NonconvexQp,
             ProblemClass::Nlp,

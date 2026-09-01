@@ -192,6 +192,29 @@ changes.
   `benchmarks/qp/README.md` and the report generator now say in the open that
   `ipopt_ma57.json` is a status and timing reference, not an objective oracle.
 
+- **A convex QP the specialized arm cannot certify is now handed to the NLP
+  arm, as an LP already was (extends gh#535).** That fallback was scoped to
+  `ProblemClass::Lp` because a stalling convex QP was "a different and
+  unmeasured population". It is measured now: `scaled_feasible_a` is a convex
+  QP with 20 orders of Jacobian spread where the convex driver needs **3596**
+  iterations and the general path **22** — and the convex driver already knows,
+  emitting the gh#293 scaling warning before returning `IterationLimit`.
+
+  This is what restores the one status regression the `bound_relax_factor`
+  change above would otherwise have carried, and it restores it *without*
+  relaxing anybody's model. On that fixture the widening had been relaxing a
+  row by **2.65e5 in absolute terms** — its rows reach `|b| = 2.65e13` and the
+  row width is relative by design (gh#385) — so the old 69-iteration success
+  was a much easier problem, not a better solve. The declared model now
+  reaches its optimum in about 20 iterations by rerouting.
+
+  `ConvexQcqp` deliberately does not reroute: the conic arm has its own failure
+  modes and no fixture behind it, which is why `Lp` was alone to begin with.
+
+  Net effect of this and the change above, against the shipped binary: the
+  fixture sweep shows **0 status flips, 0 engine flips**, 50 objective moves
+  (all toward the declared optimum) and total iterations **5618 → 5407**.
+
 ### Fixed
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,

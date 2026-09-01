@@ -64,6 +64,9 @@ fn objective(fixture: &str, opts: &[&str]) -> f64 {
     }
     let out = cmd.output().expect("run pounce");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // The convex arm must be the one that took the model. It may hand off to
+    // the NLP arm afterwards (gh #535); what would invalidate a sentinel is
+    // the classifier never sending it here at all.
     assert!(
         stdout.contains("pounce-convex"),
         "{fixture} no longer routes to the convex arm, so this sentinel is \
@@ -122,5 +125,31 @@ fn the_widening_is_what_moves_it() {
         (widened - declared).abs() > 1.0,
         "a 1e-8 widening should move this 46-variable LP's objective by the \
          whole answer: declared {declared:e} vs widened {widened:e}"
+    );
+}
+
+/// The declared model does not have to be slower to be right.
+///
+/// `scaled_feasible_a.nl` is where the widening was doing its only real work
+/// on this arm, and the work was not subtle: that model's rows carry `|b|` up
+/// to `2.65e13`, and the row width is `min(factor, cap)·|b|` — relative, by
+/// deliberate choice (gh #385, `orig_ipopt_nlp.rs::relax_bounds`) — so a
+/// `1e-8` factor relaxed one row by **2.65e5 in absolute terms**. Converging
+/// in 69 iterations on that is not a solver being clever; it is a solver
+/// being handed a much easier problem.
+///
+/// On the model as declared the convex driver needs ~3596 iterations (20
+/// orders of Jacobian spread) and says so — it emits the gh #293 scaling
+/// warning and returns `IterationLimit`. gh #535's LP→NLP fallback, extended
+/// to convex QP, then hands it to the general path, which certifies it in
+/// about 20. So the declared model is solved, quickly, and by a route that
+/// relaxes nothing.
+#[test]
+fn a_declining_convex_solve_is_rerouted_rather_than_relaxed() {
+    let obj = objective("scaled_feasible_a.nl", &[]);
+    assert!(
+        obj.abs() < 1e-6,
+        "scaled_feasible_a should reach its optimum 0 at the default routing; \
+         got {obj:e}"
     );
 }

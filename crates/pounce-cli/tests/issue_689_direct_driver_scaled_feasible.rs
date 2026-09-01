@@ -177,9 +177,18 @@ fn the_default_route_reaches_the_same_optimum() {
         report.solution.status,
     );
 
-    // `a` does not — on the model as declared, where ~3596 was measured — and
-    // must say so rather than certify the retry's point.
-    let report = solve("scaled_feasible_a.nl", &[EXACT_DECLARED_BOUNDS]);
+    // `a` does not converge on the CONVEX arm within the default budget — the
+    // ~3596 iterations measured below — and must say so rather than certify
+    // the retry's point. Pinned on the convex arm by name, because at
+    // `solver_selection=auto` an uncertified convex solve is now handed to the
+    // NLP arm (gh #535 extended to convex QP), which solves this model in ~20
+    // iterations. That hand-off is the right answer for a caller and the wrong
+    // instrument for this assertion, which is about what the convex driver
+    // does on its own.
+    let report = solve(
+        "scaled_feasible_a.nl",
+        &[EXACT_DECLARED_BOUNDS, "solver_selection=qp-ipm"],
+    );
     let code = report.solution.solve_result_num;
     assert!(
         !(0..100).contains(&code),
@@ -192,9 +201,10 @@ fn the_default_route_reaches_the_same_optimum() {
         report.statistics.final_kkt_error,
     );
 
-    // With the default relaxation it converges inside the budget instead — and
-    // that verdict has to be a real one, not the 2.3e3 point wearing a success
-    // status. This is the same rule as above, asserted on the other model.
+    // At the default routing `a` now reports success — reached by the NLP arm
+    // after the convex driver declines (gh #535, extended to convex QP). That
+    // verdict still has to be a real one, not the 2.3e3 point wearing a
+    // success status, which is the rule this whole file exists for.
     let report = solve("scaled_feasible_a.nl", &[]);
     let code = report.solution.solve_result_num;
     if (0..100).contains(&code) {
