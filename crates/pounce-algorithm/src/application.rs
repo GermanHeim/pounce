@@ -6541,6 +6541,113 @@ mod tests {
         }
     }
 
+    /// A TNLP that solves normally once, then declines to supply bounds.
+    ///
+    /// The second `optimize_constrained` therefore bails long before the
+    /// statistics block that records `row_scaling_active`, which is the
+    /// path the fail-closed reset exists for.
+    struct DescribesItselfOnce {
+        /// Flipped by the test between the two solves. A call counter
+        /// would not work: these hooks are called more than once per
+        /// solve, so it would trip inside the first one.
+        refuse: std::rc::Rc<std::cell::Cell<bool>>,
+        inner: ExactQuadratic,
+    }
+    impl TNLP for DescribesItselfOnce {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.inner.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            // Declining here is a documented TNLP outcome and unwinds
+            // cleanly; declining `get_nlp_info` mid-flight panics instead,
+            // which would test the panic path rather than the reset.
+            if self.refuse.get() {
+                return false;
+            }
+            self.inner.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.inner.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            self.inner.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+            self.inner.eval_jac_g(x, n, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            n: bool,
+            o: Number,
+            l: Option<&[Number]>,
+            nl: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner.eval_h(x, n, o, l, nl, mode)
+        }
+        fn finalize_solution(&mut self, s: Solution<'_>, d: &IpoptData, c: &IpoptCq) {
+            self.inner.finalize_solution(s, d, c)
+        }
+    }
+
+    /// gh#794 review round 2: `row_scaling_active` must be fail-closed.
+    ///
+    /// It is written near the end of `optimize_constrained`, from the NLP
+    /// that solve built. A solve that bails before that point used to
+    /// leave the *previous* solve's value in place — and the ℓ₁ outer
+    /// loop calls `optimize_constrained` repeatedly and reads the flag
+    /// after each call, so a stale `Some(false)` would let it mirror an
+    /// original-units violation into the scaled family. That is exactly
+    /// the units contract the flag was added to protect.
+    ///
+    /// The two solves here are the shape that matters: the first records
+    /// a verdict, the second never gets far enough to record one.
+    /// Removing the reset at the top of `optimize_constrained` makes this
+    /// fail with `Some(false)` where `None` is required — checked, not
+    /// assumed.
+    #[test]
+    fn row_scaling_active_is_cleared_when_a_later_solve_bails_early() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+
+        // Solve 1: reaches the statistics block and records a verdict.
+        // `ExactQuadratic` supplies `eval_h`, so the solve stays on the
+        // exact-Hessian NLP path that writes this flag; a fixture without
+        // one lands on L-BFGS instead.
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(false));
+        let first = std::rc::Rc::new(std::cell::RefCell::new(DescribesItselfOnce {
+            refuse: std::rc::Rc::clone(&refuse),
+            inner: ExactQuadratic,
+        }));
+        let _ = app
+            .optimize_tnlp(std::rc::Rc::clone(&first) as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+        assert!(
+            app.row_scaling_active.get().is_some(),
+            "the first solve did not record a row-scaling verdict, so this \
+             test cannot show the second one clearing it",
+        );
+
+        // Solve 2, same application: bails before recording anything.
+        refuse.set(true);
+        let _ = app.optimize_tnlp(first as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+
+        assert_eq!(
+            app.row_scaling_active.get(),
+            None,
+            "a solve that bailed before recording row scaling left the \
+             previous solve's verdict in place; the ℓ₁ outer loop would \
+             read it as fact and mirror an original-units violation into \
+             the scaled family (gh#794 review round 2)",
+        );
+    }
+
     #[test]
     fn application_sqp_path_solves_convex_eq_nlp_and_finalizes() {
         let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));

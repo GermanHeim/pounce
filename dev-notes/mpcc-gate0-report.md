@@ -253,7 +253,7 @@ six iterations.
 | complementarity tolerance floor | 61 | the `sqrt(tol)` section above |
 | source formulation | 36 | `infeasible_pair`: failing is the correct answer |
 | scaling | 14 | boundary item 5 |
-| POUNCE candidate | 8 | finding P2 — since confirmed against Ipopt 3.14.19, which solves the reproducer POUNCE fails |
+| POUNCE candidate | 8 | finding P2 — **open**; this label is the triage rules', not a claim about a mechanism |
 
 ### Nothing is assigned to DiscOpt
 
