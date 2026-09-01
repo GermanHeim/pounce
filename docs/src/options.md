@@ -859,38 +859,44 @@ by default) `deb7` exits `Restoration_Failed` instead of
 
 **So there is a second gate, and it reads the answer rather than the
 trajectory.** The detector fires on an *iterate*; nothing in it says the
-solve ends there. `deb7` is exactly that case — the signature is real at
-iteration 560, and the base attempt then works its way back down to an
-unscaled KKT error of `9.9e+01` before giving up. That answer is not one
-`perturb_always_cd` can repair, so POUNCE does not spend a solve finding
-out.
+solve ends there. A run can pass through a settled point with a diverged
+multiplier, work its way back down, and report something ordinary — and
+then there is nothing left for `perturb_always_cd` to repair.
 
-What gh#884's defect looks like in the *answer* is a point converged
-except that one multiplier ran away: the primal is exact, complementarity
-is met, and the whole residual is dual infeasibility. So the retry runs
-only when the reported answer's unscaled constraint violation and unscaled
+What #884's defect looks like in the *answer* is a point converged except
+that one multiplier ran away: the primal is exact, complementarity is met,
+and the whole residual is dual infeasibility. So the retry runs only when
+the reported answer's unscaled constraint violation and unscaled
 complementarity are both at or below `1e-6` times its unscaled dual
-infeasibility. Measured:
+infeasibility:
 
 | run | unscaled dual | viol | compl | ratio |
 |---|---|---|---|---|
-| the gh#884 reproducer | `7.90e+04` | `1.1e-16` | `1.1e-09` | `1.5e-14` |
-| `deb7` + L-BFGS + rung | `9.90e+01` | `8.0e-13` | `4.65e+00` | `4.7e-02` |
+| the #884 reproducer | `7.90e+04` | `1.1e-16` | `1.1e-09` | `1.5e-14` |
+| `deb7` + L-BFGS + rung, macOS | `9.90e+01` | `8.0e-13` | `4.65e+00` | `4.7e-02` |
 
 Twelve orders. `deb7`'s complementarity is five percent of its own KKT
 error — that answer is not a converged point with a runaway multiplier, it
-is an unconverged point. Before this gate that fixture paid a full cold
-re-solve, 6.1 s to 25.2 s, to decline an answer that was never going to be
-promoted (gh#887); it now declines before spending anything.
+is an unconverged point, and before this gate that run paid a full cold
+re-solve (6.1 s to 25.2 s) to decline an answer that was never going to be
+promoted (#887).
 
 The test is a *ratio within one answer* on purpose. A floor on the
 reported residual would be a threshold on a scale-dependent quantity, and
-it does not even separate these cases — `deb7`'s `9.9e+01` sits one
-percent under the detector's own `1e2`. Comparing the answer against the
-runaway the *detector* saw does separate them, but it reads two numbers
-from a trajectory, and trajectories are not portable across platforms.
-A ratio between two residuals of the same answer carries no units and
-cannot move that way.
+it does not even separate these cases — `deb7`'s `9.9e+01` sits one percent
+under the detector's own `1e2`. Comparing the answer against the runaway
+the *detector* saw does separate them, but it reads two numbers from a
+trajectory, and a trajectory is not stable across platforms. A ratio
+between two residuals of the same answer carries no units and cannot move
+that way.
+
+One consequence is worth knowing if you are reading a report from a hard
+model: whether this gate opens is a property of the answer, not of the
+machine, but *which answer a hard model reaches* can differ between
+platforms. `deb7` under that rung is the measured example — objective
+`99.677` on macOS against `99.651` on Linux, and on Linux the answer it
+reaches genuinely does carry the runaway, so the retry runs there and is
+supposed to.
 
 Set `dual_divergence_retry=no` if you are running a hard model to a
 failure verdict and even one extra attempt is not worth the clock.

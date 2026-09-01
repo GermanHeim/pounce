@@ -80,6 +80,33 @@ pub const DEFAULT_OPTION_FILE_NAMES: &[&str] = &["pounce.opt", "ipopt.opt"];
 /// `dual_divergence_retry=no`.
 const DUAL_DIV_RETRY_DOMINANCE: Number = 1e-6;
 
+/// Does this answer have gh#884's *shape*?
+///
+/// gh#884's defect is a point converged **except** that one multiplier
+/// ran away: the primal is exact, complementarity is met, and the entire
+/// residual is dual infeasibility. `perturb_always_cd` has something to
+/// repair only there, so this is what opens the retry (gh#887).
+///
+/// All three arguments are in the **model's own units**, never the
+/// `s_d`-normalised frame the convergence gate reads — that frame is what
+/// hid gh#884 in the first place. The test is a ratio *within one
+/// answer*, so it carries no units and cannot depend on which attempt
+/// produced it or on how a platform rounded. That is the property that
+/// matters, not the margin; see the module tests for what happened to
+/// the two gates that did not have it.
+///
+/// Non-finite input disables the retry rather than enabling it: a NaN
+/// compares false everywhere, and writing this so a NaN *passed* would
+/// turn "we cannot tell" into "retry anyway". A non-positive dual
+/// residual cannot be a runaway either, and makes the ratio meaningless.
+fn runaway_is_the_whole_residual(dual_inf: Number, viol: Number, compl: Number) -> bool {
+    dual_inf.is_finite()
+        && dual_inf > 0.0
+        && viol.is_finite()
+        && compl.is_finite()
+        && viol.max(compl) <= DUAL_DIV_RETRY_DOMINANCE * dual_inf
+}
+
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
 /// for a caller to tell the user which file (if any) configured the run.
 #[derive(Debug, Default, Clone)]
@@ -3108,34 +3135,15 @@ impl IpoptApplication {
         // "one extra solve" a cost the caller only pays on a run that
         // still *exhibits* the defect (gh#887).
         //
-        // The test reads only the reported answer, and only as a ratio
-        // within it: the primal residual and the complementarity must be
-        // negligible beside the dual infeasibility, which is gh#884's
-        // shape written down — converged everywhere except one
-        // multiplier. `deb7` under L-BFGS is what it excludes, and it is
-        // not close: its complementarity is `4.65`, five percent of its
-        // own KKT error, so that answer is not a converged point with a
-        // runaway multiplier, it is an unconverged point. See
-        // `DUAL_DIV_RETRY_DOMINANCE` for the table and for the
-        // trajectory-based version of this gate that was tried first and
-        // failed on CI.
-        //
-        // Non-finite is excluded the same way it is in the detector: a
-        // NaN compares false everywhere, and writing the condition so
-        // that a NaN *disables* the gate would turn "we cannot tell"
-        // into "retry anyway". A non-positive dual residual cannot be a
-        // runaway either, and would make the ratio meaningless.
+        // The test is `runaway_is_the_whole_residual`, which reads only
+        // the reported answer and only as a ratio within it; its doc
+        // comment carries the rule and the measured populations.
         let (base_viol, base_compl) = {
             let st = self.statistics.borrow();
             (st.final_unscaled_constr_viol, st.final_unscaled_compl)
         };
         let base_dual_inf = self.statistics.borrow().final_unscaled_dual_inf;
-        let runaway_is_the_whole_residual = base_dual_inf.is_finite()
-            && base_dual_inf > 0.0
-            && base_viol.is_finite()
-            && base_compl.is_finite()
-            && base_viol.max(base_compl) <= DUAL_DIV_RETRY_DOMINANCE * base_dual_inf;
-        if !runaway_is_the_whole_residual {
+        if !runaway_is_the_whole_residual(base_dual_inf, base_viol, base_compl) {
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] gh#884: the signature fired mid-trajectory, but the \
                  answer being reported is not a converged point with a runaway \
@@ -8052,5 +8060,82 @@ mod tests {
         let _ = app.optimize_tnlp(tnlp);
 
         assert_eq!(&objective_points.borrow()[..2], &[1.0, 2.0]);
+    }
+
+    // ---- gh#887: the dominance gate ------------------------------------
+    //
+    // These pin the rule directly, on numbers measured off real runs,
+    // because the fixture that motivated the gate turned out not to be a
+    // portable witness for it. `deb7` on the L-BFGS leg with
+    // `limited_memory_ls_failure_restarts=1` reaches a *materially
+    // different answer* on macOS and on Linux -- different objective
+    // (99.677 vs 99.651) and, decisively, a different shape:
+    //
+    //   | run                 | unscaled dual | viol    | compl   | ratio   |
+    //   | reproducer, .nl     | 7.90e4        | 1.1e-16 | 1.1e-9  | 1.5e-14 |
+    //   | reproducer, TNLP    | 3.25e11       | 2.5e-16 | 2.8e-3  | 8.7e-15 |
+    //   | deb7 + rung, macOS  | 9.90e1        | 8.0e-13 | 4.65e0  | 4.7e-2  |
+    //   | deb7 + rung, Linux  | 5.5743e3      | 5.6e-14 | 2.08e-5 | 3.7e-9  |
+    //
+    // The Linux row is the one worth reading twice: that answer really is
+    // gh#884's shape (scaled overall error 5.28e-1 against unscaled
+    // 5.57e3, which is the `s_d` normalisation hiding a runaway exactly
+    // as it did on `qpec_small`), so the retry there is the designed cost
+    // and not the waste gh#887 filed. A CLI assertion of "deb7 declines"
+    // is therefore false on Linux no matter what the threshold is, which
+    // is why the pin lives here instead.
+
+    #[test]
+    fn a_converged_point_with_a_runaway_multiplier_opens_the_retry() {
+        // The gh#884 reproducer, both routes it reaches the gate by.
+        assert!(runaway_is_the_whole_residual(7.90e4, 1.1e-16, 1.1e-9));
+        assert!(runaway_is_the_whole_residual(3.25e11, 2.5e-16, 2.8e-3));
+        // deb7 under the rung on Linux: primal exact, complementarity
+        // eight orders under its own dual residual. Same shape.
+        assert!(runaway_is_the_whole_residual(5.5743e3, 5.6e-14, 2.08e-5));
+    }
+
+    #[test]
+    fn an_unconverged_point_does_not_open_the_retry() {
+        // deb7 under the rung on macOS: complementarity 4.65, five
+        // percent of its own KKT error. Not a runaway multiplier on an
+        // otherwise-converged point -- just an unconverged point.
+        assert!(!runaway_is_the_whole_residual(9.90e1, 8.0e-13, 4.65e0));
+        // Either residual alone is enough to close it: the gate takes the
+        // max, so a clean complementarity does not excuse a violated
+        // constraint. (`1.0e1` against `1.0e6` is a ratio of `1e-5`; note
+        // that `1.0e0` there would be `1e-6` exactly, i.e. inside.)
+        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e1, 1.0e-16));
+        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e-16, 1.0e1));
+    }
+
+    #[test]
+    fn the_threshold_is_where_the_constant_says_it_is() {
+        // Exactly at the ratio is inside; a hair past it is outside.
+        assert!(runaway_is_the_whole_residual(
+            1.0,
+            DUAL_DIV_RETRY_DOMINANCE,
+            0.0
+        ));
+        assert!(!runaway_is_the_whole_residual(
+            1.0,
+            DUAL_DIV_RETRY_DOMINANCE * 1.001,
+            0.0
+        ));
+    }
+
+    #[test]
+    fn what_we_cannot_measure_does_not_buy_a_retry() {
+        // A NaN compares false everywhere, so the condition is written so
+        // that "we cannot tell" declines rather than retries. Each
+        // argument in turn.
+        assert!(!runaway_is_the_whole_residual(Number::NAN, 0.0, 0.0));
+        assert!(!runaway_is_the_whole_residual(1.0e6, Number::NAN, 0.0));
+        assert!(!runaway_is_the_whole_residual(1.0e6, 0.0, Number::NAN));
+        assert!(!runaway_is_the_whole_residual(Number::INFINITY, 0.0, 0.0));
+        // And a dual residual that is not a runaway at all: the ratio
+        // would be meaningless, and a zero-dual point is not gh#884.
+        assert!(!runaway_is_the_whole_residual(0.0, 0.0, 0.0));
+        assert!(!runaway_is_the_whole_residual(-1.0, 0.0, 0.0));
     }
 }

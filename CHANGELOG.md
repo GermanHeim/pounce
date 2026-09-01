@@ -246,25 +246,25 @@ changes.
   (off by default) exits `Restoration_Failed` and so is back in scope.
 
   So a second gate reads the *answer* rather than the trajectory (gh#887).
-  The detector fires on an iterate, and nothing says the solve ends there:
-  `deb7` shows the signature at iteration 560 and then works its way back
-  down to an unscaled KKT error of `9.9e1` before giving up. What gh#884's
-  defect looks like in the answer is a point converged except that one
-  multiplier ran away — primal exact, complementarity met, the whole
-  residual dual infeasibility — so the retry is spent only when the
+  The detector fires on an iterate, and nothing says the solve ends there.
+  What gh#884's defect looks like in the answer is a point converged except
+  that one multiplier ran away — primal exact, complementarity met, the
+  whole residual dual infeasibility — so the retry is spent only when the
   reported answer's unscaled constraint violation and complementarity are
   both at or below `1e-6` times its unscaled dual infeasibility. That is
-  `1.5e-14` for the reproducer against `4.7e-2` for `deb7`, whose
-  complementarity is five percent of its own KKT error. The test is a ratio
-  *within one answer* rather than a floor (a threshold on a scale-dependent
+  `1.5e-14` for the reproducer against `4.7e-2` for `deb7` under the gh#818
+  rung on macOS, whose complementarity is five percent of its own KKT
+  error; that run is back to 6.1 s from 25.2 s. The test is a ratio *within
+  one answer* rather than a floor (a threshold on a scale-dependent
   quantity, and `deb7` clears `1e2` by one percent) or a comparison against
-  what the detector saw (two numbers from a trajectory, and trajectories are
-  not portable — `deb7` runs `[685, 1874]` on macOS and
-  `[460, 3000, 3000, 1264]` on Linux). `deb7` under that rung is back to
-  6.1 s from 25.2 s, with a verdict, objective and `x` identical to the
-  pre-fix binary's. Worst case is one extra solve, on a run that satisfied
-  the detector, reached a scoped failure verdict, and still reports gh#884's
-  shape.
+  what the detector saw (two numbers from a trajectory, which is not stable
+  across platforms). The rule is pinned as unit tests on the predicate
+  rather than on a fixture, because `deb7` under that rung reaches a
+  different answer on Linux — objective `99.651` against macOS's `99.677` —
+  and that answer genuinely carries the runaway, so the retry there is the
+  designed cost rather than the waste gh#887 filed. Worst case is one extra
+  solve, on a run that satisfied the detector, reached a scoped failure
+  verdict, and still reports gh#884's shape.
 
   Two off switches: `dual_divergence_retry=no` disables the retry (the
   detector still runs and the report still records what it saw), and

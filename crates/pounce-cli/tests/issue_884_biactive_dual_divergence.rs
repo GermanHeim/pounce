@@ -54,7 +54,7 @@
 //! | `a_diverging_iterate_is_not_the_signature` | gh#274's `-exp(x)` case, measured both ways | 4 |
 //! | `the_default_configuration_never_reaches_the_retry` | wrapper ordering, and that it is free | — |
 //! | `a_generic_exhaustion_exit_does_not_buy_a_retry` | the status scope, on `deb7` — the fixture that measured it | 5 (the one line the sweep moved) |
-//! | `a_run_that_recovers_from_the_signature_does_not_buy_a_retry` | the dominance gate: the detector fires on an iterate, the retry is spent on an answer (gh#887) | — |
+//! | `a_run_that_recovers_from_the_signature_does_not_buy_a_retry` | the dominance gate does not cost the reproducer its retry; the negative is a unit test in `pounce-algorithm`, because `deb7` is not portable (gh#887) | — |
 //!
 //! Criterion 3 (`ralph1` must still fail) and the detector's branch
 //! coverage are the algorithm-level file's; criterion 5 is
@@ -472,52 +472,43 @@ fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
     );
 }
 
-/// gh#887 — "one extra solve" is a cost claim, and this is the fixture
-/// that made it false.
+/// gh#887 — "one extra solve" is a cost claim, and this is the half of
+/// it a CLI test can actually hold.
 ///
 /// The detector is a statement about an **iterate**. Nothing in it says
-/// the solve *ends* at that iterate, and `deb7` on the L-BFGS leg is the
-/// corpus case where it does not: the signature is real there, and the
-/// base attempt then works its way back down to an unscaled KKT error of
-/// `9.9e1` before giving up.
+/// the solve *ends* at that iterate, so a run can pass through a settled
+/// point with a diverged multiplier, work its way back down, and report
+/// something ordinary — and then there is nothing left for
+/// `perturb_always_cd` to repair. The gate for that is
+/// `runaway_is_the_whole_residual` in `pounce-algorithm`, and the numbers
+/// behind it are pinned there, as unit tests, on purpose.
 ///
-/// It is in scope by *status*: the gh#818 re-anchor rung sends it to
-/// `Restoration_Failed` rather than the `Error_In_Step_Computation` it
-/// reaches at default options, and `Restoration_Failed` is scoped because
-/// it is where the reproducer's TNLP path lands. So the status scope does
-/// not save it, and before the dominance gate it bought a full cold
-/// re-solve — 6.08 s to 25.17 s — to decline an answer it was never going
-/// to promote.
+/// **Why not here.** `deb7` on the L-BFGS leg under the gh#818 rung is
+/// the fixture that measured gh#887 (6.08 s → 25.17 s), and it is not a
+/// portable witness for the rule. The same invocation reaches a
+/// materially different answer on the two platforms CI runs:
 ///
-/// **What the gate reads, and why it reads that.** gh#884's defect is a
-/// point converged *except* that one multiplier ran away, so the retry
-/// requires the reported answer's other residuals to be negligible beside
-/// its dual infeasibility:
+/// | | objective | unscaled dual | viol | compl | ratio |
+/// |---|---|---|---|---|---|
+/// | macOS | `99.677` | `9.90e1` | `8.0e-13` | `4.65e0` | `4.7e-2` |
+/// | Linux | `99.651` | `5.5743e3` | `5.6e-14` | `2.08e-5` | `3.7e-9` |
 ///
-/// | run | dual inf | viol | compl | ratio |
-/// |---|---|---|---|---|
-/// | reproducer, `.nl` | `7.90e4` | `1.1e-16` | `1.1e-9` | `1.5e-14` |
-/// | reproducer, TNLP | `3.25e11` | `2.5e-16` | `2.8e-3` | `8.7e-15` |
-/// | `deb7` + rung | `9.90e1` | `8.0e-13` | `4.65e0` | `4.7e-2` |
+/// On Linux that answer genuinely *is* gh#884's shape — scaled overall
+/// error `5.28e-1` against unscaled `5.57e3`, the `s_d` normalisation
+/// hiding a runaway exactly as it did on `qpec_small` — so the retry
+/// there is the designed cost, not the waste gh#887 filed. An assertion
+/// that `deb7` declines is false on Linux at *any* threshold. It cost a
+/// red CI to learn that, and the honest reading was that the fixture was
+/// wrong, not that the constant needed loosening.
 ///
-/// Twelve orders. `deb7`'s complementarity is five percent of its own KKT
-/// error — that answer is not a converged point with a runaway
-/// multiplier, it is an unconverged point.
-///
-/// **This assertion is deliberately not about the trajectory.** The first
-/// version of this gate compared the reported answer against the runaway
-/// the *detector* had seen, and this test passed here and failed on CI:
-/// `deb7`'s trajectory is not portable (`[685, 1874]` on macOS release,
-/// `[460, 3000, 3000, 1264]` on the Linux runner) and its detector value
-/// is `9.2e5` on one attempt and `8.7e2` on another. A ratio between two
-/// residuals of one answer cannot move that way.
-///
-/// Mutation-checked: drop the dominance conjunct and this test goes red
-/// on the `deb7` half, naming the retry it just bought.
+/// So what this test holds is the part that does not depend on any
+/// fixture's trajectory: the reproducer, whose answer is gh#884's shape
+/// on every platform, still buys its retry and still promotes. The
+/// *negative* — an answer that is merely unconverged buys nothing — is
+/// `an_unconverged_point_does_not_open_the_retry`, which pins the macOS
+/// row above directly.
 #[test]
-fn a_run_that_recovers_from_the_signature_does_not_buy_a_retry() {
-    // The half that must not decline: the reproducer, whose answer is a
-    // converged point with a runaway multiplier and nothing else wrong.
+fn the_gate_that_reads_the_answer_does_not_cost_the_reproducer_its_retry() {
     let (r, stdout) = solve(REPRO);
     let counts = iteration_counts(&stdout);
     assert_eq!(
@@ -529,56 +520,8 @@ fn a_run_that_recovers_from_the_signature_does_not_buy_a_retry() {
     assert!(
         r.statistics.dual_divergence_retry_promoted,
         "{FIXTURE}: the dominance gate must not cost the reproducer its \
-         promotion; stdout=\n{stdout}"
-    );
-
-    // The half that must decline: `deb7` under the rung, which is in scope
-    // by status and whose answer is simply unconverged.
-    let (deb7, deb7_out) = solve_stem(
-        "deb7",
-        &[
-            "hessian_approximation=limited-memory",
-            "limited_memory_ls_failure_restarts=1",
-        ],
-    );
-    assert!(
-        deb7.statistics.dual_divergence_signature,
-        "deb7/lbfgs/rung: the signature is the premise of this test — if it \
-         stopped firing here the test is no longer measuring anything; \
-         stdout=\n{deb7_out}"
-    );
-    assert!(
-        !deb7_out.contains("dual-divergence retry:"),
-        "deb7/lbfgs/rung: the wrapper printed a verdict, so a retry ran — one \
-         cold re-solve, 6.1 s to 25.2 s, to decline an answer whose \
-         complementarity (4.7e0) is five percent of its own unscaled KKT \
-         error (9.9e1); stdout=\n{deb7_out}"
-    );
-    // Two attempts is the mu-strategy fallback, which is pre-existing. A
-    // third would be the cold re-solve. The *counts* are not portable —
-    // `[685, 1874]` here, `[460, 3000]` on CI's Linux runner — but how
-    // many there are is.
-    let deb7_counts = iteration_counts(&deb7_out);
-    assert_eq!(
-        deb7_counts.len(),
-        2,
-        "deb7/lbfgs/rung: {} attempts ({deb7_counts:?}), expected the two the \
-         mu-strategy fallback spends",
-        deb7_counts.len(),
-    );
-    // And the answer is the pre-gh#884 binary's, unchanged.
-    assert!(
-        matches!(
-            deb7.solution.status,
-            ApplicationReturnStatus::RestorationFailed
-        ),
-        "deb7/lbfgs/rung: verdict moved to {:?}",
-        deb7.solution.status
-    );
-    assert!(
-        (deb7.statistics.final_objective - 99.677_082_567_547_37).abs() <= 1e-9,
-        "deb7/lbfgs/rung: objective {} is not the pre-gh#884 binary's \
-         99.67708256754737",
-        deb7.statistics.final_objective
+         promotion — its answer is gh#884's shape by twelve orders \
+         (viol 1.1e-16, compl 1.1e-9, against an unscaled dual of 7.9e4); \
+         stdout=\n{stdout}"
     );
 }

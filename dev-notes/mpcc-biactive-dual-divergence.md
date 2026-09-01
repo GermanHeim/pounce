@@ -536,88 +536,108 @@ section is that gate.
 
 ### The retry has to be spent on an answer, not a trajectory (gh#887)
 
-The status scope is not what saves `deb7`; this is.
-
 The detector is a statement about an **iterate**. Nothing in it says the
 solve *ends* at that iterate, and `deb7` on the L-BFGS leg is the corpus
-case where it does not. The signature is real there — iteration 560,
-scale-relative step `1.7e-7`, `inf_pr` `7.0e-13`, unscaled `inf_du`
-`6.6e5` — and the base attempt then works its way back down to an
-unscaled KKT error of `9.9e1` before giving up. Whatever the trajectory
-did in the middle, the answer being reported is not one
-`perturb_always_cd` can repair. The old gate looked only at the
-trajectory, so it bought a full cold re-solve to decline an answer it was
-never going to promote: **6.08 s to 25.17 s**.
+case where it does not: the signature is real there and the base attempt
+then works its way back down before giving up. Whatever the trajectory
+did in the middle, the answer being reported need not be one
+`perturb_always_cd` can repair. Under the gh#818 rung that fixture bought
+a full cold re-solve to decline an answer it was never going to promote —
+**6.08 s to 25.17 s** — which is what gh#887 filed.
 
 So the retry also asks what gh#884's defect looks like **in the answer**.
 It is a point converged *except* that one multiplier ran away: the primal
 is exact, complementarity is met, and the whole residual is dual
-infeasibility. That is a ratio within one answer:
+infeasibility. That is a ratio within one answer, and it is
+`runaway_is_the_whole_residual` in `application.rs`:
 
 ```rust
-max(base_viol, base_compl) <= DUAL_DIV_RETRY_DOMINANCE * base_dual_inf
+max(viol, compl) <= DUAL_DIV_RETRY_DOMINANCE * dual_inf   // 1e-6
 ```
-
-Every run in the corpus that reaches this line:
 
 | run | unscaled dual | viol | compl | ratio |
 |---|---|---|---|---|
 | reproducer, `.nl` route | `7.90e4` | `1.1e-16` | `1.1e-9` | `1.5e-14` |
 | reproducer, TNLP route | `3.25e11` | `2.5e-16` | `2.8e-3` | `8.7e-15` |
-| `deb7` + L-BFGS + rung | `9.90e1` | `8.0e-13` | `4.65e0` | `4.7e-2` |
+| `deb7` + rung, macOS | `9.90e1` | `8.0e-13` | `4.65e0` | `4.7e-2` |
+| `deb7` + rung, Linux | `5.5743e3` | `5.6e-14` | `2.08e-5` | `3.7e-9` |
 
-Twelve orders. `deb7`'s complementarity is five percent of its own KKT
-error — that answer is not a converged point with a runaway multiplier,
-it is an unconverged point. `DUAL_DIV_RETRY_DOMINANCE = 1e-6` leaves
-eight orders of grace on the tightest keep and four on the reject.
+#### `deb7` is not a portable witness, and finding that out is the lesson
 
-**Why it reads the answer and nothing else.** Two earlier versions of
-this gate were tried and both are worth recording, because the failure
-modes are different.
+The first three rows are the ones the gate was designed against, and they
+separate by twelve orders. The fourth row is the one that cost a red CI.
 
-An **absolute floor** on the reported residual — reusing the detector's
-own `dual_divergence_retry_du_floor` — declines `deb7` by a **one
-percent** margin (`9.9e1` against `1e2`). That is a coincidence, not a
-discriminator, and it is a threshold on a scale-dependent quantity, which
-is entry 3 of this repository's own review checklist.
+`deb7` under the rung reaches a **materially different answer** on the two
+platforms CI runs — objective `99.677` on macOS against `99.651` on Linux
+— and on Linux that answer genuinely *is* gh#884's shape: scaled overall
+error `5.28e-1` against unscaled `5.57e3`, which is the `s_d`
+normalisation hiding a runaway exactly as it did on `qpec_small`, with
+complementarity eight orders under its own dual residual. So the retry
+there is the **designed cost, not the waste gh#887 filed**, and a CLI
+assertion that `deb7` declines is false on Linux at *any* threshold.
 
-A **retention ratio** — the reported unscaled KKT against the runaway the
-detector had fired on — separated the same three rows by five orders and
-passed here. It failed on CI. The reason is that it reads two numbers
-from *different attempts of a trajectory*, and `deb7`'s trajectory is not
-portable: `[685, 1874]` on macOS release, `[460, 3000, 3000, 1264]` on
-the Linux runner, with the detector reporting `9.2e5` on one attempt and
-`8.7e2` on another *in the same run*. A gate whose inputs move like that
-is a gate fitted to one machine.
+That is worth stating plainly because the tempting reading of the red was
+"the constant is too tight". It was not. The constant was right and the
+fixture was wrong, and the way to tell those apart was to read what the
+Linux base attempt actually reported rather than to fit a number until
+the job went green.
 
-The dominance ratio is immune to both, and not by being better tuned: it
-compares two residuals of **one** answer, so it carries no units, needs
-no re-fitting when a fixture moves, and cannot depend on which attempt
-fired or on how the trajectory rounded. That property is the reason it is
-the shipped gate — the twelve-order separation is a bonus.
+The consequence is that the rule is pinned as **unit tests on the
+predicate** (`a_converged_point_with_a_runaway_multiplier_opens_the_retry`,
+`an_unconverged_point_does_not_open_the_retry`,
+`the_threshold_is_where_the_constant_says_it_is`,
+`what_we_cannot_measure_does_not_buy_a_retry` in `application.rs`),
+carrying all four measured rows including the Linux one. The CLI file
+keeps only what does not depend on a trajectory:
+`the_gate_that_reads_the_answer_does_not_cost_the_reproducer_its_retry`.
+Mutation-checked: widen the ratio and the second and third go red; the
+fourth stays green, because it pins the finiteness conjunct and not this
+one.
+
+This generalises past gh#887, and it is the branch rule in `CLAUDE.md`
+wearing different clothes: **a fixture is only evidence about the answer
+it actually reaches**, and "the answer it reaches" can differ by platform
+on a model that is this hard. Before pinning a *negative* on a fixture,
+check that the fixture reaches the same class everywhere it runs — a
+green local run says nothing about that, and the assertion that catches
+it is the one that fails on the other machine.
+
+#### Why the ratio, and what it replaced
+
+**An absolute floor** on the reported residual — reusing the detector's
+own `dual_divergence_retry_du_floor` — declines macOS `deb7` by a **one
+percent** margin (`9.9e1` against `1e2`). A coincidence, not a
+discriminator, and a threshold on a scale-dependent quantity, which is
+entry 3 of this repository's own review checklist.
+
+**A retention ratio** — the reported unscaled KKT against the runaway the
+*detector* had fired on — separated the first three rows by five orders
+and passed locally. It failed on CI for the same underlying reason as the
+fixture did: it reads two numbers from a **trajectory**, and `deb7`'s
+detector reports `9.2e5` on one attempt and `8.7e2` on another *in the
+same run*.
+
+The dominance ratio compares two residuals of **one** answer. It carries
+no units, needs no re-fitting when a fixture moves, and cannot depend on
+which attempt fired or on how a platform rounded. That property is why it
+is the shipped gate; the twelve-order separation is a bonus.
 
 `DUAL_DIV_RETRY_DOMINANCE` is a constant rather than an option on
 purpose: it does not express a tolerance a caller trades against, it
 expresses "this answer is gh#884's shape". The escape hatch for the whole
 remedy is `dual_divergence_retry=no`.
 
-The cost claim is now literally true: one extra solve, on a run that
+The cost claim is now true as stated: one extra solve, on a run that
 satisfied the three-way detector, reached a scoped failure verdict, *and*
-still reports gh#884's shape. `deb7` under the rung is back to 6.1 s with
-a verdict, objective and `x` identical to the pre-gh#884 binary's.
-
-Pinned by `a_run_that_recovers_from_the_signature_does_not_buy_a_retry`,
-which asserts both halves and is mutation-checked: drop the dominance
-conjunct and it goes red on the `deb7` half, with the file's runtime
-going 6.1 s to 24.6 s.
+whose reported answer still has the defect's shape. On macOS `deb7` under
+the rung is back to 6.1 s. On Linux it still pays the retry, and that is
+correct — the answer it reports there has the shape the remedy is for.
 
 One thing this does **not** do is make the status scope redundant, and it
 should not be read as licence to widen it. The two gates fail in different
 directions: the status scope keeps the retry off runs that never reported
 failure at all, and the dominance gate keeps it off runs whose failure has
-nothing to do with a multiplier. `deb7` at default options is excluded by
-the first and would also be excluded by the second; that they agree there
-is not evidence that either is spare.
+nothing to do with a multiplier.
 
 One reporting wrinkle to know about, unchanged by any of this and not
 gh#884's to relitigate. `SolutionCertificate` floors residuals and
