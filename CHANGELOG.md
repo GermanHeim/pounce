@@ -63,6 +63,55 @@ changes.
   from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
   asserts the index spaces really do diverge before trusting the leg.
 
+- **`final_declared_constr_viol`: how far outside the model you WROTE the
+  returned point sits.** The convex arm widens every inequality row and the
+  variable box by `min(bound_relax_factor, constr_viol_tol)·|b|` before
+  extracting the QP (gh #744/#745), so it solves what the NLP arm solves. That
+  is deliberate and it is the model the convergence test is about — but
+  `final_constr_viol` measured *only* that widened model, and nothing reported
+  the difference.
+
+  On netlib `afiro` — 32 variables, 27 rows, a textbook LP — the solve reports
+
+  ```
+  Constraint violation....:   8.6816269397990406e-13
+  EXIT: Optimal Solution Found.
+  ```
+
+  while the returned point sits `4.99e-06` outside the declared row `b = 500`.
+  That is `1e-8 · 500`, the widening exactly. `25fv47` reports `2.19e-11`
+  against a declared `1.97e-05`; `shell` `2.59e-03`. A caller reading the
+  block concluded their model held to `1e-13`.
+
+  The visible half is the objective. `crates/pounce-cli/tests/fixtures/declared_row_relaxation.nl`
+  is the shape at its minimum — `min -x-y s.t. x+y <= 500` — where the solve
+  prints `Constraint violation....: 0.0` and returns `-500.0000005`, i.e.
+  *better* than the declared optimum `-500`, by one widening. Against a
+  published reference that reads as a solver beating the known answer.
+
+  `final_constr_viol` is unchanged and still measures the widened model: it is
+  what every acceptance gate reads and what gh #712's success-verdict
+  invariant is asserted on, and redefining it broke
+  `issue_689_direct_driver_scaled_feasible.rs` exactly as it should have. The
+  declared measurement is reported *beside* it — in the JSON as
+  `final_declared_constr_viol` (additive to `pounce.solve-report/v1`; `NaN`
+  when no widening applied, so readers predating it are unaffected), and in the
+  console block as one extra line, printed only when the two actually differ:
+
+  ```
+  Violation of the model as declared (before the bound_relax_factor widening): 4.9942972850658407e-06
+  ```
+
+  No trajectory moves. The solver's own residual is untouched, and across the
+  91-instance netlib corpus iteration counts and engine selection are
+  identical before and after (0 changes of either). The declared number costs
+  one extra `O(nnz)` extraction after the solve has already run, skipped
+  entirely when the widening is inactive.
+
+  Found while benchmarking POUNCE against HiGHS: 6 of 91 netlib LPs returned
+  `SolveSucceeded` with a declared-model violation above `1e-6`, and the
+  reported statistic disclosed none of them.
+
 ### Fixed
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,

@@ -2839,6 +2839,17 @@ fn run_convex_qp(
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
     let res = sol.kkt_residuals(&qp);
+    // ... but `qp` is the model the SOLVER was handed, whose inequality rows
+    // and variable box carry the `bound_relax_factor` widening
+    // (`qp_extract::BoundRelax`). That is the right model for the convergence
+    // test — pounce-convex's acceptance tests call `kkt_residuals` on it by
+    // design, and gh #744/#745 made the widening deliberate so this arm
+    // solves what the NLP arm solves — and the wrong one to REPORT as the
+    // caller's feasibility. On `afiro` the returned point sits 4.99e-06
+    // outside the declared row `b = 500` (exactly `1e-8·500`) while this
+    // reads 8.68e-13. Report the declared model's numbers instead; every
+    // solver decision still reads `res`, so no trajectory moves.
+    let reported_res = pounce_cli::qp_extract::declared_residuals_qp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
     print::print_convex_summary(
@@ -2848,6 +2859,7 @@ fn run_convex_qp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        reported_res.map(|d| d.primal_infeasibility),
     );
 
     // Recover per-constraint duals once (mapped from the QP multipliers back
@@ -2932,6 +2944,12 @@ fn run_convex_qp(
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;
         builder.stats.final_kkt_error = res.kkt_error();
+        // How far outside the model AS DECLARED the returned point sits —
+        // `final_constr_viol` measures the `bound_relax_factor`-widened model
+        // the solver was handed, which understates it by the widening.
+        builder.stats.final_declared_constr_viol = reported_res
+            .map(|d| d.primal_infeasibility)
+            .unwrap_or(f64::NAN);
         // Per-iteration convergence trace at Full detail (the convex IPM's
         // iterate records map onto the report's IterRecord schema, shared with
         // the NLP path so the harness reads one format).
@@ -3193,6 +3211,11 @@ fn run_convex_socp(
     // orthant-only `kkt_residuals` reported a large bogus constraint violation
     // and NLP error for a solved problem (pounce#209).
     let res = sol.kkt_residuals_conic(&qp, &cones);
+    // Declared-model numbers for reporting, as on the QP path above: `qp`
+    // carries the `bound_relax_factor` widening, so measuring against it
+    // understates how far the returned point sits outside the model the
+    // caller wrote. `res` still drives every solver decision.
+    let reported_res = pounce_cli::qp_extract::declared_residuals_socp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
     print::print_convex_summary(
@@ -3202,6 +3225,7 @@ fn run_convex_socp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        reported_res.map(|d| d.primal_infeasibility),
     );
 
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
@@ -3272,6 +3296,12 @@ fn run_convex_socp(
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;
         builder.stats.final_kkt_error = res.kkt_error();
+        // How far outside the model AS DECLARED the returned point sits —
+        // `final_constr_viol` measures the `bound_relax_factor`-widened model
+        // the solver was handed, which understates it by the widening.
+        builder.stats.final_declared_constr_viol = reported_res
+            .map(|d| d.primal_infeasibility)
+            .unwrap_or(f64::NAN);
         if matches!(detail, ReportDetail::Full) {
             builder.iterations = sol
                 .iterates

@@ -547,6 +547,7 @@ mod tests {
                 final_scaled_objective: 0.0,
                 final_dual_inf: 0.0,
                 final_constr_viol: 0.0,
+                final_declared_constr_viol: 0.0,
                 final_compl: 0.0,
                 final_kkt_error: 0.0,
                 num_obj_evals: 0,

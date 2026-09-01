@@ -232,6 +232,15 @@ pub struct StatisticsInfo {
     pub final_dual_inf: f64,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_constr_viol: f64,
+    /// Primal violation against the model **as declared**, before the convex
+    /// arm's `bound_relax_factor` widening (gh #744/#745). `final_constr_viol`
+    /// measures the widened model the solver was handed — the right model for
+    /// the convergence test, the wrong one to read as the caller's own
+    /// feasibility. `NaN` when no widening applied or the path does not
+    /// compute it. Additive: readers of `pounce.solve-report/v1` that predate
+    /// it are unaffected.
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
+    pub final_declared_constr_viol: f64,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_compl: f64,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]

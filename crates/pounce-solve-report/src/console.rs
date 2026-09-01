@@ -623,6 +623,14 @@ pub fn print_convex_summary(
     dual_inf: f64,
     complementarity: f64,
     kkt_error: f64,
+    // How far outside the model AS DECLARED the point sits, when the solve
+    // applied the `bound_relax_factor` widening and the two differ. The
+    // residuals above measure the widened model the solver was handed — the
+    // model its convergence test is about — so without this line a reader
+    // takes `Constraint violation....: 8.68e-13` for their own model's
+    // feasibility when the point is `4.99e-06` outside a declared row
+    // (netlib `afiro`, gh #744/#745). `None` when no widening applied.
+    declared_primal_inf: Option<f64>,
 ) {
     println!();
     println!();
@@ -638,6 +646,19 @@ pub fn print_convex_summary(
     row("Variable bound violation", 0.0);
     row("Complementarity.........", complementarity);
     row("Overall NLP error.......", kkt_error);
+    // Only when the widening actually moved the number: on the vast majority
+    // of models the point satisfies the declared rows to the same order and
+    // an extra line would be noise.
+    if let Some(d) = declared_primal_inf {
+        if d > primal_inf * 10.0 && d > 0.0 {
+            println!();
+            println!(
+                "Violation of the model as declared (before the \
+                 bound_relax_factor widening): {}",
+                fmt_ipopt(d)
+            );
+        }
+    }
     println!();
 }
 

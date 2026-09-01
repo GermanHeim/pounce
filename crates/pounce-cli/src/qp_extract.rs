@@ -36,7 +36,7 @@ use crate::nl_reader::NlProblem;
 // it and was dropped from `G` entirely, so the QP was solved over a strictly
 // larger box and reported `Optimal` at a point the model excludes.
 use pounce_common::types::{lower_bound_present, upper_bound_present};
-use pounce_convex::{ConeSpec, QpProblem, QpSolution, Triplet};
+use pounce_convex::{ConeSpec, QpProblem, QpResiduals, QpSolution, Triplet};
 
 /// Ipopt's `bound_relax_factor` widening, as the convex extractors apply it.
 ///
@@ -83,6 +83,15 @@ impl BoundRelax {
 
     fn active(self) -> bool {
         self.factor > 0.0 && self.cap > 0.0
+    }
+
+    /// Whether any widening is actually applied. Public so a caller can tell
+    /// "the declared model and the solved model coincide" from "they differ",
+    /// which struct equality against [`Self::NONE`] cannot: `bound_relax_factor=0`
+    /// zeroes the factor but leaves `cap` at `constr_viol_tol`, so the pair is
+    /// inactive without being `NONE`.
+    pub fn is_active(self) -> bool {
+        self.active()
     }
 
     /// Widening of a variable bound `b`: `min(factor·max(|b|,1), cap)`.
@@ -144,6 +153,56 @@ pub enum ConRowMap {
         upper: Option<usize>,
         lower: Option<usize>,
     },
+}
+
+/// The residuals of `sol` measured against the model **as declared**, before
+/// the [`BoundRelax`] widening.
+///
+/// [`QpSolution::kkt_residuals`] measures the problem the solver was handed,
+/// whose inequality rows and variable box are widened by
+/// `bound_relax_factor`. That is correct for the convergence test — the
+/// solver must converge on the model it is solving, and pounce-convex's own
+/// acceptance tests call it on exactly that model — and wrong for the number
+/// a caller reads as "how well does my model hold".
+///
+/// The gap is the widening itself, `min(factor, cap)·|b|` per row. On
+/// `afiro` the returned point sits `4.99e-06` outside the declared row
+/// `b = 500` — precisely `1e-8 · 500` — while the widened measurement reads
+/// `8.68e-13`, seven orders tighter, because the point does satisfy the
+/// widened row. `25fv47` reports `2.19e-11` against a declared `1.97e-05`.
+/// Neither is a solver defect: both are the widening working as designed and
+/// then being reported against the wrong model.
+///
+/// Returns `None` when no widening was applied (the two measurements
+/// coincide by construction, so the caller keeps the one it already has) or
+/// when re-extraction fails.
+pub fn declared_residuals_qp(
+    prob: &NlProblem,
+    sol: &QpSolution,
+    relax: BoundRelax,
+) -> Option<QpResiduals> {
+    if !relax.is_active() {
+        return None;
+    }
+    let (declared, _, _) = extract_qp_with_map(prob, BoundRelax::NONE)?;
+    Some(sol.kkt_residuals(&declared))
+}
+
+/// [`declared_residuals_qp`] for the conic arm: measures each block with its
+/// own cone, as [`QpSolution::kkt_residuals_conic`] does, so a converged SOC
+/// block is not read as infeasible (pounce#209). The cones come from the
+/// re-extraction rather than the caller, so the blocks and the bounds
+/// describe one model.
+pub fn declared_residuals_socp(
+    prob: &NlProblem,
+    sol: &QpSolution,
+    relax: BoundRelax,
+) -> Option<QpResiduals> {
+    if !relax.is_active() {
+        return None;
+    }
+    let (declared, _, _, cones) = extract_socp_with_map(prob, BoundRelax::NONE)?;
+    Some(sol.kkt_residuals_conic(&declared, &cones))
 }
 
 /// Extract the QP, the constraint→row provenance map, and the objective
