@@ -1,14 +1,21 @@
 //! gh#884: a biactive complementarity pair makes the exact-product
-//! lowering's multipliers diverge, and the run fails at the exact primal
+//! lowering's multipliers diverge, and the run fails next to the primal
 //! solution.
 //!
-//! **These are characterization tests, not a fix.** gh#884 is open. They
-//! pin the mechanism as measured so that a proposed fix has something to
-//! move, and — more importantly — one of them pins the *trap*: the
-//! obvious remedy makes a different model report success at an objective
-//! below its true optimum. If you are here because you are fixing
-//! gh#884, read `dev-notes/mpcc-biactive-dual-divergence.md` first; three
-//! plausible approaches are already measured and ruled out there.
+//! Numbers in this file were measured on `87402274`.
+//!
+//! **gh#884 is open, and these are invariants rather than a description
+//! of it.** Each one is written so that it stays correct after a fix: it
+//! fails when the solver gets *worse*, never when it gets better. In
+//! particular none of them asserts that the current failure persists —
+//! a test that pinned the bug would go red on a genuine fix, which is
+//! backwards, and would train the next reader to expect red here.
+//!
+//! The measurements — the runaway multipliers, the `mu` trace, and three
+//! approaches ruled out — live in
+//! `dev-notes/mpcc-biactive-dual-divergence.md`. That is where history
+//! belongs; this file holds contracts. If you are fixing gh#884, read the
+//! note first: the obvious remedy is measured and rejected there.
 //!
 //! The fixture is `qpec_small` from `benchmarks/mpcc/` under the exact
 //! product (`ncp_eq` / `prod_eq`) lowering:
@@ -23,13 +30,16 @@
 //! with `f* = 0` at `(1, 1, 0)`, where pair 1 is strict and **pair 2 is
 //! biactive** (`G2 = H2 = 0`). There `grad f` is exactly `0` and the
 //! product row's gradient is exactly `(0, 0, 0)`, so `lambda = 0`
-//! certifies stationarity with residual `0` — the answer exists and is
-//! reachable.
+//! certifies stationarity with residual `0` **at that exact point** — so
+//! the answer exists and is reachable.
 //!
-//! What actually happens: the solver reaches the point, and the
-//! multipliers on the *linearly dependent* rows run away in near-
-//! cancelling pairs. Measured at the returned iterate — rows 2 and 5 both
-//! restrict only `y2`, and rows 1 and 4 are likewise parallel:
+//! What happens instead: the solve reaches `(1.0002321, 1.0001161,
+//! 2.67e-15)`, feasible to `2.2e-16` with `f = 6.73e-8`, and stops there.
+//! That is *near* the optimum, not at it — `lambda = 0` does not certify
+//! the returned iterate, where it leaves an objective-gradient residual of
+//! `4.64e-4`. Meanwhile the multipliers on the *linearly dependent* rows
+//! run away in near-cancelling pairs; rows 2 and 5 both restrict only
+//! `y2`, and rows 1 and 4 are likewise parallel:
 //!
 //! | row | `|grad|_inf` | `lambda` |
 //! |---|---:|---:|
@@ -38,14 +48,23 @@
 //! | 2 (`G2 >= 0`) | `1.0` | `-7.283e11` |
 //! | 5 (`G2·H2 = 0`) | `2.3e-4` | `+1.737e15` |
 //!
-//! `-7.283e11 + 1.737e15 · 2.3e-4` is the reported `3.253e11` residual.
+//! `-7.283e11 + 1.737e15 · 2.3e-4` is the `3.253e11` residual it fails
+//! on. That table is measurement, not an assertion — see the note.
 //!
-//! | test | what it pins |
-//! |---|---|
-//! | `the_primal_converges_while_the_dual_diverges` | the mechanism: exact point, feasible to `2.2e-16`, objective at `f*`, and an unscaled KKT error of `3.3e11` |
-//! | `the_hessian_sparsity_pattern_does_not_change_the_outcome` | gh#884's stated prerequisite hypothesis, **refuted** |
-//! | `dual_regularization_reaches_the_answer_honestly` | a genuine solve exists at `9.96e-8` unscaled — so this is a POUNCE gap, not a property of the reformulation |
-//! | `always_on_dual_regularization_reports_success_below_the_true_optimum` | why the previous test is **not** a licence to change the default |
+//! **The asymmetry between the two fixtures is the point.** `qpec_small`
+//! failing is the *bug*, so nothing here asserts that it fails; what is
+//! asserted is that the point it returns is the optimum, and that it
+//! never claims a success it cannot back. `ralph1` failing is *correct* —
+//! no sign-feasible multiplier exists at its origin — so that one is
+//! asserted directly, and it is what catches a `perturb_always_cd`
+//! default flip.
+//!
+//! | test | what it pins | red when |
+//! |---|---|---|
+//! | `qpec_small_returns_the_optimum_and_never_claims_a_false_success` | the returned point is feasible and at `f*`; any claimed success must hold in the model's own units | a verdict-only "fix" reports success at a `1e11` residual |
+//! | `a_structurally_zero_hessian_entry_does_not_change_the_solve` | declaring an identically-zero Hessian entry is a no-op (and refutes gh#884's stated prerequisite hypothesis) | the declared sparsity pattern starts changing the answer |
+//! | `dual_regularization_reaches_the_optimum_honestly` | an honest solve of this model exists at `9.96e-8` unscaled, so gh#884 is a POUNCE gap | that configuration stops reaching the answer |
+//! | `ralph1_must_not_claim_success_where_no_multiplier_certifies_it` | a model with no sign-feasible multiplier must not report success, and never below `f*` | `perturb_always_cd` is turned on by default — measured: plain `Solve_Succeeded` at `-2.71e-5` |
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -60,12 +79,16 @@ use pounce_nlp::tnlp::{
 
 const INF: Number = 2e19;
 
-/// What `finalize_solution` hands back, so a test can recompute the
-/// stationarity residual itself rather than trusting a reported one.
+/// What `finalize_solution` hands back, so a test can measure the
+/// returned point for itself rather than trusting a reported number.
+///
+/// The multipliers are deliberately *not* carried here. The runaway
+/// values in the module table above are a measurement of behaviour
+/// gh#884 is open about, and asserting on them would pin the bug; the
+/// table and `dev-notes/mpcc-biactive-dual-divergence.md` are their home.
 #[derive(Clone, Default)]
 struct Solved {
     x: Vec<Number>,
-    lambda: Vec<Number>,
 }
 
 /// `qpec_small` under the exact-product lowering. Rows, in order:
@@ -242,10 +265,7 @@ impl TNLP for QpecSmallProdEq {
     }
 
     fn finalize_solution(&mut self, sol: Solution<'_>, _ip_data: &IpoptData, _ip_cq: &IpoptCq) {
-        *self.captured.borrow_mut() = Some(Solved {
-            x: sol.x.to_vec(),
-            lambda: sol.lambda.to_vec(),
-        });
+        *self.captured.borrow_mut() = Some(Solved { x: sol.x.to_vec() });
     }
 }
 
@@ -382,10 +402,7 @@ impl TNLP for Ralph1Direct {
         }
     }
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {
-        *self.captured.borrow_mut() = Some(Solved {
-            x: sol.x.to_vec(),
-            lambda: sol.lambda.to_vec(),
-        });
+        *self.captured.borrow_mut() = Some(Solved { x: sol.x.to_vec() });
     }
 }
 
@@ -408,25 +425,79 @@ fn app(always_cd: bool, max_iter: i32) -> IpoptApplication {
     app
 }
 
-/// The mechanism: the primal reaches the answer and the dual leaves.
+/// Statuses POUNCE offers as "we solved it". A claim of success made
+/// under any of these is a claim the user's tooling acts on — Pyomo maps
+/// both into its solved family.
+fn claims_success(status: ApplicationReturnStatus) -> bool {
+    matches!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
+}
+
+/// The invariant every solve on every model owes its caller: **if it
+/// claims success, the claim has to be true in the model's own units.**
 ///
-/// Every number here was measured, not chosen. The point is feasible to
-/// `2.2e-16` and sits at the true optimum, and the run still fails —
-/// carrying an unscaled KKT error of `3.3e11` produced entirely by
-/// multipliers on linearly dependent rows.
+/// Vacuous while a model is failing, which is the point — it is a guard,
+/// not a description. It becomes load-bearing the moment anything starts
+/// reporting success on the model it is applied to, which is exactly when
+/// someone needs catching.
+fn a_claimed_success_must_be_real(
+    what: &str,
+    status: ApplicationReturnStatus,
+    unscaled_kkt: Number,
+    violation: Number,
+) {
+    if !claims_success(status) {
+        return;
+    }
+    assert!(
+        unscaled_kkt <= 1e-6,
+        "{what}: reported {status:?} at an unscaled KKT error of {unscaled_kkt:.3e}. \
+         A verdict that passes while the residual it stands for is orders larger \
+         is the symptom-only fix gh#884 warns against.",
+    );
+    assert!(
+        violation <= 1e-8,
+        "{what}: reported {status:?} at a constraint violation of {violation:.3e}",
+    );
+}
+
+/// `qpec_small` returns a near-optimal point, and must never claim a
+/// false success.
+///
+/// Two halves, and the split is deliberate.
+///
+/// The **unconditional** half — the returned point is feasible and lands
+/// within `1e-3` of `(1, 1, 0)` with `|f|` under `1e-6` — is true today
+/// *and* after any fix, so it never needs revisiting. The tolerances are
+/// what they are because the run stops *near* the optimum, not at it:
+/// measured `(1.0002321, 1.0001161, 2.67e-15)` with `f = 6.73e-8` on
+/// `87402274`. The interesting fact is that it gives up that close.
+///
+/// The **conditional** half is the guard. gh#884 is open, so today this
+/// model exits `RestorationFailed` at an unscaled KKT error of `3.3e11`
+/// and the guard is vacuous. That failure is deliberately *not* asserted:
+/// a test that pins it would go red on a genuine fix, which is backwards.
+/// What the guard catches is the tempting bad fix gh#884 names — relaxing
+/// the exit verdict so the model reports success while the residual stays
+/// at `1e11`. That fix passes a status assertion and fails this one.
 #[test]
-fn the_primal_converges_while_the_dual_diverges() {
+fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
     let mut a = app(false, 300);
     let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
     let sol = captured.borrow().clone().expect("finalize_solution ran");
     let s = a.statistics();
+    let violation = true_violation(&sol.x);
 
-    // The primal is at the answer.
+    // Forward-compatible: true while gh#884 is open, and after it closes.
+    // Deliberately loose in `x` and `f` — the run stops near the optimum,
+    // not at it (see the doc comment); tightening these would pin the
+    // distance gh#884 leaves on the table.
     assert!(
-        true_violation(&sol.x) <= 1e-12,
-        "expected a feasible point, got violation {:.3e} at {:?}",
-        true_violation(&sol.x),
+        violation <= 1e-12,
+        "expected a feasible point, got violation {violation:.3e} at {:?}",
         sol.x,
     );
     for (i, want) in [1.0, 1.0, 0.0].iter().enumerate() {
@@ -442,48 +513,31 @@ fn the_primal_converges_while_the_dual_diverges() {
         s.final_objective,
     );
 
-    // And the run fails anyway, on a dual residual that is enormous in
-    // the model's own units.
-    assert_ne!(
+    a_claimed_success_must_be_real(
+        "qpec_small/prod_eq/origin",
         status,
-        ApplicationReturnStatus::SolveSucceeded,
-        "gh#884 is fixed — update this characterization test and the dev-note",
-    );
-    assert!(
-        s.final_unscaled_kkt_error > 1e6,
-        "expected the diverged dual gh#884 describes, got {:.3e}",
         s.final_unscaled_kkt_error,
-    );
-
-    // The residual is carried by rows whose gradients are parallel: rows
-    // 2 and 5 both restrict only `y2`, and their multipliers are huge
-    // and opposing. This is the part a fix has to address.
-    let rows = jac_rows(&sol.x);
-    let contribution =
-        |i: usize| sol.lambda[i].abs() * rows[i].iter().fold(0.0_f64, |a, v| a.max(v.abs()));
-    assert!(
-        contribution(2) > 1e6 && contribution(5) > 1e6,
-        "expected the parallel pair (rows 2 and 5) to carry the residual, \
-         got {:.3e} and {:.3e}",
-        contribution(2),
-        contribution(5),
+        violation,
     );
 }
 
-/// gh#884's stated prerequisite hypothesis, **refuted**.
+/// Declaring a structurally-zero Hessian entry must not change the solve.
 ///
-/// The issue records that the same model exits differently through the
-/// MPCC harness's Python path (`Error_In_Step_Computation`, 118 iters)
-/// than through `.nl`/CLI (`Solved_To_Acceptable_Level`, 41), and names
-/// the Hessian sparsity difference — a dense lower triangle's 6 nonzeros
-/// against the structural 5 — as the leading hypothesis, explicitly not
-/// established.
+/// A permanent contract in its own right: `(2, 1)` is identically zero
+/// here, so a caller that declares it — as the MPCC harness does, handing
+/// back a dense lower triangle with 6 nonzeros where the structural
+/// pattern has 5 — must get the same answer as one that does not.
 ///
-/// It is not the cause: both patterns produce bit-identical iterates,
-/// the same iteration count and the same status. Whatever separates the
-/// two paths is somewhere else.
+/// It also settles gh#884's stated prerequisite. The issue records that
+/// the same model exits differently through the harness's Python path
+/// (`Error_In_Step_Computation`, 118 iters) than through `.nl`/CLI
+/// (`Solved_To_Acceptable_Level`, 41), and names this sparsity difference
+/// as the leading hypothesis, explicitly not established. It is
+/// **refuted**: both patterns give bit-identical iterates, the same
+/// iteration count and the same status. Whatever separates those two
+/// paths is somewhere else.
 #[test]
-fn the_hessian_sparsity_pattern_does_not_change_the_outcome() {
+fn a_structurally_zero_hessian_entry_does_not_change_the_solve() {
     let mut seen = Vec::new();
     for dense in [false, true] {
         let (tnlp, captured) = QpecSmallProdEq::new(dense);
@@ -508,25 +562,29 @@ fn the_hessian_sparsity_pattern_does_not_change_the_outcome() {
     );
 }
 
-/// A genuine solve exists, so this is a POUNCE gap and not a property of
-/// the reformulation.
+/// An honest solve of this model exists, so gh#884 is a POUNCE gap and
+/// not a property of the reformulation.
 ///
-/// With dual regularization on from the start the same model converges
-/// to an **unscaled** KKT error of `~1e-7` — honestly, not by
-/// normalising the residual away. That is the evidence that gh#884 has
-/// something to fix.
+/// With dual regularization on from the start, `qpec_small` converges to
+/// an **unscaled** KKT error of `~1e-7` — in the model's own units, not
+/// by normalising the residual away.
+///
+/// This is evidence that there is something to fix. It is **not** an
+/// argument for turning that option on by default: see
+/// `ralph1_must_not_claim_success_where_no_multiplier_certifies_it`, and
+/// `dev-notes/mpcc-biactive-dual-divergence.md` for why engaging it only
+/// on demand does not work either.
 #[test]
-fn dual_regularization_reaches_the_answer_honestly() {
+fn dual_regularization_reaches_the_optimum_honestly() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
     let mut a = app(true, 300);
     let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
     let sol = captured.borrow().clone().expect("finalize_solution ran");
     let s = a.statistics();
 
-    assert_eq!(
-        status,
-        ApplicationReturnStatus::SolveSucceeded,
-        "dual regularization no longer reaches the answer on qpec_small",
+    assert!(
+        claims_success(status),
+        "dual regularization no longer reaches the answer on qpec_small: {status:?}",
     );
     assert!(
         s.final_unscaled_kkt_error <= 1e-6,
@@ -540,53 +598,77 @@ fn dual_regularization_reaches_the_answer_honestly() {
     );
 }
 
-/// **The trap.** The remedy above must not become the default.
+/// `ralph1`'s origin admits no sign-feasible multiplier, so **failing
+/// there is correct** — and a reported success must never sit below `f*`.
 ///
-/// On `ralph1` under the `direct` lowering the origin is M-stationary but
-/// not S-stationary, so no sign-feasible multiplier exists and the
-/// correct outcome is a failure — which is what POUNCE reports today.
-/// Turn dual regularization on always and the same model instead reports
-/// plain `Solve_Succeeded` at an objective **below** `f* = 0`, at a point
-/// the MPCC does not contain.
+/// This is gh#884's own acceptance criterion as a contract, and unlike
+/// the qpec_small guard it is not vacuous: failing is the *right* answer
+/// on this model, today and after any fix. NLP KKT is S-stationarity;
+/// the origin is M-stationary but not S-stationary, and the best
+/// achievable residual over sign-feasible multipliers there is `0.707`,
+/// three orders above any tolerance in play.
 ///
-/// So "fix gh#884 by flipping `perturb_always_cd`" trades one wrong
-/// answer for a worse one: gh#884's failure is honest, this is a silent
-/// success below the true optimum. Measured, not argued — and it is
-/// exactly the acceptance criterion gh#884 states ("a fix that greens all
-/// eight has over-fired").
+/// **What this catches.** The obvious way to "fix" gh#884 is to turn
+/// `perturb_always_cd` on by default — dual regularization is the one
+/// thing measured to reach qpec_small's answer. Do that and this test
+/// goes red, because it runs at *default* options: with regularization
+/// always on, this model reports plain `Solve_Succeeded` at an objective
+/// of `-2.71e-5`, below `f* = 0`, at a point the MPCC does not contain
+/// (measured at `max_iter = 3000`; at `300` the cap hides it as
+/// `Solved_To_Acceptable_Level` at `-3.81e-5`).
+///
+/// So the trap is guarded in the direction that stays correct: this test
+/// fails when the solver gets *worse*, never when it gets better. It
+/// deliberately does not assert that the bad outcome still happens under
+/// the non-default option — that measurement is history, and history
+/// belongs in `dev-notes/mpcc-biactive-dual-divergence.md`.
+///
+/// Mutation-checked by applying `a_claimed_success_must_be_real` and the
+/// objective bound below to a `perturb_always_cd=yes` run of this same
+/// fixture: both fire, on the objective bound, at `-2.71e-5`.
 #[test]
-fn always_on_dual_regularization_reports_success_below_the_true_optimum() {
-    // Today, with the default, the failure is honest.
-    let (tnlp, _c) = Ralph1Direct::new();
-    let mut a = app(false, 3000);
-    let baseline = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
-    assert_ne!(
-        baseline,
-        ApplicationReturnStatus::SolveSucceeded,
-        "ralph1/direct is expected to fail at the default: no sign-feasible \
-         multiplier exists at the origin",
-    );
-
-    // With dual regularization always on, it does not.
+fn ralph1_must_not_claim_success_where_no_multiplier_certifies_it() {
+    // A generous cap, so a pass here is not the cap hiding an outcome.
     let (tnlp, captured) = Ralph1Direct::new();
-    let mut a = app(true, 3000);
+    let mut a = app(false, 3000);
     let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
     let sol = captured.borrow().clone().expect("finalize_solution ran");
     let s = a.statistics();
 
-    // `f* = 0`; anything materially below it is outside the MPCC.
     assert!(
-        s.final_objective < -1e-6,
-        "the trap this test exists for has moved: expected an objective below \
-         f* = 0, got {:.6e} at {:?} (status {status:?}). Re-measure before \
-         relaxing this — the point of the test is that the objective is \
-         reported below the true optimum.",
-        s.final_objective,
+        !claims_success(status),
+        "reported {status:?} at {:?} on a model whose only candidate point \
+         admits no sign-feasible multiplier (best residual there is 0.707). \
+         If this went red on a `perturb_always_cd` default flip, that is the \
+         test working: see dev-notes/mpcc-biactive-dual-divergence.md.",
         sol.x,
     );
-    assert_eq!(
+
+    // And whatever it reports, never a success below the true optimum.
+    if claims_success(status) {
+        assert!(
+            s.final_objective >= -1e-9,
+            "reported {status:?} at objective {:.6e}, below f* = 0 — a point \
+             outside the MPCC",
+            s.final_objective,
+        );
+    }
+    a_claimed_success_must_be_real(
+        "ralph1/direct/origin",
         status,
-        ApplicationReturnStatus::SolveSucceeded,
-        "expected the measured plain success below f*, got {status:?}",
+        s.final_unscaled_kkt_error,
+        true_violation_ralph1(&sol.x),
     );
+}
+
+/// Violation of `ralph1`'s own rows and bounds at `x`, in the model's
+/// units: `G = y >= 0`, `H = y − x >= 0`, `G·H <= 0`, `x >= 0`.
+fn true_violation_ralph1(x: &[Number]) -> Number {
+    let g = x[1];
+    let h = x[1] - x[0];
+    let mut v: Number = 0.0;
+    v = v.max((-g).max(0.0));
+    v = v.max((-h).max(0.0));
+    v = v.max((g * h).max(0.0));
+    v.max((-x[0]).max(0.0))
 }
