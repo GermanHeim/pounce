@@ -30,19 +30,12 @@
 //!
 //! # What this file is NOT evidence about
 //!
-//! - **Release.** `supports_release()` is `false` in this phase, so the
-//!   refinement pins and never releases. `a_pin_only_refinement_does_not_release`
-//!   pins that limit rather than leaving it implied; the release half arrives
-//!   with the path modes.
-//! - **`natural_units_factor`, and this one is measured.** Making it return a
-//!   non-identity vector turns *nothing* in this crate red. Its only consumer
-//!   is the release half of `refine_step_onto_bounds`, which `supports_release
-//!   () == false` never reaches — so the value is correct and untested at the
-//!   same time. Whoever turns release on inherits the obligation to guard it;
-//!   a released step checked against a re-solve cannot pass with a mis-scaled
-//!   `F`. Stated here rather than left for someone to assume the equilibration
-//!   test covers it, because it does not: that test drives `parametric_step`,
-//!   which never reads the factor.
+//! - **The release path itself.** `the_refinement_can_both_pin_and_release`
+//!   only asserts the capability is on. The release *numerics* — that a
+//!   released step matches an independent re-solve, and that
+//!   `natural_units_factor` is therefore right — are owned by
+//!   `convex_sens_release.rs`, which is where the obligation this file
+//!   recorded in the pin-only phase was discharged.
 //! - **The NLP arm.** Nothing here exercises `PdSensBacksolver`. The two
 //!   implementations agree only as far as the shared core makes them; a
 //!   cross-arm equality test belongs with the parity work.
@@ -59,7 +52,7 @@
 //! | mutation | red here | note |
 //! |---|---|---|
 //! | `assemble_kkt` emits `+1.0` for a lower-active bound (the pre-change code) | `the_recovered_bound_multipliers_carry_the_solutions_sign` alone | every other test in the crate stays green — that is the point |
-//! | `natural_units_factor` returns a non-identity vector | **nothing** | the row that corrected the file: the claim it was written to support is false, and the negative-space section above now says so |
+//! | `natural_units_factor` returns a non-identity vector | **nothing here** | it did not guard this in the pin-only phase either, which is why the claim was removed rather than kept; `convex_sens_release.rs` guards it now that release reads it |
 //! | `parametric_step_bounded` returns the plain step, skipping the refinement | `a_crossing_step_is_pinned_at_the_bound` | |
 
 use pounce_convex::QpOptions;
@@ -292,17 +285,21 @@ fn prob_base(prob: &QpProblem, opts: &QpOptions) -> Vec<f64> {
     solve_qp_ipm(prob, opts, backend).x
 }
 
-/// The refinement pins but does not release in this phase, and the adapter says
-/// so. Pinning the limit rather than leaving it implied means the phase that
-/// adds release has a test to flip.
+/// Both halves of fix-relax are available: the refinement pins crossing
+/// coordinates *and* releases a bound whose multiplier the step drives
+/// negative.
+///
+/// This assertion was written inverted in the phase that shipped pin-only, so
+/// that turning release on could not be done without coming back to it.
 #[test]
-fn a_pin_only_refinement_does_not_release() {
+fn the_refinement_can_both_pin_and_release() {
     let prob = lower_bound_active();
     let opts = QpOptions::default();
     let sens = solved(&prob, &opts);
     assert!(
-        !sens.backsolver().supports_release(),
-        "release lands with the path modes; until then the refinement pins only"
+        sens.backsolver().supports_release(),
+        "the convex active-set KKT carries no barrier term, so releasing a bound \
+         is exact and costs one numeric refactorization"
     );
 }
 

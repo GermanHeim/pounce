@@ -11,6 +11,38 @@ changes.
 
 ### Added
 
+- **The convex QP sensitivity gains bound *release* and path following (Rust
+  API).** `QpKktBacksolver` now implements the release half of the
+  `SensBacksolver` contract, so `refine_step_onto_bounds` can take a bound out
+  of the active set rather than only pinning coordinates onto one, and the new
+  `QpSensitivity::parametric_step_path` walks a perturbation breakpoint by
+  breakpoint. For a QP the solution path is piecewise affine, so within a
+  segment the walk is exact; each `PathSegment` records the fraction of the
+  perturbation at which a bound was reached or freed.
+
+  Releasing is structurally cheaper on this arm than on the NLP one, and the
+  reason is worth stating: the NLP's release *must* re-factor because an active
+  bound puts `σ = z/s` on the `x` diagonal, and on a tightly converged bound
+  that term destroys the released system's information in the converged factor —
+  the better the solve converged, the worse a recovered answer would be. The
+  convex active-set KKT has no barrier term; the bound is an explicit row.
+  Neutralizing it leaves the **sparsity pattern unchanged**, so a release costs
+  one numeric refactorization and the symbolic factorization is reused. No
+  public signature changed to make this possible: the adapter stores one spare
+  linear-solver instance drawn at build rather than boxing the caller's factory,
+  which would have needed an `F: 'static` bound on a published method.
+
+  This also discharges a debt the previous release recorded. That one noted, as
+  a measured result, that `natural_units_factor = None` was correct but
+  **unguarded** — its only consumer is the release path, so with release off,
+  returning garbage from it turned nothing red. It is load-bearing now, and
+  guarded: `crates/pounce-convex/tests/convex_sens_release.rs` checks released
+  steps against an **independent re-solve of the perturbed problem** at a
+  tolerance two orders tighter than the base solve, and a mis-scaled factor
+  fails all three of its oracle legs. On the fixture, holding the active set is
+  wrong by the entire released distance; the released step reaches the re-solve,
+  and the path walk reports the breakpoint at its closed-form location.
+
 - **The convex QP sensitivity gains bound-respecting steps, by reaching the
   shared core rather than reimplementing it (Rust API).**
   `QpSensitivity::parametric_step_bounded` is the convex arm's `fix_relax`: a

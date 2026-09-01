@@ -238,10 +238,30 @@ and `solve(rhs, lhs)`, so an engine that can back-solve against its converged
 factor gets fix-relax, path following and the directional derivative without
 porting any of them.
 
-**The refinement currently pins only.** A bound whose multiplier the step drives
-*negative* is not released, so a perturbation pulling a variable off a bound
-still holds it there — the release half of fix-relax lands with the path modes.
-`QpKktBacksolver::supports_release()` reports which behaviour you have.
+Both halves of fix-relax are available: a coordinate the step carries past a
+bound is pinned there, and a bound whose multiplier the step drives *negative*
+is released so the variable can leave. Releasing is exact on this arm — the
+convex active-set KKT has no barrier term to destroy, so it costs one numeric
+refactorization against an unchanged sparsity pattern.
+
+### Following the path
+
+`parametric_step_path` applies the perturbation a little at a time, stopping
+wherever the active set changes:
+
+```rust
+let (dx, segments) = sens.parametric_step_path(&[0], &[3.0], /* max_iter */ 32)?;
+for s in &segments {
+    println!("at {:.3}: x{} {} its {} bound",
+             s.at, s.var_row, if s.pinned { "reached" } else { "left" },
+             if s.lower { "lower" } else { "upper" });
+}
+```
+
+A QP's solution path is piecewise affine, so within a segment the walk is exact
+and the reported breakpoints are the real ones. Use this when a perturbation is
+large enough to change the active set more than once, or when you want the
+events rather than only the endpoint.
 
 ### Degenerate LPs need crossover
 

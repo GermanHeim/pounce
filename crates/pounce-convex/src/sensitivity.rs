@@ -69,7 +69,9 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use pounce_sens_core::backsolver::{BoundRow, SensBacksolver};
-use pounce_sens_core::boundcheck::{BoundMultiplier, RefineStop, refine_step_onto_bounds};
+use pounce_sens_core::boundcheck::{
+    BoundMultiplier, PathSegment, RefineStop, refine_step_onto_bounds, step_along_path,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -278,6 +280,20 @@ pub struct QpSensitivity {
     last_residual: Option<f64>,
     /// Reusable iterative-refinement buffers.
     ir_scratch: IrScratch,
+    /// Factored (regularized) KKT values; a release starts from these.
+    kkt_vals_reg: Rc<Vec<f64>>,
+    /// Per active bound, the value slots a release neutralizes.
+    release_slots: Rc<Vec<(usize, usize)>>,
+    /// One spare linear-solver instance, drawn from the caller's factory at
+    /// build, reserved for the released system.
+    ///
+    /// Storing an *instance* rather than the factory is what keeps
+    /// [`build`](QpSensitivity::build)'s signature unchanged — boxing the
+    /// factory would have needed an `F: 'static` bound on a published method.
+    /// One instance is enough because at most one released `Factorization` is
+    /// ever created: a different released set refactors it in place, the
+    /// sparsity pattern being identical.
+    release_backend: Rc<RefCell<Option<Box<dyn SparseSymLinearSolverInterface>>>>,
 }
 
 /// Relative threshold below which a slack or a multiplier counts as zero for
@@ -595,6 +611,42 @@ fn assemble_kkt(
     }
 }
 
+/// For each active bound, the two value-array slots a release has to touch:
+/// the `±1` coupling the multiplier row to its variable, and that row's own
+/// diagonal.
+///
+/// Precomputed once at build so a release is an array rewrite plus a
+/// [`Factorization::refactor`] — the sparsity pattern is unchanged by
+/// neutralizing a row, so the symbolic factorization is reused.
+fn release_slots(
+    pat: &KktPattern,
+    abase: usize,
+    n_ineq_active: usize,
+    active_bounds: &[(usize, bool)],
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(active_bounds.len());
+    for (k, &(j, _)) in active_bounds.iter().enumerate() {
+        let row = abase + n_ineq_active + k;
+        // 1-based in the pattern arrays.
+        let (r1, j1) = ((row + 1) as Index, (j + 1) as Index);
+        let mut coupling = usize::MAX;
+        let mut diagonal = usize::MAX;
+        for (idx, (&a, &b)) in pat.airn.iter().zip(pat.ajcn.iter()).enumerate() {
+            if a == r1 && b == j1 {
+                coupling = idx;
+            } else if a == r1 && b == r1 {
+                diagonal = idx;
+            }
+        }
+        debug_assert!(
+            coupling != usize::MAX && diagonal != usize::MAX,
+            "every active bound row has a coupling entry and a diagonal"
+        );
+        out.push((coupling, diagonal));
+    }
+    out
+}
+
 /// Reusable buffers for [`solve_refined`].
 ///
 /// Hoisted out of the function because [`QpKktBacksolver::solve`] is called
@@ -765,13 +817,17 @@ impl QpSensitivity {
             })
             .collect();
 
+        let pat = assemble_kkt(prob, &active_ineq, &active_bounds, reg);
+        let release_slots = release_slots(&pat, n + m_eq, active_ineq.len(), &active_bounds);
         let KktPattern {
             airn: kkt_airn,
             ajcn: kkt_ajcn,
             vals_true: kkt_vals_true,
             vals_reg: values_reg,
             ..
-        } = assemble_kkt(prob, &active_ineq, &active_bounds, reg);
+        } = pat;
+        // Kept for the release path, which starts from the unreleased values.
+        let values_reg_kept = values_reg.clone();
 
         // 1-norm of the factored (regularized) KKT, for the condition estimate.
         let kkt_norm1 = one_norm_sym(dim, &kkt_airn, &kkt_ajcn, &values_reg);
@@ -819,6 +875,9 @@ impl QpSensitivity {
             kkt_cond_estimate,
             last_residual: None,
             ir_scratch: IrScratch::default(),
+            kkt_vals_reg: Rc::new(values_reg_kept),
+            release_slots: Rc::new(release_slots),
+            release_backend: Rc::new(RefCell::new(Some(make_backend()))),
             fact: Rc::new(RefCell::new(fact)),
         })
     }
@@ -1010,6 +1069,11 @@ impl QpSensitivity {
             dim: self.dim,
             bound_rows: Rc::new(bound_rows),
             last_residual: Rc::new(Cell::new(f64::NAN)),
+            vals_reg: Rc::clone(&self.kkt_vals_reg),
+            slots: Rc::clone(&self.release_slots),
+            base_mult: Rc::new(self.bound_base_mult.clone()),
+            released: Rc::new(RefCell::new(None)),
+            release_backend: Rc::clone(&self.release_backend),
         }
     }
 
@@ -1053,20 +1117,7 @@ impl QpSensitivity {
             .ok_or(SensError::FactorizationFailed)?;
 
         let n = self.n;
-        let lo: Vec<f64> = (0..n).map(|j| self.prob.lb_of(j)).collect();
-        let hi: Vec<f64> = (0..n).map(|j| self.prob.ub_of(j)).collect();
-        let x_curr: Vec<f64> = self.base_x.clone();
-        let abase = n + self.m_eq + self.active_ineq.len();
-        let multipliers: Vec<BoundMultiplier> = self
-            .bound_base_mult
-            .iter()
-            .enumerate()
-            .map(|(k, &base)| BoundMultiplier {
-                row: abase + k,
-                base,
-            })
-            .collect();
-
+        let (_, x_curr, lo, hi, multipliers) = self.path_inputs(pin_constraint_indices, deltas);
         let bs = self.backsolver();
         let (dx, pinned, stop) = refine_step_onto_bounds(
             &bs,
@@ -1083,6 +1134,82 @@ impl QpSensitivity {
         .map_err(SensError::Refinement)?;
         self.last_residual = Some(bs.last_residual());
         Ok((dx[..n].to_vec(), pinned, stop))
+    }
+
+    /// The perturbation applied **a little at a time**, stopping at each point
+    /// where the active set changes.
+    ///
+    /// `parametric_step_bounded` repairs one linear predictor. This instead
+    /// walks the perturbation, re-solving at every breakpoint where a variable
+    /// reaches a bound or a bound's multiplier hits zero, so the answer follows
+    /// the piecewise-affine solution path rather than extrapolating across its
+    /// kinks. For a QP the path *is* piecewise affine, so within a segment the
+    /// walk is exact.
+    ///
+    /// Returns `(dx, segments)`; each [`PathSegment`] records the fraction of
+    /// the perturbation at which a bound was reached or released, and which
+    /// variable it belonged to.
+    ///
+    /// Runs `pounce_sens_core::boundcheck::step_along_path` — the NLP arm's
+    /// code, reached through [`backsolver`](Self::backsolver).
+    pub fn parametric_step_path(
+        &mut self,
+        pin_constraint_indices: &[usize],
+        deltas: &[f64],
+        max_iter: usize,
+    ) -> Result<(Vec<f64>, Vec<PathSegment>), SensError> {
+        let (rhs_plain, x_curr, lo, hi, multipliers) =
+            self.path_inputs(pin_constraint_indices, deltas);
+        let bs = self.backsolver();
+        let (dx, segments) = step_along_path(
+            &bs,
+            &rhs_plain,
+            &x_curr,
+            &lo,
+            &hi,
+            &multipliers,
+            max_iter,
+            &[],
+            &[],
+            &[],
+        )
+        .map_err(SensError::Refinement)?;
+        self.last_residual = Some(bs.last_residual());
+        Ok((dx[..self.n].to_vec(), segments))
+    }
+
+    /// The shared inputs the path and bounded modes both need: the compound
+    /// right-hand side, the base point, its bounds, and the active bounds'
+    /// multiplier rows.
+    fn path_inputs(
+        &self,
+        pin_constraint_indices: &[usize],
+        deltas: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<BoundMultiplier>) {
+        assert_eq!(
+            pin_constraint_indices.len(),
+            deltas.len(),
+            "pin_constraint_indices and deltas must have equal length"
+        );
+        let mut rhs_plain = vec![0.0 as Number; self.dim];
+        for (&i, &d) in pin_constraint_indices.iter().zip(deltas) {
+            assert!(i < self.m_eq, "pin constraint index {i} out of range");
+            rhs_plain[self.n + i] += d;
+        }
+        let n = self.n;
+        let lo: Vec<f64> = (0..n).map(|j| self.prob.lb_of(j)).collect();
+        let hi: Vec<f64> = (0..n).map(|j| self.prob.ub_of(j)).collect();
+        let abase = n + self.m_eq + self.active_ineq.len();
+        let multipliers: Vec<BoundMultiplier> = self
+            .bound_base_mult
+            .iter()
+            .enumerate()
+            .map(|(k, &base)| BoundMultiplier {
+                row: abase + k,
+                base,
+            })
+            .collect();
+        (rhs_plain, self.base_x.clone(), lo, hi, multipliers)
     }
 
     /// The achieved complementarity `⟨s, z⟩ / degree` at the solution.
@@ -2221,6 +2348,27 @@ pub struct QpKktBacksolver {
     /// `ill_conditioned` reporting keeps working across boundcheck-driven
     /// solves. A `Cell` because `solve` takes `&self`.
     last_residual: Rc<Cell<f64>>,
+    // --- release support ---
+    /// The factored (regularized) values of the *unreleased* system; a release
+    /// starts from these and neutralizes the released rows.
+    vals_reg: Rc<Vec<f64>>,
+    /// Per active bound, the `(coupling, diagonal)` value slots to neutralize.
+    slots: Rc<Vec<(usize, usize)>>,
+    /// Per active bound, its oriented base multiplier — what
+    /// `solve_released_step` moves onto the variable's `x` row.
+    base_mult: Rc<Vec<f64>>,
+    /// The most recent released system, kept so a repeat costs nothing and a
+    /// *different* release costs one numeric refactorization rather than a new
+    /// symbolic one (the pattern never changes).
+    released: Rc<RefCell<Option<ReleasedFactor>>>,
+    release_backend: Rc<RefCell<Option<Box<dyn SparseSymLinearSolverInterface>>>>,
+}
+
+/// A factored released system, with the released row set it belongs to.
+struct ReleasedFactor {
+    key: Vec<usize>,
+    fact: Factorization,
+    vals_true: Vec<f64>,
 }
 
 impl QpKktBacksolver {
@@ -2294,15 +2442,158 @@ impl SensBacksolver for QpKktBacksolver {
         Some(&self.bound_rows)
     }
 
-    /// `false` in this phase: the refinement pins crossing coordinates but does
-    /// not release a bound whose multiplier the step drives negative.
+    /// Both halves of fix-relax are available on this arm.
     ///
-    /// Releasing needs the released row taken out of the operator. On this arm
-    /// that is cheaper than on the NLP one — the convex active-set KKT carries
-    /// no barrier `σ = z/s` term to destroy, the bound is an explicit row — so
-    /// it is a matter of re-assembling with that row neutralized rather than of
-    /// recovering lost digits. It lands with the path modes.
+    /// Releasing is cheaper here than on the NLP one, and for a structural
+    /// reason worth stating: the NLP's release *must* re-factor because an
+    /// active bound puts `σ = z/s` on the `x` diagonal, and on a tightly
+    /// converged bound that term destroys the released system's information in
+    /// the converged factor — the better the solve converged, the worse a
+    /// recovered answer would be. The convex active-set KKT carries no barrier
+    /// term at all; the bound is an explicit row. Releasing it is exact, and
+    /// costs one numeric refactorization against an unchanged sparsity pattern.
     fn supports_release(&self) -> bool {
-        false
+        true
+    }
+
+    fn solve_released(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.solve_released_inner(released, rhs, lhs, false)
+    }
+
+    fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        self.solve_released_inner(released, rhs, lhs, true)
+    }
+}
+
+impl QpKktBacksolver {
+    /// Index of the active bound whose multiplier lives at compound row `row`.
+    fn bound_at(&self, row: usize) -> Option<usize> {
+        self.bound_rows.iter().position(|b| b.row == row)
+    }
+
+    /// Make the released system current, factoring it if the cached one is for
+    /// a different released set.
+    ///
+    /// Neutralizing a row means zeroing its `±1` coupling to the variable and
+    /// setting its diagonal to `−1`: the row then reads `−dz_a = rhs`, so the
+    /// multiplier decouples and the variable is free. The **sparsity pattern is
+    /// untouched**, which is the point — `refactor` reuses the symbolic
+    /// factorization, so a release costs a numeric factorization rather than a
+    /// fresh analyse.
+    fn ensure_released(&self, key: &[usize]) -> bool {
+        {
+            let cached = self.released.borrow();
+            if cached.as_ref().is_some_and(|rf| rf.key == key) {
+                return true;
+            }
+        }
+        let mut vals_reg = (*self.vals_reg).clone();
+        let mut vals_true = (*self.vals_true).clone();
+        for &row in key {
+            let Some(k) = self.bound_at(row) else {
+                return false;
+            };
+            let (coupling, diagonal) = self.slots[k];
+            vals_reg[coupling] = 0.0;
+            vals_true[coupling] = 0.0;
+            vals_reg[diagonal] = -1.0;
+            vals_true[diagonal] = -1.0;
+        }
+        let mut slot = self.released.borrow_mut();
+        match slot.as_mut() {
+            Some(rf) => {
+                if rf.fact.refactor(&vals_reg).is_err() {
+                    return false;
+                }
+                rf.key = key.to_vec();
+                rf.vals_true = vals_true;
+            }
+            None => {
+                let Some(backend) = self.release_backend.borrow_mut().take() else {
+                    // Already consumed, which cannot happen: the `None` arm
+                    // runs at most once, and the factor it builds is refactored
+                    // thereafter.
+                    return false;
+                };
+                let Ok(fact) = Factorization::new(
+                    self.dim as Index,
+                    (*self.airn).clone(),
+                    (*self.ajcn).clone(),
+                    vals_reg,
+                    backend,
+                ) else {
+                    return false;
+                };
+                *slot = Some(ReleasedFactor {
+                    key: key.to_vec(),
+                    fact,
+                    vals_true,
+                });
+            }
+        }
+        true
+    }
+
+    fn solve_released_inner(
+        &self,
+        released: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+        shift: bool,
+    ) -> bool {
+        if rhs.len() != self.dim || lhs.len() != self.dim {
+            return false;
+        }
+        if released.is_empty() {
+            return self.solve(rhs, lhs);
+        }
+        let mut key = released.to_vec();
+        key.sort_unstable();
+        key.dedup();
+        if !self.ensure_released(&key) {
+            return false;
+        }
+
+        lhs.copy_from_slice(rhs);
+        if shift {
+            // The released multiplier no longer acts on its variable, so its
+            // base value moves onto that variable's `x` row with the sign that
+            // row carries the bound's side with — `−z` for a lower bound,
+            // `+z` for an upper one. Mirrors the NLP arm's
+            // `shift_released_rhs`, which is the reference for this convention.
+            for &row in &key {
+                let Some(k) = self.bound_at(row) else {
+                    return false;
+                };
+                let b = &self.bound_rows[k];
+                if b.var_row >= self.dim {
+                    return false;
+                }
+                lhs[row] = 0.0;
+                let z = self.base_mult[k];
+                lhs[b.var_row] += if b.lower { -z } else { z };
+            }
+        }
+
+        let mut slot = self.released.borrow_mut();
+        let Some(rf) = slot.as_mut() else {
+            return false;
+        };
+        let mut scratch = self.scratch.borrow_mut();
+        let vals_true = rf.vals_true.clone();
+        match solve_refined(
+            &mut rf.fact,
+            &self.airn,
+            &self.ajcn,
+            &vals_true,
+            lhs,
+            &mut scratch,
+        ) {
+            Ok(res) => {
+                self.last_residual.set(res);
+                true
+            }
+            Err(()) => false,
+        }
     }
 }
