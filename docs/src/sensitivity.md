@@ -131,6 +131,60 @@ eigendecomposition; `sens_bound_eps=…` tunes the bound refinement. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 
+### The analysis layer: `pounce.sensitivity`
+
+`solve_with_sens` answers one perturbation. The `pounce.sensitivity`
+subpackage is the whole analysis surface — the step in every mode, what
+the step did about the bounds, the active-set events along a path, and
+the estimation statistics — over a session that is *a solved NL plus the
+factorization it left behind*:
+
+```python
+import pounce
+from pounce.sensitivity import solve_for_sensitivity, solution, covariance
+
+nl = pounce.read_nl("model.nl")
+sess = solve_for_sensitivity(nl, pins={"p": 4})     # 4 is p's pin row
+
+solution(sess, [4], [0.05])                         # the moved solution
+solution(sess, [4], [0.05], mode="fix_relax")       # bounds respected
+solution_report(sess, [4], [0.05])                  # what it did about them
+active_set_changes(sess, [4], [0.05])               # the events, in order
+```
+
+Estimation statistics need the fitted parameters' `.col` columns and the
+residual variables' columns, which is what `declare_sens_fitted` and
+`declare_sens_residual` resolve to on the Pyomo side:
+
+```python
+sess = solve_for_sensitivity(nl, fit_rows={"a": 0}, res_rows={None: [1, 2, 3]})
+cov = covariance(sess)          # cov["a"], cov.std_err["a"], cov.eigen()
+inf = information(sess)         # the reduced Hessian it inverts
+```
+
+A parameter is addressed by the **full-g row** of the defining equality
+it is pinned by; a fitted parameter or residual by its **full-x
+column**. Keys are opaque — they order the result and label it — so
+results come back keyed by whatever the caller keyed the session with
+(names here, Pyomo component data under `pyomo_pounce`).
+
+Two index-space warnings that a caller working in raw rows owns, and
+that a modelling layer would otherwise hide:
+
+- `.col` order is **full-x**; the factor's `x` block is **var-x**, which
+  drops every variable the solve removed as fixed (`lb == ub` under the
+  default `fixed_variable_treatment=make_parameter`). Route every factor
+  index through `session.primal_row()`, which raises rather than
+  returning a neighbouring variable's answer (gh#450).
+- `fit_rows` and `res_rows` hold **variable columns**, not constraint
+  rows, including for the residuals.
+
+`pyomo_pounce` is a caller of this package, not a reimplementation of
+it: `sens_solution`, `sens_solution_report`, `sens_active_set_changes`,
+`sens_covariance` and `sens_information` resolve Pyomo components to
+rows and hand the same session to the same functions. A fix here reaches
+both.
+
 ## Pyomo
 
 `pyomo_pounce` wraps the same machinery in a declare-then-query
@@ -753,9 +807,11 @@ alone: **fixed** Vars, whose bounds the solver never enforces, and Vars
 on **deactivated** Blocks.
 
 This is a deliberate divergence from
-`pyomo.contrib.sensitivity_toolbox`'s `sensitivity_calculation`, which
-substitutes declared Params in constraint expressions only and still
-reports zero for the same model. Four things follow from it:
+`pyomo.contrib.sensitivity_toolbox`, which substitutes declared Params
+in constraint and objective expressions only and so still reports zero
+for the same model; see [Compared with the Pyomo sensitivity
+toolbox](#compared-with-the-pyomo-sensitivity-toolbox). Four things
+follow from the divergence:
 
 - **The bound is dropped from the Var.** `m.x.ub` reads `None` after
   the declaration and the NL row carries the reader's no-bound
@@ -1540,12 +1596,173 @@ against sIPOPT 3.14.19 itself, driven through
 | the barrier correction, at `tol = 1e-3` | 2.4e-7 |
 | the barrier correction, at `tol = 1e-8` | 4e-10 |
 
-Each case is one the other two do not reach. The release case returns
+Each case is one the other two do not reach. For how the two
+interfaces compare feature by feature, rather than number by number,
+see [Compared with the Pyomo sensitivity
+toolbox](#compared-with-the-pyomo-sensitivity-toolbox). The release case returns
 `x = 0` without it where the answer is `1.667`, since the linear step
 preserves complementarity and holds the variable on its bound. The
 barrier case differs by 9e-6 without the correction at `tol = 1e-3`,
 and by 2e-9 at `tol = 1e-8`, which is why it is only visible where the
 solve leaves `mu` loose.
+
+## Compared with the Pyomo sensitivity toolbox
+
+Pyomo ships its own parametric sensitivity interface,
+`pyomo.contrib.sensitivity_toolbox`. It computes the same
+Pirnay–Biegler quantity POUNCE does; the differences are in how the
+computation is reached and in what is built on top of it. Everything
+below is measured against Pyomo 6.10.0.
+
+### What the toolbox is
+
+Four entry points over three backends:
+
+| Entry point | Backend | Returns |
+|---|---|---|
+| `sensitivity_calculation("sipopt"\|"k_aug", m, paramList, perturbList)` | the `ipopt_sens`, or `ipopt` + `k_aug` + `dot_sens`, binaries | a **mutated model** whose `Var` values are the perturbed-solution estimate |
+| `get_dsdp(m, theta_names, theta)` | the `k_aug` binary | `ds/dp` as a SciPy sparse matrix, plus a list of column names |
+| `get_dfds_dcds(m, theta_names)` | `ipopt` + `k_aug --print_kkt` | raw `∇f` and `∇c` at the solution — a building block, not a sensitivity |
+| `pynumero.get_dsdp_dfdp(m, theta)` | PyNumero, no solver | `ds/dp` and `df/dp` for a **square** system by the implicit function theorem |
+| `sipopt()`, `kaug()` | — | deprecated shims for `sensitivity_calculation` |
+
+The first two work by model surgery: clone the model, replace each
+declared `Param` with a `Var`, walk every objective and constraint
+substituting occurrences, deactivate **all** original constraints and
+rebuild them on a new block, add one `paramConst` equality per
+parameter, stamp eight `Suffix` objects, write `.nl`/`.row`/`.col` into
+a temporary directory, shell out to the solver binary, and parse the
+answer back out of files on disk. The rebuild is unconditional — the
+upstream source notes it: *"Unfortunate that this deactivates and
+replaces constraints even if they don't contain the parameters."*
+
+### Capability comparison
+
+| | Pyomo toolbox | `pyomo_pounce` |
+|---|---|---|
+| External binaries | `ipopt_sens` / `k_aug` / `dot_sens` — none on PyPI, all must be built from source | none; in-process through `pounce.read_nl` |
+| Cost per query | model clone + full constraint rebuild + subprocess + file parse | declare once; the KKT factor is retained and each query is one backsolve |
+| Perturbation values | required **before** the solve | not required; ask for any `Δp` afterwards |
+| `dx*/dp` | ✅ `get_dsdp`, whole matrix | ✅ `sens_jacobian(of, wrt=…)`, scalar or `Jacobian` / DataFrame |
+| `dλ/dp`, multiplier sensitivity | ❌ | ✅ pass an equality `Constraint` as `of=` |
+| Total `df/dp` | ❌ | ✅ `sens_jacobian(m.obj, wrt=p)`, explicit partial plus the path through `x*` |
+| Declared `Param` in a variable **bound** | ❌ substitution walks constraints and the objective only, so the derivative reads exactly `0.0` | ✅ rewritten to a row at declaration — see [Declared Params in variable bounds](#declared-params-in-variable-bounds) |
+| Bound crossing (fix-relax) | sIPOPT implements `sens_boundcheck`, but the toolbox never sets it — only `run_sens=yes` | ✅ `mode="fix_relax"`, both the pin and the release half |
+| Stepwise application | ❌ | ✅ `mode="path"`, plus `sens_active_set_changes()` |
+| Barrier corrector | ❌ | ✅ `corrector_iter=` |
+| Degenerate base point | ❌ returns one side silently | ✅ directional derivatives, `degeneracy=`, activity classification, `reduced_activity` / `reduced_row_activity` |
+| What the step did about the bounds | ❌ | ✅ `sens_solution_report()`, clamp warnings |
+| Covariance, standard errors, correlations | ❌ — `parmest` builds its own from `get_dfds_dcds` | ✅ `sens_covariance()` off one solve |
+| Information matrix, identifiability | ❌ | ✅ `sens_information()`, rank and conditioning diagnostics |
+| Reduced Hessian, eigendecomposition | ❌ | ✅ |
+| Refusal on an inertia-corrected factor | ❌ | ✅ `max_pdpert=` |
+| NLP scaling | ❌ | ✅ `user-scaling` respected end to end |
+| Continuation, path following | ❌ | ✅ `continuation()`, `PathFollower`, pseudo-arclength, `inverse_map_rhs` |
+
+### Where the toolbox is the right tool
+
+Three cases, and they are real:
+
+- **Any Ipopt build.** The toolbox is solver-agnostic; `pyomo_pounce`'s
+  sensitivity requires POUNCE to be the solver. If you are committed to
+  a particular Ipopt/HSL configuration, that decides it.
+- **No solver at all.** `pynumero.get_dsdp_dfdp` is a pure
+  equality-Jacobian solve for a square system with as many parameters
+  as degrees of freedom. It ignores inequalities, bounds and
+  multipliers entirely — a limitation for an NLP, and the point for a
+  flowsheet you only want to differentiate.
+- **Incumbency.** `pyomo.contrib.parmest` and `pyomo.contrib.doe` both
+  call `get_dsdp` directly.
+
+### What POUNCE reuses from it
+
+The call-time route — `sens_solve(m, sens_params=[…])` — still runs the
+toolbox's `SensitivityInterface.setup_sensitivity()` on a clone built
+for that one solve and thrown away, so it inherits the unconditional
+constraint rebuild. It does not inherit the bound gap:
+`_reformulate_param_bounds()` runs on the clone immediately afterwards,
+so a `Param` in a variable bound gets a real derivative on that path
+too.
+
+The declared route — `declare_sens_param` — does not touch the toolbox
+at all. No clone, no surgery, the model solves as written.
+
+### Known defects in the toolbox, as of Pyomo 6.10.0
+
+Recorded here because POUNCE reuses part of this module, and because a
+reader comparing numbers across the two needs to know which paths are
+affected.
+
+**A filtered name list indexed against an unfiltered array.**
+`get_dsdp` drops the surgery block's own columns from the name list and
+then indexes the *unfiltered* matrix with the filtered position
+(`sens.py:322–327`):
+
+```python
+col = [i for i in col if sens.get_default_block_name() not in i]
+dsdp_out = np.zeros((len(theta_names), len(col)))
+for j in range(len(col)):
+    dsdp_out[i, j] = -dsdp[i, j]      # dsdp columns are still in NL order
+```
+
+That is only sound if the substituted variables occupy the last
+columns. They do not — the NL writer interleaves them:
+
+```
+0 _SENSITIVITY_TOOLBOX_DATA.p1
+1 x1
+2 _SENSITIVITY_TOOLBOX_DATA.p2
+3 x2
+4 x3
+```
+
+so the row labelled `x1` carries `p1`'s column. `get_dfds_dcds` repeats
+the shape at `sens.py:455`: `gradient_c` is built with unfiltered
+column indices but the filtered width, and `gradient_f` is returned at
+full NL length beside a filtered `col`.
+
+Both sites are reachable only when the declared parameters are
+`Param`s. A declared fixed `Var` takes the other branch of
+`_add_sensitivity_data` — a `Param` is added to the block, which
+creates no column — so the filter removes nothing and the arithmetic
+happens to line up. `parmest` and `contrib.doe` both pass fixed `Var`s,
+and both `test_get_dsdp` cases use `Var`s, so the `Param` path has no
+in-tree caller and no test.
+
+**An acknowledged sign inversion.** `perturb_parameters` carries its own
+note (`sens.py:811`):
+
+> `# FIXME: ^ This is incorrect. DeltaP should be (ptb - current).`
+> `# But at least one test doesn't pass unless I use (current - ptb).`
+
+**An options dict assigned to one option.**
+`sensitivity_calculation` passes the caller's whole `solver_options`
+mapping as the value of a single option (`sens.py:223`):
+
+```python
+ipopt_sens.options['linear_solver'] = solver_options
+```
+
+### None of the three is reachable from POUNCE
+
+- POUNCE never calls `get_dsdp`, never runs `k_aug`, and never parses a
+  `dsdp_in_.in` file. Its own name-to-position mapping is a dict
+  (`_row_index`, `sens.py:603`) and every lookup raises on a miss, so
+  the filter-then-index shape cannot occur. The one place two index
+  spaces genuinely differ — the user's full-x `.col` order against the
+  factor's var-x block, which drops variables removed as fixed — is
+  routed through a single raising accessor, `primal_row()`, and on the
+  Rust side through the `VarX` / `FullX` newtypes in
+  `crates/pounce-sensitivity/src/index.rs`, with leg 3 of
+  `sens_invariance_legs.rs` covering what the newtypes do not.
+- POUNCE calls `setup_sensitivity()` and nothing else. `DeltaP`,
+  `perturb_parameters()` and `sens_state_value_1` are k_aug and sIPOPT
+  wire-format concerns and appear nowhere in `pyomo_pounce`. The
+  right-hand-side shifts are computed in `_perturbation_deltas()`,
+  measured from each pin row's stored right-hand side rather than the
+  `Param`'s current value, and the sign is pinned by the
+  `parametric_cpp` golden comparison above.
+- Solver options are applied one key at a time.
 
 ## Beyond one perturbation
 

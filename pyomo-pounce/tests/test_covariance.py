@@ -100,7 +100,7 @@ def test_eigen_sign_convention_is_deterministic():
     directions on two machines (issue #471). eigen() pins it: the
     largest-magnitude component of each eigenvector is positive, ties
     broken by the earliest `params` position."""
-    from pyomo_pounce.sens import _pin_eigenvector_signs
+    from pounce.sensitivity._stats import _pin_eigenvector_signs
     rng = np.random.default_rng(7)
     A = rng.standard_normal((4, 4))
     A = A + A.T
@@ -639,7 +639,7 @@ def test_mixed_normal_binding_row_warns_not_projects():
 
 
 def test_classify_ratio_covers_all_branches():
-    from pyomo_pounce.sens import _classify_ratio
+    from pounce.sensitivity._stats import _classify_ratio
     assert _classify_ratio(1e-12, 1e-10) == "inactive"
     assert _classify_ratio(1.0, 1e-10) == "weakly_active"
     assert _classify_ratio(1e12, 1e-10) == "strongly_active"
@@ -822,7 +822,7 @@ def test_classify_ratio_agrees_with_the_rust_classifier():
     the Python rule -- which only ever sees a ratio -- neither can nor
     should reproduce it.
     """
-    from pyomo_pounce.sens import _classify_ratio
+    from pounce.sensitivity._stats import _classify_ratio
 
     seen = set()
     for p, expected in ((1.0, "inactive"), (0.0, "weakly_active"),
