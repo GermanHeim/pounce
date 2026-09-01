@@ -319,10 +319,20 @@ Composed with the cold retry, on these two fixtures the policy gives:
   orders above any separating threshold), so no retry happens and the
   honest failure stands.
 
-**Both of gh#884's acceptance criteria, satisfied.** An earlier version of
-this note claimed no solver-observable trigger could do that, on the
-grounds that the property separating the two models is whether the limit
-point is S-stationary and a solver cannot know that in advance. That
+**Two of gh#884's five acceptance criteria, satisfied** — 1 (`qpec_small`
+must not report success at `7.9e+04` unscaled) and 3 (`ralph1` must still
+fail). The other three are untouched by this two-fixture experiment and
+remain open against the route: **2**, a discriminator "checkable at the
+gate" — a minimum `||d||` taken over history while `inf_pr <= 1e-8` is a
+*trajectory statistic*, so a route built on it either has to argue the
+criterion is met in spirit or propose reinterpreting it; **4**, evidence
+it does not relabel any `-exp(x)`-shaped case (gh#274's reproducer); and
+**5**, `scripts/sweep-fixtures.sh` across both legs.
+
+An earlier version of this note claimed no solver-observable trigger could
+satisfy 1 and 3 *together*, on the grounds that the property separating
+the two models is whether the limit point is S-stationary and a solver
+cannot know that in advance. That
 claim was too strong and is **retracted**: the solver does not need to
 know S-stationarity, only to observe that the iterate stopped moving,
 which it can.
@@ -334,8 +344,28 @@ What is *not* established, and would have to be before this ships:
   corpus, is unmeasured — and per CLAUDE.md a threshold with no measured
   population behind it is exactly the kind that gets retuned later by
   someone who cannot see why it was chosen.
-- **Cost.** A cold retry doubles the work on every model that trips the
-  detector, so the false-positive rate is the price, and it is unmeasured.
+- **Cost, and it is not the one to worry about.** A cold retry doubles
+  the work on every model that trips the detector, and that rate is
+  unmeasured. But wall clock is the *cheap* half. The retry's remedy is
+  `perturb_always_cd=yes` — the option **Ruled out 3** above rejects under
+  the heading "trades an honest failure for a silent wrong answer",
+  measured there at `SolveSucceeded` with `f = -2.71e-5`, below
+  `f* = 0`, on `ralph1`. So a false positive does not cost a doubled solve; it routes
+  the model into a configuration measured to return a wrong answer
+  *reported as success* — which is strictly worse than the honest failure
+  the detector exists to preserve, and is the same failure mode this note
+  ruled the option out for. The detector is the entire barrier between
+  those two outcomes, and it currently rests on two data points.
+
+  The consequence for the prototype is concrete: **the retry's answer
+  cannot be trusted on the strength of the detector alone.** It needs a
+  post-check the retry has to pass before its verdict is returned — at
+  minimum the contract in
+  `crates/pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`'s
+  `a_claimed_success_must_be_real` (a claimed success must hold in the
+  model's own units), and on a model with a known bound, that the retried
+  objective has not gone *below* what the un-retried run achieved. Without
+  it, the route's failure mode on a false positive is silent.
 - **Whether the retry converges in general.** It does here; it is a
   different trajectory on every other model.
 - **`ralph1` is one of eight cells.** The other seven are `qpec_small`

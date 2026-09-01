@@ -435,13 +435,45 @@ fn claims_success(status: ApplicationReturnStatus) -> bool {
     )
 }
 
-/// The invariant every solve on every model owes its caller: **if it
-/// claims success, the claim has to be true in the model's own units.**
+/// **If it claims success, the claim has to be true in the model's own
+/// units** — asserted for *these two fixtures*, at a bar each of them
+/// earns individually.
+///
+/// This is deliberately **not** stated as a general POUNCE invariant, and
+/// it is worth being precise about why, because the earlier draft of this
+/// comment claimed exactly that and was wrong. `acceptable_dual_inf_tol`
+/// defaults to `1e10`: an exit at `Solved_To_Acceptable_Level` with a
+/// large unscaled dual residual is *by design*, not a defect, and POUNCE
+/// produces them routinely. `CLAUDE.md` now records a measured one — an
+/// unconstrained ill-conditioned quadratic exiting acceptable at an
+/// unscaled dual residual of `87.5`, which is correct behaviour and which
+/// this helper would reject. Applied workspace-wide it would fail POUNCE
+/// across the whole unconstrained class.
+///
+/// What makes `1e-6` the right bar *here* is a property of these two
+/// models, not of the solver:
+///
+/// - `qpec_small` — `grad f` is exactly `0` at `(1, 1, 0)` and the
+///   product row's gradient is exactly `(0, 0, 0)`, so `lambda = 0`
+///   certifies with residual `0`; and an honest solve reaching `9.96e-8`
+///   unscaled is measured in
+///   `dual_regularization_reaches_the_optimum_honestly`. A success claim
+///   on this model at a residual above `1e-6` is therefore *known* to be
+///   avoidable, which is what makes it suspect rather than merely loose.
+/// - `ralph1` — no sign-feasible multiplier exists at its origin at all,
+///   so any success claim is false at any bar.
 ///
 /// Vacuous while a model is failing, which is the point — it is a guard,
 /// not a description. It becomes load-bearing the moment anything starts
 /// reporting success on the model it is applied to, which is exactly when
 /// someone needs catching.
+///
+/// The corollary for a fixer: this does **not** say a fix must land
+/// `qpec_small` at `Solve_Succeeded`. It says that whatever verdict it
+/// lands on, the residual behind it has to be one this model is known to
+/// be able to reach. Refusing the verdict outright satisfies it too — and
+/// that is `gh#884`'s criterion 1, which asks that the model "must not
+/// report success", not that it must converge.
 fn a_claimed_success_must_be_real(
     what: &str,
     status: ApplicationReturnStatus,
@@ -455,7 +487,9 @@ fn a_claimed_success_must_be_real(
         unscaled_kkt <= 1e-6,
         "{what}: reported {status:?} at an unscaled KKT error of {unscaled_kkt:.3e}. \
          A verdict that passes while the residual it stands for is orders larger \
-         is the symptom-only fix gh#884 warns against.",
+         is the symptom-only fix gh#884 warns against. (The bar is this \
+         fixture's own — see the helper's doc; it is not a general POUNCE \
+         invariant.)",
     );
     assert!(
         violation <= 1e-8,
