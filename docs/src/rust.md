@@ -17,7 +17,7 @@ pounce-rs = "0.9"
 The default build is the NLP path. The convex/conic, active-set QP, and
 sensitivity solvers are behind [feature flags](#feature-flags).
 
-> **Why one crate.** The solver is split across ~20 workspace crates
+> **Why one crate.** The solver is split across ~21 workspace crates
 > (`pounce-nlp`, `pounce-algorithm`, `pounce-convex`, …) whose boundaries move
 > as the code evolves. Depending on them directly couples you to that layout.
 > `pounce-rs` is the stability boundary; everything below is internal.

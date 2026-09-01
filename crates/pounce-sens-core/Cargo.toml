@@ -1,0 +1,18 @@
+[package]
+name = "pounce-sens-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Engine-agnostic core of POUNCE's sensitivity layer: the `SensBacksolver` contract and the parametric machinery built on it (fix-relax, path following, directional derivatives, Schur-complement reduced Hessian)."
+keywords = ["sipopt", "sensitivity", "parametric", "kkt", "optimization"]
+categories = ["mathematics", "algorithms", "science"]
+
+[dependencies]
+pounce-common.workspace = true
+pounce-linalg.workspace = true
+
+[lints]
+workspace = true

@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **New crate `pounce-sens-core`: the engine-agnostic half of the sensitivity
+  layer (Rust API; no behavior change).** POUNCE has two independent
+  sensitivity implementations — `pounce-sensitivity` for the NLP filter-IPM and
+  `QpSensitivity` for the convex QP — sharing no code. The obstacle to sharing
+  was packaging, not design: `crates/pounce-sensitivity/src/boundcheck.rs`'s
+  fix-relax, path-following and directional-derivative machinery is already
+  generic over `SensBacksolver`, a trait whose entire required surface is
+  `dim()` and `solve(rhs, lhs)`, but it sat in a crate that pulls in the whole
+  NLP engine, so the convex arm could not reach it.
+
+  Eight modules move to the new crate — `backsolver`, `boundcheck`,
+  `schur_data`, `schur_driver`, `p_calculator`, `step_calc`, `reduced_hessian`,
+  `sens_app` — which depends only on `pounce-common` and `pounce-linalg`. Both
+  arms can now depend on it without depending on each other.
+
+  **`pounce-sensitivity`'s API is unchanged.** Every moved module is re-exported
+  at its original path, so `pounce_sensitivity::boundcheck::refine_step_onto_bounds`,
+  `pounce_sensitivity::SensBacksolver` and the rest resolve exactly as before;
+  `pounce-rs`'s facade needed no edit. Six of the eight files moved with zero
+  line changes. The two exceptions are the whole of the hand-written diff:
+  `boundcheck::path_direction` becomes `pub` (it was `pub(crate)`, which no
+  longer reaches `solver.rs` across a crate boundary — this is new public
+  surface), and four intra-doc links that pointed from the moved files back into
+  `pounce-sensitivity` are demoted to code spans, since the core cannot link to
+  a crate that depends on it.
+
+  Two parts deliberately did **not** move, and the core's crate doc says so: the
+  corrector and activity classification's plumbing both read the filter-IPM's
+  own eight-block iterate through an `IpoptData` handle and call methods that
+  are not on the trait. Generalizing either means abstracting
+  `IpoptData`/`CalculatedQuantities` behind another trait — a larger change than
+  this one.
+
+  The crates.io publish set goes 20 → 21; `pounce-sens-core` sits between
+  `pounce-linalg` and `pounce-linsol` in the topological publish order.
+
 ### Fixed
 
 - **The gh#884 dual-divergence retry could return an answer *below the known

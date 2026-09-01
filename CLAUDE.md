@@ -16,7 +16,7 @@ topological order. Run it before tagging.
    publishes to PyPI. Version: `python/pyproject.toml`.
 2. **PyPI `pyomo-pounce`** — `.github/workflows/release-pyomo-pounce.yml`,
    triggered by a `pyomo-pounce-vX.Y.Z` tag. Version: `pyomo-pounce/pyproject.toml`.
-3. **crates.io — 20 workspace crates** — automated by
+3. **crates.io — 21 workspace crates** — automated by
    `.github/workflows/release-crates.yml`, triggered by a `vX.Y.Z` tag push
    (or run manually via `workflow_dispatch`, which defaults to a dry run). It
    runs `scripts/publish-crates.sh`, which publishes in topological order and
@@ -213,8 +213,13 @@ dividing by `delta` inflates until, at `1e-10`, it is the whole answer.
 a reason its name does not describe.
 
 A change to membership, to the directional decision, or to any frame
-conversion in `pounce-sensitivity` runs these before merge. A new
-public accessor gets a row in each leg — the cost of leaving one out is
+conversion in the sensitivity layer runs these before merge — that is
+`pounce-sensitivity` **and** `pounce-sens-core`, which holds the
+engine-agnostic half (`SensBacksolver`, `boundcheck`'s fix-relax / path /
+directional machinery, the Schur stack). The legs live in
+`pounce-sensitivity/tests/` and drive the NLP arm, so a `pounce-sens-core`
+change is not exempt from them: it is the arm that exercises the code.
+A new public accessor gets a row in each leg — the cost of leaving one out is
 that the next defect in that dimension is invisible, which is the whole
 history above.
 

@@ -1,9 +1,11 @@
 # The sensitivity-layer review checklist
 
 A companion to `/adversary`. That one hunts for wrong answers from the outside,
-by solving problems whose answers are known. This one reads a **diff** to
-`pounce-sensitivity` and asks the questions that the defects which actually
-shipped from this crate would have been caught by — in a fixed order, so the
+by solving problems whose answers are known. This one reads a **diff** to the
+sensitivity layer — `pounce-sensitivity`, `pounce-sens-core` (the
+engine-agnostic half: the `SensBacksolver` contract, `boundcheck`, the Schur
+stack), and `pounce-convex`'s `sensitivity.rs` — and asks the questions that
+the defects which actually shipped from it would have been caught by — in a fixed order, so the
 same questions get asked by whoever reviews next.
 
 Every entry below carries a worked example from this repository rather than a

@@ -138,7 +138,7 @@ import sys, os
 out = sys.argv[1]
 CORE = ('pounce-algorithm','pounce-qp','pounce-convex','pounce-nlp','pounce-linsol',
         'pounce-feral','pounce-restoration','pounce-presolve','pounce-l1penalty',
-        'pounce-sensitivity','pounce-linalg','pounce-common','pounce-nl')
+        'pounce-sensitivity','pounce-sens-core','pounce-linalg','pounce-common','pounce-nl')
 SKIP = ('debug.rs','iter_dump.rs','iterate_dump.rs','console.rs','output.rs')
 # Examples/benches/bins are not shipped solve paths: 0% there is expected and
 # would otherwise dominate the ranking and crowd out real gaps.

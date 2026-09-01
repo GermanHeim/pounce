@@ -2499,7 +2499,10 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
 /// `pounce_sensitivity::register_options`) because `pounce-algorithm`
 /// cannot depend on `pounce-sensitivity` — the dep edge runs the
 /// other way. Keep this block in sync with
-/// [`pounce_sensitivity::sens_app::register_options`](../../pounce-sensitivity/src/sens_app.rs).
+/// [`pounce_sens_core::sens_app::register_options`](../../pounce-sens-core/src/sens_app.rs)
+/// (re-exported as `pounce_sensitivity::register_options`; the definition
+/// moved to `pounce-sens-core` when the engine-agnostic half of the
+/// sensitivity layer was split out).
 fn register_sipopt_options(r: &RegisteredOptions) -> Result<(), SolverException> {
     r.set_registering_category("sIPOPT");
     r.add_lower_bounded_integer_option(

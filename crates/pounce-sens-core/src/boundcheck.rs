@@ -658,9 +658,10 @@ const WORSE_THAN_PLAIN_FACTOR: Number = 10.0;
 ///
 /// The floor is `1e-9`, which is also what an unset or unreadable
 /// `bound_relax_factor` resolves to, since that is the floor by
-/// definition. Three callers reach this: [`crate::Solver::bound_context`]
-/// off the recorded state, and the CLI and [`crate::SensSolve`] off the
-/// options list through [`crate::options::release_floor_from_options`].
+/// definition. Three callers reach this: `Solver::bound_context` off the
+/// recorded state, and the CLI and `SensSolve` off the options list through
+/// `options::release_floor_from_options` — all three in `pounce-sensitivity`,
+/// which depends on this crate, so they cannot be intra-doc links from here.
 /// One derivation, so they cannot drift on what the solve's own margin
 /// is.
 pub fn release_floor(bound_relax_factor: Number) -> Number {
@@ -1620,7 +1621,7 @@ pub struct WeakBound {
     pub lower: bool,
 }
 
-pub(crate) fn path_direction<B>(
+pub fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
     released: &[usize],
