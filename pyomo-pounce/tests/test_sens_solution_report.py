@@ -8,8 +8,8 @@ import pyomo.environ as pyo
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (sens_active_set_changes, declare_sens_param, sens_solution,
                           sens_solution_report)
-from pyomo_pounce.sens import (_NO_BOUND, _perturbation_deltas, _ratio_test,
-                               _session_for)
+from pounce.sensitivity._step import _NO_BOUND, _ratio_test
+from pyomo_pounce.sens import _perturbation_deltas, _session_for
 
 
 # ── the ratio test on its own ────────────────────────────────────────────────

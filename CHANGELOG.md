@@ -11,6 +11,19 @@ changes.
 
 ### Added
 
+- **`benchmarks/mpcc/`: the MPCC benchmark harness POUNCE has listed as
+  outstanding since pounce#10.** Eleven small complementarity-constrained
+  problems covering strict, biactive, degenerate, infeasible and
+  Boolean-selector cases plus a MacMPEC-style subset, each with a
+  hand-derived optimum that an independent branch-enumeration oracle
+  re-derives; nine solver routes (direct, exact-product/NCP, the three ℓ₁
+  routes, three Scholtes continuations, and the composition of a
+  continuation with an exact-product finish); four kill-switch controls;
+  and a result contract that keeps source-level complementarity and MPCC
+  stationarity strictly apart from the NLP's own residuals. The gate report
+  — supported route, failure boundary, and ownership of every observed gap
+  — is `dev-notes/mpcc-gate0-report.md`.
+
 - **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
   (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
   `dlambda/dp`, but the objective was rejected — `ValueError: obj: not a
@@ -228,8 +241,141 @@ changes.
   Net effect of this and the change above, against the shipped binary: the
   fixture sweep shows **0 status flips, 0 engine flips**, 50 objective moves
   (all toward the declared optimum) and total iterations **5618 → 5407**.
+- **`pounce.sensitivity`: the sensitivity analysis layer is now pounce's, and
+  `pyomo_pounce` is one of its callers.** Every numeric behind
+  `sens_solution()`, `sens_solution_report()`, `sens_active_set_changes()`,
+  `sens_covariance()` and `sens_information()` lived in
+  `pyomo-pounce/pyomo_pounce/sens.py` and was reachable only with Pyomo
+  installed and a Pyomo model in hand — so a `.nl`, CLI or CasADi user had the
+  linear step and the reduced Hessian and nothing else: no fix-relax, no path
+  mode, no corrector, no activity classification, no covariance,
+  no identifiability.
+
+  None of that code was Pyomo-shaped. Measured before the move, 82 of its 100
+  functions contained no Pyomo reference in executable code at all, the
+  headline five (`sens_covariance` at 454 lines, `sens_solution` at 312,
+  `_classify_fitted_block` at 240, `sens_information` at 231,
+  `sens_active_set_changes` at 96) contained **zero**, and
+  `sens_solution_report`'s only two were the `ComponentMap()` it built its
+  answer in. It already worked in row indices and numpy; it was packaged
+  Pyomo-first, not written that way.
+
+  2 400 lines moved to `pounce/sensitivity/`, addressed by row:
+
+  ```python
+  import pounce
+  from pounce.sensitivity import solve_for_sensitivity, solution, covariance
+
+  nl   = pounce.read_nl("model.nl")
+  sess = solve_for_sensitivity(nl, pins={"p": 4})
+  solution(sess, [4], [0.05], mode="fix_relax")
+  ```
+
+  `SensSession` is the seam: a solved NL plus its held factor, keyed by
+  whatever the caller keys it with. `pyomo_pounce._Session` subclasses it and
+  supplies three hooks — `var_key`, `user_row_data`, `new_keymap` — so a Pyomo
+  caller still gets `ComponentMap`s of component data back and a bare-NL caller
+  gets `.col` names. `who=` keeps each wrapper's own function name in the
+  messages its users see, and a `hints` mapping keeps the declarations those
+  messages point at spelled the caller's way (`declare_sens_residual()` for
+  Pyomo, `res_rows=` for everyone else), so no diagnostic now names an API the
+  reader is not using.
+
+  The Pyomo API is unchanged — same functions, same arguments, same result
+  types (`Covariance`, `Information`, `SolutionReport`, `ActiveSetChange` are
+  re-exported from the core), same messages. Its 500 tests pass untouched
+  apart from five imports of internals that moved.
+
+  `python/tests/test_sensitivity_core.py` is the point of the exercise: twelve
+  tests, no Pyomo, checked against closed forms rather than against a previous
+  run — the parametric step against `dx/dp = 1`, `df/dp` against `6p` on the
+  gh#878 model where a chain-rule-only reading returns 0, the covariance
+  against the linear least-squares formula, and the information matrix against
+  `2 sum(t^2)`. Two of them exist because this refactor created a package
+  boundary exactly where full-x meets var-x: a fixture with an equal-bounds
+  variable placed AHEAD of the parameter makes the two spaces genuinely
+  diverge (`primal_row_map() == [0, 1, None, 2]`) and pins the step across it,
+  since reading one space as the other returns a neighbouring variable's
+  answer — plausible, wrong, and gh#450 twice already.
+
+  Two duplications are gone with it. `_NlBridge` is now
+  `pounce.sensitivity.NlBridge`, used by both. And `_curve_fit.py` and the
+  covariance code each carried their own SVD nullspace basis, same formula and
+  same rank tolerance written twice; both now call
+  `pounce._stats_util.nullspace`. Their *covariance* routines are deliberately
+  NOT merged: `curve_fit` reads `inv(H_S)` straight off the factor because its
+  parameters are the decision variables and `K = H_S`, while
+  `pounce.sensitivity` recovers a tangent map because its fitted block sits
+  inside a larger model with equalities. Same word, different computation.
+
+  `pyomo-pounce` now requires `pounce-solver>=0.11.0`, the release this lands
+  in. An older wheel imports but every sensitivity entry point raises
+  `ImportError`, so the floor is a hard requirement.
+
+### Documentation
+
+- **The comparison against `pyomo.contrib.sensitivity_toolbox` is now in one
+  place.** `docs/src/sensitivity.md` said three separate things about the Pyomo
+  toolbox — a divergence note under "Declared Params in variable bounds", the
+  sIPOPT-driven verification table, and nothing at all about the capability
+  gap — so a reader deciding between the two had to assemble the answer
+  themselves. A new "Compared with the Pyomo sensitivity toolbox" section
+  collects it: what the toolbox's four entry points are and which binaries each
+  needs, a feature-by-feature table, the three cases where the toolbox is the
+  right tool (any Ipopt build, `pynumero.get_dsdp_dfdp`'s solver-free square
+  path, and `parmest` / `contrib.doe` incumbency), what POUNCE reuses from it
+  (`setup_sensitivity` on the call-time `sens_params=` route only), and three
+  defects measured against Pyomo 6.10.0 — a filtered name list indexed against
+  an unfiltered array in `get_dsdp` and `get_dfds_dcds`, the acknowledged
+  `DeltaP` sign inversion, and an options mapping assigned to a single option
+  name. None of the three is reachable from POUNCE, and the section says why
+  for each. The two older passages now cross-reference it instead of
+  half-answering the question.
 
 ### Fixed
+
+- **`l1_exact_penalty_barrier` no longer reports success on a point that
+  violates your constraints.** The wrapper solves an augmented problem,
+  `c(x) − p + n = target`, whose equality rows the slack variables satisfy
+  to machine precision by construction — and that residual was what
+  `final_constr_viol` reported. On the MPCC benchmark's `ralph1` the solve
+  returned `Solve_Succeeded` at an objective `5.0e-04` *below* the true
+  optimum, from a point violating its one equality row by `2.5e-07`, while
+  reporting a constraint violation of `9.6e-15`. `final_unscaled_constr_viol`
+  said the same, so no field in the result disclosed it.
+
+  Two things were wrong and both are fixed. The reported violation is now
+  the violation of the rows **you** declared, measured at the returned
+  point, and reported in `final_unscaled_constr_viol` — the original-units
+  field family, which is where that measurement belongs. (`final_constr_viol`
+  and the other `final_*` fields are the internally-scaled residuals; they
+  carry the same number only when no row scaling is active, which is the
+  case in which the two families are defined to agree. Read
+  `final_unscaled_constr_viol` if you are checking ℓ₁ feasibility
+  programmatically.) And the verdict — both the ρ-escalation loop's stopping test and
+  the honest-infeasibility upgrade — is now judged on that same quantity
+  against the tolerances you set (`tol` for a strict success,
+  `acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative and
+  additionally bounded by the absolute `constr_viol_tol` /
+  `acceptable_constr_viol_tol` the rest of the solver judges feasibility
+  by, so that a large-magnitude row cannot buy an unbounded allowance),
+  rather than on the slack sum `Σ(p + n)` against `l1_slack_tol`. `Σ(p + n)`
+  was the wrong quantity twice over: the violation of row `i` is
+  `|pᵢ − nᵢ|`, not `pᵢ + nᵢ`, and at the barrier's interior both slacks
+  stay positive where their difference is zero; and `l1_slack_tol`'s
+  `1e-6` default is four orders looser than a `tol = 1e-8` solve asked
+  for. It keeps its other job — steering ρ, which is what it is right for
+  — and survives as the fallback when a model's rows cannot be evaluated.
+
+  The change is downgrade-only: a solve that meets the strict standard on
+  your rows keeps the status it had, and nothing here turns a failure into
+  a success. In practice the loop now escalates ρ where it used to stop at
+  the penalty point, so answers also improve — `ralph1` moves from
+  `-5.0e-04` to `-5.1e-05` with the reported violation (`2.6e-09`) equal to
+  the actual one, and under `l1_fallback_on_restoration_failure` it now
+  reaches the true optimum with the complementarity product exactly zero.
+  Only solves that opt into the wrapper are affected.
+
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,
   `normalized_optimum_is_genuine` decides whether the rescaled answer may be
@@ -260,35 +406,35 @@ changes.
   for stiffness (`Σ`) and never for complementarity.
 
   Measured on a 72-instance census (`cond` `1e2 ‥ 1e12` × magnitude
-  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not),
-  claimed-optimal-but-wrong falls **17/72 → 9/72** against the census's fixed
-  `1e-6` threshold:
+  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not), scored against the **exact**
+  optimum of each realised problem (gh #882), claimed-optimal-but-wrong falls
+  **17/72 → 9/72** at a `1e-6` relative-error threshold:
 
-  | `cond` | before | after | worst relative error after | census can resolve |
+  | `cond` | before | after | worst relative error after | `ε·cond` |
   |---|---|---|---|---|
   | `1e2`  | 0/12 | 0/12 | 6.4e-08 | 2.2e-14 |
   | `1e4`  | 0/12 | 0/12 | 6.3e-08 | 2.2e-12 |
   | `1e6`  | 2/12 | 0/12 | 3.8e-09 | 2.2e-10 |
-  | `1e8`  | 3/12 | 0/12 | 1.1e-08 | 2.2e-08 |
+  | `1e8`  | 3/12 | 0/12 | 1.4e-08 | 2.2e-08 |
   | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) | 2.2e-06 |
-  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) | 2.2e-04 |
+  | `1e12` | 6/12 | 6/12 | 4.9e-04 (was 7.1e-01) | 2.2e-04 |
 
-  **Read the error column, not the count.** The last column is the census's own
-  resolution: `x* = t` is exact by construction but `P = Q diag(e) Qᵀ` is formed
-  in floating point, so the realised optimum sits `ε·cond·‖t‖` from `t`. At the
-  bottom two rows the `1e-6` threshold is *below* that, so the count there
-  reports the reference's error as the solver's. Per instance, eight of the nine
-  survivors are at or under their own floor (`err/floor` `0.02 ‥ 1.05`) and only
-  one is outside it, by 2×. The signature the issue actually described is gone
-  outright: every failing coupled row in gh #880's table reported `Optimal` in
-  **one** iteration — an inert certificate — and after this change all 72 take
-  3–13. So this is evidence of a fix through `cond = 1e8` and evidence of no
-  regression above it; sharpening the reference so the top of the range means
-  something is gh #882.
+  **The nine survivors are real, and they begin where double precision ends.**
+  `‖Δ‖` is accumulated in `f64`, so this guard cannot resolve a relative error
+  below `ε·cond` — the last column — and cannot reject what it cannot see. A
+  `1e-6` verdict therefore means something only while `ε·cond < 1e-6`, i.e.
+  `cond ≲ 4.5e9`; every conditioning below that boundary is now clean and every
+  survivor is above it, eight of the nine *smaller* than their own floor
+  (`err/(ε·cond)` `0.01 ‥ 0.91`) and one at 2.2×. Closing the residue needs a
+  differently-conditioned estimator, not a tighter cut; it stays open as
+  gh #880.
 
-  Two limits, stated rather than papered over. The estimator computes `‖Δ‖` in
-  double precision, so its own arithmetic floor is `ε·cond` too and at `1e12` it
-  cannot distinguish a small error from zero. And under an equality row the
+  The signature the issue actually described is gone outright, and that one is
+  not a matter of resolution: every failing coupled row in gh #880's table
+  reported `Optimal` in **one** iteration — a certificate accepted without being
+  tested — and after this change the survivors take 5–13.
+
+  One further limit, stated rather than papered over: under an equality row the
   operator above is the wrong one (`A` has no barrier diagonal; the honest form
   is the full saddle system), so the arm declines rather than guessing.
 

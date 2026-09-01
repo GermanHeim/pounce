@@ -27,14 +27,29 @@ for usage. The wrapper carries:
 
 - TNLP wrapper with full solution back-projection and multiplier
   recovery into the original variable space;
-- Byrd-Nocedal-Waltz dynamic-ρ outer loop with honest infeasibility
-  upgrade (saturated slacks → `Infeasible_Problem_Detected`);
+- Byrd-Nocedal-Waltz dynamic-ρ outer loop whose termination and honest
+  infeasibility upgrade are judged on the **original** model's
+  feasibility at the returned point, against the caller's own `tol` /
+  `acceptable_tol` (gh#794). The slack sum `Σ(p + n)` steers ρ, which is
+  what it is the right quantity for; it is not the constraint violation
+  (that is `|pᵢ − nᵢ|` per row) and it is no longer what decides the
+  verdict;
+- original-space reporting that includes the constraint violation:
+  `final_constr_viol` is the violation of the rows the caller declared,
+  not the augmented problem's residual, which the slacks satisfy to
+  machine precision by construction;
 - opt-in auto-fallback on `Restoration_Failed`,
   `Infeasible_Problem_Detected`, `Solved_To_Acceptable_Level`,
   `Maximum_Iterations_Exceeded`, `Not_Enough_Degrees_Of_Freedom`.
 
-Outstanding: MPCC paper reproduction sweep (`benchmarks/mpcc/`).
-Tracking: [pounce#10](https://github.com/jkitchin/pounce/issues/10).
+The MPCC benchmark sweep this crate was long listed as needing now
+exists: [`benchmarks/mpcc/`](../../benchmarks/mpcc/README.md), with the
+gate report at
+[`dev-notes/mpcc-gate0-report.md`](../../dev-notes/mpcc-gate0-report.md).
+It is what found the reporting defect above. On that corpus the ℓ₁
+routes are **not** the recommended one — see the report's route table.
+Tracking: [pounce#10](https://github.com/jkitchin/pounce/issues/10),
+[pounce#794](https://github.com/jkitchin/pounce/issues/794).
 
 ## Algorithmic reference
 

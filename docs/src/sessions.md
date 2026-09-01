@@ -147,6 +147,16 @@ fact.refactor(&new_values)?;       // pattern preserved; numeric reuse
 fact.solve_one(&mut another_rhs)?;
 ```
 
+## The analysis layer above these calls
+
+`Solver` is the primitive; `pounce.sensitivity` is the analysis built on
+it — the parametric step in every mode, what the step did about the
+bounds, the active-set events along a path, parameter covariance and the
+information matrix — over a session that bundles a solved NL with its
+held factor. It has no modelling-layer dependency; `pyomo_pounce` is one
+of its callers. See
+[Sensitivity Analysis](sensitivity.md#the-analysis-layer-pouncesensitivity).
+
 ## What's preserved across operations
 
 * **Symbolic factor / AMD ordering.** Owned by the linear-solver

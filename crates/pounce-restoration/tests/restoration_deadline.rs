@@ -154,8 +154,13 @@ fn feral_backend() -> LinearBackendFactory {
 }
 
 /// Run the fixture with `max_wall_time = budget`; return
-/// `(status, outer_iters, restoration_inner_iters)`.
-fn solve_with_budget(budget: f64, n: usize) -> (ApplicationReturnStatus, i32, i32) {
+/// `(status, outer_iters, restoration_inner_iters, solver_wall_secs)`.
+///
+/// The wall time is the **solver's own** measurement
+/// (`SolveStatistics::total_wallclock_time_secs`), not a clock around the
+/// call, because that is the quantity `max_wall_time` is a bound on. A
+/// clock around the call also charges setup to the budget.
+fn solve_with_budget(budget: f64, n: usize) -> (ApplicationReturnStatus, i32, i32, f64) {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_numeric_value("max_wall_time", budget, true, false)
@@ -176,21 +181,25 @@ fn solve_with_budget(budget: f64, n: usize) -> (ApplicationReturnStatus, i32, i3
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(InfeasibleVec { n }));
     let status = app.optimize_tnlp(tnlp);
     let stats = app.statistics();
-    (status, stats.iteration_count, stats.restoration_inner_iters)
+    (
+        status,
+        stats.iteration_count,
+        stats.restoration_inner_iters,
+        stats.total_wallclock_time_secs,
+    )
 }
 
 #[test]
 fn restoration_grind_honors_wall_deadline() {
     let n = 40;
 
-    // Baseline: a generous budget lets restoration run to completion. Timed,
-    // because the tight budget below is derived from this measurement — a
-    // hard-coded budget cannot be right on every machine (the original
+    // Baseline: a generous budget lets restoration run to completion, and
+    // its solve time sets the scale for the tight budget below. A
+    // hard-coded budget cannot be right on every machine — the original
     // 0.05 s covered ~40% of the grind on a runner that finishes the whole
-    // baseline in ~0.13 s, and the 3× margin assertion flaked).
-    let t0 = std::time::Instant::now();
-    let (base_status, _base_outer, base_inner) = solve_with_budget(60.0, n);
-    let base_elapsed = t0.elapsed().as_secs_f64();
+    // baseline in ~0.13 s.
+    let (base_status, _base_outer, base_inner, base_wall) = solve_with_budget(60.0, n);
+
     // Sanity: the fixture is genuinely restoration-heavy (many inner iters)
     // and does not spuriously "succeed" on an infeasible problem.
     assert!(
@@ -207,17 +216,20 @@ fn restoration_grind_honors_wall_deadline() {
         ),
         "fixture claimed success on an infeasible NLP: {base_status:?}",
     );
+    assert!(
+        base_wall.is_finite() && base_wall > 0.0,
+        "baseline solve reported no wall time ({base_wall}); the budget below \
+         cannot be derived from it",
+    );
 
-    // Tight budget: 1/20 of the measured baseline duration. The solve must
-    // stop on the wall-time limit having done dramatically fewer restoration
-    // inner iterations. Deriving the budget from the baseline (instead of
-    // hard-coding one) makes the 3× margin below machine-independent — it
-    // only fails if machine load drifts by more than ~6× between the two
-    // runs, or if the deadline genuinely stops being honored. Landing at
-    // 1/20 may cut the solve anywhere, including before restoration entry
-    // (tight_inner = 0): that is still correct behaviour, exercising the
-    // pre-loop init check rather than the per-inner-iteration check.
-    let (tight_status, _tight_outer, tight_inner) = solve_with_budget(base_elapsed / 20.0, n);
+    // Tight budget: 1/20 of the baseline's solve time.
+    let budget = base_wall / 20.0;
+    let (tight_status, _tight_outer, tight_inner, tight_wall) = solve_with_budget(budget, n);
+
+    // 1. The deadline is what stopped it. **This is the assertion that
+    //    bites**: disabling `IpoptAlgorithm::deadline_status` (all six of
+    //    its call sites at once) turns this exit into `RestorationFailed`
+    //    and reddens the test here. Verified, not assumed.
     assert!(
         matches!(
             tight_status,
@@ -225,8 +237,52 @@ fn restoration_grind_honors_wall_deadline() {
         ),
         "tight-budget solve did not terminate on the wall-time limit: {tight_status:?}",
     );
+
+    // 2. It stopped *in time* — the property `max_wall_time` actually
+    //    promises, tested in the units the option is written in.
+    //
+    //    This replaces an assertion that the tight leg did at most a third
+    //    of the baseline's restoration inner iterations (gh#246). That was
+    //    a proxy, and it rests on iteration cost being roughly uniform so
+    //    that a twentieth of the time buys about a twentieth of the
+    //    iterations. It is not: measured on one machine the tight leg
+    //    reaches 4 of 89 inner iterations, and on a GitHub runner the same
+    //    code reaches 31 of 89 — a seventh versus a third of the way in,
+    //    from the same budget fraction. The margin was therefore
+    //    machine-dependent for a reason that has nothing to do with the
+    //    deadline, and it failed twice on PR #844 at exactly `31 * 3 = 93`
+    //    against a baseline of `89` while the deadline itself was working.
+    //
+    //    Overshoot is real but bounded: a solve can exceed the budget by at
+    //    most the work it was in the middle of when the deadline passed.
+    //    `OVERSHOOT` is that allowance, and `FLOOR` keeps a very small
+    //    budget from being judged against timer granularity. Measured
+    //    overshoot where this was written is 1.10-1.12x, so the allowance
+    //    is deliberately an order above what is needed: the point is to
+    //    catch a deadline that stopped working, not to police jitter.
+    //
+    //    What this assertion does NOT cover, stated so the next reader is
+    //    not misled: on a machine fast enough that the tight budget is
+    //    spent before restoration gets going, the *per-inner-iteration*
+    //    check in `RestoConvCheckAdapter` is never reached, and disabling
+    //    it changes nothing here (measured: identical `tight_inner` and
+    //    overshoot with that check stubbed out). That was equally true of
+    //    the assertion this replaces. The module doc claims both checks
+    //    are guarded; on a fast machine only the coarse one is.
+    const OVERSHOOT: f64 = 10.0;
+    const FLOOR: f64 = 0.05;
+    let allowed = (budget * OVERSHOOT).max(FLOOR);
     assert!(
-        tight_inner * 3 < base_inner,
+        tight_wall <= allowed,
+        "the wall-time deadline was not honored: budget {budget:.6}s, solve \
+         ran {tight_wall:.6}s, allowed {allowed:.6}s (#246)",
+    );
+
+    // 3. And it really was cut short. Kept as a qualitative check only —
+    //    `base_inner > 50` above stops it being vacuous — because the
+    //    *size* of the reduction is the machine-dependent part.
+    assert!(
+        tight_inner < base_inner,
         "restoration was not cut short by the deadline: tight inner iters \
          = {tight_inner}, baseline = {base_inner} (#246)",
     );

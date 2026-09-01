@@ -98,13 +98,21 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 | [`lpopt/`](lpopt/README.md)         | Hard linear programs (Mittelmann lpopt) | large/degenerate subset | LP *stress* tier from the plato lpopt benchmark (even HiGHS/ipopt time out at short limits); run with a long limit |
 | [`water/`](water/README.md)         | Water-network design | 6 problems | MINLPLib instances, signomial nonlinearities |
 | [`warmstart/`](warmstart/README.md) | Parametric NLP **sequences** | 6 families × 3 step sizes | The one suite that is not a cold-solve set: measures warm starting (cold vs warm × IPM vs active-set SQP) over paths of related NLPs. Python-driven, not `.nl` |
+| [`mpcc/`](mpcc/README.md)           | Complementarity-constrained programs (MPCC) | 11 cases, ≤ 3 vars | gh#794 Gate 0: compares the direct, exact-product/NCP, ℓ₁ exact-penalty and Scholtes-continuation routes on a corpus with known optima and known MPCC stationarity classes. Python-driven, not `.nl` |
 
-The `warmstart/` suite sits outside the `.nl` machinery entirely — it
+The `warmstart/` and `mpcc/` suites sit outside the `.nl` machinery entirely — they
 has no Ipopt reference and does not feed the composite report, because
 it measures a different thing (the cost of a *sequence* of related
 solves, cold vs warm) and needs an in-process solver handle to carry a
 working set between steps. It has its own report at
 `warmstart/results.md`; see [`warmstart/README.md`](warmstart/README.md).
+
+`mpcc/` is the same shape for a different reason: an MPCC has no Ipopt
+reference to compare against because the quantity under test is not
+"did the NLP converge" but *which MPCC stationarity class the returned
+point attains*, which no `.nl` runner reports. Its own report is
+`mpcc/results-full.md`, and the Gate 0 decision it feeds is
+[`dev-notes/mpcc-gate0-report.md`](../dev-notes/mpcc-gate0-report.md).
 
 The GAMS nlpbench harness ([`gams/nlpbench/`](../gams/nlpbench/)) is no
 longer aggregated into the composite report — its problem coverage

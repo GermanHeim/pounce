@@ -1493,8 +1493,39 @@ overriding:
 | `l1_penalty_max`                     | `1e6`   | Maximum penalty weight before declaring infeasibility.     |
 | `l1_penalty_increase_factor`         | `8.0`   | Multiplier applied to ρ each outer iteration.              |
 | `l1_penalty_max_outer_iter`          | `8`     | Maximum penalty outer iterations.                          |
-| `l1_slack_tol`                       | `1e-6`  | Slack tolerance for "constraints satisfied".               |
+| `l1_slack_tol`                       | `1e-6`  | *Fallback* slack tolerance — see below.                    |
 | `l1_steering_factor`                 | `10.0`  | Steering-rule factor for ρ escalation.                     |
+
+The wrapper solves an *augmented* problem, `c(x) − p + n = target` with
+`p, n ≥ 0`, whose equality rows the slacks satisfy to machine precision
+by construction. So neither the residual the inner solve converged nor
+the slack sum `Σ(p + n)` is the violation of the constraints you
+declared — that is `|pᵢ − nᵢ|` per row, and at the barrier's interior
+both slacks stay positive where their difference is zero.
+
+Since gh#794 the wrapper therefore **measures the original model's rows
+and bounds at the returned point**, and judges that violation by the
+tolerances you set — `tol` for a strict `Solve_Succeeded`,
+`acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative in
+both cases — before the ρ loop stops or the honest-infeasibility upgrade
+fires. `l1_slack_tol` survives only as the fallback for a model whose
+rows cannot be evaluated at the returned point, and `Σ(p + n)` keeps its
+other job as the Byrd-Nocedal-Waltz steering signal for ρ escalation.
+
+That measurement is in your model's own units, so it is reported in
+`final_unscaled_constr_viol` (and folded into
+`final_unscaled_kkt_error`), which is where the
+[statistics contract](./python.md) puts original-unit residuals. The
+scaled family — `final_constr_viol`, `final_kkt_error` — carries the
+same number only when no row scaling is active, the case in which the
+two families are defined to agree anyway. Under an active
+`nlp_scaling_method` the scaled fields keep the augmented problem's own
+residuals, because converting the measurement into that space needs
+row-scale factors the wrapper does not have once the inner solve has
+returned. **The exit status is unaffected either way**: it is decided
+from the measurement directly, not from these fields. If you are
+checking ℓ₁ feasibility programmatically, read
+`final_unscaled_constr_viol`.
 
 ## NLP Presolve
 

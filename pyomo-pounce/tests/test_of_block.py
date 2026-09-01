@@ -19,7 +19,7 @@ from pyomo_pounce import (
     sens_covariance,
     sens_information,
 )
-from pyomo_pounce.sens import _rank_deficient
+from pounce.sensitivity._stats import _rank_deficient
 
 N = 25
 SIGMA = 0.3
