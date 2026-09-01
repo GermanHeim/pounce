@@ -874,11 +874,6 @@ impl PyQpSensitivity {
                  This should be unreachable from Python, where the QP is solved \
                  internally as an orthant problem — please report it."
             )),
-            SensError::UnsupportedCone { block, family } => PyValueError::new_err(format!(
-                "QpSensitivity: cone block {block} is a {family} cone, which has no \
-                 sensitivity implementation. This should be unreachable from Python, \
-                 which exposes no `cones=` argument — please report it."
-            )),
             SensError::NonsmoothConePoint { block, what } => PyValueError::new_err(format!(
                 "QpSensitivity: cone block {block} sits at a nonsmooth point ({what}).                  This should be unreachable from Python, which exposes no `cones=`                  argument — please report it."
             )),
@@ -958,7 +953,6 @@ impl PyQpSensitivity {
             // `Ok`. Named rather than caught by `_` so that adding a variant
             // `reduced_hessian` *can* raise fails the build here.
             SensError::NotOrthantComplementary { .. }
-            | SensError::UnsupportedCone { .. }
             | SensError::ConePartitionMismatch { .. }
             | SensError::NonsmoothConePoint { .. }
             | SensError::Refinement(_) => PyValueError::new_err(

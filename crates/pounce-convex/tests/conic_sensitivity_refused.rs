@@ -25,7 +25,7 @@
 //!   block, which is a legitimate input, so `build` accepts it — and answers
 //!   with the wrong active object. Only `build_conic` is told, and
 //!   `the_apex_case_needs_the_cone_partition` pins that difference: `build`
-//!   is silent, `build_conic` classifies the block as `SocBlockKind::Apex`.
+//!   is silent, `build_conic` classifies the block as `ConeBlockKind::Apex`.
 //!   The classification's *numerics* are `convex_soc_sensitivity.rs`'s.
 //! - **Correctness of any conic `dx/db`.** Nothing here computes one; the
 //!   whole point is that none is computed yet.
@@ -49,14 +49,18 @@
 //! |---|---|---|
 //! | delete the `check_orthant_complementarity(..)?` call in `build` | `a_solved_socp_is_refused` alone | fails at the `Ok(_)` arm — i.e. the solved SOCP is *accepted*, which is the original defect reproduced |
 //! | `ORTHANT_GUARD_REL` `1e-4` → `1e-30` | `an_orthant_qp_still_builds`, `build_conic_on_an_all_nonneg_partition_matches_build` | the false-positive direction; `an_orthant_lp_still_builds` stays green because it has no inequality rows |
-//! | `cone_family` returns `"Nonneg"` for every family | `build_conic_refuses_every_unsupported_family` | the refusal must name the family, not merely occur |
-//! | `build_conic`'s `_ =>` arm falls through to the orthant path | `build_conic_refuses_every_unsupported_family` | reproduces the original defect for the three unimplemented families |
-//! | `soc_block_rows`'s apex branch returns `Interior` | `the_apex_case_needs_the_cone_partition` | an apex read as interior contributes no rows, so the block silently stops constraining `dx` |
+//! | `cone_block_face`'s apex branch returns `Interior` | `the_apex_case_needs_the_cone_partition` | an apex read as interior contributes no rows, so the block silently stops constraining `dx` |
+//!
+//! There is no longer a "refuses an unimplemented family" test here, because
+//! there is no longer an unimplemented family: `cone_block_face`'s `match` is
+//! exhaustive over `ConeSpec`, so a family added without a face decomposition
+//! is a **compile** error. `convex_cone_sensitivity.rs` asserts each family
+//! reaches a classification rather than an error.
 
 use pounce_convex::cones::ConeSpec;
 use pounce_convex::ipm::{solve_qp_ipm, solve_socp_ipm};
 use pounce_convex::qp::{QpProblem, QpStatus, Triplet};
-use pounce_convex::sensitivity::{QpSensitivity, SensError, SocBlockKind};
+use pounce_convex::sensitivity::{ConeBlockKind, QpSensitivity, SensError};
 use pounce_convex::{QpOptions, QpSolution};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -175,45 +179,6 @@ fn a_solved_socp_is_refused() {
              as an orthant row and `parametric_step` will return a number that is not a \
              derivative. This is the defect the guard exists for."
         ),
-    }
-}
-
-/// `build_conic` refuses every family it has not implemented, naming the block
-/// and the family so the message is diagnosable.
-#[test]
-fn build_conic_refuses_every_unsupported_family() {
-    // Four inequality rows so `[Nonneg(1), spec]` covers the block exactly —
-    // every family below has `dim() == 3`. A short partition would be refused
-    // as a `ConePartitionMismatch` instead, which is a different test.
-    let prob = orthant_qp_with_ineq_rows(4);
-    let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
-    assert_eq!(sol.status, QpStatus::Optimal);
-
-    // `SecondOrder` is deliberately absent: it is implemented, and
-    // `convex_soc_sensitivity.rs` owns it. The three below are the families
-    // the crate still has no tangent/normal decomposition for.
-    for (spec, family) in [
-        (ConeSpec::Exponential, "Exponential"),
-        (ConeSpec::Power(0.5), "Power"),
-        (ConeSpec::Psd(2), "Psd"),
-    ] {
-        assert_eq!(
-            spec.dim(),
-            3,
-            "the fixture sizing assumes dim 3 for {family}"
-        );
-        // Block 0 is a Nonneg the builder would accept; the unsupported family
-        // is block 1, so this also pins that the *index* is reported, not 0.
-        let cones = [ConeSpec::Nonneg(1), spec];
-        match QpSensitivity::build_conic(&prob, &cones, &sol, &QpOptions::default(), 1e-7, backend)
-        {
-            Err(SensError::UnsupportedCone { block, family: got }) => {
-                assert_eq!(block, 1, "the refusal must name the offending block");
-                assert_eq!(got, family, "the refusal must name the cone family");
-            }
-            Err(other) => panic!("{family} must be refused as UnsupportedCone, got {other:?}"),
-            Ok(_) => panic!("{family} must be refused by build_conic, but it was accepted"),
-        }
     }
 }
 
@@ -393,7 +358,7 @@ fn the_apex_case_needs_the_cone_partition() {
     };
     assert_eq!(
         conic.cone_block_kinds(),
-        [(0, SocBlockKind::Apex)],
+        [(0, ConeBlockKind::Apex)],
         "the block must be classified as an apex, not as an interior or a boundary"
     );
 }

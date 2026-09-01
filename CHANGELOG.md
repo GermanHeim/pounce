@@ -11,20 +11,49 @@ changes.
 
 ### Added
 
-- **Second-order-cone sensitivity on the convex arm (Rust API).**
-  `QpSensitivity::build_conic` now answers for `ConeSpec::SecondOrder` blocks
-  instead of refusing them. Each block is classified by the *face* its slack
-  sits on — `SocBlockKind::{Interior, Apex, Boundary}`, reported by the new
-  `cone_block_kinds()` — and contributes accordingly: nothing when the block is
-  slack, every row of the block at the apex (a single point, hence a flat face
-  and an exact predictor), and one row `wᵀG` with `w = (1, −s₁/s₀)` on the
-  boundary. `ConeSpec::Psd`, `Exponential` and `Power` still return
-  `SensError::UnsupportedCone`.
+- **Two conic thresholds are calibrated off measured populations, and the
+  measurements are recorded** (`FACET_ACTIVE_REL`, `FACET_DUAL_REL`). The
+  exponential and power cones route to the non-symmetric HSDE driver, whose
+  achieved accuracy is well short of the symmetric IPM's, so a threshold that
+  is right for a second-order block refuses correct non-symmetric solutions.
+  Across four fixtures at two tolerances, `|φ|/primal_scale` runs `4.1e-10` to
+  `2.1e-9` and the dual-parallelism residual runs `2.8e-8` to `3.4e-5`; the
+  first value tried for the latter, `1e-6`, refused two of the four correct
+  solutions. The constants are `1e-6` and `1e-3`, each with its measured
+  population and its failure mode written at the definition.
+
+- **Conic sensitivity on the convex arm, every `ConeSpec` family (Rust API).**
+  `QpSensitivity::build_conic` now answers for cones instead of refusing them.
+  Each block is classified by the *face* its slack sits on —
+  `ConeBlockKind::{Interior, Apex, Boundary}`, reported by the new
+  `cone_block_kinds()` — and contributes that face's rows and curvature:
+
+  | family | boundary face | rows |
+  |---|---|---|
+  | `SecondOrder(k)` | `s₀ = ‖s₁‖ > 0` | 1, `wᵀG` with `w = (1, −s₁/s₀)` |
+  | `Psd(n)` at rank `r` | the constant-rank manifold | `q(q+1)/2`, `q = n − r` |
+  | `Exponential` | `y·log(z/y) − x = 0`, `y, z > 0` | 1, `∇φᵀG` |
+  | `Power(α)` | `y^α z^{1−α} − |x| = 0`, `y, z > 0` | 1, `∇φᵀG` |
+
+  `Interior` contributes nothing; `Apex` (`s ≈ 0`, and for a PSD block the
+  rank-zero end of the same stratification) pins the whole block on a face that
+  is a single point, hence flat, hence an exact predictor.
+
+  `SensError::UnsupportedCone` is **removed**. There is no unsupported family
+  left, and the `match` that dispatches the face decomposition is exhaustive
+  over `ConeSpec`, so a family added later is a compile error rather than a
+  runtime refusal — a stronger promise than a message, and an empty error
+  category is a documentation hazard. What is refused is a *point*, not a
+  family: see `SensError::NonsmoothConePoint` below.
 
   **A boundary face is curved, and its curvature is part of the answer, not a
-  refinement.** The sensitivity KKT's `(x,x)` block is `P` plus
-  `(ν/s₀)·(Σ_{r≥1} gᵣgᵣᵀ − uuᵀ)`, the Hessian of `−ν(s₀ − ‖s₁‖)`. Written
-  without it — which is the natural first draft, since every orthant row and
+  refinement.** The sensitivity KKT's `(x,x)` block is `P` plus the active
+  face's own Hessian — `(ν/s₀)·(Σ_{r≥1} gᵣgᵣᵀ − uuᵀ)` for a second-order
+  block, `−ν·Gᵀ∇²φ G` for a non-symmetric one, and
+  `2·Σ_{l,k} (λ_k/a_l)·c_lk c_lkᵀ` for a PSD block at constant rank (from the
+  Schur complement `C − BᵀA⁻¹B`, with `a_l, ũ_l` the slack's positive
+  eigenpairs, `λ_k, w̃_k` the dual's, and `c_lk = Gᵀ svec(sym(ũ_l w̃_kᵀ))`).
+  Written without it — which is the natural first draft, since every orthant row and
   variable bound is a hyperplane carrying none — the step converges to the
   **wrong derivative**, not to an approximate one: on the fixture in
   `crates/pounce-convex/tests/convex_soc_sensitivity.rs`, `dx/db` reads
@@ -37,10 +66,22 @@ changes.
   New refusals, all `SensError::NonsmoothConePoint { block, what }`, covering
   the points where `dx/db` does not exist or cannot be computed from the numbers
   to hand: a collapsed dual at the apex or on the boundary (the conic analogue
-  of a weakly active row — two-valued, exactly as on the NLP arm), a boundary
-  point too close to the apex for its normal to mean anything, a slack outside
-  the cone beyond the solve tolerance, and a strictly-interior block that does
-  not complement. Refusing is the same posture the orthant guard shipped with:
+  of a weakly active row — two-valued, exactly as on the NLP arm), a
+  second-order boundary point too close to the apex for its normal to mean
+  anything, a slack outside the cone beyond the solve tolerance, a
+  strictly-interior block that does not complement, a PSD block where strict
+  complementarity fails (`rank Z ≠ n − rank S`, so a direction exists along
+  which slack and multiplier vanish together), the exponential and power cones'
+  degenerate `y = 0` / `z = 0` faces where the boundary has no tangent plane,
+  and a non-symmetric dual that is not on the ray normal to the facet being
+  linearized.
+
+  There is deliberately **no** guard for the power cone's `|x| = 0` kink: a
+  boundary point with `x = 0` needs `y^α z^{1−α} = 0`, i.e. `y = 0` or `z = 0`,
+  which the face guard already refuses. With `y, z > 0` the two sheets `x = ±g`
+  are each smooth and never meet, so a kink guard there would be unreachable
+  code that reads like coverage. The geometry is asserted instead of the
+  branch. Refusing is the same posture the orthant guard shipped with:
   a cone read as the wrong face returns a plausible number that is not a
   derivative.
 
@@ -365,11 +406,10 @@ changes.
 
   New `QpSensitivity::build_conic(prob, cones, sol, opts, active_tol, backend)`
   is the entry point for a problem that carries cones. An all-`Nonneg`
-  partition *is* the orthant problem and behaves exactly as `build`; every
-  other family returns the new `SensError::UnsupportedCone { block, family }`.
-  Refusing is the point — a cone's active object is the tangent/normal
-  decomposition of the face its slack sits on, not a set of rows, and there is
-  no sensitivity implementation for it yet.
+  partition *is* the orthant problem and behaves exactly as `build`. (This
+  change originally refused every other family with a
+  `SensError::UnsupportedCone`; the conic entry above implements them all in
+  the same release, and that variant no longer exists.)
 
   One limit is documented and pinned rather than hidden: a second-order cone at
   its apex with a zero dual tail is row-wise indistinguishable from orthant

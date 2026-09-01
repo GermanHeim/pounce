@@ -322,7 +322,7 @@ product `⟨s, z⟩ = 0`.
 Python callers were never exposed to this: `pounce.qp.QpSensitivity` solves
 internally with the QP interior-point solver and accepts no `cones=`.
 
-### Cones: second-order yes, the rest refused
+### Cones: the face, not the rows
 
 Use `QpSensitivity::build_conic(prob, cones, sol, opts, active_tol, backend)`
 for a problem that carries cones. An all-`Nonneg` partition *is* the orthant
@@ -330,32 +330,52 @@ problem and delegates to `build`, so the two entry points cannot answer
 differently on the same input.
 
 A cone's active object is not a set of rows. Its slack sits on a **face**, and
-for a second-order cone `SOC(k) = { (s₀, s₁) : s₀ ≥ ‖s₁‖ }` there are three,
-reported by `cone_block_kinds()` as `SocBlockKind`:
+every family splits the same three ways — reported by `cone_block_kinds()` as
+`ConeBlockKind`:
 
 | face | what it contributes | predictor |
 |---|---|---|
-| `Interior` — `s₀ > ‖s₁‖` | nothing: the block is not binding | exact |
+| `Interior` — `s` strictly inside, `z = 0` | nothing: the block is not binding | exact |
 | `Apex` — `s ≈ 0` | every row of the block (`ds` must keep `s = 0`) | exact — a point is a flat face |
-| `Boundary` — `s₀ = ‖s₁‖ > 0` | one row, `wᵀG` with `w = (1, −s₁/s₀)` | first order — the face is curved |
+| `Boundary` | the face's own rows, below | first order — every one of these faces is curved |
 
-`Psd`, `Exponential` and `Power` blocks return `SensError::UnsupportedCone`,
-naming the block index and the family. The exponential and power cones are
-non-symmetric and have no Nesterov–Todd block to build a normal from; the PSD
-cone is tractable at constant rank and is simply not done yet.
+What the boundary face *is*, and how many rows it contributes, is per family:
+
+| family | face | rows |
+|---|---|---|
+| `SecondOrder(k)` | `s₀ = ‖s₁‖ > 0` | 1, `wᵀG` with `w = (1, −s₁/s₀)` |
+| `Psd(n)` at rank `r` | the constant-rank manifold `{X ⪰ 0 : rank X = r}` | `q(q+1)/2` with `q = n − r`, one per pair of kernel vectors |
+| `Exponential` | `φ = y·log(z/y) − x = 0`, `y, z > 0` | 1, `∇φᵀG` |
+| `Power(α)` | `φ = y^α z^{1−α} − |x| = 0`, `y, z > 0` | 1, `∇φᵀG` |
+
+The PSD case is the one that is not just another smooth facet: its face has
+codimension `q(q+1)/2`, so a `Psd(3)` block at rank 1 contributes **three**
+rows. Its tangent is `Vᵀ dX V = 0` for `V` a basis of `ker S`, which is the
+first-order form of the Schur complement `C − Bᵀ A⁻¹ B` vanishing.
+
+There is no "unsupported cone" error. The `match` that dispatches the face
+decomposition is exhaustive over `ConeSpec`, so a family added later is a
+compile error rather than a runtime refusal — a stronger promise than a
+message, and it keeps an empty error category from sitting in the public API
+looking like a live one. What gets refused is a **point**, not a family.
 
 #### The boundary curvature is part of the answer
 
 Every orthant row and every variable bound is a hyperplane, so the sensitivity
-KKT's `(x,x)` block is the objective's Hessian `P` and nothing else. A
-second-order boundary face is **curved**, and its curvature enters the same
-block:
+KKT's `(x,x)` block is the objective's Hessian `P` and nothing else. Every
+conic boundary face is **curved**, and its curvature enters the same block:
 
 ```text
-  H = P + (ν/s₀) · ( Σ_{r≥1} gᵣgᵣᵀ − u uᵀ ),   u = Σ_{r≥1} (sᵣ/s₀) gᵣ
+  second-order:   H = P + (ν/s₀) · ( Σ_{r≥1} gᵣgᵣᵀ − u uᵀ ),  u = Σ_{r≥1} (sᵣ/s₀) gᵣ
+  exp / power:    H = P − ν · Gᵀ ∇²φ G                        (rank one, both)
+  PSD at rank r:  H = P + 2 · Σ_{l ≤ r} Σ_{k ≤ q} (λ_k / a_l) · c_lk c_lkᵀ,
+                  c_lk = Gᵀ svec(sym(ũ_l w̃_kᵀ))
 ```
 
-with `ν = z₀` the multiplier on `φ(s) = s₀ − ‖s₁‖`. This is not a refinement.
+with `ν` the multiplier on the facet's `φ`, and for the PSD case `a_l, ũ_l` the
+slack's positive eigenpairs and `λ_k, w̃_k` the dual's. Every one of these is
+positive semidefinite, as a concave constraint's contribution must be. This is
+not a refinement.
 Omit it and the step converges to the **wrong derivative**: on the worked
 fixture in `crates/pounce-convex/tests/convex_soc_sensitivity.rs`, `dx/db`
 reads `(0.348, 0.652)` where the closed-form answer is `(0.5, 0.5)`, at every
@@ -375,12 +395,31 @@ does not exist, or cannot be computed from the numbers to hand:
   perturbation pushes the block off its face. The NLP arm answers this class
   with a *directional* mode; the convex arm does not have one for cones yet, so
   it refuses rather than silently picking a side.
-- **a boundary point too close to the apex**, where `w = (1, −s₁/s₀)` would be
-  built by dividing by round-off.
+- **a second-order boundary point too close to the apex**, where
+  `w = (1, −s₁/s₀)` would be built by dividing by round-off.
 - **a slack outside the cone** beyond the solve's own tolerance: there is no
   face to linearize against.
 - **a strictly interior block that does not complement** (`⟨s, z⟩ ≫ 0`) — not a
   converged optimum, whatever its status field says.
+- **a PSD block where strict complementarity fails** (`rank Z ≠ n − rank S`).
+  That equality is what makes `ker S` the whole normal direction; without it a
+  direction exists along which slack and multiplier vanish together, and
+  `dx/db` is two-valued along it.
+- **the exponential and power cones' degenerate faces** (`y = 0`, `z = 0`),
+  where the boundary has no tangent plane. There is deliberately no guard for
+  the power cone's `|x| = 0` kink: `x = 0` on the boundary forces
+  `y^α z^{1−α} = 0`, i.e. one of those faces, so with `y, z > 0` the two smooth
+  sheets `x = ±g` never meet. A guard there would be unreachable code that
+  reads like coverage.
+- **a non-symmetric dual off the facet's normal ray.** At a facet interior the
+  normal cone *is* `ℝ₊∇φ`, so `z = ν∇φ` is the optimality condition, not an
+  approximation.
+
+Two of these thresholds are calibrated against the **non-symmetric** driver,
+whose accuracy is well short of the symmetric IPM's, and the measured
+populations are recorded at their definitions rather than left as round
+numbers — the first value tried for the dual-ray test refused two of four
+correct solutions.
 
 The apex/boundary decision is relative to the problem's primal scale
 (`max(‖h‖∞, ‖Gx‖∞, 1)`), the same quantity the orthant guard above uses, so the

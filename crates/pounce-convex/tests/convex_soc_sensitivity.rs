@@ -76,7 +76,7 @@ use pounce_convex::QpOptions;
 use pounce_convex::cones::ConeSpec;
 use pounce_convex::ipm::solve_socp_ipm;
 use pounce_convex::qp::{QpProblem, QpSolution, QpStatus, Triplet};
-use pounce_convex::sensitivity::{QpSensitivity, SensError, SocBlockKind};
+use pounce_convex::sensitivity::{ConeBlockKind, QpSensitivity, SensError};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -205,10 +205,10 @@ fn the_three_fixtures_take_different_branches() {
         (
             "boundary",
             boundary(1.0) as QpProblem,
-            SocBlockKind::Boundary,
+            ConeBlockKind::Boundary,
         ),
-        ("apex", apex(1.0), SocBlockKind::Apex),
-        ("interior", interior(1.0), SocBlockKind::Interior),
+        ("apex", apex(1.0), ConeBlockKind::Apex),
+        ("interior", interior(1.0), ConeBlockKind::Interior),
     ];
     let mut seen = Vec::new();
     for (name, prob, want) in cases {
@@ -414,7 +414,7 @@ fn the_apex_face_pins_the_whole_block() {
     let prob = apex(1.0);
     let sol = solve(&prob);
     let mut sens = sens_for(&prob, &sol);
-    assert_eq!(sens.cone_block_kinds(), [(0, SocBlockKind::Apex)]);
+    assert_eq!(sens.cone_block_kinds(), [(0, ConeBlockKind::Apex)]);
 
     for delta in [1e-2, 1e-4] {
         let dx = sens.parametric_step(&[0], &[delta]);
@@ -454,7 +454,7 @@ fn an_interior_block_contributes_nothing() {
     let prob = interior(1.0);
     let sol = solve(&prob);
     let mut sens = sens_for(&prob, &sol);
-    assert_eq!(sens.cone_block_kinds(), [(0, SocBlockKind::Interior)]);
+    assert_eq!(sens.cone_block_kinds(), [(0, ConeBlockKind::Interior)]);
     assert_eq!(
         sens.kkt_dim(),
         prob.n + prob.m_eq(),
@@ -521,7 +521,7 @@ fn a_mixed_partition_classifies_each_block_by_its_own_rule() {
         .expect("a Nonneg + SecondOrder partition is fully supported");
     assert_eq!(
         sens.cone_block_kinds(),
-        [(1, SocBlockKind::Boundary)],
+        [(1, ConeBlockKind::Boundary)],
         "only the cone block is reported, and by its own index in the partition"
     );
     // The inactive orthant row contributes nothing; the cone boundary
@@ -567,7 +567,7 @@ fn the_classification_is_unmoved_by_scaling_the_cone_block() {
         let mut sens = sens_for(&scaled, &sol);
         assert_eq!(
             sens.cone_block_kinds(),
-            [(0, SocBlockKind::Boundary)],
+            [(0, ConeBlockKind::Boundary)],
             "scaling the block by {c:e} must not change which face it is on"
         );
         let dx = sens.parametric_step(&[0], &[delta]);
@@ -628,7 +628,7 @@ fn the_apex_decision_is_relative_to_the_problems_scale() {
         .expect("an apex with a live dual is a supported face");
     assert_eq!(
         sens.cone_block_kinds(),
-        [(0, SocBlockKind::Apex)],
+        [(0, ConeBlockKind::Apex)],
         "a slack of {:e} against problem data of {BIG:e} is at the apex under the \
          problem-relative rule; reading it as a boundary point is what an absolute \
          threshold does",
@@ -718,7 +718,7 @@ fn a_boundary_with_a_collapsed_dual_is_refused() {
 /// On the boundary with `s₀` at round-off: `w = (1, −s₁/s₀)` would be a
 /// direction made of noise. This is the thin band between the two relative
 /// tests, and this test is the evidence that it is reachable rather than dead
-/// code — see `soc_block_rows`' own documentation for why it is thin.
+/// code — see `soc_face`' own documentation for why it is thin.
 #[test]
 fn a_boundary_point_too_close_to_the_apex_is_refused() {
     assert_nonsmooth(

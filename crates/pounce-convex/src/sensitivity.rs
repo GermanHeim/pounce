@@ -64,6 +64,7 @@
 
 use crate::activity::{ConvexActivityReport, classify_all, curvature_floor};
 use crate::cones::ConeSpec;
+use crate::cones::psd::smat;
 use crate::ipm::QpOptions;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_common::types::{Index, Number};
@@ -128,20 +129,6 @@ pub enum SensError {
     /// The bound refinement could not run — a shape mismatch or a back-solve
     /// failure inside `pounce-sens-core`, carrying that layer's own message.
     Refinement(String),
-    /// The problem carries a cone family whose sensitivity is not implemented.
-    ///
-    /// Raised only by [`build_conic`](QpSensitivity::build_conic). Refusing is
-    /// deliberate: the alternative is a number that looks like a derivative and
-    /// is not one.
-    /// `ConeSpec` is deliberately not `Eq` (it carries `Power(f64)`), so the
-    /// family travels as its name rather than the spec — keeping `SensError`
-    /// `Eq`, which it has always been.
-    UnsupportedCone {
-        /// Index into the `&[ConeSpec]` slice.
-        block: usize,
-        /// The cone family that is not yet supported, e.g. `"SecondOrder"`.
-        family: &'static str,
-    },
     /// The solution sits at a point where the cone's face is not differentiable
     /// — an apex reached along the boundary, a collapsed normal — so there is no
     /// single `dx/db` to report.
@@ -226,29 +213,39 @@ fn check_orthant_complementarity(
 ///
 /// A cone's "active set" is not a set of rows. Its slack `s` sits somewhere on
 /// the cone, and what the sensitivity needs is the *face* it sits on — the
-/// tangent/normal decomposition there. For `SOC(k) = { (s₀, s₁) : s₀ ≥ ‖s₁‖ }`
-/// there are three regimes and they behave very differently.
+/// tangent/normal decomposition there. Every family in [`ConeSpec`] splits the
+/// same three ways, which is why one enum serves all of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SocBlockKind {
-    /// `s` strictly inside the cone: the block constrains nothing locally and
-    /// contributes no rows.
+pub enum ConeBlockKind {
+    /// `s` strictly inside the cone, so `z = 0`: the block constrains nothing
+    /// locally and contributes no rows.
     Interior,
     /// `s` at the apex (`s ≈ 0`) with `z` in the dual interior. The whole block
     /// is active — every row of `G` for this block enters `B_a`, because `ds`
     /// must keep `s = 0`. The face is a single point, hence **flat**, so the
     /// predictor is exact here in the same way an orthant row's is.
-    Apex,
-    /// `s` on the boundary away from the apex (`s₀ = ‖s₁‖ > 0`). The active face
-    /// is the ray `ℝ₊s` and its normal cone the ray `ℝ₊z`, so the block
-    /// contributes **exactly one** row: `wᵀGᵢ` with `w = (1, −s₁/s₀)`.
     ///
-    /// Unlike the orthant and apex cases this face is **curved**, so the row is
-    /// a linearization and the step is first-order rather than exact — the same
-    /// status an active nonlinear constraint has on the NLP arm.
+    /// For a PSD block this is `S = 0`, the rank-zero end of the same
+    /// constant-rank stratification [`ConeBlockKind::Boundary`] covers.
+    Apex,
+    /// `s` on the relative boundary away from the apex, in the interior of a
+    /// face the cone is *smooth* along. What that face is, and how many rows it
+    /// contributes, is per family:
+    ///
+    /// | family | face | rows |
+    /// |---|---|---|
+    /// | `SecondOrder(k)` | `s₀ = ‖s₁‖ > 0` | 1, `wᵀG` with `w = (1, −s₁/s₀)` |
+    /// | `Psd(n)` at rank `r` | the constant-rank manifold | `q(q+1)/2`, `q = n − r` |
+    /// | `Exponential`, `Power(α)` | the smooth facet `φ(s) = 0` | 1, `∇φᵀG` |
+    ///
+    /// Unlike the orthant and apex cases every one of these faces is
+    /// **curved**, so the rows are a linearization and the step is first-order
+    /// rather than exact — the same status an active nonlinear constraint has
+    /// on the NLP arm. The curvature is not optional; see [`assemble_kkt`].
     Boundary,
 }
 
-/// Numbers a second-order block is classified against, all relative to the
+/// Numbers a cone block is classified against, all relative to the
 /// problem-wide `primal_scale` / `dual_scale` the orthant guard already uses,
 /// so a verdict does not move when the model is rescaled.
 ///
@@ -257,134 +254,639 @@ pub enum SocBlockKind {
 /// deliberate convention inherited from the orthant guard rather than an
 /// oversight — changing it here alone would leave the two guards disagreeing
 /// about what "zero" means on the same solution.
-const SOC_APEX_REL: f64 = 1e-8;
-/// How close `s₀ − ‖s₁‖` must sit to zero for the block to count as *on* the
-/// boundary rather than strictly inside it.
-const SOC_BOUNDARY_REL: f64 = 1e-8;
+const CONE_APEX_REL: f64 = 1e-8;
+/// How close the face's defining function must sit to zero for the block to
+/// count as *on* that face rather than strictly inside the cone —
+/// `s₀ − ‖s₁‖` for a second-order block, `φ(s)` for a non-symmetric one. The
+/// PSD arm uses it as the eigenvalue threshold that decides the rank.
+const CONE_BOUNDARY_REL: f64 = 1e-8;
 /// Strict-complementarity screen. A boundary block whose dual has collapsed to
 /// this level is the conic analogue of a weakly active row: slack and
 /// multiplier vanish together, `dx/db` is two-valued, and there is no single
 /// answer to return.
-const SOC_STRICT_COMP_REL: f64 = 1e-8;
+const CONE_STRICT_COMP_REL: f64 = 1e-8;
 
-/// Classify one second-order block and return the rows it contributes, plus
-/// the lower-triangle `(x,x)` curvature triplets its face carries.
+/// Classify one cone block and return the rows it contributes, plus the
+/// lower-triangle `(x,x)` curvature triplets its face carries.
 ///
-/// `s` and `z` are the block's slices; `g_rows` holds the block's rows of `G`
-/// in block order. Only [`SocBlockKind::Boundary`] contributes curvature — see
-/// [`assemble_kkt`] for why it is not optional, and
-/// [`soc_boundary_curvature`] for the form it is computed in.
+/// This is the whole of the conic arm's decision. `s` and `z` are the block's
+/// slices of the slack and the dual; `g_rows` holds the block's rows of `G` in
+/// block order.
 ///
-/// # The refusals, and why the near-apex band is narrow
+/// The `match` below is **exhaustive over [`ConeSpec`]**, and that is the
+/// guard: a family added to `ConeSpec` without a face decomposition breaks the
+/// build rather than reaching a runtime refusal. That is why there is no
+/// longer an "unsupported cone" error — an empty error category is a
+/// documentation hazard, and a compile error is a stronger promise than a
+/// message.
+///
+/// [`ConeSpec::Nonneg`] never arrives here: an orthant block is per-row, not
+/// per-block, and [`QpSensitivity::build_conic`] applies the plain path's rule
+/// to its rows directly.
+fn cone_block_face(
+    block: usize,
+    spec: &ConeSpec,
+    s: &[f64],
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    // The apex is family-independent: `s = 0` is the cone's tip whatever the
+    // cone, `ds` must keep it there, so every row of the block enters and the
+    // face — a single point — is flat.
+    if inf_norm_of(s) <= CONE_APEX_REL * primal_scale {
+        if dual_has_collapsed(z, dual_scale) {
+            return Err(ConeError::new(
+                block,
+                "the slack is at the cone apex and the dual has collapsed too, so the \
+                 block is weakly active: dx/db is two-valued there",
+            ));
+        }
+        return Ok((ConeBlockKind::Apex, g_rows.to_vec(), Vec::new()));
+    }
+    match spec {
+        ConeSpec::Nonneg(_) => unreachable!("orthant blocks are classified per row"),
+        ConeSpec::SecondOrder(_) => soc_face(block, s, z, g_rows, primal_scale, dual_scale),
+        ConeSpec::Psd(n) => psd_face(block, *n, s, z, g_rows, primal_scale, dual_scale),
+        ConeSpec::Exponential => exp_face(block, s, z, g_rows, primal_scale, dual_scale),
+        ConeSpec::Power(alpha) => power_face(block, *alpha, s, z, g_rows, primal_scale, dual_scale),
+    }
+}
+
+/// A refusal under construction — the block index is filled in by the caller
+/// that knows it, so a face routine only supplies the reason.
+struct ConeError {
+    block: usize,
+    what: &'static str,
+}
+
+impl ConeError {
+    fn new(block: usize, what: &'static str) -> Self {
+        ConeError { block, what }
+    }
+}
+
+impl From<ConeError> for SensError {
+    fn from(e: ConeError) -> SensError {
+        SensError::NonsmoothConePoint {
+            block: e.block,
+            what: e.what,
+        }
+    }
+}
+
+fn inf_norm_of(v: &[f64]) -> f64 {
+    v.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
+}
+
+fn dual_has_collapsed(z: &[f64], dual_scale: f64) -> bool {
+    inf_norm_of(z) <= CONE_STRICT_COMP_REL * dual_scale
+}
+
+/// The block contributes nothing — but only if it really is complementary. A
+/// slack strictly inside the cone with a live dual is not the optimum it is
+/// being read as, whatever the status field says.
+fn interior_face(
+    block: usize,
+    s: &[f64],
+    z: &[f64],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    let comp: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
+    if comp.abs() > ORTHANT_GUARD_REL * primal_scale * dual_scale {
+        return Err(ConeError::new(
+            block,
+            "the slack is strictly inside the cone yet the block does not \
+             complement, so this is not the optimum it is being read as",
+        ));
+    }
+    Ok((ConeBlockKind::Interior, Vec::new(), Vec::new()))
+}
+
+/// `wᵀG` over one block's rows, as a sparse row in `x` coordinates. This is
+/// also `Gᵀw`, which is the form the curvature wants — the same vector either
+/// way.
+fn combine_rows(w: &[f64], g_rows: &[Vec<(usize, f64)>]) -> Vec<(usize, f64)> {
+    let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
+    for (r, row) in g_rows.iter().enumerate() {
+        if w[r] == 0.0 {
+            continue;
+        }
+        for &(col, val) in row {
+            *acc.entry(col).or_insert(0.0) += w[r] * val;
+        }
+    }
+    acc.into_iter().filter(|&(_, v)| v != 0.0).collect()
+}
+
+/// `Σ_k κ_k · v_k v_kᵀ` as lower-triangle triplets, for sparse `v_k`.
+fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)> {
+    let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for (kappa, v) in terms {
+        if *kappa == 0.0 {
+            continue;
+        }
+        for &(r, vr) in v {
+            for &(c, vc) in v {
+                if r < c {
+                    continue; // lower triangle only
+                }
+                *acc.entry((r, c)).or_insert(0.0) += kappa * vr * vc;
+            }
+        }
+    }
+    acc.into_iter()
+        .filter(|&(_, v)| v != 0.0)
+        .map(|((r, c), v)| (r, c, v))
+        .collect()
+}
+
+/// A point on a face defined by one smooth concave inequality `φ(s) ≥ 0`,
+/// active at `φ(s) = 0`.
+///
+/// This is the shape the exponential and power cones present, and it is the
+/// general form the second-order case is a hand-optimized instance of: with
+/// `z = ν∇φ`, the active row is `∇φᵀG` and the Lagrangian carries `−νφ(h−Gx)`,
+/// whose `x`-Hessian is `−ν·Gᵀ∇²φ G`. Because `φ` is concave, `∇²φ ⪯ 0` and
+/// that term is positive semidefinite, exactly as the second-order case's is.
+///
+/// `hess_factors` supplies `∇²φ = −Σ κ_k v_k v_kᵀ` in factored form, which
+/// costs `k` rank-one updates rather than a dense `d × d` product. Both cones
+/// here have `k = 1`.
+struct SmoothFacet {
+    grad: Vec<f64>,
+    hess_factors: Vec<(f64, Vec<f64>)>,
+}
+
+/// How close `φ(s)` must sit to zero, relative to the block's primal scale,
+/// for the facet to count as active.
+///
+/// Separate from [`CONE_BOUNDARY_REL`] because it is calibrated against a
+/// different solver. The exponential and power cones route to the
+/// **non-symmetric** HSDE driver, whose achieved primal accuracy is well short
+/// of the symmetric one's. Measured across four fixtures (exponential ×2,
+/// `Power(0.6)`, `Power(0.3)`) at `tol` `1e-9` and `1e-11`, `|φ|/primal_scale`
+/// runs `4.1e-10` to `2.1e-9` — under `CONE_BOUNDARY_REL`'s `1e-8`, but by
+/// only a factor of five. `1e-6` keeps a factor of ~500 while a strictly
+/// interior point sits `O(1)` above it.
+const FACET_ACTIVE_REL: f64 = 1e-6;
+
+/// How far `z` may sit off the ray `ℝ₊∇φ` before the point is refused.
+///
+/// At the interior of a smooth facet the normal cone **is** that ray, so
+/// `z = ν∇φ` is not an approximation — it is the optimality condition. A `z`
+/// that is not parallel to `∇φ` means the solution is not the one it claims to
+/// be, or is on a lower-dimensional face where the normal cone is wider, and
+/// building `ν` from it would answer for the wrong face.
+///
+/// This is a converged-solution check of the same kind as
+/// [`ORTHANT_GUARD_REL`], and is calibrated the same way — off measured
+/// populations rather than a round number that looks safe. On the four
+/// non-symmetric fixtures above, `‖z − ν∇φ‖∞ / max(‖z‖∞, dual_scale)` runs
+/// `2.8e-8` to `3.4e-5`; a dual deliberately tilted off the ray is `O(1)`. So
+/// `1e-3` sits ~30× above everything converged and ~1000× below a genuine
+/// mismatch. `1e-6`, the first value tried, refused two of the four correct
+/// solutions.
+const FACET_DUAL_REL: f64 = 1e-3;
+
+fn smooth_facet_face(
+    block: usize,
+    facet: &SmoothFacet,
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    let grad = &facet.grad;
+    let gn2: f64 = grad.iter().map(|v| v * v).sum();
+    if !gn2.is_finite() || gn2 <= 0.0 {
+        return Err(ConeError::new(
+            block,
+            "the face's normal is zero or not finite at this point, so there is no \
+             direction to differentiate along",
+        ));
+    }
+    let nu: f64 = z.iter().zip(grad).map(|(a, b)| a * b).sum::<f64>() / gn2;
+    let resid = inf_norm_of(
+        &z.iter()
+            .zip(grad)
+            .map(|(a, b)| a - nu * b)
+            .collect::<Vec<_>>(),
+    );
+    if nu <= 0.0 || resid > FACET_DUAL_REL * inf_norm_of(z).max(dual_scale) {
+        return Err(ConeError::new(
+            block,
+            "the dual is not on the ray normal to this face, so the block is not in \
+             the facet's interior — the face being linearized is not the face the \
+             solution is on",
+        ));
+    }
+    let row = combine_rows(grad, g_rows);
+    if row.is_empty() {
+        return Err(ConeError::new(
+            block,
+            "the cone normal projects to zero against this block's rows, so there \
+             is no direction to differentiate along",
+        ));
+    }
+    let terms: Vec<(f64, Vec<(usize, f64)>)> = facet
+        .hess_factors
+        .iter()
+        .map(|(kappa, v)| (nu * kappa, combine_rows(v, g_rows)))
+        .collect();
+    Ok((ConeBlockKind::Boundary, vec![row], outer_triplets(&terms)))
+}
+
+/// The second-order cone's face, given that `s` is not at the apex.
+///
+/// `SOC(k) = { (s₀, s₁) : s₀ ≥ ‖s₁‖ }`. Away from the apex the boundary is the
+/// smooth hypersurface `φ(s) = s₀ − ‖s₁‖ = 0`, so this is
+/// [`smooth_facet_face`]'s shape — but it is written out by hand because
+/// `∇²φ = −(0 ⊕ (I − ŝ₁ŝ₁ᵀ))/‖s₁‖` has rank `k − 2`, and factoring it would
+/// mean building an orthonormal basis of `ŝ₁`'s complement to say what the
+/// closed form ([`soc_boundary_curvature`]) says in `k` rank-one updates.
+///
+/// # Why the near-apex band is narrow
 ///
 /// On a second-order cone "on the boundary and close to the apex" *is* "close
 /// to the apex" — `s₀ = ‖s₁‖`, so one is small exactly when the other is. The
 /// near-apex refusal therefore covers only the residue between the two relative
-/// tests (`‖s‖∞ > APEX_REL·scale` while `s₀ ≤ APEX_REL·scale`), which is a thin
-/// band by construction rather than by accident. It is still reachable, and
+/// tests (`‖s‖∞ > APEX_REL·scale` while `s₀ ≤ APEX_REL·scale`), a thin band by
+/// construction rather than by accident. It is still reachable, and
 /// `a_boundary_point_too_close_to_the_apex_is_refused` reaches it, because the
 /// alternative — a normal `(1, −s₁/s₀)` built by dividing by a number that is
 /// all round-off — is the silently-wrong class this crate refuses on principle.
-type SocBlockFace = (
-    SocBlockKind,
+type ConeBlockFace = (
+    ConeBlockKind,
     Vec<Vec<(usize, f64)>>,
     Vec<(usize, usize, f64)>,
 );
 
-fn soc_block_rows(
+fn soc_face(
     block: usize,
     s: &[f64],
     z: &[f64],
     g_rows: &[Vec<(usize, f64)>],
     primal_scale: f64,
     dual_scale: f64,
-) -> Result<SocBlockFace, SensError> {
-    let inf = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-    let tail = |v: &[f64]| v[1..].iter().map(|x| x * x).sum::<f64>().sqrt();
-    let (s0, s_tail) = (s[0], tail(s));
-    let dual_collapsed = inf(z) <= SOC_STRICT_COMP_REL * dual_scale;
-    let at_apex = s0.abs().max(s_tail) <= SOC_APEX_REL * primal_scale;
+) -> Result<ConeBlockFace, ConeError> {
+    let s_tail = s[1..].iter().map(|x| x * x).sum::<f64>().sqrt();
+    let s0 = s[0];
     let gap = s0 - s_tail;
 
-    // The apex. The face is a single point, so every row of the block enters
-    // `B_a`, it carries no curvature, and the predictor is exact — the same
-    // status an orthant row has. Unless the dual has also collapsed, in which
-    // case nothing is holding the block there.
-    if at_apex {
-        if dual_collapsed {
-            return Err(SensError::NonsmoothConePoint {
-                block,
-                what: "the slack is at the cone apex and the dual has collapsed too, so the \
-                       block is weakly active: dx/db is two-valued there",
-            });
-        }
-        return Ok((SocBlockKind::Apex, g_rows.to_vec(), Vec::new()));
+    if gap > CONE_BOUNDARY_REL * primal_scale {
+        return interior_face(block, s, z, primal_scale, dual_scale);
     }
-
-    // Strictly inside: the block constrains nothing locally.
-    if gap > SOC_BOUNDARY_REL * primal_scale {
-        let comp: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
-        if comp.abs() > ORTHANT_GUARD_REL * primal_scale * dual_scale {
-            return Err(SensError::NonsmoothConePoint {
-                block,
-                what: "the slack is strictly inside the cone yet the block does not \
-                       complement, so this is not the optimum it is being read as",
-            });
-        }
-        return Ok((SocBlockKind::Interior, Vec::new(), Vec::new()));
-    }
-
-    // Outside the cone by more than the solve's own tolerance: there is no face
-    // to linearize against.
-    if gap < -SOC_BOUNDARY_REL * primal_scale {
-        return Err(SensError::NonsmoothConePoint {
+    if gap < -CONE_BOUNDARY_REL * primal_scale {
+        return Err(ConeError::new(
             block,
-            what: "the slack lies outside the cone beyond the solve tolerance, so the \
-                   block has no face to differentiate along",
-        });
+            "the slack lies outside the cone beyond the solve tolerance, so the \
+             block has no face to differentiate along",
+        ));
     }
-
-    // On the boundary. A collapsed dual here is the conic weakly-active case.
-    if dual_collapsed {
-        return Err(SensError::NonsmoothConePoint {
+    if dual_has_collapsed(z, dual_scale) {
+        return Err(ConeError::new(
             block,
-            what: "the slack is on the cone boundary with a collapsed dual — the conic \
-                   analogue of a weakly active row, where dx/db is two-valued",
-        });
+            "the slack is on the cone boundary with a collapsed dual — the conic \
+             analogue of a weakly active row, where dx/db is two-valued",
+        ));
     }
-
-    // Near-apex: on the boundary but with `s₀` at round-off, so the normal
-    // `w = (1, −s₁/s₀)` is numerically meaningless. Refusing beats returning a
-    // direction made of noise.
-    if s0 <= SOC_APEX_REL * primal_scale {
-        return Err(SensError::NonsmoothConePoint {
+    if s0 <= CONE_APEX_REL * primal_scale {
+        return Err(ConeError::new(
             block,
-            what: "the slack is on the cone boundary but too close to the apex for its \
-                   normal to be meaningful; dx/db is not single-valued there",
-        });
+            "the slack is on the cone boundary but too close to the apex for its \
+             normal to be meaningful; dx/db is not single-valued there",
+        ));
     }
 
     // The boundary normal `w = (1, −s₁/s₀)`, as one combined row `wᵀG`.
-    let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
-    for (r, row) in g_rows.iter().enumerate() {
-        let w = if r == 0 { 1.0 } else { -s[r] / s0 };
-        if w == 0.0 {
-            continue;
-        }
-        for &(col, val) in row {
-            *acc.entry(col).or_insert(0.0) += w * val;
-        }
+    let mut w = vec![1.0; s.len()];
+    for (r, wr) in w.iter_mut().enumerate().skip(1) {
+        *wr = -s[r] / s0;
     }
-    let combined: Vec<(usize, f64)> = acc.into_iter().filter(|&(_, v)| v != 0.0).collect();
+    let combined = combine_rows(&w, g_rows);
     if combined.is_empty() {
-        return Err(SensError::NonsmoothConePoint {
+        return Err(ConeError::new(
             block,
-            what: "the cone normal projects to zero against this block's rows, so there \
-                   is no direction to differentiate along",
-        });
+            "the cone normal projects to zero against this block's rows, so there \
+             is no direction to differentiate along",
+        ));
     }
     let curvature = soc_boundary_curvature(s, z[0], s0, g_rows);
-    Ok((SocBlockKind::Boundary, vec![combined], curvature))
+    Ok((ConeBlockKind::Boundary, vec![combined], curvature))
+}
+
+// ---------------------------------------------------------------------------
+// The positive-semidefinite cone, at constant rank.
+// ---------------------------------------------------------------------------
+
+/// Eigenvalue threshold, relative to the scale of the quantity it is applied
+/// to, below which an eigenvalue is zero and the matrix has lost a rank.
+const PSD_RANK_REL: f64 = 1e-8;
+
+/// The PSD cone's face: the **constant-rank manifold** through `S = smat(s)`.
+///
+/// `{ X ⪰ 0 : rank X = r }` is a smooth manifold of codimension `q(q+1)/2` with
+/// `q = n − r`. Writing `X` in the (range, kernel) basis of `S` as
+/// `[[A, B], [Bᵀ, C]]`, membership is the vanishing of the Schur complement
+/// `C − Bᵀ A⁻¹ B`, and at `S` itself (`B = C = 0`) that gives:
+///
+/// * **the tangent** `Vᵀ dX V = 0` — one row per pair `(a ≤ b)` of kernel
+///   vectors, `svec(sym(v_a v_bᵀ))ᵀ G`;
+/// * **the curvature** `−2 dBᵀ A⁻¹ dB` with `dB = Uᵀ dX V`, whose contribution
+///   to the Lagrangian's `x`-Hessian (multiplier `Λ = Vᵀ Z V`, i.e. `Z = VΛVᵀ`)
+///   is
+///
+///   ```text
+///     2 · Σ_{l ≤ r} Σ_{k ≤ q} (λ_k / a_l) · c_lk c_lkᵀ,
+///     c_lk = Gᵀ svec(sym(ũ_l w̃_kᵀ))
+///   ```
+///
+///   where `a_l, ũ_l` are `S`'s positive eigenpairs and `λ_k, w̃_k` are `Z`'s.
+///   `r·q` rank-one updates, and positive semidefinite as every face's
+///   curvature in this file is.
+///
+/// # Strict complementarity is required, not assumed
+///
+/// `rank Z = n − rank S` is what makes the kernel of `S` the *whole* normal
+/// direction. Where it fails the block is weakly active in the PSD sense —
+/// a direction along which slack and multiplier vanish together — and `dx/db`
+/// is two-valued, so the block is refused rather than answered on a guess about
+/// which side.
+#[allow(clippy::too_many_arguments)]
+fn psd_face(
+    block: usize,
+    n: usize,
+    s: &[f64],
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    let (s_vals, s_vecs) = sym_spectrum(block, s, n, "primal")?;
+    let (z_vals, z_vecs) = sym_spectrum(block, z, n, "dual")?;
+    let s_tol = PSD_RANK_REL * primal_scale;
+    let z_tol = PSD_RANK_REL * dual_scale;
+
+    if s_vals.iter().any(|&v| v < -s_tol) {
+        return Err(ConeError::new(
+            block,
+            "the slack matrix has a negative eigenvalue beyond the solve tolerance, \
+             so it is outside the PSD cone and has no face to differentiate along",
+        ));
+    }
+    if z_vals.iter().any(|&v| v < -z_tol) {
+        return Err(ConeError::new(
+            block,
+            "the dual matrix has a negative eigenvalue beyond the solve tolerance, \
+             so it is outside the PSD cone's dual",
+        ));
+    }
+
+    let kernel: Vec<usize> = (0..n).filter(|&j| s_vals[j] <= s_tol).collect();
+    let range: Vec<usize> = (0..n).filter(|&j| s_vals[j] > s_tol).collect();
+    let q = kernel.len();
+    if q == 0 {
+        // `S ≻ 0`: strictly inside the cone.
+        return interior_face(block, s, z, primal_scale, dual_scale);
+    }
+    let dual_range: Vec<usize> = (0..n).filter(|&j| z_vals[j] > z_tol).collect();
+    if dual_range.len() != q {
+        return Err(ConeError::new(
+            block,
+            "the PSD block does not satisfy strict complementarity (rank Z ≠ n − rank S), \
+             so a direction exists along which slack and multiplier vanish together and \
+             dx/db is two-valued",
+        ));
+    }
+
+    // Tangent rows: `v_aᵀ dX v_b = 0` for every pair from the kernel.
+    let mut rows = Vec::with_capacity(q * (q + 1) / 2);
+    let mut buf = vec![0.0; n * (n + 1) / 2];
+    for (ai, &a) in kernel.iter().enumerate() {
+        for &b in &kernel[ai..] {
+            svec_sym_outer(
+                &s_vecs[a * n..(a + 1) * n],
+                &s_vecs[b * n..(b + 1) * n],
+                n,
+                &mut buf,
+            );
+            let row = combine_rows(&buf, g_rows);
+            if !row.is_empty() {
+                rows.push(row);
+            }
+        }
+    }
+    if rows.is_empty() {
+        return Err(ConeError::new(
+            block,
+            "the PSD face's normals all project to zero against this block's rows, so \
+             there is no direction to differentiate along",
+        ));
+    }
+
+    // Curvature: one rank-one update per (range, dual-range) pair.
+    let mut terms = Vec::with_capacity(range.len() * dual_range.len());
+    for &l in &range {
+        for &k in &dual_range {
+            svec_sym_outer(
+                &s_vecs[l * n..(l + 1) * n],
+                &z_vecs[k * n..(k + 1) * n],
+                n,
+                &mut buf,
+            );
+            terms.push((2.0 * z_vals[k] / s_vals[l], combine_rows(&buf, g_rows)));
+        }
+    }
+    let kind = if range.is_empty() {
+        // `S = 0` reached without tripping the inf-norm apex test upstream —
+        // the same face, and it carries no curvature because there is no
+        // range block for `A⁻¹` to come from.
+        ConeBlockKind::Apex
+    } else {
+        ConeBlockKind::Boundary
+    };
+    Ok((kind, rows, outer_triplets(&terms)))
+}
+
+/// Eigendecompose `smat(v)`. Returns `(values, vectors)` with eigenvector `j`
+/// at `vectors[j*n .. (j+1)*n]`, matching [`pounce_linalg::symmetric_eigen`]'s
+/// column-major output.
+fn sym_spectrum(
+    block: usize,
+    v: &[f64],
+    n: usize,
+    which: &'static str,
+) -> Result<(Vec<f64>, Vec<f64>), ConeError> {
+    let mut m = vec![0.0; n * n];
+    smat(v, n, &mut m);
+    let mut vals = vec![0.0; n];
+    let mut vecs = vec![0.0; n * n];
+    if !symmetric_eigen(&m, n, &mut vals, &mut vecs) {
+        return Err(ConeError::new(
+            block,
+            match which {
+                "primal" => {
+                    "the eigensolver did not converge on the PSD block's slack, so \
+                             its rank — and therefore its face — cannot be determined"
+                }
+                _ => {
+                    "the eigensolver did not converge on the PSD block's dual, so strict \
+                      complementarity cannot be checked"
+                }
+            },
+        ));
+    }
+    Ok((vals, vecs))
+}
+
+/// `svec((u vᵀ + v uᵀ)/2)` into `out`, in [`crate::cones::psd::svec`]'s
+/// ordering and `√2` scaling — so `⟨out, w⟩ = uᵀ smat(w) v` for any symmetric
+/// `smat(w)`, which is the identity both the rows and the curvature are built
+/// on.
+fn svec_sym_outer(u: &[f64], v: &[f64], n: usize, out: &mut [f64]) {
+    let r2 = std::f64::consts::SQRT_2;
+    let mut k = 0;
+    for j in 0..n {
+        for i in j..n {
+            let m = 0.5 * (u[i] * v[j] + u[j] * v[i]);
+            out[k] = if i == j { m } else { r2 * m };
+            k += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The non-symmetric cones: exponential and power.
+// ---------------------------------------------------------------------------
+
+/// The exponential cone's smooth facet.
+///
+/// `K_exp = cl { (x, y, z) : y·log(z/y) ≥ x, y > 0, z > 0 }`. Its boundary has
+/// two pieces: the smooth surface `φ(s) = y·log(z/y) − x = 0` with `y, z > 0`,
+/// and the ray `{ (x, 0, z) : x ≤ 0, z ≥ 0 }` where the cone has no tangent
+/// plane. Only the first is answered; the ray is refused.
+///
+/// ```text
+///   ∇φ  = (−1,  log(z/y) − 1,  y/z)
+///   ∇²φ = −(1/y) · v vᵀ,   v = (0, 1, −y/z)
+/// ```
+///
+/// The rank-one form of `∇²φ` is exact, not an approximation: `φ` is the
+/// perspective of a one-dimensional function, so its Hessian has rank one
+/// everywhere on the facet.
+fn exp_face(
+    block: usize,
+    s: &[f64],
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    let (sx, sy, sz) = (s[0], s[1], s[2]);
+    let eps = FACET_ACTIVE_REL * primal_scale;
+    if sy <= eps || sz <= eps {
+        return Err(ConeError::new(
+            block,
+            "the slack sits on the exponential cone's y = 0 (or z = 0) ray, where the \
+             boundary is not a smooth facet and has no single normal",
+        ));
+    }
+    let phi = sy * (sz / sy).ln() - sx;
+    if phi > eps {
+        return interior_face(block, s, z, primal_scale, dual_scale);
+    }
+    if phi < -eps {
+        return Err(ConeError::new(
+            block,
+            "the slack lies outside the cone beyond the solve tolerance, so the \
+             block has no face to differentiate along",
+        ));
+    }
+    if dual_has_collapsed(z, dual_scale) {
+        return Err(ConeError::new(
+            block,
+            "the slack is on the cone boundary with a collapsed dual — the conic \
+             analogue of a weakly active row, where dx/db is two-valued",
+        ));
+    }
+    let facet = SmoothFacet {
+        grad: vec![-1.0, (sz / sy).ln() - 1.0, sy / sz],
+        hess_factors: vec![(1.0 / sy, vec![0.0, 1.0, -sy / sz])],
+    };
+    smooth_facet_face(block, &facet, z, g_rows, dual_scale)
+}
+
+/// The power cone's smooth facet.
+///
+/// `K_α = { (x, y, z) : |x| ≤ y^α z^{1−α}, y, z ≥ 0 }`. The smooth piece is
+/// `φ(s) = y^α z^{1−α} − |x| = 0` with `y, z > 0`; `y = 0` and `z = 0` are the
+/// degenerate faces and are refused.
+///
+/// There is deliberately **no** guard for the `|x| = 0` kink, and that is a
+/// statement about the cone rather than an omission. `φ` is non-differentiable
+/// at `x = 0`, but a boundary point with `x = 0` needs `g = y^α z^{1−α} = 0`,
+/// which means `y = 0` or `z = 0` — already refused above. With `y, z > ε` the
+/// two sheets `x = ±g` are each smooth and never meet. A guard here would be
+/// unreachable code that reads like coverage, which is worse than no guard:
+/// see `the_power_cones_x_kink_is_not_on_the_facet`, which asserts the
+/// geometry rather than the branch.
+///
+/// With `g = y^α z^{1−α}`,
+///
+/// ```text
+///   ∇φ  = (−sign x,  α g / y,  (1−α) g / z)
+///   ∇²φ = −α(1−α) g · v vᵀ,   v = (0, 1/y, −1/z)
+/// ```
+///
+/// Rank one for the same reason the exponential cone's is: `g` is a geometric
+/// mean, homogeneous of degree one, so its Hessian annihilates the ray through
+/// the point.
+#[allow(clippy::too_many_arguments)]
+fn power_face(
+    block: usize,
+    alpha: f64,
+    s: &[f64],
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<ConeBlockFace, ConeError> {
+    let (sx, sy, sz) = (s[0], s[1], s[2]);
+    let eps = FACET_ACTIVE_REL * primal_scale;
+    if sy <= eps || sz <= eps {
+        return Err(ConeError::new(
+            block,
+            "the slack sits on the power cone's y = 0 or z = 0 face, where the boundary \
+             is not a smooth facet and has no single normal",
+        ));
+    }
+    let g = sy.powf(alpha) * sz.powf(1.0 - alpha);
+    let phi = g - sx.abs();
+    if phi > eps {
+        return interior_face(block, s, z, primal_scale, dual_scale);
+    }
+    if phi < -eps {
+        return Err(ConeError::new(
+            block,
+            "the slack lies outside the cone beyond the solve tolerance, so the \
+             block has no face to differentiate along",
+        ));
+    }
+    if dual_has_collapsed(z, dual_scale) {
+        return Err(ConeError::new(
+            block,
+            "the slack is on the cone boundary with a collapsed dual — the conic \
+             analogue of a weakly active row, where dx/db is two-valued",
+        ));
+    }
+    let k = alpha * (1.0 - alpha) * g;
+    let facet = SmoothFacet {
+        grad: vec![-sx.signum(), alpha * g / sy, (1.0 - alpha) * g / sz],
+        hess_factors: vec![(k, vec![0.0, 1.0 / sy, -1.0 / sz])],
+    };
+    smooth_facet_face(block, &facet, z, g_rows, dual_scale)
 }
 
 /// The `(x,x)` Hessian a second-order block on its boundary contributes, as
@@ -451,17 +953,6 @@ fn soc_boundary_curvature(
         .collect()
 }
 
-/// The `ConeSpec` variant name, for [`SensError::UnsupportedCone`].
-fn cone_family(spec: &ConeSpec) -> &'static str {
-    match spec {
-        ConeSpec::Nonneg(_) => "Nonneg",
-        ConeSpec::SecondOrder(_) => "SecondOrder",
-        ConeSpec::Exponential => "Exponential",
-        ConeSpec::Power(_) => "Power",
-        ConeSpec::Psd(_) => "Psd",
-    }
-}
-
 /// Post-optimal sensitivity for a solved convex QP.
 ///
 /// Holds the factored active-set KKT system at the optimum. Build it once
@@ -513,7 +1004,7 @@ pub struct QpSensitivity {
     lp_without_crossover: bool,
     /// Per second-order block, what it was doing at the solution. Empty on the
     /// orthant path.
-    cone_kinds: Vec<(usize, SocBlockKind)>,
+    cone_kinds: Vec<(usize, ConeBlockKind)>,
     /// Inequality rows at which strict complementarity fails (gh #219).
     weakly_active_ineq: Vec<usize>,
     /// Variables whose bound is weakly active.
@@ -1120,7 +1611,7 @@ impl QpSensitivity {
         active_tol: f64,
         active_rows: Vec<Vec<(usize, f64)>>,
         active_ineq: Vec<usize>,
-        cone_kinds: Vec<(usize, SocBlockKind)>,
+        cone_kinds: Vec<(usize, ConeBlockKind)>,
         curvature: Vec<(usize, usize, f64)>,
         make_backend: F,
     ) -> Result<Self, SensError>
@@ -1160,7 +1651,7 @@ impl QpSensitivity {
         active_bounds: Vec<(usize, bool)>,
         weakly_active_ineq: Vec<usize>,
         weakly_active_bound_vars: Vec<usize>,
-        cone_kinds: Vec<(usize, SocBlockKind)>,
+        cone_kinds: Vec<(usize, ConeBlockKind)>,
         curvature: Vec<(usize, usize, f64)>,
         crossover: bool,
         mut make_backend: F,
@@ -1261,19 +1752,19 @@ impl QpSensitivity {
     /// order to cover the `m_ineq` inequality rows.
     ///
     /// An all-[`ConeSpec::Nonneg`] partition *is* the orthant problem, so it
-    /// delegates to [`build`](Self::build) and behaves identically.
-    /// [`ConeSpec::SecondOrder`] blocks are classified by
-    /// [`SocBlockKind`] and contribute their face's rows.
-    /// [`ConeSpec::Exponential`], [`ConeSpec::Power`] and [`ConeSpec::Psd`]
-    /// return [`SensError::UnsupportedCone`].
+    /// delegates to [`build`](Self::build) and behaves identically. Every other
+    /// block goes through [`cone_block_face`], which classifies it as
+    /// [`ConeBlockKind`] and returns the rows and curvature its face carries.
+    /// Every family in `ConeSpec` is covered, and the `match` there is
+    /// exhaustive, so a family added later is a compile error rather than a
+    /// wrong answer.
     ///
-    /// The refusal is the feature. A cone's active object is not a set of rows
-    /// but the tangent/normal decomposition of the face its slack sits on, and
-    /// reading its rows as orthant rows produces a plausible number that is not
-    /// a derivative. Refusing names the gap; answering hides it. The same
-    /// applies *within* a supported family: a second-order block sitting where
-    /// its normal is not defined is refused as
-    /// [`SensError::NonsmoothConePoint`] rather than linearized against noise.
+    /// What is refused is not a *family* but a *point*. A cone's active object
+    /// is the tangent/normal decomposition of the face its slack sits on;
+    /// where that decomposition does not exist — a kink, a collapsed dual, a
+    /// rank that strict complementarity does not pin down — the answer is
+    /// [`SensError::NonsmoothConePoint`] rather than a linearization against
+    /// noise. Refusing names the gap; answering hides it.
     pub fn build_conic<F>(
         prob: &QpProblem,
         cones: &[ConeSpec],
@@ -1325,7 +1816,7 @@ impl QpSensitivity {
 
         let mut active_rows: Vec<Vec<(usize, f64)>> = Vec::new();
         let mut active_ineq: Vec<usize> = Vec::new();
-        let mut kinds: Vec<(usize, SocBlockKind)> = Vec::new();
+        let mut kinds: Vec<(usize, ConeBlockKind)> = Vec::new();
         let mut curvature: Vec<(usize, usize, f64)> = Vec::new();
         let mut offset = 0usize;
         for (block, spec) in cones.iter().enumerate() {
@@ -1342,9 +1833,10 @@ impl QpSensitivity {
                         }
                     }
                 }
-                ConeSpec::SecondOrder(_) => {
-                    let (kind, contributed, curved) = soc_block_rows(
+                _ => {
+                    let (kind, contributed, curved) = cone_block_face(
                         block,
+                        spec,
                         &slack[offset..offset + dim],
                         &sol.z[offset..offset + dim],
                         rows,
@@ -1353,18 +1845,12 @@ impl QpSensitivity {
                     )?;
                     for (r, row) in contributed.into_iter().enumerate() {
                         active_rows.push(row);
-                        // Provenance only; a boundary block's single row is a
-                        // combination and has no one `G` row behind it.
+                        // Provenance only; a curved face's rows are
+                        // combinations and have no one `G` row behind them.
                         active_ineq.push(offset + r.min(dim - 1));
                     }
                     curvature.extend(curved);
                     kinds.push((block, kind));
-                }
-                _ => {
-                    return Err(SensError::UnsupportedCone {
-                        block,
-                        family: cone_family(spec),
-                    });
                 }
             }
             offset += dim;
@@ -1733,7 +2219,7 @@ impl QpSensitivity {
     /// an orthant row's is, while a boundary block's single row is a
     /// linearization of a **curved** face — first-order, like an active
     /// nonlinear constraint on the NLP arm.
-    pub fn cone_block_kinds(&self) -> &[(usize, SocBlockKind)] {
+    pub fn cone_block_kinds(&self) -> &[(usize, ConeBlockKind)] {
         &self.cone_kinds
     }
 
