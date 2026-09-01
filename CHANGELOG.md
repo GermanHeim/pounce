@@ -112,6 +112,86 @@ changes.
   `SolveSucceeded` with a declared-model violation above `1e-6`, and the
   reported statistic disclosed none of them.
 
+### Changed
+
+- **The convex arm solves the model you declared; `bound_relax_factor` is now
+  opt-in there (reverses gh#744/gh#745, closes gh#760).** Scored against the
+  published Maros–Mészáros optima (DOC 97/6), the convex arm goes from
+  **130/138 to 138/138 correct**, with **0** newly wrong and **0** status
+  changes.
+
+  gh#744 taught this arm to widen its bounds like the NLP arm — `min(factor,
+  cap)·|b|` on inequality rows and the variable box, Ipopt's default `1e-8` —
+  so one binary would not solve two models depending on `solver_selection`.
+  The goal was right; the direction was backwards. It converged the arms on
+  one arm's *internal perturbation* rather than on the model the caller wrote.
+
+  A widening of `δ` moves the optimum by `δ` times the bound's multiplier, and
+  nothing bounds that product. On `LISWET1` — 10 000 monotonicity rows active,
+  multipliers summing to `1.6e9` — it buys `9.0` of objective:
+
+  | | objective |
+  |---|---|
+  | widened (previous default) | `27.1220506` |
+  | as declared (new default) | **`36.1224021`** |
+  | HiGHS, independently | **`36.1224020850`** |
+  | DOC 97/6 ground truth | **`36.1224`** |
+
+  On a 46-variable netlib LP the same `1e-8` moves the objective from `0` to
+  `-1.6` — the whole answer. The error is one-signed (widening only enlarges
+  the feasible set) so it is a systematic optimistic bias, and it does **not**
+  close as `tol` tightens, because it is a change to the model rather than
+  convergence slop.
+
+  It also cost speed. gh#760's +515 iterations are reversed: the QP suite runs
+  in **2658 iterations against 3164**, `QSCFXM1` in **30 against 131** — and
+  four orders more accurate at the same time (`1.8e-13` vs `9.1e-09`). Over the
+  91-instance netlib LP corpus, against HiGHS: median objective error
+  `1.2e-08 → 3.8e-11`, instances within `1e-8` **37 → 84**, iterations
+  `3121 → 2373`.
+
+  **The NLP arm is unchanged and must be.** It is a feasible-iterate
+  log-barrier that needs `x` strictly inside its bounds; disabling the widening
+  there is not a near miss but a failure — the fixture sweep at
+  `bound_relax_factor=0` turns `square_flowsheet_resto` into
+  `InfeasibleProblemDetected` and takes `cresc4` from 105 iterations to 3000.
+  The convex arm needs none of it: its IPM is infeasible-start, strict
+  interiority lives in the `(s, z)` pair `init_iterate`/`recenter_warm` place
+  rather than in the geometry of the declared box, which is why fixed variables
+  (`lb == ub`, zero width) have always shipped through un-widened. The sweep
+  confirms the blast radius: **0 status flips, 0 objective moves and identical
+  iteration counts on all 94 NLP-arm fixture-legs.**
+
+  `pounce foo.nl bound_relax_factor=1e-8` still reproduces the NLP arm's model
+  exactly, so Ipopt parity remains one option away, and
+  `final_declared_constr_viol` reports how far outside the declared model any
+  returned point sits.
+
+  **Costs, stated plainly.** Two convex fixture-legs flip
+  `SolveSucceeded → MaximumIterationsExceeded` (`scaled_feasible_a`): the
+  widening had been lifting a degeneracy there. At the iteration cap its
+  objective is already `0.0`, the true optimum, so this is honest
+  non-convergence rather than a wrong answer, and
+  `issue_689_direct_driver_scaled_feasible.rs` already described it as the
+  expected behaviour on the declared model. Separately, on the explicitly
+  selected `solver_selection=qp-active-set` engine, `nonconvex_qp_eq` loses its
+  negative-curvature escape and refuses (`InternalError`) instead of reaching
+  `-1`; it does not certify the saddle, and default `auto` routing is
+  unaffected. Excluding those two fixtures the convex corpus takes **16%
+  fewer** iterations.
+
+  **Why it survived:** every reference the suite compared against came from
+  POUNCE or from Ipopt-MA57, and Ipopt carries the same widening, so no check
+  in CI could see it. The one artifact that used independent ground truth —
+  `benchmarks/qp_four_way.md`, scored on DOC 97/6 — had the answer all along:
+  it put the *unrelaxed* convex arm at 137/138 correct and listed
+  `LISWET1(re=2.5e-01)` among Ipopt-MA57's wrong objectives.
+  `crates/pounce-cli/tests/declared_optimum_sentinel.rs` now holds two optima
+  from outside this solver family and is mutation-checked to go red if the
+  widening ever becomes the convex default again;
+  `benchmarks/qp/README.md` and the report generator now say in the open that
+  `ipopt_ma57.json` is a status and timing reference, not an objective oracle.
+
 ### Fixed
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,

@@ -1,11 +1,16 @@
 //! gh #760 — a convex fixture on which relaxing the bounds is *expensive*.
 //!
-//! `4c02817d` ("Apply bound_relax_factor on the convex arm too") closed a real
-//! defect: the convex arm read the `.nl` bounds verbatim while the NLP arm
-//! relaxed them, so one binary on one file solved two different models
-//! depending on `solver_selection`. It also cost **+515 iterations across the
-//! 138-problem Maros–Mészáros suite**, 4.4× on the QSCFXM family, and nothing
-//! in the CLI fixture corpus predicted that.
+//! `4c02817d` ("Apply bound_relax_factor on the convex arm too") cost **+515
+//! iterations across the 138-problem Maros–Mészáros suite**, 4.4× on the
+//! QSCFXM family, and nothing in the CLI fixture corpus predicted that.
+//!
+//! The widening is no longer the convex arm's default — it moved the ANSWER,
+//! not just the trajectory, and by `delta` times the bound's multiplier with
+//! nothing bounding that product (`LISWET1`: 33%, against a HiGHS- and
+//! DOC 97/6-confirmed optimum). So this fixture now measures the cost of
+//! asking for it: `bound_relax_factor=1e-8` against the default. The property
+//! it pins is unchanged and so is the reason it exists — a corpus in which
+//! the relaxation is cheap everywhere is the corpus gh #760 was filed about.
 //!
 //! The reason is not that the sweep skips the convex arm — it does not; both
 //! legs of `scripts/sweep-fixtures.sh` run at `solver_selection=auto` and 42
@@ -83,6 +88,10 @@ const OPTIMUM: f64 = 1.688_269_17e7;
 /// How much more expensive the relaxed box is here, at minimum. Measured 4.4×
 /// (131 vs 30) on `fdea82b5`, on both sweep legs. The margin is deliberate:
 /// the claim under test is "different magnitude class", not "4.4".
+/// Opt in to the widening: this fixture's whole subject is what that
+/// costs, and it is no longer what the default does.
+const RELAX: &str = "bound_relax_factor=1e-8";
+
 const MIN_RELAX_RATIO: f64 = 3.0;
 
 fn pounce_exe() -> PathBuf {
@@ -195,17 +204,18 @@ fn the_fixture_is_a_convex_qp_at_its_published_optimum() {
 /// it — which is what the rest of the convex corpus reports and what made the
 /// benchmark's +515 iterations a surprise.
 ///
-/// Note the direction: the relaxed (default) solve is the expensive one. It is
-/// also the correct one — the cheap counts were the cost of solving an easier,
-/// wrong model, one whose bounds disagreed with what the NLP arm enforced on
-/// the same file.
+/// Note the direction: the relaxed solve is the expensive one, and it is also
+/// the *less accurate* one. Against HiGHS on this model's family the widened
+/// answer is the one that misses (QSCFXM1: `9.1e-09` widened vs `1.8e-13`
+/// declared, on 131 iterations against 30). Both halves of that used to be
+/// read the other way round.
 #[test]
 fn relaxing_the_bounds_costs_a_multiple_of_the_trajectory_here() {
-    let (relaxed, relaxed_out) = solve(&[]);
-    let (verbatim, verbatim_out) = solve(&["bound_relax_factor=0"]);
+    let (relaxed, relaxed_out) = solve(&[RELAX]);
+    let (verbatim, verbatim_out) = solve(&[]);
 
     assert_at_optimum(&relaxed, "relaxed", &relaxed_out);
-    assert_at_optimum(&verbatim, "bound_relax_factor=0", &verbatim_out);
+    assert_at_optimum(&verbatim, "declared (default)", &verbatim_out);
 
     let ratio = iters(&relaxed) as f64 / iters(&verbatim).max(1) as f64;
     assert!(
@@ -227,12 +237,12 @@ fn relaxing_the_bounds_costs_a_multiple_of_the_trajectory_here() {
 fn the_cost_is_the_same_on_the_limited_memory_leg() {
     const LBFGS: &str = "hessian_approximation=limited-memory";
 
-    let (exact_relaxed, out) = solve(&[]);
+    let (exact_relaxed, out) = solve(&[RELAX]);
     assert_at_optimum(&exact_relaxed, "relaxed", &out);
-    let (lbfgs_relaxed, out) = solve(&[LBFGS]);
+    let (lbfgs_relaxed, out) = solve(&[LBFGS, RELAX]);
     assert_at_optimum(&lbfgs_relaxed, "lbfgs relaxed", &out);
-    let (lbfgs_verbatim, out) = solve(&[LBFGS, "bound_relax_factor=0"]);
-    assert_at_optimum(&lbfgs_verbatim, "lbfgs bound_relax_factor=0", &out);
+    let (lbfgs_verbatim, out) = solve(&[LBFGS]);
+    assert_at_optimum(&lbfgs_verbatim, "lbfgs declared (default)", &out);
 
     assert_eq!(
         iters(&exact_relaxed),

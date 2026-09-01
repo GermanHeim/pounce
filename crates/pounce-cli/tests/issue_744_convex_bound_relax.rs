@@ -1,5 +1,5 @@
-//! The convex path must apply `bound_relax_factor`, like the NLP path does
-//! (gh #744, gh #745).
+//! The convex path solves the model **as declared**; `bound_relax_factor`
+//! buys the NLP path's widening on request (gh #744, gh #745, reversed).
 //!
 //! `OrigIpoptNlp::relax_bounds` widens the variable box and the
 //! inequality-row bounds by `min(bound_relax_factor·…, constr_viol_tol)`
@@ -15,7 +15,22 @@
 //! `36.1224` and the NLP arm (and the Ipopt-MA57 reference) the relaxed one,
 //! `27.1221`. Nine Maros-Meszaros QPs and 68 of 371 LPs disagreed that way,
 //! always one-signed, and it read as a wrong answer from `pounce-convex`.
-//! It was not: both points are what their model asks for.
+//!
+//! gh #744 originally closed that gap by widening on the convex arm too. That
+//! made both arms report `27.1221` — and `27.1221` is wrong. HiGHS returns
+//! `36.1224020850`, the Maros-Meszaros DOC 97/6 ground truth is `36.1224`, and
+//! `benchmarks/qp_four_way.md` — generated before that change — scored the
+//! unrelaxed convex arm at 137/138 correct with 0 solved-but-wrong while
+//! listing `LISWET1(re=2.5e-01)` among Ipopt-MA57's *wrong* objectives. The
+//! widening does not converge the arms on the model; it converges them on one
+//! arm's internal perturbation, and the error it introduces is `delta` times the
+//! bound's multiplier, which nothing bounds, and always one-signed.
+//!
+//! So the default reversed: this arm solves what the caller declared, and the
+//! widening is opt-in. The NLP arm keeps it — a feasible-iterate log-barrier
+//! needs `x` strictly inside its bounds, and matching Ipopt is that arm's
+//! contract. The two therefore differ on constraint-degenerate models by
+//! design, which `final_declared_constr_viol` reports rather than hides.
 //!
 //! The two fixtures here isolate the two widenings. Each is an LP whose
 //! optimum sits exactly on a bound of magnitude `1e4`, where the relaxation
@@ -86,49 +101,90 @@ fn assert_routed_to_convex(fixture: &str) {
     );
 }
 
-/// The widening is `min(1e-8, 1e-4)·1e4 = 1e-4` on the row bound, plus
-/// `min(1e-8·max(0,1), 1e-4) = 1e-8` on `x1`'s declared-zero lower bound,
-/// which the optimum also rides. Assert against the total with room for
-/// interior-point noise but none for the un-relaxed answer.
+/// Asking for the widening buys `min(1e-8, 1e-4)·1e4 = 1e-4` on the row
+/// bound, plus `min(1e-8·max(0,1), 1e-4) = 1e-8` on `x1`'s declared-zero
+/// lower bound, which the optimum also rides. Far above interior-point noise
+/// and far above the ulp at `1e4`, so "did the widening happen" is
+/// unambiguous in either direction.
 const RELAXED_ROW_OBJ: f64 = 1e4 - 1e-4 - 1e-8;
 const RELAXED_VAR_OBJ: f64 = 1e4 - 1e-4;
+/// The declared optimum: both fixtures sit exactly on a bound of magnitude
+/// `1e4`.
+const DECLARED_OBJ: f64 = 1e4;
 const NOISE: f64 = 1e-6;
+/// Opt in to the NLP arm's model.
+const RELAX: &str = "bound_relax_factor=1e-8";
 
 #[test]
-fn convex_arm_relaxes_an_inequality_row_bound_like_the_nlp_arm() {
+fn convex_arm_takes_an_inequality_row_bound_as_declared() {
     assert_routed_to_convex("bound_relax_row.nl");
     let convex = objective("row_convex", "bound_relax_row.nl", &[]);
-    let nlp = objective("row_nlp", "bound_relax_row.nl", &["solver_selection=nlp"]);
+    assert!(
+        (convex - DECLARED_OBJ).abs() < NOISE,
+        "convex arm should solve the row bound as declared: {convex} vs \
+         {DECLARED_OBJ} (the widened answer is {RELAXED_ROW_OBJ})"
+    );
+}
+
+/// ... and asking for the widening by name still reproduces the NLP arm's
+/// model exactly, so the escape hatch to Ipopt parity is real.
+#[test]
+fn asking_for_the_widening_reproduces_the_nlp_arm_on_a_row_bound() {
+    let convex = objective("row_convex_relax", "bound_relax_row.nl", &[RELAX]);
+    let nlp = objective(
+        "row_nlp",
+        "bound_relax_row.nl",
+        &["solver_selection=nlp", RELAX],
+    );
     assert!(
         (convex - RELAXED_ROW_OBJ).abs() < NOISE,
-        "convex arm did not relax the row bound: {convex} vs {RELAXED_ROW_OBJ}"
+        "opt-in widening did not move the row bound: {convex} vs {RELAXED_ROW_OBJ}"
     );
     assert!(
         (convex - nlp).abs() < NOISE,
-        "the two arms disagree: convex {convex} vs nlp {nlp}"
+        "the two arms disagree under an explicit widening: convex {convex} \
+         vs nlp {nlp}"
     );
 }
 
 #[test]
-fn convex_arm_relaxes_a_variable_bound_and_leaves_a_fixed_variable_alone() {
+fn convex_arm_takes_a_variable_bound_as_declared() {
     assert_routed_to_convex("bound_relax_var.nl");
     let convex = objective("var_convex", "bound_relax_var.nl", &[]);
-    let nlp = objective("var_nlp", "bound_relax_var.nl", &["solver_selection=nlp"]);
-    // `x1` is fixed at 0 and must not contribute a further `-1e-8`; the
-    // objective is `x0 + x1`, so a widened `x1` would show up here.
     assert!(
-        (convex - RELAXED_VAR_OBJ).abs() < NOISE,
-        "convex arm did not relax the variable bound (or relaxed the fixed \
-         variable): {convex} vs {RELAXED_VAR_OBJ}"
-    );
-    assert!(
-        (convex - nlp).abs() < NOISE,
-        "the two arms disagree: convex {convex} vs nlp {nlp}"
+        (convex - DECLARED_OBJ).abs() < NOISE,
+        "convex arm should solve the variable bound as declared: {convex} \
+         vs {DECLARED_OBJ} (the widened answer is {RELAXED_VAR_OBJ})"
     );
 }
 
-/// `bound_relax_factor=0` is the escape hatch back to the model exactly as
-/// declared — the answer the convex arm used to give unconditionally.
+/// The opt-in path still leaves a FIXED variable alone. `x1` is fixed at 0
+/// and must not contribute a further `-1e-8`; the objective is `x0 + x1`, so
+/// a widened `x1` would show up here. Upstream's default
+/// `fixed_variable_treatment=make_parameter` lifts it out before
+/// `relax_bounds` runs, and the extractor mirrors that.
+#[test]
+fn asking_for_the_widening_still_leaves_a_fixed_variable_alone() {
+    let convex = objective("var_convex_relax", "bound_relax_var.nl", &[RELAX]);
+    let nlp = objective(
+        "var_nlp",
+        "bound_relax_var.nl",
+        &["solver_selection=nlp", RELAX],
+    );
+    assert!(
+        (convex - RELAXED_VAR_OBJ).abs() < NOISE,
+        "opt-in widening did not move the variable bound (or it widened the \
+         fixed variable): {convex} vs {RELAXED_VAR_OBJ}"
+    );
+    assert!(
+        (convex - nlp).abs() < NOISE,
+        "the two arms disagree under an explicit widening: convex {convex} \
+         vs nlp {nlp}"
+    );
+}
+
+/// `bound_relax_factor=0` still names the declared model explicitly — the
+/// convex arm's default now, and the NLP arm's escape hatch to it.
 #[test]
 fn bound_relax_factor_zero_restores_the_declared_model_on_both_arms() {
     for fixture in ["bound_relax_row.nl", "bound_relax_var.nl"] {

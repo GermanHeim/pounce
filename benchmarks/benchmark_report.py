@@ -895,6 +895,16 @@ def head_to_head_lines(head_to_head):
     lines.append("is a pounce-vs-pounce comparison and is independent of the Ipopt")
     lines.append("reference used by the suites above.")
     lines.append("")
+    lines.append("> **The Ipopt-MA57 reference is a status and timing reference, not an")
+    lines.append("> objective oracle.** It carries Ipopt's `bound_relax_factor` widening,")
+    lines.append("> which changes the answer on constraint-degenerate models by `delta`")
+    lines.append("> times the bound's multiplier. On the `LISWET*` / `YAO` families POUNCE")
+    lines.append("> disagrees with it by tens of percent and POUNCE is correct: scored on")
+    lines.append("> the published Maros-Meszaros optima (DOC 97/6) the convex arm is")
+    lines.append("> 138/138 and Ipopt-MA57 misses 8. Score an objective disagreement")
+    lines.append("> against DOC 97/6 (`compare_qp_four_way.py`) before calling it a")
+    lines.append("> regression -- gh #744 was filed by not doing that.")
+    lines.append("")
 
     for name, comps in head_to_head:
         s = suite_summary(name, comps)

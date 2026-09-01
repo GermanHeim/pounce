@@ -1,33 +1,34 @@
 //! The convex arm reports how far the returned point sits outside the model
 //! **as declared**, not only outside the widened one it was handed.
 //!
-//! `bound_relax_factor` (gh #744/#745) widens the inequality rows and the
-//! variable box by `min(factor, cap)·|b|` before the convex extractors build
-//! the QP, so this arm solves what the NLP arm solves. That is deliberate and
-//! it is the model the convergence test is about — but it is not the model the
-//! caller wrote, and until `final_declared_constr_viol` existed nothing said
-//! so. The fixture here is the shape stripped to its minimum:
+//! `bound_relax_factor` widens the inequality rows and the variable box by
+//! `min(factor, cap)·|b|`. The convex arm no longer does this by default —
+//! it moved answers, so it is opt-in — but the NLP arm still does, it is
+//! always available here by name, and either way the widened model is the one
+//! `final_constr_viol` measures. What the caller cannot otherwise learn is how
+//! far the returned point sits outside the model they wrote. The fixture here
+//! is that shape stripped to its minimum:
 //!
 //! ```text
 //! min -x - y   s.t.   x + y <= 500,   0 <= x,y <= 1000
 //! ```
 //!
 //! The row is active at the optimum, so the widening buys objective directly.
-//! The solve prints `Constraint violation....: 0.0` — true of the widened row
+//! Under `bound_relax_factor=1e-8` the solve prints
+//! `Constraint violation....: 0.0` — true of the widened row
 //! `x + y <= 500 + 5e-6` — while returning `-500.0000005`, which is *better*
 //! than the declared optimum `-500` because the point is `5e-6` outside the
-//! declared row. A caller reading the old block concluded their model held
-//! exactly; it held to `5e-6`.
+//! declared row. Without the extra number a caller reads that block as their
+//! model holding exactly; it holds to `5e-6`.
 //!
 //! Measured on netlib the same shape reaches `4.99e-06` on `afiro` (declared
 //! row `b = 500`, reported `8.68e-13`) and `1.97e-05` on `25fv47` (reported
 //! `2.19e-11`).
 //!
-//! What this test does NOT assert: that the widening is wrong. It is not —
-//! see `dev-notes/qp-bound-relax-iteration-cost.md`, and `final_constr_viol`
-//! deliberately still measures the widened model, because that is what every
-//! acceptance gate reads and what gh #712's success-verdict invariant is
-//! asserted on.
+//! `final_constr_viol` deliberately still measures the widened model: it is
+//! what every acceptance gate reads and what gh #712's success-verdict
+//! invariant is asserted on. Redefining it broke
+//! `issue_689_direct_driver_scaled_feasible.rs`, correctly.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -37,6 +38,9 @@ use pounce_cli::solve_report::SolveReport;
 
 /// `min(factor, cap) * |b|` for the fixture's row: `1e-8 * 500`.
 const EXPECTED_WIDENING: f64 = 5e-6;
+/// The convex arm solves the declared model by default, so a test about the
+/// widening has to ask for it.
+const RELAX: &str = "bound_relax_factor=1e-8";
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -82,7 +86,7 @@ fn solve(extra: &[&str]) -> SolveReport {
 
 #[test]
 fn the_declared_violation_is_reported_beside_the_widened_one() {
-    let r = solve(&[]);
+    let r = solve(&[RELAX]);
     let stats = &r.statistics;
 
     // The widened model is satisfied — that is the number the convergence
@@ -122,7 +126,7 @@ fn the_objective_is_past_the_declared_optimum_by_the_widening() {
     // exactly the widening, so a caller comparing against a published optimum
     // sees a solver that beat it — the visible symptom of the invisible
     // violation above.
-    let r = solve(&[]);
+    let r = solve(&[RELAX]);
     let obj = r.solution.objective;
     assert!(
         obj < -500.0,
@@ -137,13 +141,13 @@ fn the_objective_is_past_the_declared_optimum_by_the_widening() {
 
 #[test]
 fn no_widening_means_nothing_extra_to_report() {
-    // With the widening off the two measurements coincide by construction, so
-    // the declared field is left uncomputed rather than duplicating a number
-    // the caller already has.
-    let r = solve(&["bound_relax_factor=0"]);
+    // The convex arm's DEFAULT. With no widening the two measurements coincide
+    // by construction, so the declared field is left uncomputed rather than
+    // duplicating a number the caller already has.
+    let r = solve(&[]);
     assert!(
         r.statistics.final_declared_constr_viol.is_nan(),
-        "expected NaN (nothing to add) at bound_relax_factor=0; got {:e}",
+        "expected NaN (nothing to add) with no widening; got {:e}",
         r.statistics.final_declared_constr_viol
     );
     assert!(

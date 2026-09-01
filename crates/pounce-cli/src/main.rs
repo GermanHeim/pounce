@@ -2346,32 +2346,70 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
-/// The `bound_relax_factor` widening the convex path must apply so that the
-/// model it solves is the one the NLP path solves.
+/// The `bound_relax_factor` widening the convex path applies — **none by
+/// default**. Setting the option explicitly still buys Ipopt's behaviour.
 ///
-/// Reads the same two options `Application` feeds `OrigIpoptNlp::relax_bounds`
-/// — `bound_relax_factor` (Ipopt default `1e-8`) and `constr_viol_tol`
-/// (default `1e-4`) — and uses the same defaults when the user set neither,
-/// so `pounce foo.nl` and `pounce foo.nl solver_selection=nlp` agree.
+/// gh #744/#745 made this arm widen bounds like the NLP arm, so one binary
+/// would not solve two models depending on `solver_selection`. The goal was
+/// right and the direction was backwards: it converged the arms on the NLP
+/// arm's *internal perturbation* rather than on the model the user declared.
 ///
-/// gh #744 / #745: before this, the convex arm ignored both and solved the
-/// model exactly as declared. On the constraint-degenerate families
-/// (`LISWET*`, `YAO`, `POWELL20`, the `pldd*`/`delf*`/`large*` LPs) that made
-/// the two arms of the same binary disagree by up to 33% in the objective —
-/// the convex arm reporting the exact optimum and the NLP arm the relaxed one.
-/// See [`pounce_cli::qp_extract::BoundRelax`] for why so small a widening
-/// moves the objective so far.
+/// A widening of `δ` moves the optimum by `δ` times the bound's multiplier,
+/// and nothing bounds that product. On `LISWET1` — every one of 10 000
+/// monotonicity rows active, multipliers summing to `1.6e9` — a `1e-8`
+/// widening buys `9.0` of objective:
+///
+/// | | objective |
+/// |---|---|
+/// | widened (gh #744 default) | `27.1220506` |
+/// | as declared (this default) | **`36.1224021`** |
+/// | HiGHS, independently | **`36.1224020850`** |
+/// | Maros–Mészáros DOC 97/6 ground truth | **`36.1224`** |
+///
+/// The error is also **one-signed** — widening only ever enlarges the
+/// feasible set — so it is a systematic optimistic bias, not noise, and it
+/// does not close as `tol` tightens because it is a change to the model
+/// rather than a convergence slop.
+///
+/// `benchmarks/qp_four_way.md`, generated before gh #744, is the record: it
+/// scores every engine against DOC 97/6 and put the unrelaxed convex arm at
+/// **137/138 correct, 0 solved-but-wrong**, listing `LISWET1(re=2.5e-01)`
+/// among Ipopt-MA57's wrong objectives. gh #744 moved this arm into that
+/// column. Measured against HiGHS over the 91-instance netlib LP corpus,
+/// going back to the declared model takes the median objective error from
+/// `1.2e-08` to `3.8e-11` and instances within `1e-8` from 37 to 84.
+///
+/// The NLP arm keeps its widening and must: it is a feasible-iterate
+/// log-barrier that needs `x` strictly inside its bounds, and matching Ipopt
+/// is that arm's contract. Disabling it there is not a near miss but a
+/// failure — the fixture sweep at `bound_relax_factor=0` turns
+/// `square_flowsheet_resto` into `InfeasibleProblemDetected` and takes
+/// `cresc4` from 105 iterations to 3000. This arm needs none of it: the IPM
+/// is infeasible-start, strict interiority lives in the `(s, z)` slack/dual
+/// pair that `init_iterate`/`recenter_warm` place, not in the geometry of the
+/// declared box — which is why fixed variables (`lb == ub`, zero width) have
+/// always shipped through here un-widened without incident.
+///
+/// So the arms now differ on constraint-degenerate models, by construction
+/// and on purpose. That difference is reported rather than hidden:
+/// `final_declared_constr_viol` measures the returned point against the model
+/// as declared on either arm.
 fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRelax {
     let opt = app.options();
-    let num = |name: &str, default: f64| {
+    let set_value = |name: &str| {
         opt.get_numeric_value(name, "")
             .ok()
             .and_then(|(v, set)| set.then_some(v))
-            .unwrap_or(default)
     };
-    pounce_cli::qp_extract::BoundRelax {
-        factor: num("bound_relax_factor", 1e-8),
-        cap: num("constr_viol_tol", 1e-4),
+    match set_value("bound_relax_factor") {
+        // Unset: solve the model as declared.
+        None => pounce_cli::qp_extract::BoundRelax::NONE,
+        // Set: the caller asked for the widening by name, so give them
+        // exactly the NLP arm's model -- `constr_viol_tol` caps it there too.
+        Some(factor) => pounce_cli::qp_extract::BoundRelax {
+            factor,
+            cap: set_value("constr_viol_tol").unwrap_or(1e-4),
+        },
     }
 }
 

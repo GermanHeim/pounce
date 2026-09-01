@@ -125,8 +125,35 @@ not see: `dev-notes/qp-bound-relax-iteration-cost.md` (gh#760).
 - `data/` — cached `.mat` downloads (gitignored; re-fetched on demand)
 - `nl/` — generated `.nl` files (gitignored; regenerated locally)
 - `ipopt_ma57.json` — committed Ipopt-MA57 reference (run via
-  `make -C benchmarks ipopt-ref-qp`)
+  `make -C benchmarks ipopt-ref-qp`). **It is a status and timing reference,
+  not an objective oracle** — see the warning below.
 - `pounce.json` — latest POUNCE results (gitignored, regenerated each release)
+
+## The Ipopt reference is not ground truth for objectives
+
+`ipopt_ma57.json` is another interior-point solver, and it carries Ipopt's
+`bound_relax_factor` widening: before solving, it enlarges the variable box
+and the inequality rows by `min(factor, cap)·|b|`, Ipopt's default `1e-8`.
+On a constraint-degenerate model that changes the *answer*, because the
+error is `δ` times the bound's multiplier and nothing bounds that product.
+
+So on the `LISWET*` and `YAO` families POUNCE's convex arm **disagrees with
+`ipopt_ma57.json` by tens of percent, and POUNCE is right**. Scored against
+the published Maros–Mészáros optima (DOC 97/6,
+`pounce-bench-data/qp/Maros-Meszaros-answers.json`) the convex arm is
+**138/138 correct**; Ipopt-MA57 misses 8 of them, `LISWET1` by 25%. HiGHS,
+which is not an interior-point method, returns `36.1224020850` on `LISWET1`
+against Ipopt's `27.1221`.
+
+This is not hypothetical. gh #744 was filed because the two POUNCE arms
+disagreed by 33% on this family, was diagnosed by asking which arm matched
+the Ipopt reference, and closed by making the *correct* arm match the wrong
+one. Reversing that is what
+`crates/pounce-cli/tests/declared_optimum_sentinel.rs` now pins.
+
+**When an objective here disagrees with `ipopt_ma57.json`, score it against
+DOC 97/6 before calling it a regression.** `benchmarks/scripts/compare_qp_four_way.py`
+already does exactly that and writes `qp_four_way.md`.
 
 ## Prerequisites
 
