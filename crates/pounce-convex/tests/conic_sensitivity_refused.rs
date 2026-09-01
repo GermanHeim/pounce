@@ -22,9 +22,11 @@
 //!
 //! - **The apex-with-zero-tail case.** A second-order cone at its apex with
 //!   `z_{1:} = 0` is row-wise indistinguishable from a degenerate orthant
-//!   block, which is a legitimate input, so `build` accepts it. Only
-//!   `build_conic` catches that, and `the_apex_case_needs_the_cone_partition`
-//!   pins the limit rather than hiding it.
+//!   block, which is a legitimate input, so `build` accepts it — and answers
+//!   with the wrong active object. Only `build_conic` is told, and
+//!   `the_apex_case_needs_the_cone_partition` pins that difference: `build`
+//!   is silent, `build_conic` classifies the block as `SocBlockKind::Apex`.
+//!   The classification's *numerics* are `convex_soc_sensitivity.rs`'s.
 //! - **Correctness of any conic `dx/db`.** Nothing here computes one; the
 //!   whole point is that none is computed yet.
 //! - **The orthant step's numerics.** Owned by the `mod tests` in
@@ -47,12 +49,14 @@
 //! |---|---|---|
 //! | delete the `check_orthant_complementarity(..)?` call in `build` | `a_solved_socp_is_refused` alone | fails at the `Ok(_)` arm — i.e. the solved SOCP is *accepted*, which is the original defect reproduced |
 //! | `ORTHANT_GUARD_REL` `1e-4` → `1e-30` | `an_orthant_qp_still_builds`, `build_conic_on_an_all_nonneg_partition_matches_build` | the false-positive direction; `an_orthant_lp_still_builds` stays green because it has no inequality rows |
-//! | `build_conic` accepts `SecondOrder` | `build_conic_refuses_every_unsupported_family`, `the_apex_case_needs_the_cone_partition` | the second is why the apex test asserts the `build_conic` half, not just the `build` half |
+//! | `cone_family` returns `"Nonneg"` for every family | `build_conic_refuses_every_unsupported_family` | the refusal must name the family, not merely occur |
+//! | `build_conic`'s `_ =>` arm falls through to the orthant path | `build_conic_refuses_every_unsupported_family` | reproduces the original defect for the three unimplemented families |
+//! | `soc_block_rows`'s apex branch returns `Interior` | `the_apex_case_needs_the_cone_partition` | an apex read as interior contributes no rows, so the block silently stops constraining `dx` |
 
 use pounce_convex::cones::ConeSpec;
 use pounce_convex::ipm::{solve_qp_ipm, solve_socp_ipm};
 use pounce_convex::qp::{QpProblem, QpStatus, Triplet};
-use pounce_convex::sensitivity::{QpSensitivity, SensError};
+use pounce_convex::sensitivity::{QpSensitivity, SensError, SocBlockKind};
 use pounce_convex::{QpOptions, QpSolution};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -185,8 +189,10 @@ fn build_conic_refuses_every_unsupported_family() {
     let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
     assert_eq!(sol.status, QpStatus::Optimal);
 
+    // `SecondOrder` is deliberately absent: it is implemented, and
+    // `convex_soc_sensitivity.rs` owns it. The three below are the families
+    // the crate still has no tangent/normal decomposition for.
     for (spec, family) in [
-        (ConeSpec::SecondOrder(3), "SecondOrder"),
         (ConeSpec::Exponential, "Exponential"),
         (ConeSpec::Power(0.5), "Power"),
         (ConeSpec::Psd(2), "Psd"),
@@ -375,13 +381,19 @@ fn the_apex_case_needs_the_cone_partition() {
          orthant degeneracy — build_conic is what carries that information"
     );
 
-    // And build_conic, which is told, refuses.
+    // And build_conic, which is told, classifies it as an apex rather than
+    // reading three orthant rows off it. The two entry points must therefore
+    // disagree about what is active here — which is the whole point of the
+    // partition travelling with the solution.
     let cones = [ConeSpec::SecondOrder(3)];
-    assert!(
-        matches!(
-            QpSensitivity::build_conic(&prob, &cones, &apex, &QpOptions::default(), 1e-7, backend),
-            Err(SensError::UnsupportedCone { .. })
-        ),
-        "build_conic is told the block is a cone and must refuse it"
+    let Ok(conic) =
+        QpSensitivity::build_conic(&prob, &cones, &apex, &QpOptions::default(), 1e-7, backend)
+    else {
+        panic!("an apex with an interior dual is a supported (flat) face and must build");
+    };
+    assert_eq!(
+        conic.cone_block_kinds(),
+        [(0, SocBlockKind::Apex)],
+        "the block must be classified as an apex, not as an interior or a boundary"
     );
 }

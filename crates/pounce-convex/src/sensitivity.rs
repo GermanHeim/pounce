@@ -142,6 +142,15 @@ pub enum SensError {
         /// The cone family that is not yet supported, e.g. `"SecondOrder"`.
         family: &'static str,
     },
+    /// The solution sits at a point where the cone's face is not differentiable
+    /// — an apex reached along the boundary, a collapsed normal — so there is no
+    /// single `dx/db` to report.
+    NonsmoothConePoint {
+        /// Index into the `&[ConeSpec]` slice.
+        block: usize,
+        /// Which condition fired.
+        what: &'static str,
+    },
     /// The cone partition handed to
     /// [`build_conic`](QpSensitivity::build_conic) does not cover the
     /// inequality block exactly, so the caller and the builder disagree about
@@ -213,6 +222,235 @@ fn check_orthant_complementarity(
     Ok(())
 }
 
+/// What a second-order cone block is doing at the solution.
+///
+/// A cone's "active set" is not a set of rows. Its slack `s` sits somewhere on
+/// the cone, and what the sensitivity needs is the *face* it sits on — the
+/// tangent/normal decomposition there. For `SOC(k) = { (s₀, s₁) : s₀ ≥ ‖s₁‖ }`
+/// there are three regimes and they behave very differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocBlockKind {
+    /// `s` strictly inside the cone: the block constrains nothing locally and
+    /// contributes no rows.
+    Interior,
+    /// `s` at the apex (`s ≈ 0`) with `z` in the dual interior. The whole block
+    /// is active — every row of `G` for this block enters `B_a`, because `ds`
+    /// must keep `s = 0`. The face is a single point, hence **flat**, so the
+    /// predictor is exact here in the same way an orthant row's is.
+    Apex,
+    /// `s` on the boundary away from the apex (`s₀ = ‖s₁‖ > 0`). The active face
+    /// is the ray `ℝ₊s` and its normal cone the ray `ℝ₊z`, so the block
+    /// contributes **exactly one** row: `wᵀGᵢ` with `w = (1, −s₁/s₀)`.
+    ///
+    /// Unlike the orthant and apex cases this face is **curved**, so the row is
+    /// a linearization and the step is first-order rather than exact — the same
+    /// status an active nonlinear constraint has on the NLP arm.
+    Boundary,
+}
+
+/// Numbers a second-order block is classified against, all relative to the
+/// problem-wide `primal_scale` / `dual_scale` the orthant guard already uses,
+/// so a verdict does not move when the model is rescaled.
+///
+/// Those two scales are floored at `1.0` (see [`QpSensitivity::build`]), which
+/// makes them absolute for a model whose data is smaller than one. That is a
+/// deliberate convention inherited from the orthant guard rather than an
+/// oversight — changing it here alone would leave the two guards disagreeing
+/// about what "zero" means on the same solution.
+const SOC_APEX_REL: f64 = 1e-8;
+/// How close `s₀ − ‖s₁‖` must sit to zero for the block to count as *on* the
+/// boundary rather than strictly inside it.
+const SOC_BOUNDARY_REL: f64 = 1e-8;
+/// Strict-complementarity screen. A boundary block whose dual has collapsed to
+/// this level is the conic analogue of a weakly active row: slack and
+/// multiplier vanish together, `dx/db` is two-valued, and there is no single
+/// answer to return.
+const SOC_STRICT_COMP_REL: f64 = 1e-8;
+
+/// Classify one second-order block and return the rows it contributes, plus
+/// the lower-triangle `(x,x)` curvature triplets its face carries.
+///
+/// `s` and `z` are the block's slices; `g_rows` holds the block's rows of `G`
+/// in block order. Only [`SocBlockKind::Boundary`] contributes curvature — see
+/// [`assemble_kkt`] for why it is not optional, and
+/// [`soc_boundary_curvature`] for the form it is computed in.
+///
+/// # The refusals, and why the near-apex band is narrow
+///
+/// On a second-order cone "on the boundary and close to the apex" *is* "close
+/// to the apex" — `s₀ = ‖s₁‖`, so one is small exactly when the other is. The
+/// near-apex refusal therefore covers only the residue between the two relative
+/// tests (`‖s‖∞ > APEX_REL·scale` while `s₀ ≤ APEX_REL·scale`), which is a thin
+/// band by construction rather than by accident. It is still reachable, and
+/// `a_boundary_point_too_close_to_the_apex_is_refused` reaches it, because the
+/// alternative — a normal `(1, −s₁/s₀)` built by dividing by a number that is
+/// all round-off — is the silently-wrong class this crate refuses on principle.
+type SocBlockFace = (
+    SocBlockKind,
+    Vec<Vec<(usize, f64)>>,
+    Vec<(usize, usize, f64)>,
+);
+
+fn soc_block_rows(
+    block: usize,
+    s: &[f64],
+    z: &[f64],
+    g_rows: &[Vec<(usize, f64)>],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<SocBlockFace, SensError> {
+    let inf = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let tail = |v: &[f64]| v[1..].iter().map(|x| x * x).sum::<f64>().sqrt();
+    let (s0, s_tail) = (s[0], tail(s));
+    let dual_collapsed = inf(z) <= SOC_STRICT_COMP_REL * dual_scale;
+    let at_apex = s0.abs().max(s_tail) <= SOC_APEX_REL * primal_scale;
+    let gap = s0 - s_tail;
+
+    // The apex. The face is a single point, so every row of the block enters
+    // `B_a`, it carries no curvature, and the predictor is exact — the same
+    // status an orthant row has. Unless the dual has also collapsed, in which
+    // case nothing is holding the block there.
+    if at_apex {
+        if dual_collapsed {
+            return Err(SensError::NonsmoothConePoint {
+                block,
+                what: "the slack is at the cone apex and the dual has collapsed too, so the \
+                       block is weakly active: dx/db is two-valued there",
+            });
+        }
+        return Ok((SocBlockKind::Apex, g_rows.to_vec(), Vec::new()));
+    }
+
+    // Strictly inside: the block constrains nothing locally.
+    if gap > SOC_BOUNDARY_REL * primal_scale {
+        let comp: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
+        if comp.abs() > ORTHANT_GUARD_REL * primal_scale * dual_scale {
+            return Err(SensError::NonsmoothConePoint {
+                block,
+                what: "the slack is strictly inside the cone yet the block does not \
+                       complement, so this is not the optimum it is being read as",
+            });
+        }
+        return Ok((SocBlockKind::Interior, Vec::new(), Vec::new()));
+    }
+
+    // Outside the cone by more than the solve's own tolerance: there is no face
+    // to linearize against.
+    if gap < -SOC_BOUNDARY_REL * primal_scale {
+        return Err(SensError::NonsmoothConePoint {
+            block,
+            what: "the slack lies outside the cone beyond the solve tolerance, so the \
+                   block has no face to differentiate along",
+        });
+    }
+
+    // On the boundary. A collapsed dual here is the conic weakly-active case.
+    if dual_collapsed {
+        return Err(SensError::NonsmoothConePoint {
+            block,
+            what: "the slack is on the cone boundary with a collapsed dual — the conic \
+                   analogue of a weakly active row, where dx/db is two-valued",
+        });
+    }
+
+    // Near-apex: on the boundary but with `s₀` at round-off, so the normal
+    // `w = (1, −s₁/s₀)` is numerically meaningless. Refusing beats returning a
+    // direction made of noise.
+    if s0 <= SOC_APEX_REL * primal_scale {
+        return Err(SensError::NonsmoothConePoint {
+            block,
+            what: "the slack is on the cone boundary but too close to the apex for its \
+                   normal to be meaningful; dx/db is not single-valued there",
+        });
+    }
+
+    // The boundary normal `w = (1, −s₁/s₀)`, as one combined row `wᵀG`.
+    let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
+    for (r, row) in g_rows.iter().enumerate() {
+        let w = if r == 0 { 1.0 } else { -s[r] / s0 };
+        if w == 0.0 {
+            continue;
+        }
+        for &(col, val) in row {
+            *acc.entry(col).or_insert(0.0) += w * val;
+        }
+    }
+    let combined: Vec<(usize, f64)> = acc.into_iter().filter(|&(_, v)| v != 0.0).collect();
+    if combined.is_empty() {
+        return Err(SensError::NonsmoothConePoint {
+            block,
+            what: "the cone normal projects to zero against this block's rows, so there \
+                   is no direction to differentiate along",
+        });
+    }
+    let curvature = soc_boundary_curvature(s, z[0], s0, g_rows);
+    Ok((SocBlockKind::Boundary, vec![combined], curvature))
+}
+
+/// The `(x,x)` Hessian a second-order block on its boundary contributes, as
+/// lower-triangle triplets.
+///
+/// The active constraint is `φ(s) = s₀ − ‖s₁‖ = 0` with `s = h − Gx`, and its
+/// multiplier is `ν = z₀` (the dual sits on the dual cone's boundary, so
+/// `z = ν∇φ` and `∇φ₀ = 1`). Since `∇²φ` is `0 ⊕ −(I − ŝ₁ŝ₁ᵀ)/‖s₁‖` and the
+/// Lagrangian carries `−νφ`, the contribution is
+///
+/// ```text
+///   (ν/‖s₁‖) · Gᵀ (0 ⊕ (I − ŝ₁ŝ₁ᵀ)) G   =   (ν/s₀) · (Σ_{r≥1} gᵣgᵣᵀ − u uᵀ)
+/// ```
+///
+/// with `u = Σ_{r≥1} ŝᵣ gᵣ` and `ŝᵣ = sᵣ/s₀` (on the boundary `‖s₁‖ = s₀`). The
+/// right-hand form is used because it is `d` rank-one updates rather than `d²`,
+/// and because `u` is the same vector the active row is built from: that row is
+/// `g₀ − u`.
+///
+/// # Cost
+///
+/// The result is as dense as the outer products make it — up to the square of
+/// the block's column support. That is affordable at the block sizes a
+/// second-order cone is normally posed at and is *not* a claim about a cone
+/// spanning thousands of columns.
+fn soc_boundary_curvature(
+    s: &[f64],
+    nu: f64,
+    s0: f64,
+    g_rows: &[Vec<(usize, f64)>],
+) -> Vec<(usize, usize, f64)> {
+    let scale = nu / s0;
+    if scale == 0.0 {
+        return Vec::new();
+    }
+    let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    let mut outer = |a: &[(usize, f64)], b: &[(usize, f64)], w: f64| {
+        for &(r, vr) in a {
+            for &(c, vc) in b {
+                if r < c {
+                    continue; // lower triangle only
+                }
+                *acc.entry((r, c)).or_insert(0.0) += w * vr * vc;
+            }
+        }
+    };
+    // Σ_{r≥1} gᵣ gᵣᵀ
+    for row in &g_rows[1..] {
+        outer(row, row, scale);
+    }
+    // −u uᵀ, with u = Σ_{r≥1} ŝᵣ gᵣ
+    let mut u: BTreeMap<usize, f64> = BTreeMap::new();
+    for (r, row) in g_rows.iter().enumerate().skip(1) {
+        let sr = s[r] / s0;
+        for &(col, val) in row {
+            *u.entry(col).or_insert(0.0) += sr * val;
+        }
+    }
+    let u: Vec<(usize, f64)> = u.into_iter().filter(|&(_, v)| v != 0.0).collect();
+    outer(&u, &u, -scale);
+    acc.into_iter()
+        .filter(|&(_, v)| v != 0.0)
+        .map(|((r, c), v)| (r, c, v))
+        .collect()
+}
+
 /// The `ConeSpec` variant name, for [`SensError::UnsupportedCone`].
 fn cone_family(spec: &ConeSpec) -> &'static str {
     match spec {
@@ -240,8 +478,18 @@ pub struct QpSensitivity {
     fact: Rc<RefCell<Factorization>>,
     /// Problem data, retained for the reduced-Hessian projection.
     prob: QpProblem,
-    /// Active inequality rows (indices into `G`).
+    /// Active inequality rows (indices into `G`). On the conic path this names
+    /// the underlying `G` rows a cone block contributed, which is provenance
+    /// rather than the active object itself — see [`active_rows`].
     active_ineq: Vec<usize>,
+    /// The active inequality-side rows of `B_a`, as sparse `(col, val)` rows.
+    ///
+    /// On the orthant path these are just `G`'s active rows. A cone block's
+    /// contribution is not a row of `G` at all — it is a combination of them
+    /// (the cone's normal at the boundary point), or the whole block at an apex
+    /// — so the assembly and the reduced Hessian both read this rather than
+    /// re-deriving from indices.
+    active_rows: Vec<Vec<(usize, f64)>>,
     /// Variables whose bound is active (one row each).
     active_bound_vars: Vec<usize>,
     /// The solution this sensitivity was built at, retained because the bound
@@ -263,6 +511,9 @@ pub struct QpSensitivity {
     /// `true` when this is a pure LP (`P = 0`) whose solve did not run
     /// crossover — see [`lp_without_crossover`](QpSensitivity::lp_without_crossover).
     lp_without_crossover: bool,
+    /// Per second-order block, what it was doing at the solution. Empty on the
+    /// orthant path.
+    cone_kinds: Vec<(usize, SocBlockKind)>,
     /// Inequality rows at which strict complementarity fails (gh #219).
     weakly_active_ineq: Vec<usize>,
     /// Variables whose bound is weakly active.
@@ -523,7 +774,7 @@ struct KktPattern {
 /// Assemble the active-set KKT
 ///
 /// ```text
-///   ⎡ P    Aᵀ   B_aᵀ ⎤
+///   ⎡ H    Aᵀ   B_aᵀ ⎤
 ///   ⎢ A    0    0    ⎥
 ///   ⎣ B_a  0    0    ⎦
 /// ```
@@ -531,6 +782,24 @@ struct KktPattern {
 /// `B_a` stacks the active inequality rows of `G` then one row per active
 /// variable bound, in the order given. Every diagonal slot is materialized
 /// (even where `P` is zero) so `vals_true` and `vals_reg` share one pattern.
+///
+/// # `H` is `P` plus the active set's own curvature
+///
+/// For an orthant row or a variable bound, `curvature` is empty and `H = P`:
+/// the active face is a hyperplane, so it contributes no second derivative and
+/// the KKT's `(x,x)` block is the objective's alone. That is why the parameter
+/// did not exist before the conic arm.
+///
+/// A **curved** active face does contribute. A second-order block sitting on
+/// its boundary is active through `φ(s) = s₀ − ‖s₁‖ = 0`, and the Lagrangian
+/// carries `−ν φ(h − Gx)` whose `x`-Hessian is `(ν/‖s₁‖)·Gᵀ(0 ⊕ (I − ŝ₁ŝ₁ᵀ))G`
+/// — nonzero, positive semidefinite, and **not** optional. Dropping it does not
+/// make the step approximate; it makes it a first-order-wrong number that
+/// converges to the wrong derivative as `δ → 0`. Measured on the fixture in
+/// `crates/pounce-convex/tests/convex_soc_sensitivity.rs`: `dx/db` reads
+/// `(0.348, 0.652)` against a true `(0.5, 0.5)`, at every `δ`. It is the
+/// re-solve oracle that says so — every internal residual is happy, because the
+/// step solves the KKT it was *given* exactly. `/sens-review` entry 5.
 ///
 /// # Bound-row orientation
 ///
@@ -545,13 +814,14 @@ struct KktPattern {
 /// negated. `the_recovered_bound_multipliers_carry_the_solutions_sign` pins it.
 fn assemble_kkt(
     prob: &QpProblem,
-    active_ineq: &[usize],
+    active_rows: &[Vec<(usize, f64)>],
     active_bounds: &[(usize, bool)],
+    curvature: &[(usize, usize, f64)],
     reg: f64,
 ) -> KktPattern {
     let n = prob.n;
     let m_eq = prob.m_eq();
-    let n_active = active_ineq.len() + active_bounds.len();
+    let n_active = active_rows.len() + active_bounds.len();
     let dim = n + m_eq + n_active;
 
     let mut entries: BTreeMap<(usize, usize), (f64, f64)> = BTreeMap::new();
@@ -562,9 +832,14 @@ fn assemble_kkt(
         e.1 += reg_off;
     };
 
-    // (x,x): P, with +δ on the diagonal for the factor only.
+    // (x,x): P plus the active set's curvature, with +δ on the diagonal for
+    // the factor only.
     for t in &prob.p_lower {
         add(t.row, t.col, t.val, 0.0);
+    }
+    for &(r, c, v) in curvature {
+        debug_assert!(r >= c, "curvature triplets are the lower triangle");
+        add(r, c, v, 0.0);
     }
     for i in 0..n {
         add(i, i, 0.0, reg);
@@ -578,15 +853,14 @@ fn assemble_kkt(
     }
     // Active-row block `B_a`: active inequality rows, then active bound rows.
     let abase = n + m_eq;
-    let g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
-    for (k, &i) in active_ineq.iter().enumerate() {
-        for &(col, val) in &g_rows[i] {
+    for (k, row) in active_rows.iter().enumerate() {
+        for &(col, val) in row {
             add(abase + k, col, val, 0.0);
         }
     }
     for (k, &(j, is_lower)) in active_bounds.iter().enumerate() {
         let sign = if is_lower { -1.0 } else { 1.0 };
-        add(abase + active_ineq.len() + k, j, sign, 0.0);
+        add(abase + active_rows.len() + k, j, sign, 0.0);
     }
     for k in 0..n_active {
         add(abase + k, abase + k, 0.0, -reg);
@@ -730,7 +1004,7 @@ impl QpSensitivity {
         sol: &QpSolution,
         opts: &QpOptions,
         active_tol: f64,
-        mut make_backend: F,
+        make_backend: F,
     ) -> Result<Self, SensError>
     where
         F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -750,7 +1024,6 @@ impl QpSensitivity {
             return Err(SensError::NotOptimal);
         }
         let n = prob.n;
-        let m_eq = prob.m_eq();
         let reg = opts.reg;
 
         // Active set: which inequality rows and which variable bounds bind.
@@ -766,9 +1039,6 @@ impl QpSensitivity {
             .filter(|&j| sol.z_lb[j] > active_tol || sol.z_ub[j] > active_tol)
             .map(|j| (j, sol.z_lb[j] >= sol.z_ub[j]))
             .collect();
-        let active_bound_vars: Vec<usize> = active_bounds.iter().map(|&(j, _)| j).collect();
-        let n_active = active_ineq.len() + active_bounds.len();
-        let dim = n + m_eq + n_active;
 
         // Weak activity (gh #219): binding in the primal *and* negligible in
         // the dual, i.e. non-strict complementarity. Classical post-optimal
@@ -818,8 +1088,93 @@ impl QpSensitivity {
             })
             .collect();
 
-        let pat = assemble_kkt(prob, &active_ineq, &active_bounds, reg);
-        let release_slots = release_slots(&pat, n + m_eq, active_ineq.len(), &active_bounds);
+        let all_g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
+        let active_rows: Vec<Vec<(usize, f64)>> =
+            active_ineq.iter().map(|&i| all_g_rows[i].clone()).collect();
+        Self::finish(
+            prob,
+            sol,
+            reg,
+            active_rows,
+            active_ineq,
+            active_bounds,
+            weakly_active_ineq,
+            weakly_active_bound_vars,
+            Vec::new(),
+            // An orthant row and a variable bound are both hyperplanes: no
+            // curvature, which is why this parameter did not exist before the
+            // conic arm.
+            Vec::new(),
+            opts.crossover,
+            make_backend,
+        )
+    }
+
+    /// The conic entry's construction path, after cone classification has
+    /// produced the active rows.
+    #[allow(clippy::too_many_arguments)]
+    fn build_from_rows<F>(
+        prob: &QpProblem,
+        sol: &QpSolution,
+        opts: &QpOptions,
+        active_tol: f64,
+        active_rows: Vec<Vec<(usize, f64)>>,
+        active_ineq: Vec<usize>,
+        cone_kinds: Vec<(usize, SocBlockKind)>,
+        curvature: Vec<(usize, usize, f64)>,
+        make_backend: F,
+    ) -> Result<Self, SensError>
+    where
+        F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+    {
+        let n = prob.n;
+        let active_bounds: Vec<(usize, bool)> = (0..n)
+            .filter(|&j| sol.z_lb[j] > active_tol || sol.z_ub[j] > active_tol)
+            .map(|j| (j, sol.z_lb[j] >= sol.z_ub[j]))
+            .collect();
+        Self::finish(
+            prob,
+            sol,
+            opts.reg,
+            active_rows,
+            active_ineq,
+            active_bounds,
+            Vec::new(),
+            Vec::new(),
+            cone_kinds,
+            curvature,
+            opts.crossover,
+            make_backend,
+        )
+    }
+
+    /// Assemble, factor, and package — shared by both entry points so they
+    /// cannot diverge on anything but which rows are active.
+    #[allow(clippy::too_many_arguments)]
+    fn finish<F>(
+        prob: &QpProblem,
+        sol: &QpSolution,
+        reg: f64,
+        active_rows: Vec<Vec<(usize, f64)>>,
+        active_ineq: Vec<usize>,
+        active_bounds: Vec<(usize, bool)>,
+        weakly_active_ineq: Vec<usize>,
+        weakly_active_bound_vars: Vec<usize>,
+        cone_kinds: Vec<(usize, SocBlockKind)>,
+        curvature: Vec<(usize, usize, f64)>,
+        crossover: bool,
+        mut make_backend: F,
+    ) -> Result<Self, SensError>
+    where
+        F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+    {
+        let n = prob.n;
+        let m_eq = prob.m_eq();
+        let n_active = active_rows.len() + active_bounds.len();
+        let dim = n + m_eq + n_active;
+        let active_bound_vars: Vec<usize> = active_bounds.iter().map(|&(j, _)| j).collect();
+        let pat = assemble_kkt(prob, &active_rows, &active_bounds, &curvature, reg);
+        let release_slots = release_slots(&pat, n + m_eq, active_rows.len(), &active_bounds);
         let KktPattern {
             airn: kkt_airn,
             ajcn: kkt_ajcn,
@@ -852,7 +1207,7 @@ impl QpSensitivity {
             .iter()
             .map(|&(j, is_lower)| if is_lower { sol.z_lb[j] } else { sol.z_ub[j] })
             .collect();
-        let lp_without_crossover = prob.p_lower.is_empty() && !opts.crossover;
+        let lp_without_crossover = prob.p_lower.is_empty() && !crossover;
 
         Ok(QpSensitivity {
             n,
@@ -867,6 +1222,7 @@ impl QpSensitivity {
             dim,
             prob: prob.clone(),
             active_ineq,
+            active_rows,
             active_bound_vars,
             weakly_active_ineq,
             weakly_active_bound_vars,
@@ -879,6 +1235,7 @@ impl QpSensitivity {
             kkt_vals_reg: Rc::new(values_reg_kept),
             release_slots: Rc::new(release_slots),
             release_backend: Rc::new(RefCell::new(Some(make_backend()))),
+            cone_kinds,
             fact: Rc::new(RefCell::new(fact)),
         })
     }
@@ -904,13 +1261,19 @@ impl QpSensitivity {
     /// order to cover the `m_ineq` inequality rows.
     ///
     /// An all-[`ConeSpec::Nonneg`] partition *is* the orthant problem, so it
-    /// delegates to [`build`](Self::build) and behaves identically. Every other
-    /// cone family currently returns [`SensError::UnsupportedCone`].
+    /// delegates to [`build`](Self::build) and behaves identically.
+    /// [`ConeSpec::SecondOrder`] blocks are classified by
+    /// [`SocBlockKind`] and contribute their face's rows.
+    /// [`ConeSpec::Exponential`], [`ConeSpec::Power`] and [`ConeSpec::Psd`]
+    /// return [`SensError::UnsupportedCone`].
     ///
     /// The refusal is the feature. A cone's active object is not a set of rows
     /// but the tangent/normal decomposition of the face its slack sits on, and
     /// reading its rows as orthant rows produces a plausible number that is not
-    /// a derivative. Refusing names the gap; answering hides it.
+    /// a derivative. Refusing names the gap; answering hides it. The same
+    /// applies *within* a supported family: a second-order block sitting where
+    /// its normal is not defined is refused as
+    /// [`SensError::NonsmoothConePoint`] rather than linearized against noise.
     pub fn build_conic<F>(
         prob: &QpProblem,
         cones: &[ConeSpec],
@@ -936,15 +1299,87 @@ impl QpSensitivity {
                 m_ineq: prob.m_ineq(),
             });
         }
-        for (block, spec) in cones.iter().enumerate() {
-            if !matches!(spec, ConeSpec::Nonneg(_)) {
-                return Err(SensError::UnsupportedCone {
-                    block,
-                    family: cone_family(spec),
-                });
-            }
+        if sol.status != QpStatus::Optimal {
+            return Err(SensError::NotOptimal);
         }
-        Self::build(prob, sol, opts, active_tol, make_backend)
+        // All-orthant IS the orthant problem; take the plain path so the two
+        // entry points cannot answer differently on the same input.
+        if cones.iter().all(|c| matches!(c, ConeSpec::Nonneg(_))) {
+            return Self::build(prob, sol, opts, active_tol, make_backend);
+        }
+
+        let m = prob.m_ineq();
+        let g_rows = group_rows_by_index(&prob.g, m);
+        let mut gx = vec![0.0; m];
+        prob.g_mul(&sol.x, &mut gx);
+        let slack: Vec<f64> = (0..m).map(|i| prob.h[i] - gx[i]).collect();
+        // The same two scales `build` derives for the orthant guard, so both
+        // paths agree about what "zero" means on the same solution.
+        let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |mx, x| mx.max(x.abs()));
+        let dual_scale = inf_norm(&sol.y)
+            .max(inf_norm(&sol.z))
+            .max(inf_norm(&sol.z_lb))
+            .max(inf_norm(&sol.z_ub))
+            .max(1.0);
+        let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
+
+        let mut active_rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        let mut active_ineq: Vec<usize> = Vec::new();
+        let mut kinds: Vec<(usize, SocBlockKind)> = Vec::new();
+        let mut curvature: Vec<(usize, usize, f64)> = Vec::new();
+        let mut offset = 0usize;
+        for (block, spec) in cones.iter().enumerate() {
+            let dim = spec.dim();
+            let rows = &g_rows[offset..offset + dim];
+            match spec {
+                ConeSpec::Nonneg(_) => {
+                    // Orthant rows inside a mixed partition: the same rule the
+                    // plain path uses, applied to this block's slice.
+                    for r in 0..dim {
+                        if sol.z[offset + r] > active_tol {
+                            active_rows.push(rows[r].clone());
+                            active_ineq.push(offset + r);
+                        }
+                    }
+                }
+                ConeSpec::SecondOrder(_) => {
+                    let (kind, contributed, curved) = soc_block_rows(
+                        block,
+                        &slack[offset..offset + dim],
+                        &sol.z[offset..offset + dim],
+                        rows,
+                        primal_scale,
+                        dual_scale,
+                    )?;
+                    for (r, row) in contributed.into_iter().enumerate() {
+                        active_rows.push(row);
+                        // Provenance only; a boundary block's single row is a
+                        // combination and has no one `G` row behind it.
+                        active_ineq.push(offset + r.min(dim - 1));
+                    }
+                    curvature.extend(curved);
+                    kinds.push((block, kind));
+                }
+                _ => {
+                    return Err(SensError::UnsupportedCone {
+                        block,
+                        family: cone_family(spec),
+                    });
+                }
+            }
+            offset += dim;
+        }
+        Self::build_from_rows(
+            prob,
+            sol,
+            opts,
+            active_tol,
+            active_rows,
+            active_ineq,
+            kinds,
+            curvature,
+            make_backend,
+        )
     }
 
     /// First-order primal step `dx ≈ x*(b + Δb) − x*(b)` for a perturbation
@@ -1050,7 +1485,7 @@ impl QpSensitivity {
     /// This is the seam onto `pounce-sens-core`: anything there that is generic
     /// over the trait works on a convex QP through this handle.
     pub fn backsolver(&self) -> QpKktBacksolver {
-        let abase = self.n + self.m_eq + self.active_ineq.len();
+        let abase = self.n + self.m_eq + self.active_rows.len();
         let bound_rows: Vec<BoundRow> = self
             .active_bounds
             .iter()
@@ -1200,7 +1635,7 @@ impl QpSensitivity {
         let n = self.n;
         let lo: Vec<f64> = (0..n).map(|j| self.prob.lb_of(j)).collect();
         let hi: Vec<f64> = (0..n).map(|j| self.prob.ub_of(j)).collect();
-        let abase = n + self.m_eq + self.active_ineq.len();
+        let abase = n + self.m_eq + self.active_rows.len();
         let multipliers: Vec<BoundMultiplier> = self
             .bound_base_mult
             .iter()
@@ -1287,6 +1722,19 @@ impl QpSensitivity {
             iterates: vec![],
         };
         classify_all(&self.prob, &sol, self.duality_measure(), floor)
+    }
+
+    /// What each second-order block was doing at the solution: interior, at its
+    /// apex, or on its boundary.
+    ///
+    /// Empty on the orthant path. Worth reading before trusting a conic step,
+    /// because the three regimes do not carry the same guarantee: an apex block
+    /// contributes a **flat** face and the predictor is exact there, exactly as
+    /// an orthant row's is, while a boundary block's single row is a
+    /// linearization of a **curved** face — first-order, like an active
+    /// nonlinear constraint on the NLP arm.
+    pub fn cone_block_kinds(&self) -> &[(usize, SocBlockKind)] {
+        &self.cone_kinds
     }
 
     /// `true` when this is a pure LP (`P = 0`) whose solve did not run
@@ -1442,7 +1890,7 @@ impl QpSensitivity {
 
         // Active Jacobian B (m_act × n), dense row-major: equality rows,
         // then active inequality rows, then active variable-bound rows.
-        let m_act = self.m_eq + self.active_ineq.len() + self.active_bound_vars.len();
+        let m_act = self.m_eq + self.active_rows.len() + self.active_bound_vars.len();
         let mut b = vec![0.0; m_act * n];
         for t in &self.prob.a {
             b[t.row * n + t.col] += t.val;

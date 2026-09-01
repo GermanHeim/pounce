@@ -11,6 +11,47 @@ changes.
 
 ### Added
 
+- **Second-order-cone sensitivity on the convex arm (Rust API).**
+  `QpSensitivity::build_conic` now answers for `ConeSpec::SecondOrder` blocks
+  instead of refusing them. Each block is classified by the *face* its slack
+  sits on — `SocBlockKind::{Interior, Apex, Boundary}`, reported by the new
+  `cone_block_kinds()` — and contributes accordingly: nothing when the block is
+  slack, every row of the block at the apex (a single point, hence a flat face
+  and an exact predictor), and one row `wᵀG` with `w = (1, −s₁/s₀)` on the
+  boundary. `ConeSpec::Psd`, `Exponential` and `Power` still return
+  `SensError::UnsupportedCone`.
+
+  **A boundary face is curved, and its curvature is part of the answer, not a
+  refinement.** The sensitivity KKT's `(x,x)` block is `P` plus
+  `(ν/s₀)·(Σ_{r≥1} gᵣgᵣᵀ − uuᵀ)`, the Hessian of `−ν(s₀ − ‖s₁‖)`. Written
+  without it — which is the natural first draft, since every orthant row and
+  variable bound is a hyperplane carrying none — the step converges to the
+  **wrong derivative**, not to an approximate one: on the fixture in
+  `crates/pounce-convex/tests/convex_soc_sensitivity.rs`, `dx/db` reads
+  `(0.348, 0.652)` where the true answer is `(0.5, 0.5)`, at every perturbation
+  size. Nothing internal complains, because the step solves exactly the KKT it
+  was handed. The re-solve oracle in that file is what found it, and it is the
+  only guard in the crate that reads a number the sensitivity layer did not
+  produce.
+
+  New refusals, all `SensError::NonsmoothConePoint { block, what }`, covering
+  the points where `dx/db` does not exist or cannot be computed from the numbers
+  to hand: a collapsed dual at the apex or on the boundary (the conic analogue
+  of a weakly active row — two-valued, exactly as on the NLP arm), a boundary
+  point too close to the apex for its normal to mean anything, a slack outside
+  the cone beyond the solve tolerance, and a strictly-interior block that does
+  not complement. Refusing is the same posture the orthant guard shipped with:
+  a cone read as the wrong face returns a plausible number that is not a
+  derivative.
+
+  The apex/boundary decision is relative to the problem's primal scale — the
+  same quantity `build`'s orthant guard uses, so the two cannot disagree about
+  what "zero" means on one solution.
+
+  *Surfaces:* Rust API only. The CLI and Python do not yet route a conic model
+  to `build_conic`; Python's `pounce.qp.QpSensitivity` solves internally with
+  `solve_qp_ipm` and exposes no `cones=`, so it is unaffected.
+
 - **The convex QP sensitivity gains activity classification, sharing the NLP
   arm's rule (Rust API).** `QpSensitivity::activity()` reports, per variable and
   per inequality row, what the bound is doing at the optimum: holding its

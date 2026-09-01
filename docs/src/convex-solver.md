@@ -302,11 +302,12 @@ the interior point is pivoted to an exact vertex basis first.
 Because the flag reads `opts.crossover`, the options you hand to `build` must be
 the options the solve actually ran with.
 
-### It is an orthant capability, and says so
+### Orthant rows, and second-order cones
 
-`QpSensitivity` covers LP and convex QP — problems whose inequality block is
-a nonnegative orthant. It does **not** cover the conic arm (SOCP, QCQP,
-exponential, power, PSD).
+`QpSensitivity::build` covers LP and convex QP — problems whose inequality
+block is a nonnegative orthant. Cones go through
+[`build_conic`](#cones-second-order-yes-the-rest-refused) instead, which
+handles `SecondOrder` blocks and refuses the others.
 
 That distinction matters more than it looks, because `solve_socp_ipm` and
 `solve_qp_ipm` return the *same* `QpSolution` type and the cone partition
@@ -318,16 +319,72 @@ not a derivative, with no warning. It is now refused with
 (`sᵢ ≥ 0`, `zᵢ ≥ 0`, `sᵢzᵢ ≈ μ`), while a cone satisfies only the block inner
 product `⟨s, z⟩ = 0`.
 
-Use `QpSensitivity::build_conic(prob, cones, sol, …)` for a problem that
-carries cones. An all-`Nonneg` partition is the orthant problem and behaves
-identically to `build`; every other family returns
-`SensError::UnsupportedCone`. A cone's active object is the tangent/normal
-decomposition of the face its slack sits on rather than a set of rows, and
-that is not implemented yet — so the builder refuses rather than returning a
-plausible wrong answer.
-
 Python callers were never exposed to this: `pounce.qp.QpSensitivity` solves
 internally with the QP interior-point solver and accepts no `cones=`.
+
+### Cones: second-order yes, the rest refused
+
+Use `QpSensitivity::build_conic(prob, cones, sol, opts, active_tol, backend)`
+for a problem that carries cones. An all-`Nonneg` partition *is* the orthant
+problem and delegates to `build`, so the two entry points cannot answer
+differently on the same input.
+
+A cone's active object is not a set of rows. Its slack sits on a **face**, and
+for a second-order cone `SOC(k) = { (s₀, s₁) : s₀ ≥ ‖s₁‖ }` there are three,
+reported by `cone_block_kinds()` as `SocBlockKind`:
+
+| face | what it contributes | predictor |
+|---|---|---|
+| `Interior` — `s₀ > ‖s₁‖` | nothing: the block is not binding | exact |
+| `Apex` — `s ≈ 0` | every row of the block (`ds` must keep `s = 0`) | exact — a point is a flat face |
+| `Boundary` — `s₀ = ‖s₁‖ > 0` | one row, `wᵀG` with `w = (1, −s₁/s₀)` | first order — the face is curved |
+
+`Psd`, `Exponential` and `Power` blocks return `SensError::UnsupportedCone`,
+naming the block index and the family. The exponential and power cones are
+non-symmetric and have no Nesterov–Todd block to build a normal from; the PSD
+cone is tractable at constant rank and is simply not done yet.
+
+#### The boundary curvature is part of the answer
+
+Every orthant row and every variable bound is a hyperplane, so the sensitivity
+KKT's `(x,x)` block is the objective's Hessian `P` and nothing else. A
+second-order boundary face is **curved**, and its curvature enters the same
+block:
+
+```text
+  H = P + (ν/s₀) · ( Σ_{r≥1} gᵣgᵣᵀ − u uᵀ ),   u = Σ_{r≥1} (sᵣ/s₀) gᵣ
+```
+
+with `ν = z₀` the multiplier on `φ(s) = s₀ − ‖s₁‖`. This is not a refinement.
+Omit it and the step converges to the **wrong derivative**: on the worked
+fixture in `crates/pounce-convex/tests/convex_soc_sensitivity.rs`, `dx/db`
+reads `(0.348, 0.652)` where the closed-form answer is `(0.5, 0.5)`, at every
+perturbation size, while every internal residual stays happy — the step solves
+exactly the KKT it was given, and that KKT is not the problem's. The guard that
+catches it is the re-solve oracle in that file, the one test in the crate that
+compares against a number the sensitivity layer did not produce.
+
+#### Where it refuses
+
+`SensError::NonsmoothConePoint { block, what }` marks a point where `dx/db`
+does not exist, or cannot be computed from the numbers to hand:
+
+- **the apex with a collapsed dual**, and **the boundary with a collapsed
+  dual** — the conic analogue of a weakly active row. Slack and multiplier
+  vanish together, so the derivative is two-valued and depends on which way the
+  perturbation pushes the block off its face. The NLP arm answers this class
+  with a *directional* mode; the convex arm does not have one for cones yet, so
+  it refuses rather than silently picking a side.
+- **a boundary point too close to the apex**, where `w = (1, −s₁/s₀)` would be
+  built by dividing by round-off.
+- **a slack outside the cone** beyond the solve's own tolerance: there is no
+  face to linearize against.
+- **a strictly interior block that does not complement** (`⟨s, z⟩ ≫ 0`) — not a
+  converged optimum, whatever its status field says.
+
+The apex/boundary decision is relative to the problem's primal scale
+(`max(‖h‖∞, ‖Gx‖∞, 1)`), the same quantity the orthant guard above uses, so the
+two cannot disagree about what "zero" means on one solution.
 
 For the NLP arm's much larger sensitivity surface — fix-relax and path modes,
 the directional decision at a kink, the corrector, activity classification,
