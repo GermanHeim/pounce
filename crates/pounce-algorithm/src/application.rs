@@ -40,6 +40,73 @@ use crate::upstream_options::register_all_upstream_options;
 /// two behaviours — and gh#518 reported trying both.
 pub const DEFAULT_OPTION_FILE_NAMES: &[&str] = &["pounce.opt", "ipopt.opt"];
 
+/// gh#887 — how far the *runaway* must dominate everything else in the
+/// answer a solve finally reports, before
+/// [`IpoptApplication::run_with_dual_divergence_retry`] will spend a cold
+/// re-solve on it.
+///
+/// gh#884's defect is a point that is converged **except** that one
+/// multiplier ran away: the primal is exact, complementarity is met, and
+/// the entire residual is dual infeasibility. That is the shape
+/// `perturb_always_cd` repairs. A point whose other residuals are within
+/// a few orders of its dual one is not that — it is an ordinary
+/// unconverged answer, and re-solving it cold is what
+/// `mu_strategy_fallback` and the second-opinion ladder already are.
+///
+/// So the retry requires `max(viol, compl) <= 1e-6 * dual_inf`, all
+/// unscaled. Measured on every run in the corpus that reaches the test:
+///
+/// | run | dual inf | viol | compl | ratio |
+/// |---|---|---|---|---|
+/// | reproducer, `.nl` route | `7.90e4` | `1.1e-16` | `1.1e-9` | `1.5e-14` |
+/// | reproducer, TNLP route | `3.25e11` | `2.5e-16` | `2.8e-3` | `8.7e-15` |
+/// | `deb7` + L-BFGS + rung | `9.90e1` | `8.0e-13` | `4.65e0` | `4.7e-2` |
+///
+/// Twelve orders between the keeps and the reject, and `1e-6` leaves
+/// eight orders of margin on the tightest keep and four on the reject.
+///
+/// It is a **ratio of two residuals of the same answer**, so it carries
+/// no units and does not move with the model's scaling — and, unlike any
+/// test on the trajectory, it cannot depend on which attempt fired or on
+/// how a platform rounded its way there. That is not hypothetical: the
+/// first version of this gate compared the reported answer against the
+/// runaway the detector had seen, and `deb7`'s detector value is `9.2e5`
+/// on one attempt and `8.7e2` on another, differing between build
+/// profiles and again on CI's Linux runner, where the retry ran anyway.
+///
+/// Deliberately a constant and not an option. It does not express a
+/// tolerance a caller trades against — it says "the runaway is the whole
+/// residual" — and the escape hatch for the remedy is
+/// `dual_divergence_retry=no`.
+const DUAL_DIV_RETRY_DOMINANCE: Number = 1e-6;
+
+/// Does this answer have gh#884's *shape*?
+///
+/// gh#884's defect is a point converged **except** that one multiplier
+/// ran away: the primal is exact, complementarity is met, and the entire
+/// residual is dual infeasibility. `perturb_always_cd` has something to
+/// repair only there, so this is what opens the retry (gh#887).
+///
+/// All three arguments are in the **model's own units**, never the
+/// `s_d`-normalised frame the convergence gate reads — that frame is what
+/// hid gh#884 in the first place. The test is a ratio *within one
+/// answer*, so it carries no units and cannot depend on which attempt
+/// produced it or on how a platform rounded. That is the property that
+/// matters, not the margin; see the module tests for what happened to
+/// the two gates that did not have it.
+///
+/// Non-finite input disables the retry rather than enabling it: a NaN
+/// compares false everywhere, and writing this so a NaN *passed* would
+/// turn "we cannot tell" into "retry anyway". A non-positive dual
+/// residual cannot be a runaway either, and makes the ratio meaningless.
+fn runaway_is_the_whole_residual(dual_inf: Number, viol: Number, compl: Number) -> bool {
+    dual_inf.is_finite()
+        && dual_inf > 0.0
+        && viol.is_finite()
+        && compl.is_finite()
+        && viol.max(compl) <= DUAL_DIV_RETRY_DOMINANCE * dual_inf
+}
+
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
 /// for a caller to tell the user which file (if any) configured the run.
 #[derive(Debug, Default, Clone)]
@@ -253,6 +320,23 @@ pub struct IpoptApplication {
     /// solve's count. Read out into
     /// [`SolveStatistics::quality_escalations`] once the solve returns.
     quality_escalations: Rc<std::cell::Cell<u64>>,
+    /// gh#884. Set when the running [`IpoptAlgorithm`] observed the
+    /// biactive dual-divergence signature — a converged primal, a step
+    /// that has gone to zero on a scale-relative measure, and an
+    /// *unscaled* dual infeasibility still far above `dual_inf_tol`, all
+    /// at the same iterate.
+    ///
+    /// Read out of the algorithm once `optimize_constrained` returns, so
+    /// [`Self::run_with_dual_divergence_retry`] — which sits above that
+    /// call — can see it. Reset at the top of every solve for the same
+    /// reason as `quality_escalations`: a retry must not inherit the
+    /// previous attempt's verdict. Also copied into
+    /// [`SolveStatistics::dual_divergence_signature`].
+    dual_divergence_signature: std::cell::Cell<bool>,
+    /// gh#884. Set when a dual-divergence retry actually replaced the base
+    /// attempt's answer. Copied into
+    /// [`SolveStatistics::dual_divergence_retry_promoted`].
+    dual_divergence_retry_promoted: std::cell::Cell<bool>,
     /// The payload of the most recent `finalize_solution` POUNCE sent to the
     /// user's TNLP, so a second-opinion retry that loses can put the winning
     /// attempt's answer back (pounce#870).
@@ -378,6 +462,8 @@ impl IpoptApplication {
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
+            dual_divergence_signature: std::cell::Cell::new(false),
+            dual_divergence_retry_promoted: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
             last_iter_stats: Rc::new(RefCell::new(None)),
             sqp_warm_start: None,
@@ -929,6 +1015,14 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
+        // gh#884. Both belong to this solve, not to whatever ran before
+        // it. Reset *here* rather than in `optimize_constrained`, which
+        // runs once per attempt: the signature accumulates across the
+        // attempts a lower wrapper may spend, so
+        // `run_with_dual_divergence_retry` reads "some attempt of the base
+        // solve saw it" rather than "the last one did".
+        self.dual_divergence_signature.set(false);
+        self.dual_divergence_retry_promoted.set(false);
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
         // the core's scaling models the objective and the constraint
@@ -1141,6 +1235,26 @@ impl IpoptApplication {
         if info.m > 0 && self.is_l1_fallback_enabled() && !self.is_l1_penalty_enabled() {
             return self.run_with_l1_fallback(tnlp);
         }
+        // Biactive dual-divergence retry (gh#884): if the solve settles
+        // its primal while its multipliers run away, throw the iterate
+        // away and solve again from scratch with the constraint-Jacobian
+        // perturbation on. Outermost of the two retry wrappers, so its
+        // "base solve" is the whole standard dispatch below including the
+        // μ flip — the signature is about a *solve*, and spending the μ
+        // flip first is strictly cheaper than spending this one first.
+        if self.is_dual_divergence_retry_enabled() {
+            return self.run_with_dual_divergence_retry(tnlp);
+        }
+        self.dispatch_standard_solve(tnlp)
+    }
+
+    /// The standard solve dispatch: the μ-strategy fallback if it is
+    /// enabled, otherwise one `optimize_constrained` call.
+    ///
+    /// Factored out of `optimize_tnlp_with_derivative_test_tnlp` so
+    /// [`Self::run_with_dual_divergence_retry`] can wrap the whole of it
+    /// rather than only the bare IPM call (gh#884).
+    fn dispatch_standard_solve(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         // μ-strategy auto-fallback (pounce#138): if the standard solve
         // stalls, retry once with the opposite mu_strategy and promote
         // only on Solve_Succeeded. Which stalls qualify depends on
@@ -2848,6 +2962,316 @@ impl IpoptApplication {
         first_status
     }
 
+    /// Is the gh#884 biactive dual-divergence retry enabled? Default
+    /// `yes`; `dual_divergence_retry=no` is the kill switch, and
+    /// restores the pre-gh#884 behaviour outright (no detector cost, no
+    /// second solve, and the base attempt's verdict returned unchanged).
+    fn is_dual_divergence_retry_enabled(&self) -> bool {
+        self.options
+            .get_bool_value("dual_divergence_retry", "")
+            .map(|(v, _found)| v)
+            .unwrap_or(true)
+    }
+
+    /// gh#884: throw the iterate away and solve again from scratch with
+    /// `perturb_always_cd` on, when the base solve settled its primal
+    /// while its multipliers ran away.
+    ///
+    /// # The defect
+    ///
+    /// On an MPCC lowered through an exact complementarity product
+    /// `G·H = 0`, a pair that is **biactive** at the solution — both
+    /// `G` and `H` zero — leaves that row's gradient
+    /// `H∇G + G∇H` identically zero. The row is still there, so its
+    /// multiplier is *arbitrary* rather than nonexistent, and the IPM
+    /// drives it to infinity while the primal iterate sits on the
+    /// answer. Because the convergence verdict is reached on an
+    /// `s_d`-normalised aggregate and `s_d` grows with the mean
+    /// multiplier magnitude, the aggregate reads clean: MacMPEC's
+    /// `qpec_small` under `ncp_eq`/`prod_eq` reported
+    /// `Solved_To_Acceptable_Level` at an *unscaled* dual infeasibility
+    /// of `7.9e+04`.
+    ///
+    /// # Why a retry rather than a gate
+    ///
+    /// Four other shapes of fix were measured and rejected — a Hessian
+    /// sparsity hypothesis, engaging `delta_c` *in flight*, flipping
+    /// `perturb_always_cd` on globally, and putting a dual ceiling on
+    /// the acceptable-level gate. `dev-notes/mpcc-biactive-dual-
+    /// divergence.md` records all four with numbers. The short version:
+    /// by the time the runaway is visible this iterate is unrecoverable,
+    /// so the only action left is to *stop using it*; and the remedy
+    /// that works — `perturb_always_cd=yes` — is measured to return a
+    /// wrong answer reported as success on `ralph1`
+    /// (`Solve_Succeeded` at `f = -2.71e-5`, below `f* = 0`), so it
+    /// cannot be turned on for everyone.
+    ///
+    /// **The detector is therefore the entire safety barrier**, and the
+    /// promotion gate below is the second one. `ralph1` is exactly the
+    /// model the detector must not fire on, and
+    /// `IpoptAlgorithm`'s scale-relative step floor is what keeps it
+    /// from doing so: `qpec_small` settles to `4.3e-8` while `ralph1`
+    /// bottoms out at `7.2e-3`, five orders apart.
+    ///
+    /// # The gate
+    ///
+    /// The retry's verdict replaces the base one only when **all** of:
+    ///
+    /// 1. the base attempt saw the signature (a converged primal, a step
+    ///    at zero, and an unscaled `‖∇L‖∞` far above `dual_inf_tol`, all
+    ///    at one iterate — see `IpoptAlgorithm::dual_divergence_signature`);
+    /// 2. the base status is `Solved_To_Acceptable_Level` or
+    ///    `Restoration_Failed` — the two verdicts the vanishing-gradient
+    ///    row produces directly. Generic exhaustion exits are excluded;
+    ///    `deb7` under L-BFGS is why, and the reason is in the code
+    ///    below;
+    /// 3. the retry returns `Solve_Succeeded`;
+    /// 4. the retry's claimed success is **real in the model's own
+    ///    units** — unscaled KKT error at or below `tol`-scale, which is
+    ///    the property the base attempt failed and the whole point of
+    ///    the issue;
+    /// 5. the retry's unscaled KKT error is *strictly better* than the
+    ///    base attempt's.
+    ///
+    /// Otherwise the base attempt's status, point and statistics are all
+    /// put back, by the same three-sink floor
+    /// [`Self::run_with_mu_strategy_fallback`] uses and for the same
+    /// reason (pounce#870): a status describing one attempt attached to
+    /// a point from another is worse than either.
+    fn run_with_dual_divergence_retry(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> ApplicationReturnStatus {
+        let first_status = self.dispatch_standard_solve(Rc::clone(&tnlp));
+        if !self.dual_divergence_signature.get() {
+            return first_status;
+        }
+        // Which base verdicts this remedy is *for*.
+        //
+        // Two, and the narrowing was bought with a measurement. The
+        // detector is a statement about the iterate; it is not a
+        // statement that `perturb_always_cd` will help. `deb7` under
+        // L-BFGS is the corpus case that separates the two: the
+        // signature is real there — iteration 346, scale-relative step
+        // `6.5e-6`, `inf_pr` `3.0e-12`, unscaled `inf_du` `9.2e5`,
+        // which is an order *above* the gh#884 reproducer's `7.9e4`, so
+        // no dual floor excludes it, and the step conjunct separates the
+        // two only by fitting the default onto one fixture and spending
+        // the margin that holds `ralph1` out — and the retry still does
+        // not work: 3000 iterations to
+        // `Maximum_Iterations_Exceeded` at an unscaled KKT error of
+        // `6.7e1` against the base attempt's `9.9e1`. Pure cost, 4x the
+        // base trajectory, on a fixture whose verdict does not move.
+        //
+        // The exclusion is by *status*, so it is only as complete as the
+        // status is stable, and on this very fixture it is not. `deb7`
+        // reaches `Error_In_Step_Computation` at default options and is
+        // out; under `limited_memory_ls_failure_restarts=1` (gh#818's
+        // rung, off by default) it reaches `Restoration_Failed` instead
+        // and is therefore *in*. It used to pay exactly the cost above
+        // there — 6.1 s to 25.2 s wall clock for the same
+        // `Restoration_Failed` verdict and a declined retry, which is
+        // gh#887. That is the price of scoping by status rather than by
+        // model, and it is why the second gate below scopes by the
+        // *answer* instead: `deb7` now declines before spending
+        // anything. The status scope is kept because it is cheap and
+        // reads on the verdict a caller sees, but it is not what is
+        // being relied on.
+        //
+        // What separates them is the *status*, and it separates them
+        // for a reason rather than by luck:
+        //
+        //  * `Solved_To_Acceptable_Level` is gh#884 verbatim — the
+        //    runaway laundered itself through `s_d` into a success.
+        //  * `Restoration_Failed` is the same defect one step earlier:
+        //    the rows whose gradients vanished drive the solve into
+        //    restoration, and restoration cannot repair a row that has
+        //    no gradient. It is where the `qpec_small` TNLP fixture
+        //    lands (unscaled KKT `3.3e11`).
+        //  * `Error_In_Step_Computation` and
+        //    `Maximum_Iterations_Exceeded` are generic exhaustion
+        //    exits. Every hard model reaches them, for every reason.
+        //    Retrying *those* is not "repair the runaway", it is "try
+        //    again harder" — which is what `mu_strategy_fallback` and
+        //    the second-opinion ladder already are, and `deb7` is what
+        //    that costs.
+        //
+        // `Solve_Succeeded` is excluded because it is already the best
+        // verdict available and its certificate has already been
+        // checked in the model's own units; there is nothing to buy.
+        //
+        // Worst-case cost is therefore one extra solve under the
+        // caller's own `max_iter` — the same contract
+        // `run_with_mu_strategy_fallback` already has.
+        //
+        // Deliberately **not** deferred to `TERMINATION_POLICY_OPTIONS`
+        // the way the μ flip's acceptable-level trigger is (gh#757).
+        // That deferral exists because the μ flip returns a different
+        // *local solution*, so laundering a caller's deliberate
+        // downgrade loses a signal they asked for. This retry cannot:
+        // conjunct 4 requires the promoted answer to satisfy the KKT
+        // conditions in the model's own units, which a downgrade the
+        // caller induced on purpose does not. And the gh#884 reproducer
+        // sets `tol=1e-8` explicitly, so deferring would decline the
+        // retry on the one case the issue is about.
+        let retry_worthy = matches!(
+            first_status,
+            ApplicationReturnStatus::SolvedToAcceptableLevel
+                | ApplicationReturnStatus::RestorationFailed
+        );
+        if !retry_worthy {
+            return first_status;
+        }
+        let base_unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
+        // The runaway has to be the *whole* residual of the answer being
+        // reported.
+        //
+        // The detector is a statement about an *iterate*, and the iterate
+        // it fires on need not be the one the solve ends at. A run can
+        // pass through a settled point with a diverged multiplier, work
+        // its way back down, and report something ordinary — and then
+        // there is nothing left here for `perturb_always_cd` to repair,
+        // whatever the trajectory did in the middle. This is what makes
+        // "one extra solve" a cost the caller only pays on a run that
+        // still *exhibits* the defect (gh#887).
+        //
+        // The test is `runaway_is_the_whole_residual`, which reads only
+        // the reported answer and only as a ratio within it; its doc
+        // comment carries the rule and the measured populations.
+        let (base_viol, base_compl) = {
+            let st = self.statistics.borrow();
+            (st.final_unscaled_constr_viol, st.final_unscaled_compl)
+        };
+        let base_dual_inf = self.statistics.borrow().final_unscaled_dual_inf;
+        if !runaway_is_the_whole_residual(base_dual_inf, base_viol, base_compl) {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] gh#884: the signature fired mid-trajectory, but the \
+                 answer being reported is not a converged point with a runaway \
+                 multiplier — unscaled dual {:.3e} against viol {:.3e} and \
+                 complementarity {:.3e}. Nothing here for perturb_always_cd to \
+                 repair, so no retry (gh#887).",
+                base_dual_inf, base_viol, base_compl);
+            return first_status;
+        }
+        // Floor all three sinks — solution payload, certificate, and the
+        // last trace row — exactly as the μ fallback does (pounce#870).
+        let solution_floor = self.last_finalize.borrow().clone();
+        let certificate_floor = SolutionCertificate::of(&self.statistics.borrow());
+        let trace_floor = *self.last_iter_stats.borrow();
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] gh#884: the primal settled while the multipliers ran away \
+             (base {:?}, unscaled KKT {:.3e}); re-solving from scratch with \
+             perturb_always_cd=yes.",
+            first_status, base_unscaled_kkt);
+        let prev = self.options.get_string_value("perturb_always_cd", "").ok();
+        let _ = self
+            .options
+            .set_string_value("perturb_always_cd", "yes", true, false);
+        let retry_status = self.dispatch_standard_solve(Rc::clone(&tnlp));
+        // Restore the caller's option-table view. Absence is restored as
+        // absence would be seen: the registered default is `no`.
+        let _ = self.options.set_string_value(
+            "perturb_always_cd",
+            prev.as_ref()
+                .filter(|(_, found)| *found)
+                .map(|(v, _)| v.as_str())
+                .unwrap_or("no"),
+            true,
+            false,
+        );
+        let retry_unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
+        let retry_viol = self.statistics.borrow().final_unscaled_constr_viol;
+        // Conjuncts 3, 4 and 5. Conjunct 4 is the one that distinguishes
+        // this gate from every other promote-on-`Solve_Succeeded` retry
+        // in this file: the base attempt's defect *was* a status that its
+        // own unscaled residual contradicts, so promoting on the status
+        // alone would reproduce the bug one attempt later.
+        let claimed_success_is_real = retry_unscaled_kkt <= self.dual_divergence_retry_accept_tol()
+            && retry_viol <= self.dual_divergence_retry_accept_tol();
+        let promote = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded)
+            && claimed_success_is_real
+            && retry_unscaled_kkt < base_unscaled_kkt;
+        // Say on the console which of the two answers shipped.
+        //
+        // The per-attempt end summary cannot: `emit_end_summary` runs
+        // inside `optimize_constrained`, once per attempt, and the
+        // promotion is decided after the last of them. So a summary that
+        // reported the promotion would report `false` on the very run that
+        // promotes, contradicting the JSON report written from the same
+        // statistics. The summary reports the *signature*, which is true
+        // when it prints; this line reports the *outcome*, printed once,
+        // where it is known.
+        //
+        // Gated on `print_level >= 1`, matching `emit_end_summary` — the
+        // block this line follows.
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if console_output {
+            println!();
+            if promote {
+                println!(
+                    "gh#884 dual-divergence retry: promoted — unscaled KKT error \
+                     {base_unscaled_kkt:.4e} -> {retry_unscaled_kkt:.4e}."
+                );
+            } else {
+                println!(
+                    "gh#884 dual-divergence retry: declined ({retry_status:?}, \
+                     unscaled KKT error {retry_unscaled_kkt:.4e} against the base \
+                     attempt's {base_unscaled_kkt:.4e}); the base attempt's answer \
+                     is the one reported."
+                );
+            }
+        }
+        if promote {
+            self.dual_divergence_retry_promoted.set(true);
+            self.statistics.borrow_mut().dual_divergence_retry_promoted = true;
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] gh#884: the retry promoted — unscaled KKT {:.3e} \
+                 (base {:.3e}).",
+                retry_unscaled_kkt, base_unscaled_kkt);
+            return retry_status;
+        }
+        if let Some(floor) = solution_floor {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] gh#884: the retry did not promote ({:?}, unscaled KKT \
+                 {:.3e} vs base {:.3e}); restoring the first attempt's solution \
+                 and statistics alongside its status.",
+                retry_status, retry_unscaled_kkt, base_unscaled_kkt);
+            floor.replay(&tnlp);
+            certificate_floor.restore_into(&mut self.statistics.borrow_mut());
+            // The signature belongs to the attempt whose numbers are now
+            // reported, and `certificate_floor` does not carry it.
+            self.statistics.borrow_mut().dual_divergence_signature = true;
+            if let Some(stats) = trace_floor {
+                let _ = tnlp.borrow_mut().intermediate_callback(
+                    stats,
+                    &TnlpIpoptData::default(),
+                    &TnlpIpoptCq::default(),
+                );
+            }
+        }
+        first_status
+    }
+
+    /// The tolerance conjunct 4 of the dual-divergence promotion gate
+    /// tests the retry's *unscaled* residuals against.
+    ///
+    /// `acceptable_tol`-scale rather than `tol`-scale on purpose: the
+    /// unscaled residual is the one quantity nothing in the solve is
+    /// driven against, so holding it to `tol` would decline honest
+    /// retries on badly scaled models for a reason that has nothing to
+    /// do with gh#884. `qpec_small`'s honest retry reaches `9.96e-8`,
+    /// four orders inside it.
+    fn dual_divergence_retry_accept_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("acceptable_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-6)
+    }
+
     /// Phase-3 ℓ₁-exact penalty-barrier outer loop.
     ///
     /// Builds an [`L1PenaltyBarrierTnlp`] wrapper around the user
@@ -3811,6 +4235,8 @@ impl IpoptApplication {
         alg.tiny_step_y_tol = builder.tiny_step_y_tol;
         alg.diverging_iterates_tol = builder.diverging_iterates_tol;
         alg.dual_diverging_streak = builder.dual_diverging_streak.max(0) as usize;
+        alg.dual_divergence_retry_step_tol = builder.dual_divergence_retry_step_tol;
+        alg.dual_divergence_retry_du_floor = builder.dual_divergence_retry_du_floor;
         alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
         alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.neg_curv_escapes = builder.neg_curv_escapes.max(0) as usize;
@@ -3930,6 +4356,13 @@ impl IpoptApplication {
             // own `PdFullSpaceSolver`, so restoration sub-solves — which
             // run their own solver instance — are included.
             stats.quality_escalations = self.quality_escalations.get() as Index;
+            // gh#884. Read off the algorithm that just ran, so
+            // `run_with_dual_divergence_retry` — which sits above this
+            // call — can see what it observed.
+            self.dual_divergence_signature
+                .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
+            stats.dual_divergence_signature = self.dual_divergence_signature.get();
+            stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
             stats.iterations = captured_iters;
             // A refused starting point does not produce a valid iterate.
             // Leave final objective/residual fields at their NaN defaults.
@@ -4735,6 +5168,12 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("dual_diverging_streak") {
             builder.dual_diverging_streak = v;
+        }
+        if let Some(v) = read_num("dual_divergence_retry_step_tol") {
+            builder.dual_divergence_retry_step_tol = v;
+        }
+        if let Some(v) = read_num("dual_divergence_retry_du_floor") {
+            builder.dual_divergence_retry_du_floor = v;
         }
         if let Some(v) = read_int("resto_decline_deferrals") {
             builder.resto_decline_deferrals = v;
@@ -7621,5 +8060,82 @@ mod tests {
         let _ = app.optimize_tnlp(tnlp);
 
         assert_eq!(&objective_points.borrow()[..2], &[1.0, 2.0]);
+    }
+
+    // ---- gh#887: the dominance gate ------------------------------------
+    //
+    // These pin the rule directly, on numbers measured off real runs,
+    // because the fixture that motivated the gate turned out not to be a
+    // portable witness for it. `deb7` on the L-BFGS leg with
+    // `limited_memory_ls_failure_restarts=1` reaches a *materially
+    // different answer* on macOS and on Linux -- different objective
+    // (99.677 vs 99.651) and, decisively, a different shape:
+    //
+    //   | run                 | unscaled dual | viol    | compl   | ratio   |
+    //   | reproducer, .nl     | 7.90e4        | 1.1e-16 | 1.1e-9  | 1.5e-14 |
+    //   | reproducer, TNLP    | 3.25e11       | 2.5e-16 | 2.8e-3  | 8.7e-15 |
+    //   | deb7 + rung, macOS  | 9.90e1        | 8.0e-13 | 4.65e0  | 4.7e-2  |
+    //   | deb7 + rung, Linux  | 5.5743e3      | 5.6e-14 | 2.08e-5 | 3.7e-9  |
+    //
+    // The Linux row is the one worth reading twice: that answer really is
+    // gh#884's shape (scaled overall error 5.28e-1 against unscaled
+    // 5.57e3, which is the `s_d` normalisation hiding a runaway exactly
+    // as it did on `qpec_small`), so the retry there is the designed cost
+    // and not the waste gh#887 filed. A CLI assertion of "deb7 declines"
+    // is therefore false on Linux no matter what the threshold is, which
+    // is why the pin lives here instead.
+
+    #[test]
+    fn a_converged_point_with_a_runaway_multiplier_opens_the_retry() {
+        // The gh#884 reproducer, both routes it reaches the gate by.
+        assert!(runaway_is_the_whole_residual(7.90e4, 1.1e-16, 1.1e-9));
+        assert!(runaway_is_the_whole_residual(3.25e11, 2.5e-16, 2.8e-3));
+        // deb7 under the rung on Linux: primal exact, complementarity
+        // eight orders under its own dual residual. Same shape.
+        assert!(runaway_is_the_whole_residual(5.5743e3, 5.6e-14, 2.08e-5));
+    }
+
+    #[test]
+    fn an_unconverged_point_does_not_open_the_retry() {
+        // deb7 under the rung on macOS: complementarity 4.65, five
+        // percent of its own KKT error. Not a runaway multiplier on an
+        // otherwise-converged point -- just an unconverged point.
+        assert!(!runaway_is_the_whole_residual(9.90e1, 8.0e-13, 4.65e0));
+        // Either residual alone is enough to close it: the gate takes the
+        // max, so a clean complementarity does not excuse a violated
+        // constraint. (`1.0e1` against `1.0e6` is a ratio of `1e-5`; note
+        // that `1.0e0` there would be `1e-6` exactly, i.e. inside.)
+        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e1, 1.0e-16));
+        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e-16, 1.0e1));
+    }
+
+    #[test]
+    fn the_threshold_is_where_the_constant_says_it_is() {
+        // Exactly at the ratio is inside; a hair past it is outside.
+        assert!(runaway_is_the_whole_residual(
+            1.0,
+            DUAL_DIV_RETRY_DOMINANCE,
+            0.0
+        ));
+        assert!(!runaway_is_the_whole_residual(
+            1.0,
+            DUAL_DIV_RETRY_DOMINANCE * 1.001,
+            0.0
+        ));
+    }
+
+    #[test]
+    fn what_we_cannot_measure_does_not_buy_a_retry() {
+        // A NaN compares false everywhere, so the condition is written so
+        // that "we cannot tell" declines rather than retries. Each
+        // argument in turn.
+        assert!(!runaway_is_the_whole_residual(Number::NAN, 0.0, 0.0));
+        assert!(!runaway_is_the_whole_residual(1.0e6, Number::NAN, 0.0));
+        assert!(!runaway_is_the_whole_residual(1.0e6, 0.0, Number::NAN));
+        assert!(!runaway_is_the_whole_residual(Number::INFINITY, 0.0, 0.0));
+        // And a dual residual that is not a runaway at all: the ratio
+        // would be meaningless, and a zero-dual point is not gh#884.
+        assert!(!runaway_is_the_whole_residual(0.0, 0.0, 0.0));
+        assert!(!runaway_is_the_whole_residual(-1.0, 0.0, 0.0));
     }
 }

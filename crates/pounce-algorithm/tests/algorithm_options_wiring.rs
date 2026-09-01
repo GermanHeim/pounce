@@ -424,3 +424,28 @@ fn alpha_red_factor_reaches_assembled_line_search() {
     let bundle = builder.build();
     assert_eq!(bundle.line_search.alpha_red_factor, 0.2);
 }
+
+/// gh#884's two detector thresholds. Registered *and* read: the failure
+/// this file exists for is an option that is accepted and dropped, and
+/// both of these have a documented off value that has to survive the trip
+/// — `dual_divergence_retry_step_tol=0` is the finer of the fix's two
+/// kill switches, and it is only a kill switch if it arrives.
+#[test]
+fn dual_divergence_retry_thresholds_default_match_registered() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.dual_divergence_retry_step_tol, 1e-5);
+    assert_eq!(b.dual_divergence_retry_du_floor, 1e2);
+}
+
+#[test]
+fn dual_divergence_retry_thresholds_override_flows_through() {
+    let b = builder_from(|app| {
+        let o = app.options_mut();
+        o.set_numeric_value("dual_divergence_retry_step_tol", 0.0, true, false)
+            .unwrap();
+        o.set_numeric_value("dual_divergence_retry_du_floor", 1e4, true, false)
+            .unwrap();
+    });
+    assert_eq!(b.dual_divergence_retry_step_tol, 0.0);
+    assert_eq!(b.dual_divergence_retry_du_floor, 1e4);
+}

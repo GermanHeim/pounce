@@ -56,7 +56,7 @@ have (gh #505 is the worked example; see
 - **Run the kill switch first.** Most POUNCE-only heuristics can be disabled by
   an option — `infeas_stationarity_tol=0`, `presolve=no`, `acceptable_iter=0`,
   `acceptable_progress_kappa=0`, `obj_scale_certificate_threshold=0`,
-  `primal_noise_floor_kappa=0`,
+  `primal_noise_floor_kappa=0`, `dual_divergence_retry=no`,
   `nlp_scaling_method=none`. If one of them flips the outcome, that heuristic is
   the mechanism, established in a single run with no oracle and no code reading.
   On gh #505 this control was decisive and was not run until roughly eighteen

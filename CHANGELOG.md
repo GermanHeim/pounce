@@ -169,6 +169,120 @@ changes.
 
 ### Fixed
 
+- **A settled iterate with a runaway multiplier no longer ships as
+  `Solved_To_Acceptable_Level` (gh#884).** Some models have a solution at
+  which a constraint's gradient vanishes — the row is satisfied, the primal
+  iterate is exact, but the multiplier that would certify it is *arbitrary
+  rather than nonexistent*, and the barrier drives it to infinity. The
+  standard case is a complementarity constraint lowered as a product,
+  `G·H = 0`, at a point where the pair is **biactive** (`G = 0` and `H = 0`
+  together): the product's gradient `H∇G + G∇H` vanishes identically there.
+  MPCC lowerings (`ncp_eq`, `prod_eq`) reach such points routinely.
+
+  The verdict was reached on an NLP error normalised by `s_d`, and `s_d`
+  grows with the mean multiplier magnitude — so the runaway divided *itself*
+  out of the number the gate tested. On MacMPEC `qpec_small` at
+  `bound_relax_factor=0`, one line of the summary block:
+
+  ```text
+                                     (scaled)                 (unscaled)
+  Overall NLP error.......:   8.2335532426389998e-11    7.8965510781517834e+04
+  ```
+
+  Fifteen orders apart, and the gate read the left column.
+
+  POUNCE now watches for the signature directly, at one and the same
+  iterate: primal infeasibility at zero, a **settled** step
+  (`maxᵢ |dᵢ|/(1 + |xᵢ|)` over the `x` and `s` blocks at or below
+  `dual_divergence_retry_step_tol`, default `1e-5`), and an **unscaled**
+  Lagrangian gradient at or above `dual_divergence_retry_du_floor` (default
+  `1e2`). The settled-step conjunct is what separates this from an iterate
+  that is merely diverging, which has a large step rather than a zero one.
+
+  Where the signature is seen and the solve ends
+  `Solved_To_Acceptable_Level` or `Restoration_Failed` — the two verdicts a
+  vanishing gradient row produces directly, the first being gh#884 verbatim
+  and the second the same defect one step earlier — POUNCE re-solves once
+  from cold with `perturb_always_cd=yes`, and returns the second answer only
+  if it ends `Solve_Succeeded`, its *unscaled* KKT error and constraint violation are
+  both within `acceptable_tol`, and its unscaled KKT error strictly beats
+  the first attempt's. Otherwise the first attempt's status, point,
+  statistics and final trace row are all restored: the retry costs
+  iterations, never the answer. The unscaled conjunct is not decoration —
+  the defect *was* a status its own unscaled residual contradicted, so a
+  promotion rule reading the status alone would launder it one attempt
+  later.
+
+  On `qpec_small` the unscaled KKT error goes `7.8966e+04 → 9.9636e-08`,
+  nine orders, for a primal residual that goes `1.1e-16 → 5.5e-12` and a
+  point `3.7e-06` further from `(1, 1, 0)` — a marginally looser answer
+  that comes with a certificate a reader can check.
+
+  Specificity is the whole safety argument, because the remedy is not
+  universally safe: on MacMPEC `ralph1`, which has *no* sign-feasible
+  multiplier, `perturb_always_cd=yes` reaches `Solve_Succeeded` at
+  `f = -2.71e-5` — below the true optimum `f* = 0` — with an unscaled KKT
+  error of `5.25e-7`, which is better than its base attempt on every number
+  the promotion gate reads. The detector is what keeps it away: `qpec_small`
+  settles to `4.3e-8`, `ralph1` bottoms out at `7.2e-3`, and the `1e-5`
+  default sits between them.
+  `crates/pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`
+  pins that gap, and widening the step conjunct to `1e-1` turns exactly one
+  test red.
+
+  The scope is by status, not by threshold, and `deb7` under L-BFGS is why:
+  the detector fires there legitimately — at iteration 346 a step of
+  `6.5e-6` with an unscaled dual of `9.2e+05`, an *order above*
+  `qpec_small`'s — so no dual floor excludes it, and the step conjunct
+  separates the two only by fitting the default to one fixture — but the
+  remedy does not transfer, and an earlier build that also retried on
+  `Error_In_Step_Computation` spent 715 → 3000 iterations there to return
+  the same status and objective. Generic exhaustion exits are excluded for
+  that reason; the worst case is now one extra solve, under the caller's own
+  `max_iter`, on a run already reporting failure. It was the only line the
+  fixture sweep moved, and the shipped build moves none. The scope is only
+  as complete as the status is stable, and that is recorded rather than
+  glossed: the same fixture under `limited_memory_ls_failure_restarts=1`
+  (off by default) exits `Restoration_Failed` and so is back in scope.
+
+  So a second gate reads the *answer* rather than the trajectory (gh#887).
+  The detector fires on an iterate, and nothing says the solve ends there.
+  What gh#884's defect looks like in the answer is a point converged except
+  that one multiplier ran away — primal exact, complementarity met, the
+  whole residual dual infeasibility — so the retry is spent only when the
+  reported answer's unscaled constraint violation and complementarity are
+  both at or below `1e-6` times its unscaled dual infeasibility. That is
+  `1.5e-14` for the reproducer against `4.7e-2` for `deb7` under the gh#818
+  rung on macOS, whose complementarity is five percent of its own KKT
+  error; that run is back to 6.1 s from 25.2 s. The test is a ratio *within
+  one answer* rather than a floor (a threshold on a scale-dependent
+  quantity, and `deb7` clears `1e2` by one percent) or a comparison against
+  what the detector saw (two numbers from a trajectory, which is not stable
+  across platforms). The rule is pinned as unit tests on the predicate
+  rather than on a fixture, because `deb7` under that rung reaches a
+  different answer on Linux — objective `99.651` against macOS's `99.677` —
+  and that answer genuinely carries the runaway, so the retry there is the
+  designed cost rather than the waste gh#887 filed. Worst case is one extra
+  solve, on a run that satisfied the detector, reached a scoped failure
+  verdict, and still reports gh#884's shape.
+
+  Two off switches: `dual_divergence_retry=no` disables the retry (the
+  detector still runs and the report still records what it saw), and
+  `dual_divergence_retry_step_tol=0` holds the detector itself off. Both
+  the signature and the retry's outcome are reported, in the summary block
+  and as `statistics.dual_divergence_signature` /
+  `statistics.dual_divergence_retry_promoted` in the JSON report.
+
+  The retry is the **outermost** wrapper, so it never runs where an inner
+  one already won: at default options `qpec_small` is rescued by the
+  μ-strategy fallback and this costs nothing. Across the 80-fixture
+  regression corpus, on both sweep legs, no *acceptable-level* exit reaches
+  the floor — the closest non-MPCC approach is `eigena2` under L-BFGS at an
+  unscaled dual of `37` with a step of `7.9e-9` — and the sweep is unmoved
+  on both legs. The reproducer ships as
+  `crates/pounce-cli/tests/fixtures/mpcc_qpec_small_biactive.nl`, which is
+  also the corpus's first MPCC lowering.
+
 - **`l1_exact_penalty_barrier` no longer reports success on a point that
   violates your constraints.** The wrapper solves an augmented problem,
   `c(x) − p + n = target`, whose equality rows the slack variables satisfy

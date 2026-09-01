@@ -142,6 +142,21 @@ gh#414's second fix did. A change to `crates/pounce-convex/src/ipm.rs`'s
 `illconditioned_huge_scale.rs`, which reach the accept and reject branches on
 purpose; the corpora are evidence of no *collateral* damage and nothing more.
 
+The same hole exists on the **acceptable-level dual gate**, and it is the one
+case where the blind spot is a *verdict* rather than a trajectory (gh#884). No
+fixture in the corpus has an acceptable-level exit whose unscaled dual residual
+exceeds `dual_inf_tol`, so a change to that gate is measured against a corpus
+that is uniform in exactly the dimension it acts on. Measured: a proposed
+ceiling referenced to `norm_inf(grad f)` diffs **empty across all 182
+fixture-legs, both legs**, while tightening `acceptable_dual_inf_tol` from
+`1e10` to `dual_inf_tol` for the entire unconstrained and bound-only class —
+turning a `Solved_To_Acceptable_Level` at `3.7e-6` into a `RestorationFailed`
+15 orders from `f*` on an unconstrained ill-conditioned quadratic. The model
+that caught it is not in the corpus at all. So a gate-touching change needs a
+purpose-built fixture that reaches an acceptable-level exit above
+`dual_inf_tol`; an empty sweep is not evidence about it. Full account:
+`dev-notes/mpcc-biactive-dual-divergence.md`.
+
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
 regression produces the *right* answer, slowly — or a differently-wrong
