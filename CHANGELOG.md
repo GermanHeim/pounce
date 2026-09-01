@@ -9,44 +9,7 @@ changes.
 
 ## [Unreleased]
 
-- **`l1_exact_penalty_barrier` no longer reports success on a point that
-  violates your constraints.** The wrapper solves an augmented problem,
-  `c(x) − p + n = target`, whose equality rows the slack variables satisfy
-  to machine precision by construction — and that residual was what
-  `final_constr_viol` reported. On the MPCC benchmark's `ralph1` the solve
-  returned `Solve_Succeeded` at an objective `5.0e-04` *below* the true
-  optimum, from a point violating its one equality row by `2.5e-07`, while
-  reporting a constraint violation of `9.6e-15`. `final_unscaled_constr_viol`
-  said the same, so no field in the result disclosed it.
-
-  Two things were wrong and both are fixed. The reported violation is now
-  the violation of the rows **you** declared, measured at the returned
-  point, and reported in `final_unscaled_constr_viol` — the original-units
-  field family, which is where that measurement belongs. (`final_constr_viol`
-  and the other `final_*` fields are the internally-scaled residuals; they
-  carry the same number only when no row scaling is active, which is the
-  case in which the two families are defined to agree. Read
-  `final_unscaled_constr_viol` if you are checking ℓ₁ feasibility
-  programmatically.) And the verdict — both the ρ-escalation loop's stopping test and
-  the honest-infeasibility upgrade — is now judged on that same quantity
-  against the tolerances you set (`tol` for a strict success,
-  `acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative),
-  rather than on the slack sum `Σ(p + n)` against `l1_slack_tol`. `Σ(p + n)`
-  was the wrong quantity twice over: the violation of row `i` is
-  `|pᵢ − nᵢ|`, not `pᵢ + nᵢ`, and at the barrier's interior both slacks
-  stay positive where their difference is zero; and `l1_slack_tol`'s
-  `1e-6` default is four orders looser than a `tol = 1e-8` solve asked
-  for. It keeps its other job — steering ρ, which is what it is right for
-  — and survives as the fallback when a model's rows cannot be evaluated.
-
-  The change is downgrade-only: a solve that meets the strict standard on
-  your rows keeps the status it had, and nothing here turns a failure into
-  a success. In practice the loop now escalates ρ where it used to stop at
-  the penalty point, so answers also improve — `ralph1` moves from
-  `-5.0e-04` to `-5.1e-05` with the reported violation (`2.6e-09`) equal to
-  the actual one, and under `l1_fallback_on_restoration_failure` it now
-  reaches the true optimum with the complementarity product exactly zero.
-  Only solves that opt into the wrapper are affected.
+### Added
 
 - **`benchmarks/mpcc/`: the MPCC benchmark harness POUNCE has listed as
   outstanding since pounce#10.** Eleven small complementarity-constrained
@@ -60,7 +23,6 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
-### Added
 
 - **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
   (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
@@ -115,6 +77,49 @@ changes.
   asserts the index spaces really do diverge before trusting the leg.
 
 ### Fixed
+
+- **`l1_exact_penalty_barrier` no longer reports success on a point that
+  violates your constraints.** The wrapper solves an augmented problem,
+  `c(x) − p + n = target`, whose equality rows the slack variables satisfy
+  to machine precision by construction — and that residual was what
+  `final_constr_viol` reported. On the MPCC benchmark's `ralph1` the solve
+  returned `Solve_Succeeded` at an objective `5.0e-04` *below* the true
+  optimum, from a point violating its one equality row by `2.5e-07`, while
+  reporting a constraint violation of `9.6e-15`. `final_unscaled_constr_viol`
+  said the same, so no field in the result disclosed it.
+
+  Two things were wrong and both are fixed. The reported violation is now
+  the violation of the rows **you** declared, measured at the returned
+  point, and reported in `final_unscaled_constr_viol` — the original-units
+  field family, which is where that measurement belongs. (`final_constr_viol`
+  and the other `final_*` fields are the internally-scaled residuals; they
+  carry the same number only when no row scaling is active, which is the
+  case in which the two families are defined to agree. Read
+  `final_unscaled_constr_viol` if you are checking ℓ₁ feasibility
+  programmatically.) And the verdict — both the ρ-escalation loop's stopping test and
+  the honest-infeasibility upgrade — is now judged on that same quantity
+  against the tolerances you set (`tol` for a strict success,
+  `acceptable_tol` for `Solved_To_Acceptable_Level`, scale-relative and
+  additionally bounded by the absolute `constr_viol_tol` /
+  `acceptable_constr_viol_tol` the rest of the solver judges feasibility
+  by, so that a large-magnitude row cannot buy an unbounded allowance),
+  rather than on the slack sum `Σ(p + n)` against `l1_slack_tol`. `Σ(p + n)`
+  was the wrong quantity twice over: the violation of row `i` is
+  `|pᵢ − nᵢ|`, not `pᵢ + nᵢ`, and at the barrier's interior both slacks
+  stay positive where their difference is zero; and `l1_slack_tol`'s
+  `1e-6` default is four orders looser than a `tol = 1e-8` solve asked
+  for. It keeps its other job — steering ρ, which is what it is right for
+  — and survives as the fallback when a model's rows cannot be evaluated.
+
+  The change is downgrade-only: a solve that meets the strict standard on
+  your rows keeps the status it had, and nothing here turns a failure into
+  a success. In practice the loop now escalates ρ where it used to stop at
+  the penalty point, so answers also improve — `ralph1` moves from
+  `-5.0e-04` to `-5.1e-05` with the reported violation (`2.6e-09`) equal to
+  the actual one, and under `l1_fallback_on_restoration_failure` it now
+  reaches the true optimum with the complementarity product exactly zero.
+  Only solves that opt into the wrapper are affected.
+
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,
   `normalized_optimum_is_genuine` decides whether the rescaled answer may be

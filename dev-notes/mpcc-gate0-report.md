@@ -320,6 +320,84 @@ including all 11 ℓ₁ integration tests. The change is confined to solves
 that opt into the wrapper, so the CLI fixture corpus — which never sets
 the option — is untouched by construction.
 
+### P1a — the P1 fix's own hole: a large row bought a false success. **Fixed.**
+
+Found by an adversary probe against the P1 fix itself, not by this
+corpus — and the corpus is the reason it had to be a probe. Every row in
+all eleven cases lives at magnitude `O(1)`, so the corpus is *uniform in
+the dimension this defect acts on*, and reports nothing about it no
+matter how many records it carries. That is the same lesson
+`dev-notes/convex-fixture-corpus.md` records for the bound-relax cost.
+
+The P1 fix judged each row with `is_negligible(viol, scale, tol)` alone,
+i.e. `viol <= tol · max(|row|, 1)`. That is a relative test with no
+absolute floor, so the allowance grows without bound with the row's
+magnitude: at the default `tol = 1e-8`, a row near `1e10` buys `1e2` of
+"feasible".
+
+The probe: `min (x/K)²` subject to `x = K` and `0 <= x <= K − 50` —
+infeasible by exactly `50` by construction, with its row at `K`. With
+the violation held at `50` and only `K` swept, the verdict tracked
+`tol · K` exactly:
+
+| `K` | `tol · K` | verdict before this fix |
+|---|---:|---|
+| `1e6` | `1e-2` | `Infeasible_Problem_Detected` |
+| `1e8` – `4.9e9` | `1` – `49` | `Solved_To_Acceptable_Level` |
+| `5.1e9` – `1e12` | `51` – `1e4` | **`Solve_Succeeded`** |
+
+**This was a regression this branch introduced, not an inherited gap.**
+On the parent the same model exits `Error_In_Step_Computation`: the
+`Σ(p + n) > l1_slack_tol` argument P1 replaced was crude but *absolute*,
+and caught it. So the P1 fix as first written traded a dishonest number
+under an honest status for an honest number under a dishonest status —
+and "downgrade-only ... nothing here turns a failure into a success",
+which this report and the PR both claim, was false in exactly this
+corner.
+
+The repair is to stop inventing a feasibility standard and use the one
+the rest of the solver already has.
+`OptErrorConvCheck::primal_component_passes` is an absolute
+`constr_viol <= constr_viol_tol`, with scale-awareness supplied by an
+*abstention* when every row sits at its own floating-point noise floor
+(gh#528, gh#590) rather than by multiplying the tolerance by the row's
+size. Its own documentation states the property `is_negligible` lacks:
+the abstention "cannot fabricate a success on a genuinely infeasible
+model: such a model's violation is pinned at its infeasibility gap,
+orders above `eps ·` the row's own magnitude". In the probe, `50` is
+`~2e7 ×` this row's floor, so nothing abstains.
+
+`primal_resolvable` itself cannot be reused verbatim — the CQ computes it
+on the *augmented* NLP, whose rows the slacks satisfy to machine
+precision, so it would abstain always and accept everything. The floor is
+recomputed on the user's own row from the same
+`primal_noise_floor_kappa · eps · magnitude` the option documents, and
+`primal_noise_floor_kappa = 0` opts out as it does for the strict gate.
+
+The two arms are **conjoined, not substituted**: the relative test still
+catches a violation that is small absolutely but large for its row, which
+is the P1 case itself (`ralph1` at `2.5e-7` under a `2.5e-11` tol). An
+absolute-only rule would have re-admitted P1, since `2.5e-7` is well
+inside `constr_viol_tol = 1e-4`.
+
+Measured: the full sweep is **bit-identical across this change — 0 of
+2880 records differ** once wall-clock timing is stripped, and no record
+gains or loses a success. So every table above stands, and the change is
+evidence-free in the corpus for the reason the first paragraph gives:
+nothing here has a row big enough to reach it. The guard is
+`a_large_row_magnitude_does_not_buy_success_on_an_infeasible_model` in
+`crates/pounce-algorithm/tests/issue_794_l1_original_space_reporting.rs`,
+which straddles the measured crossover and is mutation-checked — drop the
+absolute conjuncts and it alone reports `Solve_Succeeded` at `4.999990e1`.
+
+**Not fixed, and recorded rather than filed:** the same scale-relative
+shape appears in `withdraw_infeasibility_if_refuted`, which is why the
+repaired verdicts above read `Error_In_Step_Computation` rather than
+`Infeasible_Problem_Detected` at large `K` — the refutation check finds
+the starting point "feasible" at that row's scale. That path is shared
+with the IPM and SQP arms, predates this branch, and changing it is not
+this PR's to make.
+
 ### P2 — a biactive pair breaks a cold exact-product solve. **Open: the exit is not what this section said, twice over.**
 
 > **Status of this section.** It has now been rewritten three times, and

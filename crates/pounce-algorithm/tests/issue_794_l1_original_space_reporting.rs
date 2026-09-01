@@ -438,3 +438,149 @@ fn an_original_units_violation_stays_out_of_the_scaled_family() {
          number was written into the scaled family",
     );
 }
+
+/// A model that is **infeasible by construction, by exactly `GAP`**, with
+/// its one row living at magnitude `K`.
+///
+/// `min (x/K)²  s.t.  x == K,  0 ≤ x ≤ K − GAP`
+///
+/// The row cannot be satisfied: the bound excludes its target. Every
+/// returned point violates the declared equality by at least `GAP`, so any
+/// success status is wrong, and no oracle is needed to say so.
+struct InfeasibleLargeRow {
+    k: Number,
+    gap: Number,
+}
+
+impl TNLP for InfeasibleLargeRow {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 1,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 1,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l[0] = 0.0;
+        b.x_u[0] = self.k - self.gap;
+        b.g_l[0] = self.k;
+        b.g_u[0] = self.k;
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = self.k - self.gap;
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some((x[0] / self.k).powi(2))
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = 2.0 * x[0] / (self.k * self.k);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0];
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, m: SparsityRequest<'_>) -> bool {
+        match m {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow[0] = 0;
+                jcol[0] = 0;
+            }
+            SparsityRequest::Values { values } => values[0] = 1.0,
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        m: SparsityRequest<'_>,
+    ) -> bool {
+        match m {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow[0] = 0;
+                jcol[0] = 0;
+            }
+            SparsityRequest::Values { values } => values[0] = obj_factor * 2.0 / (self.k * self.k),
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// gh#794 adversary follow-up: **a large-magnitude row must not buy a
+/// success on an infeasible model.**
+///
+/// `original_space_feasibility` judged each row with `is_negligible(viol,
+/// scale, tol)` alone — `viol ≤ tol · max(|row|, 1)`. That is a relative
+/// test with no absolute floor, so the allowance grows without bound with
+/// the row's magnitude: at the default `tol = 1e-8` a row near `1e10` buys
+/// `1e2` of "feasible". This model is infeasible by exactly `50` with its
+/// row at `1e10`, and it came back `Solve_Succeeded`.
+///
+/// That was a regression this branch introduced, not an inherited gap: on
+/// the parent the same model exits `Error_In_Step_Computation`, because
+/// the `Σ(p + n) > l1_slack_tol` argument it replaced was crude but
+/// *absolute*. The fix conjoins the standard the rest of the solver uses —
+/// `OptErrorConvCheck::primal_component_passes`, an absolute
+/// `constr_viol_tol` with a noise-floor abstention (gh#528/gh#590) — so
+/// scale-awareness comes from the row's floating-point floor rather than
+/// from multiplying the tolerance by the row's size. Here `50` is `~2e7 ×`
+/// that floor, so nothing abstains.
+///
+/// **Mutation that reddens it:** drop the `&& absolute_ok(..)` conjuncts
+/// from `judge` in `original_space_feasibility` — this test then reports
+/// `Solve_Succeeded` at a violation of `4.999990e1`. Verified.
+///
+/// The sweep behind the `k` values: with the violation held at `50`, the
+/// pre-fix verdict tracked `tol · k` exactly — `Infeasible_Problem_Detected`
+/// at `k = 1e6`, `Solved_To_Acceptable_Level` from `1e8` to `4.9e9`
+/// (threshold `49 < 50`), and `Solve_Succeeded` from `5.1e9` (threshold
+/// `51 > 50`) up. The two `k` values below straddle that crossover.
+#[test]
+fn a_large_row_magnitude_does_not_buy_success_on_an_infeasible_model() {
+    for k in [5.1e9, 1e10, 1e12] {
+        let gap = 50.0;
+        let mut app = IpoptApplication::new();
+        {
+            let opts = app.options_mut();
+            let _ = opts.set_string_value("sb", "yes", true, false);
+            let _ = opts.set_integer_value("print_level", 0, true, false);
+            let _ = opts.set_string_value("l1_exact_penalty_barrier", "yes", true, false);
+            // Both arms on the NLP path, so the comparison is like for like.
+            let _ = opts.set_string_value("solver_selection", "nlp", true, false);
+            let _ = opts.set_integer_value("max_iter", 500, true, false);
+        }
+        app.initialize().expect("initialize");
+        let status = app.optimize_tnlp(Rc::new(RefCell::new(InfeasibleLargeRow { k, gap })));
+
+        assert!(
+            !matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+                    | ApplicationReturnStatus::FeasiblePointFound
+            ),
+            "k = {k:.1e}: reported {status:?} on a model infeasible by exactly {gap}; \
+             a row at this magnitude bought {:.1e} of allowance from the \
+             scale-relative test (gh#794 adversary)",
+            1e-8 * k,
+        );
+
+        // And the number stays honest — the P1 property must survive the
+        // stricter verdict rather than be traded against it.
+        let reported = app.statistics().final_unscaled_constr_viol;
+        assert!(
+            (reported - gap).abs() <= 1e-3 * gap,
+            "k = {k:.1e}: reported violation {reported:.6e} does not match the \
+             model's own violation of {gap}",
+        );
+    }
+}

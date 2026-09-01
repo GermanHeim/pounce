@@ -2185,6 +2185,37 @@ impl IpoptApplication {
             .unwrap_or(1e-6)
     }
 
+    /// The user's `constr_viol_tol` — the **absolute** feasibility standard
+    /// the strict gate's primal component judges by
+    /// (`OptErrorConvCheck::primal_component_passes`).
+    fn user_constr_viol_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("constr_viol_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-4)
+    }
+
+    /// The user's `acceptable_constr_viol_tol` — the same standard at the
+    /// acceptable tier.
+    fn user_acceptable_constr_viol_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("acceptable_constr_viol_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-2)
+    }
+
+    /// `primal_noise_floor_kappa` — the safety factor on the per-row
+    /// floating-point noise floor (gh#528/gh#590). `0` opts out.
+    fn user_primal_noise_floor_kappa(&self) -> Number {
+        self.options
+            .get_numeric_value("primal_noise_floor_kappa", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(64.0)
+    }
+
     /// Emit the Ipopt-style problem-statistics block (#206) from the
     /// engine's own reduced problem, gated on `console_output`
     /// (print_level >= 1). Shared by the IPM (`optimize_tnlp`) and SQP
@@ -2911,6 +2942,9 @@ impl IpoptApplication {
                             self.nlp_upper_bound_inf(),
                             self.user_tol(),
                             self.user_acceptable_tol(),
+                            self.user_constr_viol_tol(),
+                            self.user_acceptable_constr_viol_tol(),
+                            self.user_primal_noise_floor_kappa(),
                         )
                     })
                     .flatten()
@@ -3007,6 +3041,9 @@ impl IpoptApplication {
                         self.nlp_upper_bound_inf(),
                         self.user_tol(),
                         self.user_acceptable_tol(),
+                        self.user_constr_viol_tol(),
+                        self.user_acceptable_constr_viol_tol(),
+                        self.user_primal_noise_floor_kappa(),
                     )
                 })
                 .flatten();
@@ -5688,6 +5725,9 @@ fn original_space_feasibility(
     upper_bound_inf: Number,
     tol: Number,
     acceptable_tol: Number,
+    constr_viol_tol: Number,
+    acceptable_constr_viol_tol: Number,
+    noise_floor_kappa: Number,
 ) -> Option<OriginalSpaceFeasibility> {
     use pounce_common::tolerance::is_negligible;
 
@@ -5735,8 +5775,44 @@ fn original_space_feasibility(
             return;
         }
         max_violation = max_violation.max(viol);
-        ok_tol &= is_negligible(viol, scale, tol);
-        ok_acceptable &= is_negligible(viol, scale, acceptable_tol);
+        // The scale-relative test alone is not a feasibility standard, and
+        // on a large-magnitude row it is not even close to one: it accepts
+        // anything up to `tol · |row|`, which on a row near `1e10` is `1e2`
+        // at the default `tol`. An adversary probe on this branch built a
+        // model infeasible by exactly `50` with its row at `1e10` and got
+        // `Solve_Succeeded` — a *worse* verdict than this branch's own
+        // parent, which refused the same point (the old `Σ(p+n)` argument
+        // was crude but absolute). So the wrapper has to judge feasibility
+        // the way the rest of the solver does.
+        //
+        // `OptErrorConvCheck::primal_component_passes` is that standard:
+        // an absolute `constr_viol <= constr_viol_tol`, with scale-awareness
+        // supplied by an abstention when every row sits at its own
+        // floating-point noise floor (gh#528/gh#590) rather than by
+        // multiplying the tolerance by the row's magnitude. That
+        // abstention "cannot fabricate a success on a genuinely infeasible
+        // model: such a model's violation is pinned at its infeasibility
+        // gap, orders above `eps ·` the row's own magnitude" — which is
+        // exactly the property `is_negligible` lacks and the probe
+        // exploited (`50` is `~2e7 ×` this row's floor).
+        //
+        // The strict gate's `primal_resolvable` cannot be reused verbatim:
+        // it is computed by the CQ on the *augmented* NLP, whose rows the
+        // slacks satisfy to machine precision, so it would abstain always
+        // and accept everything. The floor is therefore recomputed here on
+        // the user's own row, from the same `kappa · eps · magnitude` the
+        // option documents. `primal_noise_floor_kappa = 0` opts out, as it
+        // does for the strict gate.
+        //
+        // Both arms are conjoined rather than substituted: the relative
+        // test still catches a violation that is small in absolute terms
+        // but large for its row, which is the gh#794 P1 case itself
+        // (`ralph1` at `2.5e-7` under a `2.5e-11` tol).
+        let noise = noise_floor_kappa * Number::EPSILON * scale.abs();
+        let absolute_ok = |bound: Number| viol <= bound || viol <= noise;
+        ok_tol &= is_negligible(viol, scale, tol) && absolute_ok(constr_viol_tol);
+        ok_acceptable &=
+            is_negligible(viol, scale, acceptable_tol) && absolute_ok(acceptable_constr_viol_tol);
     };
 
     for i in 0..m {
