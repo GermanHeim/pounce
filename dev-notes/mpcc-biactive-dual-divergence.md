@@ -191,6 +191,97 @@ symptom").
 either way (`ErrorInStepComputation`, identical iterate). That criterion
 was never the binding one.
 
+## Ruled out 4: give the acceptable-level gate a dual ceiling. **Refuses the right point, and a large correct class with it.**
+
+The first entry in the *policy* family rather than the trigger family —
+the route gh#884's "Out of scope" section names and leaves undecided
+("refusing that point needs a threshold moved … precedent: gh#532's
+`dual_inf_scale_kappa` … `1e10` reads as a *disabled* cap rather than a
+loose one. Not decided here").
+
+Measured by @jkitchin in a separate session on `d89771bc` plus an
+unpushed working-tree patch implementing the bound below. The table is a
+direct in-session probe, **not a committed test**, so it is not
+reproducible from this repository as it stands; the patch was not
+proposed for merge.
+
+The route: give the acceptable-level gate the dual ceiling it lacks,
+referenced to `norm_inf(grad f)` rather than to `dual_scale`.
+
+```text
+acceptable_dual_inf_bound = min( acceptable_dual_inf_tol,
+                                 max( dual_inf_tol,
+                                      kappa * acceptable_tol * norm_inf(grad f) ) )
+```
+
+`grad f` rather than `dual_scale`, because gh#532's argument — "a
+multiplier contributes to `dual_scale` whatever it contributes to
+`grad L`, so it cannot buy the test" — holds for *one* multiplier and
+fails for a **pair**. Two rows with parallel gradients admit multipliers
+of any size whose contributions cancel, which is exactly what a biactive
+pair produces: `dual_scale` runs away while `grad L` does not.
+`norm_inf(grad f)` is the one term of `grad L` no multiplier can move.
+
+On its face it clears gh#884. It refuses the `qpec_small`/`ncp_eq`/origin
+certificate at the residual the issue names, leaves
+`ralph1`/`direct`/origin byte-identical, converges nothing so it cannot
+over-fire, and `scripts/sweep-fixtures.sh` diffs **empty across all 182
+fixture-legs, both legs**.
+
+It is still wrong. `crates/pounce-rs/tests/watchdog_trial_is_not_a_divergence_verdict.rs`,
+`IllConditionedQuadratic`, `n = 12`, condition `1e14`, L-BFGS:
+
+| | status | iters | objective | unscaled `norm_inf(grad L)` | `norm_inf(grad f)` | ratio |
+|---|---|---:|---:|---:|---:|---:|
+| ceiling on | `RestorationFailed` | 298 | `9.5916e8` | `8.4150e10` | `8.4150e10` | **1.0000** |
+| ceiling off | `SolvedToAcceptableLevel` | 197 | `3.7375e-6` | `8.7467e1` | `8.7467e1` | **1.0000** |
+
+The model is **unconstrained** — no rows, no bounds — so `grad L` is
+identically `grad f` and the ratio the ceiling tests is `1` by
+construction. The bound collapses to `max(1.0, 8.75e-5) = 1.0` and
+refuses a residual of `87.5`: `acceptable_dual_inf_tol` is tightened from
+`1e10` to `dual_inf_tol` for the whole unconstrained and bound-only
+class, which has nothing to do with a biactive pair. The run then wanders
+100 further iterations into restoration and ends 15 orders from `f*`.
+
+**The defect is in the discriminator, not the constant.** The claim was
+that `norm_inf(grad L)/norm_inf(grad f) ~ 1` is the signature of an
+*unresolved* multiplier. It is equally the signature of an ordinary
+not-yet-converged iterate with nothing to cancel. gh#884's criterion 2
+asks for something "a multiplier of `1e9` on a `1e-9` gradient cannot
+satisfy"; `grad f` clears that direction and says nothing about what else
+it refuses. A discriminator has to be checked in **both** directions —
+what it admits and what it turns away — and the corpus could not perform
+the second check here, for the reason in the next section.
+
+## The corpus cannot see the dimension a gate change acts on
+
+The generalisable half of ruled-out 4, and it qualifies the evidence in
+every other section of this note.
+
+**An empty fixture sweep is not evidence about a change to the
+acceptable-level dual gate.** No fixture in the corpus has an
+acceptable-level exit whose unscaled dual residual exceeds
+`dual_inf_tol`, so the corpus is uniform in exactly the dimension such a
+change acts on, and reports clean no matter what the change does. Ruled
+out 4 diffs empty across all 182 fixture-legs while tightening
+`acceptable_dual_inf_tol` by ten orders for an entire problem class. The
+model that caught it is not in the corpus at all.
+
+This is CLAUDE.md's own branch rule — "a corpus that is uniform in the
+dimension a change acts on reports 'small and mixed' no matter how large
+its models are" — instanced on the **convergence gate** rather than on
+iteration counts, which is where that rule has always been stated. It
+joins the two cases CLAUDE.md already records: the convex arm's
+cost-normalization (`σ`) path, and the bound-relax iteration cost.
+
+It also bounds the retry route below. That route's "generality across the
+corpus" caveat is measuring against the same corpus, so an empty sweep
+there will be evidence about *trajectories* and not about verdicts. Any
+gate-touching component of a gh#884 fix needs a purpose-built fixture
+that reaches an acceptable-level exit above `dual_inf_tol`, because
+nothing in `benchmarks/mpcc/` or the CLI corpus does.
+
 ## Not ruled out, and the most promising route: detect late, then retry cold
 
 Raised in review of PR #885, and it is a real gap in the three experiments
@@ -270,6 +361,10 @@ corpus.
    its own owner, per CLAUDE.md.
 
 What should **not** happen is an *in-flight* switch keyed on the runaway
-pattern, or a default flip. Both are measured above. A late detector with
-a cold retry is a different mechanism and is not covered by either
-measurement.
+pattern, a default flip, or a dual ceiling on the acceptable-level gate.
+All three are measured above. A late detector with a cold retry is a
+different mechanism and is not covered by any of those measurements.
+
+And whatever is built, if it touches the verdict it needs its own
+fixture: per the corpus section above, an empty sweep says nothing about
+a gate change.
