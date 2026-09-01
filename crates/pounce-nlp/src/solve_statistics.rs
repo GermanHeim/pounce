@@ -197,11 +197,14 @@ pub struct SolveStatistics {
     ///
     /// Reported whether or not a retry ran or promoted, so a caller can
     /// tell "the multipliers ran away on a settled iterate" from an exit
-    /// that merely ran out of iterations. **On a promoted run this is the
-    /// promoted attempt's value**, the same rule `quality_escalations`
-    /// and `iteration_count` follow — a retry that succeeds normally
-    /// reports `false` here and `true` in
-    /// `dual_divergence_retry_promoted`.
+    /// that merely ran out of iterations.
+    ///
+    /// Unlike `quality_escalations` and `iteration_count`, which on a
+    /// promoted run describe the promoted attempt alone, this accumulates
+    /// across every attempt of one solve. That is deliberate: the reason
+    /// a second solve happened at all is a fact about the *solve*, and a
+    /// promoted run that reported `false` here would say the retry's
+    /// answer came from nowhere.
     pub dual_divergence_signature: bool,
     /// gh#884. A dual-divergence retry ran *and* replaced the base
     /// attempt's answer. `false` both when no retry ran and when one ran

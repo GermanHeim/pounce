@@ -591,6 +591,23 @@ pub fn print_summary(
             stats.quality_escalations,
         );
     }
+    // gh#884. Same rule: printed only when it happened, so a summary from
+    // a solve that never saw the signature stays byte-identical to
+    // upstream's. Worth its own line for the same reason as the
+    // escalation count — a promoted retry reports the *retry's* iteration
+    // count and residuals, so without this the second solve leaves no
+    // trace at all, and a reader comparing two runs would see a
+    // trajectory that came from nowhere.
+    if stats.dual_divergence_signature || stats.dual_divergence_retry_promoted {
+        println!(
+            "Biactive dual divergence (gh#884)                    = {}",
+            if stats.dual_divergence_retry_promoted {
+                "detected; the cold retry's answer was returned"
+            } else {
+                "detected; the base attempt's answer was kept"
+            },
+        );
+    }
     println!(
         "Total seconds in POUNCE                              = {:.3}",
         stats.total_wallclock_time_secs

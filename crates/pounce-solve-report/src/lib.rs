@@ -459,6 +459,21 @@ pub struct StatisticsInfo {
     /// one.
     #[serde(default)]
     pub quality_escalations: Index,
+    /// The solve saw the gh#884 biactive dual-divergence signature: at one
+    /// and the same iterate a converged primal, a scale-relative step at
+    /// zero, and an *unscaled* dual infeasibility far above `dual_inf_tol`.
+    /// Reported whether or not a retry ran or promoted, because the
+    /// distinction it draws — the multipliers ran away on a settled
+    /// iterate, as against the iterate itself never settling — is not
+    /// visible in any other field. `serde(default)` for the same reason as
+    /// `quality_escalations`.
+    #[serde(default)]
+    pub dual_divergence_signature: bool,
+    /// A gh#884 dual-divergence retry ran *and* its answer was returned.
+    /// `false` both when no retry ran and when one ran and lost — in the
+    /// latter case every other field here describes the base attempt.
+    #[serde(default)]
+    pub dual_divergence_retry_promoted: bool,
 }
 
 /// Builder collecting the inputs for a [`SolveReport`]. The CLI
@@ -553,6 +568,8 @@ impl ReportBuilder {
             restoration_outer_iters: src.restoration_outer_iters,
             restoration_wall_secs: src.restoration_wall_secs,
             quality_escalations: src.quality_escalations,
+            dual_divergence_signature: src.dual_divergence_signature,
+            dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
         };
         if matches!(self.detail, ReportDetail::Full) {
             self.iterations = src.iterations.clone();
@@ -639,6 +656,8 @@ fn empty_stats() -> StatisticsInfo {
         restoration_outer_iters: 0,
         restoration_wall_secs: 0.0,
         quality_escalations: 0,
+        dual_divergence_signature: false,
+        dual_divergence_retry_promoted: false,
     }
 }
 

@@ -4,12 +4,20 @@
 //!
 //! Numbers in this file were measured on `87402274`.
 //!
-//! **gh#884 is open, and these are invariants rather than a description
-//! of it.** Each one is written so that it stays correct after a fix: it
+//! **The first four are invariants rather than a description of the
+//! defect.** Each is written so that it stays correct after a fix: it
 //! fails when the solver gets *worse*, never when it gets better. In
-//! particular none of them asserts that the current failure persists —
-//! a test that pinned the bug would go red on a genuine fix, which is
-//! backwards, and would train the next reader to expect red here.
+//! particular none of them asserts that the failure persists — a test
+//! that pinned the bug would go red on a genuine fix, which is
+//! backwards, and would train the next reader to expect red here. They
+//! were written while gh#884 was open and are unchanged by its closing,
+//! except for `qpec_small`'s feasibility bar, which moved `1e-12` ->
+//! `1e-10` because the retry reaches the answer along a different
+//! trajectory (see that test).
+//!
+//! **The last four are about the mechanism that closed it**, and each
+//! exists because the rule has a branch a green fixture would otherwise
+//! never execute. See the block comment above them.
 //!
 //! The measurements — the runaway multipliers, the `mu` trace, and three
 //! approaches ruled out — live in
@@ -65,6 +73,10 @@
 //! | `a_structurally_zero_hessian_entry_does_not_change_the_solve` | declaring an identically-zero Hessian entry is a no-op (and refutes gh#884's stated prerequisite hypothesis) | the declared sparsity pattern starts changing the answer |
 //! | `dual_regularization_reaches_the_optimum_honestly` | an honest solve of this model exists at `9.96e-8` unscaled, so gh#884 is a POUNCE gap | that configuration stops reaching the answer |
 //! | `ralph1_must_not_claim_success_where_no_multiplier_certifies_it` | a model with no sign-feasible multiplier must not report success, and never below `f*` | `perturb_always_cd` is turned on by default — measured: plain `Solve_Succeeded` at `-2.71e-5` |
+//! | `the_kill_switch_restores_the_pre_884_verdict` | `dual_divergence_retry=no` returns the base attempt's verdict | the kill switch stops killing |
+//! | `a_zero_step_tolerance_holds_the_detector_off` | a `0` step tolerance is a second, finer off switch | the detector stops consulting its threshold |
+//! | `the_detector_must_not_fire_on_ralph1` | **the safety property** — the detector is the only barrier between `ralph1` and a success below `f*` | the step conjunct is widened past `7.2e-3` |
+//! | `a_retry_that_does_not_promote_leaves_the_base_answer_in_place` | a refused retry leaves status, point and residuals as the base attempt left them | the promotion gate's conjunct 4 stops refusing, or the floor stops restoring |
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -735,4 +747,189 @@ fn true_violation_ralph1(x: &[Number]) -> Number {
     v = v.max((-h).max(0.0));
     v = v.max((g * h).max(0.0));
     v.max((-x[0]).max(0.0))
+}
+
+// ---------------------------------------------------------------------
+// gh#884's fix, and the branches it can take.
+//
+// The four tests above are the *invariants* — they were written while the
+// issue was open and are worded to survive it. The four below are about
+// the mechanism that closed it, and each one exists because the rule has
+// a branch a green fixture would otherwise never execute (CLAUDE.md, "a
+// leg is only evidence about the branch its fixture reaches"):
+//
+// | test | branch |
+// |---|---|
+// | `the_kill_switch_restores_the_pre_884_verdict` | detector never consulted |
+// | `a_zero_step_tolerance_holds_the_detector_off` | detector consulted, never fires |
+// | `the_detector_must_not_fire_on_ralph1` | detector consulted, refuses — the safety property |
+// | `a_retry_that_does_not_promote_leaves_the_base_answer_in_place` | detector fires, retry loses, floor restores |
+// ---------------------------------------------------------------------
+
+/// `dual_divergence_retry=no` restores the pre-gh#884 behaviour outright.
+///
+/// The kill switch is not a formality here. The retry's remedy is
+/// `perturb_always_cd`, which `ralph1_must_not_claim_success_where_no_
+/// multiplier_certifies_it` measures reporting success below `f*`, so a
+/// user who finds the detector firing where it should not needs a way to
+/// turn the whole thing off — not merely to widen a threshold.
+///
+/// Pins the *verdict*, not a residual: what the base attempt reports on
+/// this model is a property of gh#884 and belongs in the dev-note, so
+/// this asserts only that the answer is no longer the retry's.
+#[test]
+fn the_kill_switch_restores_the_pre_884_verdict() {
+    let (tnlp, _captured) = QpecSmallProdEq::new(false);
+    let mut a = app(false, 300);
+    let _ = a
+        .options_mut()
+        .set_string_value("dual_divergence_retry", "no", true, false);
+    let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+    let s = a.statistics();
+
+    assert!(
+        !s.dual_divergence_retry_promoted,
+        "the kill switch did not stop the retry: {status:?}",
+    );
+    assert_ne!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "with the retry off this model has no certificate to reach — a \
+         Solve_Succeeded here means the base attempt started producing one, \
+         which would make the retry dead code and this test the place that \
+         says so",
+    );
+}
+
+/// `dual_divergence_retry_step_tol = 0` holds the detector off with the
+/// feature still enabled.
+///
+/// A different branch from the kill switch above: there the wrapper is
+/// never entered, here it is entered and the *detector* declines, so the
+/// base attempt's verdict comes back through the "signature never set"
+/// early return rather than through the option gate. Both paths have to
+/// leave the answer alone and only one of them is exercised by the other
+/// test.
+#[test]
+fn a_zero_step_tolerance_holds_the_detector_off() {
+    let (tnlp, _captured) = QpecSmallProdEq::new(false);
+    let mut a = app(false, 300);
+    let _ = a
+        .options_mut()
+        .set_numeric_value("dual_divergence_retry_step_tol", 0.0, true, false);
+    let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+    let s = a.statistics();
+
+    assert!(
+        !s.dual_divergence_signature,
+        "the detector fired at a step tolerance of 0",
+    );
+    assert!(!s.dual_divergence_retry_promoted);
+    assert_ne!(status, ApplicationReturnStatus::SolveSucceeded);
+}
+
+/// **The safety property.** The detector must not fire on `ralph1`.
+///
+/// `ralph1_must_not_claim_success_where_no_multiplier_certifies_it` above
+/// pins the *outcome* — no false success — and would stay green if the
+/// detector fired and the promotion gate happened to catch it. That is
+/// not the guarantee this feature rests on, because on this model the
+/// gate does **not** catch it: `perturb_always_cd=yes` reaches
+/// `Solve_Succeeded` at an unscaled KKT error of `5.25e-7` and an
+/// objective of `-2.71e-5`, which is a *better* certified residual than
+/// the base attempt's and would therefore promote — a wrong answer,
+/// reported as success, through a gate that saw nothing wrong.
+///
+/// So the detector is the entire barrier, and this is the test that says
+/// so. It fires red the moment `dual_divergence_retry_step_tol` is
+/// widened past `ralph1`'s floor, which is the one change to this feature
+/// that turns an honest failure into a lie.
+///
+/// Mutation-checked: set `dual_divergence_retry_step_tol` to `1e-1` (past
+/// `ralph1`'s measured `7.2e-3`) and this test goes red on the signature
+/// assertion, while everything else in this file stays green.
+#[test]
+fn the_detector_must_not_fire_on_ralph1() {
+    let (tnlp, _captured) = Ralph1Direct::new();
+    let mut a = app(false, 3000);
+    let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+    let s = a.statistics();
+
+    assert!(
+        !s.dual_divergence_signature,
+        "the gh#884 detector fired on ralph1 ({status:?}). Its primal never \
+         settles — the scale-relative step bottoms out at 7.2e-3, five \
+         orders above the 1e-5 default — so this means the step conjunct \
+         moved. The retry it authorizes reaches Solve_Succeeded at \
+         f = -2.71e-5, below f* = 0, and the promotion gate does not catch \
+         that. See dev-notes/mpcc-biactive-dual-divergence.md.",
+    );
+    assert!(!s.dual_divergence_retry_promoted);
+}
+
+/// A retry that does not promote leaves the base attempt's answer,
+/// status and statistics exactly where they were.
+///
+/// The branch is reached through **conjunct 4** of the promotion gate —
+/// the retry runs, reaches `Solve_Succeeded`, and is refused anyway
+/// because its residual does not clear the bar in the model's own units.
+/// An `acceptable_tol` of `1e-30` is what sets that bar out of reach; no
+/// one should run that, and it is not the point. The point is that this
+/// is the conjunct with no natural fixture: `qpec_small` promotes and
+/// `ralph1` never fires, so without a test here the one check standing
+/// between a status and a wrong answer would never execute.
+///
+/// What it pins is the floor, which is the same three-sink floor
+/// `mu_strategy_fallback` uses (pounce#870): a status describing one
+/// attempt attached to a point from another is the failure mode it
+/// exists to prevent, and a refused retry has already run
+/// `finalize_solution` with its own iterate by the time the gate says no.
+#[test]
+fn a_retry_that_does_not_promote_leaves_the_base_answer_in_place() {
+    // Base run with the retry off: the answer the refused run below has
+    // to reproduce exactly.
+    let (tnlp, captured) = QpecSmallProdEq::new(false);
+    let mut a = app(false, 300);
+    {
+        let o = a.options_mut();
+        let _ = o.set_numeric_value("acceptable_tol", 1e-30, true, false);
+        let _ = o.set_string_value("dual_divergence_retry", "no", true, false);
+    }
+    let base_status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+    let base_x = captured.borrow().clone().expect("finalize_solution ran").x;
+    let base_obj = a.statistics().final_objective;
+    let base_kkt = a.statistics().final_unscaled_kkt_error;
+
+    let (tnlp, captured) = QpecSmallProdEq::new(false);
+    let mut a = app(false, 300);
+    let _ = a
+        .options_mut()
+        .set_numeric_value("acceptable_tol", 1e-30, true, false);
+    let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+    let x = captured.borrow().clone().expect("finalize_solution ran").x;
+    let s = a.statistics();
+
+    assert!(
+        s.dual_divergence_signature,
+        "the detector should still fire here — only the promotion gate is \
+         out of reach ({status:?})",
+    );
+    assert!(
+        !s.dual_divergence_retry_promoted,
+        "conjunct 4 was supposed to refuse this retry, and did not \
+         ({status:?})",
+    );
+    assert_eq!(
+        status, base_status,
+        "the refused retry changed the reported status",
+    );
+    assert_eq!(x, base_x, "the refused retry changed the returned point");
+    assert_eq!(
+        s.final_objective, base_obj,
+        "the refused retry changed the reported objective",
+    );
+    assert_eq!(
+        s.final_unscaled_kkt_error, base_kkt,
+        "the refused retry changed the reported residual",
+    );
 }
