@@ -90,7 +90,9 @@ Setting `presolve_fbbt=yes` without `presolve=yes` is a no-op.
 
 Each tape must exactly restate the corresponding value from `constraints()`.
 `try_solve` checks the starting point and box midpoint, but that sampling is not
-a proof: an undetected mismatch can cut off the optimum without a diagnostic.
+a proof — and the comparison at those two points allows a relative mismatch of
+~1.5e-8. An undetected mismatch can cut off the optimum without a diagnostic.
+Every slot must additionally influence the tape's root value (gh #877).
 Generate both representations from one source when possible.
 
 To supply exact derivatives, implement `gradient` and `jacobian` and return

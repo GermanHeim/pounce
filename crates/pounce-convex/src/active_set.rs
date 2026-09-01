@@ -85,7 +85,7 @@ use pounce_qp::{
 };
 
 use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, finite_or_failed, inf_norm};
-use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
+use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, Triplet, screen_variable_box};
 
 /// Clamp a convex lower-bound value to pounce-qp's `±1e19` free convention.
 fn to_qp_lower(lb: f64) -> f64 {
@@ -1119,6 +1119,33 @@ pub fn back_translate_verified(
     qsol: &pounce_qp::QpSolution,
     opts: &QpOptions,
 ) -> QpSolution {
+    back_translate_verified_inertia(prob, qsol, opts, HessianInertia::Psd)
+}
+
+/// [`back_translate_verified`] for a caller that knows what it claimed about
+/// `P` — and the only form that applies the indefinite-optimum screen.
+///
+/// The screen ([`refute_indefinite_optimum`]) is the third guard in the gh #848
+/// stack and it runs only under [`HessianInertia::Indefinite`], which is a fact
+/// about the *caller's claim*, not about the solution: nothing in a
+/// `pounce_qp::QpSolution` records it, so `back_translate_verified` — which has
+/// only the solution — could not apply it and silently did not (gh #871). An
+/// external caller that built [`ActiveSetQp`] itself, claimed `Indefinite`, and
+/// read the answer back through the supported entry point therefore got the two
+/// first-order guards and not the second-order one, which is the guard the
+/// nonconvex claim is *about*.
+///
+/// `back_translate_verified` keeps its signature and its behaviour — a `Psd`
+/// claim, under which the screen never runs. That is not merely
+/// backwards-compatibility: the screen costs a power iteration per candidate,
+/// and on the convex path it can only ever return `None`, so making it
+/// unconditional would buy nothing and be paid for on every session solve.
+pub fn back_translate_verified_inertia(
+    prob: &QpProblem,
+    qsol: &pounce_qp::QpSolution,
+    opts: &QpOptions,
+    inertia: HessianInertia,
+) -> QpSolution {
     let mut sol = back_translate(prob, qsol);
     sol.status = verify_status(
         qsol.status,
@@ -1128,6 +1155,13 @@ pub fn back_translate_verified(
         prob,
         opts,
     );
+    if inertia == HessianInertia::Indefinite
+        && sol.status == QpStatus::Optimal
+        && let Some(demoted) = refute_indefinite_optimum(prob, &sol, opts)
+    {
+        debug_trace(|| format!("indefinite optimum refuted by exhibition -> {demoted:?}"));
+        sol.status = demoted;
+    }
     let sol = finite_or_failed(prob, sol);
     if crate::deadline::expired() {
         crate::ipm::mark_timed_out(sol)
@@ -1595,11 +1629,17 @@ fn refute_indefinite_optimum(
     if n == 0 || sol.x.len() != n || !sol.x.iter().all(|v| v.is_finite()) {
         return None;
     }
-    let p_scale = prob
-        .p_lower
-        .iter()
-        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
-        .max(1.0);
+    // `P`'s own scale, with no absolute floor under it. The `.max(1.0)` this
+    // carried was gh#872's third stacked floor, and on a small-scale `P` it did
+    // more than widen a tolerance: it is also the Gershgorin `shift` floor in
+    // `most_negative_curvature_direction`, where flooring at `1` on a `P` whose
+    // entries are `~1e-10` makes `sigma*I - P` numerically a multiple of the
+    // identity and the shifted power iteration cannot separate anything.
+    let p_scale = p_inf_scale(prob);
+    if p_scale <= 0.0 {
+        // No `P` entries at all: an LP has no curvature to refute.
+        return None;
+    }
 
     // Two restrictions of the curvature search, and both are needed.
     //
@@ -1627,16 +1667,6 @@ fn refute_indefinite_optimum(
         })
         .collect();
     let all = vec![true; n];
-    let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(2);
-    if free.iter().any(|&f| f) {
-        candidates.extend(most_negative_curvature_direction(prob, &free, p_scale));
-    }
-    if !free.iter().all(|&f| f) {
-        candidates.extend(most_negative_curvature_direction(prob, &all, p_scale));
-    }
-    if candidates.is_empty() {
-        return None;
-    }
 
     let f_at = |x: &[f64]| {
         let mut px = vec![0.0; n];
@@ -1649,29 +1679,219 @@ fn refute_indefinite_optimum(
         return None;
     }
 
-    for (d, sign) in candidates.iter().flat_map(|d| [(d, 1.0_f64), (d, -1.0)]) {
-        let dir: Vec<f64> = d.iter().map(|v| sign * v).collect();
-        // A feasible recession direction of negative curvature is the
-        // unboundedness certificate, not merely a better point.
-        if ray_certifies_unbounded(prob, &dir) {
-            return Some(QpStatus::DualInfeasible);
+    // The working-set walk (gh #871).
+    //
+    // A direction of negative curvature that a bound stops dead is not a dead
+    // end, it is the ordinary active-set situation: the bound that stopped it
+    // belongs in the working set, and the search runs again inside the smaller
+    // null space. On `min −x₀², x₀+x₁+x₂ = 0` over `[0,1]×[−1,1]²` at the
+    // vertex `(0, −1, 1)`, the most negative direction in `null(A)` is
+    // `(2, −1, −1)`, which `x₁ ≥ −1` blocks at `alpha = 0`; pin that row and
+    // the next search returns `(1, 0, −1)`, curvature `−1`, which walks to
+    // `(1, −1, 0)` and the true optimum `−1`. One round of pinning is the
+    // difference between refuting that model and certifying it.
+    //
+    // Breadth-first over pinned sets, with a node budget, because the blockers
+    // of `+d` and of `−d` are different rows and pinning their union is
+    // usually the empty subspace. Cutting the budget only costs directions —
+    // this whole screen is a heuristic that demotes solely by exhibiting a
+    // strictly better feasible point, so a node it never expands leaves the
+    // verdict exactly where it already was.
+    let budget = if n > 4096 { 4 } else { 16 };
+    let mut queue: std::collections::VecDeque<PinnedRows> =
+        std::collections::VecDeque::from([PinnedRows::default()]);
+    let mut expanded = 0usize;
+    // Pinned sets already queued, as the sorted key of what they pin. Cheap
+    // and exact enough: the rows are only ever added, never combined.
+    let mut seen: Vec<Vec<(bool, usize)>> = vec![Vec::new()];
+    let mut key_of: Vec<Vec<(bool, usize)>> = vec![Vec::new()];
+
+    while let Some(pinned) = queue.pop_front() {
+        let key = key_of.remove(0);
+        if expanded >= budget {
+            break;
         }
-        let Some(alpha) = max_feasible_step(prob, &sol.x, &dir) else {
-            continue;
-        };
-        if !(alpha > 0.0) {
+        expanded += 1;
+
+        let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(3);
+        // The two restrictions of the *unprojected* search are only meaningful
+        // at the root: once rows are pinned the direction has to come out of
+        // the projected iteration or it will not respect them.
+        if pinned.count == 0 {
+            if free.iter().any(|&f| f) {
+                candidates.extend(most_negative_curvature_direction(
+                    prob, &free, p_scale, &pinned, false,
+                ));
+            }
+            if !free.iter().all(|&f| f) {
+                candidates.extend(most_negative_curvature_direction(
+                    prob, &all, p_scale, &pinned, false,
+                ));
+            }
+        }
+        // The reduced search. `P` restricted to `null([A; W])` is the operator
+        // this screen is really about once there is anything to respect, and
+        // its most negative eigenvector need not be anywhere near `P`'s own:
+        // the two searches above look at `P`, so on a model whose negative
+        // direction is *not* already in the null space they hand back a
+        // direction `max_feasible_step` must reject. Projecting their answers
+        // (below) recovers most of it; this recovers the rest.
+        if prob.m_eq() + pinned.count > 0 {
+            candidates.extend(most_negative_curvature_direction(
+                prob, &all, p_scale, &pinned, true,
+            ));
+        }
+        if candidates.is_empty() {
             continue;
         }
-        let trial: Vec<f64> = (0..n).map(|i| sol.x[i] + alpha * dir[i]).collect();
-        let f_new = f_at(&trial);
-        // Strictly better by more than the solve's own tolerance, measured
-        // relative to the objective's own scale so this cannot fire on
-        // rounding at a genuine optimum.
-        if f_new.is_finite() && f_new < f_cur - opts.tol * (1.0 + f_cur.abs()) {
-            return Some(QpStatus::NumericalFailure);
+
+        // Derived variants. Each base candidate carries negative curvature
+        // already (that is what `most_negative_curvature_direction` returns),
+        // and each derived one is re-checked before it is used, so this can
+        // only *widen* what is offered to the walk — the base direction is
+        // always tried first and unchanged, which is why nothing that refutes
+        // today can stop doing so.
+        //
+        // Two transforms, one per branch that used to defeat the screen:
+        //
+        // * **Projection onto the null space.** `max_feasible_step` opens with
+        //   a hard `return None` on any direction with an equality component,
+        //   and every `QpProblem` in the gh #848 corpus had `a: vec![]`, so
+        //   that statement was executed by no fixture — the gh #756 pattern.
+        //   On the model above the direction found is `e₀`, `A e₀ = 1`, and
+        //   the screen declined a model whose true optimum is `−1`.
+        // * **Dust pruning.** The power iteration leaves `O(1e-8)` relative
+        //   noise in coordinates the direction is not about.
+        //   `max_feasible_step`'s slack is `1e-9 ‖d‖∞`, *below* that noise
+        //   floor, so a dust component in a coordinate sitting on a bound
+        //   reads as a real move out of it and drives `alpha` to zero. Zeroing
+        //   what is demonstrably noise — and then re-deriving the curvature,
+        //   so a prune that mattered is discarded — costs nothing and unblocks
+        //   the walk.
+        let base: Vec<Vec<f64>> = candidates;
+        let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(base.len() * 4);
+        for d in base {
+            let mut derived: Vec<Vec<f64>> = Vec::with_capacity(3);
+            let pruned = prune_direction_dust(&d);
+            if let Some(p) = pruned.clone() {
+                derived.push(p);
+            }
+            if prob.m_eq() + pinned.count > 0 {
+                for seed in std::iter::once(d.clone()).chain(pruned) {
+                    let mut q = seed;
+                    if project_onto_null_a(prob, &pinned, &mut q) {
+                        derived.push(q);
+                    }
+                }
+            }
+            // The base direction is tried unchanged and first.
+            candidates.push(d);
+            for v in derived {
+                if curvature_quotient(prob, &v).is_some_and(|q| q < -1e-8 * p_scale) {
+                    candidates.push(v);
+                }
+            }
+        }
+
+        for (d, sign) in candidates.iter().flat_map(|d| [(d, 1.0_f64), (d, -1.0)]) {
+            let dir: Vec<f64> = d.iter().map(|v| sign * v).collect();
+            // A feasible recession direction of negative curvature is the
+            // unboundedness certificate, not merely a better point.
+            if ray_certifies_unbounded(prob, &dir) {
+                return Some(QpStatus::DualInfeasible);
+            }
+            let Some(alpha) = max_feasible_step(prob, &sol.x, &dir) else {
+                continue;
+            };
+            if alpha > 0.0 {
+                let trial: Vec<f64> = (0..n).map(|i| sol.x[i] + alpha * dir[i]).collect();
+                let f_new = f_at(&trial);
+                // Strictly better by more than the solve's own tolerance,
+                // measured relative to the objective's own scale so this
+                // cannot fire on rounding at a genuine optimum.
+                if f_new.is_finite() && f_new < f_cur - opts.tol * (1.0 + f_cur.abs()) {
+                    return Some(QpStatus::NumericalFailure);
+                }
+                continue;
+            }
+            // Blocked at zero. Pin what blocked it and try again inside the
+            // smaller null space.
+            let blockers = blocking_rows(prob, &sol.x, &dir);
+            if blockers.is_empty() || queue.len() + expanded >= budget {
+                continue;
+            }
+            let mut child_key = key.clone();
+            child_key.extend(blockers.iter().copied());
+            child_key.sort_unstable();
+            child_key.dedup();
+            if child_key.len() == key.len() || seen.contains(&child_key) {
+                continue;
+            }
+            let mut child = PinnedRows::default();
+            for &(is_row, idx) in &child_key {
+                if is_row {
+                    child.pin_ineq(prob, idx);
+                } else {
+                    child.pin_coord(idx);
+                }
+            }
+            seen.push(child_key.clone());
+            key_of.push(child_key);
+            queue.push_back(child);
         }
     }
     None
+}
+
+/// The rows that stopped a walk along `d` dead — the ones giving `alpha = 0` in
+/// [`max_feasible_step`].
+///
+/// `(false, i)` is the bound on variable `i`; `(true, j)` is general inequality
+/// row `j`. These are exactly the rows an active-set method would add to the
+/// working set on a blocked step, and that is what the caller does with them.
+fn blocking_rows(prob: &QpProblem, x: &[f64], d: &[f64]) -> Vec<(bool, usize)> {
+    let n = prob.n;
+    let dn = inf_norm(d);
+    if !(dn > 0.0) || !dn.is_finite() {
+        return Vec::new();
+    }
+    let slack = 1e-9 * dn;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let (lo, hi) = (prob.lb_of(i), prob.ub_of(i));
+        if d[i] > slack && hi < crate::qp::POS_INF && hi - x[i] <= 0.0 {
+            out.push((false, i));
+        }
+        if d[i] < -slack && lo > crate::qp::NEG_INF && lo - x[i] >= 0.0 {
+            out.push((false, i));
+        }
+    }
+    let mut gx = vec![0.0; prob.m_ineq()];
+    let mut gd = vec![0.0; prob.m_ineq()];
+    prob.g_mul(x, &mut gx);
+    for t in &prob.g {
+        gd[t.row] += t.val * d[t.col];
+    }
+    for j in 0..prob.m_ineq() {
+        if gd[j] > slack && prob.h[j] - gx[j] <= 0.0 {
+            out.push((true, j));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Largest magnitude of any stored `P` entry -- the scale every curvature
+/// tolerance in this module is measured against.
+///
+/// Deliberately **not** floored at `1.0`. A curvature threshold is in the units
+/// of `P`, so an absolute floor turns it into a threshold on a scale-dependent
+/// quantity: a pure change of variable units rescales `P` and nothing else, and
+/// past `||P|| ~ 1e-8` every one of this module's tests stops firing (gh#872).
+/// Zero means an `H`-free model, which the callers screen for.
+fn p_inf_scale(prob: &QpProblem) -> f64 {
+    prob.p_lower.iter().fold(0.0_f64, |a, t| a.max(t.val.abs()))
 }
 
 /// A direction of negative curvature for `P` restricted to the free
@@ -1688,10 +1908,20 @@ fn refute_indefinite_optimum(
 /// verdict exactly where it was; it cannot cause a wrong demotion, because
 /// [`refute_indefinite_optimum`] acts only after walking the direction and
 /// finding a strictly better feasible point.
+///
+/// With `project` set, the iteration runs on `ΠPΠ` rather than `P`, where `Π`
+/// is the orthogonal projector onto `null(A)`: the start vector and every
+/// update are put through [`project_onto_null_a`], so the direction returned
+/// respects the equality rows by construction. That is the operator the screen
+/// actually wants once `A` is non-empty — see the call site — and it is
+/// separate from projecting a direction found on `P`, because a projection can
+/// annihilate the very curvature it was found for.
 fn most_negative_curvature_direction(
     prob: &QpProblem,
     free: &[bool],
     p_scale: f64,
+    pinned: &PinnedRows,
+    project: bool,
 ) -> Option<Vec<f64>> {
     let n = prob.n;
     // Gershgorin bound over the free block. `p_lower` stores the lower
@@ -1729,9 +1959,16 @@ fn most_negative_curvature_direction(
             }
         })
         .collect();
+    if project && !project_onto_null_a(prob, pinned, &mut v) {
+        return None;
+    }
     let mut pv = vec![0.0; n];
     let mut best: Option<(f64, Vec<f64>)> = None;
-    for _ in 0..64 {
+    // The projected variant costs a small least-squares solve per step, so it
+    // is given a shorter run. It is a heuristic either way, and a direction it
+    // misses leaves the verdict where it already was.
+    let sweeps = if project { 32 } else { 64 };
+    for _ in 0..sweeps {
         let nrm = v.iter().fold(0.0_f64, |a, x| a + x * x).sqrt();
         if !(nrm > 0.0) || !nrm.is_finite() {
             break;
@@ -1749,12 +1986,217 @@ fn most_negative_curvature_direction(
         for i in 0..n {
             v[i] = if free[i] { shift * v[i] - pv[i] } else { 0.0 };
         }
+        if project && !project_onto_null_a(prob, pinned, &mut v) {
+            break;
+        }
     }
     let (q, vec) = best?;
     // Comparable to `P`'s own scale, and far above the rounding floor of a
     // genuinely zero curvature -- the same shape `ray_certifies_unbounded`
     // uses for its own curvature test.
     (q < -1e-8 * p_scale).then_some(vec)
+}
+
+/// The rows a direction must respect: the model's equality rows, plus whatever
+/// the blocker loop has pinned.
+///
+/// A pinned row is a row of `A_W` in the ordinary active-set sense — a bound or
+/// a general row that stopped the previous walk dead and therefore belongs in
+/// the working set the next search runs inside. `rows` holds them in the same
+/// triplet form as `QpProblem::a`, numbered from `prob.m_eq()` up.
+#[derive(Clone, Default)]
+struct PinnedRows {
+    rows: Vec<Triplet>,
+    count: usize,
+}
+
+impl PinnedRows {
+    /// A bound on `x_i`: the row `e_iᵀ d = 0`.
+    fn pin_coord(&mut self, i: usize) {
+        self.rows.push(Triplet::new(self.count, i, 1.0));
+        self.count += 1;
+    }
+
+    /// A general inequality row `j`: the row `g_jᵀ d = 0`.
+    fn pin_ineq(&mut self, prob: &QpProblem, j: usize) {
+        let row = self.count;
+        for t in &prob.g {
+            if t.row == j {
+                self.rows.push(Triplet::new(row, t.col, t.val));
+            }
+        }
+        self.count += 1;
+    }
+}
+
+/// `out = [A; W] d`, length `prob.m_eq() + pinned.count`.
+fn a_mul(prob: &QpProblem, pinned: &PinnedRows, d: &[f64], out: &mut [f64]) {
+    out.iter_mut().for_each(|x| *x = 0.0);
+    for t in &prob.a {
+        out[t.row] += t.val * d[t.col];
+    }
+    let off = prob.m_eq();
+    for t in &pinned.rows {
+        out[off + t.row] += t.val * d[t.col];
+    }
+}
+
+/// `out = [A; W]ᵀ y`.
+fn at_mul(prob: &QpProblem, pinned: &PinnedRows, y: &[f64], out: &mut [f64]) {
+    out.iter_mut().for_each(|x| *x = 0.0);
+    for t in &prob.a {
+        out[t.col] += t.val * y[t.row];
+    }
+    let off = prob.m_eq();
+    for t in &pinned.rows {
+        out[t.col] += t.val * y[off + t.row];
+    }
+}
+
+/// `dᵀPd / dᵀd`, or `None` when `d` is zero or the quotient is not finite.
+///
+/// This is the quantity [`most_negative_curvature_direction`] returns a
+/// direction *for*, re-derived. Every direction the refutation screen builds
+/// by transforming another one is re-checked through here before it is walked:
+/// pruning and projection are both linear maps that can destroy the curvature
+/// they were applied to, and a direction with no negative curvature left has
+/// nothing to refute with.
+fn curvature_quotient(prob: &QpProblem, d: &[f64]) -> Option<f64> {
+    let nrm2 = dot(d, d);
+    if !(nrm2 > 0.0) || !nrm2.is_finite() {
+        return None;
+    }
+    let mut pd = vec![0.0; prob.n];
+    prob.p_mul(d, &mut pd);
+    let q = dot(d, &pd) / nrm2;
+    q.is_finite().then_some(q)
+}
+
+/// Zero the components of `d` that are demonstrably power-iteration noise,
+/// or `None` when there are none.
+///
+/// The threshold is relative to `‖d‖∞` and sits two decades above
+/// `max_feasible_step`'s `1e-9 ‖d‖∞` slack, which is the whole point: a
+/// component below it cannot be a real part of the direction, but it is large
+/// enough to read as one to the step test and zero the step. Anything this
+/// removes that mattered shows up as a lost curvature quotient at the call
+/// site, and the pruned variant is dropped there.
+fn prune_direction_dust(d: &[f64]) -> Option<Vec<f64>> {
+    let dn = inf_norm(d);
+    if !(dn > 0.0) || !dn.is_finite() {
+        return None;
+    }
+    let floor = 1e-7 * dn;
+    let out: Vec<f64> = d
+        .iter()
+        .map(|v| if v.abs() <= floor { 0.0 } else { *v })
+        .collect();
+    (out != d).then_some(out)
+}
+
+/// Conjugate gradients on the normal equations `A Aᵀ y = rhs`.
+///
+/// Matrix-free — two triplet passes per iteration and no factorization — so
+/// this inherits [`most_negative_curvature_direction`]'s property of carrying
+/// no dimension ceiling. `A` may be rank deficient: `rhs` is `A d`, hence in
+/// `range(A) = range(A Aᵀ)`, so the system stays consistent and CG converges
+/// to a solution of it (not the least-norm one, which does not matter — only
+/// `Aᵀ y` is used, and that is unique).
+fn cg_normal_equations(prob: &QpProblem, pinned: &PinnedRows, rhs: &[f64]) -> Vec<f64> {
+    let m = prob.m_eq() + pinned.count;
+    let n = prob.n;
+    let mut y = vec![0.0; m];
+    let mut r = rhs.to_vec();
+    let mut p = r.clone();
+    let mut rs = dot(&r, &r);
+    let rs0 = rs;
+    if !(rs0 > 0.0) || !rs0.is_finite() {
+        return y;
+    }
+    let mut tmp = vec![0.0; n];
+    let mut ap = vec![0.0; m];
+    let max_it = (4 * m).clamp(50, 2000);
+    for _ in 0..max_it {
+        at_mul(prob, pinned, &p, &mut tmp);
+        a_mul(prob, pinned, &tmp, &mut ap);
+        let pap = dot(&p, &ap);
+        // Non-positive curvature on a positive semidefinite operator means `p`
+        // has run into `null(Aᵀ)` — a rank-deficient `A`. There is nothing left
+        // to remove along it.
+        if !(pap > 0.0) || !pap.is_finite() {
+            break;
+        }
+        let alpha = rs / pap;
+        for i in 0..m {
+            y[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        let rs_new = dot(&r, &r);
+        if !rs_new.is_finite() {
+            break;
+        }
+        // Relative 1e-12 in the residual norm. The refinement loop in
+        // [`project_onto_null_a`] takes it the rest of the way.
+        if rs_new <= 1e-24 * rs0 {
+            break;
+        }
+        let beta = rs_new / rs;
+        for i in 0..m {
+            p[i] = r[i] + beta * p[i];
+        }
+        rs = rs_new;
+    }
+    y
+}
+
+/// Project `d` onto `null(A)` in place. `false` means the projection did not
+/// reach machine level, and the caller must not use `d`.
+///
+/// `d ← d − Aᵀ(A Aᵀ)⁺ A d`, applied repeatedly. One round is a projection up
+/// to the CG solve's own error; re-projecting the *updated* `d` squares that
+/// error down, so two or three rounds take a 1e-12 solve to the `1e-14 ‖d‖∞`
+/// this returns `true` on. The accuracy is not decorative:
+/// [`max_feasible_step`] rejects any direction with `‖A d‖∞ > 1e-9 ‖d‖∞`, so a
+/// projection that stops one decade short is worth exactly as much as no
+/// projection at all.
+///
+/// A `true` here is not a claim that the direction is useful, only that it is
+/// on the affine set. The curvature it carries is re-derived separately.
+fn project_onto_null_a(prob: &QpProblem, pinned: &PinnedRows, d: &mut [f64]) -> bool {
+    let m = prob.m_eq() + pinned.count;
+    if m == 0 {
+        return true;
+    }
+    let n = prob.n;
+    if d.len() != n || !d.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let mut r = vec![0.0; m];
+    let mut atv = vec![0.0; n];
+    for _ in 0..3 {
+        let dn = inf_norm(d);
+        if !(dn > 0.0) || !dn.is_finite() {
+            return false;
+        }
+        a_mul(prob, pinned, d, &mut r);
+        if r.iter().all(|v| v.abs() <= 1e-14 * dn) {
+            return true;
+        }
+        let y = cg_normal_equations(prob, pinned, &r);
+        at_mul(prob, pinned, &y, &mut atv);
+        for i in 0..n {
+            d[i] -= atv[i];
+        }
+        if !d.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+    }
+    let dn = inf_norm(d);
+    if !(dn > 0.0) || !dn.is_finite() {
+        return false;
+    }
+    a_mul(prob, pinned, d, &mut r);
+    r.iter().all(|v| v.abs() <= 1e-14 * dn)
 }
 
 /// How far `x` can move along `d` before leaving the feasible region, or
@@ -1764,7 +2206,7 @@ fn most_negative_curvature_direction(
 /// `Some(f64::INFINITY)` means nothing blocks the direction.
 fn max_feasible_step(prob: &QpProblem, x: &[f64], d: &[f64]) -> Option<f64> {
     let n = prob.n;
-    let dn = d.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let dn = inf_norm(d);
     if !(dn > 0.0) || !dn.is_finite() {
         return None;
     }
@@ -1807,7 +2249,7 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     if d.len() != prob.n {
         return false;
     }
-    let dn = d.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let dn = inf_norm(d);
     if !dn.is_finite() || dn == 0.0 {
         return false;
     }
@@ -1858,11 +2300,7 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     // against `P`'s own scale — the same shape as the frontend's `check_psd`
     // tolerance.
     let curvature: f64 = (0..prob.n).map(|i| d[i] * pd[i]).sum::<f64>() / (dn * dn);
-    let p_scale = prob
-        .p_lower
-        .iter()
-        .fold(0.0_f64, |a, t| a.max(t.val.abs()))
-        .max(1.0);
+    let p_scale = p_inf_scale(prob);
     if curvature < -1e-8 * p_scale {
         return true;
     }

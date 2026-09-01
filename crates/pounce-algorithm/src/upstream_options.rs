@@ -797,9 +797,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          the engine also produces a direction `d` with `A_W d = 0` and \
          `d'Hd < 0` before certifying, and follows it to the next blocking \
          row (gh #848). Standalone QP solves \
-         (solver_selection=qp-active-set, pounce.qp.solve_qp) do that \
-         unconditionally and are not affected by this option: there the QP is \
-         the question. Here it is a *local model*, whose second-order verdict \
+         (solver_selection=qp-active-set, pounce.qp.solve_qp) do that by \
+         *default*: there the QP is the question, so the default is yes rather \
+         than the no below. Setting this option explicitly still reaches them \
+         and turns the certification off, which is a way to get a saddle \
+         certified as Optimal — say so rather than claiming the path is \
+         unaffected (gh #872). Here the QP is a *local model*, whose \
+         second-order verdict \
          is not the NLP's — at iteration 0 the multipliers are still zero, so \
          HS071 started at its own solution reports negative curvature and \
          needs five iterations instead of one. Yes fixes real wrong answers \

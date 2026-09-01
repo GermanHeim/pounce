@@ -157,7 +157,7 @@ def test_the_sparse_verdict_agrees_with_the_dense_one(name, build):
     m = build(rng, n)
     pr, pc, pv = _lower_coo(m)
     scale = max(abs(v) for v in pv) if pv else 0.0
-    tol_abs = -1e-8 * max(scale, 1.0)
+    tol_abs = -1e-8 * scale  # gh#872: relative, no absolute floor
 
     dense = _min_eig_lower_coo(pr, pc, pv, n) if pv else 0.0
     want = dense >= tol_abs
@@ -230,3 +230,31 @@ def _spectrum_list(rng, n, ev):
 def _lower_coo(m):
     lower = sp.tril(sp.csr_matrix(m)).tocoo()
     return list(lower.row), list(lower.col), list(lower.data)
+
+
+def test_psd_verdict_is_invariant_under_a_change_of_units():
+    """gh#872: ``_psd_verdict_coo``'s tolerance is relative to ``P``'s own scale.
+
+    ``P = K**-2 * [[1, 5], [5, 1]]`` is the same matrix in different variable
+    units, and is strongly indefinite at every ``K`` --
+    ``|lambda_min| / lambda_max = 2/3``, nowhere near the round-off it is
+    supposed to be absorbing (``eps * scale``, sixteen orders down). The
+    ``max(scale, 1.0)`` this tolerance used to carry made it absolute for
+    ``scale < 1``, so past ``K ~ 1e5`` it read PSD and the guard handed it to an
+    engine whose optimality and unboundedness detection both assume PSD.
+
+    Both sides are asserted: a PD matrix at the same scales must keep passing,
+    or the fix would just be a stricter screen that rejects everything small.
+    """
+    from pounce.qp import _psd_verdict_coo
+
+    for k in (1.0, 1e2, 1e5, 1e8, 1e-4):
+        f = k ** -2
+        # lower triangle of [[1, 5], [5, 1]] * f
+        rows, cols, vals = [0, 1, 1], [0, 0, 1], [1.0 * f, 5.0 * f, 1.0 * f]
+        ok, lam = _psd_verdict_coo(rows, cols, vals, 2)
+        assert not ok, f"K={k:e}: indefinite at every scale, got psd={ok} lam={lam:e}"
+
+        rows, cols, vals = [0, 1], [0, 1], [6.0 * f, 4.0 * f]
+        ok, _ = _psd_verdict_coo(rows, cols, vals, 2)
+        assert ok, f"K={k:e}: diag(6, 4) is PD at every scale and must pass"

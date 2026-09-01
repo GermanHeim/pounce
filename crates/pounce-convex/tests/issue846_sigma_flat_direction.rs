@@ -40,12 +40,23 @@
 //! `4.5e-10`. One number is wrong by seven orders about the same point, and
 //! the difference is entirely which denominator the row is held to.
 //!
-//! A companion arm over the **stationarity** rows was written and then
-//! removed: on this family it rejects nothing complementarity does not, and
-//! the same spectrum unconstrained, in a wide box, or under an equality row
-//! comes back exact to `3e-16`. The failure needs an *active bound*, because
-//! the slack it spends is bought by the embedding's objective-relative gap
-//! test and a gap is spent on the bound multipliers.
+//! On *this* family complementarity is the binding half, because the slack it
+//! spends is bought by the embedding's objective-relative gap test and a gap
+//! is spent on the bound multipliers — so the failure here needs an *active
+//! bound*, and this is the arm that catches it.
+//!
+//! The companion arm over the **stationarity** rows was written, removed on
+//! the reasoning that it "rejects nothing complementarity does not", and then
+//! put back as `sigma_stationarity_is_genuine` (gh #875). The reasoning was
+//! true of the fixtures it was measured on and false in general: every one of
+//! them had an active bound, and the complementarity loop runs over
+//! `m_ineq()` and the finite bounds, so on a model with neither it returns
+//! `true` having tested nothing. The same spectrum *unconstrained* was
+//! reported here as exact to `3e-16`; re-measured it returns
+//! `|x−x*|∞ = 2.03e-02` via the `σ` path in one iteration. Two guards, two
+//! halves of the KKT system, and neither subsumes the other — removing this
+//! one turns four tests red, removing that one turns five red in
+//! `issue875_unconstrained_sigma_stationarity.rs` and none here.
 //!
 //! # `σ` is the amplifier, not the origin
 //!

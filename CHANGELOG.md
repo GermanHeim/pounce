@@ -60,6 +60,8 @@ changes.
   stationarity strictly apart from the NLP's own residuals. The gate report
   — supported route, failure boundary, and ownership of every observed gap
   — is `dev-notes/mpcc-gate0-report.md`.
+### Added
+
 - **`sens_jacobian(of=<Objective>)` now returns the total derivative `df/dp`
   (gh#878).** `of=` a Var gave `dx/dp` and `of=` an equality Constraint gave
   `dlambda/dp`, but the objective was rejected — `ValueError: obj: not a
@@ -112,6 +114,460 @@ changes.
   from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
   asserts the index spaces really do diverge before trusting the leg.
 
+### Fixed
+- **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
+  coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,
+  `normalized_optimum_is_genuine` decides whether the rescaled answer may be
+  returned. Both of its componentwise guards — stationarity and
+  complementarity — hold row `i`'s residual against `dᵢ`, the largest single
+  term that built it. On a **diagonal** `P` that ratio *is* the relative error
+  in `xᵢ`, so the rule is exact and gh #875's fix worked. Rotate the same
+  spectrum and the stiff mode enters every row, every denominator collapses to
+  one aggregate number, and the guard rejects nothing — the same
+  `reduced`-vs-`directional` distinction CLAUDE.md draws for the sensitivity
+  classifier (gh #763) and for constraint rows (gh #804), here in the convex
+  arm.
+
+  The fix adds a third, strictly further conjunct that asks the question as a
+  **distance** rather than a ratio: `sigma_forward_error_is_small` takes one
+  affine-scaling Newton step from the returned point,
+
+      (P + Gᵀ Σ_row G + Σ_bnd) Δ = −(Px + c)
+
+  by conjugate gradients, and requires `‖Δ‖∞ ≤ cut · max(1, ‖x‖∞)`. A norm of
+  a vector is basis-free, so unlike a per-row ratio it does not care how the
+  spectrum is oriented. The right-hand side is `−(Px + c)` and **not** the
+  stationarity residual: eliminating `Δz`/`Δs` cancels the multiplier term
+  exactly, which matters because trusting the returned multipliers is what let
+  the defect through in the first place — a non-complementary point (bound
+  multipliers of order 1 on bounds with slack 10) reads a stationarity residual
+  of `2e-6` while sitting `0.42` from the optimum. The multipliers are trusted
+  for stiffness (`Σ`) and never for complementarity.
+
+  Measured on a 72-instance census (`cond` `1e2 ‥ 1e12` × magnitude
+  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not),
+  claimed-optimal-but-wrong falls **17/72 → 9/72** against the census's fixed
+  `1e-6` threshold:
+
+  | `cond` | before | after | worst relative error after | census can resolve |
+  |---|---|---|---|---|
+  | `1e2`  | 0/12 | 0/12 | 6.4e-08 | 2.2e-14 |
+  | `1e4`  | 0/12 | 0/12 | 6.3e-08 | 2.2e-12 |
+  | `1e6`  | 2/12 | 0/12 | 3.8e-09 | 2.2e-10 |
+  | `1e8`  | 3/12 | 0/12 | 1.1e-08 | 2.2e-08 |
+  | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) | 2.2e-06 |
+  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) | 2.2e-04 |
+
+  **Read the error column, not the count.** The last column is the census's own
+  resolution: `x* = t` is exact by construction but `P = Q diag(e) Qᵀ` is formed
+  in floating point, so the realised optimum sits `ε·cond·‖t‖` from `t`. At the
+  bottom two rows the `1e-6` threshold is *below* that, so the count there
+  reports the reference's error as the solver's. Per instance, eight of the nine
+  survivors are at or under their own floor (`err/floor` `0.02 ‥ 1.05`) and only
+  one is outside it, by 2×. The signature the issue actually described is gone
+  outright: every failing coupled row in gh #880's table reported `Optimal` in
+  **one** iteration — an inert certificate — and after this change all 72 take
+  3–13. So this is evidence of a fix through `cond = 1e8` and evidence of no
+  regression above it; sharpening the reference so the top of the range means
+  something is gh #882.
+
+  Two limits, stated rather than papered over. The estimator computes `‖Δ‖` in
+  double precision, so its own arithmetic floor is `ε·cond` too and at `1e12` it
+  cannot distinguish a small error from zero. And under an equality row the
+  operator above is the wrong one (`A` has no barrier diagonal; the honest form
+  is the full saddle system), so the arm declines rather than guessing.
+
+  `crates/pounce-convex/tests/issue880_coupled_sigma_forward_error.rs` (15
+  tests) and `forward_error_operator_tests` in `ipm.rs` (13) pin it, with a
+  mutation table that was **run**: five of the eight mutations leave every
+  integration test green, because they change the arm's verdict without
+  changing the answer the cascade finally reaches — which is why the four
+  structural pieces are pinned by calling the arm directly. `sweep-fixtures.sh`
+  moves zero of 182 fixture-legs, the expected result given that one fixture in
+  the corpus reaches the `σ` path at all.
+
+- **FBBT no longer cuts feasible points three separate ways (gh #877).** The
+  2026-08-31 adversarial audit (seam F) found three independent unsoundnesses
+  in the bound-tightening engine. `git diff 3ed5eaa0...9f16f80b --
+  crates/pounce-presolve/` is empty: all three shipped in 0.10.0. What PR #864
+  changed was **reachability** — it accepted hand-written tapes through the
+  `pounce-rs` builder, and the `.nl` translator had been holding two unstated
+  invariants by construction (reachable slots only, `PowInt`'s `n` capped at
+  64). `validate_fbbt_tape` enforced neither.
+
+  **F-3, the severe one: a wrong answer under `Solve_Succeeded`.**
+  `reverse_pass` propagated bounds out of *every* tape slot, including ones
+  the root's value does not depend on. A tape that exactly restates
+  `constraints()` at its root but carries an unused `ln(x)` slot turned a
+  one-variable LP with optimum `x = -10` into `x = -9.99e-9` — wrong by the
+  entire feasible range, `success = true`, `infeasibility_witness: None`, no
+  diagnostic. The certification margin does not help; it guards infeasibility
+  verdicts only, never applied tightenings. Dead slots are routine when a
+  producer emits one tape per row from a shared CSE pool, which is the usage
+  the tape format is sold on.
+
+  Reachability alone would not have fixed it: `f64::NAN.powi(0) == 1.0`, so
+  `ln(x)^0 == 1` is a tautology whose `Ln` slot *is* reachable from the root
+  and still carries no information about `x` — it cut `x = -5` just the same.
+  `reverse_pass` now computes influence on the root's **value**
+  (`influencing_slots`), cutting the dependency edge at `PowInt(_, 0)`, and
+  skips the rest. The control case is the point of the rule: `ln(x) <= 5`
+  still tightens `x` to `x > 0`, because there the root does depend on the
+  slot.
+
+  **F-2: non-finite endpoints survived the outward rounding.** `round_down` /
+  `round_up` passed them through, so an overflowed interval degenerated to
+  the *point* `[inf, inf]` and the reverse pass emptied every operand:
+  `exp(x) >= 1` on `[800, 900]`, `x + y >= 1` on `[1e308, 1.5e308]²`, and
+  even a **free row** on `[1e200, 2e200]²` all reported
+  `infeasibility_witness = Some(0)` on feasible problems. `inf - inf` also
+  leaked a `NaN` interval to the root. Both now round outward correctly
+  (`next_down(+inf) == f64::MAX`, `next_up(-inf) == f64::MIN`), and a `NaN`
+  endpoint — arithmetic destroyed the value — widens to the matching
+  infinity rather than to `EMPTY`, which would have claimed infeasibility.
+
+  **F-1: `n`-th roots were `powf(1.0/n)` plus a one-ULP pad.** `1.0/n` is
+  relatively 5.55e-17 low for non-power-of-two `n`, and `powf` computes
+  `exp(ln(x)·(1/n))`, so the root is short by `|ln z| · 5.55e-17` — 10 ULP at
+  `z = 2^90`, far more than one. `x³ == 1073741824` on `x ∈ [0, 2000]`
+  returned `[1023.99999999999955, 1023.99999999999977]`, cutting the exact
+  `x = 1024` and reporting `infeasibility_witness = Some(0)` on a feasible,
+  well-scaled problem. Roots are now a `powf` seed plus a Newton correction,
+  verified against the forward pass's own `powi` by walking ULPs (capped,
+  with a relative fallback) so the enclosure brackets the true root by
+  construction rather than by a guessed pad.
+
+  Related, and found in the same probe: `PowInt`'s `n` is a `u32` and the
+  interval code wrote `n as i32`, which **wraps** — `u32::MAX as i32 == -1`,
+  turning `xⁿ` into `1/x`, a different function, smaller than 1 where the
+  true value is astronomically large. `interval::powi` now takes `u32` and
+  converts with a checked `i32::try_from`, falling back to `powf`.
+  `validate_fbbt_tape` deliberately still does **not** cap `n`: the defect
+  was the conversion, and a cap would reject tapes that are now handled
+  correctly.
+
+  Both switches (`presolve`, `presolve_fbbt`) default to `no`, so no shipping
+  default path changes and no fixture sweep is owed. Pinned by
+  `crates/pounce-presolve/tests/issue877_fbbt_unsound_tightening.rs` (12
+  cases, with each side of the influence rule reached by a different fixture
+  per CLAUDE.md's gh #756 rule — the control case that must still tighten is
+  the actual test) and
+  `crates/pounce-rs/tests/issue877_fbbt_dead_slot_wrong_answer.rs`, which
+  pins the end-to-end wrong answer rather than only the box.
+
+  Also from the same finding: the soundness section of `docs/src/fbbt.md`
+  claimed FBBT "cannot drop a feasible point" without stating the tape
+  contract that claim rests on (F-4) — it now states both halves and names
+  this issue as what happens when they are violated; the in-binary
+  `presolve_fbbt` help still said `.nl`-only (F-5); the "must exactly restate"
+  check accepts a `sqrt(eps)` (~1.5e-8) relative mismatch at the two points it
+  samples, which the docs now say instead of promising exactness (F-6); and
+  the builder passed the derivative-test TNLP override unconditionally, so
+  the `None` arm was never exercised — it is now passed only when presolve
+  actually wraps the adapter (F-7).
+- **A `NaN` iterate on the active-set SQP arm is no longer reported as an
+  optimal solution (gh #876).** `unbounded_cubic.nl` under
+  `algorithm=active-set-sqp hessian_approximation=limited-memory` printed
+  `Objective nan`, then `Overall NLP error 0.0000000000000000e+00`, then
+  `EXIT: Optimal Solution Found.` — a perfect KKT error beside a `nan`
+  objective, with success declared on the strength of the zero.
+
+  `f64::max` is defined to *ignore* `NaN`, so `fold(0.0, f64::max)` over an
+  all-`NaN` vector is `0.0`, and `0.0 <= tol` passes. `check_kkt` reduced
+  **both** of its residuals that way: the stationarity rows through the fold
+  the issue names, and the constraint violation one layer earlier through
+  `(bl - c).max(0.0)`, which turns a `NaN` row into a tidy "perfectly
+  feasible" `0.0` before the outer `max` ever sees it — so fixing only the
+  reported site would have left `constr_viol` lying. Both are fixed, and the
+  in-crate mutation table shows neither half covers the other's tests. The
+  SQP arm's `inf_norm` now short-circuits on `NaN`, matching the
+  `pounce-convex` helper that has done so since gh #222; gh #845 was the
+  second instance of the shape, in `pounce-sensitivity`, and this is the
+  third.
+
+  A non-finite iterate or constraint value now terminates the arm with a new
+  `SqpStatus::InvalidNumber`, mapping to `Invalid_Number_Detected` — the same
+  verdict the interior-point arm has always given for the same condition
+  (`ipopt_alg.rs`, `if !nlp_err.is_finite()`), so the two arms cannot disagree
+  about what a `NaN` iterate means.
+
+  Sweeps: the default arm is **unmoved on all 180 fixture-legs**; the SQP arm
+  moves exactly **two**, both limited-memory, both unbounded models.
+  `unbounded_cubic` `SolveSucceeded`/it=9 → `InvalidNumberDetected`/it=8 is
+  the reported defect. `unbounded_exp` `MaximumIterationsExceeded`/it=200 →
+  `InvalidNumberDetected`/it=3 is a second manifestation the issue does not
+  mention: its iterates went to `±inf` rather than `NaN`, and `inf` survives a
+  `max`-fold intact, so it failed the tolerance honestly and then ground out
+  197 further iterations on an iterate that had stopped meaning anything.
+
+  Scope: `Invalid_Number_Detected` is not the same claim as
+  `Diverging_Iterates`. The *exact* leg of `unbounded_cubic` still reports the
+  latter, because its step QP certifies a recession ray (gh #388); an L-BFGS
+  matrix is positive definite by construction, so the limited-memory leg never
+  can. Giving the SQP arm its own `diverging_iterates_tol` guard, so both legs
+  reach the same verdict on an unbounded model, is a trajectory change and was
+  not attempted here.
+
+- **An unconstrained ill-conditioned QP no longer returns a materially wrong
+  `x` under `Optimal` (gh #875).** `min ½(x₀−3)² + ½·10¹²(x₁−½)²` has
+  `x* = (3, ½)` by identity; the cost-normalized (`σ`) path returned
+  `x₀ = 0.027` in one iteration and printed `Dual infeasibility 5.50e+01` on
+  the line directly above `EXIT: Optimal Solution Found.`, so the report
+  contradicted itself. `qp_hsde=no` and Ipopt both return `(3, ½)`, and
+  tightening `tol` was not a workaround — `1e-4` through `1e-10` all returned
+  `0.027039`.
+
+  gh #846 fixed this class for models with an active bound by asking the
+  relative test one row at a time instead of over an aggregate scale, but it
+  asked it only of the **complementarity** rows: that loop runs over
+  `m_ineq()` and the finite entries of `lb`/`ub`, so on a model with neither
+  it reached the end and returned `true` having executed no test at all,
+  putting the verdict back on the bare aggregate. The sibling arm over the
+  **stationarity** rows — which exist whatever the constraint count is — had
+  been written during gh #846 and removed on the reasoning that it rejected
+  nothing complementarity did not. That was true of the fixtures it was
+  measured on, all of which had an active bound, and the doc comment recording
+  it went further and claimed the same spectrum unconstrained "comes back
+  exact to `3e-16`"; re-measured, it comes back wrong by `2.03e-02`. The arm
+  is restored as `sigma_stationarity_is_genuine` and both guards now run, each
+  covering a half of the KKT system the other cannot see.
+
+  Neither subsumes the other, and that is pinned: removing the complementarity
+  arm turns four tests red in `issue846_sigma_flat_direction.rs` and none in
+  the new `issue875_unconstrained_sigma_stationarity.rs`; removing the
+  stationarity arm turns five red in the new file and none in gh #846's. The
+  two accept-branch tests in the new file stay green under both mutations,
+  by construction.
+
+  Measured over a 72-instance unconstrained census (condition number
+  `1e2 ‥ 1e12` × objective magnitude `1e-3 ‥ 1e3` × `n` ∈ {2, 5} × rotated or
+  not), claimed-optimal-but-wrong goes from **32/72 to 17/72**. The split is
+  total and is stated as a limitation rather than a headline: all 15 repairs
+  are **separable** instances, and every **coupled** instance is bit-identical
+  to before — same `x`, same iteration count, same reported dual
+  infeasibility. A componentwise denominator is the largest term that built
+  the row, which is a *directional* scale and not a reduced one; rotate the
+  spectrum and the stiff mode appears in every row, so every denominator
+  collapses back to the aggregate. The coupled half is a larger and different
+  defect — `qp_hsde=no`, the destination a `σ` reject routes to, is itself
+  wrong on the worst of them — and is filed as gh #880 with the full census
+  table. `scripts/sweep-fixtures.sh`
+  moves **zero** of 180 fixture-legs, which per CLAUDE.md is the expected
+  result on this path (one fixture in the corpus reaches it) and is a
+  no-collateral-damage check, not evidence.
+
+- **The jax and torch QP layers no longer silently solve a zero-padded model
+  when `P`'s shape disagrees with the rest of the problem (gh #874).**
+  `7dc03c66` added `_validate_p_shape` for gh #862 and landed it in
+  `python/pounce/qp.py` alone, so its commit message's claim to cover "every
+  entry point that checks the Hessian before it builds" was false as written —
+  both differentiable frontends run their own `_guard_psd`, which reaches
+  `_check_psd` with the shape already discarded. `P = 2·I₃` against a length-5
+  `c` returned `[-0.5, -0.5, -0.5, -1, -1]` from both, which is the exact
+  optimum of the **zero-padded** 5x5 model: a different problem, answered
+  confidently and with no exception anywhere. An oversized `P` failed the other
+  way, with the raw `IndexError: index 3 is out of bounds for axis 0 with
+  size 3` from inside numpy — verbatim the string `7dc03c66` was written to
+  eliminate.
+
+  These are the worse place for it to happen, because both are differentiable
+  layers: `_kkt_backward` inverts the padded KKT system, so the gradients
+  reaching a training loop are the padded model's gradients and the user gets a
+  silently wrong descent direction. Both frontends now call the shared
+  `_validate_p_shape`, so all three give one identical message; the jax layer
+  also validates at its entry point, where the shape is static, rather than
+  letting the error surface from inside a host callback as
+  `JaxRuntimeError: INTERNAL: CpuCallback error` with the real message buried
+  in a nested traceback. The check runs **above** the `check_psd is False`
+  early return: `check_psd` says whether the caller wants the *definiteness*
+  precondition verified, and is not permission to solve a different model than
+  the one passed.
+
+  Making the shared helper reachable from a traced frontend required one
+  change inside it: `_mat_shape` read the shape through `np.asarray`, which
+  raises `TracerArrayConversionError` on a jax tracer, so the first draft of
+  this fix broke every `jit`/`grad` call carrying a *correct* `P`. It now
+  reads `.shape` off anything that has one — a tracer answers that exactly as
+  a concrete array does — and falls back to `np.asarray` only for shape-less
+  input such as a nested list.
+
+- **`check_psd`'s documented default was wrong in six places.** The public
+  docstrings for `pounce.qp.solve_qp` and the jax/torch `solve_qp`,
+  `solve_qp_batch` and layer classes all still said `None` "runs the check only
+  when `n <= 1500`", and `pounce.qp.solve_qp` additionally told the reader the
+  guard does not run "above the `n <= 1500` cap" and to "pass `check_psd=True`
+  on a large QP you know to be indefinite". gh #849 removed that cliff: the
+  check now always runs, and `1500` is only the dense/sparse crossover *inside*
+  it. Found while fixing gh #874, in the same functions; the advice was
+  actively misleading, since following it changed nothing.
+
+
+- **The active-set SQP arm no longer certifies a constrained maximum on the
+  repo's own fixture for the class (gh #873).** gh #856 gave that arm a
+  second-order escape so it would stop doing exactly this; on
+  `nonconvex_two_escapes.nl` it found the negative curvature every time
+  (`ev[0] = −0.9` against a `−2e-5` threshold) and then discarded it, returning
+  `0.0` — the point the fixture's own generator labels a *maximum* — with
+  `EXIT: Optimal Solution Found.`, while the default NLP arm on the same file
+  walked its documented ladder to the global `−6752.25`. pounce disagreed with
+  itself across two arms on a file it ships. It now returns `−6752.25` on both
+  the exact and limited-memory legs.
+
+  Three independent causes, each sufficient alone. **The ray was never
+  searched**: `exhibit_better_point` left its backtracking loop on feasibility
+  alone, so `alpha` never halved past the first feasible trial and `alpha`
+  starts at the far wall — but the profile along a curvature direction is not
+  monotone, and on that fixture the quartic term puts `f = +1.8` at the wall
+  and `−0.225` in the interior of the same ray. **The first acceptable point
+  was returned rather than the best**: the two signs of `±d` are scanned in a
+  fixed order and can be worth wildly different amounts, so on
+  `min −x₀² + x₁²` over `x₀ ∈ [−2, g]` the arm returned the near wall's `−g²`
+  and threw away the `−4` sitting in the other sign. Both are now scored and
+  the best is returned, which costs no extra evaluations. **And three absolute
+  thresholds on scale-dependent quantities** — the same class as gh #872 — in
+  the curvature test (`h_scale…max(1.0)`), the acceptance bar (an additive
+  `1e-10`), and the active-set test, which compared a bound's distance against
+  `constr_viol_tol`, an absolute distance in `x` units. Measured: the same
+  model rewritten in `u = S·x` units flipped from `−4` to the constrained
+  maximum `0.0` at `S ≤ 1e-1` purely because a genuinely inactive bound got
+  frozen into the working set; and `min k·x₀x₁ s.t. x₀ + x₁ = 2`, whose reduced
+  Hessian is `−k` and is as indefinite at `k = 1e-30` as at `k = 1`, returned
+  the constrained maximum `+k` from `k = 1e-8` down. Both now return the true
+  minimum at every scale tested, `k` down to `1e-30`.
+
+  A fourth cause was found by the fixture sweep rather than by the suite, while
+  validating the three above. **The refutation was held to the convergence
+  tolerance instead of the incumbent's own feasibility.** `exhibit_better_point`
+  admitted any trial inside `constr_viol_tol`, so once the ray was actually
+  searched it began accepting points that were better only because they were
+  *less feasible*. On `cresc4.nl`'s limited-memory leg the KKT point is feasible
+  to `2.2e-16` and the accepted trials violated the rows by `6e-7` — nine orders
+  worse, legal under `constr_viol_tol = 1e-6` — to gain `4.4e-7` of objective;
+  the arm restored feasibility, returned to the same point, and repeated until
+  `MAX_SECOND_ORDER_ESCAPES` capped it, taking 15 iterations to 45 for an
+  answer identical to 15 significant figures. That is gh #544's shape exactly,
+  and nothing in the suite could have seen it, because the suite asserts status
+  and objective. A trial must now be at least as feasible as the incumbent, to
+  within `1e-12` *relative* to its own row magnitudes and never looser than the
+  old bar. The honest cost: against a curved active constraint a straight
+  tangent probe leaves the feasible set at order `α²`, so on such a model the
+  exhibition declines rather than accepting a tolerance-feasible point — the
+  same structural limit as the unfixed item below, made visible instead of paid
+  for in iterations.
+
+  As in gh #872 all three floors are lowered **only** (`.min(1.0)`), so no
+  solve that succeeds today becomes newly refutable, and a refutation still has
+  to exhibit a strictly better feasible point before it changes any answer. A
+  strictly convex model at the same `k = 1e-20` is certified, not refuted, and
+  is pinned as the negative control — without it, "refute everything at tiny
+  scale" would pass every other test added here.
+
+  One test had to change its claim, which is worth stating rather than
+  burying. `issue848_sqp_second_order_option.rs` proved
+  `sqp_qp_certify_second_order` is read end to end — gh #677's lesson — by
+  showing the arm stopped at the ridge point `f = 0` with the option off and
+  reached `−6752.25` with it on. Repairing the *other* guard removed that gap:
+  the arm now reaches `−6752.25` either way. Measured over both legs of the
+  corpus — 180 fixture-legs — **no** fixture separates the two settings by
+  objective any more, and exactly **three** separate them by iteration count
+  (`nonconvex_qp` 3 → 1, `nonconvex_two_escapes` 5 → 4, `nonconvex_qcqp`
+  6 → 8), all three on the exact leg. Two independent guards catching the same models is the outcome to
+  want, but the test's discriminator is gone, so it now asserts that at least
+  one of those three responds at all — which still fails an option nothing
+  reads, and is deliberately weaker than what it replaced. The engine-level
+  claim is unaffected and still lives in `pounce-qp`'s own
+  `the_check_can_be_switched_off_and_then_the_saddle_comes_back`.
+
+  Two things deliberately not fixed. The exhibition walks a straight tangent
+  and tests the objective, so a maximum whose negative curvature lives entirely
+  in the `λ·∇²c` term stays un-refutable at any tolerance; that is a gap in
+  gh #856's coverage rather than a regression, `ipopt` 3.14.19 returns `0.0` on
+  the same family, and closing it needs a curved exhibition. And this arm caps
+  escapes with its own `MAX_SECOND_ORDER_ESCAPES = 8` and never reads
+  `neg_curv_escapes`, which is the NLP arm's — worth knowing, since it is why
+  the arm's answer was *constant* across that option.
+
+- **The QP second-order verdict no longer depends on the units the user chose
+  for their variables (gh #872).** One model in two systems of units —
+  `min ½(X₀/K)² + ½(X₁/K)² + 5(X₀/K)(X₁/K)` over `[−2K, 2K]²`, whose objective
+  *values* and whose minimum of `−16` are identical for every `K` — was solved
+  correctly up to `K = 1e4` and returned `0.0` from `K = 1e5` on, with
+  `Number of Iterations: 0`, `Overall NLP error: 0.0` and
+  `EXIT: Optimal Solution Found.` The Hessian `K⁻²·[[1,5],[5,1]]` is *strongly*
+  indefinite at every scale (`|λ_min|/λ_max = 2/3`), so nothing here was near
+  the round-off the tolerances were meant to absorb.
+
+  The causal gate was `dispatch::PSD_TOL`, a fixed `1e-9` serving both as the
+  classifier's band and as the diagonal shift its inertia certificate factors:
+  at `‖H‖∞ ~ 1e-10` the shift *dominates* `H`, so the certificate was reading
+  `1e-9·I` and was vacuous. It is now scaled by `‖H‖∞`, and deliberately only
+  downwards — widening the band on a large `H` would hand the convex engine
+  Hessians it correctly rejects today, trading one wrong answer for another.
+  Four further absolute floors, each of which independently re-blocked the
+  rescue once the classifier was fixed, got the same treatment: `negcurv.rs`'s
+  shift-ladder start and its witness threshold, `pounce-convex`'s `p_scale`
+  (where the `.max(1.0)` also flattened the shifted power iteration's spectrum
+  on a small `P`, so it was not merely a widened tolerance), and
+  `pounce.qp`'s `check_psd` screen, which read a strongly indefinite `P` as PSD
+  and handed it to an engine that assumes PSD. `solver_selection=qp-active-set`
+  now returns `−16` from `K = 1` through `K = 1e8`.
+
+  Two carve-outs, both stated rather than fixed. The NLP arm keeps its own copy
+  of the constant (`NEG_CURV_DELTA_MIN`), whose shift lands on `W + Σ` rather
+  than on `H` and so is not the same change; on this model the NLP arm agrees
+  with upstream `ipopt`, which also returns `0.0`, so `auto` is unchanged here.
+  And the fixture corpus was **uniform in the dimension this acts on** — 48 of
+  the 49 fixtures reaching the classifier sit at `‖H‖∞ ≥ 1`, where the clamp
+  makes the change a no-op — so the clean two-leg sweep was near-tautological
+  evidence, and two small-scale fixtures (one indefinite, one PD) were added to
+  make the corpus able to see it at all.
+
+- **`sqp_qp_certify_second_order`'s registered help said standalone QP solves
+  "do that unconditionally and are not affected by this option" (gh #872).**
+  They are affected: the standalone default is `yes`, but an explicit `no`
+  reaches that path too and turns the certification off, taking gh #871's
+  fixture from `−1` to a saddle certified as `Optimal Solution Found`. The
+  inverse of gh #677 — an option read on a path documented as not reading it.
+
+- **The QP active-set second-order refutation now survives an equality row
+  (gh #871).** `refute_indefinite_optimum` is the third guard in the gh #848
+  stack: it walks a direction of negative curvature and demotes a claimed
+  optimum only after exhibiting a strictly better feasible point. Every
+  `QpProblem` in both gh #848 test files has `a: vec![]`, and
+  `max_feasible_step` opens with a hard rejection of any direction carrying an
+  equality component — so on `min −x₀² s.t. x₀+x₁+x₂ = 0` over `[0,1]×[−1,1]²`
+  the search returned `e₀`, `A e₀ = 1`, and the origin went out `Optimal` at
+  `f = 0` against a true minimum of `−1`. From Python at defaults the same
+  model with the box opened is **unbounded below** and came back
+  `status='optimal'`, `f = 0`, rather than `dual_infeasible`. Three changes:
+
+  - the curvature search now also runs on `P` restricted to `null(A)` — the
+    operator the screen is actually about — and every direction it finds is
+    projected onto that null space before the feasible-step test, matrix-free
+    (CG on `A Aᵀ` with iterative refinement), so it carries no dimension
+    ceiling;
+  - power-iteration dust below `1e-7 ‖d‖∞` is pruned. `max_feasible_step`'s
+    slack is `1e-9 ‖d‖∞`, *below* the iteration's own noise floor, so a dust
+    component in a coordinate sitting on a bound read as a real move out of it
+    and drove the step to zero;
+  - a direction that a bound or row stops dead is no longer a dead end. The
+    blocking row joins the working set and the search runs again inside the
+    smaller null space, breadth-first with a node budget — ordinary active-set
+    logic, and the difference between refuting `min −x₀²` at the vertex
+    `(0, −1, 1)` and certifying it.
+
+  Every derived direction is re-checked for negative curvature before it is
+  used and the base direction is still tried first and unchanged, so nothing
+  the screen refuted before can stop being refuted. `solver_selection=auto`
+  routes this class to the NLP arm and was never affected.
+
+- **`back_translate_verified` could not apply the second-order screen at all
+  (gh #871).** Nothing in a `pounce_qp::QpSolution` records what the caller
+  claimed about `P`, so the supported read-back entry point ran the two
+  first-order guards and silently skipped the one the nonconvex claim is
+  *about*. New `back_translate_verified_inertia` takes the claim;
+  `back_translate_verified` keeps its signature and its `Psd` behaviour, under
+  which the screen never runs and costs nothing.
 - **A `mu_strategy_fallback` retry that loses now gives back the answer it
   displaced, not just the status (pounce#870).** The retry re-solves under the
   flipped barrier schedule and promotes only on `Solve_Succeeded`; otherwise the
