@@ -52,6 +52,34 @@ const DUAL_DIV_COUNT_FLOOR: Number = 1e2;
 /// restoration happens *before* the seconds-long factorizations start.
 const DUAL_DIV_FIRE_TOL: Number = 1e8;
 
+/// gh#884 — the scale-relative search direction below which the iterate
+/// counts as **settled** for the dual-divergence-retry signature.
+///
+/// Measured on `d89771bc`, minimum over the iterates where the primal is
+/// already converged: `qpec_small`/`ncp_eq`/origin reaches `8.6e-14`
+/// through the `.nl` path and `4.3e-8` through a Rust TNLP, while
+/// `ralph1`/`direct`/origin — which *must not* fire, because no
+/// sign-feasible multiplier exists at its origin and failing there is
+/// correct — bottoms out at `7.2e-3`. Five orders of separation; `1e-5`
+/// sits near the middle of it in log terms. The census behind this, and
+/// the corpus fixtures that come closest on either side, are in
+/// `dev-notes/mpcc-biactive-dual-divergence.md`.
+const DUAL_DIV_RETRY_STEP_TOL: Number = 1e-5;
+
+/// gh#884 — the unscaled `‖∇L‖∞` floor for that signature.
+///
+/// Deliberately the same `1e2` as [`DUAL_DIV_COUNT_FLOOR`], and for the
+/// same reason: below it a solve is merely mid-flight. It is what
+/// excludes `eigena2` on the L-BFGS leg, which reaches a settled step of
+/// `7.9e-9` but at an unscaled dual of only `37`.
+const DUAL_DIV_RETRY_DU_FLOOR: Number = 1e2;
+
+/// gh#884 — primal infeasibility below which the primal counts as
+/// converged for that signature. The failure mode is defined by the
+/// primal being *done* while the duals run away, so this conjunct is
+/// what separates it from an ordinary struggling solve.
+const DUAL_DIV_RETRY_PRIMAL_TOL: Number = 1e-8;
+
 /// gh #534 — how many consecutive outer NLP errors the progress test reads.
 /// Four samples give three ratios: enough that a single lucky step cannot pass
 /// the test, short enough to still be inside the endgame it is meant to
@@ -344,6 +372,27 @@ pub struct IpoptAlgorithm {
     pub dual_diverging_streak: usize,
     dual_inf_prev: Number,
     dual_growth_streak: usize,
+    /// gh#884 — thresholds for the dual-divergence *retry* signature.
+    /// Distinct from the pounce#246 guard above in both mechanism and
+    /// consequence: that one diverts a running solve to restoration, this
+    /// one only *records* that a cold retry is worth attempting after the
+    /// solve has already given up. Set from options of the same name; see
+    /// [`DUAL_DIV_RETRY_STEP_TOL`] for the measured populations.
+    pub dual_divergence_retry_step_tol: Number,
+    /// Companion floor on the unscaled dual — see
+    /// [`DUAL_DIV_RETRY_DU_FLOOR`].
+    pub dual_divergence_retry_du_floor: Number,
+    /// Scale-relative magnitude of the most recent search direction,
+    /// `max(max_i |δx_i|/(1+|x_i|), max_i |δs_i|/(1+|s_i|))` — the
+    /// `detect_tiny_step` measure, kept as a number rather than a
+    /// predicate. `INFINITY` before the first direction is computed, so
+    /// the signature cannot fire on iteration 0.
+    last_step_rel: Number,
+    /// gh#884 — sticky: set once the four-conjunct signature is seen at a
+    /// single iterate, never cleared. Read by the application layer after
+    /// the solve to decide whether a cold retry is authorized. It never
+    /// changes a verdict by itself.
+    dual_divergence_signature: bool,
     /// Set true when the previous iterate was tagged tiny; on the
     /// second consecutive tiny step the loop sets `data.tiny_step_flag`
     /// so the mu update can attempt to terminate. Mirrors
@@ -610,6 +659,10 @@ impl IpoptAlgorithm {
             dual_diverging_streak: 15,
             dual_inf_prev: 0.0,
             dual_growth_streak: 0,
+            dual_divergence_retry_step_tol: DUAL_DIV_RETRY_STEP_TOL,
+            dual_divergence_retry_du_floor: DUAL_DIV_RETRY_DU_FLOOR,
+            last_step_rel: Number::INFINITY,
+            dual_divergence_signature: false,
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
             last_resto_entry_s: None,
@@ -2618,6 +2671,51 @@ impl IpoptAlgorithm {
         //   restoration provider, so the guard can only ever route to
         //   restoration. Do not assume it is dead code and delete the provider
         //   check; do not assume it is live and rely on the status either.
+        // gh#884 — the dual-divergence-at-a-settled-primal signature.
+        //
+        // Four conjuncts, all required **at the same iterate**. That is not
+        // stylistic: measured on the corpus, `deb7` on the L-BFGS leg reaches
+        // a settled step of `5.9e-13` at an unscaled dual of `8.6e-7`, and its
+        // *maximum* unscaled dual over settled iterates is `7.2e6`. A
+        // formulation that took the minimum step and the maximum dual over a
+        // window would fire on it; this one does not.
+        //
+        // What it is for: at a biactive complementarity pair the product row's
+        // multiplier is arbitrary rather than determined, so it runs away, `s_d`
+        // grows with it, and the `s_d`-normalised aggregate the convergence
+        // check reads stays clean while the honest residual is `7.9e+04`. The
+        // one quantity that feedback loop cannot fake is the step: with the
+        // primal settled and the duals diverging the direction collapses. So
+        // this reads the *raw unscaled* residual, and only at iterates where
+        // the algorithm has demonstrably stopped moving with the primal solved.
+        // A multiplier of `1e9` on a `1e-9` gradient cannot satisfy it, because
+        // nothing here is normalised by a multiplier — which is gh#884's
+        // criterion 2.
+        //
+        // It never changes a verdict. All it does is authorize the application
+        // layer to spend a second solve; see `run_with_dual_divergence_retry`.
+        if !self.dual_divergence_signature && self.dual_divergence_retry_step_tol > 0.0 {
+            let cq = self.cq.borrow();
+            let has_rows = cq.curr_c().dim() > 0 || cq.curr_d().dim() > 0;
+            if has_rows && self.last_step_rel <= self.dual_divergence_retry_step_tol {
+                let inf_pr = cq.curr_primal_infeasibility_max();
+                let unscaled_du = cq.curr_unscaled_dual_infeasibility_max();
+                if inf_pr <= DUAL_DIV_RETRY_PRIMAL_TOL
+                    && unscaled_du >= self.dual_divergence_retry_du_floor
+                    && unscaled_du.is_finite()
+                {
+                    self.dual_divergence_signature = true;
+                    tracing::debug!(target: "pounce::algorithm",
+                        "[POUNCE] gh#884 dual-divergence signature at iter {}: \
+                         step_rel={:.2e} inf_pr={:.2e} unscaled_inf_du={:.2e}; \
+                         a cold retry is authorized if this solve does not succeed.",
+                        self.data.borrow().iter_count,
+                        self.last_step_rel, inf_pr, unscaled_du,
+                    );
+                }
+            }
+        }
+
         if self.dual_diverging_streak > 0 {
             let inf_du = self.cq.borrow().curr_dual_infeasibility_max();
             if inf_du.is_finite() && inf_du > self.dual_inf_prev && inf_du > DUAL_DIV_COUNT_FLOOR {
@@ -3291,6 +3389,11 @@ impl IpoptAlgorithm {
             // to hit `STOP_AT_TINY_STEP` cleanly when the iterate is
             // already at a converged point but `nlp_error > tol` due to
             // scaling or unbounded duals.
+            // gh#884 — record the direction's scale-relative magnitude for
+            // the dual-divergence-retry signature. Done here, where `delta`
+            // is already in hand, rather than recomputed at the gate.
+            self.last_step_rel = self.scale_relative_step_max(&delta);
+
             if self.detect_tiny_step(&delta) {
                 let alpha_p = alpha_p_max;
                 let alpha_d = alpha_d_max;
@@ -3447,6 +3550,44 @@ impl IpoptAlgorithm {
         }
 
         IterateOutcome::Continue
+    }
+
+    /// `max(max_i |δx_i|/(1+|x_i|), max_i |δs_i|/(1+|s_i|))` — the same
+    /// scale-relative measure [`Self::detect_tiny_step`] thresholds, kept
+    /// as a magnitude.
+    ///
+    /// Scale-relative rather than a bare `‖d‖` on purpose: a bare norm is
+    /// a length in the model's units, so on a badly scaled model it says
+    /// more about the units than about whether the iterate has stopped
+    /// moving. gh#884's signature needs the latter.
+    fn scale_relative_step_max(&self, delta: &crate::iterates_vector::IteratesVector) -> Number {
+        let curr = match self.data.borrow().curr.clone() {
+            Some(c) => c,
+            None => return Number::INFINITY,
+        };
+
+        let mut tmp = curr.x.make_new_copy();
+        tmp.element_wise_abs();
+        tmp.add_scalar(1.0);
+        let mut tmp2 = delta.x.make_new_copy();
+        tmp2.element_wise_divide(&*tmp);
+        let mut worst = tmp2.amax();
+
+        if curr.s.dim() > 0 {
+            let mut tmp = curr.s.make_new_copy();
+            tmp.element_wise_abs();
+            tmp.add_scalar(1.0);
+            let mut tmp2 = delta.s.make_new_copy();
+            tmp2.element_wise_divide(&*tmp);
+            worst = worst.max(tmp2.amax());
+        }
+        worst
+    }
+
+    /// Whether this solve ever saw gh#884's dual-divergence-at-a-settled-primal
+    /// signature. Sticky; see [`Self::dual_divergence_signature`].
+    pub fn dual_divergence_signature(&self) -> bool {
+        self.dual_divergence_signature
     }
 
     /// Port of `IpBacktrackingLineSearch::DetectTinyStep`

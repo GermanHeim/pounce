@@ -389,6 +389,19 @@ pub struct AlgorithmBuilder {
     /// is opt-in rather than imposed. See `upstream_options.rs` for the full
     /// account.
     pub dual_diverging_streak: Index,
+    /// `dual_divergence_retry_step_tol` (gh#884) — the scale-relative
+    /// step `max_i |d_i| / (1 + |x_i|)` at or below which the biactive
+    /// dual-divergence detector calls the primal iterate *settled*.
+    /// Default `1e-5`; `0` disables the detector without disabling the
+    /// `dual_divergence_retry` option. See `upstream_options.rs` for the
+    /// measured population behind the default.
+    pub dual_divergence_retry_step_tol: Number,
+    /// `dual_divergence_retry_du_floor` (gh#884) — the *unscaled* dual
+    /// infeasibility at or above which the same detector calls the
+    /// multipliers *diverged*. Default `1e2`. Measured in the model's own
+    /// units on purpose: the `s_d`-normalised aggregate is what hid the
+    /// defect. See `upstream_options.rs`.
+    pub dual_divergence_retry_du_floor: Number,
     /// `resto_decline_deferrals` (gh #534) — how many times the
     /// acceptable-point restoration decline may be deferred on a solve whose
     /// NLP error is still contracting. Default `1`; `0` restores the pre-#534
@@ -1191,6 +1204,8 @@ impl Default for AlgorithmBuilder {
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
+            dual_divergence_retry_step_tol: 1e-5,
+            dual_divergence_retry_du_floor: 1e2,
             dual_diverging_streak: 0,
             resto_decline_deferrals: 1,
             resto_decline_progress_ratio: 0.5,
@@ -1772,6 +1787,8 @@ mod tests {
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,
                             dual_diverging_streak: 0,
+                            dual_divergence_retry_step_tol: 1e-5,
+                            dual_divergence_retry_du_floor: 1e2,
                             resto_decline_deferrals: 1,
                             resto_decline_progress_ratio: 0.5,
                             neg_curv_escapes: 1,

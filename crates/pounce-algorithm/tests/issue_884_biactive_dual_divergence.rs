@@ -509,13 +509,24 @@ fn a_claimed_success_must_be_real(
 /// measured `(1.0002321, 1.0001161, 2.67e-15)` with `f = 6.73e-8` on
 /// `87402274`. The interesting fact is that it gives up that close.
 ///
-/// The **conditional** half is the guard. gh#884 is open, so today this
-/// model exits `RestorationFailed` at an unscaled KKT error of `3.3e11`
-/// and the guard is vacuous. That failure is deliberately *not* asserted:
-/// a test that pins it would go red on a genuine fix, which is backwards.
-/// What the guard catches is the tempting bad fix gh#884 names — relaxing
-/// the exit verdict so the model reports success while the residual stays
-/// at `1e11`. That fix passes a status assertion and fails this one.
+/// The **conditional** half is the guard, and it is no longer vacuous.
+/// Before gh#884 closed, this model exited `RestorationFailed` at an
+/// unscaled KKT error of `3.3e11` (and, from the acceptable-level start
+/// the issue filed, `Solved_To_Acceptable_Level` at `7.9e+04`), so the
+/// guard had nothing to check. The dual-divergence retry now takes it to
+/// `Solve_Succeeded` with a residual that holds in the model's own units,
+/// which is what the guard has always demanded of a claimed success. What
+/// it still catches is the tempting bad fix gh#884 names — relaxing the
+/// exit verdict so the model reports success while the residual stays at
+/// `1e11`. That fix passes a status assertion and fails this one.
+///
+/// The feasibility bar moved `1e-12` → `1e-10` when the retry landed, and
+/// the direction is worth naming: the *base* attempt sat at `2.7e-15`,
+/// the promoted one at `5.5e-12`. The retry is not a tighter solve of the
+/// same trajectory — it is a different one, run with `perturb_always_cd`,
+/// and it buys nine orders of unscaled dual residual for three orders of
+/// primal. Both are far inside `constr_viol_tol`; the point of the number
+/// here is that the trade is recorded rather than absorbed.
 #[test]
 fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
@@ -530,7 +541,7 @@ fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
     // not at it (see the doc comment); tightening these would pin the
     // distance gh#884 leaves on the table.
     assert!(
-        violation <= 1e-12,
+        violation <= 1e-10,
         "expected a feasible point, got violation {violation:.3e} at {:?}",
         sol.x,
     );
@@ -552,6 +563,25 @@ fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
         status,
         s.final_unscaled_kkt_error,
         violation,
+    );
+
+    // gh#884, criterion 1, in its strongest available form. The issue
+    // asks only that this model not report success at an unscaled
+    // `7.9e+04`; the retry does better and reaches a certificate, so pin
+    // that instead — a regression that returns the honest failure would
+    // still satisfy criterion 1 and would still be a regression.
+    assert_eq!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "the dual-divergence retry should reach a real certificate here \
+         (unscaled KKT {:.3e})",
+        s.final_unscaled_kkt_error,
+    );
+    assert!(
+        s.dual_divergence_retry_promoted,
+        "the certificate should have come from the gh#884 retry, not from \
+         the base attempt; signature={} promoted={}",
+        s.dual_divergence_signature, s.dual_divergence_retry_promoted,
     );
 }
 

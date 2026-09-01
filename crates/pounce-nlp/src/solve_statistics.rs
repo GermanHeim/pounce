@@ -188,6 +188,27 @@ pub struct SolveStatistics {
     /// driver, before any promotion, so the gate is unaffected.
     pub quality_escalations: Index,
 
+    /// gh#884. The solve observed the biactive dual-divergence signature:
+    /// at one and the same iterate, a converged primal
+    /// (`inf_pr <= dual_divergence_retry_primal_tol`), a scale-relative
+    /// step at or below `dual_divergence_retry_step_tol`, and an
+    /// *unscaled* dual infeasibility at or above
+    /// `dual_divergence_retry_du_floor`.
+    ///
+    /// Reported whether or not a retry ran or promoted, so a caller can
+    /// tell "the multipliers ran away on a settled iterate" from an exit
+    /// that merely ran out of iterations. **On a promoted run this is the
+    /// promoted attempt's value**, the same rule `quality_escalations`
+    /// and `iteration_count` follow — a retry that succeeds normally
+    /// reports `false` here and `true` in
+    /// `dual_divergence_retry_promoted`.
+    pub dual_divergence_signature: bool,
+    /// gh#884. A dual-divergence retry ran *and* replaced the base
+    /// attempt's answer. `false` both when no retry ran and when one ran
+    /// and lost — in the latter case the returned point, status and
+    /// residuals are the base attempt's.
+    pub dual_divergence_retry_promoted: bool,
+
     // ---- Active-set SQP subproblem counters. ----
     //
     // Populated by `IpoptApplication::optimize_sqp_tnlp`; both stay 0
@@ -285,6 +306,8 @@ impl Default for SolveStatistics {
             restoration_outer_iters: 0,
             restoration_wall_secs: 0.0,
             quality_escalations: 0,
+            dual_divergence_signature: false,
+            dual_divergence_retry_promoted: false,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
             iterations: Vec::new(),
