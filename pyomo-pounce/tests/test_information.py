@@ -368,7 +368,7 @@ def test_indefinite_detector():
     """At a genuine minimum the reduced Hessian is PSD, so the branch
     cannot be reached by a healthy fixture; the detector is pinned
     directly instead."""
-    from pyomo_pounce.sens import _indefinite
+    from pounce.sensitivity._stats import _indefinite
     assert not _indefinite(np.array([[2.0, 0.0], [0.0, 3.0]]))
     assert _indefinite(np.array([[2.0, 0.0], [0.0, -0.5]]))
     assert not _indefinite(np.array([[1.0, 0.0], [0.0, -1e-14]]))
