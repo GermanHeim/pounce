@@ -60,6 +60,7 @@ export IPOPT_LINEAR_SOLVER
 	gams-bench gams-rerun \
 	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
 	warmstart-ipopt warmstart-transfer warmstart-composite warmstart-all \
+	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report
 
 # Show available targets
@@ -101,6 +102,11 @@ help:
 	@echo "  warmstart-transfer         Changed-structure arms: horizon shift and mesh prolongation"
 	@echo "  warmstart-composite        Render the pounce#611 composite report into dev-notes/"
 	@echo "  warmstart-all              Every warm-start run above, then the composite report"
+	@echo "  mpcc-selftest              MPCC suite: derivatives, oracle, classifier, manifest (no solver needed)"
+	@echo "  mpcc-smoke                 MPCC suite: deterministic asserted subset (~10 s, needs the built Python ext)"
+	@echo "  mpcc-run                   MPCC suite: the full gh#794 configuration, writes results-full.{json,md}"
+	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
+	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
@@ -373,6 +379,39 @@ warmstart-quick:
 warmstart-report:
 	cd $(CURDIR) && $(PYTHON) -m warmstart.report \
 		warmstart/results.json -o warmstart/results.md
+
+# --- MPCC benchmark (gh#794) ------------------------------------------
+#
+# Gate 0 of gh#776: the smallest corpus that can separate a source
+# formulation deficiency from a lowering deficiency from a POUNCE
+# deficiency on complementarity-constrained problems. Like warmstart it
+# drives the Python extension in process (build it with `make
+# python-ext` from the repo root) and needs SciPy for its independent
+# oracle and its stationarity classifier.
+#
+# `mpcc-selftest` needs no solver at all and is the gate on the others:
+# it finite-difference-checks every declared derivative, re-derives every
+# expected optimum by branch enumeration, and checks that the
+# stationarity classifier still discriminates S from M from C.
+#
+# Outputs (mpcc/results-*.json, mpcc/results-*.md) are regenerated per run
+# and gitignored; mpcc/manifest.json and mpcc/schema.json are tracked.
+
+mpcc-selftest:
+	cd $(CURDIR) && $(PYTHON) -m mpcc.selftest
+
+mpcc-smoke: mpcc-selftest
+	cd $(CURDIR) && $(PYTHON) -m mpcc.run --smoke
+
+mpcc-run: mpcc-selftest
+	cd $(CURDIR) && $(PYTHON) -m mpcc.run --full -v
+
+mpcc-report:
+	cd $(CURDIR) && $(PYTHON) -m mpcc.report \
+		mpcc/results-full.json -o mpcc/results-full.md
+
+mpcc-manifest:
+	cd $(CURDIR) && $(PYTHON) -m mpcc.run --write-manifest
 
 # pounce#611. The external arm needs cyipopt, which has no PyPI wheel:
 #   apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev

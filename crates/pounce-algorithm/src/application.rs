@@ -114,7 +114,7 @@ use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
-    IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP,
+    BoundsInfo, IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP,
 };
 use pounce_nlp::tnlp_adapter::{
     DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF, FixedVarTreatment, TNLPAdapter,
@@ -140,6 +140,18 @@ pub struct IpoptApplication {
     /// the JSON report — can undo the substitution. `None` when no
     /// variable scaling was applied.
     variable_scaling: RefCell<Option<Vec<Number>>>,
+    /// Whether the most recent `optimize_constrained` ran with per-row
+    /// constraint scaling active (`c_scale_vec`/`d_scale_vec` present).
+    ///
+    /// Read by [`Self::run_l1_penalty_outer_loop`], which measures the
+    /// user's rows in the model's own units and so may only write that
+    /// number into the `final_unscaled_*` family. `SolveStatistics`
+    /// documents `final_*` as the internally-scaled residuals and
+    /// `final_unscaled_*` as the same quantities in original units,
+    /// *equal when no scaling is active* — so the measurement may be
+    /// mirrored into the scaled family exactly when this is `false`
+    /// (gh#794 review). `None` when no solve has run.
+    row_scaling_active: std::cell::Cell<Option<bool>>,
     /// Whether the submitted TNLP has already been explicitly wrapped by the
     /// caller's presolve layer.
     presolve_already_applied: bool,
@@ -348,6 +360,7 @@ impl IpoptApplication {
             options: OptionsList::with_registered(Rc::clone(&reg)),
             least_square_init_report: None,
             variable_scaling: RefCell::new(None),
+            row_scaling_active: std::cell::Cell::new(None),
             presolve_already_applied: false,
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
@@ -2162,6 +2175,47 @@ impl IpoptApplication {
             .unwrap_or(1e-8)
     }
 
+    /// The user's `acceptable_tol` — the standard behind
+    /// `Solved_To_Acceptable_Level`.
+    fn user_acceptable_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("acceptable_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-6)
+    }
+
+    /// The user's `constr_viol_tol` — the **absolute** feasibility standard
+    /// the strict gate's primal component judges by
+    /// (`OptErrorConvCheck::primal_component_passes`).
+    fn user_constr_viol_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("constr_viol_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-4)
+    }
+
+    /// The user's `acceptable_constr_viol_tol` — the same standard at the
+    /// acceptable tier.
+    fn user_acceptable_constr_viol_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("acceptable_constr_viol_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-2)
+    }
+
+    /// `primal_noise_floor_kappa` — the safety factor on the per-row
+    /// floating-point noise floor (gh#528/gh#590). `0` opts out.
+    fn user_primal_noise_floor_kappa(&self) -> Number {
+        self.options
+            .get_numeric_value("primal_noise_floor_kappa", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(64.0)
+    }
+
     /// Emit the Ipopt-style problem-statistics block (#206) from the
     /// engine's own reduced problem, gated on `console_output`
     /// (print_level >= 1). Shared by the IPM (`optimize_tnlp`) and SQP
@@ -2849,6 +2903,7 @@ impl IpoptApplication {
             }
             let slack_sum = w.last_slack_sum();
             let y_eq_inf = w.last_y_eq_inf_norm();
+            let x_here: Vec<Number> = w.last_x_trunc().to_vec();
             drop(w);
 
             // Termination decisions.
@@ -2860,8 +2915,48 @@ impl IpoptApplication {
             if !inner_ok {
                 break;
             }
-            if slack_sum.is_finite() && slack_sum <= slack_tol {
-                break;
+            // Stop escalating ρ once the **user's** constraints are
+            // satisfied to the tolerance the caller asked for — not once
+            // `Σ(p + n)` falls under `l1_slack_tol`, which is a different
+            // quantity judged by a different number (gh#794 P1). The
+            // slack sum stays the BNW steering signal below, which is
+            // the job it is right for. One extra `eval_g` per outer
+            // iteration buys the difference between stopping at the
+            // penalty solution and stopping at the model's own.
+            let feasible_here = {
+                let m_inner = tnlp
+                    .borrow_mut()
+                    .get_nlp_info()
+                    .map(|i| i.m.max(0) as usize)
+                    .unwrap_or(0);
+                let mut g_here = vec![0.0; m_inner];
+                let evaluated =
+                    m_inner == 0 || tnlp.borrow_mut().eval_g(&x_here, true, &mut g_here);
+                evaluated
+                    .then(|| {
+                        original_space_feasibility(
+                            &tnlp,
+                            &x_here,
+                            &g_here,
+                            self.nlp_lower_bound_inf(),
+                            self.nlp_upper_bound_inf(),
+                            self.user_tol(),
+                            self.user_acceptable_tol(),
+                            self.user_constr_viol_tol(),
+                            self.user_acceptable_constr_viol_tol(),
+                            self.user_primal_noise_floor_kappa(),
+                        )
+                    })
+                    .flatten()
+                    .map(|f| f.negligible_at_tol)
+            };
+            match feasible_here {
+                Some(true) => break,
+                Some(false) => {}
+                // Unmeasurable model: fall back to the historical
+                // slack-sum test rather than looping to the cap.
+                None if slack_sum.is_finite() && slack_sum <= slack_tol => break,
+                None => {}
             }
             if rho >= rho_max {
                 break;
@@ -2883,19 +2978,164 @@ impl IpoptApplication {
             let slack_sum = w.last_slack_sum();
             drop(w);
 
-            // Honest-infeasibility upgrade (Phase 3): if the inner
-            // solve says SolveSucceeded / SolvedToAcceptableLevel but
-            // the slacks did not collapse, the original problem is
-            // locally infeasible at the returned point. Override the
-            // application status; the user-visible Solution.status is
-            // updated below to the matching SolverReturn so the inner
-            // TNLP sees a consistent picture.
-            let infeasible_certificate = matches!(
+            // Recompute f(x*) and c(x*) on the inner. Both are needed
+            // before the status is decided, because the status now turns
+            // on the *original-space* feasibility at this point.
+            let f_inner = tnlp
+                .borrow_mut()
+                .eval_f(&x_trunc, true)
+                .unwrap_or(Number::NAN);
+            let m = tnlp
+                .borrow_mut()
+                .get_nlp_info()
+                .map(|i| i.m as usize)
+                .unwrap_or(0);
+            // The success flag decides whether `g_inner` is a measurement
+            // or a zero-filled buffer. Dropping it would let a TNLP whose
+            // final `eval_g` fails fabricate feasibility: every row would
+            // read `0`, `original_space_feasibility` would return a
+            // violation of zero, and that would flow into both the exit
+            // status and the reported residuals. Gate it exactly as the
+            // ρ-escalation measurement above does, so an evaluation
+            // failure produces `None` and follows the documented
+            // `l1_slack_tol` fallback instead (gh#794 review).
+            let mut g_inner = vec![0.0; m];
+            let g_evaluated = m == 0 || tnlp.borrow_mut().eval_g(&x_trunc, false, &mut g_inner);
+
+            // gh#794 P1. Everything below used to argue from `Σ(p + n)`,
+            // the sum of the augmented slacks, judged against
+            // `l1_slack_tol`. That is not the user's constraint
+            // violation and it is not judged by the user's tolerance:
+            //
+            //   * the violation of equality row `i` is `|p_i − n_i|`,
+            //     not `p_i + n_i`, and at the barrier's interior both
+            //     slacks stay positive where their difference is zero,
+            //     so the sum is an upper bound that is loose in one
+            //     direction; and
+            //   * `l1_slack_tol` defaults to `1e-6`, four orders looser
+            //     than a `tol = 1e-8` solve asked for, so a violation
+            //     that the solver's own strict gate would refuse on the
+            //     unwrapped problem read as "the constraints are
+            //     satisfied".
+            //
+            // Measured, not argued: the MPCC benchmark's `ralph1`
+            // (`benchmarks/mpcc/`) returned `Solve_Succeeded` at a point
+            // violating its one equality row by `2.5e-07`, with the
+            // reported `final_constr_viol` — the *augmented* residual —
+            // at `9.6e-15`, so no field in the result disclosed it. The
+            // objective came back `5.0e-04` below the true optimum,
+            // which is reachable only off the feasible set.
+            //
+            // So: measure the user's own rows at the returned point, and
+            // judge them by the tolerances the caller set. The slack sum
+            // keeps its other job unchanged — it is the BNW steering
+            // signal for ρ escalation inside the loop above, which is
+            // what it is the right quantity for.
+            let feas = g_evaluated
+                .then(|| {
+                    original_space_feasibility(
+                        &tnlp,
+                        &x_trunc,
+                        &g_inner,
+                        self.nlp_lower_bound_inf(),
+                        self.nlp_upper_bound_inf(),
+                        self.user_tol(),
+                        self.user_acceptable_tol(),
+                        self.user_constr_viol_tol(),
+                        self.user_acceptable_constr_viol_tol(),
+                        self.user_primal_noise_floor_kappa(),
+                    )
+                })
+                .flatten();
+
+            // The reported constraint violation must be the user's, not
+            // the augmented problem's. Without this the KKT block of a
+            // successful ℓ₁ solve describes a problem the caller never
+            // posed. The aggregate errors take a `max` rather than a
+            // rewrite: the NLP error's primal term enters undivided, so
+            // the aggregate is never below the constraint violation, and
+            // the other two components are unaffected by the wrapper.
+            //
+            // `f.max_violation` is measured on the inner TNLP's own rows
+            // and bounds, so it is in the model's **original units**. That
+            // decides which field family may carry it. `SolveStatistics`
+            // documents `final_*` as the max-norms in the internally
+            // scaled NLP space and `final_unscaled_*` as the same
+            // residuals with the scaling divided back out — equal only
+            // when no scaling is active — and `docs/src/python.md` states
+            // the same contract to Python callers. Writing an
+            // original-units number into `final_constr_viol` would break
+            // it on any run with `nlp_scaling_method` engaged (gh#794
+            // review).
+            //
+            // So the unscaled family always takes the measurement, and
+            // the scaled family mirrors it exactly when per-row scaling
+            // did not engage — the case in which the contract requires
+            // the two to agree anyway. Under active row scaling the
+            // scaled fields keep what the inner solve reported; the
+            // converted number is not available here, because the
+            // augmented problem's row-scale factors belong to an NLP that
+            // `optimize_constrained` has already dropped. The status
+            // decision below does not read these fields — it reads
+            // `feas` directly — so an active-scaling run is judged on the
+            // user's rows either way.
+            if let Some(f) = feas.as_ref() {
+                let scaled_may_mirror = self.row_scaling_active.get() == Some(false);
+                let mut stats = self.statistics.borrow_mut();
+                stats.final_unscaled_constr_viol = f.max_violation;
+                stats.final_unscaled_kkt_error =
+                    stats.final_unscaled_kkt_error.max(f.max_violation);
+                if scaled_may_mirror {
+                    stats.final_constr_viol = f.max_violation;
+                    stats.final_kkt_error = stats.final_kkt_error.max(f.max_violation);
+                    stats.final_kkt_error_above_noise =
+                        stats.final_kkt_error_above_noise.max(f.max_violation);
+                }
+            }
+
+            let inner_claimed_success = matches!(
                 last_status,
                 ApplicationReturnStatus::SolveSucceeded
                     | ApplicationReturnStatus::SolvedToAcceptableLevel
-            ) && slack_sum.is_finite()
-                && slack_sum > slack_tol;
+            );
+
+            // Downgrade, not upgrade: a solve that reached the strict
+            // standard on the user's own rows keeps whatever status the
+            // inner gave it, and nothing here can turn a failure into a
+            // success.
+            let downgrade_to_acceptable = inner_claimed_success
+                && feas
+                    .as_ref()
+                    .is_some_and(|f| !f.negligible_at_tol && f.negligible_at_acceptable);
+
+            let infeasible_certificate = inner_claimed_success
+                && match feas.as_ref() {
+                    // Measured: the point does not satisfy the user's
+                    // constraints even to `acceptable_tol`.
+                    Some(f) => !f.negligible_at_acceptable,
+                    // Unmeasurable model — fall back to the historical
+                    // slack-sum argument rather than to silence.
+                    None => slack_sum.is_finite() && slack_sum > slack_tol,
+                };
+
+            if let Some(f) = feas.as_ref()
+                && inner_claimed_success
+                && !f.negligible_at_tol
+            {
+                tracing::info!(
+                    target: "pounce::application",
+                    "l1 penalty-barrier: the inner solve converged the augmented NLP, \
+                     but the returned point violates the model's own constraints by \
+                     {:.3e}, which does not meet tol; reporting {} rather than success \
+                     (gh#794)",
+                    f.max_violation,
+                    if f.negligible_at_acceptable {
+                        "Solved_To_Acceptable_Level"
+                    } else {
+                        "an infeasibility verdict"
+                    },
+                );
+            }
             // …unless the model's own starting point satisfies every
             // constraint, which disproves the certificate outright (gh #379).
             // Same gate as the IPM and SQP paths; see
@@ -2910,32 +3150,22 @@ impl IpoptApplication {
                 ) != SolverReturn::LocalInfeasibility;
             let final_solver_status = match (infeasible_certificate, refuted) {
                 (true, false) => SolverReturn::LocalInfeasibility,
-                // The slacks did not collapse, so the returned point is not
-                // feasible and `Solve_Succeeded` would be just as wrong as
-                // `Infeasible_Problem_Detected`. Report the breakdown.
+                // The point is not feasible, so `Solve_Succeeded` would be
+                // just as wrong as `Infeasible_Problem_Detected`. Report the
+                // breakdown.
                 (true, true) => SolverReturn::ErrorInStepComputation,
+                (false, _) if downgrade_to_acceptable => SolverReturn::StopAtAcceptablePoint,
                 (false, _) => solver_status,
             };
             let final_app_status = match (infeasible_certificate, refuted) {
                 (true, false) => ApplicationReturnStatus::InfeasibleProblemDetected,
                 (true, true) => ApplicationReturnStatus::ErrorInStepComputation,
+                (false, _) if downgrade_to_acceptable => {
+                    ApplicationReturnStatus::SolvedToAcceptableLevel
+                }
                 (false, _) => last_status,
             };
 
-            // Recompute f(x*) and c(x*) on the inner.
-            let f_inner = tnlp
-                .borrow_mut()
-                .eval_f(&x_trunc, true)
-                .unwrap_or(Number::NAN);
-            let m = tnlp
-                .borrow_mut()
-                .get_nlp_info()
-                .map(|i| i.m as usize)
-                .unwrap_or(0);
-            let mut g_inner = vec![0.0; m];
-            if m > 0 {
-                let _ = tnlp.borrow_mut().eval_g(&x_trunc, false, &mut g_inner);
-            }
             tnlp.borrow_mut().finalize_solution(
                 Solution {
                     status: final_solver_status,
@@ -3008,6 +3238,19 @@ impl IpoptApplication {
 
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
+
+        // Invalidate the row-scaling record before anything can read it.
+        //
+        // It is written near the end of this function, from the NLP the
+        // solve actually built, so a solve that bails before that point
+        // leaves whatever the *previous* one recorded. The ℓ₁ outer loop
+        // calls this repeatedly and reads the flag after each call, so a
+        // stale `Some(false)` would let it mirror an original-units
+        // violation into the scaled family — the exact contract this flag
+        // exists to protect (gh#794 review round 2). Clearing it here
+        // makes the failure mode fail-closed: "not recorded" reads as
+        // "cannot mirror", never as "scaling was off".
+        self.row_scaling_active.set(None);
 
         // `print_user_options yes` — dump the OptionsList before the
         // solve. Mirrors `IpoptApplication::call_optimize` (upstream
@@ -3762,6 +4005,18 @@ impl IpoptApplication {
                 // scaling is active.
                 stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
+                // Record whether per-row scaling actually engaged, so a
+                // wrapper that measures the user's rows in the model's own
+                // units knows which field family may carry that number.
+                // `curr_unscaled_primal_infeasibility_max` treats both
+                // vectors absent as "scaled == unscaled"; the ℓ₁ outer loop
+                // relies on the same equivalence (gh#794 review).
+                {
+                    let nlp_ref = nlp_handle.borrow();
+                    self.row_scaling_active.set(Some(
+                        nlp_ref.c_scale_vec().is_some() || nlp_ref.d_scale_vec().is_some(),
+                    ));
+                }
                 stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
                 stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
 
@@ -5429,6 +5684,173 @@ fn withdraw_infeasibility_if_refuted(
     }
 }
 
+/// How well a point satisfies the **user's own** rows and bounds.
+///
+/// Computed from `g = c(x)` and the inner TNLP's declared bounds, in the
+/// user's units, with no reference to whatever problem the algorithm
+/// actually iterated on. That distinction is the whole reason this
+/// exists: on the ℓ₁ path the IPM converges the *augmented* NLP
+/// `c(x) − p + n = target`, whose equality rows the slacks satisfy to
+/// machine precision by construction, and reporting that residual as
+/// the solve's constraint violation says nothing about `c(x) − target`
+/// (gh#794 finding P1).
+struct OriginalSpaceFeasibility {
+    /// Largest absolute violation of any row or bound, in the user's units.
+    max_violation: Number,
+    /// Every row and bound negligible at `tol`, judged scale-relative.
+    negligible_at_tol: bool,
+    /// The same at `acceptable_tol`.
+    negligible_at_acceptable: bool,
+}
+
+/// Measure [`OriginalSpaceFeasibility`] at `x`, given `g = c(x)`.
+///
+/// `is_negligible` rather than `!is_significant`, deliberately, and for
+/// the reason that function's own documentation gives: the question here
+/// is "did the solve converge well enough to call this point feasible",
+/// which must never demand more precision than the solver promised, so
+/// the threshold is clamped at `tol` from below (`tol · max(|scale|, 1)`).
+/// The refutation path next door asks the opposite question — "is this
+/// residual real at this row's scale" — and correctly uses the pure
+/// relative form.
+///
+/// Returns `None` when the model cannot be measured (bounds unreadable, a
+/// non-finite value). `None` means "not measured", never "feasible": the
+/// caller keeps whatever verdict it already had.
+fn original_space_feasibility(
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+    x: &[Number],
+    g: &[Number],
+    lower_bound_inf: Number,
+    upper_bound_inf: Number,
+    tol: Number,
+    acceptable_tol: Number,
+    constr_viol_tol: Number,
+    acceptable_constr_viol_tol: Number,
+    noise_floor_kappa: Number,
+) -> Option<OriginalSpaceFeasibility> {
+    use pounce_common::tolerance::is_negligible;
+
+    let info = tnlp.borrow_mut().get_nlp_info()?;
+    let n = info.n.max(0) as usize;
+    let m = info.m.max(0) as usize;
+    if x.len() < n || g.len() < m {
+        return None;
+    }
+
+    let mut x_l = vec![0.0; n];
+    let mut x_u = vec![0.0; n];
+    let mut g_l = vec![0.0; m];
+    let mut g_u = vec![0.0; m];
+    if !tnlp.borrow_mut().get_bounds_info(BoundsInfo {
+        x_l: &mut x_l,
+        x_u: &mut x_u,
+        g_l: &mut g_l,
+        g_u: &mut g_u,
+    }) {
+        return None;
+    }
+
+    let mut max_violation: Number = 0.0;
+    let mut ok_tol = true;
+    let mut ok_acceptable = true;
+
+    // Only *finite, present* bounds inform a row's magnitude: letting the
+    // `±1e19` sentinel set the scale would make every row look satisfied,
+    // the same trap `infeasibility_refutation` documents.
+    let present = |b: Number, is_lower: bool| -> Option<Number> {
+        let absent = if is_lower {
+            b <= lower_bound_inf
+        } else {
+            b >= upper_bound_inf
+        };
+        (b.is_finite() && !absent).then_some(b)
+    };
+
+    // Accumulates into `max_violation` / `ok_tol` / `ok_acceptable`; a
+    // non-positive `viol` means the side is satisfied and contributes
+    // nothing. Returns nothing — every caller is a statement.
+    let mut judge = |viol: Number, scale: Number| {
+        if viol <= 0.0 {
+            return;
+        }
+        max_violation = max_violation.max(viol);
+        // The scale-relative test alone is not a feasibility standard, and
+        // on a large-magnitude row it is not even close to one: it accepts
+        // anything up to `tol · |row|`, which on a row near `1e10` is `1e2`
+        // at the default `tol`. An adversary probe on this branch built a
+        // model infeasible by exactly `50` with its row at `1e10` and got
+        // `Solve_Succeeded` — a *worse* verdict than this branch's own
+        // parent, which refused the same point (the old `Σ(p+n)` argument
+        // was crude but absolute). So the wrapper has to judge feasibility
+        // the way the rest of the solver does.
+        //
+        // `OptErrorConvCheck::primal_component_passes` is that standard:
+        // an absolute `constr_viol <= constr_viol_tol`, with scale-awareness
+        // supplied by an abstention when every row sits at its own
+        // floating-point noise floor (gh#528/gh#590) rather than by
+        // multiplying the tolerance by the row's magnitude. That
+        // abstention "cannot fabricate a success on a genuinely infeasible
+        // model: such a model's violation is pinned at its infeasibility
+        // gap, orders above `eps ·` the row's own magnitude" — which is
+        // exactly the property `is_negligible` lacks and the probe
+        // exploited (`50` is `~2e7 ×` this row's floor).
+        //
+        // The strict gate's `primal_resolvable` cannot be reused verbatim:
+        // it is computed by the CQ on the *augmented* NLP, whose rows the
+        // slacks satisfy to machine precision, so it would abstain always
+        // and accept everything. The floor is therefore recomputed here on
+        // the user's own row, from the same `kappa · eps · magnitude` the
+        // option documents. `primal_noise_floor_kappa = 0` opts out, as it
+        // does for the strict gate.
+        //
+        // Both arms are conjoined rather than substituted: the relative
+        // test still catches a violation that is small in absolute terms
+        // but large for its row, which is the gh#794 P1 case itself
+        // (`ralph1` at `2.5e-7` under a `2.5e-11` tol).
+        let noise = noise_floor_kappa * Number::EPSILON * scale.abs();
+        let absolute_ok = |bound: Number| viol <= bound || viol <= noise;
+        ok_tol &= is_negligible(viol, scale, tol) && absolute_ok(constr_viol_tol);
+        ok_acceptable &=
+            is_negligible(viol, scale, acceptable_tol) && absolute_ok(acceptable_constr_viol_tol);
+    };
+
+    for i in 0..m {
+        let v = g[i];
+        if !v.is_finite() {
+            return None;
+        }
+        let lo = present(g_l[i], true);
+        let hi = present(g_u[i], false);
+        let scale = v
+            .abs()
+            .max(lo.map_or(0.0, Number::abs))
+            .max(hi.map_or(0.0, Number::abs));
+        judge(lo.map_or(0.0, |b| b - v), scale);
+        judge(hi.map_or(0.0, |b| v - b), scale);
+    }
+    for j in 0..n {
+        let v = x[j];
+        if !v.is_finite() {
+            return None;
+        }
+        let lo = present(x_l[j], true);
+        let hi = present(x_u[j], false);
+        let scale = v
+            .abs()
+            .max(lo.map_or(0.0, Number::abs))
+            .max(hi.map_or(0.0, Number::abs));
+        judge(lo.map_or(0.0, |b| b - v), scale);
+        judge(hi.map_or(0.0, |b| v - b), scale);
+    }
+
+    Some(OriginalSpaceFeasibility {
+        max_violation,
+        negligible_at_tol: ok_tol,
+        negligible_at_acceptable: ok_acceptable,
+    })
+}
+
 /// Map upstream `SolverReturn` codes to `ApplicationReturnStatus`.
 /// Mirrors the table in
 /// `ref/Ipopt/AGENT_REFERENCE/MAIN_LOOP.md` ("exception → SolverReturn
@@ -6201,6 +6623,113 @@ mod tests {
         fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
             *self.finalize_called.borrow_mut() = Some((sol.x.to_vec(), sol.obj_value));
         }
+    }
+
+    /// A TNLP that solves normally once, then declines to supply bounds.
+    ///
+    /// The second `optimize_constrained` therefore bails long before the
+    /// statistics block that records `row_scaling_active`, which is the
+    /// path the fail-closed reset exists for.
+    struct DescribesItselfOnce {
+        /// Flipped by the test between the two solves. A call counter
+        /// would not work: these hooks are called more than once per
+        /// solve, so it would trip inside the first one.
+        refuse: std::rc::Rc<std::cell::Cell<bool>>,
+        inner: ExactQuadratic,
+    }
+    impl TNLP for DescribesItselfOnce {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.inner.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            // Declining here is a documented TNLP outcome and unwinds
+            // cleanly; declining `get_nlp_info` mid-flight panics instead,
+            // which would test the panic path rather than the reset.
+            if self.refuse.get() {
+                return false;
+            }
+            self.inner.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.inner.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            self.inner.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+            self.inner.eval_jac_g(x, n, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            n: bool,
+            o: Number,
+            l: Option<&[Number]>,
+            nl: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner.eval_h(x, n, o, l, nl, mode)
+        }
+        fn finalize_solution(&mut self, s: Solution<'_>, d: &IpoptData, c: &IpoptCq) {
+            self.inner.finalize_solution(s, d, c)
+        }
+    }
+
+    /// gh#794 review round 2: `row_scaling_active` must be fail-closed.
+    ///
+    /// It is written near the end of `optimize_constrained`, from the NLP
+    /// that solve built. A solve that bails before that point used to
+    /// leave the *previous* solve's value in place — and the ℓ₁ outer
+    /// loop calls `optimize_constrained` repeatedly and reads the flag
+    /// after each call, so a stale `Some(false)` would let it mirror an
+    /// original-units violation into the scaled family. That is exactly
+    /// the units contract the flag was added to protect.
+    ///
+    /// The two solves here are the shape that matters: the first records
+    /// a verdict, the second never gets far enough to record one.
+    /// Removing the reset at the top of `optimize_constrained` makes this
+    /// fail with `Some(false)` where `None` is required — checked, not
+    /// assumed.
+    #[test]
+    fn row_scaling_active_is_cleared_when_a_later_solve_bails_early() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+
+        // Solve 1: reaches the statistics block and records a verdict.
+        // `ExactQuadratic` supplies `eval_h`, so the solve stays on the
+        // exact-Hessian NLP path that writes this flag; a fixture without
+        // one lands on L-BFGS instead.
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(false));
+        let first = std::rc::Rc::new(std::cell::RefCell::new(DescribesItselfOnce {
+            refuse: std::rc::Rc::clone(&refuse),
+            inner: ExactQuadratic,
+        }));
+        let _ = app
+            .optimize_tnlp(std::rc::Rc::clone(&first) as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+        assert!(
+            app.row_scaling_active.get().is_some(),
+            "the first solve did not record a row-scaling verdict, so this \
+             test cannot show the second one clearing it",
+        );
+
+        // Solve 2, same application: bails before recording anything.
+        refuse.set(true);
+        let _ = app.optimize_tnlp(first as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+
+        assert_eq!(
+            app.row_scaling_active.get(),
+            None,
+            "a solve that bailed before recording row scaling left the \
+             previous solve's verdict in place; the ℓ₁ outer loop would \
+             read it as fact and mirror an original-units violation into \
+             the scaled family (gh#794 review round 2)",
+        );
     }
 
     #[test]

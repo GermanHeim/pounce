@@ -1,0 +1,682 @@
+{
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "$id": "https://github.com/jkitchin/pounce/benchmarks/mpcc/schema.json",
+ "title": "POUNCE MPCC benchmark result file",
+ "description": "The gh#794 result contract. Every record stamps both repository commits, the model-data revision, the environment, the scaling and tolerances, the initial point and the configuration; and it keeps source-level quantities (feasibility, complementarity product, MPCC stationarity) strictly apart from POUNCE's own NLP/KKT diagnostics, because an MPCC lowering's NLP residuals are residuals of a different problem.",
+ "type": "object",
+ "required": [
+  "schema",
+  "stamp",
+  "config",
+  "records"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "schema": {
+   "const": "pounce-mpcc-results/1"
+  },
+  "issue": {
+   "type": "string"
+  },
+  "stamp": {
+   "type": "object",
+   "required": [
+    "repositories",
+    "model_data_revision",
+    "environment",
+    "started_utc"
+   ],
+   "properties": {
+    "repositories": {
+     "type": "object",
+     "required": [
+      "pounce",
+      "discopt"
+     ],
+     "description": "Both repository commits. discopt is recorded as absent-with-a-reason rather than omitted, so 'no comparison was run' is distinguishable from 'a comparison was run and not stamped'.",
+     "properties": {
+      "pounce": {
+       "type": "object",
+       "required": [
+        "commit"
+       ],
+       "properties": {
+        "commit": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "short": {
+         "type": "string"
+        },
+        "describe": {
+         "type": "string"
+        },
+        "dirty": {
+         "type": [
+          "boolean",
+          "null"
+         ]
+        }
+       }
+      },
+      "discopt": {
+       "type": "object",
+       "required": [
+        "present"
+       ],
+       "properties": {
+        "present": {
+         "type": "boolean"
+        },
+        "version": {
+         "type": "string"
+        },
+        "commit": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "reason": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "model_data_revision": {
+     "type": "string",
+     "description": "SHA-256 prefix over spec.py, cases.py and lowering.py. Two result files with different revisions describe different benchmarks and must not be merged."
+    },
+    "environment": {
+     "type": "object"
+    },
+    "ccopt": {
+     "type": "object",
+     "description": "The optional CCOpt integrated-continuation oracle: whether it was available, at what version, the pin a comparison would use, and whether a comparison was actually run.",
+     "required": [
+      "available",
+      "pin",
+      "comparison_run"
+     ],
+     "properties": {
+      "available": {
+       "type": "boolean"
+      },
+      "pin": {
+       "type": "string"
+      },
+      "version": {
+       "type": "string"
+      },
+      "pin_satisfied": {
+       "type": "boolean"
+      },
+      "comparison_run": {
+       "type": "boolean"
+      },
+      "reason": {
+       "type": "string"
+      }
+     }
+    },
+    "started_utc": {
+     "type": "string"
+    },
+    "wall_s": {
+     "type": "number"
+    }
+   }
+  },
+  "config": {
+   "type": "object",
+   "description": "Everything needed to reproduce the run: which cells were run, the pinned solver options, the relaxation schedule and the restart ladder.",
+   "required": [
+    "cases",
+    "routes",
+    "controls",
+    "scalings",
+    "base_options",
+    "tau_schedule",
+    "restart_ladder"
+   ],
+   "properties": {
+    "mode": {
+     "type": "string",
+     "enum": [
+      "smoke",
+      "full",
+      "custom"
+     ]
+    },
+    "cases": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "routes": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "controls": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "scalings": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "starts": {
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "type": "string"
+     }
+    },
+    "base_options": {
+     "type": "object"
+    },
+    "tau_schedule": {
+     "type": "array",
+     "items": {
+      "type": "number"
+     }
+    },
+    "restart_ladder": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "tau_bisections": {
+     "type": "integer"
+    },
+    "capture_log": {
+     "type": "boolean"
+    },
+    "active_tol": {
+     "type": "number"
+    }
+   }
+  },
+  "records": {
+   "type": "array",
+   "items": {
+    "$ref": "#/definitions/record"
+   }
+  }
+ },
+ "definitions": {
+  "record": {
+   "type": "object",
+   "required": [
+    "case",
+    "klass",
+    "scaling",
+    "start",
+    "route",
+    "control",
+    "lowering",
+    "ok",
+    "status",
+    "status_msg",
+    "obj",
+    "source",
+    "nlp",
+    "iters",
+    "outer_stages",
+    "accepted_stages",
+    "rejected_stages"
+   ],
+   "properties": {
+    "case": {
+     "type": "string"
+    },
+    "klass": {
+     "type": "string",
+     "description": "Benchmark class of the case."
+    },
+    "scaling": {
+     "type": "string",
+     "enum": [
+      "unit",
+      "skew"
+     ]
+    },
+    "start": {
+     "type": "string",
+     "description": "Named initial point; the values are in the manifest."
+    },
+    "route": {
+     "type": "string"
+    },
+    "control": {
+     "type": "string",
+     "description": "Kill-switch control applied, 'none' for the plain configuration."
+    },
+    "lowering": {
+     "type": "string",
+     "enum": [
+      "prod_ineq",
+      "prod_eq",
+      "scholtes"
+     ]
+    },
+    "ok": {
+     "type": "boolean",
+     "description": "The route ran to completion: every scheduled stage was accepted (after the restart ladder, if it was climbed). NOT 'a point came back' -- a continuation that accepts two stages and then fails still returns its best accepted point in `x`/`obj`, with accepted_stages/rejected_stages beside it, but is not ok."
+    },
+    "status": {
+     "type": "integer",
+     "description": "POUNCE ApplicationReturnStatus of the last stage."
+    },
+    "status_msg": {
+     "type": "string"
+    },
+    "obj": {
+     "type": [
+      "number",
+      "null"
+     ],
+     "description": "Objective of the SOURCE model at the returned point."
+    },
+    "x": {
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "type": "number"
+     }
+    },
+    "source": {
+     "type": "object",
+     "description": "See definitions/source_measured. Empty exactly when no point was returned."
+    },
+    "stationarity": {
+     "type": "object",
+     "description": "MPCC stationarity classification and the evidence behind it.",
+     "properties": {
+      "klass": {
+       "type": "string",
+       "enum": [
+        "S",
+        "M",
+        "C",
+        "W",
+        "none",
+        "not-enumerated"
+       ]
+      },
+      "residuals": {
+       "type": "object"
+      },
+      "multipliers": {
+       "type": "object"
+      },
+      "n_biactive": {
+       "type": "integer"
+      },
+      "biactive": {
+       "type": "array",
+       "items": {
+        "type": "boolean"
+       }
+      },
+      "regime": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "mpcc_licq": {
+       "type": [
+        "boolean",
+        "null"
+       ]
+      },
+      "classes_coincide": {
+       "type": "boolean"
+      },
+      "act_tol": {
+       "type": "number"
+      },
+      "resid_tol": {
+       "type": "number"
+      },
+      "reason": {
+       "type": "string"
+      },
+      "note": {
+       "type": "string"
+      },
+      "dual_scale": {
+       "type": "number",
+       "description": "The magnitude of the largest term the stationarity sum is assembled from, including the terms inside grad f. The residual tolerance is this times 1e-6; an absolute threshold here would be a scale-dependent one, and the skew scaling leg breaks it."
+      }
+     }
+    },
+    "validation": {
+     "type": "object",
+     "description": "Source-level validation at the returned point: the benchmark class's own validator (validate.CLASS_VALIDATORS, one per class as gh#794 requires) plus any case-specific checks. Every entry is computed from the source MPCC -- no solver status, no NLP residual, no lowering. Keys ending in _ok are pass/fail; a failing one is a claim that the returned point is not the one the class describes, not automatically a defect (a local solver reaching a different local solution fails strict_complementarity_ok honestly). x_unscaled carries the returned point mapped back to the unscaled source model so the two scaling legs can be compared directly."
+    },
+    "regime": {
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "type": "string",
+      "enum": [
+       "G0",
+       "H0",
+       "both",
+       "none"
+      ]
+     }
+    },
+    "regime_changes": {
+     "type": "integer",
+     "description": "Number of stage-to-stage active-pair/mode changes."
+    },
+    "nlp": {
+     "type": "object",
+     "description": "POUNCE's ordinary NLP/KKT diagnostics for the LOWERED problem, scaled and unscaled. Kept separate from the source block by design.",
+     "properties": {
+      "final_kkt_error": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_dual_inf": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_constr_viol": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_compl": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_unscaled_kkt_error": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_unscaled_dual_inf": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_unscaled_constr_viol": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      },
+      "final_unscaled_compl": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": " `null` where the value is not available -- a solve that returned no point has no residual to report."
+      }
+     }
+    },
+    "iters": {
+     "type": "integer",
+     "description": "Total inner NLP iterations over all stages and restarts."
+    },
+    "outer_stages": {
+     "type": "integer"
+    },
+    "accepted_stages": {
+     "type": "integer"
+    },
+    "rejected_stages": {
+     "type": "integer"
+    },
+    "restarts": {
+     "type": "integer"
+    },
+    "max_restart_level": {
+     "type": "string"
+    },
+    "restoration": {
+     "type": "object",
+     "properties": {
+      "restoration_calls": {
+       "type": "integer"
+      },
+      "restoration_outer_iters": {
+       "type": "integer"
+      },
+      "restoration_inner_iters": {
+       "type": "integer"
+      }
+     }
+    },
+    "log_counters": {
+     "type": "object",
+     "description": "Counters read off the iteration table. filter_resets is null because POUNCE emits no message for one: unmeasured, not zero.",
+     "properties": {
+      "parsed": {
+       "type": "boolean"
+      },
+      "inertia_corrections": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "restoration_iters": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "filter_resets": {
+       "type": "null"
+      },
+      "filter_resets_note": {
+       "type": "string"
+      }
+     }
+    },
+    "wall_s": {
+     "type": "number"
+    },
+    "error": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "stages": {
+     "type": "array",
+     "description": "Per-stage detail: the relaxation parameter and why it moved, mu in and out and why, the warm-start and restart level, and whether the stage was accepted.",
+     "items": {
+      "type": "object",
+      "required": [
+       "index",
+       "tau",
+       "tau_reason",
+       "status",
+       "accepted",
+       "warm_level",
+       "restart_level",
+       "iters"
+      ],
+      "properties": {
+       "index": {
+        "type": "integer"
+       },
+       "tau": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "tau_reason": {
+        "type": "string"
+       },
+       "status": {
+        "type": "integer"
+       },
+       "status_msg": {
+        "type": "string"
+       },
+       "accepted": {
+        "type": "boolean"
+       },
+       "warm_level": {
+        "type": "string",
+        "enum": [
+         "none",
+         "primal",
+         "full"
+        ]
+       },
+       "restart_level": {
+        "type": "string"
+       },
+       "restart_reason": {
+        "type": "string"
+       },
+       "iters": {
+        "type": "integer"
+       },
+       "mu_in": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "mu_out": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "mu_reason": {
+        "type": "string"
+       },
+       "wall_s": {
+        "type": "number"
+       },
+       "nlp": {
+        "type": "object"
+       },
+       "restoration": {
+        "type": "object"
+       },
+       "regime": {
+        "type": [
+         "array",
+         "null"
+        ],
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "allOf": [
+    {
+     "if": {
+      "properties": {
+       "x": {
+        "type": "array"
+       }
+      },
+      "required": [
+       "x"
+      ]
+     },
+     "then": {
+      "properties": {
+       "source": {
+        "$ref": "#/definitions/source_measured"
+       }
+      }
+     },
+     "else": {
+      "properties": {
+       "source": {
+        "type": "object",
+        "maxProperties": 0
+       }
+      }
+     }
+    }
+   ]
+  },
+  "source_measured": {
+   "type": "object",
+   "description": "Original-space quantities, computed from the source MPCC at the returned point. Never read off the lowered NLP. Present and fully populated exactly when `x` is non-null: a route that returned no point has nothing to measure, and an empty `source` beside a returned point would mean the original-space measurement silently did not happen.",
+   "required": [
+    "row_viol",
+    "bound_viol",
+    "sign_viol",
+    "compl_max",
+    "compl_min",
+    "compl_sum"
+   ],
+   "properties": {
+    "row_viol": {
+     "type": "number",
+     "description": "Max violation of the ordinary rows. Invariant under the scaling legs."
+    },
+    "sign_viol": {
+     "type": "number",
+     "description": "Max violation of G >= 0 / H >= 0."
+    },
+    "compl_max": {
+     "type": "number",
+     "description": "Max |G_i H_i|: the source complementarity product. Not an NLP residual and not comparable against tol."
+    },
+    "compl_min": {
+     "type": "number"
+    },
+    "compl_sum": {
+     "type": "number"
+    },
+    "bound_viol": {
+     "type": "number",
+     "description": "Max violation of the variable bounds. Scale-dependent by construction (lb - x becomes (lb - x)/d under the skew leg), so it is reported apart from row_viol rather than merged into it."
+    }
+   }
+  }
+ }
+}
