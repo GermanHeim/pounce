@@ -85,13 +85,13 @@ const M: usize = 330;
 /// what makes the fixture a sentinel rather than a snapshot.
 const OPTIMUM: f64 = 1.688_269_17e7;
 
-/// How much more expensive the relaxed box is here, at minimum. Measured 4.4×
-/// (131 vs 30) on `fdea82b5`, on both sweep legs. The margin is deliberate:
-/// the claim under test is "different magnitude class", not "4.4".
 /// Opt in to the widening: this fixture's whole subject is what that
 /// costs, and it is no longer what the default does.
 const RELAX: &str = "bound_relax_factor=1e-8";
 
+/// How much more expensive the relaxed box is here, at minimum. Measured 4.4×
+/// (131 vs 30) on `fdea82b5`, on both sweep legs. The margin is deliberate:
+/// the claim under test is "different magnitude class", not "4.4".
 const MIN_RELAX_RATIO: f64 = 3.0;
 
 fn pounce_exe() -> PathBuf {

@@ -98,6 +98,12 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
   residuals with the scaling divided back out, i.e. in your **original
   problem units**. Equal to the scaled values when no scaling activates.
+- `final_declared_constr_viol` — how far outside the model **as
+  declared** the returned point sits, before the `bound_relax_factor`
+  widening. `final_constr_viol` measures the widened model the solver was
+  handed, which is the right model for its convergence test and not a
+  statement about yours; on a row-degenerate model the two differ by
+  orders. `NaN` when no widening was applied.
 
 On ill-conditioned problems `nlp_scaling` can deflate the scaled residual
 enough that the default test reports `Solve_Succeeded` while the

@@ -81,17 +81,13 @@ impl BoundRelax {
         cap: 0.0,
     };
 
-    fn active(self) -> bool {
-        self.factor > 0.0 && self.cap > 0.0
-    }
-
     /// Whether any widening is actually applied. Public so a caller can tell
     /// "the declared model and the solved model coincide" from "they differ",
     /// which struct equality against [`Self::NONE`] cannot: `bound_relax_factor=0`
     /// zeroes the factor but leaves `cap` at `constr_viol_tol`, so the pair is
     /// inactive without being `NONE`.
-    pub fn is_active(self) -> bool {
-        self.active()
+    pub fn active(self) -> bool {
+        self.factor > 0.0 && self.cap > 0.0
     }
 
     /// Widening of a variable bound `b`: `min(factor·max(|b|,1), cap)`.
@@ -181,10 +177,18 @@ pub fn declared_residuals_qp(
     sol: &QpSolution,
     relax: BoundRelax,
 ) -> Option<QpResiduals> {
-    if !relax.is_active() {
+    if !relax.active() {
         return None;
     }
     let (declared, _, _) = extract_qp_with_map(prob, BoundRelax::NONE)?;
+    // Structurally the re-extraction differs from the solved model only in
+    // the bound VALUES, so the shapes must agree; a mismatch would silently
+    // measure one model's point against another's rows.
+    debug_assert_eq!(declared.n, sol.x.len(), "declared re-extraction changed n");
+    // Only `primal_infeasibility` is consumed. The dual and complementarity
+    // terms this also computes are measured against a model whose multipliers
+    // are not the ones that produced them, so they are meaningless here and
+    // deliberately unused rather than reported.
     Some(sol.kkt_residuals(&declared))
 }
 
@@ -198,10 +202,12 @@ pub fn declared_residuals_socp(
     sol: &QpSolution,
     relax: BoundRelax,
 ) -> Option<QpResiduals> {
-    if !relax.is_active() {
+    if !relax.active() {
         return None;
     }
     let (declared, _, _, cones) = extract_socp_with_map(prob, BoundRelax::NONE)?;
+    debug_assert_eq!(declared.n, sol.x.len(), "declared re-extraction changed n");
+    // As above: only `primal_infeasibility` is consumed.
     Some(sol.kkt_residuals_conic(&declared, &cones))
 }
 

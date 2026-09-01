@@ -83,6 +83,34 @@ fn objective(fixture: &str, opts: &[&str]) -> f64 {
         .expect("parse objective")
 }
 
+fn report(fixture: &str, opts: &[&str]) -> pounce_cli::solve_report::SolveReport {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "pounce_declared_sentinel_rep_{}_{n}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let mut src = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    src.push("tests/fixtures");
+    src.push(fixture);
+    std::fs::copy(&src, dir.join("m.nl")).expect("copy fixture");
+    let json = dir.join("r.json");
+    let mut cmd = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")));
+    cmd.current_dir(&dir)
+        .arg("m.nl")
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json);
+    for o in opts {
+        cmd.arg(o);
+    }
+    let _ = cmd.output().expect("run pounce");
+    let text = std::fs::read_to_string(&json).expect("read json report");
+    serde_json::from_str(&text).expect("deserialize SolveReport")
+}
+
 #[test]
 fn the_declared_optimum_is_returned() {
     let p = objective("issue745_netlib_problem.nl", &[]);
@@ -128,28 +156,65 @@ fn the_widening_is_what_moves_it() {
     );
 }
 
-/// The declared model does not have to be slower to be right.
+/// The declared model does not have to be slower to be right — and the route
+/// that rescues a declining convex solve has to deliver the declared model,
+/// not merely an answer.
 ///
 /// `scaled_feasible_a.nl` is where the widening was doing its only real work
 /// on this arm, and the work was not subtle: that model's rows carry `|b|` up
 /// to `2.65e13`, and the row width is `min(factor, cap)·|b|` — relative, by
 /// deliberate choice (gh #385, `orig_ipopt_nlp.rs::relax_bounds`) — so a
-/// `1e-8` factor relaxed one row by **2.65e5 in absolute terms**. Converging
+/// `1e-8` factor relaxes one row by **2.65e5 in absolute terms**. Converging
 /// in 69 iterations on that is not a solver being clever; it is a solver
 /// being handed a much easier problem.
 ///
 /// On the model as declared the convex driver needs ~3596 iterations (20
 /// orders of Jacobian spread) and says so — it emits the gh #293 scaling
-/// warning and returns `IterationLimit`. gh #535's LP→NLP fallback, extended
-/// to convex QP, then hands it to the general path, which certifies it in
-/// about 20. So the declared model is solved, quickly, and by a route that
-/// relaxes nothing.
+/// warning and returns `IterationLimit`. gh #535's fallback, extended to
+/// convex QP, hands it to the general path, which certifies it in ~20.
+///
+/// **The assertion is on `final_declared_constr_viol`, not the objective.**
+/// An objective check cannot tell "rerouted" from "relaxed" — the widened
+/// convex answer on shipped `main` also lands within `1e-6` of `0` here. Only
+/// the declared-model measurement separates them, and before the fallback was
+/// taught to pass `bound_relax_factor=0` it read **2679.85** on a solve
+/// reporting `Solve_Succeeded`.
 #[test]
 fn a_declining_convex_solve_is_rerouted_rather_than_relaxed() {
-    let obj = objective("scaled_feasible_a.nl", &[]);
+    let r = report("scaled_feasible_a.nl", &[]);
+    let obj = r.solution.objective;
     assert!(
         obj.abs() < 1e-6,
         "scaled_feasible_a should reach its optimum 0 at the default routing; \
          got {obj:e}"
+    );
+    // The point of the name: nothing was widened to get there.
+    let d = r.statistics.final_declared_constr_viol;
+    assert!(
+        d.is_nan(),
+        "the rerouted solve must answer the DECLARED model — \
+         final_declared_constr_viol should be NaN (no widening applied), got \
+         {d:e}. If this reads about 2679, the fallback is handing the model \
+         to the arm that still widens, and the route named \"rather than \
+         relaxed\" is doing exactly that."
+    );
+    assert!(
+        r.statistics.final_constr_viol < 1e-6,
+        "and the solve it did produce must be feasible: {:e}",
+        r.statistics.final_constr_viol
+    );
+}
+
+/// Asking for the widening still reaches the rerouted solve, so the escape
+/// hatch is not silently disabled on this path either.
+#[test]
+fn the_reroute_still_honours_an_explicit_widening() {
+    let r = report("scaled_feasible_a.nl", &["bound_relax_factor=1e-8"]);
+    let d = r.statistics.final_declared_constr_viol;
+    assert!(
+        d.is_finite() && d > 1e-6,
+        "an explicit bound_relax_factor should still buy Ipopt's model on the \
+         rerouted path, and be reported as a declared-model violation; got \
+         {d:e}"
     );
 }

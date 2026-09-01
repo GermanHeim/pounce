@@ -1150,6 +1150,33 @@ pub fn main() -> ExitCode {
                 // Reaching here means the convex attempt declined and the NLP
                 // path below owns the verdict; charge it for the time it spent.
                 charge_wall_budget(app.options_mut(), convex_t0.elapsed());
+                // ...and make that path solve the model the caller DECLARED,
+                // which is the whole point of the reroute.
+                //
+                // Without this the fallback hands the model to the one arm
+                // that still applies `bound_relax_factor`, so a route
+                // introduced to rescue a declined solve answers a different
+                // question than the one asked. Measured on
+                // `scaled_feasible_a`: the rerouted point sits **2679.85**
+                // outside the declared model — its rows reach `|b| = 2.65e13`
+                // and the row width is relative (gh #385) — while reporting
+                // `Solve_Succeeded` at `Constraint violation 7.45e-09`. That
+                // is the exact failure this branch exists to remove, reached
+                // through the mechanism added to repair its one regression.
+                //
+                // Unset-means-declared is the same rule the convex arm now
+                // follows, so `pounce foo.nl` solves one model whichever arm
+                // answers. An explicit `bound_relax_factor` is still honoured
+                // and still buys Ipopt's model, exactly as
+                // `solver_selection=nlp` does — neither is a default.
+                if !matches!(
+                    app.options().get_numeric_value("bound_relax_factor", ""),
+                    Ok((_, true))
+                ) {
+                    let _ =
+                        app.options_mut()
+                            .set_numeric_value("bound_relax_factor", 0.0, true, true);
+                }
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -1991,6 +2018,11 @@ pub fn main() -> ExitCode {
             builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
         }
+        // The arm that produced this verdict, not the one routing
+        // picked: a convex solve that declines its own result lands
+        // here (gh #535) after the `Selected solver:` banner has
+        // already said `pounce-convex`.
+        builder.solution.engine = "nlp".to_string();
         builder.solution.status = status;
         // Same source of truth as the `.sol` writer below — a run must not
         // report 201 in one output and 200 in the other.
@@ -2981,6 +3013,12 @@ fn run_convex_qp(
         builder.problem.n_constraints = lambda.len() as _;
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
+        builder.solution.engine = if use_active_set {
+            "qp-active-set"
+        } else {
+            "cvx-qp"
+        }
+        .to_string();
         builder.solution.status = qp_status_to_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
@@ -3335,6 +3373,7 @@ fn run_convex_socp(
         builder.problem.n_constraints = lambda.len() as _;
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
+        builder.solution.engine = "cvx-qcqp".to_string();
         builder.solution.status = qp_status_to_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;

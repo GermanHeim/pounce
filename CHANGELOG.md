@@ -77,12 +77,13 @@ changes.
   asserts the index spaces really do diverge before trusting the leg.
 
 - **`final_declared_constr_viol`: how far outside the model you WROTE the
-  returned point sits.** The convex arm widens every inequality row and the
-  variable box by `min(bound_relax_factor, constr_viol_tol)·|b|` before
-  extracting the QP (gh #744/#745), so it solves what the NLP arm solves. That
-  is deliberate and it is the model the convergence test is about — but
-  `final_constr_viol` measured *only* that widened model, and nothing reported
-  the difference.
+  returned point sits.** Both arms could widen every inequality row and the
+  variable box by `min(bound_relax_factor, constr_viol_tol)·|b|` before the
+  solve — the convex arm by default at the time this landed, and see the
+  **Changed** entry below, which turns that off for the convex arm in the
+  same release; the NLP arm still does and must. Either way the widened
+  model is the one the convergence test is about, but `final_constr_viol`
+  measured *only* it, and nothing reported the difference.
 
   On netlib `afiro` — 32 variables, 27 rows, a textbook LP — the solve reports
 
@@ -238,9 +239,30 @@ changes.
   `ConvexQcqp` deliberately does not reroute: the conic arm has its own failure
   modes and no fixture behind it, which is why `Lp` was alone to begin with.
 
+  **The rerouted solve runs on the declared model too.** Without that the
+  fallback would hand the model to the one arm that still widens, so a route
+  added to rescue a declined solve would answer a different question: measured
+  on `scaled_feasible_a`, the rerouted point sat **2679.85** outside the
+  declared model while reporting `Solve_Succeeded` — the exact failure this
+  release removes, reached through the mechanism added to repair its one
+  regression, and caught by this release's own new statistic. Unset means
+  declared, the same rule the convex arm follows, so `pounce foo.nl` solves one
+  model whichever arm answers; an explicit `bound_relax_factor` still buys
+  Ipopt's model on this path as everywhere else.
+
+  `solution.engine` now records **which arm produced the verdict**, and
+  `scripts/sweep-fixtures.sh` prefers it over the `Selected solver:` banner.
+  The banner names the engine *routing* chose, and it is printed before a
+  fallback can fire — so a reroute left no trace in the sweep diff, which is
+  the blind spot CLAUDE.md names when it says a routing regression "used to
+  leave no trace". With the field in place the sweep shows `scaled_feasible_a`
+  and `airport` answering from `nlp`; both already did so on `main`, and only
+  the instrument changed.
+
   Net effect of this and the change above, against the shipped binary: the
-  fixture sweep shows **0 status flips, 0 engine flips**, 50 objective moves
-  (all toward the declared optimum) and total iterations **5618 → 5407**.
+  fixture sweep shows **0 status flips**, 52 objective moves (all toward the
+  declared optimum), total iterations **5618 → 5409**, and 4 engine-column
+  moves that are the new instrument reporting pre-existing reroutes.
 - **`pounce.sensitivity`: the sensitivity analysis layer is now pounce's, and
   `pyomo_pounce` is one of its callers.** Every numeric behind
   `sens_solution()`, `sens_solution_report()`, `sens_active_set_changes()`,

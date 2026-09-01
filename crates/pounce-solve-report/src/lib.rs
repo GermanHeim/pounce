@@ -340,6 +340,21 @@ pub struct ProblemInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionInfo {
+    /// Which engine produced this verdict: `"cvx-qp"`, `"cvx-qcqp"`,
+    /// `"qp-active-set"` or `"nlp"`.
+    ///
+    /// The `Selected solver:` banner names the engine *routing* chose, which
+    /// is not always the one that answered: a convex solve that declines its
+    /// own result hands the model to the NLP arm (gh #535), and the banner
+    /// has already been printed by then. `scripts/sweep-fixtures.sh` scraped
+    /// that banner because the report carried nothing better, so a reroute
+    /// left no trace in the sweep diff — the precise blind spot CLAUDE.md
+    /// names when it says a routing regression "used to leave no trace".
+    ///
+    /// Empty when a path does not set it, which a consumer should read as
+    /// "unknown" rather than as any particular arm.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine: String,
     /// `SolveSucceeded`, `MaximumIterationsExceeded`, etc. The string
     /// form is the Rust enum variant name verbatim.
     pub status: ApplicationReturnStatus,
@@ -517,6 +532,7 @@ impl ReportBuilder {
                 nnz_h_lag: None,
             },
             solution: SolutionInfo {
+                engine: String::new(),
                 status: ApplicationReturnStatus::InternalError,
                 // Overwritten from `status` by `finish`; see the field docs.
                 status_upstream: String::new(),

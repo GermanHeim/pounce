@@ -527,6 +527,25 @@ pub fn print_summary(
              Set primal_noise_floor_kappa = 0 to disable.)"
         );
     }
+    // How far outside the model AS DECLARED the returned point sits. This arm
+    // applies the `bound_relax_factor` widening by design -- a feasible-iterate
+    // log-barrier needs `x` strictly inside its bounds -- so the residuals
+    // above are honest residuals of the WIDENED model, and on a row-degenerate
+    // one the two differ by orders: netlib `wood1p` prints `1.71e-14` above at
+    // a point `9.84e-09` outside the declared model. Printed only when a
+    // widening was applied and it actually moved the number, so the block
+    // stays byte-identical to upstream's on everything else.
+    if stats.final_declared_constr_viol.is_finite()
+        && stats.final_declared_constr_viol > stats.final_constr_viol * 10.0
+        && stats.final_declared_constr_viol > 0.0
+    {
+        println!();
+        println!(
+            "Violation of the model as declared (before the \
+             bound_relax_factor widening): {}",
+            fmt_ipopt(stats.final_declared_constr_viol)
+        );
+    }
     println!();
     println!();
     println!(

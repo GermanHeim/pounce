@@ -149,13 +149,25 @@ sweep_leg() {
     # A fixture that hangs must not hang the sweep; it shows up as NO_JSON.
     timeout 300 "$BIN" "$f" "$W/$n.sol" --json-output "$W/$n.json" "$@" \
       > "$W/$n.out" 2>&1
-    # Which arm solved it. The JSON does not carry this, so it comes off the
-    # banner line: "Problem class: LP. Selected solver: convex QP
-    # interior-point (pounce-convex) [solver_selection=auto]." An unrecognised
+    # Which arm solved it. Preferred from the JSON report's
+    # `solution.engine`, which names the engine that produced the VERDICT.
+    # The `Selected solver:` banner names the one routing picked, and the two
+    # differ exactly where it matters: a convex solve that declines its own
+    # result hands the model to the NLP arm (gh #535) long after the banner
+    # printed, so scraping the banner reported `cvx-qp` for an answer the NLP
+    # arm produced and a reroute left no trace in this diff. The banner
+    # remains the fallback for a binary predating the field. An unrecognised
     # engine is reported verbatim rather than bucketed, so a newly added one
     # shows up as a diff instead of hiding under "other".
-    eng=$(sed -n 's/.*Selected solver: \(.*\) \[solver_selection.*/\1/p' \
-          "$W/$n.out" | head -1)
+    eng=$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1]))["solution"].get("engine",""))
+except Exception:
+    print("")' "$W/$n.json" 2>/dev/null)
+    if [ -z "$eng" ]; then
+      eng=$(sed -n 's/.*Selected solver: \(.*\) \[solver_selection.*/\1/p' \
+            "$W/$n.out" | head -1)
+    fi
     case "$eng" in
       *"QCQP conic"*)  eng=cvx-qcqp ;;
       *"convex QP"*)   eng=cvx-qp   ;;

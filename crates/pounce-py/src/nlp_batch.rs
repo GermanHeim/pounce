@@ -244,6 +244,12 @@ fn build_result<'py>(
     info.set_item("final_kkt_error", r.stats.final_kkt_error)?;
     info.set_item("final_dual_inf", r.stats.final_dual_inf)?;
     info.set_item("final_constr_viol", r.stats.final_constr_viol)?;
+    // See `problem.rs`: the declared-model violation, `NaN` when the solve
+    // applied no `bound_relax_factor` widening.
+    info.set_item(
+        "final_declared_constr_viol",
+        r.stats.final_declared_constr_viol,
+    )?;
     info.set_item("final_compl", r.stats.final_compl)?;
     // Unscaled (user-space) residuals — see `build_info_dict` in
     // problem.rs (pounce#173). Mirrored here so the batch path's `info`

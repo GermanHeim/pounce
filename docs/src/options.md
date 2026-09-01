@@ -70,7 +70,7 @@ the time it is read. POUNCE warns about that rather than ignoring it.
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
 | `qp_presolve`   | Presolve on the convex LP/QP path, and on the conic (convex QCQP) path with the cone rows protected (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
 | `obj_scaling_factor` | Constant multiplier on the objective; **negative maximizes**. See below. |
-| `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve (default `1e-8`). |
+| `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve. Default `1e-8` on the **NLP arm**; the convex (LP/QP/conic) arms solve the model as declared unless you set this explicitly. See below. |
 | `honor_original_bounds` | Project the reported point back into the un-relaxed bounds (`yes` / `no`, default `no`). See below. |
 
 For the full upstream option catalogue, see the
@@ -602,10 +602,11 @@ Two limits are worth knowing:
 
 ## Bound relaxation and `honor_original_bounds`
 
-Before the solve, POUNCE widens every variable and constraint bound by
-`bound_relax_factor` (default `1e-8`, capped by `constr_viol_tol`),
-exactly as upstream Ipopt does — it keeps the interior-point iterates
-strictly feasible without the user's bounds becoming numerically
+Before the solve, **the NLP arm** widens every variable and constraint
+bound by `bound_relax_factor` (default `1e-8`, capped by
+`constr_viol_tol`), exactly as upstream Ipopt does — a feasible-iterate
+log-barrier needs `x` strictly inside its bounds, and this keeps the
+iterates there without the user's bounds becoming numerically
 degenerate. The consequence is that a solution *pinned to a bound* is
 reported just past it:
 
@@ -633,6 +634,32 @@ bound" from "genuinely `1e-8` inside it". [Crossover](crossover.md)
 answers that question instead: it re-solves against the bounds you
 declared, so the returned point sits *on* them and the active set is
 established rather than inferred.
+
+
+### The convex arm does not widen by default
+
+**The LP / convex-QP / conic arms solve the model exactly as declared.**
+Widening moves the *optimum* by `δ` times the bound's multiplier, and
+nothing bounds that product: on `LISWET1` — every one of 10 000
+monotonicity rows active, multipliers summing to `1.6e9` — a `1e-8`
+widening buys `9.0` of objective, a 33 % error against the published
+optimum. Scored on the Maros–Mészáros optima (DOC 97/6) the convex arm
+is 138/138 correct without it and 130/138 with it, so it is off by
+default there.
+
+Set `bound_relax_factor` explicitly and the convex arm applies it and
+reproduces the NLP arm's model exactly, so Ipopt parity remains
+available on request.
+
+The two arms therefore disagree on constraint-degenerate models, by
+design. `final_declared_constr_viol` reports how far outside the model
+*as declared* a returned point sits, on either arm, so the difference is
+readable rather than silent; the console prints it as one extra line
+whenever it differs materially from `Constraint violation`.
+
+A convex solve that declines to certify is handed to the NLP arm
+(gh #535), and that re-solve also runs on the declared model unless you
+asked for a widening by name.
 
 ## Large constraint values and `primal_noise_floor_kappa`
 
