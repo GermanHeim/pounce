@@ -80,9 +80,12 @@ assert!(sol.fbbt_report.is_some());
 
 `constraint_expression(i)` must exactly restate the value written by
 `constraints()` for row `i`; otherwise FBBT can cut off the true optimum.
-`try_solve` compares the two at the starting point and box midpoint and reports
-sampled mismatches as `NlpError::InvalidFbbtTape`. This is a smoke check, not a
-proof of equivalence, so generate both forms from one source when possible.
+Every slot in the tape must also influence its root's value: a dead slot, or
+one masked by a `PowInt(_, 0)`, carries no information about the constraint
+(gh #877). `try_solve` compares the two forms at the starting point and box
+midpoint and reports sampled mismatches as `NlpError::InvalidFbbtTape`. This is
+a smoke check, not a proof of equivalence — two points, compared to a relative
+tolerance of ~1.5e-8 — so generate both forms from one source when possible.
 
 Anything you don't implement is provided automatically. Missing gradients and
 Jacobians are approximated with finite differences, while the Hessian defaults

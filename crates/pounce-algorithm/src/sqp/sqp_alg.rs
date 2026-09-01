@@ -322,6 +322,32 @@ impl SqpAlgorithm {
             final_stationarity = kkt.stationarity;
             final_constr_viol = kkt.constr_viol;
 
+            // Non-finite residuals mean the iterate itself is garbage, and
+            // every gate below this point — the convergence test, the
+            // gh #856 negative-curvature escape installed on it, the filter,
+            // the merit function — is a comparison against a tolerance that
+            // a `NaN` cannot inform. Stop here and say so, mirroring the
+            // interior-point arm's `if !nlp_err.is_finite()` screen
+            // (`ipopt_alg.rs`) so the two arms give the same verdict on the
+            // same condition (gh #876).
+            if !kkt.stationarity.is_finite() || !kkt.constr_viol.is_finite() {
+                let obj = nlp.eval_f(&iter.x);
+                self.iterates = Some(iter.clone());
+                return Ok(SqpResult {
+                    x: iter.x,
+                    lambda_g: iter.lambda_g,
+                    lambda_x: iter.lambda_x,
+                    obj,
+                    status: SqpStatus::InvalidNumber,
+                    n_iter: outer,
+                    n_qp_solves,
+                    n_qp_working_set_changes,
+                    final_stationarity,
+                    final_constr_viol,
+                    working_set: iter.working,
+                });
+            }
+
             #[cfg(test)]
             if self.opts.print_level >= 1 {
                 tracing::debug!(target: "pounce::sqp",
@@ -1307,6 +1333,68 @@ fn exhibit_better_point<N: SqpProblemSpec>(
     }
     // Both signs: curvature is even, so `-d` descends wherever `d` does, and
     // only one of them may have room before a bound.
+    //
+    // Every feasible trial is *scored* and the best one is returned, rather
+    // than the first that clears the bar (gh#873). Two reasons, and the second
+    // is a defect the first exposed:
+    //
+    // 1. The profile along `d` is not monotone. `f(x + αd) ≈ f(x) + ½α²·dᵀ∇²f d`
+    //    only near `x`; on `nonconvex_two_escapes` the quartic term takes `f`
+    //    back to `+1.8` at the wall while the interior of the same ray reaches
+    //    `−0.225`. So the step length has to be searched, not guessed —
+    //    which is why the halving below now runs on *either* rejection and not
+    //    only on infeasibility, the mechanism that had the SQP arm certifying
+    //    that fixture's documented maximum at every `neg_curv_escapes`.
+    // 2. `sign` is scanned in a fixed order, so "first acceptable" made the
+    //    answer depend on it. On `min −x₀² + x₁²` with `x₀ ∈ [−2, g]` the `+d`
+    //    wall is worth `−g²` and the `−d` wall is worth `−4`; returning the
+    //    first meant a `g` small enough to clear the bar handed back `−g²` and
+    //    threw away the global minimum sitting in the other sign.
+    //
+    // Scoring costs nothing extra — the evaluations already happened — and the
+    // bound stays the 24 halvings per sign the loop always carried, spent once
+    // at convergence on a point already known to have negative curvature.
+    // The feasibility a refutation is held to is the *incumbent's*, not the
+    // convergence tolerance (gh#873, found by the fixture sweep).
+    //
+    // `constr_viol_tol` is the bar for calling a solve converged; using it here
+    // let the exhibition buy objective with infeasibility. Measured on
+    // `cresc4.nl` (lbfgs leg): the KKT point is feasible to 2.2e-16, and the
+    // trials this accepted violated the rows by 6e-7 — nine orders worse, but
+    // legal under `constr_viol_tol = 1e-6` — to gain 4.4e-7 of objective. The
+    // arm then restored feasibility and returned to the same point, eight
+    // times over, until `MAX_SECOND_ORDER_ESCAPES` capped it: 15 iterations
+    // became 45 for an answer identical to 15 significant figures. That is
+    // gh#544's shape exactly — the right answer, slowly — and it is the reason
+    // CLAUDE.md requires the sweep on a trajectory change.
+    //
+    // A point that proves the incumbent is not a local minimum has to be at
+    // least as feasible as the incumbent is. The slack is `1e-12` *relative to
+    // the trial's own row magnitudes*, so it is roundoff and not a distance in
+    // the units of `c`; and it is clamped at `constr_viol_tol`, so this bar is
+    // never looser than the one it replaces.
+    //
+    // The cost is honest and worth naming: against a *curved* active
+    // constraint a straight tangent probe leaves the feasible set at order
+    // `α²`, so on such a model the exhibition now declines rather than
+    // accepting a point that is only tolerance-feasible. That is the same
+    // structural limit as gh#873 D3 — this walks a straight line and tests the
+    // objective — made visible instead of paid for in iterations.
+    let viol_at = |nlp: &mut N, v: &[Number]| -> (Number, Number) {
+        let c = nlp.eval_c(v);
+        let mut viol = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for (j, &cj) in c.iter().enumerate() {
+            viol = viol
+                .max((bl_c[j] - cj).max(0.0))
+                .max((cj - bu_c[j]).max(0.0));
+            scale = scale.max(cj.abs());
+        }
+        (viol, scale)
+    };
+    let (viol_curr, _) = viol_at(nlp, x);
+
+    let mut best: Option<(Number, Vec<Number>)> = None;
     for sign in [1.0_f64, -1.0] {
         let mut alpha = f64::INFINITY;
         for i in 0..n {
@@ -1330,26 +1418,62 @@ fn exhibit_better_point<N: SqpProblemSpec>(
             let trial: Vec<Number> = (0..n)
                 .map(|i| (x[i] + sign * alpha * d[i]).clamp(xl[i], xu[i]))
                 .collect();
-            let viol = nlp
-                .eval_c(&trial)
-                .iter()
-                .enumerate()
-                .fold(0.0_f64, |a, (j, &cj)| {
-                    a.max((bl_c[j] - cj).max(0.0)).max((cj - bu_c[j]).max(0.0))
-                });
-            if viol <= constr_viol_tol {
+            let (viol, c_scale) = viol_at(nlp, &trial);
+            let feas_bar = viol_curr.max(1e-12 * c_scale).min(constr_viol_tol);
+            if viol <= feas_bar {
                 let f_trial = nlp.eval_f(&trial);
-                // Strictly better by more than the objective's own scale can
-                // round, so this cannot fire on noise at a genuine optimum.
-                if f_trial.is_finite() && f_trial < f_curr - 1e-10 * (1.0 + f_curr.abs()) {
-                    return Some(trial);
+                if f_trial.is_finite() && best.as_ref().is_none_or(|(b, _)| f_trial < *b) {
+                    best = Some((f_trial, trial));
                 }
-                break;
             }
             alpha *= 0.5;
         }
     }
-    None
+
+    // Strictly better by more than the objective's own scale can round, so
+    // this cannot fire on noise at a genuine optimum.
+    //
+    // The `1.0 +` is what made that "the objective's own scale" rather than an
+    // absolute `1e-10`, and it is itself scaled here (gh#873 D2, the same class
+    // as gh#872). On `min k·x₀x₁ s.t. x₀ + x₁ = 2` the true improvement is
+    // `64·k` (the corner `(9, −7)` against the stationary `(1, 1)`), so from
+    // `k ≈ 1e-12` down the whole model lived below the additive
+    // `1e-10` and every genuine refutation was rejected as noise — while the
+    // reduced Hessian is `−k`, as indefinite at `k = 1e-30` as at `k = 1`.
+    //
+    // Lowered only: `.min(1.0)` leaves the bar exactly as it was for any
+    // objective at or above unit scale, so this cannot make an existing solve
+    // newly refutable.
+    let (f_best, x_best) = best?;
+    let f_scale = f_curr.abs().max(f_best.abs());
+    let bar = 1e-10 * (f_scale.min(1.0) + f_curr.abs());
+    (f_best < f_curr - bar).then_some(x_best)
+}
+
+/// The activity tolerance for one bound or row, in that quantity's own units.
+///
+/// A raw `constr_viol_tol` is a distance in the units of `x` (for a bound) or
+/// of `c` (for a row), so using it directly is an absolute threshold on a
+/// scale-dependent quantity — gh#873 D2, the same class as gh#872. Confirmed
+/// as pure scaling by an exact change of variables `u = S·x` with the gap held
+/// fixed in `x` units: at `S = 1e-2` a `5e-7` gap crosses `tol`, and a bound
+/// with multiplier zero is frozen into the working set, closing the null space
+/// and the second-order verdict with it.
+///
+/// `scale` is the quantity and its own bounds; infinite entries are skipped,
+/// and everything left scales together under a change of units, so the ratio
+/// the test really wants is invariant.
+///
+/// Scaled **only downwards**, as in gh#872's `psd_band`: widening the test
+/// above unit scale would freeze bounds that are free today, which loses
+/// refutations rather than gaining them, and every refutation still has to
+/// exhibit a strictly better feasible point before it changes any answer.
+fn active_tol(tol: Number, scale: &[Number]) -> Number {
+    let s = scale
+        .iter()
+        .filter(|v| v.is_finite())
+        .fold(0.0_f64, |a, v| a.max(v.abs()));
+    tol * s.min(1.0)
 }
 
 /// A feasible direction of negative curvature at a *converged* first-order
@@ -1415,8 +1539,9 @@ fn negative_curvature_at_kkt_point(
     // this is the set the verdict was issued about.
     let mut rows: Vec<Vec<Number>> = Vec::new();
     for j in 0..m {
-        let lo_active = bl_c[j] > f64::NEG_INFINITY && (c_vals[j] - bl_c[j]).abs() <= tol;
-        let hi_active = bu_c[j] < f64::INFINITY && (bu_c[j] - c_vals[j]).abs() <= tol;
+        let t = active_tol(tol, &[c_vals[j], bl_c[j], bu_c[j]]);
+        let lo_active = bl_c[j] > f64::NEG_INFINITY && (c_vals[j] - bl_c[j]).abs() <= t;
+        let hi_active = bu_c[j] < f64::INFINITY && (bu_c[j] - c_vals[j]).abs() <= t;
         if lo_active || hi_active {
             let mut r = vec![0.0; n];
             // `pounce_linalg` triplets are **1-based** (see `triplet.rs`).
@@ -1429,8 +1554,9 @@ fn negative_curvature_at_kkt_point(
         }
     }
     for i in 0..n {
-        let on_lo = xl[i] > f64::NEG_INFINITY && (x[i] - xl[i]).abs() <= tol;
-        let on_hi = xu[i] < f64::INFINITY && (xu[i] - x[i]).abs() <= tol;
+        let t = active_tol(tol, &[x[i], xl[i], xu[i]]);
+        let on_lo = xl[i] > f64::NEG_INFINITY && (x[i] - xl[i]).abs() <= t;
+        let on_hi = xu[i] < f64::INFINITY && (xu[i] - x[i]).abs() <= t;
         if on_lo || on_hi {
             let mut r = vec![0.0; n];
             r[i] = 1.0;
@@ -1464,13 +1590,30 @@ fn negative_curvature_at_kkt_point(
             return None;
         }
         let lam_max = ev.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
-        let cut = 1e-9 * lam_max.max(1.0);
-        for (j, &lam) in ev.iter().enumerate() {
-            if lam.abs() <= cut {
-                z.extend_from_slice(&evec[j * n..(j + 1) * n]);
+        // Relative to `BᵀB`'s own spectral scale, with no absolute floor under
+        // it (gh#873 D2). `lam_max` is already that scale, so the `.max(1.0)`
+        // this carried made the rank cut absolute for small constraint
+        // normals: a row scaled down by a change of units then read as part of
+        // the null space, and the direction built from it does not respect the
+        // constraint it came from.
+        //
+        // `lam_max == 0` means every active row has a zero gradient, so none
+        // of them restricts anything and the whole space is free. The old
+        // `.max(1.0)` produced that answer as a side effect of the floor;
+        // stated here so removing the floor does not quietly change it into
+        // "no degrees of freedom", which would decline the refutation.
+        let cut = if lam_max > 0.0 { 1e-9 * lam_max } else { 0.0 };
+        if lam_max == 0.0 {
+            z.extend_from_slice(&evec[..n * n]);
+            n_dof = n;
+        } else {
+            for (j, &lam) in ev.iter().enumerate() {
+                if lam.abs() <= cut {
+                    z.extend_from_slice(&evec[j * n..(j + 1) * n]);
+                }
             }
+            n_dof = z.len() / n;
         }
-        n_dof = z.len() / n;
     }
     if n_dof == 0 {
         return None;
@@ -1506,12 +1649,13 @@ fn negative_curvature_at_kkt_point(
         return None;
     }
     // Relative to the Hessian's own scale, so this cannot fire on the
-    // rounding noise of a genuinely positive-semidefinite reduced Hessian.
-    let h_scale = hess_lag
-        .vals
-        .iter()
-        .fold(0.0_f64, |a, v| a.max(v.abs()))
-        .max(1.0);
+    // rounding noise of a genuinely positive-semidefinite reduced Hessian --
+    // and with no absolute floor under it (gh#873 D2, gh#872's sibling). The
+    // `.max(1.0)` this carried made the test absolute below unit Hessian
+    // scale, and `min k·x₀x₁ s.t. x₀ + x₁ = 2` then returned the constrained
+    // *maximum* `f = k` for every `k` from `1e-8` down -- a family whose
+    // reduced Hessian is `−k`, i.e. as indefinite at `k = 1e-30` as at `k = 1`.
+    let h_scale = hess_lag.vals.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
     if ev[0] >= -1e-8 * h_scale {
         return None;
     }
@@ -1539,7 +1683,15 @@ pub(crate) fn check_kkt(
 ) -> KktError {
     // Constraint violation: max(0, bl - c, c - bu) on every row,
     // plus bound violation on every variable.
+    //
+    // `NaN` propagates rather than reducing away (gh #876). `f64::max`
+    // ignores `NaN`, so `(bl - c).max(0.0)` on a non-finite `c` is `0.0` and
+    // a diverged iterate scores as perfectly feasible. The same reduction on
+    // the stationarity rows below is the site the issue reports; both are
+    // fixed, because either one alone still lets `check_kkt` return a clean
+    // `KktError` from garbage.
     let mut viol = 0.0_f64;
+    let mut nonfinite = false;
     for i in 0..m {
         let lo = if bl_c[i] > NLP_LOWER_BOUND_INF {
             (bl_c[i] - c_vals[i]).max(0.0)
@@ -1551,9 +1703,11 @@ pub(crate) fn check_kkt(
         } else {
             0.0
         };
+        nonfinite |= !c_vals[i].is_finite();
         viol = viol.max(lo).max(hi);
     }
     for i in 0..n {
+        nonfinite |= !iter.x[i].is_finite();
         let lo = if xl[i] > NLP_LOWER_BOUND_INF {
             (xl[i] - iter.x[i]).max(0.0)
         } else {
@@ -1587,10 +1741,167 @@ pub(crate) fn check_kkt(
     for (s, &lx) in stat.iter_mut().zip(iter.lambda_x.iter()) {
         *s -= lx;
     }
-    let stat_max = stat.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+    let stat_max = crate::sqp::line_search::inf_norm(&stat);
+
+    // An iterate or a constraint value that is not finite makes every residual
+    // computed from it meaningless, whichever way the arithmetic happens to
+    // reduce: `+inf - inf` is `NaN`, but `(bl - inf).max(0.0)` is a tidy `0.0`
+    // and `inf.abs()` is a large number that at least fails `<= tol`. Reporting
+    // `NaN` for both is the honest answer and the one the caller's `<= tol`
+    // gates already handle correctly.
+    if nonfinite {
+        return KktError {
+            stationarity: Number::NAN,
+            constr_viol: Number::NAN,
+        };
+    }
 
     KktError {
         stationarity: stat_max,
         constr_viol: viol,
+    }
+}
+
+#[cfg(test)]
+mod kkt_nan_tests {
+    //! gh #876 — `check_kkt` must not launder a non-finite iterate into a
+    //! clean `KktError`.
+    //!
+    //! The caller's convergence gate is
+    //! `kkt.stationarity <= stationarity_tol && kkt.constr_viol <= constr_viol_tol`,
+    //! so anything `check_kkt` reports as `0.0` is reported as converged. Both
+    //! of its reductions used to swallow `NaN`:
+    //!
+    //! * `stat.iter().map(|s| s.abs()).fold(0.0_f64, f64::max)` — `f64::max`
+    //!   is defined to *ignore* `NaN`, so an all-`NaN` stationarity vector
+    //!   reduced to `0.0`. This is the site gh #876 reports, and the third
+    //!   instance of the same shape in this workspace: gh #222 fixed it in
+    //!   `pounce-convex`, gh #845 in `pounce-sensitivity`.
+    //! * `viol.max(lo).max(hi)` where `lo = (bl - c).max(0.0)` — the same
+    //!   definition one layer earlier, so a `NaN` constraint value scored as
+    //!   *perfectly feasible* before the outer `max` ever saw it. The issue
+    //!   does not name this one; fixing only the reported site would still
+    //!   have left `constr_viol` reading `0.0` on a diverged iterate.
+    //!
+    //! ## Which branch each test reaches
+    //!
+    //! Per this repo's gh #756 lesson, a guard is only evidence about the
+    //! branch its fixture reaches, so the four tests below are chosen to land
+    //! in four different places: a `NaN` arriving through `c_vals`, one
+    //! arriving through `x`, one arriving through the *duals* (where `x` and
+    //! `c` are both finite and only the stationarity row is poisoned — the
+    //! `inf_norm` fix, not the `nonfinite` flag), and an ordinary finite
+    //! iterate that must be completely unaffected.
+    //!
+    //! ## Mutation table
+    //!
+    //! | revert | red |
+    //! |---|---|
+    //! | `inf_norm` back to `fold(0.0, f64::max)` | `a_nan_dual_poisons_only_stationarity`, `inf_norm_tests::a_nan_entry_propagates_rather_than_reducing_away` |
+    //! | drop the `nonfinite` flag | `a_nan_constraint_value_is_not_perfect_feasibility`, `a_nan_iterate_is_not_perfect_feasibility` |
+    //! | both | all four of the above |
+    //!
+    //! Measured, both directions: each mutation turns exactly the listed
+    //! tests red and leaves the others — including
+    //! `a_finite_iterate_is_measured_exactly_as_before` — green. Neither half
+    //! subsumes the other, which is why both are here.
+
+    use super::*;
+    use crate::sqp::qp_assembly::Triplet;
+    use pounce_common::types::Index;
+
+    /// `min x0` s.t. one row `c(x) = x0`, no bounds — the smallest shape that
+    /// exercises every accumulation in `check_kkt`.
+    fn setup(x: Vec<Number>, c: Vec<Number>, lam_g: Vec<Number>) -> KktError {
+        let n = x.len();
+        let m = c.len();
+        let iter = SqpIterates {
+            x,
+            lambda_g: lam_g,
+            lambda_x: vec![0.0; n],
+            working: None,
+        };
+        let jac = Triplet {
+            n_rows: m,
+            n_cols: n,
+            irow: (1..=m as i32).map(|i| i as Index).collect(),
+            jcol: vec![1 as Index; m],
+            vals: vec![1.0; m],
+        };
+        check_kkt(
+            n,
+            m,
+            &iter,
+            &vec![1.0; n],
+            &c,
+            &vec![0.0; m],
+            &vec![0.0; m],
+            &vec![NLP_LOWER_BOUND_INF; n],
+            &vec![NLP_UPPER_BOUND_INF; n],
+            &jac,
+        )
+    }
+
+    #[test]
+    fn a_finite_iterate_is_measured_exactly_as_before() {
+        // x0 = 2 against the equality row c = x0 = 0: violation 2, and
+        // stationarity ∇f + Jᵀλ = 1 + 1·(-1) = 0.
+        let k = setup(vec![2.0], vec![2.0], vec![-1.0]);
+        assert_eq!(k.constr_viol, 2.0);
+        assert_eq!(k.stationarity, 0.0);
+    }
+
+    #[test]
+    fn a_nan_constraint_value_is_not_perfect_feasibility() {
+        let k = setup(vec![0.0], vec![Number::NAN], vec![-1.0]);
+        assert!(
+            k.constr_viol.is_nan(),
+            "a NaN constraint value reported constr_viol = {}, which clears \
+             every tolerance the caller compares it against",
+            k.constr_viol
+        );
+        assert!(k.stationarity.is_nan());
+    }
+
+    #[test]
+    fn a_nan_iterate_is_not_perfect_feasibility() {
+        let k = setup(vec![Number::NAN], vec![0.0], vec![-1.0]);
+        assert!(k.constr_viol.is_nan());
+        assert!(k.stationarity.is_nan());
+    }
+
+    /// The dual-side branch: `x` and `c` are both finite, so the `nonfinite`
+    /// flag stays false and nothing but `inf_norm` stands between a `NaN`
+    /// multiplier and a stationarity residual of `0.0`. This is the test that
+    /// the `nonfinite` flag alone does **not** cover.
+    #[test]
+    fn a_nan_dual_poisons_only_stationarity() {
+        let k = setup(vec![0.0], vec![0.0], vec![Number::NAN]);
+        assert!(
+            k.stationarity.is_nan(),
+            "a NaN multiplier reduced to stationarity = {}",
+            k.stationarity
+        );
+        // Feasibility genuinely holds at this x, and saying so is correct —
+        // the flag is about the *primal* iterate, not about the duals.
+        assert_eq!(k.constr_viol, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod inf_norm_tests {
+    use crate::sqp::line_search::inf_norm;
+
+    #[test]
+    fn a_nan_entry_propagates_rather_than_reducing_away() {
+        assert!(inf_norm(&[1.0, f64::NAN, 2.0]).is_nan());
+        assert!(inf_norm(&[f64::NAN]).is_nan());
+    }
+
+    #[test]
+    fn finite_vectors_are_unchanged() {
+        assert_eq!(inf_norm(&[]), 0.0);
+        assert_eq!(inf_norm(&[-3.0, 1.0, 2.0]), 3.0);
+        assert_eq!(inf_norm(&[f64::INFINITY, 1.0]), f64::INFINITY);
     }
 }

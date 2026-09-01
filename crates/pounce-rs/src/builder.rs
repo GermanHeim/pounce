@@ -65,7 +65,20 @@ pub trait Problem {
     fn constraints(&self, _x: &[f64], _out: &mut [f64]) {}
 
     /// Optional FBBT expression for constraint `index`.
-    /// The tape must exactly restate [`Self::constraints`] for that row.
+    ///
+    /// The tape must restate [`Self::constraints`] for that row, and every
+    /// slot in it must influence the root's value — a slot the root does not
+    /// depend on says nothing about the constraint, and gh #877 is what
+    /// happens when bounds are propagated back out of one anyway. The reverse
+    /// pass now skips non-influencing slots rather than trusting the caller,
+    /// but keeping them out of the tape is cheaper.
+    ///
+    /// `try_solve` samples the two forms at the starting point and the box
+    /// midpoint. That is a smoke test twice over: two points are not a proof
+    /// of equivalence, and even at those two the comparison allows a relative
+    /// mismatch of `sqrt(f64::EPSILON)` (~1.5e-8). Generate the callback and
+    /// the tape from one source when you can.
+    ///
     /// It is used only when both `presolve=yes` and `presolve_fbbt=yes`.
     fn constraint_expression(&self, _index: usize) -> Option<FbbtTape> {
         None
@@ -469,9 +482,25 @@ impl<P: Problem + 'static> Nlp<P> {
             app.enable_iter_history();
             crate::collector_scope()
         });
-        let derivative_test_tnlp = Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>;
-        let status = app
-            .optimize_tnlp_with_derivative_test_tnlp(Rc::clone(&tnlp), Some(derivative_test_tnlp));
+        // The derivative test must run against the *unpresolved* adapter, since
+        // presolve may have eliminated variables the user's `gradient` /
+        // `jacobian` still index. When no presolve wrapper was installed,
+        // `tnlp` **is** `adapter` and the override is the same `Rc` — passing
+        // it is a no-op (`application.rs` does
+        // `derivative_test_tnlp.as_ref().unwrap_or(&tnlp)`), but it means the
+        // builder never exercises the `None` arm. gh #877 F-7: pass the
+        // override only when it actually differs, so the default path here is
+        // the same call shape every other frontend makes.
+        let status = match &fbbt_handle {
+            Some(_) => {
+                let derivative_test_tnlp = Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>;
+                app.optimize_tnlp_with_derivative_test_tnlp(
+                    Rc::clone(&tnlp),
+                    Some(derivative_test_tnlp),
+                )
+            }
+            None => app.optimize_tnlp(Rc::clone(&tnlp)),
+        };
         let stats = app.statistics();
         // Second-opinion ladder, on by default here as in the CLI and the
         // Python / C frontends: an `Infeasible_Problem_Detected` or an
@@ -634,7 +663,7 @@ fn validate_fbbt_tape_values<P: Problem>(
                 return Err(NlpError::InvalidFbbtTape {
                     constraint,
                     reason: format!(
-                        "constraints() returned {actual:.16e} but the tape returned [{:.16e}, {:.16e}] at the {sample_name}; the tape must exactly restate this constraint",
+                        "constraints() returned {actual:.16e} but the tape returned [{:.16e}, {:.16e}] at the {sample_name}; the tape must restate this constraint (checked at two points, to a relative tolerance of {FD:.3e} — agreement here is necessary, not sufficient)",
                         range.lo, range.hi
                     ),
                 });

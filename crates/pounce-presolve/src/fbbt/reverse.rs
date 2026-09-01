@@ -27,7 +27,7 @@
 use pounce_common::types::Number;
 use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 
-use crate::fbbt::interval::{Interval, round_down, round_up};
+use crate::fbbt::interval::{Interval, powi, round_down, round_up};
 
 /// Result of [`reverse_pass`].
 #[derive(Debug, Clone, PartialEq)]
@@ -76,8 +76,15 @@ pub fn reverse_pass(tape: &FbbtTape, forward: &[Interval], con_bound: Interval) 
     }
     slots[root_idx] = new_root;
 
-    // Walk backward.
+    // Walk backward, but only out of slots the root's value actually
+    // depends on. See `influencing_slots` — propagating out of the others
+    // is how gh #877 turned a one-variable LP with optimum `x = -10` into a
+    // `SolveSucceeded` at `x = -1e-8`.
+    let influences = influencing_slots(tape);
     for i in (0..tape.ops.len()).rev() {
+        if !influences[i] {
+            continue;
+        }
         let parent = slots[i];
         if parent.is_empty() {
             // Infeasible somewhere; no point pushing further.
@@ -92,6 +99,102 @@ pub fn reverse_pass(tape: &FbbtTape, forward: &[Interval], con_bound: Interval) 
         slots,
         infeasible: false,
     }
+}
+
+/// Which tape slots the **root's value** depends on.
+///
+/// `FbbtTape`'s contract (`pounce-nlp`'s `expression_provider`) is that the
+/// value of the whole tape is the value at the last slot. A slot the root
+/// does not depend on therefore contributes nothing to the constraint, and
+/// reverse-propagating out of it asserts something the constraint does not
+/// say. `reverse_pass` used to walk **every** slot unconditionally, and
+/// `validate_fbbt_tape` requires only that operand references point
+/// backward — it does not require reachability. That combination is
+/// gh #877 F-3, and it is a wrong answer under `SolveSucceeded`:
+///
+/// ```text
+/// minimize x   s.t.  g(x) = x ∈ [-10, 10],  x ∈ [-10, 10]
+/// tape: 0: Var(0)   1: Ln(0) ← dead   2: Const(0.0)   3: Add(0,2) ← root
+///
+/// fbbt=no  : SolveSucceeded  x = -10.000000098702795
+/// fbbt=yes : SolveSucceeded  x =  -9.990002698385514e-9
+/// ```
+///
+/// The tape exactly restates `constraints()` at its root, so the builder's
+/// value check passes; the dead `Ln` slot's forward interval is clipped to
+/// the log domain (the right *forward* answer, and the standard FBBT
+/// convention when the sub-expression is part of the constraint), and
+/// pushing that clip back out of a slot the root ignores fabricates
+/// `x ≥ 0`. Wrong by the entire feasible range, `infeasibility_witness =
+/// None`, no diagnostic.
+///
+/// Dead slots are not exotic. The tape format is *sold* on folding common
+/// subexpressions into a shared pool, and a producer that emits one tape per
+/// row from one pool will routinely carry slots the current root does not
+/// reach. The `.nl` translator emits reachable slots only, which is why the
+/// engine's unstated assumption held until hand-written tapes were accepted.
+///
+/// **Reachability alone is not the whole fix**, which is why this is phrased
+/// as dependence of the *value*. `PowInt(a, 0)` is `1` for every `a`
+/// including `NaN` (`f64::NAN.powi(0) == 1.0`), so `ln(x)^0 == 1` is a
+/// tautology whose slot `Ln(x)` *is* reachable from the root and still
+/// carries no information about `x` — and it cut `x = -5` out of
+/// `[-10, 10]` just as the dead slot did. `inverse_powint` already declines
+/// to tighten `a` when `n == 0`; what it could not do is stop the loop
+/// visiting `a`'s own slot afterwards with `a`'s forward interval as a
+/// "tightened parent". So the marking below cuts the dependency at
+/// `PowInt(_, 0)` rather than following it.
+///
+/// The control case is the point of the whole rule: `ln(x) <= 5` tightens
+/// `x` to `x > 0` and that is *correct*. The same tightening is right in one
+/// tape and wrong in the other, and the only thing that distinguishes them
+/// is whether the root's value depends on the slot.
+fn influencing_slots(tape: &FbbtTape) -> Vec<bool> {
+    let n = tape.ops.len();
+    let mut influences = vec![false; n];
+    if n == 0 {
+        return influences;
+    }
+    influences[n - 1] = true;
+    // One backward sweep suffices: every operand reference points strictly
+    // backward (`validate_fbbt_tape` enforces it, and `first_invalid_slot`
+    // is how), so a slot's own mark is final by the time we read it.
+    for i in (0..n).rev() {
+        if !influences[i] {
+            continue;
+        }
+        match tape.ops[i] {
+            FbbtOp::Const(_) | FbbtOp::Var(_) | FbbtOp::Opaque => {}
+            FbbtOp::Add(a, b) | FbbtOp::Sub(a, b) | FbbtOp::Mul(a, b) | FbbtOp::Div(a, b) => {
+                if a < n {
+                    influences[a] = true;
+                }
+                if b < n {
+                    influences[b] = true;
+                }
+            }
+            FbbtOp::Neg(a)
+            | FbbtOp::Sqrt(a)
+            | FbbtOp::Exp(a)
+            | FbbtOp::Ln(a)
+            | FbbtOp::Abs(a)
+            | FbbtOp::Sin(a)
+            | FbbtOp::Cos(a) => {
+                if a < n {
+                    influences[a] = true;
+                }
+            }
+            // `a⁰ == 1` for every `a`, so the root's value does not depend
+            // on `a` through this slot. Cutting the edge here is what makes
+            // the rule "influences the value" rather than "is reachable".
+            FbbtOp::PowInt(a, exponent) => {
+                if exponent != 0 && a < n {
+                    influences[a] = true;
+                }
+            }
+        }
+    }
+    influences
 }
 
 /// Push the parent's tightened interval back into the operand slots
@@ -212,8 +315,10 @@ fn inverse_powint(z: Interval, n: u32, prior_a: Interval) -> Interval {
         // the endpoints — `powf` is round-to-nearest, so without nudging the
         // lower endpoint up / upper endpoint down by a ULP we could exclude a
         // feasible point (L44, soundness invariant).
-        let lo = round_down(signed_nth_root(z.lo, n));
-        let hi = round_up(signed_nth_root(z.hi, n));
+        // The enclosures are already outward-rounded; take the outer end of
+        // each so the union covers every `a` whose `aⁿ` can reach `z`.
+        let lo = signed_nth_root_enclosure(z.lo, n).0;
+        let hi = signed_nth_root_enclosure(z.hi, n).1;
         Interval::new(lo, hi)
     } else {
         // Even: z must be non-negative.
@@ -226,8 +331,8 @@ fn inverse_powint(z: Interval, n: u32, prior_a: Interval) -> Interval {
         // root must be nudged down and the upper root up, else the
         // over-approximation could over-tighten and drop a feasible point
         // (L44, the soundness invariant the interval module promises).
-        let abs_lo = round_down(z_pos.lo.powf(1.0 / n as f64));
-        let abs_hi = round_up(z_pos.hi.powf(1.0 / n as f64));
+        let abs_lo = nth_root_enclosure(z_pos.lo, n).0.max(0.0);
+        let abs_hi = nth_root_enclosure(z_pos.hi, n).1;
         // Two branches: a ∈ [-abs_hi, -abs_lo] ∪ [abs_lo, abs_hi].
         // We can't return a union, so pick the branch that
         // intersects `prior_a` (the orchestrator-typical case). If
@@ -249,14 +354,115 @@ fn inverse_powint(z: Interval, n: u32, prior_a: Interval) -> Interval {
     }
 }
 
-/// `signum(x) * |x|^(1/n)` — the real-valued nth root for odd `n`
-/// (defined on the whole real line). Returns `±∞` unchanged.
-fn signed_nth_root(x: Number, n: u32) -> Number {
-    if !x.is_finite() {
-        return x;
+/// How many ULPs the verification loop in [`nth_root_enclosure`] will walk
+/// before giving up and widening by a relative amount instead.
+///
+/// The Newton step lands within a couple of ULPs on every case measured, so
+/// this is a termination guard and not a working budget. It exists because
+/// `powi`'s own error grows with `n`, and for a large enough `n` no f64
+/// endpoint satisfies the bracketing test exactly — walking ULPs forever
+/// instead of returning a wider, still-sound answer would be the wrong
+/// trade.
+const ROOT_MAX_ULPS: u32 = 64;
+
+/// Relative widening applied when the verification loop hits its cap. Chosen
+/// to dominate `|ln x| · ε` at the top of the double range
+/// (`709 · 1.1e-16 ≈ 7.9e-14`) with three orders to spare.
+const ROOT_FALLBACK_REL: Number = 1e-10;
+
+/// A **sound** f64 enclosure `[lo, hi]` of `x^(1/n)` for `x ≥ 0`, `n ≥ 1`:
+/// `lo^n ≤ x ≤ hi^n` under the same `powi` the forward pass uses.
+///
+/// The old computation was `x.powf(1.0 / n as f64)` padded by one ULP, and
+/// it is short by far more than one ULP for two compounding reasons
+/// (gh #877 F-1):
+///
+/// 1. `1.0 / n` is not exact for any `n` that is not a power of two.
+///    `1.0/3.0` is relatively `5.55e-17` **below** the true third, and
+///    `powf` computes `exp(ln(x) · (1/n))`, so the answer is short by
+///    relatively `|ln x| · 5.55e-17` — which is `10` ULP at `x = 2^90`, not
+///    one, and grows to ~`7.9e-14` relative at the top of the range.
+/// 2. `powf` itself is only round-to-nearest, adding its own ULP.
+///
+/// One ULP of padding therefore does not restore the enclosure, and the
+/// result *cuts feasible points*: `x³ == 1073741824` on `x ∈ [0, 2000]`
+/// returned `[1023.99999999999955, 1023.99999999999977]`, which excludes the
+/// exact answer `x = 1024`, and the row was then reported infeasible.
+///
+/// The repair is the one the issue proposes — a Newton correction on the
+/// f64 seed — followed by **verification**: each endpoint is walked outward
+/// until it actually brackets `x` under `powi`, then one ULP further.
+/// Verifying against `powi` rather than against a real-arithmetic ideal is
+/// deliberate: `powi` is what the forward pass evaluates, so this makes the
+/// reverse rule unable to cut a point the forward rule would have accepted,
+/// which is the consistency FBBT's soundness argument actually needs.
+fn nth_root_enclosure(x: Number, n: u32) -> (Number, Number) {
+    debug_assert!(n >= 1);
+    if x.is_nan() {
+        return (Number::NEG_INFINITY, Number::INFINITY);
     }
-    let mag = x.abs().powf(1.0 / n as f64);
-    if x < 0.0 { -mag } else { mag }
+    if x <= 0.0 {
+        // Callers pass `x ≥ 0`; `0` and the `-0.0` that `next_down` can
+        // produce both root to 0.
+        return (0.0, 0.0);
+    }
+    if x.is_infinite() {
+        return (Number::INFINITY, Number::INFINITY);
+    }
+
+    let seed = x.powf(1.0 / n as Number);
+    if !seed.is_finite() || seed <= 0.0 {
+        // Under/overflowed out of the f64 range; nothing to refine, and the
+        // widening below would not be meaningful.
+        return (seed, seed);
+    }
+
+    // One Newton step on `f(r) = rⁿ − x`: `r ← r − (rⁿ − x) / (n·rⁿ⁻¹)`.
+    // From a seed already correct to ~1e-13 relative this lands within a
+    // couple of ULPs. Every intermediate is checked, because `rⁿ⁻¹·n`
+    // overflows for a large `n` and a `NaN` correction must not be taken.
+    let mut r = seed;
+    let f = powi(r, n) - x;
+    let d = powi(r, n - 1) * n as Number;
+    if f.is_finite() && d.is_finite() && d > 0.0 {
+        let cand = r - f / d;
+        if cand.is_finite() && cand > 0.0 {
+            r = cand;
+        }
+    }
+
+    let mut lo = r;
+    let mut steps = 0;
+    while lo > 0.0 && powi(lo, n) > x && steps < ROOT_MAX_ULPS {
+        lo = lo.next_down();
+        steps += 1;
+    }
+    if steps == ROOT_MAX_ULPS {
+        lo = r * (1.0 - ROOT_FALLBACK_REL);
+    }
+
+    let mut hi = r;
+    steps = 0;
+    while hi.is_finite() && powi(hi, n) < x && steps < ROOT_MAX_ULPS {
+        hi = hi.next_up();
+        steps += 1;
+    }
+    if steps == ROOT_MAX_ULPS {
+        hi = r * (1.0 + ROOT_FALLBACK_REL);
+    }
+
+    (round_down(lo), round_up(hi))
+}
+
+/// `signum(x) · |x|^(1/n)` — the real-valued nth root for odd `n`, as a
+/// sound enclosure. Returns `±∞` unchanged.
+fn signed_nth_root_enclosure(x: Number, n: u32) -> (Number, Number) {
+    if !x.is_finite() {
+        return (x, x);
+    }
+    let (lo, hi) = nth_root_enclosure(x.abs(), n);
+    // Negating swaps which end is which.
+    if x < 0.0 { (-hi, -lo) } else { (lo, hi) }
 }
 
 #[cfg(test)]
@@ -511,8 +717,14 @@ mod tests {
     /// The odd-`n` branch carries the same outward-rounding requirement.
     #[test]
     fn inverse_powint_odd_branch_is_outward_rounded() {
-        let raw_lo = signed_nth_root(8.0, 3);
-        let raw_hi = signed_nth_root(27.0, 3);
+        // The un-rounded roots. `signed_nth_root` used to *be* this expression
+        // plus one ULP; gh #877 replaced it with `signed_nth_root_enclosure`,
+        // which already rounds outward, so naming the raw value here keeps the
+        // assertion below a statement about the enclosure rather than a
+        // tautology about itself. Both are exact in `f64` (checked: `powf`
+        // returns exactly 2.0 and 3.0 for these arguments).
+        let raw_lo = 8.0_f64.powf(1.0 / 3.0);
+        let raw_hi = 27.0_f64.powf(1.0 / 3.0);
         let r = inverse_powint(Interval::new(8.0, 27.0), 3, Interval::ENTIRE);
         assert!(
             r.lo < raw_lo,

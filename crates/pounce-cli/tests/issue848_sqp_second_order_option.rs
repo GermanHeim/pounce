@@ -17,9 +17,18 @@
 //! registry accepts is never rejected by a reader — a different claim from
 //! "setting it changes the answer".
 //!
-//! So this file asserts the answer moves, on fixtures where the two
-//! behaviours give *different objectives* rather than different iteration
-//! counts. `pounce-qp`'s own
+//! So this file asserts that setting the option changes what the solver does.
+//! It used to assert that specifically as a *different objective*, and the
+//! reasoning for preferring objectives to iteration counts is below and still
+//! sound. gh #873 took that away: repairing gh #856's escape at the KKT point
+//! means the arm now reaches `−6752.25` on `nonconvex_two_escapes.nl` with the
+//! option off as well as on, and over both legs of the corpus — 180
+//! fixture-legs — **no** fixture separates the two settings by objective,
+//! while exactly three separate them by iteration count, all on the exact
+//! leg. Two independent guards catching the
+//! same models is the right outcome; the cost is this file's discriminator,
+//! and `the_switch_is_still_read_end_to_end` records what replaced it and how
+//! much weaker the replacement is. `pounce-qp`'s own
 //! `issue848_second_order_certification::the_check_can_be_switched_off_and_then_the_saddle_comes_back`
 //! pins the engine-level behaviour; what is only reachable from here is the
 //! plumbing between the CLI option registry and that reader.
@@ -76,6 +85,29 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// `(objective, iteration count)`. The iteration count is what
+/// `the_switch_is_still_read_end_to_end` needs; see its doc comment for why
+/// the objective alone can no longer carry that claim.
+fn solve(args: &[&str]) -> (f64, u32) {
+    let out = Command::new(pounce_exe())
+        .args(args)
+        .output()
+        .expect("spawn pounce");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "must solve:\n{combined}");
+    let iters = combined
+        .lines()
+        .find(|l| l.trim_start().starts_with("Number of Iterations"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("no iteration count in:\n{combined}"));
+    (objective(args), iters)
+}
+
 fn objective(args: &[&str]) -> f64 {
     let out = Command::new(pounce_exe())
         .args(args)
@@ -115,32 +147,95 @@ fn turning_it_on_stops_the_sqp_arm_certifying_the_constrained_maximum() {
 }
 
 /// The option is plumbed from the CLI registry through to the engine, and
-/// setting it changes the answer — gh #677's lesson, asserted rather than
-/// assumed.
+/// setting it changes what the solver does — gh #677's lesson, asserted
+/// rather than assumed.
 ///
-/// This is the claim `nonconvex_qp.nl` cannot carry: see the module docs for
-/// why its default answer is a tie that macOS and Linux break differently.
-/// Here the default's stopping point is forced by exact cancellation, so what
-/// separates the two settings is a real ~6752-wide improvement and not luck.
+/// # Why this no longer asserts an objective
+///
+/// It used to, and the objective was the right thing to assert: on
+/// `nonconvex_two_escapes.nl` the default stopped at the ridge point `A`
+/// (`f = 0`) and turning the check on reached the global `−6752.25`, a gap of
+/// nearly four orders of magnitude that no tie-break could counterfeit.
+///
+/// gh #873 removed that gap, by fixing the *other* guard. gh #856's
+/// second-order escape at the KKT point had been finding the negative
+/// curvature on that fixture and then discarding it; with
+/// `exhibit_better_point` repaired, the arm reaches `−6752.25` on that model
+/// whether this option is on or off. Two independent guards now catch it,
+/// which is the outcome to want — but it costs this test its discriminator,
+/// and pretending otherwise by loosening the old assertion until it passed
+/// would have left gh #677's shape undetectable here.
+///
+/// Measured at that commit with `scripts/sweep-fixtures.sh …
+/// sqp_qp_certify_second_order=no|yes`, over both legs — 180 fixture-legs:
+/// **zero** differ in objective, and exactly **three** differ in iteration
+/// count — `nonconvex_qp` 3 → 1, `nonconvex_two_escapes` 5 → 4,
+/// `nonconvex_qcqp` 6 → 8. All three are on the **exact** leg; the
+/// limited-memory leg is unmoved everywhere, which is why the assertions
+/// below do not pass `hessian_approximation`. So the option is still read,
+/// and what it still moves is the trajectory.
+///
+/// # What is asserted instead, and why it is not brittle
+///
+/// That *at least one* of those three fixtures responds to the option, in
+/// objective or in iteration count. An option that is registered and never
+/// read — gh #677 exactly — makes all three identical in both, and fails
+/// this. A single platform breaking a single fixture's count the same way on
+/// both settings does not, because the other two still have to agree as well.
+///
+/// This is deliberately weaker than the claim the module docs argue for, and
+/// the difference is worth stating plainly rather than burying: an
+/// iteration-count difference is evidence the value reaches a reader, not
+/// evidence that it still buys a better answer anywhere. On this corpus it
+/// does not, and `pounce-qp`'s own
+/// `issue848_second_order_certification::the_check_can_be_switched_off_and_then_the_saddle_comes_back`
+/// remains the test that the engine-level behaviour is real. If a future
+/// fixture separates the two settings by objective again, that assertion
+/// belongs back here.
 #[test]
-fn the_switch_is_not_a_no_op_end_to_end() {
+fn the_switch_is_still_read_end_to_end() {
+    let mut responded = Vec::new();
+    for name in [
+        "nonconvex_two_escapes.nl",
+        "nonconvex_qp.nl",
+        "nonconvex_qcqp.nl",
+    ] {
+        let f = fixture(name);
+        let f = f.to_str().unwrap();
+        let off = solve(&[f, "--no-sol", "algorithm=active-set-sqp"]);
+        let on = solve(&[
+            f,
+            "--no-sol",
+            "algorithm=active-set-sqp",
+            "sqp_qp_certify_second_order=yes",
+        ]);
+        if (off.0 - on.0).abs() > 1e-9 || off.1 != on.1 {
+            responded.push(format!("{name}: off={off:?} on={on:?}"));
+        }
+    }
+    assert!(
+        !responded.is_empty(),
+        "sqp_qp_certify_second_order changed neither the objective nor the          iteration count on any of the three fixtures it is known to move.          That is gh #677's shape: an option the registry accepts and no          reader consults."
+    );
+}
+
+/// The claim the fixture above lost, kept where it is still true: with the
+/// check on, the arm reaches the corner minimum and not the ridge point.
+///
+/// This does not compare the two settings, so gh #873 making the default
+/// agree with it does not weaken it — it pins the *answer*, which is what a
+/// user of the option cares about, and it fails if the escape ladder ever
+/// stops reaching `C`.
+#[test]
+fn with_the_check_on_the_arm_reaches_the_corner_minimum() {
     let f = fixture("nonconvex_two_escapes.nl");
     let f = f.to_str().unwrap();
-    let off = objective(&[f, "--no-sol", "algorithm=active-set-sqp"]);
     let on = objective(&[
         f,
         "--no-sol",
         "algorithm=active-set-sqp",
         "sqp_qp_certify_second_order=yes",
     ]);
-    assert!(
-        on < off - 1.0,
-        "setting sqp_qp_certify_second_order=yes must change the answer, and \
-         change it for the better: the default stops at the ridge point A \
-         (f = 0) and the check must escape it. Got off={off}, on={on}. If \
-         these are equal the option is being registered and not read, which \
-         is gh #677's shape."
-    );
     assert!(
         (on + 6752.25).abs() < 1e-3,
         "with the check on the arm should reach the global minimum at the \

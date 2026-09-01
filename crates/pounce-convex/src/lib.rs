@@ -54,8 +54,8 @@ pub(crate) mod simplex;
 pub mod sos;
 
 pub use active_set::{
-    ActiveSetQp, back_translate, back_translate_verified, engine_options, solve_qp_active_set,
-    solve_qp_active_set_inertia, verify_status,
+    ActiveSetQp, back_translate, back_translate_verified, back_translate_verified_inertia,
+    engine_options, solve_qp_active_set, solve_qp_active_set_inertia, verify_status,
 };
 pub use active_set_session::{ActiveSetSession, PresolveNote, Reuse, SessionStats};
 pub use batch::{

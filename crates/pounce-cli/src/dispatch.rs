@@ -816,21 +816,47 @@ fn socp_reform_flops(h: &QuadHessian) -> u128 {
     }
 }
 
+/// The band around zero within which a Hessian eigenvalue counts as zero.
+///
+/// [`PSD_TOL`] scaled by `‖H‖∞`, and deliberately only in the *lowering*
+/// direction (`.min(1.0)`): tightening the band on a small `H` fixes gh#872,
+/// while widening it on a large `H` would hand the convex engine Hessians it
+/// rejects today — a wrong answer, not a slower one. The asymmetry is the
+/// point, so this is not a plain `PSD_TOL * h_scale`.
+fn psd_band(h: &QuadHessian) -> f64 {
+    let h_scale = h.values().fold(0.0_f64, |a, v| a.max(v.abs()));
+    PSD_TOL * h_scale.min(1.0)
+}
+
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
 ///
 /// A diagonal Hessian is settled in `O(nnz)` by sign before converting to the
 /// reusable triplet API. A coupled Hessian is certified from the inertia of
-/// `H + PSD_TOL·I`. An inconclusive certificate conservatively routes to NLP.
-/// The absolute shift is intentional and preserves the classifier's
-/// `lambda_min(H) >= -PSD_TOL` contract. On badly scaled, rank-deficient PSD
-/// matrices it can fall below floating-point resolution, in which case FERAL
-/// reports a zero pivot and this dispatch takes the slower NLP path.
+/// `H + tol·I`. An inconclusive certificate conservatively routes to NLP.
+///
+/// `tol` is [`PSD_TOL`] scaled by `‖H‖∞`, but **only downwards** — see
+/// [`psd_band`]. An eigenvalue is in the units of `H`, so a fixed `1e-9` is an
+/// absolute threshold on a scale-dependent quantity, and the failure it
+/// produced (gh#872) is worse than a widened band: on a `‖H‖∞ ~ 1e-10` model
+/// the shift *dominates* `H`, so the inertia count certifies `1e-9·I` rather
+/// than `H` and the certificate is vacuous. A pure change of variable units —
+/// metres to micrometres — was enough to route a strongly indefinite Hessian
+/// (`|λ_min| / λ_max = 0.667`) to the convex engine, which returned the saddle
+/// at the start point as `Optimal Solution Found` with zero iterations.
+///
+/// The relative form keeps a constant ~7 orders of margin over the
+/// factorization's own roundoff (`ε·‖H‖∞`) at every scale, where the absolute
+/// one had that margin only near `‖H‖∞ ≈ 1`. On badly scaled, rank-deficient
+/// PSD matrices the shift can still fall below floating-point resolution, in
+/// which case FERAL reports a zero pivot and this dispatch takes the slower
+/// NLP path.
 fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
     if h.is_empty() {
         return true;
     }
+    let tol = psd_band(h);
     if h.keys().all(|(i, j)| i == j) {
-        return h.values().all(|value| *value >= -PSD_TOL);
+        return h.values().all(|value| *value >= -tol);
     }
 
     let lower: Vec<_> = h
@@ -839,7 +865,7 @@ fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
         // lower triangle, so (i, j) is emitted at (row = j, col = i).
         .map(|(&(i, j), &val)| Triplet::new(j, i, val))
         .collect();
-    certify_psd_lower_triangle(n, &lower, PSD_TOL, || {
+    certify_psd_lower_triangle(n, &lower, tol, || {
         Box::new(pounce_feral::FeralSolverInterface::with_config(
             pounce_feral::FeralConfig::default(),
         ))
@@ -1127,28 +1153,103 @@ mod tests {
         );
     }
 
-    /// Pin the threshold at exactly `±PSD_TOL` (1e-9). Within the band the
-    /// test rounds a tiny negative eigenvalue to PSD **by design**: a
-    /// genuinely semidefinite Hessian whose smallest eigenvalue computes as a
-    /// tiny negative (Jacobi roundoff) must not be misread as nonconvex. The
-    /// band is far below the error of solving a convex QP with that much
-    /// curvature, so it is the sound tradeoff — see the A1 Finding in
-    /// `dev-notes/pr70-hardening.md`. (1×1 Hessians are returned exactly, so
-    /// this is deterministic.)
+    /// Pin the band at `±PSD_TOL` (1e-9) for a Hessian whose own scale is at
+    /// or above 1 — where [`psd_band`]'s `.min(1.0)` leaves it untouched.
+    ///
+    /// Within the band a tiny negative eigenvalue rounds to PSD **by design**:
+    /// a genuinely semidefinite Hessian whose smallest eigenvalue computes as
+    /// a tiny negative (roundoff) must not be misread as nonconvex. At this
+    /// scale the band is far below the error of solving a convex QP with that
+    /// much curvature, so it is the sound tradeoff — see the A1 Finding in
+    /// `dev-notes/pr70-hardening.md`. (Diagonal Hessians take the exact sign
+    /// path, so this is deterministic.)
     #[test]
-    fn psd_threshold_is_psd_tol() {
+    fn psd_threshold_is_psd_tol_at_unit_scale() {
         let mut just_inside = QuadHessian::new();
-        just_inside.insert((0, 0), -1e-10); // |λ| < PSD_TOL ⇒ treated as zero
+        just_inside.insert((0, 0), 1.0);
+        just_inside.insert((1, 1), -1e-10); // |λ| < PSD_TOL ⇒ treated as zero
         assert!(
-            hessian_is_psd(&just_inside, 1),
-            "−1e-10 is within tolerance and must round to PSD"
+            hessian_is_psd(&just_inside, 2),
+            "−1e-10 against ‖H‖ = 1 is within tolerance and must round to PSD"
         );
 
         let mut just_outside = QuadHessian::new();
-        just_outside.insert((0, 0), -1e-7); // |λ| > PSD_TOL ⇒ genuine negative
+        just_outside.insert((0, 0), 1.0);
+        just_outside.insert((1, 1), -1e-7); // |λ| > PSD_TOL ⇒ genuine negative
         assert!(
-            !hessian_is_psd(&just_outside, 1),
-            "−1e-7 is beyond tolerance and must read indefinite"
+            !hessian_is_psd(&just_outside, 2),
+            "−1e-7 against ‖H‖ = 1 is beyond tolerance and must read indefinite"
+        );
+    }
+
+    /// The band scales with `‖H‖∞`, so the verdict survives a pure change of
+    /// variable units (gh#872).
+    ///
+    /// `H = K⁻² · [[1, 5], [5, 1]]` is strongly indefinite at every `K` —
+    /// `|λ_min| / λ_max = 2/3`, nowhere near roundoff — and the objective
+    /// *values* of the model it comes from do not depend on `K` at all. Under
+    /// the old absolute `1e-9` this read PSD from `K = 1e5` on, and the convex
+    /// engine then returned the saddle at the start point as `Optimal` with
+    /// zero iterations and an objective wrong by 100%.
+    ///
+    /// Both branches of `hessian_is_psd` are exercised: the coupled matrix
+    /// goes through the factorization certificate, the diagonal one through
+    /// the `O(nnz)` sign path. A band that is relative in one and absolute in
+    /// the other would pass a test that used only the first.
+    #[test]
+    fn psd_verdict_is_invariant_under_a_change_of_units() {
+        for k in [1.0_f64, 1e2, 1e5, 1e8, 1e-4] {
+            let f = k.powi(-2);
+
+            let mut coupled = QuadHessian::new();
+            coupled.insert((0, 0), f);
+            coupled.insert((0, 1), 5.0 * f);
+            coupled.insert((1, 1), f);
+            assert!(
+                !hessian_is_psd(&coupled, 2),
+                "K = {k:e}: [[1,5],[5,1]] scaled by K⁻² is indefinite at every \
+                 scale (|λ_min|/λ_max = 2/3); an absolute band hides it"
+            );
+
+            let mut diagonal = QuadHessian::new();
+            diagonal.insert((0, 0), 6.0 * f);
+            diagonal.insert((1, 1), -4.0 * f);
+            assert!(
+                !hessian_is_psd(&diagonal, 2),
+                "K = {k:e}: diag(6, −4) scaled by K⁻² is indefinite at every scale"
+            );
+
+            let mut convex = QuadHessian::new();
+            convex.insert((0, 0), 6.0 * f);
+            convex.insert((1, 1), 4.0 * f);
+            assert!(
+                hessian_is_psd(&convex, 2),
+                "K = {k:e}: diag(6, 4) scaled by K⁻² is PD at every scale and \
+                 must keep reaching the convex engine"
+            );
+        }
+    }
+
+    /// The band never *widens*, which is the half of gh#872's fix that is not
+    /// "make it relative".
+    ///
+    /// A plain `PSD_TOL * ‖H‖∞` would put the band at `1e-3` on a `‖H‖∞ = 1e6`
+    /// model, handing the convex engine Hessians it correctly rejects today —
+    /// a wrong answer traded for a wrong answer. `psd_band` clamps the factor
+    /// at 1, so above unit scale the threshold is exactly what it always was.
+    #[test]
+    fn psd_band_does_not_widen_above_unit_scale() {
+        let mut h = QuadHessian::new();
+        h.insert((0, 0), 1e6);
+        h.insert((1, 1), -1e-7);
+        assert!(
+            !hessian_is_psd(&h, 2),
+            "−1e-7 must stay indefinite however large the rest of H is"
+        );
+        assert_eq!(
+            psd_band(&h),
+            PSD_TOL,
+            "the band is clamped at PSD_TOL for ‖H‖∞ ≥ 1"
         );
     }
 

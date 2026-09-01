@@ -2057,6 +2057,14 @@ impl IpoptApplication {
                 ApplicationReturnStatus::DivergingIterates,
                 pounce_nlp::SolverReturn::DivergingIterates,
             ),
+            // A non-finite iterate or constraint value (gh #876). Same
+            // verdict, from the same condition, as the interior-point arm's
+            // `if !nlp_err.is_finite()` screen — the two arms must not
+            // disagree about what a `NaN` iterate means.
+            crate::sqp::SqpStatus::InvalidNumber => (
+                ApplicationReturnStatus::InvalidNumberDetected,
+                pounce_nlp::SolverReturn::InvalidNumberDetected,
+            ),
         };
 
         // Same gate as the IPM path: an infeasible-subproblem exit is a

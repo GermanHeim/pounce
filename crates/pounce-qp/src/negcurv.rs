@@ -293,9 +293,35 @@ impl ParametricActiveSetSolver {
         // Climb §4.5's ladder for a shift that does factor, keeping the
         // bracket: `hi` works, `hi / inertia_shift_factor` did not, so
         // `|λ_min|` lies between them.
+        // `inertia_shift_initial` is a shift in the units of `H`, so both the
+        // ladder's first rung and the "not worth rejecting a solve over" floor
+        // below are absolute thresholds on a scale-dependent quantity -- the
+        // class CLAUDE.md names as recurring, and gh#872's subject. A pure
+        // change of variable units (metres to micrometres) rescales `H` by
+        // `K^-2` while leaving every objective *value* alone, and past
+        // `K = 1e5` on gh#872's fixture the whole ladder sat above `|lambda_min|`
+        // and the saddle was certified as optimal.
+        //
+        // Scale the floor by `||H||_inf`, but **only downwards** (the `< 1.0`
+        // arm): lowering it can at worst make the search more sensitive, and
+        // every verdict it reaches still has to exhibit a witness direction
+        // below `threshold` and on the working set. Raising it on a large `H`
+        // would coarsen the ladder and decline saddles that are found today --
+        // and the audit measured 350 instances at `||P|| ~ 1e5..1e7` with
+        // nothing wrongly certified, so there is nothing to buy in that
+        // direction. `h_scale == 0` is an `H`-free model, which has no
+        // negative curvature to find; it keeps the absolute rung so the
+        // ladder still climbs.
+        let h_scale = inf_scale(qp.h.values());
+        let shift_floor = if h_scale > 0.0 && h_scale < 1.0 {
+            opts.inertia_shift_initial * h_scale
+        } else {
+            opts.inertia_shift_initial
+        };
+
         let mut current = 0.0;
         let mut hi = None;
-        let mut next = opts.inertia_shift_initial;
+        let mut next = shift_floor;
         for _ in 0..opts.inertia_max_shifts {
             if crate::deadline::expired() {
                 return Err(QpError::DeadlineExpired);
@@ -316,8 +342,8 @@ impl ParametricActiveSetSolver {
             return Ok(SecondOrder::NotChecked);
         };
 
-        if hi <= opts.inertia_shift_initial {
-            // The very first rung worked, so `|λ_min| < inertia_shift_initial`
+        if hi <= shift_floor {
+            // The very first rung worked, so `|λ_min| < shift_floor`
             // — a negative eigenvalue at the level of the rounding noise in
             // the factor. There is nothing here worth rejecting a solve over,
             // and the bracket below has no lower end to bisect against.
@@ -356,7 +382,10 @@ impl ParametricActiveSetSolver {
 
         // A shift was needed at all, so `ZᵀHZ` is indefinite, singular, or the
         // constraint block is rank deficient. Only a witness separates them.
-        let h_scale = inf_scale(qp.h.values()).max(1.0);
+        // Relative to `H`'s own scale, with no absolute floor under it: the
+        // `.max(1.0)` this line used to carry made the witness test absolute
+        // for `||H||_inf < 1`, which is the second of gh#872's four stacked
+        // floors and independently blocks the rescue the first one enables.
         let threshold = -opts.neg_curv_tol * h_scale;
 
         let mut d = rhs[..n].to_vec();
