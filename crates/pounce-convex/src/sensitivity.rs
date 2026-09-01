@@ -62,6 +62,7 @@
 //!    the near-singularity shows up in the condition estimate (badly-scaled `P`)
 //!    or only in the stalled residual (well-scaled `P`, near-LICQ constraints).
 
+use crate::cones::ConeSpec;
 use crate::ipm::QpOptions;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_common::types::{Index, Number};
@@ -97,6 +98,120 @@ pub enum SensError {
     /// trusted. Only [`reduced_hessian`](QpSensitivity::reduced_hessian) can
     /// raise this; the parametric step does not eigendecompose.
     EigenFailed,
+    /// The solution's inequality block does not complement **row by row**, so
+    /// it is not a solution of an orthant-only problem and
+    /// [`build`](QpSensitivity::build) must not read it as one.
+    ///
+    /// [`solve_socp_ipm`](crate::solve_socp_ipm) returns the same
+    /// [`QpSolution`] type as [`solve_qp_ipm`](crate::solve_qp_ipm), and the
+    /// cone partition travels beside it as a separate `&[ConeSpec]` argument
+    /// that `build` never sees. Without this check a solved SOCP is accepted
+    /// and every cone row is silently read as an orthant row — a wrong
+    /// `dx/db` reported as a good one. A conic solution complements only as a
+    /// *block* inner product `⟨s, z⟩ = 0`; row-wise `sᵢ·zᵢ` is generally
+    /// nonzero and `z` generally has negative entries, which is what this
+    /// detects. Use [`build_conic`](QpSensitivity::build_conic) for a problem
+    /// that carries cones.
+    NotOrthantComplementary {
+        /// The inequality row whose evidence triggered the refusal.
+        row: usize,
+        /// Which test failed, for a diagnosable message.
+        what: &'static str,
+    },
+    /// The problem carries a cone family whose sensitivity is not implemented.
+    ///
+    /// Raised only by [`build_conic`](QpSensitivity::build_conic). Refusing is
+    /// deliberate: the alternative is a number that looks like a derivative and
+    /// is not one.
+    /// `ConeSpec` is deliberately not `Eq` (it carries `Power(f64)`), so the
+    /// family travels as its name rather than the spec — keeping `SensError`
+    /// `Eq`, which it has always been.
+    UnsupportedCone {
+        /// Index into the `&[ConeSpec]` slice.
+        block: usize,
+        /// The cone family that is not yet supported, e.g. `"SecondOrder"`.
+        family: &'static str,
+    },
+    /// The cone partition handed to
+    /// [`build_conic`](QpSensitivity::build_conic) does not cover the
+    /// inequality block exactly, so the caller and the builder disagree about
+    /// which rows are which.
+    ConePartitionMismatch {
+        /// Rows the partition accounts for (`Σ ConeSpec::dim`).
+        covered: usize,
+        /// Rows the problem actually has.
+        m_ineq: usize,
+    },
+}
+
+/// Refuse a solution whose inequality block does not complement row by row.
+///
+/// `gx` is `G·x` at the solution, so `sᵢ = hᵢ − gxᵢ` is row `i`'s slack. For a
+/// nonnegative-orthant row at an optimum, `sᵢ ≥ 0`, `zᵢ ≥ 0` and `sᵢzᵢ = μ ≈ 0`
+/// — all three hold *per row*. A conic block satisfies only `⟨s, z⟩ = 0` over
+/// the block, so a second-order-cone row on its boundary has `s = (t, u)` with
+/// `t = ‖u‖ > 0` and `z ∝ (t, −u)`: the tail entries of `z` are negative and
+/// `s₀z₀ = c·t² > 0`. Either signal is decisive.
+///
+/// # What this cannot catch
+///
+/// A second-order cone at its **apex** with `z_{1:} = 0` — `s = 0` and
+/// `z = (z₀, 0, …, 0)` — passes every test here, because row-wise it is
+/// indistinguishable from a degenerate orthant block, which is a legitimate
+/// input. That case needs the cone partition, which is what
+/// [`QpSensitivity::build_conic`] takes. This guard is the safety net for a
+/// caller who never mentions cones; it is not a substitute for telling the
+/// builder what the problem is.
+fn check_orthant_complementarity(
+    prob: &QpProblem,
+    sol: &QpSolution,
+    gx: &[f64],
+    primal_scale: f64,
+    dual_scale: f64,
+) -> Result<(), SensError> {
+    let sign_tol = ORTHANT_GUARD_REL * dual_scale;
+    let slack_tol = ORTHANT_GUARD_REL * primal_scale;
+    let comp_tol = ORTHANT_GUARD_REL * primal_scale * dual_scale;
+    for (i, (&h_i, &gx_i)) in prob.h.iter().zip(gx.iter()).enumerate() {
+        let s = h_i - gx_i;
+        let z = sol.z[i];
+        // A dual entry that is negative by more than round-off is not an
+        // orthant multiplier at all — the SOC dual's tail is the common case.
+        if z < -sign_tol {
+            return Err(SensError::NotOrthantComplementary {
+                row: i,
+                what: "the inequality multiplier is negative, which the nonnegative orthant \
+                       forbids; a second-order or exponential cone's dual has negative entries",
+            });
+        }
+        // Likewise a slack outside the orthant.
+        if s < -slack_tol {
+            return Err(SensError::NotOrthantComplementary {
+                row: i,
+                what: "the inequality slack is negative beyond the solve's own tolerance, so \
+                       this row is not a satisfied orthant row",
+            });
+        }
+        if (s * z).abs() > comp_tol {
+            return Err(SensError::NotOrthantComplementary {
+                row: i,
+                what: "slack and multiplier are both away from zero, so the row does not \
+                       complement; a conic block complements only as a block inner product",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The `ConeSpec` variant name, for [`SensError::UnsupportedCone`].
+fn cone_family(spec: &ConeSpec) -> &'static str {
+    match spec {
+        ConeSpec::Nonneg(_) => "Nonneg",
+        ConeSpec::SecondOrder(_) => "SecondOrder",
+        ConeSpec::Exponential => "Exponential",
+        ConeSpec::Power(_) => "Power",
+        ConeSpec::Psd(_) => "Psd",
+    }
 }
 
 /// Post-optimal sensitivity for a solved convex QP.
@@ -152,6 +267,35 @@ pub struct QpSensitivity {
 /// enough to look precise would simply miss the default-tolerance case, which
 /// is the one users hit.
 const WEAK_ACTIVE_REL: f64 = 1e-3;
+
+/// Relative margin for the orthant guard's three row-wise tests
+/// ([`SensError::NotOrthantComplementary`]).
+///
+/// Deliberately loose. The guard separates two *categorically* different
+/// inputs, not two nearby numbers: a converged orthant row has `sᵢ·zᵢ ≈ μ`,
+/// which is at round-off relative to `‖s‖∞·‖z‖∞`, while a second-order-cone
+/// row on its boundary has `s₀z₀ = c·s₀²`, which is `O(1)` on the same scale.
+///
+/// # The measured populations on each side
+///
+/// Worst row of each fixture, as the ratio this constant is compared against:
+///
+/// | fixture | `|sᵢzᵢ| / (‖s‖∞‖z‖∞)` | `max(−zᵢ) / ‖z‖∞` | verdict |
+/// |---|---|---|---|
+/// | `SecondOrder(3)` through `solve_socp_ipm` | **1.3e-1** | **1.2e-1** | must refuse |
+/// | convex QP, one active inequality | 1.7e-9 | 0 | must accept |
+/// | weakly-active (non-strictly-complementary) QP | 6.5e-9 | 0 | must accept |
+///
+/// The gap is **7.9 orders wide** and `1e-4` sits near its centre — about five
+/// orders below anything that must be refused and about five above anything
+/// that must be accepted. The weakly-active row is the one worth checking,
+/// since non-strict complementarity is the accept-side case that comes closest
+/// to the boundary, and it is still five orders clear.
+///
+/// The asymmetry is deliberate: a false *positive* is the failure that would
+/// matter, because this guard sits on the path of every convex sensitivity
+/// build, so the threshold is placed far from the accept side.
+const ORTHANT_GUARD_REL: f64 = 1e-4;
 
 /// Above this 1-norm condition estimate of the factored KKT the parametric
 /// step is reported [`ill_conditioned`](QpSensitivity::ill_conditioned).
@@ -414,6 +558,13 @@ impl QpSensitivity {
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(&sol.x, &mut gx);
         let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
+
+        // Before reading a single row as an orthant row, check that it is one.
+        // `solve_socp_ipm` hands back this very `QpSolution` type and the cone
+        // partition travels beside it, so without this a solved SOCP is
+        // accepted here and answered wrongly in silence.
+        check_orthant_complementarity(prob, sol, &gx, primal_scale, dual_scale)?;
+
         let dual_zero = WEAK_ACTIVE_REL * dual_scale;
         let primal_zero = WEAK_ACTIVE_REL * primal_scale;
 
@@ -545,6 +696,57 @@ impl QpSensitivity {
         F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
     {
         Self::build(prob, sol, &QpOptions::default(), 1e-7, make_backend)
+    }
+
+    /// [`build`](Self::build) for a problem that carries a cone partition —
+    /// the entry point for a solution produced by
+    /// [`solve_socp_ipm`](crate::solve_socp_ipm).
+    ///
+    /// `cones` is the same slice handed to the solve; its blocks stack in
+    /// order to cover the `m_ineq` inequality rows.
+    ///
+    /// An all-[`ConeSpec::Nonneg`] partition *is* the orthant problem, so it
+    /// delegates to [`build`](Self::build) and behaves identically. Every other
+    /// cone family currently returns [`SensError::UnsupportedCone`].
+    ///
+    /// The refusal is the feature. A cone's active object is not a set of rows
+    /// but the tangent/normal decomposition of the face its slack sits on, and
+    /// reading its rows as orthant rows produces a plausible number that is not
+    /// a derivative. Refusing names the gap; answering hides it.
+    pub fn build_conic<F>(
+        prob: &QpProblem,
+        cones: &[ConeSpec],
+        sol: &QpSolution,
+        opts: &QpOptions,
+        active_tol: f64,
+        make_backend: F,
+    ) -> Result<Self, SensError>
+    where
+        F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+    {
+        // The partition must cover the inequality block exactly, or the caller
+        // and the builder disagree about which rows are which. A short
+        // partition is the dangerous direction: `[Nonneg(2)]` on a problem
+        // whose rows 2.. are really a cone would pass the family check below
+        // and hand a conic solution to the orthant path. `build`'s row-wise
+        // guard would still catch that, but a caller error deserves to be
+        // reported as one rather than as a complementarity failure.
+        let covered: usize = cones.iter().map(ConeSpec::dim).sum();
+        if covered != prob.m_ineq() {
+            return Err(SensError::ConePartitionMismatch {
+                covered,
+                m_ineq: prob.m_ineq(),
+            });
+        }
+        for (block, spec) in cones.iter().enumerate() {
+            if !matches!(spec, ConeSpec::Nonneg(_)) {
+                return Err(SensError::UnsupportedCone {
+                    block,
+                    family: cone_family(spec),
+                });
+            }
+        }
+        Self::build(prob, sol, opts, active_tol, make_backend)
     }
 
     /// First-order primal step `dx ≈ x*(b + Δb) − x*(b)` for a perturbation

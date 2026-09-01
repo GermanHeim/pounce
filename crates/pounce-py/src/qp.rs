@@ -862,6 +862,28 @@ impl PyQpSensitivity {
             SensError::EigenFailed => {
                 PyValueError::new_err("QpSensitivity: a symmetric eigensolve did not converge")
             }
+            // Unreachable from Python: this constructor solves the problem
+            // itself with the QP interior-point solver and takes no `cones=`,
+            // so the solution it hands `build` is always an orthant one. The
+            // arm exists because `SensError` is shared with the Rust API,
+            // where a conic solution *can* reach `build` — and a message that
+            // says "cannot happen here" is more useful than a silent `_ =>`
+            // that would swallow a future variant.
+            SensError::NotOrthantComplementary { row, what } => PyValueError::new_err(format!(
+                "QpSensitivity: inequality row {row} does not complement ({what}). \
+                 This should be unreachable from Python, where the QP is solved \
+                 internally as an orthant problem — please report it."
+            )),
+            SensError::UnsupportedCone { block, family } => PyValueError::new_err(format!(
+                "QpSensitivity: cone block {block} is a {family} cone, which has no \
+                 sensitivity implementation. This should be unreachable from Python, \
+                 which exposes no `cones=` argument — please report it."
+            )),
+            SensError::ConePartitionMismatch { covered, m_ineq } => PyValueError::new_err(format!(
+                "QpSensitivity: the cone partition covers {covered} rows but the problem \
+                 has {m_ineq}. This should be unreachable from Python, which exposes no \
+                 `cones=` argument — please report it."
+            )),
         })?;
         Ok(Self {
             inner,
@@ -922,6 +944,16 @@ impl PyQpSensitivity {
             SensError::FactorizationFailed => {
                 PyValueError::new_err("QpSensitivity: the active-set KKT is singular")
             }
+            // `reduced_hessian` cannot raise either of these — both are build
+            // -time refusals and this object only exists once `build` returned
+            // `Ok`. Named rather than caught by `_` so that adding a variant
+            // `reduced_hessian` *can* raise fails the build here.
+            SensError::NotOrthantComplementary { .. }
+            | SensError::UnsupportedCone { .. }
+            | SensError::ConePartitionMismatch { .. } => PyValueError::new_err(
+                "QpSensitivity.reduced_hessian: build-time refusal reported after a \
+                     successful build — please report it",
+            ),
         })?;
         let d = PyDict::new_bound(py);
         d.set_item("n_dof", rh.n_dof)?;

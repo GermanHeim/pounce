@@ -198,6 +198,57 @@ inner-serial) and `QpFactorization` reuses the AMD ordering and symbolic
 factorization across solves that share a structure — the two compose with
 warm starting.
 
+## Post-optimal sensitivity (`QpSensitivity`)
+
+`QpSensitivity` is the convex arm's sIPOPT analog: it holds the factored
+active-set KKT system at the optimum, so each `parametric_step` is a single
+back-substitution.
+
+```python
+from pounce.qp import QpSensitivity
+
+# min ½‖x‖²  s.t.  x₀ + x₁ = 2   →   x* = (1, 1),  dx/db = (½, ½)
+s = QpSensitivity(P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[2.0])
+dx = s.parametric_step([0], [1.0])       # perturb b₀ by +1
+```
+
+It perturbs the **equality right-hand side** `b`, and reports the active set,
+the weakly-active set, a reduced Hessian, and two conditioning diagnostics
+(`ill_conditioned`, `last_step_residual`) that let a caller detect a step it
+should not trust.
+
+### It is an orthant capability, and says so
+
+`QpSensitivity` covers LP and convex QP — problems whose inequality block is
+a nonnegative orthant. It does **not** cover the conic arm (SOCP, QCQP,
+exponential, power, PSD).
+
+That distinction matters more than it looks, because `solve_socp_ipm` and
+`solve_qp_ipm` return the *same* `QpSolution` type and the cone partition
+travels beside it as a separate `cones` argument. So on the Rust API, handing
+a solved conic program to `QpSensitivity::build` used to be accepted and
+answered — every cone row read as an orthant row, producing a number that was
+not a derivative, with no warning. It is now refused with
+`SensError::NotOrthantComplementary`: an orthant row complements *row by row*
+(`sᵢ ≥ 0`, `zᵢ ≥ 0`, `sᵢzᵢ ≈ μ`), while a cone satisfies only the block inner
+product `⟨s, z⟩ = 0`.
+
+Use `QpSensitivity::build_conic(prob, cones, sol, …)` for a problem that
+carries cones. An all-`Nonneg` partition is the orthant problem and behaves
+identically to `build`; every other family returns
+`SensError::UnsupportedCone`. A cone's active object is the tangent/normal
+decomposition of the face its slack sits on rather than a set of rows, and
+that is not implemented yet — so the builder refuses rather than returning a
+plausible wrong answer.
+
+Python callers were never exposed to this: `pounce.qp.QpSensitivity` solves
+internally with the QP interior-point solver and accepts no `cones=`.
+
+For the NLP arm's much larger sensitivity surface — fix-relax and path modes,
+the directional decision at a kink, the corrector, activity classification,
+and the covariance/identifiability statistics — see
+[Sensitivity Analysis](sensitivity.md). The two arms are not at parity today.
+
 ## Presolve (PaPILO-inspired)
 
 Before the interior-point solve, POUNCE can apply a **transaction-stack

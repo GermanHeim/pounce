@@ -28,10 +28,19 @@
 //! `tests/` (Maros-Mészáros-style closed-form KKT optima). The active
 //! set engine is reached from Python through the SQP path
 //! (`Problem(algorithm = "active-set-sqp")`, with `working_set`
-//! warm-starting) and through `QpSensitivity` (parametric `dx/dp`), and
-//! from the CLI via `solver_selection = "qp-active-set"` on an LP /
-//! convex-QP `.nl` (routed through the SQP driver, which solves its step
-//! QPs here). Still outstanding: cross-checking the full 138-problem
+//! warm-starting), and from the CLI via `solver_selection =
+//! "qp-active-set"` on an LP / convex-QP `.nl` (routed through the SQP
+//! driver, which solves its step QPs here) and by LP crossover
+//! (`pounce_convex::crossover`, `qp_crossover=yes`), which pivots a
+//! near-optimal interior point to an exact vertex — through
+//! `pounce_convex::simplex` first, falling back to
+//! [`ParametricActiveSetSolver`].
+//!
+//! It is **not** reached through `pounce_convex::QpSensitivity`, which this
+//! text claimed until it was checked: that type solves with
+//! `solve_qp_ipm` and factors its own hand-assembled active-set KKT via
+//! `pounce_linsol::Factorization`. It never constructs a
+//! [`ParametricActiveSetSolver`] and never touches [`WorkingSet`]. Still outstanding: cross-checking the full 138-problem
 //! Maros-Mészáros `.qps` set against external oracles (qpOASES / OSQP),
 //! which is gated on the `.qps` distribution and FFI.
 //!

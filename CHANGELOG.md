@@ -163,6 +163,40 @@ changes.
   while the reroute lands **>10× further out on 43** of them. So the fix ships
   with its effect measured and its trigger unreproduced — the honest split, and
   the reason it also carries unit tests on all three branches of the helper.
+- **The convex sensitivity builder no longer reads a solved conic program as
+  an LP/QP (Rust API).** `solve_socp_ipm` and `solve_qp_ipm` return the same
+  `QpSolution`, and the cone partition travels beside it as a separate
+  `&[ConeSpec]` argument that `QpSensitivity::build` never saw. A Rust caller
+  could hand `build` a solved SOCP, QCQP or exponential-cone program and get a
+  `dx/db` back: every cone row was read as a nonnegative-orthant row, so the
+  active-set KKT was assembled from rows that are not the active object and
+  the answer was not a derivative. Nothing warned. `build` now checks that the
+  inequality block complements **row by row** — an orthant row has `sᵢ ≥ 0`,
+  `zᵢ ≥ 0` and `sᵢzᵢ ≈ μ` individually, where a cone satisfies only the block
+  inner product `⟨s, z⟩ = 0` — and refuses with the new
+  `SensError::NotOrthantComplementary { row, what }`. Python was never exposed:
+  `pounce.qp.QpSensitivity` solves internally with `solve_qp_ipm` and accepts
+  no `cones=`.
+
+  New `QpSensitivity::build_conic(prob, cones, sol, opts, active_tol, backend)`
+  is the entry point for a problem that carries cones. An all-`Nonneg`
+  partition *is* the orthant problem and behaves exactly as `build`; every
+  other family returns the new `SensError::UnsupportedCone { block, family }`.
+  Refusing is the point — a cone's active object is the tangent/normal
+  decomposition of the face its slack sits on, not a set of rows, and there is
+  no sensitivity implementation for it yet.
+
+  One limit is documented and pinned rather than hidden: a second-order cone at
+  its apex with a zero dual tail is row-wise indistinguishable from orthant
+  degeneracy, which is a legitimate input, so only `build_conic` — which is
+  told — catches it. See `crates/pounce-convex/tests/conic_sensitivity_refused.rs`.
+
+- **`pounce-qp`'s crate documentation claimed a call path that does not
+  exist.** It stated the active-set engine "is reached from Python … through
+  `QpSensitivity`". It is not: `QpSensitivity` solves with `solve_qp_ipm` and
+  factors its own hand-assembled active-set KKT through `pounce_linsol`,
+  never constructing a `ParametricActiveSetSolver`. The engine *is* reached by
+  LP crossover (`qp_crossover=yes`), which the text omitted.
 
 ### Added
 
