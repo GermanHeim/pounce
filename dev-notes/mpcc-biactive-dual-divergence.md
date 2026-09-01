@@ -1,15 +1,19 @@
 # gh#884: why the biactive dual divergence is not a targeted fix
 
 Status: **gh#884 open.** This note records what was measured while
-attempting a fix, three approaches ruled out by measurement, and one that
-is **not** ruled out and looks like the most promising route. It exists so
+attempting a fix, **four** approaches ruled out by measurement — three in
+the *trigger* family and one in the *policy* family — and one that is
+**not** ruled out and looks like the most promising route. It exists so
 the next attempt starts from the measurements rather than from the same
 ideas.
 
-**All measurements below were taken on `87402274`** (whose solver source is
-identical to `main` at `7c42947f` — this branch adds only a test file and
-this note). Re-measure rather than trusting these numbers across any
-commit that touches the IPM.
+**Provenance.** Ruled out 1–3, the mechanism trace and the `||d||`
+separation were measured on `87402274`, whose solver source is identical
+to `main` at `7c42947f` (this branch adds only a test file and this
+note). **Ruled out 4 was measured on `d89771bc`** plus an unpushed
+working-tree patch, and is the one section not reproducible from this
+repository — see its own provenance paragraph. Re-measure rather than
+trusting any of these numbers across a commit that touches the IPM.
 
 Guards: `crates/pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`.
 
