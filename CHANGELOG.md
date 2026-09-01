@@ -63,6 +63,26 @@ changes.
   from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
   asserts the index spaces really do diverge before trusting the leg.
 
+### Documentation
+
+- **The comparison against `pyomo.contrib.sensitivity_toolbox` is now in one
+  place.** `docs/src/sensitivity.md` said three separate things about the Pyomo
+  toolbox — a divergence note under "Declared Params in variable bounds", the
+  sIPOPT-driven verification table, and nothing at all about the capability
+  gap — so a reader deciding between the two had to assemble the answer
+  themselves. A new "Compared with the Pyomo sensitivity toolbox" section
+  collects it: what the toolbox's four entry points are and which binaries each
+  needs, a feature-by-feature table, the three cases where the toolbox is the
+  right tool (any Ipopt build, `pynumero.get_dsdp_dfdp`'s solver-free square
+  path, and `parmest` / `contrib.doe` incumbency), what POUNCE reuses from it
+  (`setup_sensitivity` on the call-time `sens_params=` route only), and three
+  defects measured against Pyomo 6.10.0 — a filtered name list indexed against
+  an unfiltered array in `get_dsdp` and `get_dfds_dcds`, the acknowledged
+  `DeltaP` sign inversion, and an options mapping assigned to a single option
+  name. None of the three is reachable from POUNCE, and the section says why
+  for each. The two older passages now cross-reference it instead of
+  half-answering the question.
+
 ### Fixed
 - **The cost-normalization (`σ`) path no longer certifies a wrong answer on a
   coupled Hessian (gh #880).** When `hsde_cost_scale` rescales the objective,
