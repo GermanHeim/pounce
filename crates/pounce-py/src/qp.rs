@@ -879,6 +879,12 @@ impl PyQpSensitivity {
                  sensitivity implementation. This should be unreachable from Python, \
                  which exposes no `cones=` argument — please report it."
             )),
+            // `build` does not run the bound refinement, so it cannot raise
+            // this. Named rather than swallowed for the same reason as above.
+            SensError::Refinement(msg) => PyValueError::new_err(format!(
+                "QpSensitivity: bound refinement reported '{msg}' during build, which \
+                 does not run the refinement — please report it."
+            )),
             SensError::ConePartitionMismatch { covered, m_ineq } => PyValueError::new_err(format!(
                 "QpSensitivity: the cone partition covers {covered} rows but the problem \
                  has {m_ineq}. This should be unreachable from Python, which exposes no \
@@ -950,7 +956,8 @@ impl PyQpSensitivity {
             // `reduced_hessian` *can* raise fails the build here.
             SensError::NotOrthantComplementary { .. }
             | SensError::UnsupportedCone { .. }
-            | SensError::ConePartitionMismatch { .. } => PyValueError::new_err(
+            | SensError::ConePartitionMismatch { .. }
+            | SensError::Refinement(_) => PyValueError::new_err(
                 "QpSensitivity.reduced_hessian: build-time refusal reported after a \
                      successful build — please report it",
             ),

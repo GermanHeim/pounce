@@ -217,6 +217,45 @@ the weakly-active set, a reduced Hessian, and two conditioning diagnostics
 (`ill_conditioned`, `last_step_residual`) that let a caller detect a step it
 should not trust.
 
+### Holding the step inside the bounds
+
+The plain step is a linear predictor, so a large enough perturbation can point
+outside the variable box. `parametric_step_bounded` repairs that the way the NLP
+arm does — by pinning the crossing coordinate at its bound and re-solving, so the
+other coordinates move to suit and the constraints still hold. Clipping instead
+would satisfy the bounds and quietly break the equalities.
+
+```rust
+let (dx, pinned, stop) =
+    sens.parametric_step_bounded(&[0], &[-6.0], /* bound_eps */ 1e-3, /* max_iter */ 16)?;
+```
+
+This is not a second implementation: it runs
+`pounce_sens_core::boundcheck::refine_step_onto_bounds`, the same code the NLP
+arm runs, reached through `QpSensitivity::backsolver()`. That machinery is
+generic over the `SensBacksolver` trait, whose whole required surface is `dim()`
+and `solve(rhs, lhs)`, so an engine that can back-solve against its converged
+factor gets fix-relax, path following and the directional derivative without
+porting any of them.
+
+**The refinement currently pins only.** A bound whose multiplier the step drives
+*negative* is not released, so a perturbation pulling a variable off a bound
+still holds it there — the release half of fix-relax lands with the path modes.
+`QpKktBacksolver::supports_release()` reports which behaviour you have.
+
+### Degenerate LPs need crossover
+
+`lp_without_crossover()` is `true` when the problem is a pure LP (`P = 0`) whose
+solve did not run crossover. At a degenerate optimal vertex more constraints are
+active than there are variables, the active-set KKT is rank-deficient, and
+`dx/db` is not single-valued — on a two-variable example the step comes back
+summing to half the perturbation it should. `ill_conditioned()` already catches
+that; this flag names the cause. The fix is to solve with `qp_crossover=yes`, so
+the interior point is pivoted to an exact vertex basis first.
+
+Because the flag reads `opts.crossover`, the options you hand to `build` must be
+the options the solve actually ran with.
+
 ### It is an orthant capability, and says so
 
 `QpSensitivity` covers LP and convex QP — problems whose inequality block is

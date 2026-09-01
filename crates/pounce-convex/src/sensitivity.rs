@@ -68,7 +68,11 @@ use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_common::types::{Index, Number};
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
+use pounce_sens_core::backsolver::{BoundRow, SensBacksolver};
+use pounce_sens_core::boundcheck::{BoundMultiplier, RefineStop, refine_step_onto_bounds};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// Group a constraint matrix's triplets by row, so an active-set assembly
 /// can read a row's `(col, val)` entries directly. Without this, both the
@@ -118,6 +122,9 @@ pub enum SensError {
         /// Which test failed, for a diagnosable message.
         what: &'static str,
     },
+    /// The bound refinement could not run — a shape mismatch or a back-solve
+    /// failure inside `pounce-sens-core`, carrying that layer's own message.
+    Refinement(String),
     /// The problem carries a cone family whose sensitivity is not implemented.
     ///
     /// Raised only by [`build_conic`](QpSensitivity::build_conic). Refusing is
@@ -225,13 +232,34 @@ pub struct QpSensitivity {
     m_eq: usize,
     /// KKT dimension `n + m_eq + n_active`.
     dim: usize,
-    fact: Factorization,
+    /// Shared so [`backsolver`](QpSensitivity::backsolver) can hand the same
+    /// factorization to the core's machinery — see [`QpKktBacksolver`].
+    fact: Rc<RefCell<Factorization>>,
     /// Problem data, retained for the reduced-Hessian projection.
     prob: QpProblem,
     /// Active inequality rows (indices into `G`).
     active_ineq: Vec<usize>,
-    /// Variables whose bound is active (one `eⱼᵀ` row each).
+    /// Variables whose bound is active (one row each).
     active_bound_vars: Vec<usize>,
+    /// The solution this sensitivity was built at, retained because the bound
+    /// refinement measures the step against the base point and the duality
+    /// measure needs the slacks.
+    base_x: Vec<f64>,
+    base_z: Vec<f64>,
+    base_z_lb: Vec<f64>,
+    base_z_ub: Vec<f64>,
+    /// The same set, carrying which side is active: `true` = lower bound.
+    /// The orientation is what `assemble_kkt` signs the row by and what the
+    /// recovered `dz_a` block is read against.
+    active_bounds: Vec<(usize, bool)>,
+    /// Each active bound's multiplier at the base point, oriented so it is the
+    /// non-negative multiplier of the row `assemble_kkt` emitted. Needed by the
+    /// release half of fix-relax, which has to move a released multiplier onto
+    /// its variable's `x` row.
+    bound_base_mult: Vec<f64>,
+    /// `true` when this is a pure LP (`P = 0`) whose solve did not run
+    /// crossover — see [`lp_without_crossover`](QpSensitivity::lp_without_crossover).
+    lp_without_crossover: bool,
     /// Inequality rows at which strict complementarity fails (gh #219).
     weakly_active_ineq: Vec<usize>,
     /// Variables whose bound is weakly active.
@@ -248,6 +276,8 @@ pub struct QpSensitivity {
     /// Relative KKT residual of the most recent parametric step, or `None`
     /// before any step has been taken (gh #284).
     last_residual: Option<f64>,
+    /// Reusable iterative-refinement buffers.
+    ir_scratch: IrScratch,
 }
 
 /// Relative threshold below which a slack or a multiplier counts as zero for
@@ -339,6 +369,14 @@ const STEP_UNRELIABLE_RESIDUAL: f64 = 1e-6;
 /// solve's `IR_MAX_PASSES`). A handful suffices: refinement against the
 /// unregularized KKT converges geometrically until it hits the near-singular
 /// floor, where it stagnates and stops.
+/// Margin below which a bound multiplier counts as driven negative by a step.
+///
+/// The NLP arm derives this from `bound_relax_factor`, since there the solve's
+/// own bound relaxation sets the scale. The convex path does not relax bounds
+/// in that sense, so this is the floor that derivation bottoms out at: `1e-9`,
+/// which upstream also uses when `bound_relax_factor` is unset or unreadable.
+const RELEASE_FLOOR: f64 = 1e-9;
+
 const IR_MAX_PASSES: usize = 5;
 
 /// Relative-residual target below which refinement stops early (the KKT step
@@ -449,15 +487,148 @@ fn estimate_inv_norm1(fact: &mut Factorization, dim: usize) -> f64 {
 /// both `‖r‖` and `‖rhs₀‖` by `1e-6`, but the `1 +` left the denominator at
 /// `≈ 1`, so a fully over-damped step (true relative residual `≈ 0.25`) read
 /// back as `≈ 2.5e-7` — small enough to look solved (gh #328).
+/// The assembled lower triangle of the active-set KKT, in the 1-based triplet
+/// form [`Factorization`] takes.
+///
+/// `vals_reg` is what gets factored (the `δ`-stabilized, indefinite matrix);
+/// `vals_true` is the same pattern with the regularization removed and is what
+/// iterative refinement measures its residual against (gh #284). They share one
+/// sparsity pattern by construction, which is what lets a release re-use the
+/// symbolic factor.
+struct KktPattern {
+    airn: Vec<Index>,
+    ajcn: Vec<Index>,
+    vals_true: Vec<f64>,
+    vals_reg: Vec<f64>,
+    dim: usize,
+}
+
+/// Assemble the active-set KKT
+///
+/// ```text
+///   ⎡ P    Aᵀ   B_aᵀ ⎤
+///   ⎢ A    0    0    ⎥
+///   ⎣ B_a  0    0    ⎦
+/// ```
+///
+/// `B_a` stacks the active inequality rows of `G` then one row per active
+/// variable bound, in the order given. Every diagonal slot is materialized
+/// (even where `P` is zero) so `vals_true` and `vals_reg` share one pattern.
+///
+/// # Bound-row orientation
+///
+/// `active_bounds` carries `(variable, is_lower)`, and the sign matters. In the
+/// `Gx ≤ h` orientation the convex form uses, a lower bound `lb ≤ xⱼ` is the row
+/// `−eⱼᵀ` (its multiplier is `z_lb ≥ 0`, entering stationarity as `−z_lb`), and
+/// an upper bound `xⱼ ≤ ub` is `+eⱼᵀ`. Emitting `+1` for both — as this code did
+/// before the sign was needed — is invisible while the active block's
+/// right-hand side is zero, because `eⱼᵀ dx = 0` and `−eⱼᵀ dx = 0` are the same
+/// constraint. It stops being invisible the moment anything *reads* the
+/// recovered multiplier block `dz_a`, where the lower-bound entries come back
+/// negated. `the_recovered_bound_multipliers_carry_the_solutions_sign` pins it.
+fn assemble_kkt(
+    prob: &QpProblem,
+    active_ineq: &[usize],
+    active_bounds: &[(usize, bool)],
+    reg: f64,
+) -> KktPattern {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let n_active = active_ineq.len() + active_bounds.len();
+    let dim = n + m_eq + n_active;
+
+    let mut entries: BTreeMap<(usize, usize), (f64, f64)> = BTreeMap::new();
+    let mut add = |r: usize, c: usize, v: f64, reg_off: f64| {
+        let (r, c) = if r >= c { (r, c) } else { (c, r) };
+        let e = entries.entry((r, c)).or_insert((0.0, 0.0));
+        e.0 += v;
+        e.1 += reg_off;
+    };
+
+    // (x,x): P, with +δ on the diagonal for the factor only.
+    for t in &prob.p_lower {
+        add(t.row, t.col, t.val, 0.0);
+    }
+    for i in 0..n {
+        add(i, i, 0.0, reg);
+    }
+    // (y,x): A; (y,y): −δI (factor only).
+    for t in &prob.a {
+        add(n + t.row, t.col, t.val, 0.0);
+    }
+    for i in 0..m_eq {
+        add(n + i, n + i, 0.0, -reg);
+    }
+    // Active-row block `B_a`: active inequality rows, then active bound rows.
+    let abase = n + m_eq;
+    let g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
+    for (k, &i) in active_ineq.iter().enumerate() {
+        for &(col, val) in &g_rows[i] {
+            add(abase + k, col, val, 0.0);
+        }
+    }
+    for (k, &(j, is_lower)) in active_bounds.iter().enumerate() {
+        let sign = if is_lower { -1.0 } else { 1.0 };
+        add(abase + active_ineq.len() + k, j, sign, 0.0);
+    }
+    for k in 0..n_active {
+        add(abase + k, abase + k, 0.0, -reg);
+    }
+
+    let nnz = entries.len();
+    let mut airn = Vec::with_capacity(nnz);
+    let mut ajcn = Vec::with_capacity(nnz);
+    let mut vals_true = Vec::with_capacity(nnz);
+    let mut vals_reg = Vec::with_capacity(nnz);
+    for ((r, c), (v_true, v_reg_off)) in entries {
+        airn.push((r + 1) as Index);
+        ajcn.push((c + 1) as Index);
+        vals_true.push(v_true);
+        vals_reg.push(v_true + v_reg_off);
+    }
+    KktPattern {
+        airn,
+        ajcn,
+        vals_true,
+        vals_reg,
+        dim,
+    }
+}
+
+/// Reusable buffers for [`solve_refined`].
+///
+/// Hoisted out of the function because [`QpKktBacksolver::solve`] is called
+/// once per candidate row per refinement pass — `refine_step_onto_bounds` makes
+/// `k + 1` back-solves per pass — so a per-call `Vec` allocation turns `O(1)`
+/// into `O(k)` for no reason.
+#[derive(Default, Clone)]
+struct IrScratch {
+    b: Vec<f64>,
+    r: Vec<f64>,
+}
+
+impl IrScratch {
+    fn ready(&mut self, dim: usize) {
+        self.b.clear();
+        self.b.resize(dim, 0.0);
+        self.r.clear();
+        self.r.resize(dim, 0.0);
+    }
+}
+
 fn solve_refined(
     fact: &mut Factorization,
     airn: &[Index],
     ajcn: &[Index],
     vals_true: &[f64],
     rhs: &mut [f64],
+    scratch: &mut IrScratch,
 ) -> Result<f64, ()> {
     let dim = rhs.len();
-    let b: Vec<f64> = rhs.to_vec();
+    scratch.ready(dim);
+    let b = &mut scratch.b;
+    b.copy_from_slice(rhs);
+    let b = &*b;
     fact.solve_one(rhs).map_err(|_| ())?;
     // True relative residual: divide by ‖rhs₀‖, flooring only a genuinely zero
     // RHS (whose exact solution is the zero step, residual zero) to avoid 0/0.
@@ -465,14 +636,14 @@ fn solve_refined(
         let bn = inf_norm(&b);
         if bn > 0.0 { bn } else { 1.0 }
     };
-    let mut r = vec![0.0; dim];
+    let r = &mut scratch.r;
     let mut res = f64::INFINITY;
     for _ in 0..IR_MAX_PASSES {
-        kkt_matvec(airn, ajcn, vals_true, rhs, &mut r);
+        kkt_matvec(airn, ajcn, vals_true, rhs, r);
         for k in 0..dim {
             r[k] = b[k] - r[k];
         }
-        let new_res = inf_norm(&r) / bnorm;
+        let new_res = inf_norm(r) / bnorm;
         // Stop when solved to working precision, or when refinement stops
         // making progress — the latter is the near-singular floor and its
         // residual is exactly the "step is unreliable" signal.
@@ -481,7 +652,7 @@ fn solve_refined(
             break;
         }
         res = new_res;
-        fact.solve_one(&mut r).map_err(|_| ())?;
+        fact.solve_one(r).map_err(|_| ())?;
         for k in 0..dim {
             rhs[k] += r[k];
         }
@@ -533,12 +704,17 @@ impl QpSensitivity {
         let active_ineq: Vec<usize> = (0..prob.m_ineq())
             .filter(|&i| sol.z[i] > active_tol)
             .collect();
-        // A bound contributes one row `eⱼᵀ` (the gradient of `xⱼ = const` is
-        // `eⱼ` whether the lower or upper bound is the active one).
-        let active_bound_vars: Vec<usize> = (0..n)
+        // A bound contributes one row per variable, oriented by which side is
+        // active: `−eⱼᵀ` for a lower bound, `+eⱼᵀ` for an upper one (see
+        // `assemble_kkt`). A variable active on both sides is a fixed variable
+        // (`lb == ub`); it gets one row, and the larger multiplier decides the
+        // orientation, which is the side the solve actually leaned on.
+        let active_bounds: Vec<(usize, bool)> = (0..n)
             .filter(|&j| sol.z_lb[j] > active_tol || sol.z_ub[j] > active_tol)
+            .map(|j| (j, sol.z_lb[j] >= sol.z_ub[j]))
             .collect();
-        let n_active = active_ineq.len() + active_bound_vars.len();
+        let active_bound_vars: Vec<usize> = active_bounds.iter().map(|&(j, _)| j).collect();
+        let n_active = active_ineq.len() + active_bounds.len();
         let dim = n + m_eq + n_active;
 
         // Weak activity (gh #219): binding in the primal *and* negligible in
@@ -589,66 +765,13 @@ impl QpSensitivity {
             })
             .collect();
 
-        // Assemble the lower triangle of the symmetric KKT matrix. We keep the
-        // *unregularized* value and the regularization offset per entry
-        // separately: the factor sees `value + reg_offset` (the stabilized,
-        // indefinite matrix) while iterative refinement in `step_from_db`
-        // measures the residual against the `δ`-free `value` (gh #284). Every
-        // diagonal slot `(i, i)` is materialized (even where `P` is zero) so
-        // the two value arrays share one sparsity pattern.
-        let mut entries: BTreeMap<(usize, usize), (f64, f64)> = BTreeMap::new();
-        let mut add = |r: usize, c: usize, v: f64, reg_off: f64| {
-            let (r, c) = if r >= c { (r, c) } else { (c, r) };
-            let e = entries.entry((r, c)).or_insert((0.0, 0.0));
-            e.0 += v;
-            e.1 += reg_off;
-        };
-
-        // (x,x): P, with +δ on the diagonal for the factor only.
-        for t in &prob.p_lower {
-            add(t.row, t.col, t.val, 0.0);
-        }
-        for i in 0..n {
-            add(i, i, 0.0, reg);
-        }
-        // (y,x): A; (y,y): −δI (factor only).
-        for t in &prob.a {
-            add(n + t.row, t.col, t.val, 0.0);
-        }
-        for i in 0..m_eq {
-            add(n + i, n + i, 0.0, -reg);
-        }
-        // Active-row block `B_a` after the equality rows, in order:
-        // active inequality rows, then active bound rows. (·,·): −δI diagonal
-        // (factor only).
-        let abase = n + m_eq;
-        let g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
-        for (k, &i) in active_ineq.iter().enumerate() {
-            // The k-th active row holds G's row i.
-            for &(col, val) in &g_rows[i] {
-                add(abase + k, col, val, 0.0);
-            }
-        }
-        for (k, &j) in active_bound_vars.iter().enumerate() {
-            add(abase + active_ineq.len() + k, j, 1.0, 0.0);
-        }
-        for k in 0..n_active {
-            add(abase + k, abase + k, 0.0, -reg);
-        }
-
-        // Triplets → 1-based lower-triangle arrays. `values_reg` (true + reg
-        // offset) is factored; `kkt_vals_true` (δ-free) drives refinement.
-        let nnz = entries.len();
-        let mut kkt_airn = Vec::with_capacity(nnz);
-        let mut kkt_ajcn = Vec::with_capacity(nnz);
-        let mut kkt_vals_true = Vec::with_capacity(nnz);
-        let mut values_reg = Vec::with_capacity(nnz);
-        for ((r, c), (v_true, v_reg_off)) in entries {
-            kkt_airn.push((r + 1) as Index);
-            kkt_ajcn.push((c + 1) as Index);
-            kkt_vals_true.push(v_true);
-            values_reg.push(v_true + v_reg_off);
-        }
+        let KktPattern {
+            airn: kkt_airn,
+            ajcn: kkt_ajcn,
+            vals_true: kkt_vals_true,
+            vals_reg: values_reg,
+            ..
+        } = assemble_kkt(prob, &active_ineq, &active_bounds, reg);
 
         // 1-norm of the factored (regularized) KKT, for the condition estimate.
         let kkt_norm1 = one_norm_sym(dim, &kkt_airn, &kkt_ajcn, &values_reg);
@@ -667,11 +790,24 @@ impl QpSensitivity {
         let inv_norm1 = estimate_inv_norm1(&mut fact, dim);
         let kkt_cond_estimate = kkt_norm1 * inv_norm1;
 
+        // Oriented base multipliers, in the row order `assemble_kkt` used.
+        let bound_base_mult: Vec<f64> = active_bounds
+            .iter()
+            .map(|&(j, is_lower)| if is_lower { sol.z_lb[j] } else { sol.z_ub[j] })
+            .collect();
+        let lp_without_crossover = prob.p_lower.is_empty() && !opts.crossover;
+
         Ok(QpSensitivity {
             n,
             m_eq,
+            base_x: sol.x.clone(),
+            base_z: sol.z.clone(),
+            base_z_lb: sol.z_lb.clone(),
+            base_z_ub: sol.z_ub.clone(),
+            active_bounds,
+            bound_base_mult,
+            lp_without_crossover,
             dim,
-            fact,
             prob: prob.clone(),
             active_ineq,
             active_bound_vars,
@@ -682,6 +818,8 @@ impl QpSensitivity {
             kkt_vals_true,
             kkt_cond_estimate,
             last_residual: None,
+            ir_scratch: IrScratch::default(),
+            fact: Rc::new(RefCell::new(fact)),
         })
     }
 
@@ -801,18 +939,211 @@ impl QpSensitivity {
         rhs[self.n..self.n + self.m_eq].copy_from_slice(db);
         // A singular factor would have been caught at build; a back-solve
         // failure here is not recoverable, so surface a zero step.
+        let mut fact = self.fact.borrow_mut();
         match solve_refined(
-            &mut self.fact,
+            &mut fact,
             &self.kkt_airn,
             &self.kkt_ajcn,
             &self.kkt_vals_true,
             &mut rhs,
+            &mut self.ir_scratch,
         ) {
             Ok(res) => self.last_residual = Some(res),
             Err(()) => return vec![0.0; self.n],
         }
         rhs.truncate(self.n);
         rhs
+    }
+
+    /// The full compound KKT step for an equality-RHS perturbation `db`,
+    /// length [`kkt_dim`](Self::kkt_dim) rather than truncated to `n`.
+    ///
+    /// [`step_from_db`](Self::step_from_db) returns the primal block; the
+    /// bound refinement needs the whole vector, because the multiplier rows are
+    /// what tell it which bounds the step drives negative.
+    fn full_step_from_db(&mut self, db: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+        assert_eq!(db.len(), self.m_eq, "db must have length m_eq");
+        let mut rhs = vec![0.0 as Number; self.dim];
+        rhs[self.n..self.n + self.m_eq].copy_from_slice(db);
+        let rhs_plain = rhs.clone();
+        let mut fact = self.fact.borrow_mut();
+        match solve_refined(
+            &mut fact,
+            &self.kkt_airn,
+            &self.kkt_ajcn,
+            &self.kkt_vals_true,
+            &mut rhs,
+            &mut self.ir_scratch,
+        ) {
+            Ok(res) => {
+                drop(fact);
+                self.last_residual = Some(res);
+                Some((rhs, rhs_plain))
+            }
+            Err(()) => None,
+        }
+    }
+
+    /// The active-set KKT as a [`SensBacksolver`], sharing this object's
+    /// factorization.
+    ///
+    /// This is the seam onto `pounce-sens-core`: anything there that is generic
+    /// over the trait works on a convex QP through this handle.
+    pub fn backsolver(&self) -> QpKktBacksolver {
+        let abase = self.n + self.m_eq + self.active_ineq.len();
+        let bound_rows: Vec<BoundRow> = self
+            .active_bounds
+            .iter()
+            .enumerate()
+            .map(|(k, &(j, is_lower))| BoundRow {
+                row: abase + k,
+                var_row: j,
+                lower: is_lower,
+            })
+            .collect();
+        QpKktBacksolver {
+            fact: Rc::clone(&self.fact),
+            airn: Rc::new(self.kkt_airn.clone()),
+            ajcn: Rc::new(self.kkt_ajcn.clone()),
+            vals_true: Rc::new(self.kkt_vals_true.clone()),
+            scratch: Rc::new(RefCell::new(IrScratch::default())),
+            dim: self.dim,
+            bound_rows: Rc::new(bound_rows),
+            last_residual: Rc::new(Cell::new(f64::NAN)),
+        }
+    }
+
+    /// [`parametric_step`](Self::parametric_step), refined to respect the
+    /// variable bounds — the convex arm's `fix_relax`.
+    ///
+    /// The plain step is a linear predictor and can point outside the box.
+    /// Clipping the offending coordinate is cheap but leaves every other one at
+    /// its unclipped value, so the result satisfies the bounds and no longer
+    /// satisfies the constraints. This instead pins the crossing coordinate at
+    /// its bound and re-solves, so the others move with it.
+    ///
+    /// Returns `(dx, pinned_variables, stop_reason)`. The computation is
+    /// `pounce_sens_core::boundcheck::refine_step_onto_bounds` — the same code
+    /// the NLP arm runs, reached through [`backsolver`](Self::backsolver)
+    /// rather than reimplemented.
+    ///
+    /// In this phase the refinement **pins only**: a bound whose multiplier the
+    /// step drives negative is not released (see
+    /// [`QpKktBacksolver::supports_release`]), so a perturbation pulling a
+    /// variable off a bound is still held there.
+    pub fn parametric_step_bounded(
+        &mut self,
+        pin_constraint_indices: &[usize],
+        deltas: &[f64],
+        bound_eps: f64,
+        max_iter: usize,
+    ) -> Result<(Vec<f64>, Vec<usize>, RefineStop), SensError> {
+        assert_eq!(
+            pin_constraint_indices.len(),
+            deltas.len(),
+            "pin_constraint_indices and deltas must have equal length"
+        );
+        let mut db = vec![0.0; self.m_eq];
+        for (&i, &d) in pin_constraint_indices.iter().zip(deltas) {
+            assert!(i < self.m_eq, "pin constraint index {i} out of range");
+            db[i] += d;
+        }
+        let (dx_full, rhs_plain) = self
+            .full_step_from_db(&db)
+            .ok_or(SensError::FactorizationFailed)?;
+
+        let n = self.n;
+        let lo: Vec<f64> = (0..n).map(|j| self.prob.lb_of(j)).collect();
+        let hi: Vec<f64> = (0..n).map(|j| self.prob.ub_of(j)).collect();
+        let x_curr: Vec<f64> = self.base_x.clone();
+        let abase = n + self.m_eq + self.active_ineq.len();
+        let multipliers: Vec<BoundMultiplier> = self
+            .bound_base_mult
+            .iter()
+            .enumerate()
+            .map(|(k, &base)| BoundMultiplier {
+                row: abase + k,
+                base,
+            })
+            .collect();
+
+        let bs = self.backsolver();
+        let (dx, pinned, stop) = refine_step_onto_bounds(
+            &bs,
+            &dx_full,
+            &x_curr,
+            &lo,
+            &hi,
+            &multipliers,
+            &rhs_plain,
+            bound_eps,
+            RELEASE_FLOOR,
+            max_iter,
+        )
+        .map_err(SensError::Refinement)?;
+        self.last_residual = Some(bs.last_residual());
+        Ok((dx[..n].to_vec(), pinned, stop))
+    }
+
+    /// The achieved complementarity `⟨s, z⟩ / degree` at the solution.
+    ///
+    /// The μ-scaled activity classification the NLP arm uses needs a barrier
+    /// parameter, and `QpSolution` does not carry one. It does not need to:
+    /// everything required is derivable from `(prob, sol)`, which is why this
+    /// is a method rather than a new field — the type is all-public, not
+    /// `#[non_exhaustive]`, and constructed by literal in dozens of places.
+    ///
+    /// Caveat worth knowing before comparing arms: this is the *achieved*
+    /// complementarity at the returned point, not the barrier parameter the
+    /// last interior-point iteration actually ran at. They agree to within the
+    /// centering ratio at convergence, and the classification bands are decades
+    /// wide, so it is fine for classifying — but a cross-arm test must not
+    /// demand bit-agreement with the NLP's `barrier_mu()`.
+    pub fn duality_measure(&self) -> f64 {
+        let prob = &self.prob;
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(&self.base_x, &mut gx);
+        let mut total = 0.0;
+        let mut degree = 0usize;
+        for (i, &gx_i) in gx.iter().enumerate() {
+            total += (prob.h[i] - gx_i) * self.base_z[i];
+            degree += 1;
+        }
+        for j in 0..prob.n {
+            let (lb, ub) = (prob.lb_of(j), prob.ub_of(j));
+            if lb > -BOUND_INF {
+                total += (self.base_x[j] - lb) * self.base_z_lb[j];
+                degree += 1;
+            }
+            if ub < BOUND_INF {
+                total += (ub - self.base_x[j]) * self.base_z_ub[j];
+                degree += 1;
+            }
+        }
+        if degree == 0 {
+            0.0
+        } else {
+            total / degree as f64
+        }
+    }
+
+    /// `true` when this is a pure LP (`P = 0`) whose solve did not run
+    /// crossover, so a **degenerate** optimal vertex is a real hazard here.
+    ///
+    /// At a degenerate LP vertex more constraints are active than there are
+    /// variables, the active-set KKT is rank-deficient, and `dx/db` is not
+    /// single-valued — measured on a two-variable example, the step comes back
+    /// summing to half the perturbation it should. That case *is* caught, by
+    /// [`ill_conditioned`](Self::ill_conditioned); this flag names the cause and
+    /// the remedy, which is to solve with `qp_crossover=yes` so the interior
+    /// point is pivoted to an exact vertex basis first.
+    ///
+    /// Reading `opts.crossover` means the `opts` handed to
+    /// [`build`](Self::build) must be **the options the solve actually ran
+    /// with**. Passing a fresh `QpOptions::default()` to `build` after solving
+    /// with crossover on would report `true` here and be wrong.
+    pub fn lp_without_crossover(&self) -> bool {
+        self.lp_without_crossover
     }
 
     /// Hager 1-norm estimate of the condition number `κ₁` of the (factored,
@@ -1846,5 +2177,132 @@ mod tests {
             1e-10,
             "module doc names this as the default sensitivity regularization δ",
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The `SensBacksolver` adapter.
+// ---------------------------------------------------------------------------
+
+/// The convex active-set KKT, as a [`SensBacksolver`].
+///
+/// This is what lets the convex arm reach the parametric machinery in
+/// `pounce-sens-core` — fix-relax refinement, and in due course path following
+/// and the directional derivative — instead of reimplementing it. That
+/// machinery is already generic over this trait, derives its variable count
+/// from slice lengths, and reads bounds only through [`BoundRow`], so the only
+/// thing it needed was an implementation over a different KKT.
+///
+/// # Why `Rc<RefCell<…>>`
+///
+/// Not a style choice. [`Factorization::solve_one`] takes `&mut self` while
+/// [`SensBacksolver::solve`] takes `&self`, and `boundcheck` additionally
+/// requires `B: Clone` while `Factorization` owns a non-`Clone`
+/// `TSymLinearSolver`. Shared interior mutability is the only shape that
+/// satisfies all three — and it is exactly the shape the NLP arm's
+/// `PdSensBacksolver` already uses for the same reasons.
+///
+/// # Block layout
+///
+/// The compound vector is `(x, y, z_a)`: `n` primal rows, `m_eq` equality
+/// multipliers, then one row per active constraint (inequality rows first, then
+/// bound rows). The NLP arm's is an eight-block iterate instead, which is fine —
+/// the shared machinery assumes only that block 0 is `x`.
+#[derive(Clone)]
+pub struct QpKktBacksolver {
+    fact: Rc<RefCell<Factorization>>,
+    airn: Rc<Vec<Index>>,
+    ajcn: Rc<Vec<Index>>,
+    vals_true: Rc<Vec<f64>>,
+    scratch: Rc<RefCell<IrScratch>>,
+    dim: usize,
+    bound_rows: Rc<Vec<BoundRow>>,
+    /// Relative residual of the most recent `solve`, so the caller's
+    /// `ill_conditioned` reporting keeps working across boundcheck-driven
+    /// solves. A `Cell` because `solve` takes `&self`.
+    last_residual: Rc<Cell<f64>>,
+}
+
+impl QpKktBacksolver {
+    /// Relative KKT residual of the most recent [`SensBacksolver::solve`],
+    /// or `f64::NAN` if none has run.
+    pub fn last_residual(&self) -> f64 {
+        self.last_residual.get()
+    }
+}
+
+impl SensBacksolver for QpKktBacksolver {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        if rhs.len() != self.dim || lhs.len() != self.dim {
+            return false;
+        }
+        lhs.copy_from_slice(rhs);
+        let mut fact = self.fact.borrow_mut();
+        let mut scratch = self.scratch.borrow_mut();
+        match solve_refined(
+            &mut fact,
+            &self.airn,
+            &self.ajcn,
+            &self.vals_true,
+            lhs,
+            &mut scratch,
+        ) {
+            Ok(res) => {
+                self.last_residual.set(res);
+                true
+            }
+            Err(()) => false,
+        }
+    }
+
+    /// `None`, and that is correct rather than unimplemented.
+    ///
+    /// The factor this trait answers in and the multipliers a caller reads off
+    /// `QpSolution` are already in one frame: Ruiz equilibration lives inside
+    /// `solve_qp_ipm` and is undone by `Scaling::unscale_solution` before the
+    /// solution is returned, and [`assemble_kkt`] builds from the raw
+    /// `QpProblem`. So the per-row factor is the identity.
+    ///
+    /// That is an **invariant, not a fact of nature**. If anyone later builds
+    /// the sensitivity KKT from equilibrated data — a plausible "make the
+    /// factorization faster" change — `F` silently becomes the Ruiz diagonal,
+    /// and every pin and release would read a mis-scaled multiplier against a
+    /// natural-units step.
+    ///
+    /// **And it is currently unguarded, measured rather than assumed.** Making
+    /// this return a non-identity vector turns *nothing* in the crate red,
+    /// because the only consumer is the release half of `refine_step_onto_bounds`
+    /// and [`supports_release`](Self::supports_release) is `false` here. So the
+    /// value is correct and untested at the same time. The phase that turns
+    /// release on is the phase that makes it load-bearing, and it owes this a
+    /// guard — a leg comparing a released step against a re-solve, which cannot
+    /// pass with a mis-scaled `F`.
+    ///
+    /// `the_step_is_unmoved_by_internal_equilibration` guards the neighbouring
+    /// and weaker claim that `dx/db` itself does not depend on whether the
+    /// solve equilibrated internally. That is worth having, but it exercises
+    /// `parametric_step`, which never reads this factor.
+    fn natural_units_factor(&self) -> Option<&[Number]> {
+        None
+    }
+
+    fn bound_rows(&self) -> Option<&[BoundRow]> {
+        Some(&self.bound_rows)
+    }
+
+    /// `false` in this phase: the refinement pins crossing coordinates but does
+    /// not release a bound whose multiplier the step drives negative.
+    ///
+    /// Releasing needs the released row taken out of the operator. On this arm
+    /// that is cheaper than on the NLP one — the convex active-set KKT carries
+    /// no barrier `σ = z/s` term to destroy, the bound is an explicit row — so
+    /// it is a matter of re-assembling with that row neutralized rather than of
+    /// recovering lost digits. It lands with the path modes.
+    fn supports_release(&self) -> bool {
+        false
     }
 }

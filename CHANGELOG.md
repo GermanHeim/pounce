@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **The convex QP sensitivity gains bound-respecting steps, by reaching the
+  shared core rather than reimplementing it (Rust API).**
+  `QpSensitivity::parametric_step_bounded` is the convex arm's `fix_relax`: a
+  linear predictor can point outside the variable box, and clipping the
+  offending coordinate leaves every other one at its unclipped value, so the
+  result satisfies the bounds and no longer satisfies the constraints. It
+  instead pins the crossing coordinate at its bound and re-solves, so the others
+  move with it.
+
+  The computation is `pounce_sens_core::boundcheck::refine_step_onto_bounds` —
+  the same code the NLP arm runs. The new `QpKktBacksolver` implements
+  `SensBacksolver` over the convex active-set KKT, which is all that machinery
+  needed: it is generic over the trait, derives its variable count from slice
+  lengths, and reads bounds only through `BoundRow`. Also new:
+  `QpSensitivity::backsolver()` (the handle), `duality_measure()` (the achieved
+  complementarity, derived from `(prob, sol)` rather than added as a
+  `QpSolution` field — that type is all-public and constructed by literal in
+  dozens of places), and `lp_without_crossover()`.
+
+  In this phase the refinement **pins only**. A bound whose multiplier the step
+  drives negative is not released, so a perturbation pulling a variable off a
+  bound still holds it there; `QpKktBacksolver::supports_release()` reports
+  `false` and a test pins that limit rather than leaving it implied.
+
+  A latent sign defect had to be fixed first. In the `Gx ≤ h` orientation the
+  convex form uses, an active lower bound is the row `−eⱼᵀ` and an upper bound
+  `+eⱼᵀ`; the assembly emitted `+1` for both. That is invisible while the active
+  block's right-hand side is zero — `eⱼᵀ dx = 0` and `−eⱼᵀ dx = 0` are the same
+  constraint — which is why 774 lines of inline tests never caught it, and it
+  becomes load-bearing the moment anything reads the recovered multiplier block,
+  which a release decision does. Verified by mutation: restoring the `+1` turns
+  exactly one test red and leaves every other test in the crate green.
+
+  `lp_without_crossover()` names a hazard rather than fixing one. At a
+  degenerate LP vertex the active-set KKT is rank-deficient and `dx/db` is not
+  single-valued — measured on a two-variable example, the step comes back
+  summing to half the perturbation it should. That case is already caught by
+  `ill_conditioned()`; the flag says *why* and points at `qp_crossover=yes`.
+  Reading `opts.crossover` means the options handed to `build` must be the
+  options the solve actually ran with.
+
 ### Changed
 
 - **New crate `pounce-sens-core`: the engine-agnostic half of the sensitivity

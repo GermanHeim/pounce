@@ -956,6 +956,7 @@ dependencies = [
  "pounce-linsol",
  "pounce-presolve",
  "pounce-qp",
+ "pounce-sens-core",
  "rayon",
  "tracing",
 ]
