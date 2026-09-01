@@ -253,7 +253,7 @@ six iterations.
 | complementarity tolerance floor | 61 | the `sqrt(tol)` section above |
 | source formulation | 36 | `infeasible_pair`: failing is the correct answer |
 | scaling | 14 | boundary item 5 |
-| POUNCE candidate | 8 | finding P2 — **open**; this label is the triage rules', not a claim about a mechanism |
+| POUNCE candidate | 8 | finding P2 — **open**, filed as gh#884; this label is the triage rules', not a claim about a mechanism |
 
 ### Nothing is assigned to DiscOpt
 
@@ -398,7 +398,7 @@ the starting point "feasible" at that row's scale. That path is shared
 with the IPM and SQP arms, predates this branch, and changing it is not
 this PR's to make.
 
-### P2 — a biactive pair breaks a cold exact-product solve. **Open: the exit is not what this section said, twice over.**
+### P2 — a biactive pair breaks a cold exact-product solve. **Open, filed as gh#884: the exit is not what this section said, twice over.**
 
 > **Status of this section.** It has now been rewritten three times, and
 > the first two versions were wrong in opposite directions — first
@@ -659,7 +659,10 @@ proposed fix can be checked against it before it is written.
 gh#794's issue-splitting rule is satisfied for filing this — minimal
 model, commit-stamped comparators, kill-switch evidence
 (`upstream_heuristics` moves 3 of the cells, `no_scaling` moves others,
-neither explains it) — but no issue is opened here.
+neither explains it) — and it is now filed as **gh#884**, which carries
+the measurements above, the seven-versus-one split, the two ruled-out
+fixes, the acceptance criteria, and the Python-versus-`.nl` path
+discrepancy as the cheap prerequisite.
 
 **A separate candidate this turned up**, recorded rather than filed:
 `recalc_y=yes` can take a point whose unscaled KKT error is `2.7e-02`
