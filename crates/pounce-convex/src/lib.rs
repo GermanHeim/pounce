@@ -34,6 +34,7 @@
 
 pub mod active_set;
 pub mod active_set_session;
+pub mod activity;
 pub(crate) mod aggregate;
 pub mod batch;
 pub mod cones;
@@ -83,6 +84,7 @@ pub use pounce_qp::HessianInertia;
 // needs and the one thing about the returned point that cannot be re-derived
 // from it (gh #848). Defined in `pounce-qp` next to the `QpStats` field it
 // fills; re-exported for the same reason `HessianInertia` is.
+pub use activity::ConvexActivityReport;
 pub use pounce_qp::SecondOrderVerdict;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{

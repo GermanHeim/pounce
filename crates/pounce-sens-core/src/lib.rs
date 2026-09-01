@@ -49,6 +49,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod activity_kernel;
 pub mod backsolver;
 pub mod boundcheck;
 pub mod p_calculator;
