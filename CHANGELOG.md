@@ -95,25 +95,36 @@ changes.
 
   Measured on a 72-instance census (`cond` `1e2 ‥ 1e12` × magnitude
   `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not),
-  claimed-optimal-but-wrong falls **17/72 → 9/72**:
+  claimed-optimal-but-wrong falls **17/72 → 9/72** against the census's fixed
+  `1e-6` threshold:
 
-  | `cond` | before | after | worst relative error after |
-  |---|---|---|---|
-  | `1e2`  | 0/12 | 0/12 | 6.4e-08 |
-  | `1e4`  | 0/12 | 0/12 | 6.3e-08 |
-  | `1e6`  | 2/12 | 0/12 | 3.8e-09 |
-  | `1e8`  | 3/12 | 0/12 | 1.1e-08 |
-  | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) |
-  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) |
+  | `cond` | before | after | worst relative error after | census can resolve |
+  |---|---|---|---|---|
+  | `1e2`  | 0/12 | 0/12 | 6.4e-08 | 2.2e-14 |
+  | `1e4`  | 0/12 | 0/12 | 6.3e-08 | 2.2e-12 |
+  | `1e6`  | 2/12 | 0/12 | 3.8e-09 | 2.2e-10 |
+  | `1e8`  | 3/12 | 0/12 | 1.1e-08 | 2.2e-08 |
+  | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) | 2.2e-06 |
+  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) | 2.2e-04 |
 
-  Two carve-outs, stated rather than papered over. At `cond = 1e12` the
-  estimator's own arithmetic floor is `ε·cond ≈ 1e-4`, so it under-reports by
-  roughly 30× and cannot reject reliably; independently, `qp_hsde=no` — the
-  destination a `σ` reject routes to — is *itself* wrong there, so rejecting
-  harder would not help. That is sub-problem 2 of gh #880 and is out of scope
-  here. And under an equality row the operator above is the wrong one (`A` has
-  no barrier diagonal; the honest form is the full saddle system), so the arm
-  declines rather than guessing.
+  **Read the error column, not the count.** The last column is the census's own
+  resolution: `x* = t` is exact by construction but `P = Q diag(e) Qᵀ` is formed
+  in floating point, so the realised optimum sits `ε·cond·‖t‖` from `t`. At the
+  bottom two rows the `1e-6` threshold is *below* that, so the count there
+  reports the reference's error as the solver's. Per instance, eight of the nine
+  survivors are at or under their own floor (`err/floor` `0.02 ‥ 1.05`) and only
+  one is outside it, by 2×. The signature the issue actually described is gone
+  outright: every failing coupled row in gh #880's table reported `Optimal` in
+  **one** iteration — an inert certificate — and after this change all 72 take
+  3–13. So this is evidence of a fix through `cond = 1e8` and evidence of no
+  regression above it; sharpening the reference so the top of the range means
+  something is gh #882.
+
+  Two limits, stated rather than papered over. The estimator computes `‖Δ‖` in
+  double precision, so its own arithmetic floor is `ε·cond` too and at `1e12` it
+  cannot distinguish a small error from zero. And under an equality row the
+  operator above is the wrong one (`A` has no barrier diagonal; the honest form
+  is the full saddle system), so the arm declines rather than guessing.
 
   `crates/pounce-convex/tests/issue880_coupled_sigma_forward_error.rs` (15
   tests) and `forward_error_operator_tests` in `ipm.rs` (13) pin it, with a

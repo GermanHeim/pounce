@@ -75,7 +75,8 @@
 //!
 //! Over the same 72-instance unconstrained census gh #875 used (`cond`
 //! `1e2 ‥ 1e12` × magnitude `1e-3 ‥ 1e3` × `n` ∈ {2, 5} × rotated or not),
-//! claimed-optimal-but-wrong goes **17/72 → 9/72**:
+//! claimed-optimal-but-wrong goes **17/72 → 9/72** against the census's fixed
+//! `1e-6` threshold:
 //!
 //! | `cond` | wrong before | wrong after | worst rel. err before | after |
 //! |---|---|---|---|---|
@@ -84,16 +85,48 @@
 //! | `1e10` | 6 | 3 | 3.208e-01 | 1.969e-06 |
 //! | `1e12` | 6 | 6 | 7.051e-01 | 4.479e-04 |
 //!
+//! **That fixed `1e-6` threshold is below the measurement's own noise floor at
+//! the bottom two rows, so read the last column, not the count.** `x* = t` is
+//! exact by construction but `P = Q diag(e) Qᵀ` is formed in floating point, so
+//! the census can only resolve an error down to `ε·cond·‖t‖` — `1.3e-6 ‥ 2.2e-6`
+//! at `cond = 1e10` and `1.9e-4 ‥ 2.2e-4` at `1e12`. gh #880 says so itself,
+//! in the `ref acc` column of its table; the rows it reported were three or
+//! more orders above their floor, and these are not. Per instance, `err/floor`
+//! for the nine survivors is
+//!
+//! ```text
+//!   k=49 1.05   k=51 0.63   k=57 0.89     (cond 1e10)
+//!   k=61 0.21   k=63 0.09   k=65 2.02
+//!   k=67 0.05   k=69 0.13   k=71 0.02     (cond 1e12)
+//! ```
+//!
+//! so **eight of the nine are at or under the floor** and only `k=65` is
+//! outside it, by 2×. The other signature is gone outright: every failing
+//! coupled row in gh #880's table reported `Optimal Solution Found` in **one**
+//! iteration, which is what an inert guard looks like. After this change all 72
+//! take 3–13, i.e. the arm fires everywhere and the residue is the destination's
+//! accuracy, not a certificate that was never checked.
+//!
+//! What that buys is a bound on the claim, not a stronger claim: the census can
+//! no longer tell a correct answer from a wrong one above `cond = 1e10`, so it
+//! is evidence of a fix through `1e8` and evidence of *nothing* above it in
+//! either direction. Resolving that needs a reference built in extended
+//! precision rather than a tighter guard — gh #882.
+//!
 //! # What this file is NOT evidence about
 //!
-//! **`cond ≥ 1e12`.** Six instances stay wrong, and the fix improves them by
-//! ~1500× rather than repairing them. Two things are true there at once: the
-//! estimator's own arithmetic floor is `ε·cond ≈ 1e-4`, so it under-reports by
-//! ~30× and some of those six are accepted on a genuinely uninformative
-//! number; and, separately, `qp_hsde=no` — the destination a `σ` reject routes
-//! to — is *itself* wrong at that conditioning, so rejecting harder has
-//! nowhere correct to route to. That second half is sub-problem 2 of gh #880
-//! and is deliberately out of scope here; `the_cond_1e12_floor_is_a_carve_out`
+//! **`cond ≥ 1e10`, in either direction.** Three things are simultaneously
+//! true up there and none of them is "six instances stay wrong". The estimator
+//! `‖Δ‖` is itself computed in double precision, so its own arithmetic floor is
+//! `ε·cond ≈ 1e-4` at `1e12` and it can under-report by ~30×. The census
+//! reference is no better, per the section above. And `qp_hsde=no` — the
+//! destination a `σ` reject routes to — was *itself* wrong at that conditioning
+//! in gh #880's table (`1.39` and `1.04` relative), so rejecting harder had
+//! nowhere correct to route to; after this change those two rows read `2.96e-05`
+//! and `4.68e-06`, but that improvement is measured with the same blunt ruler.
+//! The honest statement is that this file demonstrates the fix through
+//! `cond = 1e8` and demonstrates no regression above it.
+//! `the_cond_1e12_floor_is_a_carve_out`
 //! pins the improvement as a number so the carve-out cannot quietly widen.
 //!
 //! **Equality rows.** `sigma_forward_error_is_small` returns `true` outright

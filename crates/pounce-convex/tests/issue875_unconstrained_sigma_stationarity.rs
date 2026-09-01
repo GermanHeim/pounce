@@ -60,8 +60,10 @@
 //! step `‖Δ‖∞` — a norm of a vector, so basis-free, where any per-row ratio
 //! (this file's included) is not. Over the same 72-instance census the two
 //! fixes together take claimed-optimal-but-wrong from **32/72 → 17/72 → 9/72**,
-//! and the remaining 9 are `cond ≥ 1e10`, where the estimator's own arithmetic
-//! floor is `ε·cond`.
+//! and the remaining 9 all sit at `cond ≥ 1e10`, where the census's own
+//! reference is only good to `ε·cond·‖t‖` — eight of the nine are at or under
+//! that floor, so the count there is mostly the ruler and not the solver
+//! (gh #882).
 //!
 //! So a green run of *this* file still does not cover the coupled arm, for the
 //! same reason it never did — every fixture below is separable, and the
