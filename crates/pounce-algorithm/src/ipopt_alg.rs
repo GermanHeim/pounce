@@ -393,6 +393,14 @@ pub struct IpoptAlgorithm {
     /// the solve to decide whether a cold retry is authorized. It never
     /// changes a verdict by itself.
     dual_divergence_signature: bool,
+    /// gh#884 — the unscaled dual infeasibility at the iterate where
+    /// [`Self::dual_divergence_signature`] was set, or `0.0` if it never
+    /// was. This is the size of the runaway the detector actually saw,
+    /// and the application layer compares the *reported* answer against
+    /// it: a solve that fires the signature mid-flight and then works
+    /// its way back down has nothing left for the retry's remedy to
+    /// repair (gh#887). Written once, with the flag.
+    dual_divergence_detected_du: Number,
     /// Set true when the previous iterate was tagged tiny; on the
     /// second consecutive tiny step the loop sets `data.tiny_step_flag`
     /// so the mu update can attempt to terminate. Mirrors
@@ -663,6 +671,7 @@ impl IpoptAlgorithm {
             dual_divergence_retry_du_floor: DUAL_DIV_RETRY_DU_FLOOR,
             last_step_rel: Number::INFINITY,
             dual_divergence_signature: false,
+            dual_divergence_detected_du: 0.0,
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
             last_resto_entry_s: None,
@@ -2705,6 +2714,7 @@ impl IpoptAlgorithm {
                     && unscaled_du.is_finite()
                 {
                     self.dual_divergence_signature = true;
+                    self.dual_divergence_detected_du = unscaled_du;
                     tracing::debug!(target: "pounce::algorithm",
                         "[POUNCE] gh#884 dual-divergence signature at iter {}: \
                          step_rel={:.2e} inf_pr={:.2e} unscaled_inf_du={:.2e}; \
@@ -3588,6 +3598,13 @@ impl IpoptAlgorithm {
     /// signature. Sticky; see [`Self::dual_divergence_signature`].
     pub fn dual_divergence_signature(&self) -> bool {
         self.dual_divergence_signature
+    }
+
+    /// The unscaled dual infeasibility at the iterate that set
+    /// [`Self::dual_divergence_signature`]; `0.0` if it was never set.
+    /// See [`Self::dual_divergence_detected_du`].
+    pub fn dual_divergence_detected_du(&self) -> Number {
+        self.dual_divergence_detected_du
     }
 
     /// Port of `IpBacktrackingLineSearch::DetectTinyStep`

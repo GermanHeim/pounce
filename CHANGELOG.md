@@ -243,9 +243,24 @@ changes.
   fixture sweep moved, and the shipped build moves none. The scope is only
   as complete as the status is stable, and that is recorded rather than
   glossed: the same fixture under `limited_memory_ls_failure_restarts=1`
-  (off by default) exits `Restoration_Failed` and so is back in scope,
-  paying one extra solve — 6.1 s to 25.2 s for the same verdict and
-  objective, retry declined. Filed as gh#887 rather than absorbed.
+  (off by default) exits `Restoration_Failed` and so is back in scope.
+
+  So a second gate reads the *answer* rather than the trajectory (gh#887).
+  The detector fires on an iterate, and nothing says the solve ends there:
+  `deb7` shows the signature at iteration 560 and then works its way back
+  down to an unscaled KKT error of `9.9e1` before giving up, leaving no
+  runaway for `perturb_always_cd` to repair. The retry is spent only when
+  the reported answer still carries at least a hundredth of the runaway the
+  detector fired on. That test is a ratio rather than a floor because a
+  floor on a reported residual is a threshold on a scale-dependent
+  quantity, and because it does not separate these cases: the reproducer's
+  runaway *grows* into its answer (`2.36e3` detected, `7.90e4` reported)
+  while `deb7`'s falls four and a half orders — five orders apart as a
+  ratio, one percent apart against a `1e2` floor. `deb7` under that rung is
+  back to 6.1 s from 25.2 s, with a verdict, objective and `x` identical to
+  the pre-fix binary's. Worst case is one extra solve, on a run that
+  satisfied the detector, reached a scoped failure verdict, and still
+  reports the runaway.
 
   Two off switches: `dual_divergence_retry=no` disables the retry (the
   detector still runs and the report still records what it saw), and

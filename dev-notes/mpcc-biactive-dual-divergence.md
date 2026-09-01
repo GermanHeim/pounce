@@ -522,21 +522,86 @@ this very fixture it is not.** `deb7` reaches `Error_In_Step_Computation`
 at default options and is out of scope; under
 `limited_memory_ls_failure_restarts=1` — gh#818's re-anchor rung, off by
 default — it reaches `Restoration_Failed` instead, and is therefore *in*.
-It then pays the cost this section is about: measured **6.1 s to 25.2 s**
+It then paid the cost this section is about: measured **6.08 s to 25.17 s**
 wall clock for the same `Restoration_Failed` verdict, the same objective,
-and a declined retry. Nothing is wrong with the answer and nothing in the
+and a declined retry. That cost is now fixed rather than accepted — see
+the next section — but the scoping lesson survives the fix, so it is left
+standing here. Nothing is wrong with the answer and nothing in the
 default corpus sees it — the sweep runs default options — but it is the
 honest bound on the narrowing. What the status scope buys is that the
 retry only ever runs on a solve already reporting failure; what it does
-*not* buy is that the retry only runs where the remedy works. That
-distinction is what closes gh#884 without a wrong answer, and it is not
-free.
+*not* buy is that the retry only runs where the remedy has something to
+work on. That is a second question, it needs a second gate, and the next
+section is that gate.
 
-That cost is filed rather than absorbed, per the repository's own rule
-about accepted regressions: **gh#887**, which also carries the two
-candidate ways to shrink it (bound the retry's budget by the base
-attempt's; find a pre-check that the remedy is plausible).
+### The retry has to be spent on an answer, not a trajectory (gh#887)
 
+The status scope is not what saves `deb7`; this is.
+
+The detector is a statement about an **iterate**. Nothing in it says the
+solve *ends* at that iterate, and `deb7` on the L-BFGS leg is the corpus
+case where it does not. The signature is real there — iteration 560,
+scale-relative step `1.7e-7`, `inf_pr` `7.0e-13`, unscaled `inf_du`
+`6.6e5` — and the base attempt then works its way back down to an
+unscaled KKT error of `9.9e1` before giving up. Whatever the trajectory
+did in the middle, there is no runaway multiplier left in the answer
+being reported, and `perturb_always_cd` has nothing there to repair. The
+old gate looked only at the trajectory, so it bought a full cold
+re-solve to decline an answer it was never going to promote: **6.08 s to
+25.17 s**.
+
+So the retry also requires that the answer *being reported* still
+carries the runaway the detector fired on:
+
+```rust
+base_unscaled_kkt >= DUAL_DIV_RETRY_RETAINED_FRACTION * detected_du
+```
+
+**Why a ratio and not a floor.** A floor on the reported residual is a
+threshold on a scale-dependent quantity — the thing this repository's own
+review checklist puts at entry 3 — and it would have to be re-fitted every
+time a fixture moves. It also does not separate these cases. All three
+runs in the corpus that reach this line:
+
+| run | detected | reported | retained |
+|---|---|---|---|
+| reproducer, `.nl` route | `2.36e3` | `7.90e4` | `3.3e1` |
+| reproducer, TNLP route | `7.76e11` | `3.25e11` | `4.2e-1` |
+| `deb7` + L-BFGS + rung | `6.59e5` | `9.90e1` | `1.5e-4` |
+
+The reproducer's runaway *grows* into the answer on one route and
+survives at 42% of itself on the other; `deb7` recovers from it by four
+and a half orders. At `1e-2` the tightest keep clears by 42x and the one
+reject misses by 67x. The absolute floor that was tried first — reusing
+the detector's own `dual_divergence_retry_du_floor` — gets the same
+verdict on `deb7` by a **one percent** margin (`9.9e1` against `1e2`),
+which is a coincidence and not a discriminator, and it was dropped for
+saying less than it appeared to.
+
+`DUAL_DIV_RETRY_RETAINED_FRACTION` is a constant rather than an option on
+purpose: it does not express a tolerance a caller trades against, it
+expresses "the same runaway", and two orders of grace against a five-order
+separation is already generous. The escape hatch for the whole remedy is
+`dual_divergence_retry=no`.
+
+The cost claim is now literally true: one extra solve, on a run that
+satisfied the three-way detector, reached a scoped failure verdict, *and*
+still reports the runaway. `deb7` under the rung is back to 6.1 s with a
+verdict, objective and `x` identical to the pre-gh#884 binary's.
+
+Pinned by `a_run_that_recovers_from_the_signature_does_not_buy_a_retry`,
+which asserts both halves and is mutation-checked: drop the retention
+conjunct and it goes red on the `deb7` half with `[685, 3000, 3000, 1874,
+3000]` — five attempts where there should be two — and the file's runtime
+goes 6.3 s to 25.2 s.
+
+One thing this does **not** do is make the status scope redundant, and it
+should not be read as licence to widen it. The two gates fail in different
+directions: the status scope keeps the retry off runs that never reported
+failure at all, and the retention gate keeps it off runs whose failure has
+nothing to do with a multiplier. `deb7` at default options is excluded by
+the first and would also be excluded by the second; that they agree there
+is not evidence that either is spare.
 
 One reporting wrinkle to know about, unchanged by any of this and not
 gh#884's to relitigate. `SolutionCertificate` floors residuals and

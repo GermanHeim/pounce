@@ -54,6 +54,7 @@
 //! | `a_diverging_iterate_is_not_the_signature` | gh#274's `-exp(x)` case, measured both ways | 4 |
 //! | `the_default_configuration_never_reaches_the_retry` | wrapper ordering, and that it is free | — |
 //! | `a_generic_exhaustion_exit_does_not_buy_a_retry` | the status scope, on `deb7` — the fixture that measured it | 5 (the one line the sweep moved) |
+//! | `a_run_that_recovers_from_the_signature_does_not_buy_a_retry` | the retention gate: the detector fires on an iterate, the retry is spent on an answer (gh#887) | — |
 //!
 //! Criterion 3 (`ralph1` must still fail) and the detector's branch
 //! coverage are the algorithm-level file's; criterion 5 is
@@ -162,6 +163,27 @@ fn residual(stdout: &str, label: &str) -> (f64, f64) {
     };
     let n = cols.len();
     (parse(cols[n - 2]), parse(cols[n - 1]))
+}
+
+/// Every `Number of Iterations....:` the run printed, in order.
+///
+/// One per summary block, so one per *attempt*: on a run that retries,
+/// `[base, retry]`, and on one that also climbs the second-opinion ladder,
+/// one such pair per rung. This is the only place an attempt's iteration
+/// count survives — `statistics.iteration_count` is overwritten by each
+/// attempt rather than accumulated, so the JSON report carries the last
+/// attempt's count and no record of the others.
+fn iteration_counts(stdout: &str) -> Vec<i64> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("Number of Iterations"))
+        .filter_map(|rest| rest.rsplit(':').next())
+        .map(|n| {
+            n.trim()
+                .parse::<i64>()
+                .unwrap_or_else(|e| panic!("iteration count {n:?} is not an integer ({e})"))
+        })
+        .collect()
 }
 
 fn max_x_error(r: &SolveReport) -> f64 {
@@ -447,5 +469,107 @@ fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
         "deb7/lbfgs: {} iterations — it takes 715 without a retry and 3000 \
          with one; stdout=\n{stdout}",
         r.statistics.iteration_count
+    );
+}
+
+/// gh#887 — "one extra solve" is a cost claim, and this is the fixture
+/// that made it false.
+///
+/// The detector is a statement about an **iterate**. Nothing in it says
+/// the solve *ends* at that iterate, and `deb7` on the L-BFGS leg is the
+/// corpus case where it does not: the signature is real there (iteration
+/// 560, scale-relative step `1.7e-7`, `inf_pr` `7.0e-13`, unscaled
+/// `inf_du` `6.6e5`) and the base attempt then works its way back down to
+/// an unscaled KKT error of `9.9e1` before giving up. There is no runaway
+/// multiplier left in that answer for `perturb_always_cd` to repair.
+///
+/// It is in scope by *status*: the gh#818 re-anchor rung sends it to
+/// `Restoration_Failed` rather than the `Error_In_Step_Computation` it
+/// reaches at default options, and `Restoration_Failed` is scoped because
+/// it is where the reproducer's TNLP path lands. So the status scope does
+/// not save it, and before the retention gate it bought a full cold
+/// re-solve — 6.08 s to 25.17 s — to decline an answer it was never going
+/// to promote.
+///
+/// The gate is relative, not a floor, and this test asserts both sides of
+/// it because a gate that bound on the fixture the fix exists for would be
+/// a gate that broke it:
+///
+/// | run | detected | reported | retained |
+/// |---|---|---|---|
+/// | reproducer (`.nl`) | `2.36e3` | `7.90e4` | `3.3e1` |
+/// | `deb7` + rung | `6.59e5` | `9.90e1` | `1.5e-4` |
+///
+/// `DUAL_DIV_RETRY_RETAINED_FRACTION` is `1e-2`, so the keep clears by
+/// three orders and the reject misses by two. An **absolute** floor on
+/// the reported residual does not separate these: `deb7`'s `9.9e1` sits
+/// 1% under the detector's own `1e2`, which is a coincidence rather than
+/// a discriminator, and that is why the shipped gate does not use one.
+///
+/// Mutation-checked: drop the retention conjunct and this test goes red
+/// on the `deb7` half, naming the retry it just bought.
+#[test]
+fn a_run_that_recovers_from_the_signature_does_not_buy_a_retry() {
+    // The half that must not decline: the reproducer, whose runaway grows
+    // into the answer it reports.
+    let (r, stdout) = solve(REPRO);
+    let counts = iteration_counts(&stdout);
+    assert_eq!(
+        counts.len(),
+        2,
+        "{FIXTURE}: expected a base attempt and one retry, saw {counts:?}; \
+         stdout=\n{stdout}"
+    );
+    assert!(
+        r.statistics.dual_divergence_retry_promoted,
+        "{FIXTURE}: the retention gate must not cost the reproducer its \
+         promotion; stdout=\n{stdout}"
+    );
+
+    // The half that must decline: `deb7` under the rung, which is in scope
+    // by status and recovers by four and a half orders anyway.
+    let (deb7, deb7_out) = solve_stem(
+        "deb7",
+        &[
+            "hessian_approximation=limited-memory",
+            "limited_memory_ls_failure_restarts=1",
+        ],
+    );
+    assert!(
+        deb7.statistics.dual_divergence_signature,
+        "deb7/lbfgs/rung: the signature is the premise of this test — if it \
+         stopped firing here the test is no longer measuring anything; \
+         stdout=\n{deb7_out}"
+    );
+    let deb7_counts = iteration_counts(&deb7_out);
+    assert_eq!(
+        deb7_counts.len(),
+        2,
+        "deb7/lbfgs/rung: {} attempts ({deb7_counts:?}) — two is the \
+         mu-strategy fallback, which is pre-existing; a third is the cold \
+         re-solve gh#887 is about, and it takes the run from 6.1 s to 25.2 s \
+         to decline an answer whose unscaled KKT error is 9.9e1 against a \
+         detected runaway of 6.6e5",
+        deb7_counts.len(),
+    );
+    assert!(
+        !deb7_out.contains("dual-divergence retry:"),
+        "deb7/lbfgs/rung: the wrapper printed a verdict, so a retry ran; \
+         stdout=\n{deb7_out}"
+    );
+    // And the answer is the pre-gh#884 binary's, unchanged.
+    assert!(
+        matches!(
+            deb7.solution.status,
+            ApplicationReturnStatus::RestorationFailed
+        ),
+        "deb7/lbfgs/rung: verdict moved to {:?}",
+        deb7.solution.status
+    );
+    assert!(
+        (deb7.statistics.final_objective - 99.677_082_567_547_37).abs() <= 1e-9,
+        "deb7/lbfgs/rung: objective {} is not the pre-gh#884 binary's \
+         99.67708256754737",
+        deb7.statistics.final_objective
     );
 }

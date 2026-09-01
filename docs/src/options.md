@@ -852,14 +852,39 @@ tightening the default onto one fixture and spending the margin that holds
 earlier build that retried on `Error_In_Step_Computation` spent 715 → 3000
 iterations to return the same status and the same objective.
 
-Scoping by status is only as complete as the status is stable. That same
-fixture under `limited_memory_ls_failure_restarts=1` (off by default) exits
-`Restoration_Failed` instead of `Error_In_Step_Computation`, so it *is* in
-scope and pays one extra solve — measured 6.1 s to 25.2 s for the same
-verdict and objective, retry declined (gh#887). Set
-`dual_divergence_retry=no` if
-you are running a hard model to a failure verdict and the second attempt is
-not worth the clock.
+Scoping by status is only as complete as the status is stable, and on that
+same fixture it is not: under `limited_memory_ls_failure_restarts=1` (off
+by default) `deb7` exits `Restoration_Failed` instead of
+`Error_In_Step_Computation`, so it *is* in scope.
+
+**So there is a second gate, and it reads the answer rather than the
+trajectory.** The detector fires on an *iterate*; nothing in it says the
+solve ends there. `deb7` is exactly that case — the signature is real at
+iteration 560, and the base attempt then works its way back down to an
+unscaled KKT error of `9.9e+01` before giving up. There is no runaway
+multiplier left in that answer for `perturb_always_cd` to repair, so
+POUNCE does not spend a solve finding out. The retry runs only when the
+reported answer still carries at least a hundredth of the runaway the
+detector fired on.
+
+That test is a *ratio*, not a floor, because a floor on a reported
+residual is a threshold on a scale-dependent quantity — it would have to
+be re-fitted every time a fixture moves. The ratio is scale-free and the
+measured separation is five orders:
+
+| run | detected | reported | retained |
+|---|---|---|---|
+| the gh#884 reproducer | `2.36e+03` | `7.90e+04` | `33` |
+| `deb7` + L-BFGS + rung | `6.59e+05` | `9.90e+01` | `1.5e-04` |
+
+The reproducer's runaway *grows* into the answer it reports; `deb7`'s is
+gone. A floor would not have separated these — `deb7`'s `9.9e+01` sits one
+percent under the detector's own `1e2`. Before this gate that fixture paid
+a full cold re-solve, 6.1 s to 25.2 s, to decline an answer that was never
+going to be promoted (gh#887); it now declines before spending anything.
+
+Set `dual_divergence_retry=no` if you are running a hard model to a
+failure verdict and even one extra attempt is not worth the clock.
 
 Two off switches, coarse and fine:
 

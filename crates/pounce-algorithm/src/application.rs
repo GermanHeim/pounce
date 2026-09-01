@@ -40,6 +40,25 @@ use crate::upstream_options::register_all_upstream_options;
 /// two behaviours — and gh#518 reported trying both.
 pub const DEFAULT_OPTION_FILE_NAMES: &[&str] = &["pounce.opt", "ipopt.opt"];
 
+/// gh#887 — the fraction of the detected runaway that must survive into
+/// the answer a solve finally reports, before
+/// [`IpoptApplication::run_with_dual_divergence_retry`] will spend a cold
+/// re-solve on it.
+///
+/// The detector fires on an *iterate*; this asks whether that iterate's
+/// runaway is still in the *answer*. Two orders of grace, against a
+/// measured separation of five and a half: the gh#884 reproducer's
+/// runaway grows into its reported answer (`2.36e3` detected, `7.90e4`
+/// reported — a factor of 33), while `deb7` on the L-BFGS leg under
+/// `limited_memory_ls_failure_restarts=1` recovers from `6.59e5` to
+/// `9.90e1` before giving up (a factor of `1.5e-4`) and has nothing left
+/// for `perturb_always_cd` to repair.
+///
+/// Deliberately a constant and not an option. It is not a tolerance a
+/// caller trades against — it expresses "the same runaway" — and the
+/// escape hatch for the whole remedy is `dual_divergence_retry=no`.
+const DUAL_DIV_RETRY_RETAINED_FRACTION: Number = 1e-2;
+
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
 /// for a caller to tell the user which file (if any) configured the run.
 #[derive(Debug, Default, Clone)]
@@ -266,6 +285,19 @@ pub struct IpoptApplication {
     /// previous attempt's verdict. Also copied into
     /// [`SolveStatistics::dual_divergence_signature`].
     dual_divergence_signature: std::cell::Cell<bool>,
+    /// gh#884 — the unscaled dual infeasibility at the iterate that set
+    /// [`Self::dual_divergence_signature`], from the most recent attempt
+    /// that set it. `0.0` when the signature was never seen.
+    ///
+    /// This is the size of the runaway the detector actually observed,
+    /// and [`Self::run_with_dual_divergence_retry`] compares the answer
+    /// finally *reported* against it (gh#887). Taken from the last
+    /// attempt that fired rather than the largest across attempts, so
+    /// the number is always one a single iterate really produced; if a
+    /// later attempt then reports the answer without firing itself, the
+    /// pairing crosses attempts — the same wrinkle the console summary
+    /// documents, and it can only make this gate stricter.
+    dual_divergence_detected_du: std::cell::Cell<Number>,
     /// gh#884. Set when a dual-divergence retry actually replaced the base
     /// attempt's answer. Copied into
     /// [`SolveStatistics::dual_divergence_retry_promoted`].
@@ -396,6 +428,7 @@ impl IpoptApplication {
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
+            dual_divergence_detected_du: std::cell::Cell::new(0.0),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
             last_iter_stats: Rc::new(RefCell::new(None)),
@@ -955,6 +988,7 @@ impl IpoptApplication {
         // `run_with_dual_divergence_retry` reads "some attempt of the base
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
+        self.dual_divergence_detected_du.set(0.0);
         self.dual_divergence_retry_promoted.set(false);
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
@@ -3001,13 +3035,15 @@ impl IpoptApplication {
         // reaches `Error_In_Step_Computation` at default options and is
         // out; under `limited_memory_ls_failure_restarts=1` (gh#818's
         // rung, off by default) it reaches `Restoration_Failed` instead
-        // and is therefore *in* — and pays exactly the cost above,
-        // measured 6.1 s to 25.2 s wall clock for the same
-        // `Restoration_Failed` verdict and a declined retry. That is the
-        // price of scoping by status rather than by model. It is
-        // accepted knowingly and filed as gh#887, and it is why the
-        // narrowing below is described as making the miss rarer rather
-        // than impossible.
+        // and is therefore *in*. It used to pay exactly the cost above
+        // there — 6.1 s to 25.2 s wall clock for the same
+        // `Restoration_Failed` verdict and a declined retry, which is
+        // gh#887. That is the price of scoping by status rather than by
+        // model, and it is why the second gate below scopes by the
+        // *answer* instead: `deb7` now declines before spending
+        // anything. The status scope is kept because it is cheap and
+        // reads on the verdict a caller sees, but it is not what is
+        // being relied on.
         //
         // What separates them is the *status*, and it separates them
         // for a reason rather than by luck:
@@ -3054,6 +3090,58 @@ impl IpoptApplication {
             return first_status;
         }
         let base_unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
+        // The runaway has to still be in the answer being *reported*.
+        //
+        // The detector is a statement about an *iterate*, and the iterate
+        // it fires on need not be the one the solve ends at. A run can
+        // pass through a settled point with a diverged multiplier, work
+        // its way back down, and report something ordinary — and then
+        // there is nothing left here for `perturb_always_cd` to repair,
+        // whatever the trajectory did in the middle. This is what makes
+        // "one extra solve" a cost the caller only pays on a run that
+        // still *exhibits* the defect (gh#887).
+        //
+        // The test is **relative**, against the runaway the detector
+        // itself saw, because that is the statement being made — "the
+        // thing we fired on is still there" — and because it carries no
+        // units: an absolute floor on the reported residual would be a
+        // threshold on a scale-dependent quantity, fitted to whatever
+        // fixture last moved. Measured on all three runs in the corpus
+        // that reach this line:
+        //
+        //   | run                     | detected | reported | retained |
+        //   |-------------------------|----------|----------|----------|
+        //   | reproducer, `.nl`       |  2.36e3  |  7.90e4  |  3.3e1   |
+        //   | reproducer, TNLP        |  7.76e11 |  3.25e11 |  4.2e-1  |
+        //   | `deb7` + L-BFGS + rung  |  6.59e5  |  9.90e1  |  1.5e-4  |
+        //
+        // The reproducer's runaway *grows* into the answer on the `.nl`
+        // route and survives at 42% of itself on the TNLP one; `deb7`
+        // recovers from it by four and a half orders before giving up.
+        // `DUAL_DIV_RETRY_RETAINED_FRACTION` sits between, with 42x of
+        // margin on the tightest keep and 67x on the one reject.
+        //
+        // It is not an option: it does not express a tolerance the caller
+        // trades against, it expresses "the same runaway", and two orders
+        // of grace is already generous. The escape hatch is
+        // `dual_divergence_retry=no`.
+        //
+        // Non-finite is excluded for the same reason it is in the
+        // detector: a NaN compares false everywhere, and writing the
+        // condition so that a NaN *disables* the gate would turn "we
+        // cannot tell" into "retry anyway".
+        let detected_du = self.dual_divergence_detected_du.get();
+        let retains_the_runaway = base_unscaled_kkt.is_finite()
+            && base_unscaled_kkt >= DUAL_DIV_RETRY_RETAINED_FRACTION * detected_du;
+        if !retains_the_runaway {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] gh#884: the signature fired mid-trajectory at an \
+                 unscaled dual of {:.3e}, but the answer being reported has an \
+                 unscaled KKT error of {:.3e} — there is no runaway multiplier \
+                 left to repair, so no retry (gh#887).",
+                detected_du, base_unscaled_kkt);
+            return first_status;
+        }
         // Floor all three sinks — solution payload, certificate, and the
         // last trace row — exactly as the μ fallback does (pounce#870).
         let solution_floor = self.last_finalize.borrow().clone();
@@ -4260,8 +4348,11 @@ impl IpoptApplication {
             // gh#884. Read off the algorithm that just ran, so
             // `run_with_dual_divergence_retry` — which sits above this
             // call — can see what it observed.
-            self.dual_divergence_signature
-                .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
+            if alg.dual_divergence_signature() {
+                self.dual_divergence_signature.set(true);
+                self.dual_divergence_detected_du
+                    .set(alg.dual_divergence_detected_du());
+            }
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
             stats.iterations = captured_iters;
