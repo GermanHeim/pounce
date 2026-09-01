@@ -161,3 +161,80 @@ fn no_widening_means_nothing_extra_to_report() {
         r.solution.objective
     );
 }
+
+// ── the NLP arm ──────────────────────────────────────────────────────────────
+//
+// The convex arm no longer widens by default, so the arm where this number
+// now earns its keep is the NLP one — which must keep widening (a
+// feasible-iterate log-barrier needs `x` strictly inside its bounds) and
+// whose `final_constr_viol` is the *internal slack* measure, not a statement
+// about the user's model at all. On netlib `wood1p` it reports `1.71e-14` at
+// a point that is `7.96e-09` outside the declared rows and `9.84e-09` outside
+// the declared box, and returns an objective `4.4e-05` from the optimum HiGHS
+// reports. Five orders between the number shown and the number that matters.
+
+fn nlp_solve(fixture: &str, extra: &[&str]) -> SolveReport {
+    let json_path = tmp_path("nlp.json");
+    let sol_path = tmp_path("nlp.sol");
+    let mut src = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    src.push("tests/fixtures");
+    src.push(fixture);
+    let mut cmd = Command::new(pounce_exe());
+    cmd.arg(&src)
+        .arg(&sol_path)
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("solver_selection=nlp");
+    for o in extra {
+        cmd.arg(o);
+    }
+    let _ = cmd.status().expect("spawn pounce");
+    let text = std::fs::read_to_string(&json_path).expect("read json report");
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&sol_path);
+    serde_json::from_str(&text).expect("deserialize SolveReport")
+}
+
+/// A binding **row**: the widened row is satisfied, the declared one is not.
+#[test]
+fn the_nlp_arm_reports_a_declared_row_violation() {
+    let r = nlp_solve("bound_relax_row.nl", &[]);
+    let d = r.statistics.final_declared_constr_viol;
+    assert!(
+        (d - 1e-4).abs() < 1e-6,
+        "expected the row widening (min(1e-8,1e-4)*1e4 = 1e-4) to show up as \
+         the declared violation; got {d:e}"
+    );
+    assert!(
+        r.statistics.final_constr_viol < d / 1e3,
+        "and the internal measure should be far smaller, which is the whole \
+         point: {:e} vs {d:e}",
+        r.statistics.final_constr_viol
+    );
+}
+
+/// A binding **variable bound**. This is the half that needs the lift out of
+/// the compressed bound spaces (`Nlp::declared_box_violation`); without it the
+/// number came back `0.0` on this fixture while the point sat `1e-4` outside
+/// its declared box.
+#[test]
+fn the_nlp_arm_reports_a_declared_box_violation() {
+    let r = nlp_solve("bound_relax_var.nl", &[]);
+    let d = r.statistics.final_declared_constr_viol;
+    assert!(
+        (d - 1e-4).abs() < 1e-6,
+        "expected the box widening to show up as the declared violation; got \
+         {d:e}"
+    );
+}
+
+/// And with the widening off there is nothing to add, on this arm too.
+#[test]
+fn the_nlp_arm_adds_nothing_when_it_did_not_widen() {
+    let r = nlp_solve("bound_relax_row.nl", &["bound_relax_factor=0"]);
+    assert!(
+        r.statistics.final_declared_constr_viol.is_nan(),
+        "expected NaN at bound_relax_factor=0; got {:e}",
+        r.statistics.final_declared_constr_viol
+    );
+}

@@ -167,6 +167,22 @@ pub trait IpoptNlp: Nlp {
         None
     }
 
+    /// How far `x` sits outside the **declared** variable box — the box the
+    /// user wrote, before `bound_relax_factor` widened it.
+    ///
+    /// [`Self::declared_x_bounds`] returns those bounds in the *compressed*
+    /// spaces, which a caller holding an algorithm-space iterate cannot line
+    /// up on its own: the map from a bound slot to a full-x index runs through
+    /// the fixed-variable classification, and the iterate may be a compound
+    /// vector with no flat values to index. This does the lift and the
+    /// comparison where both are known.
+    ///
+    /// `None` means "not tracked" — no widening was recorded, so the declared
+    /// box and the live one are the same and there is nothing to add.
+    fn declared_box_violation(&self, _x: &dyn Vector) -> Option<Number> {
+        None
+    }
+
     /// The *declared* equality right-hand sides `b` — the pre-fold constants
     /// subtracted to turn `g_i(x) == b_i` into the algorithm's residual
     /// `c_i(x) = 0` — reported in the same (internally scaled) space as

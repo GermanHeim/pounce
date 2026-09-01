@@ -1183,6 +1183,34 @@ impl IpoptCalculatedQuantities {
         worst
     }
 
+    /// The primal violation of the model **as declared** — before the
+    /// `bound_relax_factor` widening `OrigIpoptNlp::relax_bounds` applied.
+    ///
+    /// [`Self::curr_unscaled_nlp_constraint_violation_max`] already judges the
+    /// `c` and `d` blocks against the declared bounds. What nothing else
+    /// measured is the **variable box**, which the widening moves too; that
+    /// term comes from `Nlp::declared_box_violation`, which owns the lift out
+    /// of the compressed bound spaces.
+    ///
+    /// This is not what any gate reads and must not become one. The barrier
+    /// genuinely solves the widened model — a feasible-iterate log-barrier
+    /// needs `x` strictly inside its bounds — and `final_constr_viol` reports
+    /// the internal slack measure the convergence test uses. The point of this
+    /// number is that the two can differ by orders and a caller could not
+    /// previously see it: on netlib `wood1p` this arm reports `1.71e-14` at a
+    /// point `7.96e-09` outside the declared rows and `9.84e-09` outside the
+    /// declared box, and returns an objective `4.4e-05` from the optimum
+    /// HiGHS reports.
+    pub fn curr_declared_primal_violation_max(&self) -> Number {
+        let rows = self.curr_unscaled_nlp_constraint_violation_max();
+        let iv = self.curr_iv();
+        let nlp = self.nlp.borrow();
+        match nlp.declared_box_violation(&*iv.x) {
+            Some(box_viol) => rows.max(box_viol),
+            None => rows,
+        }
+    }
+
     /// Largest primal infeasibility of a constraint row **relative to that
     /// row's own magnitude** — `|c_i| / |b_i|` over the equality block and
     /// `dist(d_i, [d_l_i, d_u_i]) / max(|d_l_i|, |d_u_i|)` over the

@@ -112,6 +112,20 @@ changes.
   `SolveSucceeded` with a declared-model violation above `1e-6`, and the
   reported statistic disclosed none of them.
 
+  **Reported on the NLP arm too**, which is where it now matters most: that arm
+  keeps the widening (a feasible-iterate log-barrier needs `x` strictly inside
+  its bounds) and its `final_constr_viol` is the *internal slack* measure, not
+  a statement about the user's model at all. On netlib `wood1p` it reports
+  `1.71e-14` at a point `7.96e-09` outside the declared rows and `9.84e-09`
+  outside the declared box — five orders between the number shown and the
+  number that matters — while returning an objective `4.4e-05` from the
+  optimum HiGHS reports. The row half comes from
+  `curr_unscaled_nlp_constraint_violation_max`, which already judged against
+  declared bounds; the box half needed a lift out of the compressed bound
+  spaces, so `Nlp::declared_box_violation` owns it and mirrors the
+  `honor_original_bounds` projection exactly — same lift, same maps, same
+  declared bounds, reporting the distance instead of removing it.
+
 ### Changed
 
 - **The convex arm solves the model you declared; `bound_relax_factor` is now
