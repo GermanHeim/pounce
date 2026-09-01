@@ -1173,6 +1173,16 @@ pub fn main() -> ExitCode {
                     app.options().get_numeric_value("bound_relax_factor", ""),
                     Ok((_, true))
                 ) {
+                    // The discarded `Result<bool, _>` is dead, and provably so
+                    // rather than incidentally: `Ok(false)` means "clobber
+                    // refused, nothing written", which here would silently
+                    // leave the widening on — the very defect this restores.
+                    // It cannot happen, because the guard above is exactly
+                    // complementary to the refusal. `get_numeric_value`
+                    // reports `set == true` iff the tag is in the user's map
+                    // (`options_list.rs`, `find_tag`), and `will_allow_clobber`
+                    // returns true iff it is ABSENT from that same map. Guard
+                    // false ⟹ absent ⟹ clobber allowed ⟹ the write lands.
                     let _ =
                         app.options_mut()
                             .set_numeric_value("bound_relax_factor", 0.0, true, true);
