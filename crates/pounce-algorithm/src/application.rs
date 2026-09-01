@@ -2953,8 +2953,11 @@ impl IpoptApplication {
     /// 1. the base attempt saw the signature (a converged primal, a step
     ///    at zero, and an unscaled `‖∇L‖∞` far above `dual_inf_tol`, all
     ///    at one iterate — see `IpoptAlgorithm::dual_divergence_signature`);
-    /// 2. the base status is one a second solve could improve on — never
-    ///    `Solve_Succeeded`, which is already the best verdict there is;
+    /// 2. the base status is `Solved_To_Acceptable_Level` or
+    ///    `Restoration_Failed` — the two verdicts the vanishing-gradient
+    ///    row produces directly. Generic exhaustion exits are excluded;
+    ///    `deb7` under L-BFGS is why, and the reason is in the code
+    ///    below;
     /// 3. the retry returns `Solve_Succeeded`;
     /// 4. the retry's claimed success is **real in the model's own
     ///    units** — unscaled KKT error at or below `tol`-scale, which is
@@ -2976,17 +2979,61 @@ impl IpoptApplication {
         if !self.dual_divergence_signature.get() {
             return first_status;
         }
-        // Which base verdicts a second solve could improve on.
+        // Which base verdicts this remedy is *for*.
+        //
+        // Two, and the narrowing was bought with a measurement. The
+        // detector is a statement about the iterate; it is not a
+        // statement that `perturb_always_cd` will help. `deb7` under
+        // L-BFGS is the corpus case that separates the two: the
+        // signature is real there — iteration 346, scale-relative step
+        // `6.5e-6`, `inf_pr` `3.0e-12`, unscaled `inf_du` `9.2e5`,
+        // which is an order *above* the gh#884 reproducer's `7.9e4`, so
+        // no dual floor excludes it, and the step conjunct separates the
+        // two only by fitting the default onto one fixture and spending
+        // the margin that holds `ralph1` out — and the retry still does
+        // not work: 3000 iterations to
+        // `Maximum_Iterations_Exceeded` at an unscaled KKT error of
+        // `6.7e1` against the base attempt's `9.9e1`. Pure cost, 4x the
+        // base trajectory, on a fixture whose verdict does not move.
+        //
+        // The exclusion is by *status*, so it is only as complete as the
+        // status is stable, and on this very fixture it is not. `deb7`
+        // reaches `Error_In_Step_Computation` at default options and is
+        // out; under `limited_memory_ls_failure_restarts=1` (gh#818's
+        // rung, off by default) it reaches `Restoration_Failed` instead
+        // and is therefore *in* — and pays exactly the cost above,
+        // measured 6.1 s to 25.2 s wall clock for the same
+        // `Restoration_Failed` verdict and a declined retry. That is the
+        // price of scoping by status rather than by model. It is
+        // accepted knowingly and filed as gh#887, and it is why the
+        // narrowing below is described as making the miss rarer rather
+        // than impossible.
+        //
+        // What separates them is the *status*, and it separates them
+        // for a reason rather than by luck:
+        //
+        //  * `Solved_To_Acceptable_Level` is gh#884 verbatim — the
+        //    runaway laundered itself through `s_d` into a success.
+        //  * `Restoration_Failed` is the same defect one step earlier:
+        //    the rows whose gradients vanished drive the solve into
+        //    restoration, and restoration cannot repair a row that has
+        //    no gradient. It is where the `qpec_small` TNLP fixture
+        //    lands (unscaled KKT `3.3e11`).
+        //  * `Error_In_Step_Computation` and
+        //    `Maximum_Iterations_Exceeded` are generic exhaustion
+        //    exits. Every hard model reaches them, for every reason.
+        //    Retrying *those* is not "repair the runaway", it is "try
+        //    again harder" — which is what `mu_strategy_fallback` and
+        //    the second-opinion ladder already are, and `deb7` is what
+        //    that costs.
         //
         // `Solve_Succeeded` is excluded because it is already the best
-        // verdict available and its certificate has already been checked
-        // in the model's own units; there is nothing to buy. The four
-        // below are the exits the biactive runaway is measured to
-        // produce across the eight `qpec_small`/`ralph1` cells: the
-        // acceptable-level exit gh#884 filed, the two restoration and
-        // step-computation failures the runaway induces when the
-        // linear system finally degenerates, and the budget exit it
-        // produces when neither fires first.
+        // verdict available and its certificate has already been
+        // checked in the model's own units; there is nothing to buy.
+        //
+        // Worst-case cost is therefore one extra solve under the
+        // caller's own `max_iter` — the same contract
+        // `run_with_mu_strategy_fallback` already has.
         //
         // Deliberately **not** deferred to `TERMINATION_POLICY_OPTIONS`
         // the way the μ flip's acceptable-level trigger is (gh#757).
@@ -3002,8 +3049,6 @@ impl IpoptApplication {
             first_status,
             ApplicationReturnStatus::SolvedToAcceptableLevel
                 | ApplicationReturnStatus::RestorationFailed
-                | ApplicationReturnStatus::ErrorInStepComputation
-                | ApplicationReturnStatus::MaximumIterationsExceeded
         );
         if !retry_worthy {
             return first_status;
@@ -3047,6 +3092,39 @@ impl IpoptApplication {
         let promote = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded)
             && claimed_success_is_real
             && retry_unscaled_kkt < base_unscaled_kkt;
+        // Say on the console which of the two answers shipped.
+        //
+        // The per-attempt end summary cannot: `emit_end_summary` runs
+        // inside `optimize_constrained`, once per attempt, and the
+        // promotion is decided after the last of them. So a summary that
+        // reported the promotion would report `false` on the very run that
+        // promotes, contradicting the JSON report written from the same
+        // statistics. The summary reports the *signature*, which is true
+        // when it prints; this line reports the *outcome*, printed once,
+        // where it is known.
+        //
+        // Gated on `print_level >= 1`, matching `emit_end_summary` — the
+        // block this line follows.
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if console_output {
+            println!();
+            if promote {
+                println!(
+                    "gh#884 dual-divergence retry: promoted — unscaled KKT error \
+                     {base_unscaled_kkt:.4e} -> {retry_unscaled_kkt:.4e}."
+                );
+            } else {
+                println!(
+                    "gh#884 dual-divergence retry: declined ({retry_status:?}, \
+                     unscaled KKT error {retry_unscaled_kkt:.4e} against the base \
+                     attempt's {base_unscaled_kkt:.4e}); the base attempt's answer \
+                     is the one reported."
+                );
+            }
+        }
         if promote {
             self.dual_divergence_retry_promoted.set(true);
             self.statistics.borrow_mut().dual_divergence_retry_promoted = true;

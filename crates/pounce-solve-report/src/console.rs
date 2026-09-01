@@ -598,15 +598,28 @@ pub fn print_summary(
     // count and residuals, so without this the second solve leaves no
     // trace at all, and a reader comparing two runs would see a
     // trajectory that came from nowhere.
-    if stats.dual_divergence_signature || stats.dual_divergence_retry_promoted {
-        println!(
-            "Biactive dual divergence (gh#884)                    = {}",
-            if stats.dual_divergence_retry_promoted {
-                "detected; the cold retry's answer was returned"
-            } else {
-                "detected; the base attempt's answer was kept"
-            },
-        );
+    //
+    // This line reports the **signature**, never the retry's verdict, and
+    // that is forced rather than chosen: this block runs once per attempt,
+    // from inside the solve, while the promotion is decided after the last
+    // attempt returns. `dual_divergence_retry_promoted` therefore reads
+    // `false` here even on the run that promotes, and an earlier draft that
+    // printed it produced a summary contradicting the JSON report beside
+    // it. `run_with_dual_divergence_retry` prints the verdict, being the
+    // only place that knows it.
+    //
+    // Two further narrowings. No number is printed: the flag is sticky
+    // across the attempts of one solve, so on a promoted run it is `true`
+    // while *this* attempt's residuals are clean, and a residual beside the
+    // word "detected" would read as its evidence while belonging to the
+    // other attempt. And it is suppressed on `Solve_Succeeded`, because
+    // passing *through* a biactive runaway and recovering is routine on an
+    // MPCC lowering — `mpcc_qpec_small_biactive.nl` sets the flag at
+    // default options and then converges in 29 iterations. A warning over a
+    // correct answer is noise.
+    if stats.dual_divergence_signature && !matches!(status, ApplicationReturnStatus::SolveSucceeded)
+    {
+        println!("Biactive dual divergence (gh#884)                    = detected");
     }
     println!(
         "Total seconds in POUNCE                              = {:.3}",

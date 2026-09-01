@@ -183,6 +183,18 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
 /// would be the rung turning a stall into a spurious success — a wrong
 /// answer, and the one outcome that would matter more than any iteration
 /// count.
+///
+/// **It reads the reported verdict, not the log.** An earlier revision
+/// asked whether the combined stdout+stderr *contained* the substring
+/// `Solve_Succeeded`, which is a proxy, and the proxy broke: the blob is
+/// captured at `RUST_LOG=pounce::algorithm=debug` so that the re-anchor
+/// decision is observable at all, and the debug narration names status
+/// codes. On this arm with the rung on, `deb7` exits `Restoration_Failed`,
+/// which is a base verdict the gh#884 dual-divergence retry acts on, so a
+/// second `dispatch_standard_solve` runs — and *its* mu-strategy fallback
+/// logs `MaximumIterationsExceeded is not Solve_Succeeded`. No success was
+/// reported and none was manufactured; a string that names the status
+/// matched. The `Status:` line is the verdict, so ask it.
 #[test]
 fn the_rung_fires_on_the_model_it_was_designed_from() {
     let (off_fires, off_status) = solve_counting_reanchors("deb7.nl", "deb7_off", 0);
@@ -198,11 +210,21 @@ fn the_rung_fires_on_the_model_it_was_designed_from() {
          rung was designed from; saw {on_fires}"
     );
 
-    for (label, status) in [("off", &off_status), ("on", &on_status)] {
-        assert!(
-            !status.contains("Solve_Succeeded"),
+    for (label, out) in [("off", &off_status), ("on", &on_status)] {
+        // The last `Status:` line is the verdict finally reported: a solve
+        // that retries prints one summary per attempt, and the wrapper
+        // restores the base attempt's status after the last of them.
+        let verdict = out
+            .lines()
+            .rev()
+            .find_map(|l| l.strip_prefix("Status: "))
+            .unwrap_or_else(|| {
+                panic!("no `Status:` line in the rung-{label} run's output:\n{out}")
+            });
+        assert_ne!(
+            verdict, "Solve_Succeeded",
             "deb7 does not solve on the limited-memory arm; a success with the \
-             rung {label} means the rung manufactured one ({status})"
+             rung {label} means the rung manufactured one"
         );
     }
 }

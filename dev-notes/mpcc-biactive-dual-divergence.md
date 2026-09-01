@@ -1,11 +1,22 @@
-# gh#884: why the biactive dual divergence is not a targeted fix
+# gh#884: the biactive dual divergence, and the four fixes that did not work
 
-Status: **gh#884 open.** This note records what was measured while
-attempting a fix, **four** approaches ruled out by measurement — three in
-the *trigger* family and one in the *policy* family — and one that is
-**not** ruled out and looks like the most promising route. It exists so
-the next attempt starts from the measurements rather than from the same
-ideas.
+Status: **fixed.** The route this note recommended — detect late, retry
+cold — shipped; see "What shipped" at the end for what was built and
+which of its open questions the build answered. The note keeps its
+original shape because its value is the **negative** results: four
+approaches ruled out by measurement, three in the *trigger* family and
+one in the *policy* family. Each of them is an idea a reader will have
+again, and each already has a number attached.
+
+The title was "why the biactive dual divergence is not a targeted fix",
+and an earlier draft argued no solver-observable trigger could satisfy
+gh#884's criteria 1 and 3 together. That was wrong, and how it was wrong
+is the lesson: the argument turned on a property of the *limit point*
+(S-stationarity) that the solver cannot know, and the fix turned on a
+property of the *iterate* (that it stopped moving) that the solver
+observes every iteration. When an impossibility argument appeals to
+something unknowable, check whether the thing you actually need is
+observable instead.
 
 **Provenance.** Ruled out 1–3, the mechanism trace and the `||d||`
 separation were measured on `87402274`, whose solver source is identical
@@ -15,9 +26,12 @@ working-tree patch, and is the one section not reproducible from this
 repository — see its own provenance paragraph. Re-measure rather than
 trusting any of these numbers across a commit that touches the IPM.
 
-Guards: `crates/pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`.
+Guards: `crates/pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`
+(eight tests now — four invariants and four branch tests added with the
+fix) and `crates/pounce-cli/tests/issue_884_biactive_dual_divergence.rs`
+(the reproducer, end to end).
 
-Those four tests are **invariants, not a description of the bug**. None of
+The original four tests are **invariants, not a description of the bug**. None of
 them asserts that the current failure persists: a test that pinned the bug
 would go red on a genuine fix, which is backwards, and would teach the next
 reader to expect red in that file. The split follows an asymmetry —
@@ -327,7 +341,8 @@ gate" — a minimum `||d||` taken over history while `inf_pr <= 1e-8` is a
 *trajectory statistic*, so a route built on it either has to argue the
 criterion is met in spirit or propose reinterpreting it; **4**, evidence
 it does not relabel any `-exp(x)`-shaped case (gh#274's reproducer); and
-**5**, `scripts/sweep-fixtures.sh` across both legs.
+**5**, `scripts/sweep-fixtures.sh` across both legs. (Both were measured
+against the shipped detector — see "What shipped".)
 
 An earlier version of this note claimed no solver-observable trigger could
 satisfy 1 and 3 *together*, on the grounds that the property separating
@@ -371,34 +386,212 @@ What is *not* established, and would have to be before this ships:
 - **`ralph1` is one of eight cells.** The other seven are `qpec_small`
   starts; the detector's behaviour on the remaining six is unmeasured.
 
-So: promising, cheap to prototype, and the route this note recommends
-trying first — not a finished answer.
+So: promising, cheap to prototype, and the route this note recommended
+trying first. It was, and it is what shipped.
 
-## What is left
+## What shipped
 
-With the retry class open, the ordering changes: prototype that first,
-and treat the options below as what to do if it does not survive the
-corpus.
+The route above, with three changes forced by the build.
 
-1. **Accept `perturb_always_cd` as a documented per-model lever** for the
-   degenerate-complementarity class, with the measured caveat above:
-   on a model whose limit point is only M-stationary it can return a
-   success below `f*`. It already ships as an option; nothing to build.
-2. **Re-scope gh#884** to the exact-product lowering being unsupported
-   for biactive pairs, which is what `benchmarks/mpcc/`'s recommended
-   route (`scholtes_then_ncp`) already assumes — it clears all eight
-   cells (`1.9e-12`, `4.9e-11`, `5.7e-28`).
-3. **Treat it as a genuine IPM research change** — a pair-structured KKT
-   regularizer, or a `mu` rule that does not stall on a dual term
-   inflated by the multipliers it is normalised by. That needs the
-   fixture sweep across both legs, `benchmarks/qp` magnitude checks, and
-   its own owner, per CLAUDE.md.
+**The trigger is a per-iterate conjunction, not a trajectory statistic.**
+The experiment used a minimum `||d||` taken over history while
+`inf_pr <= 1e-8`, which is exactly what gh#884's criterion 2 rules out —
+it is not checkable at the gate. The shipped detector evaluates three
+things at *one and the same* iterate, and is sticky once true:
 
-What should **not** happen is an *in-flight* switch keyed on the runaway
-pattern, a default flip, or a dual ceiling on the acceptable-level gate.
-All three are measured above. A late detector with a cold retry is a
-different mechanism and is not covered by any of those measurements.
+* `inf_pr <= 1e-8`;
+* a **scale-relative** step, `maxᵢ |dᵢ| / (1 + |xᵢ|)` over the `x` and `s`
+  blocks, at or below `dual_divergence_retry_step_tol` (default `1e-5`);
+* the **unscaled** dual infeasibility at or above
+  `dual_divergence_retry_du_floor` (default `1e2`), and finite.
 
-And whatever is built, if it touches the verdict it needs its own
-fixture: per the corpus section above, an empty sweep says nothing about
-a gate change.
+The step is scale-relative rather than a bare norm because a bare `||d||`
+threshold means different things at different variable scales, and the
+detector's whole job is to separate two models by that number.
+
+**Eligibility: `m >= 1`.** On an unconstrained model `∇L ≡ ∇f`, so the
+third conjunct degenerates into a second, much looser copy of
+`dual_inf_tol` and the detector would fire on any model with a large
+gradient at a flat spot. This is the same collapse that killed ruled-out
+4, arriving from a different direction.
+
+**The promotion gate has five conjuncts, not one.** The base attempt saw
+the signature; its status is `SolvedToAcceptableLevel` or
+`RestorationFailed` (see the scope note below — never `SolveSucceeded`,
+and deliberately not the generic exhaustion exits); the retry returns
+`Solve_Succeeded`; the retry's **unscaled** KKT error *and* unscaled
+constraint violation are within `acceptable_tol`; and the retry's
+unscaled KKT error strictly beats the base attempt's. Conjunct 4 is the
+one that matters: the defect *was* a status contradicted by its own
+unscaled residual, so a gate reading the status alone reproduces the bug
+one attempt later. On a refusal all three sinks are floored the way the
+μ fallback floors them (pounce#870) — solution payload, certificate, and
+the last trace row.
+
+Deliberately **not** deferred to `TERMINATION_POLICY_OPTIONS` the way the
+μ flip's acceptable-level trigger is (gh#757). That deferral exists
+because the μ flip can hand back a different *local solution*; this retry
+cannot, because conjunct 4 requires the promoted answer to satisfy the
+KKT conditions in the model's own units.
+
+### What the build answered from the open list
+
+- **"The false-positive class is unquantified."** It stays unquantified
+  in general, and the sweep found the corpus's one second instance —
+  `deb7` under L-BFGS, where the *detector* is right and the *remedy* is
+  not. That is the subject of the next subsection, and it is what set
+  the status scope. Among the acceptable-level exits, which is the class
+  gh#884 is about, there is still no second instance: the only one on
+  either leg is `mu_fallback_point_floor`, which ends at an unscaled dual
+  of `2.4e-11`, and the closest approach to the `1e2` floor from any
+  direction is `eigena2` under L-BFGS at `37` with a settled step of
+  `7.9e-9` — under the floor, and the floor is why it is excluded. So the
+  guard against a false positive is not corpus breadth. It is conjunct 4:
+  a false positive costs one solve and cannot change the answer.
+- **"The route needs a guard that a claimed success is real."** Built,
+  as conjunct 4, and reported: `dual_divergence_signature` and
+  `dual_divergence_retry_promoted` reach `SolveStatistics`, the JSON
+  report and the console.
+- **"Whether the retry converges in general."** Still open, and still a
+  different trajectory on every other model — which is why a
+  non-converging retry is a no-op rather than a regression.
+- **"`ralph1` is one of eight cells."** Still one cell. What changed is
+  that the safety argument no longer rests on breadth: the shipped
+  `the_detector_must_not_fire_on_ralph1` is mutation-checked (widen the
+  step conjunct to `1e-1` and only that test goes red), and the remedy's
+  danger is stated in the option help rather than left implicit —
+  `perturb_always_cd=yes` takes `ralph1` to `Solve_Succeeded` at
+  `f = -2.71e-5`, *below* `f* = 0`, with an unscaled KKT error of
+  `5.25e-7`. That answer beats its base attempt on every number the gate
+  reads. Detector specificity is the only thing standing between it and
+  a promotion, which is why the threshold is an option with a documented
+  off value.
+
+### `deb7`: a true positive for the detector, and why the gate names statuses
+
+The fixture sweep — 80 fixtures, both legs, against a `main` binary —
+moved exactly one line:
+
+```
+lbfgs  deb7  nlp  ErrorInStepComputation  it=715 -> it=3000
+```
+
+same status, same objective (`101.0934371`). The detector fires there,
+and it is **not** a false positive. Measured at iteration 346: a
+scale-relative step of `6.5e-6`, `inf_pr` of `3.0e-12`, and an unscaled
+`inf_du` of `9.2e+05` — an *order above* `qpec_small`'s `7.9e+04`.
+
+The first instinct is to move a threshold, and it does not survive
+being written out. Raising the dual floor cannot work in the right
+direction at all: `deb7` is the *larger* of the two on that conjunct.
+Tightening the step tolerance can — `qpec_small` settles to `4.3e-8`
+against `deb7`'s `6.5e-6` — but only by fitting the default to one
+fixture, with a factor of ~30 of margin left for every model neither
+corpus contains, on a conjunct whose other job is to hold `ralph1`
+(`7.2e-3`) out by five orders. Buying two orders of specificity by
+spending an order and a half of margin is a bad trade, and it is the
+wrong lesson besides: the detector is describing this iterate
+*correctly*. What does not transfer is the *remedy*: the retry
+ran the full 3000-iteration budget to `Maximum_Iterations_Exceeded` at an
+unscaled KKT error of `6.7e+01`, against the base attempt's `9.9e+01` —
+better, and nowhere near `acceptable_tol`, so conjunct 4 refused it
+exactly as designed. The cost was real all the same: 4x the trajectory,
+for an answer that did not change.
+
+So the scope was cut by **status**, not by threshold, and the two kept
+statuses are the ones a vanishing-gradient row produces *directly*:
+
+- `Solved_To_Acceptable_Level` is gh#884 verbatim — the `.nl`/CLI path.
+- `Restoration_Failed` is the same defect one step earlier, where the
+  TNLP path lands, at an unscaled KKT error of `3.3e+11`.
+- `Error_In_Step_Computation` and `Maximum_Iterations_Exceeded` are
+  generic exhaustion exits. Every hard model in the corpus can reach
+  them for reasons that have nothing to do with an arbitrary multiplier,
+  which is precisely what `deb7` demonstrates.
+
+Worst case is now one extra solve, under the caller's own `max_iter`, on
+a model that was going to report a non-success verdict anyway. `deb7` is
+back to 715 iterations and the sweep diff is empty. Pinned by
+`a_generic_exhaustion_exit_does_not_buy_a_retry`, which asserts the
+signature *does* fire there and that no retry runs — so re-widening
+`retry_worthy` fails a test that names this measurement rather than
+silently re-costing the trajectory.
+
+**Scoping by status is only as complete as the status is stable, and on
+this very fixture it is not.** `deb7` reaches `Error_In_Step_Computation`
+at default options and is out of scope; under
+`limited_memory_ls_failure_restarts=1` — gh#818's re-anchor rung, off by
+default — it reaches `Restoration_Failed` instead, and is therefore *in*.
+It then pays the cost this section is about: measured **6.1 s to 25.2 s**
+wall clock for the same `Restoration_Failed` verdict, the same objective,
+and a declined retry. Nothing is wrong with the answer and nothing in the
+default corpus sees it — the sweep runs default options — but it is the
+honest bound on the narrowing. What the status scope buys is that the
+retry only ever runs on a solve already reporting failure; what it does
+*not* buy is that the retry only runs where the remedy works. That
+distinction is what closes gh#884 without a wrong answer, and it is not
+free.
+
+That cost is filed rather than absorbed, per the repository's own rule
+about accepted regressions: **gh#887**, which also carries the two
+candidate ways to shrink it (bound the retry's budget by the base
+attempt's; find a pre-check that the remedy is plausible).
+
+
+One reporting wrinkle to know about, unchanged by any of this and not
+gh#884's to relitigate. `SolutionCertificate` floors residuals and
+deliberately *not* `iteration_count` — the count describes what the
+invocation did, and rewinding it would under-report work that really
+happened (see its doc comment, and
+`issue857_escalation_gated_quality_rung.rs`, where `deb7` at
+`max_iter=100` is the case that settled it). But the field is
+overwritten per attempt rather than accumulated, so a declined retry
+reports the base attempt's status beside the *retry's* count, which is
+neither attempt's total. The μ fallback and the second-opinion ladder
+have the same shape; the narrowing only makes it rarer here. Worth a
+look if the scope ever widens.
+
+### Criterion 4, measured
+
+gh#274's `unbounded_exp.nl` — `min -exp(x) s.t. x >= 0`, unbounded below
+— is the corpus's closest thing to a false positive, and it is close.
+It satisfies **two of the three conjuncts outright**: the constraint row
+stays satisfied while the iterates run off, so `inf_pr` is at zero and
+the unscaled dual infeasibility is `8.7e+20` at the exit.
+
+The step conjunct is the *only* thing holding the detector off, which is
+gh#884's discriminator stated as a measurement rather than an intention.
+Measured both ways, so that "it does not fire" is evidence for the
+reason claimed rather than for some other conjunct quietly doing the
+work:
+
+| `dual_divergence_retry_step_tol` | signature | promoted | status | objective |
+|---|---|---|---|---|
+| `1e-5` (default) | no | no | `Error_In_Step_Computation` | `-8.688703979461661e+20` |
+| `1e30` (conjunct disabled) | **yes** | no | `Error_In_Step_Computation` | `-8.688703979461661e+20` |
+
+Status and objective are identical across the two rows: a deceived
+detector costs nothing here at all. It cannot, for two independent
+reasons. This model exits `Error_In_Step_Computation`, which the status
+scope above excludes, so no retry runs — and when an earlier draft did
+retry on that status, the retry returned an unscaled KKT error of
+`1.49e+19` and conjunct 4 refused it. Either barrier alone is enough.
+Pinned by `a_diverging_iterate_is_not_the_signature`, which asserts both
+the signature's absence at the default *and* its presence at `1e30`, so
+"it does not fire" stays evidence for the reason claimed.
+
+### What did not change
+
+The three ruled-out trigger/policy routes stay ruled out, and none of the
+measurements above is superseded: an *in-flight* switch keyed on the
+runaway pattern, a global default flip, and a dual ceiling on the
+acceptable-level gate are all still wrong, for the reasons measured here.
+A late detector with a cold retry is a different mechanism, and the
+numbers in those sections say nothing about it either way.
+
+And the corpus caveat stands: per the corpus section above, an empty
+sweep says nothing about a gate change, which is why the fix ships with
+its own fixture —
+`crates/pounce-cli/tests/fixtures/mpcc_qpec_small_biactive.nl`, the
+corpus's first MPCC lowering — rather than resting on the sweep being
+quiet.
