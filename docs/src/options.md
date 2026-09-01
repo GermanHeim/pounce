@@ -861,27 +861,36 @@ by default) `deb7` exits `Restoration_Failed` instead of
 trajectory.** The detector fires on an *iterate*; nothing in it says the
 solve ends there. `deb7` is exactly that case — the signature is real at
 iteration 560, and the base attempt then works its way back down to an
-unscaled KKT error of `9.9e+01` before giving up. There is no runaway
-multiplier left in that answer for `perturb_always_cd` to repair, so
-POUNCE does not spend a solve finding out. The retry runs only when the
-reported answer still carries at least a hundredth of the runaway the
-detector fired on.
+unscaled KKT error of `9.9e+01` before giving up. That answer is not one
+`perturb_always_cd` can repair, so POUNCE does not spend a solve finding
+out.
 
-That test is a *ratio*, not a floor, because a floor on a reported
-residual is a threshold on a scale-dependent quantity — it would have to
-be re-fitted every time a fixture moves. The ratio is scale-free and the
-measured separation is five orders:
+What gh#884's defect looks like in the *answer* is a point converged
+except that one multiplier ran away: the primal is exact, complementarity
+is met, and the whole residual is dual infeasibility. So the retry runs
+only when the reported answer's unscaled constraint violation and unscaled
+complementarity are both at or below `1e-6` times its unscaled dual
+infeasibility. Measured:
 
-| run | detected | reported | retained |
-|---|---|---|---|
-| the gh#884 reproducer | `2.36e+03` | `7.90e+04` | `33` |
-| `deb7` + L-BFGS + rung | `6.59e+05` | `9.90e+01` | `1.5e-04` |
+| run | unscaled dual | viol | compl | ratio |
+|---|---|---|---|---|
+| the gh#884 reproducer | `7.90e+04` | `1.1e-16` | `1.1e-09` | `1.5e-14` |
+| `deb7` + L-BFGS + rung | `9.90e+01` | `8.0e-13` | `4.65e+00` | `4.7e-02` |
 
-The reproducer's runaway *grows* into the answer it reports; `deb7`'s is
-gone. A floor would not have separated these — `deb7`'s `9.9e+01` sits one
-percent under the detector's own `1e2`. Before this gate that fixture paid
-a full cold re-solve, 6.1 s to 25.2 s, to decline an answer that was never
-going to be promoted (gh#887); it now declines before spending anything.
+Twelve orders. `deb7`'s complementarity is five percent of its own KKT
+error — that answer is not a converged point with a runaway multiplier, it
+is an unconverged point. Before this gate that fixture paid a full cold
+re-solve, 6.1 s to 25.2 s, to decline an answer that was never going to be
+promoted (gh#887); it now declines before spending anything.
+
+The test is a *ratio within one answer* on purpose. A floor on the
+reported residual would be a threshold on a scale-dependent quantity, and
+it does not even separate these cases — `deb7`'s `9.9e+01` sits one
+percent under the detector's own `1e2`. Comparing the answer against the
+runaway the *detector* saw does separate them, but it reads two numbers
+from a trajectory, and trajectories are not portable across platforms.
+A ratio between two residuals of the same answer carries no units and
+cannot move that way.
 
 Set `dual_divergence_retry=no` if you are running a hard model to a
 failure verdict and even one extra attempt is not worth the clock.
