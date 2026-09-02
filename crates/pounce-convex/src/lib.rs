@@ -51,6 +51,7 @@ pub mod presolve;
 mod psd_certificate;
 pub mod qp;
 pub mod sensitivity;
+mod sigma_verdict;
 pub(crate) mod simplex;
 pub mod sos;
 

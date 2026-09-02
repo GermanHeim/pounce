@@ -827,13 +827,17 @@ impl PyQpSensitivity {
         let (status, payload): (QpStatus, Option<Payload>) = py
             .allow_threads(|| {
                 let sol = solve_qp_ipm(qp, &o, backend);
-                let payload = (sol.status == QpStatus::Optimal).then(|| {
-                    (
-                        sol.x.clone(),
-                        sol.obj,
-                        QpSensitivity::build(qp, &sol, &o, active_tol, backend),
-                    )
-                });
+                // gh #880: `OptimalInaccurate` now also carries the `σ`
+                // cascade's "could not certify" verdict, and that population
+                // built a payload before. See `QpSensitivity::build`.
+                let payload = matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate)
+                    .then(|| {
+                        (
+                            sol.x.clone(),
+                            sol.obj,
+                            QpSensitivity::build(qp, &sol, &o, active_tol, backend),
+                        )
+                    });
                 SendGuard::new((sol.status, payload))
             })
             .into_inner();

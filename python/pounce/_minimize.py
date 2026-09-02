@@ -911,7 +911,9 @@ def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
         method=method,
     )
     fun_val = float(res.obj) + ex.obj_const
-    success = res.status == "optimal"
+    # gh #880: ``optimal_inaccurate`` is a converged-to-acceptable solve, the
+    # same convention the NLP arm uses (gh #119 / #123). See `QpResult.success`.
+    success = res.status in ("optimal", "optimal_inaccurate")
     selector = (
         "qp-active-set"
         if method == "active-set"
@@ -970,7 +972,9 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
         max_iter=opts.get("max_iter"),
     )
     fun_val = float(res.obj) + ex.obj_const
-    success = res.status == "optimal"
+    # gh #880: ``optimal_inaccurate`` is a converged-to-acceptable solve, the
+    # same convention the NLP arm uses (gh #119 / #123). See `QpResult.success`.
+    success = res.status in ("optimal", "optimal_inaccurate")
     message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
         x=np.asarray(res.x),

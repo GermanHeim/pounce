@@ -408,6 +408,108 @@ changes.
   what carries the claim about that arm is the 25-instance measurement above
   and the CLI checks on `qcqp_ball` / `qcqp_columns_illcond` under both `socp`
   and `auto`, not the empty diff.
+- **The cost-normalized (`σ`) convex path reported `Optimal` on points it could
+  not certify (gh#880).** When `hsde_cost_scale` rescales the objective,
+  `solve_qp_core` tries the normalized solve, an un-normalized re-solve and the
+  direct driver, asking `normalized_optimum_is_genuine` of each. If none passes
+  it returns whichever claimed optimum is closest to optimality in the caller's
+  own coordinates — the right point to keep, and by a wide margin: on a
+  72-instance coupled census (rotated spectra, exact `Fraction` optimum per
+  instance) it beats the un-normalized re-solve on seven of nine failures, by
+  6× to 15416×. What was wrong was the label. The point went back under a bare
+  `Optimal`, and on three instances that `Optimal` sat on an `x` **further from
+  the optimum than f64 permits at that conditioning** — `3.06e-04`, `2.90e-04`
+  and `2.45e-04` against a `κ·ε` floor of `2.20e-04`.
+
+  The cascade's verdict is now carried out to `solve_qp_ipm` and applied there,
+  so such a point returns `OptimalInaccurate`; the CLI's existing gh#535/#888
+  reroute reads that and hands the model to the NLP arm. Measured on the
+  census: instances above their conditioning floor **3 → 0**, worst forward
+  error `3.06e-04` → `5.62e-05`, total iterations `443` → `404`. The nine that
+  still read above a flat `1e-6` are all at or below `κ·ε` — the wall commit
+  `4005ca8d` recorded when it stopped counting this census above `1e10` — and
+  are not wrong answers.
+
+  **What is recorded is the scale-free half of the verdict, not the whole
+  gate.** "The cascade certified nothing" mixes whether the residual is small
+  in *absolute* terms, which legitimately depends on the objective's scale,
+  with whether `x` is far from the optimum, which does not. Recording the
+  mixture makes the status flap under an objective rescaling that leaves the
+  argmin unchanged by identity — swept over `k = 1e-2 ‥ 1e8` it oscillates six
+  times. Only the forward-error arm is recorded, and only with a 10× margin:
+  at `cond = 1e10` the realized error is `1.47e-06` against a `1e-06` cut, so
+  the model sits *on* the decision boundary and rounding decides it — each `k`
+  reaches a slightly different iterate, so this is solve-to-solve variation.
+  With the margin the inert rescaling is uniformly `Optimal` across eleven
+  decades.
+
+  **The layer is load-bearing.** `OptimalInaccurate` is one of the statuses
+  `solve_qp_ipm_core` reads as the badly-scaled pathology worth a
+  Ruiz-equilibrated retry, and that retry is accepted whenever it converges to
+  a clean `Optimal` — its status outranking the better answer. Demoting where
+  the pick is made takes the census's worst forward error from `3.06e-04` to
+  `3.93e+01`. At the outermost layer every retry has already run. The verdict
+  rides in `pounce-convex/src/sigma_verdict.rs`, modelled on the existing
+  `deadline` thread-local (`QpSolution` has 145 construction sites and no
+  `Default`), and is re-recorded on every attempt so a retry cannot inherit a
+  superseded verdict.
+
+  The arm's right-hand side is now compensated (FMA two-product plus two-sum),
+  since it decides a user-visible status. The census does not discriminate that
+  — swapped back to a plain sum it demotes the same instances with the same
+  errors — so it is pinned instead on rows whose exact value is known by
+  construction: on `(1e16, 1, −1e16)` the plain traversal reads `0.0` where the
+  truth is `1.0`, losing the answer rather than digits.
+
+  **Scope, since the entry above says "reported `OptimalInaccurate`".** The
+  demotion rides on `sigma_forward_error_is_small`, which opens with
+  `if prob.m_eq() > 0 { return true; }` — it needs the saddle system rather
+  than a barrier diagonal — so it is structurally silent on **every**
+  equality-constrained `σ` model, however far from the optimum that model
+  lands. It is also silent wherever `σ` never engages: a warm solve seeded
+  from a nearby point is forced onto the direct driver, where the whole
+  normalization block is skipped. Both are unchanged by this entry and neither
+  is a regression; they are the boundary of what it claims.
+
+  **`OptimalInaccurate` is admitted wherever `Optimal` used to be required.**
+  The demotion changes a label, not what the library will do: `optimal_inaccurate`
+  now counts as success in `QpResult.success` and `minimize`, and
+  `QpSensitivity::build` (and `pounce-py`'s payload gate) build for it. That is
+  the repo's settled convention rather than a new judgement — `_curve_fit.py`
+  (gh#119/#123) records that treating `Solved_To_Acceptable_Level` as a
+  non-success "reported `success=False` at a verified optimum … and callers
+  gating on `.success` discarded valid fits". Without this the demoted
+  population, which previously arrived as a clean `Optimal`, would silently
+  lose derivatives and `success`.
+
+  **The margin is pinned from both sides by tests that already exist**, which
+  is the checkable form of the claim: at `<= 2` the inert-rescaling test fails
+  (the verdict flaps), at `>= 50` the tolerance sweep stops demoting where it
+  must, and at `>= 200` the bound-constrained sweep goes too. The admissible
+  window is `(2, 50)` and `10` is roughly its geometric centre.
+
+  **Also fixed here, because it was found here:** the same guard's slack scale,
+  `bound.abs().max(x.abs())`, collapsed to zero when a variable rested on a
+  bound of `0`, so `|slack| <= cut·0` was false for every nonzero slack and a
+  converged `1e-16` was rejected — which is why the cascade could decline an LP
+  whose relative KKT error was `9.5e-17` and whose `x` was the exact vertex. It
+  costs a wasted re-solve rather than a wrong answer, so no corpus can see it;
+  `a_converged_slack_on_a_zero_bound_is_negligible` pins it directly against
+  the guard.
+
+  No pre-existing fixture moves: `scripts/sweep-fixtures.sh` diffs only the two
+  lines of the new `issue880_sigma_uncertified` fixture (both legs, routing to
+  `nlp`) — nothing else moves in status, objective, iteration count or engine,
+  consistent with only 1 of 79 fixtures reaching `σ`, and that one a QCQP the
+  cascade's non-orthant early return excludes from the recording site. That is
+  why this population needed a CLI fixture of its own:
+  `issue880_sigma_demotion_reroutes.rs` asserts the reroute fires (engine
+  `nlp`) and that pinned to the convex arm the status and AMPL
+  `solve_result_num` are the honest `SolvedToAcceptableLevel` / `1`. The sweep
+  tests in
+  `issue880_coupled_sigma_forward_error.rs` now assert the exact status
+  expected at each conditioning and tolerance, so the certification boundary is
+  pinned in both directions rather than assumed.
 
 - **A settled iterate with a runaway multiplier no longer ships as
   `Solved_To_Acceptable_Level` (gh#884).** Some models have a solution at
