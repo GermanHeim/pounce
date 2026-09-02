@@ -63,9 +63,14 @@
 //! looked like it broke one test when it breaks four.
 
 use pounce_convex::QpOptions;
-use pounce_convex::ipm::solve_qp_ipm;
+use pounce_convex::cones::ConeSpec;
+use pounce_convex::ipm::{solve_qp_ipm, solve_socp_ipm};
 use pounce_convex::qp::{QpProblem, QpStatus, Triplet};
-use pounce_convex::sensitivity::QpSensitivity;
+use pounce_convex::sensitivity::{ConeBlockKind, QpSensitivity};
+use pounce_sens_core::boundcheck::RefineStop;
+
+/// The partition used by the conic release fixture at the bottom of this file.
+const CONIC_SOC3: [ConeSpec; 1] = [ConeSpec::SecondOrder(3)];
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -320,4 +325,191 @@ fn a_refinement_can_release_one_bound_and_pin_another() {
             truth.x
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Release on a CONIC build. Round 5 of #889 listed this under "not covered":
+// `QpKktBacksolver` against `boundcheck`'s index expectations, and the bound
+// refinement on conic builds with combined face rows. Every fixture above is
+// orthant, so the release path had never run against an active block holding
+// anything but a `G` row.
+// ---------------------------------------------------------------------------
+
+/// The releasing fixture above, with a **second-order block on its boundary**
+/// bolted alongside.
+///
+/// Variables `(x₀, x₁, t, v, w)`. The first two are the orthant release pair,
+/// unchanged: `min ½‖x‖² − 2x₀ + x₁ s.t. x₀ + x₁ = b, x ≥ 0`, so `x₁` sits on
+/// its bound with `z₁ = 3 − b` and must release past `b = 3`. The last three
+/// carry `(t, v, w) ∈ Q₃` under `min ½‖·‖² − v − 0.2w`, which puts the block on
+/// its **boundary**, and are otherwise **decoupled** from the equality.
+///
+/// # The coupling is the point, and the first draft got this backwards
+///
+/// `v` is a **coordinate of the cone** and it sits in the equality, so the
+/// perturbation's answer has to travel through the block's face row and its
+/// curvature. That is what makes the fixture evidence about a conic release
+/// rather than about a release that happens to have a cone nearby.
+///
+/// The first version of this fixture left the block **decoupled**, on the
+/// reasoning that "what is under test is not an interaction — it is whether the
+/// release path indexes correctly around a face row". Measured, that fixture is
+/// nearly worthless: with `assemble_kkt` mutated to drop the face curvature
+/// entirely it stays **green**, because a decoupled block cannot influence the
+/// released coordinates. Eight other tests catch that mutation and the one
+/// written for the conic release path does not.
+///
+/// The index-space mutation that draft's doc named as its guard is worse — it
+/// is **vacuous**. `release_slots` is keyed off `active_rows.len()`, and a face
+/// contributes exactly one entry to `active_rows` and one to `active_ineq`, so
+/// the two lengths are equal on every build and substituting one for the other
+/// changes nothing. A doc naming a guard the code does not have is the failure
+/// this PR has paid for more than any other.
+///
+/// An **apex** block would not test this: there the block contributes every one
+/// of its `G` rows, so provenance and the active rows coincide. That is exactly
+/// the coincidence which hid round 5's Finding 1 in `reduced_hessian` — the
+/// apex fixtures were accidentally correct while the boundary ones were wrong —
+/// so the fixture here is a boundary block on purpose.
+fn conic_releasing_qp(b: f64) -> QpProblem {
+    QpProblem {
+        n: 5,
+        p_lower: (0..5).map(|j| tri(j, j, 1.0)).collect(),
+        c: vec![-2.0, -0.9, 0.0, -1.0, -0.2],
+        // x₀ + x₁ + v = b. `v` is a COORDINATE OF THE CONE, and that coupling
+        // is the whole point — see the note above.
+        a: vec![tri(0, 0, 1.0), tri(0, 1, 1.0), tri(0, 3, 1.0)],
+        b: vec![b],
+        // s = (t, v, w) = h − Gx with h = 0
+        g: vec![tri(0, 2, -1.0), tri(1, 3, -1.0), tri(2, 4, -1.0)],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![0.0, 0.0, -1e19, -1e19, -1e19],
+        ub: vec![1e19; 5],
+    }
+}
+
+/// **A release on a conic build reaches the re-solve**, judged the way the
+/// orthant case is: against an independent solve of the perturbed problem.
+///
+/// # Why `δ = 0.2` and not the orthant fixture's `+3`
+///
+/// The perturbation has to cross the release breakpoint, and it has to be small
+/// enough that a *first-order* step along a **curved** face can still be
+/// compared to a re-solve. `c₁ = −0.9` puts the breakpoint next door — `z₁ =
+/// 0.0999998` at `b = 1`, released by `b = 1.2` — so `δ = 0.2` does both. At
+/// the orthant fixture's `δ = 3` the comparison is meaningless: measured, the
+/// step misses the re-solve by `0.9`, essentially all of it in `t`, which is
+/// the curvature being *correct* rather than wrong.
+///
+/// # What the numbers look like, and what they pin
+///
+/// ```text
+///              x₀         x₁          t          v          w
+///   predicted  1.1200012  0.0200012   0.0999988  0.0599976  0.1000000
+///   oracle     1.1199999  0.0199999   0.1166190  0.0600003  0.0999998
+/// ```
+///
+/// The released pair matches to `~1.4e-6`; `t`, the curved coordinate, carries
+/// `1.7e-2`, which is `O(δ²)` at `δ = 0.2`. That split is the face being used.
+///
+/// # Mutation evidence — run, and one of them negative
+///
+/// | mutation | result |
+/// |---|---|
+/// | `assemble_kkt` drops the face curvature | **red here.** `x₁` comes back `1.4e-6` instead of `0.0200012` — the bound does not release at all |
+/// | `release_slots` keyed off `active_ineq.len()` instead of `active_rows.len()` | **vacuous, nothing red anywhere.** The two vectors have equal length on every build; recorded so nobody re-derives it as a guard |
+///
+/// The first row is what the decoupled first draft could not do.
+#[test]
+fn a_release_on_a_conic_build_reaches_the_resolve() {
+    let opts = QpOptions {
+        tol: 1e-11,
+        ..Default::default()
+    };
+    let prob = conic_releasing_qp(1.0);
+    let sol = solve_socp_ipm(&prob, &CONIC_SOC3, &opts, backend);
+    assert_eq!(sol.status, QpStatus::Optimal);
+
+    let mut sens = match QpSensitivity::build_conic(&prob, &CONIC_SOC3, &sol, &opts, 1e-7, backend)
+    {
+        Ok(s) => s,
+        Err(e) => panic!("the fixture must build a conic sensitivity, got {e:?}"),
+    };
+
+    // The two properties that make this fixture the one described.
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(0, ConeBlockKind::Boundary)],
+        "the block must be on its BOUNDARY — an apex contributes its own G rows \
+         and would not exercise the combined-row index space"
+    );
+    assert_eq!(
+        sens.active_bound_vars(),
+        [1],
+        "and x₁ must be on its bound, or there is nothing to release"
+    );
+
+    const DELTA: f64 = 0.2;
+    let Ok((dx, _pinned, stop)) = sens.parametric_step_bounded(&[0], &[DELTA], 1e-3, 32) else {
+        panic!("the refinement must run on a conic build");
+    };
+    assert_eq!(stop, RefineStop::Settled);
+
+    let predicted: Vec<f64> = sol.x.iter().zip(dx.iter()).map(|(a, b)| a + b).collect();
+    let truth = solve_socp_ipm(
+        &conic_releasing_qp(1.0 + DELTA),
+        &CONIC_SOC3,
+        &opts,
+        backend,
+    );
+    assert_eq!(
+        truth.status,
+        QpStatus::Optimal,
+        "the oracle solve must converge"
+    );
+
+    // The released pair sits on the flat part of the geometry, so it must reach
+    // the re-solve outright.
+    for j in [0usize, 1] {
+        assert!(
+            (predicted[j] - truth.x[j]).abs() < 1e-5,
+            "released coordinate {j} must reach the re-solve: predicted {}, \
+             oracle {} (full {predicted:?} vs {:?})",
+            predicted[j],
+            truth.x[j],
+            truth.x
+        );
+    }
+
+    // x₁ must genuinely leave its bound. Holding the active set leaves it at 0;
+    // dropping the face curvature leaves it at ~1.4e-6, which is the same thing
+    // by a different route. Either is orders away from the 0.02 that is right.
+    assert!(
+        predicted[1] > 0.015 && (predicted[1] - 0.02).abs() < 1e-4,
+        "x₁ must actually release (≈0.02): got {}",
+        predicted[1]
+    );
+
+    // The curved coordinate is a different claim: a first-order step along a
+    // curved face carries O(δ²), so assert the ORDER rather than the value —
+    // asserting a match would be asserting the face is flat.
+    let err = |d: f64| -> f64 {
+        let mut s2 =
+            match QpSensitivity::build_conic(&prob, &CONIC_SOC3, &sol, &opts, 1e-7, backend) {
+                Ok(v) => v,
+                Err(e) => panic!("rebuild must succeed, got {e:?}"),
+            };
+        let (dxd, _, _) = s2
+            .parametric_step_bounded(&[0], &[d], 1e-3, 32)
+            .expect("the refinement must run");
+        let t = solve_socp_ipm(&conic_releasing_qp(1.0 + d), &CONIC_SOC3, &opts, backend);
+        ((sol.x[2] + dxd[2]) - t.x[2]).abs()
+    };
+    let (e_full, e_half) = (err(DELTA), err(DELTA / 2.0));
+    let ratio = e_full / e_half;
+    assert!(
+        (3.0..=5.0).contains(&ratio),
+        "the curved coordinate's residual must be second order (halving δ \
+         should quarter it): {e_full:e} / {e_half:e} = {ratio}"
+    );
 }
