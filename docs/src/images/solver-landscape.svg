@@ -133,7 +133,7 @@
   <!-- ===================== Support / post-solve ===================== -->
   <rect x="60" y="620" width="860" height="92" rx="8" fill="#fafaf9" stroke="#9ca3af" stroke-width="1.3" stroke-dasharray="6 4"/>
   <text x="74" y="640" font-size="11" font-weight="bold" fill="#334155">Cross-cutting layers</text>
-  <text x="80" y="662" font-size="11" fill="#111827">• <tspan font-weight="bold">Sensitivity</tspan> — sIPOPT parametric step + reduced Hessian (NLP, pounce-sensitivity); QpSensitivity (convex QP)</text>
+  <text x="80" y="662" font-size="11" fill="#111827">• <tspan font-weight="bold">Sensitivity</tspan> — sIPOPT parametric step + reduced Hessian (NLP, pounce-sensitivity); QpSensitivity (convex QP + cones)</text>
   <text x="80" y="682" font-size="11" fill="#111827">• <tspan font-weight="bold">Restoration phase</tspan> — feasibility recovery inside the filter-IPM (pounce-restoration); ℓ₁-penalty reformulation (pounce-l1penalty)</text>
   <text x="80" y="702" font-size="11" fill="#111827">• <tspan font-weight="bold">Cone library</tspan> — nonnegative · second-order · exponential · power · PSD (small dense); shared JSON solve report</text>
 

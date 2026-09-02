@@ -329,6 +329,67 @@ fn solver_reduced_hessian_matches_sens_solve_builder() {
     }
 }
 
+/// The session API's eigendecomposition must be the one-shot builder's.
+///
+/// Before this the spectrum was reachable only through
+/// `SensSolve::with_reduced_hessian_eigen`, so a caller holding a `Solver` —
+/// which already has the factor and the reduced Hessian — had to **re-solve
+/// the whole NLP** through the one-shot path to decompose a matrix it was
+/// already holding. That is the parity gap; this asserts closing it did not
+/// invent a second answer.
+#[test]
+fn solver_reduced_hessian_eigen_matches_sens_solve_builder() {
+    let tnlp_a: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut app_a = make_app();
+    let baseline = SensSolve::new(vec![2, 3])
+        .with_reduced_hessian_eigen()
+        .run(&mut app_a, tnlp_a);
+    let vals_baseline = baseline
+        .reduced_hessian_eigenvalues
+        .expect("eigenvalues populated by the one-shot builder");
+    let vecs_baseline = baseline
+        .reduced_hessian_eigenvectors
+        .expect("eigenvectors populated by the one-shot builder");
+
+    let tnlp_b: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(make_app(), tnlp_b);
+    solver.solve();
+    let (hr, vals, vecs) = solver
+        .compute_reduced_hessian_eigen(&[2, 3], 1.0)
+        .expect("session eigendecomposition ok");
+
+    assert_eq!(hr.len(), 4);
+    assert_eq!(vals.len(), 2);
+    assert_eq!(vecs.len(), 4);
+    // The matrix itself must still be `compute_reduced_hessian`'s, so the new
+    // entry point is the same computation plus a decomposition rather than a
+    // second route to the number.
+    let hr_plain = solver
+        .compute_reduced_hessian(&[2, 3], 1.0)
+        .expect("reduced_hessian ok");
+    assert_eq!(hr, hr_plain);
+
+    for k in 0..2 {
+        assert!(
+            (vals[k] - vals_baseline[k]).abs() < 1e-10,
+            "eigenvalue {k}: session={}, sens_solve={}",
+            vals[k],
+            vals_baseline[k]
+        );
+    }
+    // Eigenvectors are sign-pinned by `symmetric_eigen`, so they must agree
+    // component-wise rather than only up to a sign — that pinning is what
+    // makes a column readable as a direction across builds.
+    for k in 0..4 {
+        assert!(
+            (vecs[k] - vecs_baseline[k]).abs() < 1e-10,
+            "eigenvector component {k}: session={}, sens_solve={}",
+            vecs[k],
+            vecs_baseline[k]
+        );
+    }
+}
+
 #[test]
 fn solver_converged_none_before_solve() {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));

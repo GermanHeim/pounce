@@ -1995,6 +1995,39 @@ impl Solver {
         Ok(hr)
     }
 
+    /// [`Self::compute_reduced_hessian`] plus its eigendecomposition —
+    /// `(H_R, eigenvalues, eigenvectors)`.
+    ///
+    /// The curvature on the null space of the active constraints is the
+    /// question; its **spectrum** is what answers "is this parameter
+    /// identifiable, and along which direction". `SensSolve` has offered that
+    /// since gh#561 ([`crate::SensSolve::with_reduced_hessian_eigen`]), and
+    /// the session API did not — so a caller holding a `Solver` had to
+    /// re-solve the whole NLP through the one-shot builder to get a
+    /// decomposition of a matrix it already had. That is the gap this closes;
+    /// the numbers are the one-shot path's, from the same
+    /// [`pounce_linalg::symmetric_eigen`].
+    ///
+    /// Eigenvectors are column-major, length `n²`, column `j` belonging to
+    /// eigenvalue `j`, and sign-pinned by `symmetric_eigen` so a column read
+    /// as a direction reproduces across builds.
+    pub fn compute_reduced_hessian_eigen(
+        &self,
+        pin_constraint_indices: &[Index],
+        obj_scal: Number,
+    ) -> Result<(Vec<Number>, Vec<Number>, Vec<Number>), SolverError> {
+        let hr = self.compute_reduced_hessian(pin_constraint_indices, obj_scal)?;
+        let n = pin_constraint_indices.len();
+        let mut vals = vec![0.0; n];
+        let mut vecs = vec![0.0; n * n];
+        if !pounce_linalg::symmetric_eigen(&hr, n, &mut vals, &mut vecs) {
+            return Err(SolverError::SensComputationFailed(
+                "the reduced Hessian's eigendecomposition did not converge".into(),
+            ));
+        }
+        Ok((hr, vals, vecs))
+    }
+
     /// The reduced Hessian as the solver's internal **scaled** space
     /// sees it — the value [`Self::compute_reduced_hessian`] returned
     /// before pounce#128: `H̃_ij = (df / (dc_i·dc_j)) · H_ij`.
