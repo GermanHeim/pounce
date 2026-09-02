@@ -460,24 +460,54 @@ fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)
 /// The apex gate is what keeps all of it off the common path, not the row
 /// count: an apex is rare, and a build without one never calls this.
 ///
-/// # The tolerance biases toward *missing* a deficiency, deliberately
+/// That is a statement about **frequency, not magnitude** — the gate does not
+/// bound `m_eq`. Once you are on the path, the two `A`-width eliminations are
+/// `~20 GB` each at 50 000 equalities over 50 000 columns (round 5 of #889,
+/// recording the number rather than proposing a change). Unreachable today,
+/// since the conic CLI route reroutes before it. If it ever is reachable the
+/// fix is a rank-revealing factorization or a gate on `m_eq`, not the
+/// short-circuit round 4 proposed — that one is only valid for the weaker
+/// criterion this replaced.
+///
+/// # The tolerance biases toward *refusing a servable model*
 ///
 /// The guard refuses unless `rank([A;B]) == rank(A) + rank(B)`. Undercounting
 /// the stacked rank breaks that equality and **refuses**; undercounting either
-/// part restores it and **passes**. The stacked elimination is the longest, and
-/// so the one with the most opportunity to drop a marginal pivot, which biases
-/// the guard toward *missing* a deficiency rather than inventing one.
+/// part restores it and **passes**. The stacked elimination has the most rows,
+/// and so the most opportunity to drop a marginal pivot — which biases the
+/// guard toward **inventing** a deficiency, not missing one.
 ///
-/// Missing is the right way to err for a refusal this new: a missed deficiency
-/// leaves the step to `ill_conditioned()`, which catches it (measured across
-/// three shapes now — residual `0.5`, `0.333` and `0.8` against a `1e-6`
-/// threshold, no overlap with the `~1e-13` of a correct step), while an
-/// invented one breaks a working model at build time with no recourse.
+/// Measured, on `A = [x₀]`, `B = [x₀ + ε·x₁]`, `n = 2`, where
+/// `ker(B) = span(−ε, 1)` and `A(ker B) = range(A)` for every `ε > 0`, so the
+/// truth is *serve* throughout:
 ///
-/// (An earlier version of this comment had both halves backwards, and a later
-/// one described a global scale this function no longer uses. The threshold has
-/// been `√ε` throughout; only what it is measured against, and the argument for
-/// its direction, have changed.)
+/// ```text
+///   ε = 1e-6, 1e-7    rank([A;B]) = 2      serve
+///   ε ≤ 1e-8          rank([A;B]) = 1      REFUSE   (truth: serve)
+/// ```
+///
+/// That is acceptable, and the reason is specific rather than general: the
+/// near-dependency an undercount detects is between `A` and `B`, so at `ε ≤
+/// 1e-8` the true `dx/db` is `O(1/ε) ≥ 1e8` and a refusal is the honest
+/// answer to a question whose answer is numerically meaningless. It is **not**
+/// acceptable for the reason the previous three versions of this comment gave
+/// — "a missed deficiency is left to `ill_conditioned()`" — because missing is
+/// no longer the direction this errs in. A reader who budgeted for that would
+/// budget for an error the code does not make.
+///
+/// The complementary misfire exists and goes the other way: undercount a
+/// *part* and a genuinely deficient model passes (`A = [x₁]`,
+/// `B = [x₀, x₀ + 1e-12·x₁]`, where `rank(B)` reads 1 against a true 2). There
+/// `ill_conditioned()` is the fallback, measured across three shapes at
+/// residual `0.5`, `0.333` and `0.8` against a `1e-6` threshold, with no
+/// overlap against the `~1e-13` of a correct step.
+///
+/// (This direction has now been recorded wrongly three times: twice with both
+/// halves backwards, and once — here — because changing the criterion from
+/// `≥` to `==` inverted the bias and the prose did not move. The threshold has
+/// been `√ε` throughout. `row_rank_drops_a_round_off_pivot` now asserts the
+/// guard's *verdict* on both misfires, not just this function's rank, so a
+/// fourth flip has a test that can see it.)
 fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
     if rows.is_empty() || n == 0 {
         return 0;
@@ -575,6 +605,17 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// `s = 0` is the cone's tip, so `ds_block = 0` and every row of the block
 /// enters the active set. Every other face pins one row, or none. That
 /// difference is what makes this check apex-gated.
+///
+/// **That is a statement about faces, not about rows, and it is not a
+/// completeness claim** (round 5 of #889). Active orthant rows are in `B` too
+/// and have no release path either — [`release_slots`] is built for variable
+/// bounds only — so a purely polyhedral degenerate QP can have
+/// `A(ker B) ⊊ range(A)`, never reach this gate, and be served the same
+/// least-squares answer the gate exists to refuse. That is pre-existing
+/// plain-path behaviour rather than something this guard introduced, and
+/// widening the gate to every build is a separate change with its own cost;
+/// but the reader should not take "apex-gated" to mean "the only place this
+/// can happen".
 ///
 /// The step then lives in `ker(B)` for the active rows `B`, while feasibility
 /// of the perturbed problem needs `A·dx = db`. So the apex model can answer
@@ -2924,12 +2965,19 @@ mod tests {
     ///
     /// `row_rank` equilibrates each row and drops pivots under `√ε`, so a row
     /// that differs from a dependent one only at round-off is **not** counted.
-    /// That deflates the rank, which biases the guard toward *passing* — toward
-    /// missing a deficiency rather than inventing one. Erring that way is
-    /// deliberate for a new refusal: a missed deficiency is left to
-    /// `ill_conditioned()`, an invented one breaks a working model at build
-    /// time with no recourse. The comment on `row_rank` had this backwards
-    /// once (re-review of #889); this test is what would catch it flipping.
+    ///
+    /// What that does to the *guard* is the part worth pinning, and it is not
+    /// what this test used to say. Under `rank([A;B]) == rank(A) + rank(B)`,
+    /// undercounting the stacked rank **refuses** and undercounting a part
+    /// **passes**; the stacked elimination has the most rows, so the dominant
+    /// misfire is refusing a model that could have been served. Both are
+    /// asserted below.
+    ///
+    /// This test's own doc claimed to be "what would catch it flipping" while
+    /// calling only `row_rank` and never `apex_can_absorb_db` — so it could
+    /// not, and the direction then flipped once with it green (round 4's `≥` →
+    /// `==` change, caught in round 5 of #889). The guard's verdict is in the
+    /// test now.
     #[test]
     fn row_rank_drops_a_round_off_pivot() {
         let eps = 1e-14;
@@ -2944,6 +2992,39 @@ mod tests {
         // not simply swallowing everything.
         let real = [row(&[(0, 1.0), (1, 1.0)]), row(&[(0, 1.0), (1, 1.001)])];
         assert_eq!(row_rank(&real, 2), 2);
+
+        // ---- and what that does to the guard's verdict ----
+        //
+        // (a) Stacked undercount -> REFUSE a servable model. `ker(B)` is
+        //     `span(-eps, 1)`, so `A(ker B) = range(A)` for every eps > 0 and
+        //     the truth is serve; at eps <= 1e-8 the stacked rank reads 1
+        //     against a true 2 and the guard refuses. Acceptable, because the
+        //     near-dependency is between A and B: the true dx/db there is
+        //     O(1/eps) >= 1e8. Recorded as the *dominant* misfire, which is
+        //     the opposite of what this file said for three revisions.
+        let a = [row(&[(0, 1.0)])];
+        let b_tight = [row(&[(0, 1.0), (1, 1e-12)])];
+        assert!(
+            !apex_can_absorb_db(2, &a, &b_tight),
+            "a stacked undercount must refuse — that is the direction this errs in"
+        );
+        let b_loose = [row(&[(0, 1.0), (1, 1e-6)])];
+        assert!(
+            apex_can_absorb_db(2, &a, &b_loose),
+            "…and well clear of the tolerance the same shape is served"
+        );
+
+        // (b) Part undercount -> PASS a deficient model. B's two rows are
+        //     near-dependent, so rank(B) reads 1 against a true 2; with the
+        //     true rank `ker(B) = {0}` and `A(ker B) = {0}`, so the truth is
+        //     refuse. This is the direction `ill_conditioned()` covers.
+        let a2 = [row(&[(1, 1.0)])];
+        let b2 = [row(&[(0, 1.0)]), row(&[(0, 1.0), (1, 1e-12)])];
+        assert_eq!(row_rank(&b2, 2), 1, "the two rows read as one");
+        assert!(
+            apex_can_absorb_db(2, &a2, &b2),
+            "a part undercount passes a model whose true rank would refuse"
+        );
     }
 
     #[test]

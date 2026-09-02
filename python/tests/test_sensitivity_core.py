@@ -380,3 +380,108 @@ def test_the_refinement_is_spent_only_on_the_ambiguous_entries():
     assert asked == [ambiguous], (
         f"the refinement must ask for the ambiguous entries and no others; "
         f"asked for {asked}, ambiguous are {ambiguous}")
+
+
+# ---------------------------------------------------------------------
+# The refinement's ROW branch, and what it does to the ratio test.
+#
+# Round 5 of #889: `_refine_ambiguous` branches on variables and on rows,
+# and every test above reaches only the variable one. The row branch's
+# exposure is not the accessor (`test_activity.py` owns that) but the
+# *wiring* — that `row_names`, `classify_activity`'s `row_status` and
+# `reduced_row_activity`'s user-space row indices are the same space in
+# the same order. Reading one as another returns a neighbouring row's
+# answer: plausible, and wrong.
+# ---------------------------------------------------------------------
+
+
+def _coupled_row_model(rho):
+    """`CoupledKinkRow` from `test_activity.py`, as an `NlExpr` model.
+
+    The same kink as `_coupled_kink_model`, held by an inequality **row**
+    (`2k >= 0`) instead of a bound on `k`. `classify_activity` divides a
+    row's weight by the curvature along the row's own gradient — a real
+    directional curvature, but not the *reduced* one — so its ratio is
+    `rho` and the kink falls out of the band into "ambiguous" once
+    `rho < 1e-1`. gh#804.
+    """
+    a, c = 1.10, np.sqrt(1.0 - rho)
+    v = pounce.NlExpr.vars(3)                       # k, y, p
+    k, y, pp = v[0], v[1], v[2]
+    return pounce.build_nl_problem(
+        n=3,
+        objective=0.5 * k * k + c * k * y + 0.5 * y * y - a * pp * k,
+        constraints=[pp, 2.0 * k],
+        g_l=[0.0, 0.0], g_u=[0.0, 1e19],
+        x_l=[-1e19] * 3, x_u=[1e19] * 3,
+        x0=[0.3, 0.0, 0.0],
+        var_names=["k", "y", "p"], con_names=["pin_p", "kink_row"],
+    )
+
+
+@pytest.mark.parametrize("rho", [1e-2, 1e-3])
+def test_the_report_refines_a_coupled_ROW_kink_too(rho):
+    """gh#804's misreading, through the report, on the row path.
+
+    The variable branch above and this one are separate code paths in
+    `_refine_ambiguous` reading separate index spaces. A row index handed
+    to `reduced_row_activity` in the wrong space would come back with a
+    real, plausible, wrong row's verdict — so this asserts the *name* that
+    moved, not just that something did.
+    """
+    sess = solve_for_sensitivity(
+        _coupled_row_model(rho), pins={"p": 0},
+        options={"print_level": 0, "tol": 1e-10})
+
+    cheap = sess.solver.classify_activity()
+    assert cheap["row_status"][1] == "ambiguous", (
+        "the fixture must reach the branch this test is about")
+    assert cheap["row_ratio"][1] == pytest.approx(rho, rel=1e-3)
+
+    rep = solution_report(sess, [0], [1e-3], mode="linear")
+    assert rep.refined == {"kink_row": ("ambiguous", "weakly_active")}, (
+        "the row branch must refine the coupled row kink, and must name "
+        "the row it refined — a wrong index space names a neighbour")
+
+    off = solution_report(sess, [0], [1e-3], mode="linear",
+                          refine_activity=False)
+    assert off.refined == {}, "and the opt-out must reach the row branch too"
+
+
+def test_refinement_can_only_lengthen_alpha_never_shorten_it():
+    """The ratio-test consequence of the default, and its direction.
+
+    Refinement only ever rewrites `"ambiguous"` entries, and `_AT_BOUND`
+    does not contain `"ambiguous"` — so it can only **add** coordinates to
+    `on_bound`, never remove one. `_ratio_test` *excludes* what is on its
+    bound, for the reason its own docstring gives: at an active bound the
+    remaining gap is the slack the barrier leaves and the step component
+    is the same size, so their quotient is meaningless and would become
+    the minimum on any model carrying an active bound.
+
+    So the refinement removes spurious candidates, and `alpha` can only
+    get **longer**. Round 5 of #889 raised this property and read the
+    direction as "can only shorten"; measured, it is the other way, and
+    the exclusion is the point of the mechanism rather than a side effect.
+    Pinned here because a default-on behaviour change whose consequence
+    nothing asserts is one nobody can review.
+    """
+    from pounce.sensitivity._step import _AT_BOUND, _ratio_test
+
+    assert "ambiguous" not in _AT_BOUND, (
+        "refinement rewrites only ambiguous entries, so this is what makes "
+        "the change one-directional")
+
+    # A step that does NOT carry the coordinate past its bound, so the
+    # 'always score a crossing' escape hatch does not apply and the
+    # exclusion is what decides.
+    base, step = np.array([0.0]), np.array([0.5])
+    lo, hi, tol = np.array([-10.0]), np.array([1.0]), np.array([1e-9])
+    a_amb, first_amb = _ratio_test(base, step, lo, hi, ["r"],
+                                   on_bound=np.array([False]), tol=tol)
+    a_ref, first_ref = _ratio_test(base, step, lo, hi, ["r"],
+                                   on_bound=np.array([True]), tol=tol)
+
+    assert (a_amb, first_amb) == (2.0, "r")
+    assert (a_ref, first_ref) == (float("inf"), None)
+    assert a_ref >= a_amb, "refining a coordinate onto its bound cannot shorten alpha"
