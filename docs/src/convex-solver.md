@@ -386,8 +386,15 @@ compares against a number the sensitivity layer did not produce.
 
 #### Where it refuses
 
-`SensError::NonsmoothConePoint { block, what }` marks a point where `dx/db`
-does not exist, or cannot be computed from the numbers to hand:
+Two errors mark the refusals, and the split between them is load-bearing.
+`SensError::NonsmoothConePoint { block, what }` means **no single `dx/db`
+exists here** — a kink, a collapsed normal, a two-valued derivative.
+`SensError::ActiveSetOverdetermined { block, what }` means **the derivative
+exists and this active set cannot express it**; a caller matching the first to
+decide "genuinely nondifferentiable, fall back to a subgradient" would make the
+wrong call on the second, which is why they are not one variant.
+
+`NonsmoothConePoint` covers:
 
 - **the apex with a collapsed dual**, and **the boundary with a collapsed
   dual** — the conic analogue of a weakly active row. Slack and multiplier
@@ -411,17 +418,37 @@ does not exist, or cannot be computed from the numbers to hand:
   `y^α z^{1−α} = 0`, i.e. one of those faces, so with `y, z > 0` the two smooth
   sheets `x = ±g` never meet. A guard there would be unreachable code that
   reads like coverage.
-- **an apex-pinned block whose active set cannot absorb `db`.** The apex is the
-  one face that pins its *whole* block, so the step lives in `ker(B_a)` while
-  feasibility needs `A·dx = db`. Where no room is left — `n − rank(B_a) < m_eq`
-  — no step satisfies both, and what would come back is a least-squares
-  compromise. Note this is a *dimension* count: necessary, never a false
-  refusal, and not sufficient. `ill_conditioned()` catches the subtler cases,
-  and on those it is the step's **residual** rather than the condition estimate
-  that fires — the regularized matrix is perfectly well conditioned there.
 - **a non-symmetric dual off the facet's normal ray.** At a facet interior the
   normal cone *is* `ℝ₊∇φ`, so `z = ν∇φ` is the optimality condition, not an
   approximation.
+
+`ActiveSetOverdetermined` has one case today:
+
+- **an apex-pinned block whose active set cannot absorb `db`.** The apex is the
+  one face that pins its *whole* block, so the step lives in `ker(B)` while
+  feasibility needs `A·dx = db`. Where no room is left — `n − rank(B) < m_eq` —
+  no step satisfies both, and what would come back is a least-squares
+  compromise. The model itself is usually perfectly smooth here: the guard
+  fires where the *classifier* switched to `Apex`, and a decade further from
+  the tip the boundary face returns the same derivative.
+
+  `B` is the active rows that cannot be **released**: the cone faces and the
+  active orthant rows. Active variable bounds are deliberately excluded, even
+  though a bound pins its coordinate for the plain `parametric_step` — the
+  release path can open a bound, and refusing at build time would take that
+  path away too.
+
+  Two limits worth knowing. It is a *dimension* count, so it is **necessary,
+  not sufficient**: a subtler dependency between `A`'s rows and `B`'s can leave
+  one particular `db` unreachable while the count passes. `ill_conditioned()`
+  catches those, and on them it is the step's **residual** rather than the
+  condition estimate that fires — the regularized matrix is perfectly well
+  conditioned there. And it is coarse in the other direction: when
+  `n − rank(B) < m_eq` the reachable `db` form a proper subspace rather than
+  nothing, so a build-time refusal also declines directions it could have
+  answered. That is deliberate — a build serves every later `db` and cannot
+  know which are coming — but it is a stronger action than "no answer exists
+  here".
 
 Two of these thresholds are calibrated against the **non-symmetric** driver,
 whose accuracy is well short of the symmetric IPM's, and the measured

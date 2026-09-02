@@ -38,12 +38,21 @@
 //! - **Any cone family but `SecondOrder`.** `Psd`, `Exponential` and `Power`
 //!   are refused; `conic_sensitivity_refused.rs` owns that.
 //! - **Whether a *particular* `db` is reachable.** `apex_can_absorb_db` is a
-//!   dimension count — necessary, not sufficient. It convicts an active set
-//!   with no room left at all, which is the case adversarial review of #889
-//!   found; it can still pass while a subtler dependency between `A`'s rows
-//!   and `B_a`'s makes one direction unreachable. `ill_conditioned()` is what
-//!   covers the remainder, and that review measured the separation (residual
-//!   `0.5` on every wrong step, `~1e-13` on every right one, over 33 probes).
+//!   dimension count over the active rows that **cannot be released** — cone
+//!   faces and active orthant rows; active variable bounds are excluded, see
+//!   `an_active_bound_does_not_count_as_an_apex_pin`. It is necessary, not
+//!   sufficient: it convicts an active set with no room left at all, which is
+//!   the case adversarial review of #889 found, and can still pass while a
+//!   subtler dependency between `A`'s rows and the active ones makes a
+//!   particular direction unreachable. `ill_conditioned()` covers the
+//!   remainder, and that review measured the separation (residual `0.5` on
+//!   every wrong step, `~1e-13` on every right one, over 33 probes).
+//! - **The guard's arithmetic about a bound.** The fixture here reaches the
+//!   line with an apex *and* an active bound, which nothing did before, but it
+//!   cannot separate the two candidate rules — a fixture that could must be
+//!   primal degenerate, and the counting argument is written out at that
+//!   fixture. `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`
+//!   owns the separation, on constructed rows with no solver.
 //! - **Release / fix-relax on a conic build.** Every fixture here is
 //!   bound-free, so `release_slots` is empty and the release path is never
 //!   entered. `convex_sens_release.rs` owns it, on orthant models. A cone row
@@ -78,6 +87,8 @@
 //! | the `gap < −SOC_BOUNDARY_REL` arm disabled | `a_slack_outside_the_cone_is_refused` | otherwise it falls through and builds a normal from `s₀ < ‖s₁‖` |
 //! | the interior complementarity arm disabled | `an_interior_block_that_does_not_complement_is_refused` | |
 //! | the `apex_can_absorb_db` guard disabled | `an_apex_that_cannot_absorb_db_is_refused` — **and only it** | run after the guard landed. It fails with the defect in the message (`du/db₀ = 0.5`, `|A·dx − db| = 5e-10`) rather than a bare assertion, so a regression reads as what it is |
+//! | `apex_can_absorb_db` stacks a unit row per active bound (the rule as first written) | `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank` — **and only it**, across all 267 tests in the crate | re-review of #889. The mutation changes the signature, so `finish` and both unit call sites move with it; it is still compile-checkable, just not a one-line edit |
+//! | the same stacking applied at the **call site** in `finish`, leaving the signature alone | **nothing — the whole crate stays green** | run, not predicted, and the result is the point: no non-degenerate model can separate the two rules (the counting argument is at `an_active_bound_does_not_count_as_an_apex_pin`), so an integration fixture cannot carry this line and the unit test above is not a convenience |
 //! | `primal_scale` replaced by a bare `1.0` in `build_conic` | `the_apex_decision_is_relative_to_the_problems_scale` — **and nothing else** | that test was written *because* the first run of this mutation was green across the whole crate: every other fixture here is `O(1)`, where the relative and absolute readings coincide. A scale-convention change with no failing test is exactly `/sens-review` entry 3 |
 
 use pounce_convex::QpOptions;
@@ -485,7 +496,7 @@ fn an_apex_that_cannot_absorb_db_is_refused() {
         let prob = model(k);
         let sol = solve(&prob);
         match QpSensitivity::build_conic(&prob, &SOC3, &sol, &opts(), 1e-7, backend) {
-            Err(SensError::NonsmoothConePoint { block, what }) => {
+            Err(SensError::ActiveSetOverdetermined { block, what }) => {
                 assert_eq!(block, 0);
                 assert!(
                     what.contains("absorb"),
@@ -507,6 +518,96 @@ fn an_apex_that_cannot_absorb_db_is_refused() {
             }
         }
     }
+}
+
+/// **An active variable bound must not count as a pin here** — the guard's most
+/// delicate line, and the one an ordinary fixture cannot convict.
+///
+/// Raised in re-review of #889. The first version of `apex_can_absorb_db`
+/// stacked one unit row per active bound into the rank, on the reasoning that
+/// "an active bound pins its coordinate exactly as a face row does". For
+/// `parametric_step` that is true. But `release_slots` exists precisely so
+/// `parametric_step_bounded` can *open* an active bound — so counting one here
+/// refuses the whole build, fix-relax included, for a model fix-relax could
+/// serve. A cone face row has no such escape; a bound does. The rank is
+/// therefore taken over the un-releasable rows only.
+///
+/// # What this fixture proves, and what it does not
+///
+/// It proves the line is **reached with a bound present** and that the build is
+/// served there: an apex block, an active lower bound on a variable outside it,
+/// and the correct `dx₂/db = 1`. Before this there was no fixture in the crate
+/// with both an apex and an active bound — the file header says every fixture
+/// here is bound-free, and that was true.
+///
+/// It does **not** discriminate between the two rules, and saying otherwise
+/// would be the exact failure `/sens-review` entry 6 describes. Here
+/// `rank(active_rows) = 3` and `n − 3 = 2 ≥ m_eq = 1`; stacking the bound row
+/// gives rank 4 and `n − 4 = 1 ≥ 1`. Both rules serve it.
+///
+/// # Why a discriminating *integration* fixture must be degenerate
+///
+/// Discrimination needs `rank(B) ≤ n − m_eq` while
+/// `rank(B ∪ bounds) ≥ n − m_eq + 1`. Stack `A` on top of that:
+/// `m_eq + (n − m_eq + 1) = n + 1 > n`, so `[A; B; bounds]` **must** carry a
+/// linear dependency — some equality row lies in the span of the active
+/// constraints. That is primal degeneracy by definition, not a fixture that
+/// happens to be awkward: it is the only shape in which the two rules can
+/// disagree.
+///
+/// So the discrimination is pinned one layer down, by
+/// `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`,
+/// which calls `apex_can_absorb_db` on constructed rows at exactly that shape
+/// and needs no solver. This fixture and that unit test are two halves of one
+/// guard: reachability here, arithmetic there.
+///
+/// Note also what this is not: it does not exercise the release path itself
+/// (`convex_sens_release.rs` owns that, on orthant models). It exercises the
+/// guard's treatment of a bound, which is the part that was unreached.
+#[test]
+fn an_active_bound_does_not_count_as_an_apex_pin() {
+    // `apex()`'s geometry — variables (x₀, x₁, x₂, t) with the cone on
+    // (t, x₀, x₁) and the equality x₀ + x₂ = 1 — plus a fifth variable `u`
+    // carrying an active lower bound, so the guard sees a bound row.
+    let prob = QpProblem {
+        n: 5,
+        p_lower: vec![
+            tri(0, 0, 1.0),
+            tri(1, 1, 1.0),
+            tri(2, 2, 1.0),
+            tri(4, 4, 1.0),
+        ],
+        c: vec![0.0, 0.0, -1.0, 5.0, 0.5],
+        a: vec![tri(0, 0, 1.0), tri(0, 2, 1.0)],
+        b: vec![1.0],
+        g: vec![tri(0, 3, -1.0), tri(1, 0, -1.0), tri(2, 1, -1.0)],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![-1e19, -1e19, -1e19, -1e19, 1.0],
+        ub: vec![1e19, 1e19, 1e19, 1e19, 1e19],
+    };
+    let sol = solve(&prob);
+    let mut sens = sens_for(&prob, &sol);
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(0, ConeBlockKind::Apex)],
+        "the fixture must reach the apex branch, or it tests nothing about the guard"
+    );
+    assert_eq!(
+        sens.active_bound_vars(),
+        [4],
+        "and it must carry an active bound, or the line under test is still unreached"
+    );
+
+    // Served, and served correctly: with x₀ pinned at the apex the whole
+    // perturbation goes to x₂, so dx₂/db = 1 exactly — primal feasibility
+    // alone, the oracle-free identity `A·dx = db`.
+    let delta = 1e-6;
+    let dx = sens.parametric_step(&[0], &[delta]);
+    assert!(
+        (dx[2] / delta - 1.0).abs() < 1e-9,
+        "x₀ is pinned by the apex, so x₂ must absorb all of db: got dx₂/db = {}",
+        dx[2] / delta
+    );
 }
 
 /// The guard must not fire on an apex that *can* absorb `db`, or it would

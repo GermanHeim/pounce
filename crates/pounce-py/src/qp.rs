@@ -879,6 +879,11 @@ impl PyQpSensitivity {
                  This should be unreachable from Python, which exposes no `cones=` \
                  argument — please report it."
             )),
+            SensError::ActiveSetOverdetermined { block, what } => PyValueError::new_err(format!(
+                "QpSensitivity: the active set around cone block {block} has no room \
+                 left for a step ({what}). This should be unreachable from Python, \
+                 which exposes no `cones=` argument — please report it."
+            )),
             // `build` does not run the bound refinement, so it cannot raise
             // this. Named rather than swallowed for the same reason as above.
             SensError::Refinement(msg) => PyValueError::new_err(format!(
@@ -957,6 +962,7 @@ impl PyQpSensitivity {
             SensError::NotOrthantComplementary { .. }
             | SensError::ConePartitionMismatch { .. }
             | SensError::NonsmoothConePoint { .. }
+            | SensError::ActiveSetOverdetermined { .. }
             | SensError::Refinement(_) => PyValueError::new_err(
                 "QpSensitivity.reduced_hessian: build-time refusal reported after a \
                      successful build — please report it",

@@ -15,16 +15,34 @@ changes.
   (Rust API).** A cone block at its apex pins its *whole* block — `s = 0` is the
   tip, so `ds = 0` and every row enters the active set. It is the one face that
   pins unconditionally, and nothing checked that the equality rows could still
-  absorb an arbitrary `db`. Where they cannot, `[A; B_a]` is rank-deficient and
-  the returned step is a least-squares compromise rather than a derivative.
+  absorb an arbitrary `db`. Where they cannot, the active-set block is
+  rank-deficient and the returned step is a least-squares compromise rather
+  than a derivative.
 
   Measured on the parametric distance function `min t s.t. u = b₀, v = b₁,
   (t,u,v) ∈ Q₃` — about as ordinary as a parametric SOCP gets: once `‖b‖` falls
   under `CONE_APEX_REL` the block classifies `Apex` and `du/db₀` comes back
   `0.5`, where **primal feasibility alone** forces `1`. `build_conic` now
-  returns `SensError::NonsmoothConePoint` there. The guard is a dimension count
-  (`n − rank(B_a) ≥ m_eq`), so it is necessary rather than sufficient and never
-  refuses a case it should serve; `ill_conditioned()` covers the remainder.
+  returns the new `SensError::ActiveSetOverdetermined` there.
+
+  The criterion is a dimension count, `n − rank(B) ≥ m_eq`, where **`B` is the
+  active rows that cannot be *released*** — the cone faces and the active
+  orthant rows. Active variable bounds are deliberately **not** in `B`, even
+  though a bound does pin its coordinate for the plain `parametric_step`:
+  `release_slots` exists so `parametric_step_bounded` can open one, and the
+  refusal is at build time, so counting a bound would take the release path
+  away from a model fix-relax could serve.
+
+  Two things it does not promise. It is **necessary, not sufficient** — a
+  subtler dependency between `A`'s rows and `B`'s can make one particular `db`
+  unreachable while the count passes, and `ill_conditioned()` is what covers
+  that remainder (measured over 33 probes: residual `0.5` on every wrong step
+  against `~1e-13` on every right one). And it is coarse the other way too:
+  when `n − rank(B) < m_eq` the image of `A` restricted to `ker(B)` is a
+  *proper subspace*, not empty, so some `db` remain reachable and would be
+  answered correctly — refusing at build time takes those away as well. That
+  is deliberate, since a build serves every later `db` and cannot know which
+  are coming, but it is a stronger action than "no answer exists here".
 
   Two things make this worth refusing rather than caveating. The problem is
   **smooth on both sides of the cliff** — at `‖b‖ = 1.12e-8` the derivative
@@ -38,6 +56,22 @@ changes.
   the perturbation is absorbed by a variable *outside* the block, so the other
   side of the branch was never executed — `/sens-review` entry 6, on a rule this
   crate's own test headers quote.
+
+- **New `SensError::ActiveSetOverdetermined { block, what }` (Rust API,
+  breaking for exhaustive `match`).** It is the sibling of
+  `NonsmoothConePoint`, and the split is the point: that one means *there is no
+  single `dx/db` here* — a kink, a collapsed normal, a two-valued derivative.
+  The new one means *the derivative exists and this active set cannot express
+  it*. The apex refusal above is exactly the second case — the problem is
+  smooth on both sides of the classification cliff, and at `‖b‖` a decade
+  larger the boundary face finds the same derivative — so a caller matching
+  `NonsmoothConePoint` to decide "genuinely nondifferentiable, fall back to a
+  subgradient" would have made the wrong call on a smooth model.
+
+  `SensError` is not `#[non_exhaustive]`, so this breaks a downstream
+  exhaustive `match`. Stated rather than left to be discovered; the whole conic
+  refusal surface is new in this same unreleased cycle and the crate is pre-1.0.
+  Raised in re-review of PR #889.
 
 ### Fixed
 
@@ -56,9 +90,11 @@ changes.
 - **A malformed `NonsmoothConePoint` message in the Python binding** — missing
   line continuations put ~18 literal spaces mid-sentence.
 - **`KktPattern::dim` was written and never read.** It now carries the
-  `debug_assert_eq!` that is its reason to exist: a mismatch means the assembler
-  and its caller disagree about the KKT's shape, which would corrupt every index
-  into it.
+  `assert_eq!` that is its reason to exist: a mismatch means the assembler and
+  its caller disagree about the KKT's shape, which would corrupt every index
+  into it. `assert_eq!` rather than `debug_assert_eq!` — the stated hazard is a
+  release-build one (every wheel and every CLI binary is a release build), and
+  one `usize` comparison per build is not a cost worth trading for it.
 
 - **`solution_report` refines the activity classes the cheap rule cannot call
   (Python).** `pounce.sensitivity.solution_report` reported the classifier's

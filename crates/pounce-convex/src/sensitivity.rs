@@ -138,6 +138,31 @@ pub enum SensError {
         /// Which condition fired.
         what: &'static str,
     },
+    /// The active set has no room left for `dx`, so no step can satisfy
+    /// `A·dx = db` — but a derivative may well **exist**.
+    ///
+    /// This is the sibling of [`NonsmoothConePoint`](Self::NonsmoothConePoint)
+    /// and the distinction is the whole point of having two variants. That one
+    /// means *there is no single `dx/db` here*: a kink, a collapsed normal, a
+    /// two-valued derivative. This one means *the derivative exists and this
+    /// active set cannot express it*.
+    ///
+    /// The case it was introduced for is exactly that: an apex-pinned block on
+    /// a problem that is **smooth on both sides of the classification cliff**
+    /// — at `‖s‖` a decade larger the boundary face finds the true derivative,
+    /// and only the classifier changed its mind. A caller who matched
+    /// `NonsmoothConePoint` to decide "genuinely nondifferentiable, fall back
+    /// to a subgradient" would make the wrong call on a smooth model, which is
+    /// why these are not the same error. Raised in review of #889.
+    ///
+    /// A re-solve at a looser apex tolerance, or a perturbation small enough to
+    /// keep the block off its tip, will generally be answerable.
+    ActiveSetOverdetermined {
+        /// Index into the `&[ConeSpec]` slice.
+        block: usize,
+        /// Which condition fired.
+        what: &'static str,
+    },
     /// The cone partition handed to
     /// [`build_conic`](QpSensitivity::build_conic) does not cover the
     /// inequality block exactly, so the caller and the builder disagree about
@@ -406,9 +431,34 @@ fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)
 /// Rank of a set of sparse rows over `n` columns, by Gaussian elimination with
 /// partial pivoting on the dense restriction to their combined support.
 ///
-/// Only ever called on the **active** rows, which are few next to `n` on the
-/// models that reach it, and only when an apex block is present — see
-/// [`apex_can_absorb_db`] for why that gate matters.
+/// Called only on the **active rows** of a build that carries an apex block,
+/// and only on rows that cannot be released (see [`apex_can_absorb_db`]).
+///
+/// # Cost, stated honestly
+///
+/// `O(r² · w)` for `r` rows over a combined support of width `w`. A cone face
+/// contributes one row (second-order, exponential, power) or `q(q+1)/2` (PSD),
+/// each touching a handful of columns — but a **mixed partition's orthant rows
+/// are also in here**, and there can be many of them on a large model. The
+/// apex gate is what keeps that off the common path, not the row count: an
+/// apex is rare, and a build without one never calls this.
+///
+/// # The tolerance biases toward *missing* a deficiency, deliberately
+///
+/// The guard passes iff `n − rank ≥ m_eq`, so **rank up ⇒ refuse**. Counting a
+/// round-off pivot would inflate the rank and make the guard *invent* a
+/// deficiency on a model that is fine; dropping small pivots — which is what
+/// `√ε · scale` does — deflates the rank and makes it *miss* one.
+///
+/// Missing is the right way to err for a refusal this new: a missed deficiency
+/// leaves the step to `ill_conditioned()`, which catches it (measured: residual
+/// `0.5` against `~1e-13`, no overlap), while an invented one breaks a working
+/// model at build time with no recourse. `scale` is the global maximum taken
+/// once before elimination and does not shrink as entries do, which biases the
+/// same way.
+///
+/// (An earlier version of this comment had both halves backwards. The number
+/// was always this one; only the argument for it was wrong.)
 fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
     if rows.is_empty() || n == 0 {
         return 0;
@@ -482,48 +532,66 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 ///
 /// An apex block is the one face that pins its **whole** block unconditionally:
 /// `s = 0` is the cone's tip, so `ds_block = 0` and every row of the block
-/// enters `B_a`. Every other face pins one row, or none. That difference is
-/// what makes this check apex-specific.
+/// enters the active set. Every other face pins one row, or none. That
+/// difference is what makes this check apex-gated.
 ///
-/// The step then lives in `ker(B_a)`, while feasibility of the perturbed
-/// problem needs `A·dx = db`. So the apex model can answer at all only if
-/// `A` restricted to `ker(B_a)` is still onto `R^{m_eq}` — and a necessary
-/// condition for that, cheap and needing only a rank, is
+/// The step then lives in `ker(B)` for the active rows `B`, while feasibility
+/// of the perturbed problem needs `A·dx = db`. So the apex model can answer at
+/// all only if `A` restricted to that kernel is still onto `R^{m_eq}` — and a
+/// necessary condition, cheap and needing only a rank, is
 ///
 /// ```text
-///   n − rank(B_a)  ≥  m_eq
+///   n − rank(B)  ≥  m_eq
 /// ```
 ///
-/// **Necessary, not sufficient**, and deliberately so. When it fires the
-/// refusal is always right: a space of dimension below `m_eq` cannot map onto
-/// `R^{m_eq}`, so some `db` is unreachable and the returned step would be a
-/// least-squares compromise rather than a derivative. It can still pass while a
-/// subtler dependency between `A`'s rows and `B_a`'s makes a *particular* `db`
-/// unreachable; the full test is a rank of the stacked `[A; B_a]`, which costs
-/// far more on a model with many equalities for a case this coarse one already
-/// covers. What catches the remainder is
-/// [`ill_conditioned`](QpSensitivity::ill_conditioned) — the step's own
-/// residual, which separates cleanly here (`0.5` against `~1e-13`).
+/// # `B` is the rows that cannot be released, and that is the whole subtlety
+///
+/// `B` is `active_rows`: the cone faces and the active orthant rows. It
+/// deliberately **excludes active variable bounds**, even though a bound does
+/// pin its coordinate for the plain [`parametric_step`](QpSensitivity::parametric_step).
+///
+/// The reason is [`release_slots`], which exists precisely so that fix-relax
+/// can *open* an active bound. Counting bounds here would refuse the build for
+/// a model [`parametric_step_bounded`](QpSensitivity::parametric_step_bounded)
+/// could serve — the refusal is at build time, so it takes the release path
+/// away too. A cone face row has no such escape: `release_slots` is built for
+/// variable bounds only. Ranking exactly the un-releasable rows is what keeps
+/// the guard from over-refusing.
+///
+/// The cost of that choice is a bound-pinned model whose *plain* step is then a
+/// least-squares compromise. That is the same case the dimension count already
+/// leaves to `ill_conditioned()`, and the same division of labour: refuse what
+/// no mode can serve, flag what some mode can.
+///
+/// # What the condition does and does not promise
+///
+/// **Necessary, not sufficient.** When it fires the refusal is right: a space
+/// of dimension below `m_eq` cannot map onto `R^{m_eq}`. It can still pass
+/// while a subtler dependency between `A`'s rows and `B`'s makes a particular
+/// `db` unreachable; the full test is a rank of the stacked `[A; B]`, which
+/// costs far more on a model with many equalities for a case this coarse one
+/// already covers.
+///
+/// And it is coarse in the other direction too, which is worth saying plainly:
+/// when `n − rank(B) < m_eq` the image of `A|ker(B)` is a *proper subspace*,
+/// not empty — so some `db` are still reachable and would be answered
+/// correctly. Refusing at build time takes those away as well. That is
+/// deliberate (the build serves every later `db`, and cannot know which are
+/// coming), but it is a stronger action than "no answer exists here".
 ///
 /// Found by adversarial review of #889: `min t s.t. u = b₀, v = b₁,
 /// (t,u,v) ∈ Q₃` — the parametric distance function — classifies `Apex` once
 /// `‖b‖` drops under `CONE_APEX_REL`, and returned `du/db₀ = 0.5` where primal
 /// feasibility *alone* forces `1`. The problem is smooth on both sides of that
 /// cliff: at `‖b‖ = 1.12e-8` the true derivative still exists and the boundary
-/// branch finds it. Only the classifier changed its mind.
-fn apex_can_absorb_db(
-    n: usize,
-    m_eq: usize,
-    active_rows: &[Vec<(usize, f64)>],
-    active_bounds: &[(usize, bool)],
-) -> bool {
+/// branch finds it. Only the classifier changed its mind — which is why the
+/// error this raises is [`SensError::ActiveSetOverdetermined`] and **not**
+/// `NonsmoothConePoint`.
+fn apex_can_absorb_db(n: usize, m_eq: usize, active_rows: &[Vec<(usize, f64)>]) -> bool {
     if m_eq == 0 {
         return true;
     }
-    let mut rows: Vec<Vec<(usize, f64)>> = active_rows.to_vec();
-    // An active bound pins its coordinate exactly as a face row does.
-    rows.extend(active_bounds.iter().map(|&(j, _)| vec![(j, 1.0)]));
-    n.saturating_sub(row_rank(&rows, n)) >= m_eq
+    n.saturating_sub(row_rank(active_rows, n)) >= m_eq
 }
 
 /// A point on a face defined by one smooth concave inequality `φ(s) ≥ 0`,
@@ -1793,14 +1861,15 @@ impl QpSensitivity {
         // that is the only face that pins unconditionally, and because the
         // rank costs something; see `apex_can_absorb_db`.
         if let Some(&(block, _)) = cone_kinds.iter().find(|&&(_, k)| k == ConeBlockKind::Apex)
-            && !apex_can_absorb_db(n, m_eq, &active_rows, &active_bounds)
+            && !apex_can_absorb_db(n, m_eq, &active_rows)
         {
-            return Err(SensError::NonsmoothConePoint {
+            return Err(SensError::ActiveSetOverdetermined {
                 block,
                 what: "the block is pinned at the cone apex, which leaves the equality \
                        rows unable to absorb an arbitrary perturbation: the active set \
                        has no room left for dx, so the step would be a least-squares \
-                       compromise rather than a derivative",
+                       compromise rather than a derivative. The derivative may still \
+                       exist — a solve that keeps the block off its tip will find it",
             });
         }
 
@@ -1812,7 +1881,12 @@ impl QpSensitivity {
         // it to be there, so here it is. A mismatch means the assembler and the
         // caller disagree about the KKT's shape, which would corrupt every
         // index into it.
-        debug_assert_eq!(
+        // `assert!`, not `debug_assert!`: the stated consequence of a mismatch
+        // is that every index into the KKT is corrupt, and a debug-only check
+        // does not protect the builds where that would happen — every wheel and
+        // every CLI binary is a release build. One `usize` comparison once per
+        // build is not a cost worth trading for it. (Raised in review of #889.)
+        assert_eq!(
             pat.dim, dim,
             "assemble_kkt and finish must agree on the KKT dimension"
         );
@@ -2690,6 +2764,141 @@ mod tests {
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
+    }
+
+    // -----------------------------------------------------------------------
+    // `row_rank` / `apex_can_absorb_db` — the apex absorbability guard's
+    // arithmetic, tested without a solver.
+    //
+    // These are here rather than in `convex_soc_sensitivity.rs` because the
+    // case that separates the right rule from the wrong one cannot be reached
+    // by an ordinary model: see
+    // `an_active_bound_does_not_count_as_an_apex_pin` for the counting
+    // argument (a discriminating integration fixture must be primal
+    // degenerate). The integration fixture pins that the line is *reached*;
+    // these pin what it computes.
+    // -----------------------------------------------------------------------
+
+    fn row(cols: &[(usize, f64)]) -> Vec<(usize, f64)> {
+        cols.to_vec()
+    }
+
+    #[test]
+    fn row_rank_counts_independent_rows() {
+        assert_eq!(row_rank(&[], 4), 0, "no rows is rank zero");
+        assert_eq!(row_rank(&[row(&[(0, 1.0)])], 4), 1);
+        assert_eq!(
+            row_rank(&[row(&[(0, 1.0)]), row(&[(2, 3.0)]), row(&[(3, -1.0)])], 4),
+            3,
+            "unit rows on distinct columns are independent"
+        );
+        assert_eq!(
+            row_rank(
+                &[row(&[(0, 1.0), (1, 1.0)]), row(&[(0, 1.0), (1, -1.0)])],
+                4
+            ),
+            2,
+            "partial pivoting must not lose a rank on a well-conditioned pair"
+        );
+    }
+
+    #[test]
+    fn row_rank_sees_through_a_dependency() {
+        // The third row is the sum of the first two, so the rank is 2 — this
+        // is the case the guard exists to detect, since a dependent active row
+        // does not remove a further dimension from `ker(B)`.
+        let rows = [
+            row(&[(0, 1.0), (1, 1.0)]),
+            row(&[(1, 1.0), (2, 1.0)]),
+            row(&[(0, 1.0), (1, 2.0), (2, 1.0)]),
+        ];
+        assert_eq!(row_rank(&rows, 3), 2);
+    }
+
+    /// The tolerance's bias direction, as behaviour rather than prose.
+    ///
+    /// `row_rank` drops pivots under `√ε · scale`, so a row that differs from
+    /// a dependent one only at round-off is **not** counted. That deflates the
+    /// rank, which — since the guard passes iff `n − rank ≥ m_eq` — biases it
+    /// toward *missing* a deficiency rather than inventing one. Erring that
+    /// way is deliberate for a new refusal: a missed deficiency is left to
+    /// `ill_conditioned()`, an invented one breaks a working model at build
+    /// time with no recourse. The comment on `row_rank` had this backwards
+    /// once (re-review of #889); this test is what would catch it flipping.
+    #[test]
+    fn row_rank_drops_a_round_off_pivot() {
+        let eps = 1e-14;
+        let near = [row(&[(0, 1.0), (1, 1.0)]), row(&[(0, 1.0), (1, 1.0 + eps)])];
+        assert_eq!(
+            row_rank(&near, 2),
+            1,
+            "a difference at round-off must not buy a rank"
+        );
+
+        // …and a genuinely distinct second row still does, so the tolerance is
+        // not simply swallowing everything.
+        let real = [row(&[(0, 1.0), (1, 1.0)]), row(&[(0, 1.0), (1, 1.001)])];
+        assert_eq!(row_rank(&real, 2), 2);
+    }
+
+    #[test]
+    fn apex_can_absorb_db_is_a_dimension_count() {
+        // No equalities: nothing to absorb, so nothing to refuse.
+        assert!(apex_can_absorb_db(
+            3,
+            0,
+            &[row(&[(0, 1.0)]), row(&[(1, 1.0)])]
+        ));
+
+        // The reviewer's minimal case, as rows: n = 3, m_eq = 2, and an apex
+        // pinning all three coordinates leaves `ker(B) = {0}`.
+        let apex_rows = [row(&[(0, 1.0)]), row(&[(1, 1.0)]), row(&[(2, 1.0)])];
+        assert!(!apex_can_absorb_db(3, 2, &apex_rows));
+
+        // One coordinate free is enough for one equality, and not for two.
+        let two_pinned = [row(&[(0, 1.0)]), row(&[(1, 1.0)])];
+        assert!(apex_can_absorb_db(3, 1, &two_pinned));
+        assert!(!apex_can_absorb_db(3, 2, &two_pinned));
+    }
+
+    /// **The bound-exclusion, at the only shape that can convict it.**
+    ///
+    /// `apex_can_absorb_db` ranks the active rows that cannot be *released*.
+    /// Active variable bounds are excluded on purpose: `release_slots` builds
+    /// one releasable slot per active bound, so counting a bound as a hard pin
+    /// would refuse the whole build — fix-relax included — for a model
+    /// `parametric_step_bounded` could serve. The refusal is at build time,
+    /// which takes the release path away with it.
+    ///
+    /// Here `n = 4`, `m_eq = 2`, and the apex pins two coordinates: rank 2,
+    /// `n − 2 = 2 ≥ 2`, served. Stack a unit row for an active bound on a
+    /// third coordinate and the rank is 3, `n − 3 = 1 < 2`, refused. So this
+    /// input separates the two rules exactly, which no solved model can do
+    /// without being primal degenerate (the argument is written out at
+    /// `an_active_bound_does_not_count_as_an_apex_pin` in
+    /// `tests/convex_soc_sensitivity.rs`).
+    ///
+    /// Mutation: re-add the `active_bounds` parameter and stack
+    /// `vec![(j, 1.0)]` per bound. That changes the signature, so this call
+    /// and the one in `finish` both move with it — the mutation is still
+    /// compile-checkable, it is just not a one-line edit.
+    #[test]
+    fn an_active_bound_is_not_stacked_into_the_apex_rank() {
+        let apex_rows = [row(&[(0, 1.0)]), row(&[(1, 1.0)])];
+        assert!(
+            apex_can_absorb_db(4, 2, &apex_rows),
+            "two free coordinates absorb two equalities"
+        );
+
+        // The rank the discarded rule would have computed, spelled out so the
+        // separation is visible rather than asserted: adding the bound row
+        // takes it to 3, and `4 − 3 = 1 < 2`.
+        let with_bound = [row(&[(0, 1.0)]), row(&[(1, 1.0)]), row(&[(2, 1.0)])];
+        assert_eq!(row_rank(&with_bound, 4), 3);
+        assert!(
+            !apex_can_absorb_db(4, 2, &with_bound),
+            "…so had the bound been stacked, this build would have been refused"
+        );
     }
 
     /// gh #219's degenerate QP: `min ½‖x‖² s.t. x₀ + x₁ = 1, x₀ − 2x₁ ≤ h`.
