@@ -474,9 +474,31 @@ changes.
   population, which previously arrived as a clean `Optimal`, would silently
   lose derivatives and `success`.
 
-  No fixture moves: `scripts/sweep-fixtures.sh` is empty across both legs and
-  all 79 fixtures (status, objective, iterations, engine), consistent with only
-  1 of 79 reaching `σ`. The sweep tests in
+  **The margin is pinned from both sides by tests that already exist**, which
+  is the checkable form of the claim: at `<= 2` the inert-rescaling test fails
+  (the verdict flaps), at `>= 50` the tolerance sweep stops demoting where it
+  must, and at `>= 200` the bound-constrained sweep goes too. The admissible
+  window is `(2, 50)` and `10` is roughly its geometric centre.
+
+  **Also fixed here, because it was found here:** the same guard's slack scale,
+  `bound.abs().max(x.abs())`, collapsed to zero when a variable rested on a
+  bound of `0`, so `|slack| <= cut·0` was false for every nonzero slack and a
+  converged `1e-16` was rejected — which is why the cascade could decline an LP
+  whose relative KKT error was `9.5e-17` and whose `x` was the exact vertex. It
+  costs a wasted re-solve rather than a wrong answer, so no corpus can see it;
+  `a_converged_slack_on_a_zero_bound_is_negligible` pins it directly against
+  the guard.
+
+  No pre-existing fixture moves: `scripts/sweep-fixtures.sh` diffs only the two
+  lines of the new `issue880_sigma_uncertified` fixture (both legs, routing to
+  `nlp`) — nothing else moves in status, objective, iteration count or engine,
+  consistent with only 1 of 79 fixtures reaching `σ`, and that one a QCQP the
+  cascade's non-orthant early return excludes from the recording site. That is
+  why this population needed a CLI fixture of its own:
+  `issue880_sigma_demotion_reroutes.rs` asserts the reroute fires (engine
+  `nlp`) and that pinned to the convex arm the status and AMPL
+  `solve_result_num` are the honest `SolvedToAcceptableLevel` / `1`. The sweep
+  tests in
   `issue880_coupled_sigma_forward_error.rs` now assert the exact status
   expected at each conditioning and tolerance, so the certification boundary is
   pinned in both directions rather than assumed.

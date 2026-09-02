@@ -178,7 +178,7 @@
 //! | `barrier_ratio` returns `Some(0.0)` instead of `None` on an unusable slack | *nothing here.* `forward_error_operator_tests::{an_exactly_active_bound_declines_rather_than_reading_as_free, a_negative_slack_declines_too}` |
 //!
 
-use pounce_convex::{QpOptions, QpProblem, QpSolution, QpStatus, Triplet, solve_qp_ipm};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -898,5 +898,75 @@ fn a_demoted_answer_still_builds_a_sensitivity_object() {
     assert!(
         pounce_convex::QpSensitivity::build_default(&prob, &sol, backend).is_ok(),
         "a demoted answer must still yield derivatives"
+    );
+}
+
+/// **Does the demotion depend on which public entry you came through?**
+/// Measured: no. This is review finding F1, which predicted from the call
+/// graph that `solve_qp_batch` would return `Optimal` where `solve_qp`
+/// returns `OptimalInaccurate` — the same model, the same options, the label
+/// gh #880 is about.
+///
+/// It does not reproduce, and the reason is worth recording because the call
+/// graph really does look like it should. `solve_qp_ipm_warm_inner` reaches
+/// `solve_qp_core` directly (not via `solve_qp_ipm`), so a missing verdict
+/// frame would indeed make `record` a silent no-op — but it reaches it with a
+/// *direct*, non-HSDE options struct, and the whole `σ` block including the
+/// cascade, the gate and `record` lives under `if opts.use_hsde`. Nothing to
+/// record. The demotion these paths do report arrives through the inner cold
+/// HSDE solve, which carries its own frame.
+///
+/// So the frame is needed exactly where HSDE is live, and adding it to the
+/// other five entries would be dead code — verified by stripping it from all
+/// five and running the suite in a debug build with the `record` assertion
+/// active: nothing fires. What guards the concern instead is that assertion
+/// (`sigma_verdict::record`), which turns the silent no-op into a loud
+/// failure the first time any route reaches the cascade without a frame.
+#[test]
+fn every_public_entry_agrees_on_the_verdict() {
+    let (prob, exact) = coupled_qp([1.0, 1e12], &TGT, 1.0);
+    let opts = QpOptions::default();
+
+    let solo = solve_qp_ipm(&prob, &opts, backend);
+    assert_eq!(
+        solo.status,
+        QpStatus::OptimalInaccurate,
+        "premise: this model demotes through the plain entry"
+    );
+
+    // F1's reproducer, run rather than derived: `solve_qp_batch` is what
+    // `batch.rs:152` drives per item through `solve_qp_ipm_warm`.
+    let batched = pounce_convex::solve_qp_batch(std::slice::from_ref(&prob), &opts, backend);
+    assert_eq!(
+        batched[0].status, solo.status,
+        "the batch API must not disagree with the solo one about the same model"
+    );
+    assert!(
+        (rel_x_err(&batched[0].x, &exact) - rel_x_err(&solo.x, &exact)).abs() < 1e-12,
+        "and must return the same point"
+    );
+
+    // Seeded from a nearby point the same entry takes the direct driver, where
+    // `σ` never engages. Pinned as the *scope*, with the number that makes it
+    // defensible: the answer is unchanged and sits at the conditioning floor
+    // (`κ·ε ≈ 2.2e-04`) rather than past it.
+    let seeded = pounce_convex::QpWarmStart {
+        x: solo.x.clone(),
+        y: solo.y.clone(),
+        z: solo.z.clone(),
+        z_lb: solo.z_lb.clone(),
+        z_ub: solo.z_ub.clone(),
+    };
+    let warm = pounce_convex::solve_qp_ipm_warm(&prob, &opts, &seeded, backend);
+    let err = rel_x_err(&warm.x, &exact);
+    assert_eq!(
+        warm.status,
+        QpStatus::Optimal,
+        "the direct driver does not run the `σ` cascade, so it has no verdict \
+         to carry; if this ever demotes, the scope note above is stale"
+    );
+    assert!(
+        err < 1e-3,
+        "at the conditioning floor, not past it: {err:.3e}"
     );
 }

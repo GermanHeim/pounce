@@ -425,8 +425,15 @@ where
 /// failures, by 6x to 15416x — but it went back under a bare `Optimal`, and on
 /// three instances that `Optimal` sat on an `x` further from the optimum than
 /// f64 permits at that conditioning (`3.06e-04` against a `kappa*eps` floor of
-/// `2.20e-04`). After this, instances above their floor go 3 -> 0, worst
-/// forward error `3.06e-04` -> `5.62e-05`, census iterations 443 -> 404.
+/// `2.20e-04`).
+///
+/// The census numbers this PR quotes — instances above their floor 3 -> 0,
+/// worst forward error `3.06e-04` -> `5.62e-05`, iterations 443 -> 404 — are
+/// the *change's*, not this function's. It is a pure relabel at the outermost
+/// layer, after every retry has run; it cannot move a forward error and
+/// certainly cannot move an iteration count. Those belong to the compensated
+/// estimator and the cut, which reroute which candidate the cascade accepts,
+/// and to the CLI reroute the new status enables.
 ///
 /// **Applied at the outermost layer, not where the pick is made.** Demoting
 /// inside the cascade looks equivalent and is not: `OptimalInaccurate` is one
@@ -3018,7 +3025,25 @@ fn sigma_complementarity_is_genuine(
         rows[t.row].push((t.col, t.val));
     }
 
-    let negligible = |v: f64, scale: f64| v.abs() <= cut * scale;
+    // The `max(1, ·)` floor is load-bearing, and its absence is a defect with
+    // no lower bound on how wrong it gets. Without it the scale **collapses to
+    // zero** exactly where the answer is most obviously right — a variable
+    // resting on a bound of `0`, where `bound` and `x` are both `0` — and then
+    // `|slack| <= cut·0` is false for every nonzero slack, however tiny. A
+    // converged `1e-16` is rejected on that arithmetic. It is the same
+    // convention `sigma_forward_error_is_small` uses for `‖x‖`, and for the
+    // same reason: below a scale of 1 the only meaningful comparison is
+    // absolute.
+    //
+    // gh #880 found this rather than fixing it: the cascade rejected an LP
+    // whose relative KKT error was `9.5e-17` and whose `x` was the exact
+    // vertex, and the `Optimal` it returned hid the rejection. It is a
+    // *wasted re-solve* rather than a wrong answer today — nothing downstream
+    // reads the per-candidate verdict, the demotion is the forward-error
+    // arm's — so the corpora cannot see it: identical census errors and
+    // iterations, empty fixture sweep.
+    // `a_converged_slack_on_a_zero_bound_is_negligible` is what holds it.
+    let negligible = |v: f64, scale: f64| v.abs() <= cut * scale.max(1.0);
     for j in 0..prob.m_ineq() {
         if !orthant[j] {
             continue;
@@ -3420,15 +3445,26 @@ where
             // `1.47e-6` against a cut of `1e-6`: the model sits *on* the
             // decision boundary, and sweeping an inert objective rescaling
             // `k = 1e-2 ‥ 1e8` across it flips the verdict six times, since
-            // each `k` reaches a slightly different iterate. `cond = 1e12`
+            // each `k` reaches a slightly different iterate. That is
+            // solve-to-solve variation, not summation noise. `cond = 1e12`
             // (`3.06e-04`, 300x the cut) is decisive at every `k`.
             //
-            // `SIGMA_DEMOTION_MARGIN` is the estimator's own uncertainty, not
-            // a tuned knob: measured against a `Fraction` reference, a plain
-            // summation of this residual reads between `0.29x` and `5.4x` of
-            // the truth, so a verdict inside one order of magnitude of the cut
-            // is inside the estimator's noise and is not reportable. Demote
-            // only where the distance is larger than the instrument's error.
+            // **The constant is pinned from both sides by tests that already
+            // exist**, which is a checkable claim rather than an asserted one:
+            //
+            // | margin | outcome |
+            // |---|---|
+            // | `<= 2` | `an_inert_objective_rescaling_stays_inert_on_the_coupled_arm` fails — the rescaling flaps |
+            // | `5`, `10` | green |
+            // | `>= 50` | `every_tolerance_is_correct_on_the_coupled_arm` fails — stops demoting where it must |
+            // | `>= 200` | `a_bound_constrained_coupled_instance_is_solved` fails too |
+            //
+            // So the admissible window is `(2, 50)` and `10` is roughly its
+            // geometric centre. (An earlier draft justified this by the plain
+            // summation's `0.29x`–`5.4x` spread against a `Fraction`
+            // reference; that is the noise of an estimator this same change
+            // replaces with `residual_compensated`, so it cannot be the
+            // reason.)
             const SIGMA_DEMOTION_MARGIN: f64 = 10.0;
             let far_from_optimal = !sigma_forward_error_is_small(
                 prob,
@@ -6639,6 +6675,71 @@ mod compensated_residual_tests {
             (got[0] + 0.1_f64).abs() <= f64::EPSILON,
             "expected the f64 nearest −0.1, got {}",
             got[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod complementarity_scale_tests {
+    //! gh #880: the slack scale in [`super::sigma_complementarity_is_genuine`]
+    //! must not collapse to zero on a bound of `0`.
+
+    use crate::cones::CompositeCone;
+    use crate::qp::{QpProblem, QpSolution, QpStatus};
+
+    /// A variable resting on `lb = 0` with a converged slack and a large
+    /// multiplier. `z·slack` exceeds an absolute `tol` on the multiplier's
+    /// magnitude alone, so the guard falls through to its two ratio tests; the
+    /// slack one is the escape that must fire.
+    ///
+    /// Without the `max(1, ·)` floor the scale is `max(|0|, |0|) = 0`, so
+    /// `|1e-16| <= cut·0` is false and a converged point is declared
+    /// non-complementary. The multiplier test cannot save it — the multiplier
+    /// is genuinely the dominant term in its row, which is the whole point of
+    /// an active bound.
+    ///
+    /// | change | effect |
+    /// |---|---|
+    /// | drop `.max(1.0)` from `negligible` | this test fails |
+    #[test]
+    fn a_converged_slack_on_a_zero_bound_is_negligible() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1e10],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![f64::INFINITY],
+        };
+        let sol = QpSolution {
+            status: QpStatus::Optimal,
+            // Converged: on the bound to within one ulp of the scale.
+            x: vec![1e-16],
+            y: vec![],
+            z: vec![],
+            z_lb: vec![1e10],
+            z_ub: vec![0.0],
+            obj: 1e-6,
+            iters: 1,
+            iterates: vec![],
+        };
+        // `z·slack = 1e10 · 1e-16 = 1e-6`, above `tol`, so the absolute arm
+        // does not apply and the ratio tests decide.
+        let dscale = vec![1e10];
+        assert!(
+            super::sigma_complementarity_is_genuine(
+                &prob,
+                &CompositeCone::single_nonneg(0),
+                &sol,
+                1e-8,
+                1e-6,
+                &dscale,
+            ),
+            "a slack of 1e-16 on a bound of 0 is complementary; the scale must \
+             not collapse to zero underneath it"
         );
     }
 }

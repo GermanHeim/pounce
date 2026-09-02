@@ -71,8 +71,27 @@ pub(crate) fn tracking<T>(f: impl FnOnce() -> T) -> (T, bool) {
 }
 
 /// Record this attempt's verdict, overwriting any earlier one.
+///
+/// **Debug-asserts that a frame is installed**, because the failure mode
+/// without one is silent: `record` would no-op and an uncertified pick would
+/// go back under a bare `Optimal`, which is gh #880 verbatim on that path.
+/// The assertion turns "every entry that reaches the cascade installs
+/// [`tracking`]" from a convention someone has to remember into an invariant
+/// the test suite enforces — a new entry, or an existing one that starts
+/// running the cascade because HSDE was enabled on its route, fails loudly
+/// the first time a test drives it.
+///
+/// Only the cascade's own verdict goes through here. [`clear`] deliberately
+/// does not, since it runs at the top of *every* `solve_qp_core` attempt,
+/// including the many that are reached without a frame and never touch the
+/// cascade at all.
 pub(crate) fn record(uncertified: bool) {
     SLOT.with(|slot| {
+        debug_assert!(
+            slot.get().is_some(),
+            "the σ cascade recorded a verdict with no frame installed: the \
+             calling entry point needs `sigma_verdict::tracking` (gh #880)"
+        );
         if slot.get().is_some() {
             slot.set(Some(uncertified));
         }
@@ -81,6 +100,13 @@ pub(crate) fn record(uncertified: bool) {
 
 /// Reset at the top of a solve attempt, so a retry cannot inherit a verdict
 /// about an answer it is replacing.
+///
+/// Unlike [`record`] this is reached constantly without a frame — every
+/// non-HSDE convex solve runs it — so it asserts nothing and simply no-ops.
 pub(crate) fn clear() {
-    record(false);
+    SLOT.with(|slot| {
+        if slot.get().is_some() {
+            slot.set(Some(false));
+        }
+    });
 }
