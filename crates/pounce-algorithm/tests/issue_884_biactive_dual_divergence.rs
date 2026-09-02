@@ -2,7 +2,19 @@
 //! lowering's multipliers diverge, and the run fails next to the primal
 //! solution.
 //!
-//! Numbers in this file were measured on `87402274`.
+//! **Provenance, by measurement group.** The numbers describing the
+//! *defect* — the multiplier table below, the base attempt's returned
+//! point, the `3.3e11` and `7.9e+04` residuals, the `9.96e-8` an honest
+//! solve reaches, and `ralph1`'s objectives under `perturb_always_cd` —
+//! were measured on `87402274`, before the fix existed. The numbers
+//! describing the *retry* — the promoted point and violation in
+//! `qpec_small_returns_a_near_optimal_point_and_never_claims_a_false_success`,
+//! `ralph1`'s `7.2e-3` step floor, and the `5.25e-7` its regularized run
+//! certifies — could only be measured with the fix in place, and come
+//! from its own commits (`ef1dd0b`, `198173b`; PR #885). Every number in
+//! both groups reproduces on `d32204e0`. Each site names the group it
+//! belongs to; re-measure rather than trusting any of them across a
+//! commit that touches the IPM.
 //!
 //! **The first four are invariants rather than a description of the
 //! defect.** Each is written so that it stays correct after a fix: it
@@ -61,15 +73,16 @@
 //!
 //! **The asymmetry between the two fixtures is the point.** `qpec_small`
 //! failing is the *bug*, so nothing here asserts that it fails; what is
-//! asserted is that the point it returns is the optimum, and that it
-//! never claims a success it cannot back. `ralph1` failing is *correct* —
+//! asserted is that the point it returns is feasible and lands *near* the
+//! optimum — not at it, in either era; see that test — and that it never
+//! claims a success it cannot back. `ralph1` failing is *correct* —
 //! no sign-feasible multiplier exists at its origin — so that one is
 //! asserted directly, and it is what catches a `perturb_always_cd`
 //! default flip.
 //!
 //! | test | what it pins | red when |
 //! |---|---|---|
-//! | `qpec_small_returns_the_optimum_and_never_claims_a_false_success` | the returned point is feasible and at `f*`; any claimed success must hold in the model's own units | a verdict-only "fix" reports success at a `1e11` residual |
+//! | `qpec_small_returns_a_near_optimal_point_and_never_claims_a_false_success` | the returned point is feasible and within `1e-3` of `(1, 1, 0)` with `|f|` under `1e-6` — near `f*`, not at it; any claimed success must hold in the model's own units | a verdict-only "fix" reports success at a `1e11` residual |
 //! | `a_structurally_zero_hessian_entry_does_not_change_the_solve` | declaring an identically-zero Hessian entry is a no-op (and refutes gh#884's stated prerequisite hypothesis) | the declared sparsity pattern starts changing the answer |
 //! | `dual_regularization_reaches_the_optimum_honestly` | an honest solve of this model exists at `9.96e-8` unscaled, so gh#884 is a POUNCE gap | that configuration stops reaching the answer |
 //! | `ralph1_must_not_claim_success_where_no_multiplier_certifies_it` | a model with no sign-feasible multiplier must not report success, and never below `f*` | `perturb_always_cd` is turned on by default — measured: plain `Solve_Succeeded` at `-2.71e-5` |
@@ -517,9 +530,16 @@ fn a_claimed_success_must_be_real(
 /// The **unconditional** half — the returned point is feasible and lands
 /// within `1e-3` of `(1, 1, 0)` with `|f|` under `1e-6` — is true today
 /// *and* after any fix, so it never needs revisiting. The tolerances are
-/// what they are because the run stops *near* the optimum, not at it:
-/// measured `(1.0002321, 1.0001161, 2.67e-15)` with `f = 6.73e-8` on
-/// `87402274`. The interesting fact is that it gives up that close.
+/// what they are because the run stops *near* the optimum, not at it, and
+/// that is still true after the retry: the base attempt returned
+/// `(1.0002321, 1.0001161, 2.67e-15)` with `f = 6.73e-8` (measured on
+/// `87402274`), and the promoted retry returns
+/// `(0.9999940, 0.9999970, 3.72e-6)` with `f = 5.84e-11` (measured with
+/// the fix in place; reproduces on `d32204e0`). Neither is `(1, 1, 0)`.
+/// The interesting fact about the first is that it gives up that close;
+/// the second is three orders nearer in objective (and about one and a
+/// half in `x`) and still not the point itself, which is why nothing here
+/// asserts `f*` exactly.
 ///
 /// The **conditional** half is the guard, and it is no longer vacuous.
 /// Before gh#884 closed, this model exited `RestorationFailed` at an
@@ -533,14 +553,18 @@ fn a_claimed_success_must_be_real(
 /// `1e11`. That fix passes a status assertion and fails this one.
 ///
 /// The feasibility bar moved `1e-12` → `1e-10` when the retry landed, and
-/// the direction is worth naming: the *base* attempt sat at `2.7e-15`,
-/// the promoted one at `5.5e-12`. The retry is not a tighter solve of the
-/// same trajectory — it is a different one, run with `perturb_always_cd`,
-/// and it buys nine orders of unscaled dual residual for three orders of
-/// primal. Both are far inside `constr_viol_tol`; the point of the number
-/// here is that the trade is recorded rather than absorbed.
+/// the direction is worth naming: the *base* attempt violates by
+/// `2.2e-16`, the promoted one by `5.5e-12`. The retry is not a tighter
+/// solve of the same trajectory — it is a different one, run with
+/// `perturb_always_cd`, and it buys eighteen orders of unscaled dual
+/// residual (`3.25e11` → `9.96e-8`) for four of primal. Both are far
+/// inside `constr_viol_tol`; the point of the number here is that the
+/// trade is recorded rather than absorbed. All four reproduce on
+/// `d32204e0`: the base pair is the pre-fix behaviour, re-measured there
+/// with `dual_divergence_retry=no`, and the promoted pair is retry-era
+/// and could not have been measured on `87402274` at all.
 #[test]
-fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
+fn qpec_small_returns_a_near_optimal_point_and_never_claims_a_false_success() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
     let mut a = app(false, 300);
     let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
@@ -560,13 +584,13 @@ fn qpec_small_returns_the_optimum_and_never_claims_a_false_success() {
     for (i, want) in [1.0, 1.0, 0.0].iter().enumerate() {
         assert!(
             (sol.x[i] - want).abs() <= 1e-3,
-            "x[{i}] = {:.6e} is not at the optimum {want}",
+            "x[{i}] = {:.6e} is not within 1e-3 of the optimum {want}",
             sol.x[i],
         );
     }
     assert!(
         s.final_objective.abs() <= 1e-6,
-        "objective {:.3e} is not at f* = 0",
+        "objective {:.3e} is not within 1e-6 of f* = 0",
         s.final_objective,
     );
 
@@ -648,8 +672,14 @@ fn a_structurally_zero_hessian_entry_does_not_change_the_solve() {
 /// This is evidence that there is something to fix. It is **not** an
 /// argument for turning that option on by default: see
 /// `ralph1_must_not_claim_success_where_no_multiplier_certifies_it`, and
-/// `dev-notes/mpcc-biactive-dual-divergence.md` for why engaging it only
-/// on demand does not work either.
+/// `dev-notes/mpcc-biactive-dual-divergence.md` ("Ruled out 2") for why
+/// engaging it *in flight*, after the runaway is detected mid-solve, does
+/// not work either — by the time the pattern is visible, regularization
+/// can no longer recover *that iterate*, non-monotonically so. That
+/// negative is about the in-flight switch specifically. What shipped does
+/// engage this option conditionally, but by restarting the solve **cold**
+/// from the original starting point, which is a different mechanism and
+/// is not what those measurements rule out.
 #[test]
 fn dual_regularization_reaches_the_optimum_honestly() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
