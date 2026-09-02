@@ -356,6 +356,50 @@ changes.
 
 ### Fixed
 
+- **Attaching the interactive debugger no longer changes the solve
+  (gh#892).** `pounce model.nl --debug` on a convex QCQP ran a *different
+  algorithm* than the same command without it. The conic debug entry point
+  built its own interior-point iteration and never consulted `qp_hsde`, so
+  the debugger silently substituted the direct IPM for the default HSDE
+  embedding and dropped the objective normalization and the
+  verify-and-retry guards that live on the embedding's side. On the
+  reported 5-variable model:
+
+  ```text
+  $ pounce repro.nl solver_selection=socp --no-sol
+  POUNCE (convex QCQP conic IPM): Optimal Solution Found.  obj=0.46851408  iters=38   # exit 0
+
+  $ pounce repro.nl solver_selection=socp --debug-script cont.pdbg --no-sol
+  POUNCE (convex QCQP conic IPM): Numerical failure (no verified KKT point). iters=21 # exit 1
+  ```
+
+  where the script contained nothing but `continue`. The plain run agrees
+  with Clarabel 0.11.1 to `1.3e-10`; the debugged one failed on a problem
+  the very same engine solves. Under `solver_selection=auto` the failure
+  was then masked by a silent extra solve on the NLP path. Measured over
+  the reported model plus 24 freshly drawn convex QCQPs, **all 25**
+  disagreed on status, objective or iteration count, 16 of them turning an
+  `Optimal` into a failure or a reduced-accuracy exit — so this was the
+  normal case on that arm, not an unlucky instance. The missing `tau` block
+  users saw under `print tau` was the same fact from the debugger's side.
+
+  Both convex debug entry points are now the ordinary solve entry points
+  reached with a hook rather than parallel implementations, so driver
+  selection, scaling and every recovery guard are the ones the plain run
+  uses. Two consequences worth knowing:
+
+  - **Presolve now runs under the debugger**, on the convex paths where it
+    used to be skipped. The blocks you inspect are the reduced model's —
+    which is the model being solved. Pass `qp_presolve=no` to step your own
+    rows instead, and the plain run then matches, because both skip it.
+  - **`quit` stops the solve.** The recovery machinery that re-solves after
+    a failed or capped solve runs unhooked, so it now declines to start
+    once you have halted the run rather than reporting success for a solve
+    you deliberately stopped.
+
+  Solves without a debugger attached are bit-identical: the fixture corpus
+  sweep is empty across all 186 legs.
+
 - **A settled iterate with a runaway multiplier no longer ships as
   `Solved_To_Acceptable_Level` (gh#884).** Some models have a solution at
   which a constraint's gradient vanishes — the row is satisfied, the primal
