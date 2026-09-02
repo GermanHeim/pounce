@@ -391,7 +391,12 @@ changes.
   - **Presolve now runs under the debugger**, on the convex paths where it
     used to be skipped. The blocks you inspect are the reduced model's —
     which is the model being solved. Pass `qp_presolve=no` to step your own
-    rows instead, and the plain run then matches, because both skip it.
+    rows instead, and the plain run then matches, because both skip it. When
+    presolve *settles* the model there is no iteration left to step at all,
+    so an unbounded presolve verdict now prints `Presolve: proved unbounded
+    below — a free column with a nonzero objective coefficient`, the sibling
+    of the primal-infeasible line gh#523 added; it was the one presolve
+    verdict that arrived with no record of why.
   - **`quit` stops the solve.** The recovery machinery that re-solves after
     a failed or capped solve runs unhooked, so it now declines to start
     once you have halted the run rather than reporting success for a solve

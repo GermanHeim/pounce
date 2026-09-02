@@ -55,8 +55,10 @@ small set of commands whose availability is backend-conditional.
 > interior-point solve left to step, so **no checkpoint fires and your debug
 > script never runs**. That is the plain run's behaviour faithfully reproduced,
 > but it is a silent no-op at exactly the moment you were most likely trying to
-> find out *why* the model is infeasible. The `Presolve: proved primal
-> infeasible — <trigger>` line names the screen that decided it, and
+> find out *why* the model is infeasible. What you get instead is presolve's own
+> one-line record — `Presolve: proved primal infeasible — <trigger>`, naming the
+> screen that decided it and what it tripped on, or `Presolve: proved unbounded
+> below — a free column with a nonzero objective coefficient` — and
 > `qp_presolve=no` puts the iteration back so you can step it.
 >
 > A stopped solve stops. `quit` leaves the run's own non-converged status

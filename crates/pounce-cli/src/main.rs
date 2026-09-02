@@ -2844,7 +2844,21 @@ fn run_convex_qp(
                 presolve_log.push(format!("Presolve: proved primal infeasible — {trigger}"));
                 trivial(QpStatus::PrimalInfeasible)
             }
-            PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
+            PresolveOutcome::Unbounded => {
+                // The sibling of the line above, and it exists for the same
+                // reason (gh #523, gh #892 re-review): a presolve verdict
+                // arrives with no iteration behind it, so this line is the
+                // whole record of *why*. `Unbounded` carries no trigger
+                // payload because it has exactly one cause — a free column
+                // with a nonzero objective coefficient — so the cause is
+                // named here instead.
+                presolve_log.push(
+                    "Presolve: proved unbounded below — a free column with a \
+                     nonzero objective coefficient"
+                        .to_string(),
+                );
+                trivial(QpStatus::DualInfeasible)
+            }
         }
     } else if use_active_set {
         let mut mk = backend;
@@ -3273,7 +3287,15 @@ fn run_convex_socp(
                 presolve_log.push(format!("Presolve: proved primal infeasible — {trigger}"));
                 trivial(pounce_convex::QpStatus::PrimalInfeasible)
             }
-            PresolveOutcome::Unbounded => trivial(pounce_convex::QpStatus::DualInfeasible),
+            PresolveOutcome::Unbounded => {
+                // See the twin in `run_convex_qp`.
+                presolve_log.push(
+                    "Presolve: proved unbounded below — a free column with a \
+                     nonzero objective coefficient"
+                        .to_string(),
+                );
+                trivial(pounce_convex::QpStatus::DualInfeasible)
+            }
         }
     } else {
         let _t = timing.solve.guard();
