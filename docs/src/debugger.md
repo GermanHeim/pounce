@@ -40,14 +40,25 @@ small set of commands whose availability is backend-conditional.
 > embedding — different trajectory, and on the reported model a
 > `Numerical failure` where the plain run returned Clarabel's optimum.
 >
-> The one thing the debugger still changes is **presolve**, which the CLI
-> skips while a debugger is attached (on every engine, not just the convex
-> ones) so that the `x`/`s`/`y`/`z` blocks you inspect are the model you
-> wrote rather than a reduced one. On a model presolve can reduce, that is a
-> different — smaller — problem being solved, so expect the iteration count to
-> move; add `qp_presolve=no` to the plain run to compare like with like.
-> Anything *else* that differs between the debugged and the plain run is a
-> bug; please report it.
+> **Presolve runs under the debugger too**, so the model being solved is the
+> model the plain run solves. It used to be skipped on the convex paths, so
+> that the blocks you inspect were your own rows rather than a reduced set —
+> but the price was a debugged run solving a different, smaller problem, which
+> is the same defect one level up from the driver substitution. On a reduced
+> model the blocks are the reduced ones and `print` falls back to index labels
+> where a name no longer survives; pass `qp_presolve=no` if you would rather
+> step your own rows, and the plain run then agrees with it because both skip
+> the reduction.
+>
+> A stopped solve stops. `quit` leaves the run's own non-converged status
+> standing: the recovery machinery that would ordinarily re-solve after a
+> failed or capped solve — the equilibrated retry, the optimality reverify,
+> the LP crossover — declines to start once you have halted the run, because
+> those re-solves run *unhooked* and would otherwise report success for a
+> solve you deliberately stopped.
+>
+> Anything that differs between the debugged and the plain run is a bug;
+> please report it.
 
 ---
 

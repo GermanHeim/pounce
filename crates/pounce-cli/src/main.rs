@@ -2723,6 +2723,31 @@ fn run_convex_qp(
         )
     };
     let solve_opts = || solve_opts_offset(0.0);
+    // The interior-point solve, with the interactive debugger attached when
+    // there is one (gh #892).
+    //
+    // Routing the hook through here rather than through an arm of its own is
+    // what keeps presolve on under the debugger. It used to be skipped, so
+    // that the inspected `x`/`s`/`y`/`z` blocks were the user's rows rather
+    // than a reduced set — but the price was that the debugged run solved a
+    // *different, smaller* problem than the plain one, which is the same
+    // "attaching the debugger changes the solve" defect gh #892 is about, one
+    // level up from the driver substitution. A user who wants the unreduced
+    // blocks asks for them with `qp_presolve=no`, and then both runs agree
+    // again because both skip it.
+    //
+    // Guarded on `!use_active_set`: the debugger hooks barrier-IPM iterations
+    // and has no active-set analogue, so under that engine it must not engage
+    // — the caller has already printed the note saying so.
+    let ipm_solve = |p: &pounce_convex::QpProblem, o: &QpOptions| -> pounce_convex::QpSolution {
+        match debug_hook.filter(|_| !use_active_set) {
+            Some(hook) => {
+                let mut h = hook.borrow_mut();
+                solve_qp_ipm_debug(p, o, &mut *h, backend)
+            }
+            None => solve_qp_ipm(p, o, backend),
+        }
+    };
     // What presolve did, held back until we know this solve is the one that
     // reports (gh #535). These lines describe the reduction, not the verdict,
     // but they are the *only* stdout a declined convex attempt would otherwise
@@ -2738,19 +2763,6 @@ fn run_convex_qp(
         // enforce the zero-iteration stop here before any solve runs
         // (pounce#186). Mirrors the NLP path's MaximumIterationsExceeded.
         trivial(QpStatus::IterationLimit)
-    } else if let Some(hook) = debug_hook.filter(|_| !use_active_set) {
-        // Interactive debug: step the IPM on the extracted QP directly.
-        // Presolve is skipped so the debugger's `x`/`s`/`y`/`z` blocks
-        // correspond to the user's problem rather than a reduced one.
-        //
-        // Guarded on `!use_active_set`: the debugger hooks barrier-IPM
-        // iterations and has no active-set analogue, so on that engine this
-        // arm would quietly solve with a *different solver* than the one the
-        // user selected. The caller has already printed the note explaining
-        // the debugger does not engage; fall through and solve normally.
-        let mut h = hook.borrow_mut();
-        let _t = timing.solve.guard();
-        solve_qp_ipm_debug(&qp, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         let outcome = {
             let _t = timing.presolve.guard();
@@ -2817,7 +2829,7 @@ fn run_convex_qp(
                             &mut mk,
                         )
                     } else {
-                        solve_qp_ipm(&ps.reduced, &solve_opts_offset(ps.obj_offset()), backend)
+                        ipm_solve(&ps.reduced, &solve_opts_offset(ps.obj_offset()))
                     }
                 };
                 // The postsolve lift is presolve's other half, so it is
@@ -2840,7 +2852,7 @@ fn run_convex_qp(
         solve_qp_active_set_inertia(&qp, &solve_opts(), &engine_overrides, inertia, &mut mk)
     } else {
         let _t = timing.solve.guard();
-        solve_qp_ipm(&qp, &solve_opts(), backend)
+        ipm_solve(&qp, &solve_opts())
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -3174,19 +3186,29 @@ fn run_convex_socp(
     // exactly as `run_convex_qp` does: these lines describe the reduction,
     // not the verdict, and a declined conic attempt must leave no stdout.
     let mut presolve_log: Vec<String> = Vec::new();
+    // The conic solve, with the interactive debugger attached when there is
+    // one (gh #892). See the twin in `run_convex_qp` for why the hook goes
+    // through here instead of an arm of its own: it is what keeps presolve on
+    // under the debugger, so the debugged run is the same problem the plain
+    // run solves. `qp_presolve=no` is how you ask for the unreduced blocks.
+    let conic_solve = |p: &pounce_convex::QpProblem,
+                       k: &[pounce_convex::ConeSpec],
+                       o: &QpOptions|
+     -> pounce_convex::QpSolution {
+        match debug_hook {
+            Some(hook) => {
+                let mut h = hook.borrow_mut();
+                solve_socp_ipm_debug(p, k, o, &mut *h, backend)
+            }
+            None => solve_socp_ipm(p, k, o, backend),
+        }
+    };
     let sol = if qp_opts.max_iter == 0 {
         // `max_iter=0` cannot reach optimality — stop before any solve, the
         // same zero-iteration contract the QP path enforces (pounce#186).
         // Above the presolve arm for the same reason it is on the QP path:
         // presolve can otherwise settle a trivial problem without iterating.
         trivial(pounce_convex::QpStatus::IterationLimit)
-    } else if let Some(hook) = debug_hook {
-        // Interactive debug steps the conic IPM on the *extracted* problem,
-        // so the debugger's blocks correspond to the user's rows rather than
-        // a reduced set. Same carve-out as the QP path.
-        let mut h = hook.borrow_mut();
-        let _t = timing.solve.guard();
-        solve_socp_ipm_debug(&qp, &cones, &solve_opts(), &mut *h, backend)
     } else if presolve_on {
         // **`presolve_conic`, never `presolve`.** The orthant entry point
         // would hand `dedup_rows` an unprotected row list, and this driver's
@@ -3241,7 +3263,7 @@ fn run_convex_socp(
                 let red_cones = ps.reduced_cones(&cones);
                 let red = {
                     let _t = timing.solve.guard();
-                    solve_socp_ipm(&ps.reduced, &red_cones, &solve_opts(), backend)
+                    conic_solve(&ps.reduced, &red_cones, &solve_opts())
                 };
                 // The postsolve lift is presolve's other half.
                 let _t = timing.presolve.guard();
@@ -3255,7 +3277,7 @@ fn run_convex_socp(
         }
     } else {
         let _t = timing.solve.guard();
-        solve_socp_ipm(&qp, &cones, &solve_opts(), backend)
+        conic_solve(&qp, &cones, &solve_opts())
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
