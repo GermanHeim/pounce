@@ -396,7 +396,11 @@ where
     // never-regressing — a no-op for QPs and whenever the vertex is not a
     // strict improvement. Runs against the same un-equilibrated `prob` so the
     // `z`/`s` conventions line up. See [`crate::crossover`].
-    let sol = crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend);
+    let sol = if crate::debug_stop::requested() {
+        sol
+    } else {
+        crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend)
+    };
     // Crossover declines rather than restamps when the budget runs out mid-
     // refinement, so account for a deadline crossed in there here — where
     // `mark_timed_out`'s verdict rule applies and an `Optimal` cannot be lost.
@@ -485,7 +489,15 @@ where
         sol.status,
         QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
     );
-    if opts.use_hsde && opts.equilibrate && retry_on {
+    // `!debug_stop::requested()` guards every recovery re-solve in this
+    // function and its neighbours (gh #892): each of them re-solves unhooked,
+    // so after a debugger `quit` they would run to completion and hand back a
+    // verdict for a solve the user deliberately halted. Declining to start one
+    // leaves the halted run's own status standing, which is the honest answer
+    // and the one the debug path returned before it shared this code. The
+    // predicate is `false` whenever no debugger is attached, so the ordinary
+    // path is bit-for-bit unchanged.
+    if opts.use_hsde && opts.equilibrate && retry_on && !crate::debug_stop::requested() {
         if crate::deadline::expired() {
             return mark_timed_out(sol);
         }
@@ -566,7 +578,11 @@ where
     // it converged but did not. See [`verify_or_repair_optimum`]. Touches only
     // an `Optimal` verdict, so it composes with (and cannot disturb) the
     // certificate handling below.
-    let sol = verify_or_repair_optimum(prob, opts, sol, &mut make_backend);
+    let sol = if crate::debug_stop::requested() {
+        sol
+    } else {
+        verify_or_repair_optimum(prob, opts, sol, &mut make_backend)
+    };
     // gh #293 (extreme tail): refute a *spurious* unboundedness certificate on a
     // QP with genuine curvature. A `DualInfeasible` verdict rests on finding a
     // recession ray whose normalized curvature `dᵀPd/‖d‖²` is below
@@ -587,6 +603,7 @@ where
         && opts.equilibrate
         && sol.status == QpStatus::DualInfeasible
         && prob.p_lower.iter().any(|t| t.val != 0.0)
+        && !crate::debug_stop::requested()
     {
         if crate::deadline::expired() {
             return mark_timed_out(sol);
@@ -636,7 +653,7 @@ where
     // Costs one extra solve, and only on a `DualInfeasible` verdict. The twin
     // cannot re-enter this branch: with `c = 0` no direction has `cᵀd < 0`, so
     // `DualInfeasible` is unreachable for it.
-    if sol.status == QpStatus::DualInfeasible {
+    if sol.status == QpStatus::DualInfeasible && !crate::debug_stop::requested() {
         if crate::deadline::expired() {
             return mark_timed_out(sol);
         }
@@ -1117,7 +1134,7 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_qp_ipm_scoped(prob, opts, make_backend, Some(hook))
+        crate::debug_stop::with_scope(|| solve_qp_ipm_scoped(prob, opts, make_backend, Some(hook)))
     })
 }
 
@@ -1366,6 +1383,7 @@ where
                 sol.status,
                 QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
             )
+            && !crate::debug_stop::requested()
         {
             let hsde_opts = QpOptions {
                 use_hsde: true,
@@ -1387,7 +1405,7 @@ where
     // rests on — is a per-row scaling and stays sound exactly on the orthant,
     // so the check is gated on that and every genuine cone program is
     // untouched. See [`verify_or_repair_optimum`].
-    if cones.iter().all(|c| matches!(c, ConeSpec::Nonneg(_))) {
+    if cones.iter().all(|c| matches!(c, ConeSpec::Nonneg(_))) && !crate::debug_stop::requested() {
         return verify_or_repair_optimum(prob, opts, sol, &mut make_backend);
     }
     sol
@@ -1429,7 +1447,9 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_socp_ipm_scoped(prob, cones, opts, make_backend, Some(hook))
+        crate::debug_stop::with_scope(|| {
+            solve_socp_ipm_scoped(prob, cones, opts, make_backend, Some(hook))
+        })
     })
 }
 
@@ -3118,7 +3138,12 @@ where
             // actually collapsed τ, which is exactly the ‖c‖ ≪ σ regime — reaches
             // the real optimum; if that solve cannot converge either, its honest
             // non-`Optimal` status stands (never a false `Optimal`).
+            // A debugger stop lands here as a non-`Optimal` status, and the
+            // re-solves below run unhooked — so the halted run would be
+            // replaced by one the debugger never saw (gh #892). Take the
+            // stopped result as it stands.
             if sol.status != QpStatus::Optimal
+                || crate::debug_stop::requested()
                 || normalized_optimum_is_genuine(prob, cone, &sol, opts.tol)
             {
                 tracing::debug!(
