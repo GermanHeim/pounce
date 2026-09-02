@@ -630,6 +630,58 @@ fn an_exponential_dual_off_the_normal_ray_is_refused() {
     );
 }
 
+/// **A second-order boundary point whose dual is off the normal ray.**
+///
+/// Round 5 of #889. `smooth_facet_face` has refused this for the exponential
+/// and power cones since they were written — `an_exponential_dual_off_the_normal_ray_is_refused`
+/// above — and `soc_face` did not, even though at a boundary point the normal
+/// cone *is* `ℝ₊w` with `w = (1, −ŝ₁)`, so `z = νw` is the optimality condition
+/// rather than an approximation. `ν = z₀` is fed straight into the curvature,
+/// so a tilted dual does not degrade the answer: it linearizes a different
+/// problem's face.
+///
+/// `s = (1, 0.6, 0.8)` is on the boundary (`‖s₁‖ = 1 = s₀`) and
+/// `z = (1, 0.8, −0.6)` is the tail rotated 90°, giving `⟨s, z⟩ = 1.0` —
+/// wildly non-complementary, and accepted before this.
+///
+/// Reachable whenever the caller's `sol` does not match the partition handed
+/// beside it: a stale solution, a mislabeled block. The same class
+/// `NotOrthantComplementary` refuses one cone family over.
+#[test]
+fn a_second_order_dual_off_the_normal_ray_is_refused() {
+    assert_nonsmooth(
+        refusal(
+            ConeSpec::SecondOrder(3),
+            &[1.0, 0.6, 0.8],
+            &[1.0, 0.8, -0.6],
+        ),
+        "not on the ray normal to this boundary point",
+    );
+}
+
+/// **A PSD block whose ranks complement but whose subspaces do not.**
+///
+/// The rank count says `dim range(Z) = dim ker(S)`; complementarity needs
+/// `range(Z) ⊆ ker(S)`. A `Z` of exactly the right rank in a mismatched
+/// eigenbasis passes the count, and the tangent rows are then built from `S`'s
+/// kernel while the dual lives elsewhere.
+///
+/// `S = diag(1, 0)` has `ker = span(e₂)` and rank 1; `Z = diag(1, 0)` also has
+/// rank 1, so `rank Z = n − rank S` holds — but `range(Z) = span(e₁)`, which is
+/// `S`'s *range*, the opposite subspace. `⟨S, Z⟩ = 1`, not 0.
+///
+/// Raised in round 5 of #889 as reasoned-not-run; this is the run.
+#[test]
+fn a_psd_block_whose_dual_range_is_not_in_the_kernel_is_refused() {
+    // svec order for n = 2: (0,0), (1,0), (1,1)
+    let s = [1.0, 0.0, 0.0]; // S = diag(1, 0)
+    let z = [1.0, 0.0, 0.0]; // Z = diag(1, 0) — right rank, wrong subspace
+    assert_nonsmooth(
+        refusal(ConeSpec::Psd(2), &s, &z),
+        "range(Z) is not inside ker(S)",
+    );
+}
+
 /// The power cone's degenerate faces, where `g = y^α z^{1−α} = 0` and the two
 /// smooth sheets `x = ±g` meet.
 #[test]

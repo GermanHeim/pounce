@@ -916,6 +916,282 @@ fn an_equality_inside_the_pinned_coordinates_is_refused() {
     }
 }
 
+/// **`reduced_hessian` on a curved face** — the method round 5 of #889 found
+/// returning a plausible wrong number with `Ok`.
+///
+/// Two defects, one call. `active_ineq` is **provenance** on a conic build (the
+/// `G` rows a block contributed); the active object is the face's own row, a
+/// combination of them. `reduced_hessian` indexed raw `G` with the provenance
+/// index — gh#450's shape, and the `active_rows` field doc had claimed this
+/// loop read `active_rows` since the row was introduced. Separately it
+/// projected bare `P` where a curved face makes the second-order object the
+/// Hessian of the **Lagrangian**.
+///
+/// Measured on `boundary(1.0)` with `P = diag(1, 1, 9)`, chosen so the third
+/// coordinate's curvature cannot hide:
+///
+/// ```text
+///   wrong G row, no curvature   1.0000     <- what shipped, with Ok
+///   correct face row, no curv   1.0506
+///   correct face row + curv     9.9368     <- correct
+/// ```
+///
+/// The middle line is why the index fix alone is not enough to call this
+/// closed, and the spread is why it is not a rounding matter.
+///
+/// # Why the curvature belongs, by parity rather than by taste
+///
+/// The NLP arm computes `H_R = B K⁻¹ Bᵀ` off the converged KKT, whose `(x,x)`
+/// block is the Lagrangian Hessian — so it has always included constraint
+/// curvature, and this method's own doc says it mirrors that. On the orthant
+/// path `curvature` is empty and this is exactly `P`, which is the classical
+/// definition: a linear constraint has no Hessian.
+///
+/// The expected value is not taken from the implementation. The test builds
+/// the face row and the curvature from the *solution* — `w = (1, −ŝ₁)`,
+/// `(ν/s₀)(Σ gᵣgᵣᵀ − uuᵀ)` — forms `Z` by hand, and evaluates `Zᵀ(P+curv)Z`.
+/// Both routes agree to every digit.
+///
+/// Mutations: read `active_ineq` + raw `G` again (→ 1.0000), or drop the
+/// curvature term (→ 1.0506). Each reddens this test and nothing else.
+#[test]
+fn the_reduced_hessian_reads_the_face_row_and_its_curvature() {
+    let prob = QpProblem {
+        p_lower: vec![tri(0, 0, 1.0), tri(1, 1, 1.0), tri(2, 2, 9.0)],
+        ..boundary(1.0)
+    };
+    let sol = solve(&prob);
+    let sens = sens_for(&prob, &sol);
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(0, ConeBlockKind::Boundary)],
+        "the fixture must reach a curved face, or it tests nothing"
+    );
+
+    let rh = sens
+        .reduced_hessian(1e-9)
+        .expect("a converged boundary build must produce a reduced Hessian");
+    assert_eq!(rh.eigenvalues.len(), 1, "n − rank(B) = 3 − 2 = 1");
+
+    // ---- the independent hand projection ----
+    let (t, x0, x1) = (sol.x[2], sol.x[0], sol.x[1]);
+    let nrm = (x0 * x0 + x1 * x1).sqrt();
+    let (h0, h1) = (x0 / nrm, x1 / nrm); // ŝ₁
+    // face row = wᵀG with w = (1, −ŝ₁); G's rows are (0,0,−1), (−1,0,0), (0,−1,0)
+    let face = [h0, h1, -1.0];
+    // Z spans null([A; face]) with A = (1,1,0): v = (1, −1, c), c = f₀ − f₁
+    let v = [1.0, -1.0, face[0] - face[1]];
+    let vn = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let z = [v[0] / vn, v[1] / vn, v[2] / vn];
+    // curvature = (ν/s₀)(Σ_{r≥1} gᵣgᵣᵀ − uuᵀ), u = Σ ŝᵣ gᵣ
+    let u = [-h0, -h1, 0.0];
+    let mut curv = [[0.0f64; 3]; 3];
+    curv[0][0] = 1.0;
+    curv[1][1] = 1.0;
+    for a in 0..3 {
+        for b in 0..3 {
+            curv[a][b] -= u[a] * u[b];
+            curv[a][b] *= 1.0; // keep the loop shape obvious
+        }
+    }
+    let scale = sol.z[0] / t;
+    for a in 0..3 {
+        for b in 0..3 {
+            curv[a][b] *= scale;
+        }
+    }
+    let pdiag = [1.0, 1.0, 9.0];
+    let mut expected = 0.0;
+    let mut without_curvature = 0.0;
+    for a in 0..3 {
+        without_curvature += z[a] * pdiag[a] * z[a];
+        for b in 0..3 {
+            let h = if a == b {
+                pdiag[a] + curv[a][b]
+            } else {
+                curv[a][b]
+            };
+            expected += z[a] * h * z[b];
+        }
+    }
+
+    assert!(
+        (rh.eigenvalues[0] - expected).abs() < 1e-9,
+        "the reduced Hessian must be Zᵀ(P + face curvature)Z: got {}, hand-computed {expected}",
+        rh.eigenvalues[0]
+    );
+
+    // And the two defects this replaced are far away, so a regression to
+    // either is a failure rather than a rounding difference.
+    assert!(
+        (rh.eigenvalues[0] - 1.0).abs() > 1.0,
+        "1.0 is the value for the WRONG G row with no curvature"
+    );
+    assert!(
+        (rh.eigenvalues[0] - without_curvature).abs() > 1.0,
+        "and {without_curvature} is the right row with the curvature dropped"
+    );
+}
+
+/// **What `activity()` says about a cone row, measured** — so the caveat on
+/// that accessor is a number rather than a warning.
+///
+/// `classify_all` is the orthant rule: it reads each `G` row as an inequality
+/// with its own slack and multiplier. A cone block complements as a *block*
+/// inner product, so row-wise `sᵢ·zᵢ` is generally nonzero and `z` generally
+/// carries negative entries — a cone row's entry is a reading of a quantity
+/// that does not exist, not a wrong reading of a real one.
+///
+/// This pins the actual output on the boundary fixture so the doc cannot drift
+/// from it, and so that anyone who later makes `activity()` cone-aware has to
+/// come here and say so. Round 5 of #889.
+#[test]
+fn activity_reads_cone_rows_with_the_orthant_rule_and_says_so() {
+    let prob = boundary(1.0);
+    let sol = solve(&prob);
+    let sens = sens_for(&prob, &sol);
+    assert_eq!(sens.cone_block_kinds(), [(0, ConeBlockKind::Boundary)]);
+
+    // The dual's tail is negative — legal for a cone, impossible for an
+    // orthant row, which is precisely why the orthant rule cannot read it.
+    assert!(
+        sol.z[1] < 0.0 && sol.z[2] < 0.0,
+        "the fixture must have a negative cone tail, or it shows nothing: z = {:?}",
+        sol.z
+    );
+
+    let rep = sens.activity();
+    assert_eq!(
+        rep.row_status.len(),
+        3,
+        "one entry per G row, cone rows included — there is no gap to notice"
+    );
+    // The binding block's tail rows read as *inactive*. That is the
+    // plausible-and-wrong answer the accessor's doc warns about.
+    assert_ne!(
+        rep.row_status[1], rep.row_status[0],
+        "the block is one object, yet its rows get different orthant verdicts"
+    );
+}
+
+/// **The weak-activity screens run on a conic build's orthant rows.**
+///
+/// Both screens were `Vec::new()` on every conic build until round 5 of #889,
+/// while their docs promised a "deliberately conservative" screen. A `Nonneg`
+/// block inside a mixed partition is an ordinary orthant block and its rows are
+/// ordinary rows.
+///
+/// A *cone* block still never appears, and that is by construction:
+/// `cone_block_face` refuses a collapsed dual at the apex or on the boundary —
+/// the conic analogue of weak activity — so no built conic sensitivity carries
+/// one. The refusal is the report.
+///
+/// # The fixture has to be non-empty, or it proves nothing
+///
+/// The first version of this test asserted the screens were *empty* on the
+/// strictly complementary `boundary` fixture. That is true with the screens
+/// wired and equally true with them stubbed to `Vec::new()` — the mutation ran
+/// **green**, which is the exact failure this file's header warns about, made
+/// on the test written to close it.
+///
+/// So the fixture is gh#219's weakly active row carried as a `Nonneg` block
+/// beside a strictly interior second-order block: `min ½‖x‖² − 5t` subject to
+/// `x₀ + x₁ = 1`, `x₀ − 2x₁ ≤ −½`, `(t, u, v) ∈ Q₃`. The equality-only optimum
+/// `(½, ½)` hits the inequality exactly, so its slack and its multiplier
+/// vanish together, and the screen must name row 0.
+#[test]
+fn the_weak_screens_are_wired_on_a_conic_build() {
+    let prob = QpProblem {
+        n: 5,
+        p_lower: (0..5).map(|j| tri(j, j, 1.0)).collect(),
+        c: vec![0.0, 0.0, -5.0, 0.0, 0.0],
+        a: vec![tri(0, 0, 1.0), tri(0, 1, 1.0)],
+        b: vec![1.0],
+        g: vec![
+            // row 0: the orthant row, weakly active at (½, ½)
+            tri(0, 0, 1.0),
+            tri(0, 1, -2.0),
+            // rows 1..3: s = (t, u, v), driven strictly interior by the −5t cost
+            tri(1, 2, -1.0),
+            tri(2, 3, -1.0),
+            tri(3, 4, -1.0),
+        ],
+        h: vec![-0.5, 0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::Nonneg(1), ConeSpec::SecondOrder(3)];
+    let sol = solve_socp_ipm(&prob, &cones, &opts(), backend);
+    assert_eq!(sol.status, QpStatus::Optimal);
+
+    let sens = match QpSensitivity::build_conic(&prob, &cones, &sol, &opts(), 1e-7, backend) {
+        Ok(v) => v,
+        Err(e) => panic!("build_conic must accept this fixture, got {e:?}"),
+    };
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(1, ConeBlockKind::Interior)],
+        "the cone must be interior so it contributes nothing and the orthant \
+         row is the only thing the screen could name"
+    );
+
+    assert_eq!(
+        sens.weakly_active_ineq(),
+        [0],
+        "the orthant row of a mixed partition must still be screened; this \
+         returned empty on every conic build before round 5 of #889"
+    );
+}
+
+/// **`build_conic` and `build` admit the same statuses**, which is what makes
+/// the all-`Nonneg` delegation honest.
+///
+/// `build_conic` refuses non-`Optimal` and then, for an all-`Nonneg` partition,
+/// hands straight to `build` with the comment "so the two entry points cannot
+/// answer differently on the same input". That comment was false: the check
+/// read `!= Optimal` while `build` admits `OptimalInaccurate` (gh#880), so the
+/// same solution with the same partition was served by one and refused by the
+/// other. Round 5 of #889.
+///
+/// This drives both entry points with an `OptimalInaccurate` status on an
+/// all-orthant model and asserts they agree — which is the property the comment
+/// claims, tested rather than asserted.
+#[test]
+fn both_entry_points_admit_the_same_statuses() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![tri(0, 0, 1.0), tri(1, 1, 1.0)],
+        c: vec![-1.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![tri(0, 0, 1.0), tri(1, 1, 1.0)],
+        h: vec![0.5, 0.5],
+        lb: vec![],
+        ub: vec![],
+    };
+    let mut sol = solve_socp_ipm(&prob, &[ConeSpec::Nonneg(2)], &opts(), backend);
+    assert_eq!(sol.status, QpStatus::Optimal);
+
+    // Relabel exactly as the sigma cascade does: the numbers are unchanged,
+    // only the certification verdict is.
+    sol.status = QpStatus::OptimalInaccurate;
+
+    let plain = QpSensitivity::build(&prob, &sol, &opts(), 1e-7, backend);
+    let conic =
+        QpSensitivity::build_conic(&prob, &[ConeSpec::Nonneg(2)], &sol, &opts(), 1e-7, backend);
+    assert_eq!(
+        plain.is_ok(),
+        conic.is_ok(),
+        "the entry points must agree on OptimalInaccurate; plain = {:?}, conic = {:?}",
+        plain.err(),
+        conic.err()
+    );
+    assert!(
+        plain.is_ok(),
+        "and gh#880's decision is that they both serve it"
+    );
+}
+
 /// The guard must not fire on an apex that *can* absorb `db`, or it would
 /// refuse the flat, exact case the apex branch exists to serve.
 ///

@@ -902,6 +902,36 @@ fn soc_face(
     for (r, wr) in w.iter_mut().enumerate().skip(1) {
         *wr = -s[r] / s0;
     }
+
+    // **The dual must lie on that normal ray**, `z = ν·w` with `ν = z₀ > 0`.
+    //
+    // At a boundary point the normal cone *is* `ℝ₊w`, so this is the optimality
+    // condition rather than a refinement — and `ν` is fed straight into the
+    // curvature below, so a tilted `z` does not degrade the answer, it makes up
+    // a different problem's. [`smooth_facet_face`] has refused exactly this for
+    // the exponential and power cones since they were written, with the same
+    // constant; the second-order cone did not, and round 5 of #889 reached it
+    // with `s = (1, 0.6, 0.8)`, `z = (1, 0.8, −0.6)` — `⟨s, z⟩ = 1.0`, wildly
+    // non-complementary — and was served.
+    //
+    // Reachable whenever the caller's `sol` does not match the partition it
+    // hands alongside: a stale solution, a mislabeled block. That is the same
+    // mismatched-caller-input class [`SensError::NotOrthantComplementary`]
+    // exists to refuse, one cone family over.
+    let nu = z[0];
+    let dual_resid = inf_norm_of(
+        &z.iter()
+            .zip(&w)
+            .map(|(zi, wi)| zi - nu * wi)
+            .collect::<Vec<_>>(),
+    );
+    if nu <= 0.0 || dual_resid > FACET_DUAL_REL * inf_norm_of(z).max(dual_scale) {
+        return Err(ConeError::new(
+            block,
+            "the dual is not on the ray normal to this boundary point, so the face              being linearized is not the face the solution is on",
+        ));
+    }
+
     let combined = combine_rows(&w, g_rows);
     if combined.is_empty() {
         return Err(ConeError::new(
@@ -995,6 +1025,34 @@ fn psd_face(
             "the PSD block does not satisfy strict complementarity (rank Z ≠ n − rank S), \
              so a direction exists along which slack and multiplier vanish together and \
              dx/db is two-valued",
+        ));
+    }
+
+    // **The ranks matching is not the same as the subspaces matching.**
+    //
+    // Complementarity needs `range(Z) ⊆ ker(S)`; counting eigenvalues only says
+    // the two have the right *dimensions*. A `Z` of exactly the right rank in a
+    // mismatched eigenbasis passes the count and is not complementary at all —
+    // and the tangent rows below are built from `S`'s kernel vectors, so a `Z`
+    // living somewhere else silently linearizes a face the solution is not on.
+    //
+    // Both matrices are PSD here (checked above), so `⟨S, Z⟩ = 0` is equivalent
+    // to `SZ = 0` and hence to the range containment — one inner product rather
+    // than a subspace comparison. `svec` is an isometry, so the dot product of
+    // the vectorized forms IS the trace inner product.
+    //
+    // Round 5 of #889 raised this alongside the second-order cone's missing
+    // dual-ray check; the same mismatched-caller-input class, and the same
+    // reason it is worth a refusal rather than a caveat.
+    let sz_inner: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
+    if sz_inner.abs()
+        > FACET_DUAL_REL * inf_norm_of(s).max(primal_scale) * inf_norm_of(z).max(dual_scale)
+    {
+        return Err(ConeError::new(
+            block,
+            "the PSD block's ranks complement but its subspaces do not — ⟨S, Z⟩ is \
+             not zero, so range(Z) is not inside ker(S) and the face being \
+             linearized is not the face the solution is on",
         ));
     }
 
@@ -1342,6 +1400,18 @@ pub struct QpSensitivity {
     /// Per second-order block, what it was doing at the solution. Empty on the
     /// orthant path.
     cone_kinds: Vec<(usize, ConeBlockKind)>,
+    /// The active faces' curvature, as lower-triangle `(row, col, val)` into
+    /// the `(x,x)` block. Empty on the orthant path, where every active face is
+    /// a hyperplane and carries none.
+    ///
+    /// Retained rather than consumed by [`assemble_kkt`] because
+    /// [`reduced_hessian`](QpSensitivity::reduced_hessian) needs it too: on a
+    /// curved face the second-order object is the Hessian of the **Lagrangian**
+    /// restricted to the tangent space, and projecting bare `P` there is the
+    /// same omission that made the first draft of the step converge to the
+    /// wrong derivative. Round 5 of #889 found `reduced_hessian` still doing
+    /// it.
+    curvature: Vec<(usize, usize, f64)>,
     /// Inequality rows at which strict complementarity fails (gh #219).
     weakly_active_ineq: Vec<usize>,
     /// Variables whose bound is weakly active.
@@ -1950,6 +2020,7 @@ impl QpSensitivity {
         active_ineq: Vec<usize>,
         cone_kinds: Vec<(usize, ConeBlockKind)>,
         curvature: Vec<(usize, usize, f64)>,
+        orthant_rows: Vec<usize>,
         make_backend: F,
     ) -> Result<Self, SensError>
     where
@@ -1960,6 +2031,57 @@ impl QpSensitivity {
             .filter(|&j| sol.z_lb[j] > active_tol || sol.z_ub[j] > active_tol)
             .map(|j| (j, sol.z_lb[j] >= sol.z_ub[j]))
             .collect();
+
+        // ---- weak-activity screens on a conic build -----------------------
+        //
+        // These were both `Vec::new()`, so `weakly_active_ineq()` and
+        // `weakly_active_bound_vars()` returned empty on *every* conic build
+        // while their docs promised a "deliberately conservative" screen.
+        // Round 5 of #889.
+        //
+        // The two halves are not the same story:
+        //
+        // * **Variable bounds are ordinary bounds.** A cone in the inequality
+        //   block does not change what `x_j` sitting on `lb_j` with a vanishing
+        //   multiplier means, so this screen is simply run, exactly as `build`
+        //   runs it.
+        // * **Rows are screened only where the row is an orthant row** — the
+        //   `Nonneg` blocks of a mixed partition. A *cone* block has no weak
+        //   row to report, and that is by construction rather than by omission:
+        //   `cone_block_face` **refuses** a block whose dual has collapsed at
+        //   the apex or on the boundary, which is the conic analogue of weak
+        //   activity, so no built conic sensitivity carries one. The refusal is
+        //   the report.
+        let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |mx, x| mx.max(x.abs()));
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(&sol.x, &mut gx);
+        let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
+        let dual_scale = inf_norm(&sol.y)
+            .max(inf_norm(&sol.z))
+            .max(inf_norm(&sol.z_lb))
+            .max(inf_norm(&sol.z_ub))
+            .max(1.0);
+        let dual_zero = WEAK_ACTIVE_REL * dual_scale;
+        let primal_zero = WEAK_ACTIVE_REL * primal_scale;
+        let weakly_active_ineq: Vec<usize> = orthant_rows
+            .iter()
+            .copied()
+            .filter(|&i| (prob.h[i] - gx[i]).abs() <= primal_zero && sol.z[i] <= dual_zero)
+            .collect();
+        let x_scale = inf_norm(&sol.x).max(1.0);
+        let bound_zero = WEAK_ACTIVE_REL * x_scale;
+        let weakly_active_bound_vars: Vec<usize> = (0..n)
+            .filter(|&j| {
+                let (lb, ub) = (prob.lb_of(j), prob.ub_of(j));
+                let lb_weak = lb > -BOUND_INF
+                    && (sol.x[j] - lb).abs() <= bound_zero
+                    && sol.z_lb[j] <= dual_zero;
+                let ub_weak = ub < BOUND_INF
+                    && (ub - sol.x[j]).abs() <= bound_zero
+                    && sol.z_ub[j] <= dual_zero;
+                lb_weak || ub_weak
+            })
+            .collect();
         Self::finish(
             prob,
             sol,
@@ -1967,8 +2089,8 @@ impl QpSensitivity {
             active_rows,
             active_ineq,
             active_bounds,
-            Vec::new(),
-            Vec::new(),
+            weakly_active_ineq,
+            weakly_active_bound_vars,
             cone_kinds,
             curvature,
             opts.crossover,
@@ -2098,6 +2220,7 @@ impl QpSensitivity {
             release_slots: Rc::new(release_slots),
             release_backend: Rc::new(RefCell::new(Some(make_backend()))),
             cone_kinds,
+            curvature,
             fact: Rc::new(RefCell::new(fact)),
         })
     }
@@ -2161,11 +2284,26 @@ impl QpSensitivity {
                 m_ineq: prob.m_ineq(),
             });
         }
-        if sol.status != QpStatus::Optimal {
+        // The **same** admissible statuses as [`build`](Self::build), which
+        // takes `OptimalInaccurate` per gh#880. This check read
+        // `!= QpStatus::Optimal` while `build` admitted both, so an all-`Nonneg`
+        // partition carrying an `OptimalInaccurate` solution was served by one
+        // entry point and refused by the other — with the comment below
+        // asserting that could not happen. Round 5 of #889.
+        //
+        // gh#880's reasoning applies unchanged here: `OptimalInaccurate` now
+        // also carries the `σ` cascade's "could not certify to `tol`" verdict,
+        // and that population previously arrived as a clean `Optimal` and built
+        // a sensitivity object. The derivative at a less accurate point is less
+        // accurate, which is what it was before; narrowing what the library
+        // will do for it is a separate change, and one the repo has already
+        // ruled on in the other direction.
+        if !matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate) {
             return Err(SensError::NotOptimal);
         }
         // All-orthant IS the orthant problem; take the plain path so the two
-        // entry points cannot answer differently on the same input.
+        // entry points cannot answer differently on the same input — which is
+        // only true because the status check above matches `build`'s.
         if cones.iter().all(|c| matches!(c, ConeSpec::Nonneg(_))) {
             return Self::build(prob, sol, opts, active_tol, make_backend);
         }
@@ -2189,6 +2327,9 @@ impl QpSensitivity {
         let mut active_ineq: Vec<usize> = Vec::new();
         let mut kinds: Vec<(usize, ConeBlockKind)> = Vec::new();
         let mut curvature: Vec<(usize, usize, f64)> = Vec::new();
+        // Which rows are ordinary orthant rows, so the weak-activity screen can
+        // still run over them on a mixed partition — see `build_from_rows`.
+        let mut orthant_rows: Vec<usize> = Vec::new();
         let mut offset = 0usize;
         for (block, spec) in cones.iter().enumerate() {
             let dim = spec.dim();
@@ -2198,6 +2339,7 @@ impl QpSensitivity {
                     // Orthant rows inside a mixed partition: the same rule the
                     // plain path uses, applied to this block's slice.
                     for r in 0..dim {
+                        orthant_rows.push(offset + r);
                         if sol.z[offset + r] > active_tol {
                             active_rows.push(rows[r].clone());
                             active_ineq.push(offset + r);
@@ -2235,6 +2377,7 @@ impl QpSensitivity {
             active_ineq,
             kinds,
             curvature,
+            orthant_rows,
             make_backend,
         )
     }
@@ -2581,6 +2724,26 @@ impl QpSensitivity {
     /// `reduced/diagonal`, which is μ-independent — so re-solving tighter does
     /// not separate it. Treating the class as a proxy for kink-ness is the
     /// error that shipped gh#763.
+    ///
+    /// # On a conic build, only the orthant rows and the bounds mean anything
+    ///
+    /// The classifier is the **orthant** rule: it reads each row of `G` as an
+    /// inequality with its own slack and multiplier. A cone block does not work
+    /// that way — it complements as a *block* inner product `⟨s, z⟩ = 0`, and
+    /// row-wise `sᵢ·zᵢ` is generally nonzero with `z` generally carrying
+    /// negative entries. So a cone row's entry here is not a wrong reading of a
+    /// real quantity; it is a reading of a quantity that does not exist.
+    ///
+    /// Measured on this crate's `boundary` fixture, where `z = (6.38, −4.86,
+    /// −4.14)`: the two negative tail rows come back classified **inactive**,
+    /// which is exactly the plausible-and-wrong answer — the block is on its
+    /// boundary and binding. Round 5 of #889.
+    ///
+    /// This is not refused, because the report is still correct for every
+    /// orthant row and every variable bound of a mixed partition, and those are
+    /// the entries a caller on a mixed model actually asks about. Use
+    /// [`cone_block_kinds`](Self::cone_block_kinds) for what a cone block is
+    /// doing; there is no per-row answer for it to give.
     pub fn activity(&self) -> ConvexActivityReport {
         let floor = curvature_floor(&self.prob);
         let sol = QpSolution {
@@ -2736,6 +2899,18 @@ impl QpSensitivity {
     /// direction it actually cares about. The screen is deliberately
     /// conservative (see `WEAK_ACTIVE_REL`) — a near-degenerate constraint is
     /// flagged too, which is the useful behaviour for a diagnostic.
+    ///
+    /// # On a conic build this screens the orthant rows only
+    ///
+    /// A `Nonneg` block inside a mixed partition is screened exactly as the
+    /// plain path screens it. A **cone** block never appears here, and that is
+    /// by construction rather than omission: `cone_block_face` *refuses* a
+    /// block whose dual has collapsed at the apex or on the boundary, which is
+    /// the conic analogue of a weakly active row — so no built conic
+    /// sensitivity carries one, and the refusal is the report.
+    ///
+    /// Both screens returned empty on every conic build until round 5 of #889,
+    /// which is a different thing from "there was nothing to report".
     pub fn weakly_active_ineq(&self) -> &[usize] {
         &self.weakly_active_ineq
     }
@@ -2782,10 +2957,16 @@ impl QpSensitivity {
         for t in &self.prob.a {
             b[t.row * n + t.col] += t.val;
         }
-        let g_rows = group_rows_by_index(&self.prob.g, self.prob.m_ineq());
+        // `active_rows`, NOT `active_ineq`. On the orthant path they say the
+        // same thing; on a conic build `active_ineq` is **provenance** — the
+        // `G` rows a block contributed — while the active object is the face's
+        // own row, a combination of them. Indexing raw `G` with a provenance
+        // index returns a real, plausible, wrong row: gh#450's shape, and the
+        // `active_rows` field doc has claimed this loop reads it since the row
+        // was introduced. It did not until round 5 of #889 measured it.
         let mut row = self.m_eq;
-        for &i in &self.active_ineq {
-            for &(col, val) in &g_rows[i] {
+        for r in &self.active_rows {
+            for &(col, val) in r {
                 b[row * n + col] += val;
             }
             row += 1;
@@ -2825,12 +3006,28 @@ impl QpSensitivity {
         let rank = sv.iter().filter(|&&l| l > thresh).count();
         let n_dof = n - rank;
 
-        // Dense symmetric P (n×n) from its lower triangle.
+        // Dense symmetric Hessian (n×n) from `P`'s lower triangle, **plus the
+        // active faces' curvature** — i.e. the Hessian of the Lagrangian, not
+        // of the objective alone.
+        //
+        // On the orthant path `curvature` is empty and this is exactly `P`,
+        // which is what the classical definition wants: a linear constraint has
+        // no Hessian, so the Lagrangian's is the objective's. A conic boundary
+        // face is *curved*, and there the second-order behaviour along the
+        // active manifold is not `P`'s. Projecting bare `P` there is the same
+        // omission that made the first draft of the parametric step converge to
+        // the wrong derivative, one method over. Round 5 of #889.
         let mut p = vec![0.0; n * n];
         for t in &self.prob.p_lower {
             p[t.row * n + t.col] += t.val;
             if t.row != t.col {
                 p[t.col * n + t.row] += t.val;
+            }
+        }
+        for &(r, c, v) in &self.curvature {
+            p[r * n + c] += v;
+            if r != c {
+                p[c * n + r] += v;
             }
         }
 

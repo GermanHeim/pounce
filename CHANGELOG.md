@@ -95,6 +95,68 @@ changes.
 
 ### Fixed
 
+- **`QpSensitivity::reduced_hessian` was silently wrong on a conic build with a
+  curved face (Rust API).** Two defects in one method, both returning `Ok`.
+
+  This PR made `active_ineq` **provenance** on the conic path — the `G` rows a
+  cone block contributed — while the rows that are actually active live in
+  `active_rows`. The KKT assembly and the parametric step were moved over;
+  `reduced_hessian` was not, and kept indexing raw `G` with the provenance
+  index. That is gh#450's shape (a real, plausible, wrong row) and it
+  contradicted the `active_rows` field doc, which has said "the assembly and
+  the reduced Hessian both read this" since the field was added.
+
+  Separately it projected bare `P`, where a curved face makes the second-order
+  object the Hessian of the **Lagrangian**. The NLP arm has always included
+  constraint curvature — it computes `H_R = B K⁻¹ Bᵀ` off the converged KKT —
+  and this method's doc says it mirrors that, so the convex arm now does too.
+  On the orthant path `curvature` is empty and this is exactly `P`, the
+  classical definition.
+
+  Measured on the `boundary` fixture with `P = diag(1, 1, 9)`: `1.0000` shipped,
+  `1.0506` is the correct face row without curvature, and `9.9368` is right.
+  Found by adversarial review of PR #889.
+
+- **The second-order and PSD cones accepted a dual that is not complementary
+  (Rust API).** At a boundary point the normal cone *is* `ℝ₊w`, so `z = νw` is
+  the optimality condition rather than an approximation — and `ν` is fed
+  straight into the curvature, so a tilted dual does not degrade the answer, it
+  linearizes a different problem's face. The exponential and power cones have
+  refused this since they were written (`FACET_DUAL_REL`); `soc_face` did not,
+  and was served `s = (1, 0.6, 0.8)` against `z = (1, 0.8, −0.6)` with
+  `⟨s, z⟩ = 1.0`.
+
+  `psd_face` had the analogous gap one level up: it checked strict
+  complementarity by **rank counting alone**, so a `Z` of the right rank in a
+  mismatched eigenbasis passed while `range(Z)` sat in `S`'s range rather than
+  its kernel. Both matrices are PSD there, so `⟨S, Z⟩ = 0` is equivalent to the
+  range containment and is one inner product.
+
+  Reachable whenever the caller's solution does not match the partition handed
+  beside it — a stale solution, a mislabeled block — which is the same
+  mismatched-input class `NotOrthantComplementary` already refuses.
+
+- **`build_conic` refused `OptimalInaccurate` where `build` admits it.** The
+  status check sat *before* the all-`Nonneg` delegation whose comment says the
+  two entry points "cannot answer differently on the same input", so an
+  all-orthant partition carrying that status was served by one and refused by
+  the other. Now matches `build`, per gh#880's decision.
+
+- **The weak-activity screens were empty on every conic build.**
+  `weakly_active_ineq()` and `weakly_active_bound_vars()` returned `[]`
+  regardless, while their docs promised a "deliberately conservative" screen.
+  The orthant rows of a mixed partition and every variable bound are now
+  screened as the plain path screens them. A *cone* block still never appears,
+  and that is by construction: a collapsed dual at the apex or on the boundary
+  is refused at build time, so the refusal is the report.
+
+- **`activity()` reads cone rows with the orthant rule**, which is now
+  documented at the accessor with the measurement (on the `boundary` fixture a
+  binding block's negative-dual tail rows classify as *inactive*). Not refused:
+  the report is still correct for every orthant row and bound of a mixed
+  partition. Use `cone_block_kinds()` for what a cone block is doing.
+
+
 - **`QpSensitivity::active_ineq()` documented a `G` index it does not always
   return.** For an orthant row it is the row of `G`; for a **curved cone face**
   the rows are linear combinations and the entry is block provenance, so
