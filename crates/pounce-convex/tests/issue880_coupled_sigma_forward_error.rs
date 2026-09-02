@@ -178,7 +178,7 @@
 //! | `barrier_ratio` returns `Some(0.0)` instead of `None` on an unusable slack | *nothing here.* `forward_error_operator_tests::{an_exactly_active_bound_declines_rather_than_reading_as_free, a_negative_slack_declines_too}` |
 //!
 
-use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
+use pounce_convex::{QpOptions, QpProblem, QpSolution, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -314,6 +314,23 @@ const TGT: [f64; 2] = [3.0, 0.5];
 /// on the left column and inert on the right, and no choice of threshold on a
 /// per-row ratio can change that, because the quantity itself has stopped
 /// carrying the information.
+/// The status the `σ` gate can honestly report at a given conditioning and
+/// tolerance, and **why the boundary sits where it does**.
+///
+/// The gate's cut is `min(100·tol, 1e-3)` — fixed, and independent of the
+/// problem's conditioning. The accuracy actually reachable in `f64` is not:
+/// it is bounded below by `κ·ε`, which is `2.2e-06` at `cond = 1e10` and
+/// `2.2e-04` at `1e12`. Where `κ·ε` exceeds the cut the solver cannot certify
+/// to the caller's tolerance however well it does, and `OptimalInaccurate`
+/// ("solved to acceptable level") is the truthful report rather than a
+/// failure. `destination_bar` is the separate, conditioning-aware statement of
+/// how accurate the answer must still be, and every caller of this asserts it
+/// too — the two are deliberately different questions.
+///
+/// Written out per case rather than derived from a formula: the realized
+/// error is not exactly `κ·ε`, and a formula here would silently absorb a
+/// regression that moved the boundary. These are measured values, and a
+/// change to either side of the boundary turns one of them red.
 #[test]
 fn the_row_ratio_is_blind_on_a_rotated_spectrum_and_exact_on_a_diagonal_one() {
     for cond in [1e8, 1e10, 1e12] {
@@ -425,7 +442,15 @@ fn every_tolerance_is_correct_on_the_coupled_arm() {
             ..QpOptions::default()
         };
         let sol = solve_qp_ipm(&prob, &opts, backend);
-        assert_eq!(sol.status, QpStatus::Optimal, "tol {tol:.0e}");
+        // `cond = 1e10` here, so `κ·ε ≈ 2.2e-06`. At `tol = 1e-10` the cut is
+        // `1e-08`, two orders below that, and no answer can be certified;
+        // above it the cut is loose enough that this one is.
+        let want = if tol <= 1e-10 {
+            QpStatus::OptimalInaccurate
+        } else {
+            QpStatus::Optimal
+        };
+        assert_eq!(sol.status, want, "tol {tol:.0e}");
         let err = rel_x_err(&sol.x, &exact);
         // `cut` is `min(100·tol, 1e-3)`, so a loose `tol` licenses a looser
         // answer; the bar tracks it rather than pretending otherwise.
@@ -494,7 +519,19 @@ fn a_bound_constrained_coupled_instance_is_solved() {
         prob.lb = vec![-10.0, -10.0];
         prob.ub = vec![10.0, 10.0];
         let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
-        assert_eq!(sol.status, QpStatus::Optimal, "cond {cond:.0e}");
+        // The active bound/row leaves this arm further from the optimum than
+        // the unconstrained one at the same conditioning — a measured forward
+        // error of `1.6e-04` (bounds) / `1.0e-04` (row) against a `1e-06`
+        // cut, so the demotion is decisive rather than boundary noise. It is
+        // still inside `destination_bar` below: "could not certify to `tol`"
+        // and "the answer is bad" are different claims, and only the first is
+        // being made.
+        let want = if cond >= 1e10 {
+            QpStatus::OptimalInaccurate
+        } else {
+            QpStatus::Optimal
+        };
+        assert_eq!(sol.status, want, "cond {cond:.0e}");
         let (err, bar) = (rel_x_err(&sol.x, &exact), destination_bar(cond));
         assert!(
             err < bar,
@@ -516,7 +553,19 @@ fn an_inequality_constrained_coupled_instance_is_solved() {
         prob.g = vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)];
         prob.h = vec![20.0];
         let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
-        assert_eq!(sol.status, QpStatus::Optimal, "cond {cond:.0e}");
+        // The active bound/row leaves this arm further from the optimum than
+        // the unconstrained one at the same conditioning — a measured forward
+        // error of `1.6e-04` (bounds) / `1.0e-04` (row) against a `1e-06`
+        // cut, so the demotion is decisive rather than boundary noise. It is
+        // still inside `destination_bar` below: "could not certify to `tol`"
+        // and "the answer is bad" are different claims, and only the first is
+        // being made.
+        let want = if cond >= 1e10 {
+            QpStatus::OptimalInaccurate
+        } else {
+            QpStatus::Optimal
+        };
+        assert_eq!(sol.status, want, "cond {cond:.0e}");
         let (err, bar) = (rel_x_err(&sol.x, &exact), destination_bar(cond));
         assert!(
             err < bar,
@@ -696,7 +745,10 @@ fn a_large_magnitude_coupled_answer_survives_sigma() {
 fn the_cond_1e12_floor_is_a_carve_out() {
     let (prob, exact) = coupled_qp([1.0, 1e12], &TGT, 1.0);
     let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
-    assert_eq!(sol.status, QpStatus::Optimal);
+    // `κ·ε ≈ 2.2e-04` here against a `1e-06` cut: the forward error is
+    // `3.06e-04`, 300x the cut and decisive at every objective scaling. This
+    // is the instance gh #880 reported as a wrong answer under `Optimal`.
+    assert_eq!(sol.status, QpStatus::OptimalInaccurate);
     let err = rel_x_err(&sol.x, &exact);
     assert!(
         err < 1e-2,
@@ -704,4 +756,79 @@ fn the_cond_1e12_floor_is_a_carve_out() {
          4.908e-04 after this fix and 7.050e-01 before it, so anything near \
          O(1) means the arm stopped firing here"
     );
+}
+
+// ---------------------------------------------------------------------------
+// gh #880, second half: the label. Pinned exactly, in one place, because
+// `assert_returned_an_optimum` above is deliberately loose about it.
+// ---------------------------------------------------------------------------
+
+/// **The defect: the cascade could not certify the point and returned it as
+/// `Optimal` anyway.**
+///
+/// When `σ` engages, `solve_qp_core` tries three drivers and asks
+/// `normalized_optimum_is_genuine` of each. If none passes it hands back
+/// whichever claimed optimum is closest to optimality in the caller's own
+/// coordinates -- the right point to keep: on the 72-instance coupled census
+/// it beats the un-normalized re-solve on seven of nine, by 6x to 15416x. But
+/// it went back under a bare `Optimal`, and on three census instances that
+/// `Optimal` sat on an `x` further from the optimum than f64 permits at that
+/// conditioning (`3.06e-04` against a `kappa*eps` floor of `2.20e-04`).
+///
+/// Both directions are asserted here, because only the pair has content: a
+/// build that demoted unconditionally would satisfy the first half and be
+/// useless, and it is the second and third arms that catch it.
+///
+/// # Mutation table
+///
+/// | change | effect |
+/// |---|---|
+/// | drop `demote_uncertified_sigma_optimum`'s call in `solve_qp_ipm` | the `cond 1e12` arm reads `Optimal`; this test fails |
+/// | demote unconditionally (ignore the carried verdict) | the well-conditioned arms read `OptimalInaccurate`; this test fails |
+/// | record the whole gate verdict instead of the forward-error arm | `an_inert_objective_rescaling_stays_inert_on_the_coupled_arm` flaps across `k` |
+/// | set `SIGMA_DEMOTION_MARGIN` to `1.0` | same test fails: `cond 1e10` sits on the cut and rounding decides it |
+/// | move the demotion into `solve_qp_core`'s terminal branch | the Ruiz retry's clean `Optimal` is accepted instead: census worst error `3.06e-04` -> `3.93e+01` |
+/// | drop `sigma_verdict::clear()` at the top of `solve_qp_core` | a retry inherits a superseded attempt's verdict |
+#[test]
+fn the_demotion_population_is_exactly_the_uncertifiable_instances() {
+    // Uncertifiable: at `cond = 1e12` the estimator's own f64 floor is
+    // `eps*cond ~ 2e-4`, so the cascade cannot certify to `tol` and must say
+    // so rather than claim a clean optimum.
+    let (prob, _) = coupled_qp([1.0, 1e12], &TGT, 1.0);
+    let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+    assert_eq!(
+        sol.status,
+        QpStatus::OptimalInaccurate,
+        "the cascade certified none of its three candidates here, so the \
+         status must not claim a clean optimum"
+    );
+
+    // ... and the point itself is kept, not discarded. Rejecting harder has
+    // nowhere better to go: this is the answer that beats the un-normalized
+    // re-solve, so the demotion is a relabelling and must not move `x`.
+    let (prob2, exact2) = coupled_qp([1.0, 1e12], &TGT, 1.0);
+    let sol2 = solve_qp_ipm(&prob2, &QpOptions::default(), backend);
+    assert!(
+        rel_x_err(&sol2.x, &exact2) < 1e-2,
+        "demotion must relabel, not degrade: x off by {:.3e}",
+        rel_x_err(&sol2.x, &exact2)
+    );
+
+    // The other direction. A certified answer keeps its clean `Optimal`, so
+    // the demotion cannot be unconditional. `σ` is engaged on this instance
+    // (`sigma_is_engaged_but_a_conditioned_coupled_answer_survives_it` is the
+    // same model) -- what differs is that the cascade certifies it.
+    let (prob3, _) = coupled_qp([1e9, 1e9], &TGT, 1.0);
+    let sol3 = solve_qp_ipm(&prob3, &QpOptions::default(), backend);
+    assert_eq!(
+        sol3.status,
+        QpStatus::Optimal,
+        "a certified σ answer must keep its clean status"
+    );
+
+    // And an ordinary well-conditioned solve, which never reaches the cascade
+    // at all, is untouched.
+    let (prob4, _) = coupled_qp([1.0, 1e2], &TGT, 1.0);
+    let sol4 = solve_qp_ipm(&prob4, &QpOptions::default(), backend);
+    assert_eq!(sol4.status, QpStatus::Optimal);
 }

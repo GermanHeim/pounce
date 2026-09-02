@@ -387,7 +387,9 @@ where
     };
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
-    let sol = solve_qp_ipm_core(prob, opts, &mut make_backend, hook);
+    let (sol, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+        solve_qp_ipm_core(prob, opts, &mut make_backend, hook)
+    });
     if crate::deadline::expired() {
         return mark_timed_out(sol);
     }
@@ -409,7 +411,44 @@ where
     } else {
         sol
     };
+    let sol = demote_uncertified_sigma_optimum(sol, sigma_uncertified);
     finite_or_failed(prob, sol)
+}
+
+/// Strip `Optimal` from a `σ`-path answer the cascade could not certify.
+///
+/// gh #880. When [`hsde_cost_scale`] rescales the objective, the cascade tries
+/// three drivers and asks [`normalized_optimum_is_genuine`] of each; if none
+/// passes it returns the closest to optimality in the caller's own
+/// coordinates. That point is the right one to keep — on the 72-instance
+/// coupled census it beats the un-normalized re-solve on seven of nine
+/// failures, by 6x to 15416x — but it went back under a bare `Optimal`, and on
+/// three instances that `Optimal` sat on an `x` further from the optimum than
+/// f64 permits at that conditioning (`3.06e-04` against a `kappa*eps` floor of
+/// `2.20e-04`). After this, instances above their floor go 3 -> 0, worst
+/// forward error `3.06e-04` -> `5.62e-05`, census iterations 443 -> 404.
+///
+/// **Applied at the outermost layer, not where the pick is made.** Demoting
+/// inside the cascade looks equivalent and is not: `OptimalInaccurate` is one
+/// of the statuses [`solve_qp_ipm_core`] reads as the badly-scaled pathology
+/// worth a Ruiz-equilibrated retry, and that retry is accepted whenever it
+/// converges to a clean `Optimal` — its status outranking the better answer.
+/// Measured, demoting there takes the census's worst forward error from
+/// `3.06e-04` to `3.93e+01`. By this point every retry has run, so the verdict
+/// cannot re-enter the solver.
+///
+/// What is recorded is the **scale-free half** of the cascade's verdict and a
+/// margin, not "nothing was certified" — see the recording site in
+/// [`solve_qp_core`] for why the mixture is not reportable and the margin is
+/// the estimator's own uncertainty rather than a knob.
+fn demote_uncertified_sigma_optimum(sol: QpSolution, sigma_uncertified: bool) -> QpSolution {
+    if !sigma_uncertified || sol.status != QpStatus::Optimal {
+        return sol;
+    }
+    QpSolution {
+        status: QpStatus::OptimalInaccurate,
+        ..sol
+    }
 }
 
 /// The interior-point solve (the historical [`solve_qp_ipm`] body): bounds-aware
@@ -2486,6 +2525,61 @@ fn sigma_stationarity_is_genuine(rstat: &[f64], dscale: &[f64], tol: f64, cut: f
         .all(|(&r, &d)| r.abs() <= tol || r.abs() <= cut * d)
 }
 
+/// `a + b` and the exact rounding error it dropped, for `|a| ≥ |b|` or not.
+///
+/// Knuth's `two_sum`. The pair `(s, e)` satisfies `s + e == a + b` exactly in
+/// real arithmetic, so carrying `e` alongside `s` costs six flops and buys the
+/// error term back.
+#[inline]
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+/// `−(Px + c)` with the rounding error of the sum carried, not dropped.
+///
+/// Each product `P_ij·x_j` is split exactly into `p + e` by one FMA
+/// (`f64::mul_add` is fused by contract, so `mul_add(a, b, -p)` is the exact
+/// product error), and each accumulation into the running total is split by
+/// [`two_sum`]. The dropped parts are summed separately and folded back at the
+/// end, which is a two-term (double-double) accumulator: enough to make the
+/// computed residual the exact residual to working precision.
+///
+/// Why it matters here rather than being a general nicety:
+/// [`sigma_forward_error_is_small`] divides this residual by the Newton
+/// operator, so any error in it is amplified by `‖M⁻¹‖`. In the ordinary sum
+/// that error is `ε‖P‖‖x‖` and the amplification turns it into `ε·cond·‖x‖`,
+/// which *is* the quantity being tested against. The guard was then reading
+/// its own arithmetic noise. See gh #880 and
+/// `tests/issue880_coupled_sigma_forward_error.rs`.
+///
+/// Mirrors [`QpProblem::p_mul_add`]'s traversal exactly, including the
+/// off-diagonal mirroring of the stored lower triangle, so the two cannot
+/// disagree about what `P` is.
+fn residual_compensated(prob: &QpProblem, x: &[f64]) -> Vec<f64> {
+    let n = prob.n;
+    // `hi` carries the running sum, `lo` the accumulated dropped bits.
+    let mut hi = prob.c.clone();
+    hi.resize(n, 0.0);
+    let mut lo = vec![0.0_f64; n];
+    let accumulate = |i: usize, a: f64, b: f64, hi: &mut [f64], lo: &mut [f64]| {
+        let prod = a * b;
+        // Exact product error; zero when the product is exact.
+        let perr = a.mul_add(b, -prod);
+        let (s, serr) = two_sum(hi[i], prod);
+        hi[i] = s;
+        lo[i] += serr + perr;
+    };
+    for t in &prob.p_lower {
+        accumulate(t.row, t.val, x[t.col], &mut hi, &mut lo);
+        if t.row != t.col {
+            accumulate(t.col, t.val, x[t.row], &mut hi, &mut lo);
+        }
+    }
+    hi.iter().zip(&lo).map(|(h, l)| -(h + l)).collect()
+}
+
 /// The `σ` path's genuineness test asked as a **forward error bound** — how far
 /// the returned `x` can be from the true minimizer — instead of as a ratio
 /// between a residual and a term of its own row (gh #880).
@@ -2608,11 +2702,38 @@ fn sigma_forward_error_is_small(prob: &QpProblem, sol: &QpSolution, cut: f64) ->
     // stationarity residual with the inequality and bound multipliers taken
     // back out. See the doc comment — trusting them is what let a
     // non-complementary point read as converged.
-    let mut rhs = vec![0.0; n];
-    prob.p_mul(&sol.x, &mut rhs);
-    for (r, ci) in rhs.iter_mut().zip(&prob.c) {
-        *r = -(*r + ci);
-    }
+    //
+    // Accumulated in COMPENSATED arithmetic, and that is what makes the
+    // verdict mean anything at high conditioning (gh #880). Formed the
+    // ordinary way this sum carries an absolute error of order
+    // `ε‖P‖‖x‖`, so `Δ = M⁻¹r` carries `‖P⁻¹‖ε‖P‖‖x‖ = ε·cond·‖x‖` — the
+    // estimator cannot resolve a relative error below `ε·cond` and cannot
+    // reject what it cannot see. That floor, not the cut, is what left nine
+    // census instances returning a wrong `x` under `Optimal` at
+    // `cond ≥ 1e10`, eight of them wrong by *less* than their own instance's
+    // floor.
+    //
+    // `residual_compensated` removes the term: each product is split exactly
+    // by FMA and each partial sum by `two_sum`, so the computed residual is
+    // the exact one to working precision and `Δ` is limited by the solve
+    // rather than by the right-hand side. Measured against a
+    // `fractions.Fraction` reference on the census's own rotated spectra, it
+    // agrees to every digit printed at `cond = 1e10` and `1e12` and at
+    // injected errors from `5×` down to `0.02×` of the old floor, where the
+    // plain sum reads between `0.29×` and `5.4×` of the truth — in both
+    // directions, so the old estimator both accepted wrong answers and would
+    // have rejected right ones.
+    //
+    // The gh #880 census does *not* discriminate this: swapped back to the
+    // plain sum it demotes the same nine instances with the same errors,
+    // because its forward errors sit orders away from the cutoff. The
+    // estimator only decides anything within a few multiples of `tol`, which
+    // that corpus does not populate. `compensated_residual_tests` is what
+    // holds the claim instead, on rows whose exact value is known by
+    // construction: `the_compensated_residual_survives_a_cancelling_row`
+    // fails, reading `0.0` where the truth is `1.0`, if the plain sum is
+    // restored.
+    let rhs = residual_compensated(prob, &sol.x);
     if rhs.iter().any(|v| !v.is_finite()) {
         // Not "small", but it is the gh #845 shape and the stationarity arm
         // already rejects on it. Nothing to add here.
@@ -3086,6 +3207,9 @@ where
     if crate::deadline::expired() {
         return timed_out_solution(prob);
     }
+    // gh #880: this attempt owns the `σ` verdict from here on. A retry that
+    // re-enters must not inherit a verdict about the answer it is replacing.
+    crate::sigma_verdict::clear();
     // Opt-in homogeneous self-dual embedding driver. It builds its own
     // factorization and self-starts, so it bypasses the warm-start /
     // factor-reuse plumbing below (warm is ignored — it cannot change the
@@ -3263,6 +3387,56 @@ where
                 status = ?candidates[pick].status,
                 "convex sigma: nothing certified, returning the closest \
                  claimed optimum"
+            );
+            // gh #880: the point is the best available and stays, but the
+            // cascade has now declined to certify it three times over and the
+            // caller must not be handed it under a bare `Optimal`. Recorded
+            // rather than applied here: `OptimalInaccurate` is one of the
+            // statuses `solve_qp_ipm_core` reads as the badly-scaled pathology
+            // worth a Ruiz-equilibrated retry, and that retry is accepted
+            // whenever it converges to a clean `Optimal` — its status
+            // outranking the better answer. Measured, demoting at this line
+            // takes the gh #880 census's worst forward error from `3.06e-04`
+            // to `3.93e+01`. `solve_qp_ipm` applies it once every retry has
+            // run.
+            // What gets recorded is **not** "the cascade certified nothing".
+            // That verdict mixes two different questions: whether the residual
+            // is small in *absolute* terms, which legitimately depends on the
+            // objective's scale, and whether `x` is far from the optimum,
+            // which does not. Recording the mixture makes the status flap
+            // under an objective rescaling that leaves the argmin unchanged by
+            // identity — measured over `k = 1e-2 ‥ 1e8` on a `cond = 1e10`
+            // coupled model it oscillates Optimal/Inaccurate six times, which
+            // is not a contract anyone can use, and is the same
+            // scale-dependence gh #880 is about in the first place.
+            //
+            // The forward-error arm is the scale-free half. Unconstrained,
+            // `Δ = −P⁻¹(Px + c)` is exactly invariant under
+            // `(P, c) → k(P, c)`, and `‖Δ‖/max(1, ‖x‖)` is the basis-free
+            // distance this issue added it to measure. It is the arm that
+            // answers the question a status should answer.
+            // ... and asked with a margin, because a status must not flip on
+            // rounding noise. At `cond = 1e10` the realized forward error is
+            // `1.47e-6` against a cut of `1e-6`: the model sits *on* the
+            // decision boundary, and sweeping an inert objective rescaling
+            // `k = 1e-2 ‥ 1e8` across it flips the verdict six times, since
+            // each `k` reaches a slightly different iterate. `cond = 1e12`
+            // (`3.06e-04`, 300x the cut) is decisive at every `k`.
+            //
+            // `SIGMA_DEMOTION_MARGIN` is the estimator's own uncertainty, not
+            // a tuned knob: measured against a `Fraction` reference, a plain
+            // summation of this residual reads between `0.29x` and `5.4x` of
+            // the truth, so a verdict inside one order of magnitude of the cut
+            // is inside the estimator's noise and is not reportable. Demote
+            // only where the distance is larger than the instrument's error.
+            const SIGMA_DEMOTION_MARGIN: f64 = 10.0;
+            let far_from_optimal = !sigma_forward_error_is_small(
+                prob,
+                &candidates[pick],
+                SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(opts.tol),
+            );
+            crate::sigma_verdict::record(
+                candidates[pick].status == QpStatus::Optimal && far_from_optimal,
             );
             return candidates.swap_remove(pick);
         }
@@ -6364,5 +6538,97 @@ mod finite_guard_tests {
             assert_eq!(out.status, QpStatus::TimeLimit, "from {status:?}");
             assert_eq!(out.x, s.x, "the best iterate is still worth returning");
         }
+    }
+}
+
+#[cfg(test)]
+mod compensated_residual_tests {
+    //! gh #880: the `σ` forward-error arm's right-hand side is `−(Px + c)`,
+    //! and it now drives a user-visible status, so the arithmetic that builds
+    //! it has to be better than the quantity it is measuring.
+
+    use super::residual_compensated;
+    use crate::qp::{QpProblem, Triplet};
+
+    fn row_problem(vals: &[f64], c0: f64) -> QpProblem {
+        QpProblem {
+            n: vals.len(),
+            // One dense row 0 of `P`, off-diagonals held on the lower triangle.
+            // Row 0 of a symmetric `P`, held on the lower triangle: `P[0][j]`
+            // is stored at `(j, 0)`.
+            p_lower: vals
+                .iter()
+                .enumerate()
+                .map(|(j, v)| Triplet::new(j, 0, *v))
+                .collect(),
+            c: std::iter::once(c0)
+                .chain(std::iter::repeat_n(0.0, vals.len() - 1))
+                .collect(),
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY; vals.len()],
+            ub: vec![f64::INFINITY; vals.len()],
+        }
+    }
+
+    /// **The plain sum does not merely lose digits here — it loses the
+    /// answer.** `1e16 + 1 − 1e16` left to right is `0.0` in `f64`: the `1`
+    /// falls off the end of the accumulator and never comes back. The exact
+    /// row value is `1.0`, so the estimator would read a converged residual
+    /// where the truth is `1.0`, and `sigma_forward_error_is_small` would
+    /// certify a point it should reject.
+    ///
+    /// This is the mechanism behind the `0.29×`–`5.4×` spread recorded at the
+    /// call site, isolated to a case whose exact answer is known by
+    /// construction rather than by a reference implementation — every value
+    /// here is exactly representable, so `1.0` is arithmetic, not a
+    /// tolerance.
+    ///
+    /// | change | effect |
+    /// |---|---|
+    /// | restore `prob.p_mul` + a plain `+= c` | reads `0.0`; this test fails |
+    /// | drop the `lo` correction term when summing | reads `0.0`; this test fails |
+    /// | drop the `mul_add` product-error term | the scaled arm below fails |
+    #[test]
+    fn the_compensated_residual_survives_a_cancelling_row() {
+        // Row 0 of `P` is (1e16, 1, -1e16) and `x = (1, 1, 1)`, so
+        // `(Px)₀ = 1.0` exactly and `c₀ = 0`.
+        let prob = row_problem(&[1e16, 1.0, -1e16], 0.0);
+        let x = vec![1.0, 1.0, 1.0];
+
+        let mut plain = vec![0.0; prob.n];
+        prob.p_mul(&x, &mut plain);
+        assert_eq!(
+            plain[0], 0.0,
+            "the premise: the plain traversal loses the row entirely"
+        );
+
+        // `residual_compensated` returns `−(Px + c)`, the affine-scaling
+        // right-hand side, so the exact row value `1.0` comes back negated.
+        let got = residual_compensated(&prob, &x);
+        assert_eq!(
+            got[0], -1.0,
+            "compensated residual must recover the exact row value"
+        );
+    }
+
+    /// The same row with a non-unit `x`, so the *products* cancel rather than
+    /// the stored coefficients. This is the half `two_sum` alone cannot fix:
+    /// `1e16 · 3` and `−1e16 · 3` are exact, but `1 · 0.1` is not, and the
+    /// `mul_add` term is what carries that product's rounding error.
+    #[test]
+    fn the_product_error_term_is_carried_too() {
+        let prob = row_problem(&[1e16, 1.0, -1e16], 0.0);
+        let x = vec![3.0, 0.1, 3.0];
+        // Exact: 1e16·3 + 1·0.1 + (−1e16)·3 = 0.1 (the `f64` nearest 0.1),
+        // negated by the `−(Px + c)` convention.
+        let got = residual_compensated(&prob, &x);
+        assert!(
+            (got[0] + 0.1_f64).abs() <= f64::EPSILON,
+            "expected the f64 nearest −0.1, got {}",
+            got[0]
+        );
     }
 }
