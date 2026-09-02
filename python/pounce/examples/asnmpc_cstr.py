@@ -717,6 +717,21 @@ def _ambiguous_activity(
     manipulated-variable ambiguity: interior collocation states can be in the
     classifier's low-multiplier ambiguity band without representing a control
     active-set decision.
+
+    That band is narrower than it used to be, and the guard is more precise
+    for it.  `solution_report` now re-classifies the entries the cheap rule
+    could not call, using the reduced curvature, so an entry that reaches
+    here as "ambiguous" is one the *refined* rule could not settle either --
+    not merely one whose coordinate is coupled.  A coupled kink on a
+    collocation model is exactly the case the cheap rule mislabels, and it
+    comes back "weakly_active" now.  `report.refined` names every entry that
+    moved, `(before, after)`, which is what to read when diagnosing why a
+    guard did or did not fire.
+
+    All three classes stay in the tuple: this guard is asking "is the
+    derivative here single-valued", and a certified kink answers no just as
+    an undetermined one does.  What the refinement removes is the entries
+    that were never kinks at all.
     """
     return tuple(
         name

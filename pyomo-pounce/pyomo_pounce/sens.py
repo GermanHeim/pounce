@@ -1776,13 +1776,22 @@ def sens_solution(model, perturb, clamp=True, mode="linear",
 def sens_solution_report(model, perturb, max_iter=None,
                          degeneracy="directional", degeneracy_iter=None,
                          corrector_iter=0, mode="linear", predictor_iter=16,
-                         bound_eps=None, max_pdpert=None):
+                         bound_eps=None, max_pdpert=None,
+                         refine_activity=True):
     """Report what `sens_solution()`'s step does about the bounds.
 
     Takes the same perturbation argument `sens_solution()` takes and
     returns a `SolutionReport`; see `pounce.sensitivity.solution_report`.
     `crossed` and `crossed_rows` come back as `ComponentMap`s keyed by
     the original model's data objects.
+
+    `refine_activity` re-classifies the entries the cheap classifier
+    could not call, using the reduced curvature, and records what moved
+    under `SolutionReport.refined`. On by default, because a coupled
+    kink -- routine on a collocation model -- is "ambiguous" to the
+    cheap rule at every tolerance, and reading that class as "probably
+    not a kink" is what shipped gh#763. It costs one back-solve per
+    ambiguous entry and nothing when there are none.
     """
     session = _model_session(model, _NO_SESSION_PARAM)
     pin_idx, deltas = _perturbation_deltas(session, perturb)
@@ -1790,7 +1799,8 @@ def sens_solution_report(model, perturb, max_iter=None,
         session, pin_idx, deltas, max_iter=max_iter, degeneracy=degeneracy,
         degeneracy_iter=degeneracy_iter, corrector_iter=corrector_iter,
         mode=mode, predictor_iter=predictor_iter, bound_eps=bound_eps,
-        max_pdpert=max_pdpert, who="sens_solution_report")
+        max_pdpert=max_pdpert, refine_activity=refine_activity,
+        who="sens_solution_report")
 
 
 def sens_active_set_changes(model, perturb, predictor_iter=16,
