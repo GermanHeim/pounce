@@ -129,7 +129,7 @@ Dual regularization *is* the effective remedy. With `perturb_always_cd=yes`
 the same model converges in 19 iterations to an **unscaled** KKT error of
 `9.96e-8` at `x = (0.999994, 0.999997, 3.7e-6)` — an honest solve, not a
 residual normalised away. So an answer is reachable and gh#884 is a real
-POUNCE gap. Pinned by `dual_regularization_reaches_the_optimum_honestly`.
+POUNCE gap. Pinned by `dual_regularization_reaches_a_certificate_honestly`.
 
 The obvious refinement is to engage it *only* when the runaway is
 detected, leaving every other model alone. That does not work, and the
