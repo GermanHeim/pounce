@@ -47,12 +47,15 @@
 //!   particular direction unreachable. `ill_conditioned()` covers the
 //!   remainder, and that review measured the separation (residual `0.5` on
 //!   every wrong step, `~1e-13` on every right one, over 33 probes).
-//! - **The guard's arithmetic about a bound.** The fixture here reaches the
-//!   line with an apex *and* an active bound, which nothing did before, but it
-//!   cannot separate the two candidate rules — a fixture that could must be
-//!   primal degenerate, and the counting argument is written out at that
-//!   fixture. `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`
-//!   owns the separation, on constructed rows with no solver.
+//! - **The guard's arithmetic about a bound** is covered twice over, at two
+//!   levels, and neither is redundant.
+//!   `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`
+//!   owns the rank arithmetic on constructed rows with no solver;
+//!   `a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it` owns
+//!   the end-to-end consequence on a real (necessarily degenerate) model, and
+//!   is the only test here that shows what the bound-exclusion *buys*.
+//!   `an_active_bound_does_not_count_as_an_apex_pin` reaches the line on a
+//!   non-degenerate model and says of itself that it does not discriminate.
 //! - **Release / fix-relax on a conic build.** Every fixture here is
 //!   bound-free, so `release_slots` is empty and the release path is never
 //!   entered. `convex_sens_release.rs` owns it, on orthant models. A cone row
@@ -88,7 +91,7 @@
 //! | the interior complementarity arm disabled | `an_interior_block_that_does_not_complement_is_refused` | |
 //! | the `apex_can_absorb_db` guard disabled | `an_apex_that_cannot_absorb_db_is_refused` — **and only it** | run after the guard landed. It fails with the defect in the message (`du/db₀ = 0.5`, `|A·dx − db| = 5e-10`) rather than a bare assertion, so a regression reads as what it is |
 //! | `apex_can_absorb_db` stacks a unit row per active bound (the rule as first written) | `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank` — **and only it**, across all 267 tests in the crate | re-review of #889. The mutation changes the signature, so `finish` and both unit call sites move with it; it is still compile-checkable, just not a one-line edit |
-//! | the same stacking applied at the **call site** in `finish`, leaving the signature alone | **nothing — the whole crate stays green** | run, not predicted, and the result is the point: no non-degenerate model can separate the two rules (the counting argument is at `an_active_bound_does_not_count_as_an_apex_pin`), so an integration fixture cannot carry this line and the unit test above is not a convenience |
+//! | the same stacking applied at the **call site** in `finish`, leaving the signature alone | `a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it` — **and only it** | two measurements, and the first one's *conclusion* was wrong. Run before that fixture existed, this mutation left the whole crate green, and the table here concluded "no non-degenerate model can separate the two rules, so an integration fixture cannot carry this line". The counting argument is sound — discrimination forces `[A; B; bounds]` to be dependent, i.e. primal degeneracy — but *must be degenerate* is not *cannot be written*: degenerate is ordinary. The third review of #889 wrote the model, it is four variables long, and the mutation is red on it. The green run measured this crate's corpus, not a possibility |
 //! | `primal_scale` replaced by a bare `1.0` in `build_conic` | `the_apex_decision_is_relative_to_the_problems_scale` — **and nothing else** | that test was written *because* the first run of this mutation was green across the whole crate: every other fixture here is `O(1)`, where the relative and absolute readings coincide. A scale-convention change with no failing test is exactly `/sens-review` entry 3 |
 
 use pounce_convex::QpOptions;
@@ -98,6 +101,7 @@ use pounce_convex::qp::{QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_convex::sensitivity::{ConeBlockKind, QpSensitivity, SensError};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_sens_core::boundcheck::RefineStop;
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
@@ -555,11 +559,15 @@ fn an_apex_that_cannot_absorb_db_is_refused() {
 /// happens to be awkward: it is the only shape in which the two rules can
 /// disagree.
 ///
-/// So the discrimination is pinned one layer down, by
-/// `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`,
-/// which calls `apex_can_absorb_db` on constructed rows at exactly that shape
-/// and needs no solver. This fixture and that unit test are two halves of one
-/// guard: reachability here, arithmetic there.
+/// Degenerate is ordinary, not unreachable, and
+/// `a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it` below
+/// is that model — four variables, contributed by the third review of #889
+/// after this file claimed such a fixture could not be written. It is the one
+/// that discriminates. `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`
+/// owns the same question at the level of the rank arithmetic, on constructed
+/// rows with no solver, which is cheaper and sharper about *what* is computed.
+/// This fixture is the third leg: the line reached on a model that is **not**
+/// degenerate, where both rules agree.
 ///
 /// Note also what this is not: it does not exercise the release path itself
 /// (`convex_sens_release.rs` owns that, on orthant models). It exercises the
@@ -608,6 +616,141 @@ fn an_active_bound_does_not_count_as_an_apex_pin() {
         "x₀ is pinned by the apex, so x₂ must absorb all of db: got dx₂/db = {}",
         dx[2] / delta
     );
+}
+
+/// **The bound-exclusion's benefit, as a number** — and the fixture whose
+/// absence I wrongly called an impossibility.
+///
+/// Contributed by the third review of #889. The previous round's mutation
+/// table concluded, from the call-site mutation running green, that "no
+/// non-degenerate model can separate the two rules, so an integration fixture
+/// *cannot* carry this line". The counting argument behind that is right —
+/// discrimination forces `[A; B; bounds]` to be linearly dependent, which is
+/// primal degeneracy — but the step from *must be degenerate* to *cannot be
+/// written* does not follow. Degenerate is ordinary. This model is degenerate
+/// in exactly that way (`A = e₀ + e₂` is the `x₀` cone row plus the `x₂` bound
+/// row) and is four variables long.
+///
+/// ```text
+///   min ½‖x‖² + push·x₂ + tcost·t
+///   s.t.  x₀ + x₂ = 1,  (t, x₀, x₁) ∈ Q₃,  x₂ ≥ 1
+/// ```
+///
+/// `rank(active_rows) = 3` and `4 − 3 = 1 ≥ m_eq`, so it is served. Stack the
+/// bound row: rank 4, `4 − 4 = 0 < 1`, and the rule as first written **refused
+/// it at build time** — taking `parametric_step_bounded` away with it. That is
+/// the `release_slots` argument as a measurement rather than a claim, and it
+/// is the first evidence in this crate of what excluding bounds *buys*;
+/// `an_active_bound_does_not_count_as_an_apex_pin` only shows the line is
+/// reached.
+///
+/// # Three things it pins at once
+///
+/// 1. **Fix-relax serves it exactly.** `parametric_step_bounded` reproduces
+///    the re-solve — `dx₂/db = 1`, the whole perturbation on the one variable
+///    free to take it.
+/// 2. **The plain step does not**, and is wrong by a third of the
+///    perturbation: it splits `db` between `x₀` and `x₂` and misses primal
+///    feasibility, which needs no cone, no dual and no oracle to judge.
+/// 3. **`ill_conditioned()` catches that**, which is the fallback the whole
+///    bound-exclusion rests on — and it is the **second** clause that fires,
+///    *after* a step. At build time `kkt_cond_estimate()` is `3.0e10`,
+///    comfortably under the `1e14` threshold, so a caller who checks
+///    `ill_conditioned()` straight after `build_conic` gets `false` and then
+///    takes the wrong step. The assembled KKT really is well conditioned; what
+///    is wrong is that it holds a row the perturbation forces off, and only
+///    the residual sees that.
+///
+/// Assertion 3 is the one to keep: the day someone widens
+/// `STEP_UNRELIABLE_RESIDUAL` past `1/3`, this goes red rather than silent.
+#[test]
+fn a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it() {
+    // Swept over the shape's free parameters, because a single point cannot
+    // tell a structural result from a coincidence of one objective.
+    for (push, tcost) in [(0.5, 1.0), (1.0, 5.0), (2.0, 5.0)] {
+        let prob = QpProblem {
+            n: 4,
+            p_lower: vec![
+                tri(0, 0, 1.0),
+                tri(1, 1, 1.0),
+                tri(2, 2, 1.0),
+                tri(3, 3, 1.0),
+            ],
+            c: vec![0.0, 0.0, push, tcost],
+            a: vec![tri(0, 0, 1.0), tri(0, 2, 1.0)],
+            b: vec![1.0],
+            g: vec![tri(0, 3, -1.0), tri(1, 0, -1.0), tri(2, 1, -1.0)],
+            h: vec![0.0, 0.0, 0.0],
+            lb: vec![-1e19, -1e19, 1.0, -1e19],
+            ub: vec![1e19, 1e19, 1e19, 1e19],
+        };
+        let sol = solve(&prob);
+        let mut sens = sens_for(&prob, &sol);
+
+        // The shape must actually be the discriminating one, or the rest of
+        // this test is about some other model.
+        assert_eq!(sens.cone_block_kinds(), [(0, ConeBlockKind::Apex)]);
+        assert_eq!(sens.active_bound_vars(), [2]);
+        assert!(
+            sol.z_lb[2] > 1.0,
+            "the bound must be genuinely active, not marginal: z_lb₂ = {}",
+            sol.z_lb[2]
+        );
+
+        // The build-time reading is clean — this is the trap, not an aside.
+        assert!(
+            sens.kkt_cond_estimate() < 1e14,
+            "the regularized KKT is well conditioned here; got {:e}",
+            sens.kkt_cond_estimate()
+        );
+        assert!(
+            !sens.ill_conditioned(),
+            "and so `ill_conditioned()` is false until a step is taken"
+        );
+
+        let delta = 1e-6;
+
+        // (2) the plain step misses primal feasibility by a third.
+        let dx = sens.parametric_step(&[0], &[delta]);
+        let feas = ((dx[0] + dx[2]) - delta).abs() / delta;
+        assert!(
+            (feas - 1.0 / 3.0).abs() < 1e-9,
+            "the plain step must miss `A·dx = db` by a third; got {feas:e}"
+        );
+
+        // (3) …and the residual clause catches it, well clear of threshold.
+        assert!(
+            sens.ill_conditioned(),
+            "the fallback the bound-exclusion rests on must fire after the step"
+        );
+        let resid = sens
+            .last_step_residual()
+            .expect("a step was taken, so there is a residual");
+        assert!(
+            resid > 1e-2,
+            "and not marginally: {resid} against STEP_UNRELIABLE_RESIDUAL = 1e-6"
+        );
+
+        // (1) fix-relax reproduces the re-solve exactly.
+        let (dxb, pinned, stop) = sens
+            .parametric_step_bounded(&[0], &[delta], 1e-9, 20)
+            .expect("fix-relax must serve the model the old rule refused");
+        assert_eq!(stop, RefineStop::Settled);
+        assert!(
+            !pinned.is_empty(),
+            "the bound must be pinned by the refinement"
+        );
+        assert!(
+            (dxb[2] / delta - 1.0).abs() < 1e-9,
+            "x₂ is the only variable free to absorb db: got dx₂/db = {}",
+            dxb[2] / delta
+        );
+        assert!(
+            (dxb[0] / delta).abs() < 1e-9,
+            "and x₀ is pinned at the apex: got dx₀/db = {}",
+            dxb[0] / delta
+        );
+    }
 }
 
 /// The guard must not fire on an apex that *can* absorb `db`, or it would

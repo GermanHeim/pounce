@@ -438,17 +438,26 @@ wrong call on the second, which is why they are not one variant.
   release path can open a bound, and refusing at build time would take that
   path away too.
 
-  Two limits worth knowing. It is a *dimension* count, so it is **necessary,
+  Three limits worth knowing. It is a *dimension* count, so it is **necessary,
   not sufficient**: a subtler dependency between `A`'s rows and `B`'s can leave
-  one particular `db` unreachable while the count passes. `ill_conditioned()`
-  catches those, and on them it is the step's **residual** rather than the
-  condition estimate that fires — the regularized matrix is perfectly well
-  conditioned there. And it is coarse in the other direction: when
-  `n − rank(B) < m_eq` the reachable `db` form a proper subspace rather than
-  nothing, so a build-time refusal also declines directions it could have
-  answered. That is deliberate — a build serves every later `db` and cannot
-  know which are coming — but it is a stronger action than "no answer exists
-  here".
+  one particular `db` unreachable while the count passes. It is coarse in the
+  other direction too — when `n − rank(B) < m_eq` the reachable `db` form a
+  proper subspace rather than nothing, so a build-time refusal also declines
+  directions it could have answered (deliberate, since a build serves every
+  later `db` and cannot know which are coming, but stronger than "no answer
+  exists here"). And it compares against the **row count** of `A` where the
+  geometry wants `rank(A)`, so a redundant equality makes it over-refuse by
+  exactly the redundancy.
+
+  What covers the first case — and the bound-pinned model the exclusion above
+  deliberately serves — is `ill_conditioned()`. **That means after a step, not
+  at build time.** It is the step's *residual* clause that fires, never the
+  condition estimate: the regularized KKT is perfectly well conditioned on
+  these models (`3.0e10` against a `1e14` threshold on the measured one), so
+  checking `ill_conditioned()` straight after `build_conic` returns `false` on
+  a build whose plain step will miss `A·dx = db` by a third. Take the step,
+  then check — and where a bound is what pins the model,
+  `parametric_step_bounded` reproduces the re-solve exactly.
 
 Two of these thresholds are calibrated against the **non-symmetric** driver,
 whose accuracy is well short of the symmetric IPM's, and the measured

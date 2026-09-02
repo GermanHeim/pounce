@@ -559,9 +559,27 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// the guard from over-refusing.
 ///
 /// The cost of that choice is a bound-pinned model whose *plain* step is then a
-/// least-squares compromise. That is the same case the dimension count already
-/// leaves to `ill_conditioned()`, and the same division of labour: refuse what
-/// no mode can serve, flag what some mode can.
+/// least-squares compromise, left to `ill_conditioned()` — the same division of
+/// labour the dimension count already uses: refuse what no mode can serve, flag
+/// what some mode can.
+///
+/// That transfer was **measured** rather than assumed, at the third review of
+/// #889, because the 33-probe separation behind it was taken on the cone-apex
+/// case and this is a different row type on a different path. On the
+/// discriminating model (`a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it`
+/// in `tests/convex_soc_sensitivity.rs`) the plain step misses `A·dx = db` by a
+/// third, `parametric_step_bounded` reproduces the re-solve exactly, and
+/// `ill_conditioned()` is `true` — residual `0.333` against a `1e-6` threshold,
+/// not a marginal call.
+///
+/// **But it is the *second* clause that fires, and only after a step.** At
+/// build time `kkt_cond_estimate()` reads `3.0e10` there, comfortably under
+/// `KKT_ILL_CONDITIONED_THRESHOLD`, so a caller who checks `ill_conditioned()`
+/// straight after `build_conic` — which that accessor's own doc invites — gets
+/// `false`, and then takes the wrong step. The assembled KKT genuinely *is*
+/// well conditioned; what is wrong is that it carries a row the perturbation
+/// forces off, and only the residual can see that. So "`ill_conditioned()`
+/// covers the remainder" means *after the step*, never at build time.
 ///
 /// # What the condition does and does not promise
 ///
@@ -578,6 +596,16 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// correctly. Refusing at build time takes those away as well. That is
 /// deliberate (the build serves every later `db`, and cannot know which are
 /// coming), but it is a stronger action than "no answer exists here".
+///
+/// And a third, narrower one, raised in the third review of #889: `m_eq` is the
+/// **row count** of `A`, where the condition being derived wants `rank(A)`. A
+/// redundant equality makes the count stricter than the geometry, so the guard
+/// over-refuses by exactly the redundancy. Left as it is rather than fixed: the
+/// correction is another `row_rank`, it errs toward refusing (the safe
+/// direction for a new refusal, as the tolerance does), and demonstrating a fix
+/// needs a redundant-equality fixture that does not exist here yet. Recorded
+/// because a doc block that lists two directions of coarseness and omits a
+/// third is worse than one that lists none.
 ///
 /// Found by adversarial review of #889: `min t s.t. u = b₀, v = b₁,
 /// (t,u,v) ∈ Q₃` — the parametric distance function — classifies `Apex` once

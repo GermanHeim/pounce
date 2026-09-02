@@ -33,16 +33,26 @@ changes.
   refusal is at build time, so counting a bound would take the release path
   away from a model fix-relax could serve.
 
-  Two things it does not promise. It is **necessary, not sufficient** — a
+  Three things it does not promise. It is **necessary, not sufficient** — a
   subtler dependency between `A`'s rows and `B`'s can make one particular `db`
-  unreachable while the count passes, and `ill_conditioned()` is what covers
-  that remainder (measured over 33 probes: residual `0.5` on every wrong step
-  against `~1e-13` on every right one). And it is coarse the other way too:
-  when `n − rank(B) < m_eq` the image of `A` restricted to `ker(B)` is a
-  *proper subspace*, not empty, so some `db` remain reachable and would be
-  answered correctly — refusing at build time takes those away as well. That
-  is deliberate, since a build serves every later `db` and cannot know which
-  are coming, but it is a stronger action than "no answer exists here".
+  unreachable while the count passes. It is coarse the other way too: when
+  `n − rank(B) < m_eq` the image of `A` restricted to `ker(B)` is a *proper
+  subspace*, not empty, so some `db` remain reachable and would be answered
+  correctly — refusing at build time takes those away as well (deliberate,
+  since a build serves every later `db` and cannot know which are coming, but
+  stronger than "no answer exists here"). And it compares against the **row
+  count** of `A` where the geometry wants `rank(A)`, so a redundant equality
+  makes it over-refuse by exactly the redundancy.
+
+  `ill_conditioned()` is what covers the first case, and what flags the
+  bound-pinned model the exclusion deliberately serves — **but only after a
+  step is taken, never at build time.** It is the *residual* clause that fires;
+  the regularized KKT is well conditioned on these models (`3.0e10` against a
+  `1e14` threshold), so a caller checking `ill_conditioned()` immediately after
+  `build_conic` gets `false` on a build whose plain step will miss `A·dx = db`
+  by a third. Measured on a four-variable model where the plain step is wrong
+  by that third, `parametric_step_bounded` reproduces the re-solve exactly, and
+  the residual reads `0.333` against a `1e-6` threshold.
 
   Two things make this worth refusing rather than caveating. The problem is
   **smooth on both sides of the cliff** — at `‖b‖ = 1.12e-8` the derivative
