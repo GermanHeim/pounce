@@ -1439,6 +1439,83 @@ fn the_apex_decision_is_relative_to_the_problems_scale() {
     );
 }
 
+/// **…and below unit scale the floor makes it absolute, deliberately.**
+///
+/// `primal_scale` is `max(‖h‖∞, ‖Gx‖∞, 1.0)`. The `1.0` is a floor, so for a
+/// model whose data is smaller than unity the scale stops tracking the problem
+/// and `CONE_APEX_REL` becomes a flat `1e-8` on `‖s‖∞`.
+///
+/// The test above covers the large direction only, and round 5 of #889 pointed
+/// out that leaves the floor itself unexercised — `/sens-review` entry 3 asks
+/// for the *measured* consequence of a threshold, not just its intent.
+///
+/// Here the data is `O(1e-6)` and the slack `1e-9`. Relative to the problem
+/// that is `1e-3` — nowhere near the apex, and an unfloored rule would call it
+/// a boundary point. Against the floored `1.0` it is `1e-9 < 1e-8`, so it reads
+/// `Apex`: a different face, a different active set, a different answer.
+///
+/// # What the mutation actually showed, which is not what I predicted
+///
+/// I expected removing the floor to redden this test **and only** this test.
+/// It reddens **ten**, and the reason is worth more than the prediction was:
+/// at an apex `s → 0`, and when `h = 0` that forces `‖Gx‖∞ → 0` with it, so
+/// the *unfloored* scale is round-off. Measured on `apex(1.0)`:
+///
+/// ```text
+///   ‖h‖∞ = 0    ‖Gx‖∞ = 2.4e-13    unfloored scale 2.4e-13, floored 1.0
+///   boundary(1.0):        ‖Gx‖∞ = 0.76    unfloored 0.76,     floored 1.0
+/// ```
+///
+/// So the floor is not a guard for an obscure sub-unit corner — it is what
+/// **every apex fixture in this crate rests on**. Without it
+/// `CONE_APEX_REL · 2.4e-13` is under machine epsilon and nothing classifies
+/// as an apex at all.
+///
+/// This test therefore does **not** uniquely pin the floor, and saying it did
+/// would be the mistake this file's header is about. What it adds is the one
+/// case where the data is non-zero *and* sub-unit, so the floor's effect is a
+/// deliberate override of a meaningful scale rather than a rescue from
+/// round-off — and it says so with a number, which is what entry 3 asks for.
+#[test]
+fn below_unit_scale_the_floor_makes_the_apex_decision_absolute() {
+    const SMALL: f64 = 1e-6;
+    // s₀ = ‖s₁‖ exactly, at 1e-9 — a thousandth of the data, but a tenth of
+    // the *floored* threshold.
+    let s = [1e-9, 6e-10, 8e-10];
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![tri(0, 0, 1.0), tri(1, 1, 1.0), tri(2, 2, 1.0)],
+        c: vec![0.0, 0.0, 0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![tri(0, 0, 1.0), tri(1, 1, 1.0), tri(2, 2, 1.0)],
+        h: vec![SMALL + s[0], SMALL + s[1], SMALL + s[2]],
+        lb: vec![],
+        ub: vec![],
+    };
+    let sol = QpSolution {
+        status: QpStatus::Optimal,
+        x: vec![SMALL, SMALL, SMALL],
+        y: vec![],
+        z: vec![1.0, -0.6, -0.8],
+        z_lb: vec![0.0; 3],
+        z_ub: vec![0.0; 3],
+        obj: 0.0,
+        iters: 0,
+        iterates: vec![],
+    };
+    let sens = QpSensitivity::build_conic(&prob, &SOC3, &sol, &opts(), 1e-7, backend)
+        .expect("an apex with a live dual is a supported face");
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(0, ConeBlockKind::Apex)],
+        "a slack of {:e} is 1e-3 of this model's data — a boundary point under a \
+         rule that tracked the problem — but the scale floors at 1.0, so the \
+         threshold is an absolute 1e-8 and this reads as the apex",
+        s[0]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The refusals. Each is a point where `dx/db` does not exist or cannot be
 // computed from the numbers to hand; answering anyway is the defect.

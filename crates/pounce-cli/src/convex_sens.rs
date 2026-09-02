@@ -243,10 +243,29 @@ where
         .collect();
     let dx = sens.parametric_step(&pins.pin_rows, &deltas);
     if sens.ill_conditioned() {
+        // Report **both** numbers, because from out here we cannot tell which
+        // clause fired: `KKT_ILL_CONDITIONED_THRESHOLD` is private to
+        // `pounce-convex`, and `ill_conditioned()` is the OR of two tests.
+        //
+        // Which matters, because the message used to print only the condition
+        // estimate — and on the population this refusal exists for, that is
+        // the reassuring one. A rank-deficient active set leaves the
+        // *regularized* KKT perfectly well conditioned (the trap gh#328 named;
+        // #889's round 4 measured `3.0e10` against a `1e14` threshold) while
+        // the residual is what rejects the step. So the old text handed the
+        // user a healthy-looking number as the stated reason for a refusal.
+        // Raised as a "minor" item in round 5 of #889; it is not cosmetic.
+        let cond = sens.kkt_cond_estimate();
+        let resid = sens
+            .last_step_residual()
+            .map(|r| format!("{r:.3e}"))
+            .unwrap_or_else(|| "n/a".to_string());
         return Err(format!(
-            "the active-set KKT is too ill-conditioned for the step to be meaningful \
-             (condition estimate {:.3e})",
-            sens.kkt_cond_estimate()
+            "the step is not meaningful here: condition estimate {cond:.3e}, \
+             step residual {resid}. Either alone is enough to reject it, and on \
+             a rank-deficient active set it is the residual — the regularized \
+             KKT is well conditioned there, so the condition estimate looks \
+             healthy while the answer is not"
         ));
     }
     Ok(sol.x.iter().zip(&dx).map(|(a, b)| a + b).collect())
