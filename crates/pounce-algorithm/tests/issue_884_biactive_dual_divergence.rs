@@ -2,19 +2,29 @@
 //! lowering's multipliers diverge, and the run fails next to the primal
 //! solution.
 //!
-//! **Provenance, by measurement group.** The numbers describing the
-//! *defect* — the multiplier table below, the base attempt's returned
-//! point, the `3.3e11` and `7.9e+04` residuals, the `9.96e-8` an honest
-//! solve reaches, and `ralph1`'s objectives under `perturb_always_cd` —
-//! were measured on `87402274`, before the fix existed. The numbers
-//! describing the *retry* — the promoted point and violation in
+//! **Provenance, by measurement group.** Almost everything here is
+//! *defect*-era, measured on `87402274` before the fix existed: the
+//! multiplier table below, the base attempt's returned point, the
+//! `3.25e11` and `7.9e+04` residuals, the `4.64e-4` objective-gradient
+//! residual it leaves, the `9.96e-8` an honest solve reaches, and — both
+//! of them, from one run — `ralph1`'s objectives under
+//! `perturb_always_cd` and the `5.25e-7` that run certifies.
+//! `ralph1`'s `7.2e-3` step floor belongs to that group too: it is the
+//! minimum `||d||` of its *base* `RestorationFailed` trajectory, which
+//! the retry never touches (`dev-notes/mpcc-biactive-dual-divergence.md`,
+//! the `||d||` separation table).
+//!
+//! Only the **promoted** point and its violation, in
 //! `qpec_small_returns_a_near_optimal_point_and_never_claims_a_false_success`,
-//! `ralph1`'s `7.2e-3` step floor, and the `5.25e-7` its regularized run
-//! certifies — could only be measured with the fix in place, and come
-//! from its own commits (`ef1dd0b`, `198173b`; PR #885). Every number in
-//! both groups reproduces on `d32204e0`. Each site names the group it
-//! belongs to; re-measure rather than trusting any of them across a
-//! commit that touches the IPM.
+//! are *retry*-era — they could not exist before the fix — and they come
+//! from its own commits (`ef1dd0b`, `198173b`; PR #885).
+//!
+//! Both groups were re-run on `d32204e0` and reproduce, with one
+//! exception that was **not** re-derived there: the `7.2e-3` floor, which
+//! is a minimum over a trajectory rather than a quantity the solve
+//! returns, and whose source is the dev-note's table. Each site names the
+//! group it belongs to; re-measure rather than trusting any of them
+//! across a commit that touches the IPM.
 //!
 //! **The first four are invariants rather than a description of the
 //! defect.** Each is written so that it stays correct after a fix: it
@@ -31,8 +41,8 @@
 //! exists because the rule has a branch a green fixture would otherwise
 //! never execute. See the block comment above them.
 //!
-//! The measurements — the runaway multipliers, the `mu` trace, and three
-//! approaches ruled out — live in
+//! The measurements — the runaway multipliers, the `mu` trace, and the
+//! four approaches ruled out — live in
 //! `dev-notes/mpcc-biactive-dual-divergence.md`. That is where history
 //! belongs; this file holds contracts. If you are fixing gh#884, read the
 //! note first: the obvious remedy is measured and rejected there.
@@ -53,8 +63,13 @@
 //! certifies stationarity with residual `0` **at that exact point** — so
 //! the answer exists and is reachable.
 //!
-//! What happens instead: the solve reaches `(1.0002321, 1.0001161,
-//! 2.67e-15)`, feasible to `2.2e-16` with `f = 6.73e-8`, and stops there.
+//! What happens instead — the *base* attempt, which is what gh#884 is
+//! about, and which the default path still runs first: it reaches
+//! `(1.0002321, 1.0001161, 2.67e-15)`, feasible to `2.2e-16` with
+//! `f = 6.73e-8`, and before #885 stopped there. (Since #885 the default
+//! path does not stop there: it detects the runaway, retries cold, and
+//! returns the promoted point instead. Everything from here to the end of
+//! this section describes the attempt that fails.)
 //! That is *near* the optimum, not at it — `lambda = 0` does not certify
 //! the returned iterate, where it leaves an objective-gradient residual of
 //! `4.64e-4`. Meanwhile the multipliers on the *linearly dependent* rows
@@ -68,7 +83,7 @@
 //! | 2 (`G2 >= 0`) | `1.0` | `-7.283e11` |
 //! | 5 (`G2·H2 = 0`) | `2.3e-4` | `+1.737e15` |
 //!
-//! `-7.283e11 + 1.737e15 · 2.3e-4` is the `3.253e11` residual it fails
+//! `-7.283e11 + 1.737e15 · 2.3e-4` is the `3.25e11` residual it fails
 //! on. That table is measurement, not an assertion — see the note.
 //!
 //! **The asymmetry between the two fixtures is the point.** `qpec_small`
@@ -84,7 +99,7 @@
 //! |---|---|---|
 //! | `qpec_small_returns_a_near_optimal_point_and_never_claims_a_false_success` | the returned point is feasible and within `1e-3` of `(1, 1, 0)` with `|f|` under `1e-6` — near `f*`, not at it; any claimed success must hold in the model's own units | a verdict-only "fix" reports success at a `1e11` residual |
 //! | `a_structurally_zero_hessian_entry_does_not_change_the_solve` | declaring an identically-zero Hessian entry is a no-op (and refutes gh#884's stated prerequisite hypothesis) | the declared sparsity pattern starts changing the answer |
-//! | `dual_regularization_reaches_the_optimum_honestly` | an honest solve of this model exists at `9.96e-8` unscaled, so gh#884 is a POUNCE gap | that configuration stops reaching the answer |
+//! | `dual_regularization_reaches_a_certificate_honestly` | an honest solve of this model exists at `9.96e-8` unscaled, so gh#884 is a POUNCE gap | that configuration stops reaching the answer |
 //! | `ralph1_must_not_claim_success_where_no_multiplier_certifies_it` | a model with no sign-feasible multiplier must not report success, and never below `f*` | `perturb_always_cd` is turned on by default — measured: plain `Solve_Succeeded` at `-2.71e-5` |
 //! | `the_kill_switch_restores_the_pre_884_verdict` | `dual_divergence_retry=no` returns the base attempt's verdict | the kill switch stops killing |
 //! | `a_zero_step_tolerance_holds_the_detector_off` | a `0` step tolerance is a second, finer off switch | the detector stops consulting its threshold |
@@ -482,7 +497,7 @@ fn claims_success(status: ApplicationReturnStatus) -> bool {
 ///   product row's gradient is exactly `(0, 0, 0)`, so `lambda = 0`
 ///   certifies with residual `0`; and an honest solve reaching `9.96e-8`
 ///   unscaled is measured in
-///   `dual_regularization_reaches_the_optimum_honestly`. A success claim
+///   `dual_regularization_reaches_a_certificate_honestly`. A success claim
 ///   on this model at a residual above `1e-6` is therefore *known* to be
 ///   avoidable, which is what makes it suspect rather than merely loose.
 /// - `ralph1` — no sign-feasible multiplier exists at its origin at all,
@@ -543,7 +558,7 @@ fn a_claimed_success_must_be_real(
 ///
 /// The **conditional** half is the guard, and it is no longer vacuous.
 /// Before gh#884 closed, this model exited `RestorationFailed` at an
-/// unscaled KKT error of `3.3e11` (and, from the acceptable-level start
+/// unscaled KKT error of `3.25e11` (and, from the acceptable-level start
 /// the issue filed, `Solved_To_Acceptable_Level` at `7.9e+04`), so the
 /// guard had nothing to check. The dual-divergence retry now takes it to
 /// `Solve_Succeeded` with a residual that holds in the model's own units,
@@ -669,6 +684,15 @@ fn a_structurally_zero_hessian_entry_does_not_change_the_solve() {
 /// an **unscaled** KKT error of `~1e-7` — in the model's own units, not
 /// by normalising the residual away.
 ///
+/// The name says *certificate*, not *optimum*, and the distinction is the
+/// same one the `qpec_small_returns_a_near_optimal_point_…` rename draws.
+/// This run lands on `(0.999994, 0.999997, 3.7e-6)` — bit-identical to
+/// the point the retry promotes, measured on `d32204e0`, because the
+/// retry *is* this configuration restarted cold — which is near
+/// `(1, 1, 0)` and not at it. What is pinned here is that the residual
+/// behind the verdict holds in the model's own units — not that the
+/// iterate is the optimum.
+///
 /// This is evidence that there is something to fix. It is **not** an
 /// argument for turning that option on by default: see
 /// `ralph1_must_not_claim_success_where_no_multiplier_certifies_it`, and
@@ -681,7 +705,7 @@ fn a_structurally_zero_hessian_entry_does_not_change_the_solve() {
 /// from the original starting point, which is a different mechanism and
 /// is not what those measurements rule out.
 #[test]
-fn dual_regularization_reaches_the_optimum_honestly() {
+fn dual_regularization_reaches_a_certificate_honestly() {
     let (tnlp, captured) = QpecSmallProdEq::new(false);
     let mut a = app(true, 300);
     let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
