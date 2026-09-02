@@ -11,6 +11,72 @@ changes.
 
 ### Added
 
+- **An LP/QP sensitivity request is served on the convex path instead of
+  rerouting the whole model (CLI).** Issue #196's fix was to *decline* the
+  convex fast path whenever a `.nl` carried the sIPOPT `sens_*` suffixes:
+  `auto` sent the model to the general NLP filter interior-point engine, and an
+  explicit `solver_selection=qp-ipm` warned that the request "will be skipped".
+  Correct at the time — only the general engine could answer — and expensive,
+  because an LP or convex QP paid the general engine's cost for a question the
+  specialized engine can now answer itself.
+
+  The decline is narrowed to the capability that is genuinely missing.
+  `pounce_cli::convex_sens` resolves the `.nl`'s pins into the extracted QP's
+  equality rows and takes the step through `pounce_convex::QpSensitivity`,
+  writing the same `sens_sol_state_1` block under the same name, so a `.sol`
+  consumer cannot tell which engine answered. The banner now names the engine
+  that actually ran.
+
+  What still routes to the NLP path, each a capability statement rather than an
+  oversight: a **reduced-Hessian** request (`QpSensitivity::reduced_hessian` is
+  a null-space projection where the CLI's sIPOPT path takes the Schur route —
+  serving it here would silently change which number `--compute-red-hessian`
+  returns, and CLAUDE.md names keeping them separate as a non-goal); the
+  **conic** route (`build_conic` can answer for every family now, but the CLI's
+  conic dispatch extracts through a different provenance map and that plumbing
+  is not written); the **active-set** engine; and any pin that is not a unit
+  equality row.
+
+  **The index space is the risk.** The request arrives in the `.nl`'s own
+  constraint indices while `parametric_step` takes indices into the extracted
+  QP's equality right-hand side `b` — a different space, because extraction
+  splits ranges and separates the equality and inequality blocks.
+  `qp_extract::ConRowMap` is the single source of truth and is read rather than
+  reconstructed.
+
+  A run that serves a sensitivity request also switches the **convex presolve
+  off**, and the reason is narrower than it looks. It is *not* that presolve's
+  row space breaks the pins: this driver postsolves back to the extracted-QP
+  space before anything downstream runs, so the pin indices stay valid, and
+  with presolve left on the step still lands within `1e-6` of the NLP path's —
+  measured, not reasoned. What presolve costs is accuracy and an unanswered
+  question. On the one fixture that exercises it, presolve fixes the parameter
+  the pin parametrizes and drops its row (`3 → 2 vars, 1 → 0 rows`), so the
+  sensitivity reads a postsolve reconstruction rather than the converged KKT:
+  the step lands `5.0e-11` from the analytic answer instead of `6.2e-15`.
+  Whether a reconstructed bound multiplier can also move the *active set* the
+  sensitivity infers — a wrong derivative rather than a less accurate one — is
+  unmeasured, and needs a model whose active set is nontrivial. The NLP path
+  makes the same trade.
+
+  One hazard the NLP arm has and this one does not, stated so nobody hunts for
+  it: there is no var-x/full-x split, because the extractor keeps variables 1:1
+  with the `.nl` — no `lift_x_to_full`, and no gh#450 to reproduce.
+
+  *Trajectory sweep* (`scripts/sweep-fixtures.sh`, both legs, against a
+  pre-change binary): **exactly one fixture moves**, `convex_qp_sens`, whose
+  engine column goes `nlp → cvx-qp` on both legs — the routing change itself
+  and nothing else. Three fixtures carry the sIPOPT suffixes, but carrying them
+  is necessary and not sufficient: `parametric.nl` and
+  `parametric_red_hessian.nl` both classify **NLP**, so `auto` never routed
+  them to the convex path and the gate never applied to them. That leaves the
+  corpus with exactly one model exercising this change, and none of any size —
+  so the sweep shows the change is contained and says nothing about magnitude
+  at scale.
+
+  *Surfaces:* CLI. Python and Pyomo are unaffected — `pounce.qp.QpSensitivity`
+  solves internally and has no `.nl` route.
+
 - **Two conic thresholds are calibrated off measured populations, and the
   measurements are recorded** (`FACET_ACTIVE_REL`, `FACET_DUAL_REL`). The
   exponential and power cones route to the non-symmetric HSDE driver, whose

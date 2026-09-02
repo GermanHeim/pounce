@@ -769,8 +769,39 @@ pub fn main() -> ExitCode {
         // (which honors the request — correctness over the specialized path's
         // speed); under an explicit convex solver_selection, respect the forced
         // choice but warn (below) instead of silently skipping.
-        let decline_convex_for_postopt =
-            wants_nlp_postopt && matches!(selection, SolverSelection::Auto);
+        //
+        // The convex arm has a parametric step of its own now
+        // (`pounce_convex::QpSensitivity`, reached through
+        // `pounce_cli::convex_sens`), so this decline is narrowed to the
+        // capability it still lacks rather than to "any post-optimal request".
+        // What it can serve is a **parametric step on an LP or convex QP whose
+        // pins are equality rows** — see `convex_sens::resolve_pins`, which is
+        // where the request stops being expressible and the run falls back.
+        //
+        // What still reroutes, and why each is a capability rather than an
+        // oversight:
+        //
+        // * **A reduced-Hessian request.** `QpSensitivity::reduced_hessian`
+        //   exists, but it is a *different computation* behind the same word —
+        //   a null-space projection where the CLI's `sens::try_compute_red_hessian`
+        //   takes sIPOPT's Schur route. Serving it here would silently change
+        //   which number `--compute-red-hessian` returns. CLAUDE.md names this
+        //   as a deliberate non-goal; honoring it means routing.
+        // * **The conic path** (`SolverChoice::SocpIpm`). `build_conic` can
+        //   answer for every cone family, but the CLI's conic route extracts
+        //   through `extract_socp_with_map` into a different provenance map,
+        //   and mapping pins through *that* is its own index space. Not
+        //   started, so not claimed.
+        // * **The active-set engine** (`SolverChoice::QpActiveSet`). It returns
+        //   a vertex solution the orthant guard accepts, but its degenerate
+        //   bases are exactly the case `QpSensitivity` flags as
+        //   `lp_without_crossover`, and that interaction is unmeasured here.
+        let convex_can_serve_sens = wants_sens
+            && !wants_red_hessian
+            && matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm);
+        let decline_convex_for_postopt = wants_nlp_postopt
+            && matches!(selection, SolverSelection::Auto)
+            && !convex_can_serve_sens;
 
         // gh#483: same bargain for user NLP scaling. `nlp_scaling_method=
         // user-scaling` plus the `.nl`'s `scaling_factor` suffixes is honored
@@ -925,6 +956,17 @@ pub fn main() -> ExitCode {
                          requests {postopt_what}, which the convex solver \
                          (pounce-convex) does not provide; routing to the general \
                          NLP interior-point path so the request is honored.",
+                        class.name()
+                    );
+                } else if convex_can_serve_sens {
+                    // Served where it was solved. Said out loud because it is a
+                    // routing change: the same input used to run on a different
+                    // engine, and a user comparing two versions deserves to see
+                    // which one answered.
+                    eprintln!(
+                        "pounce: note: the .nl requests {postopt_what}; the convex \
+                         solver (pounce-convex) computes it directly on this {} — \
+                         no reroute to the general NLP path is needed.",
                         class.name()
                     );
                 } else {
@@ -1133,7 +1175,40 @@ pub fn main() -> ExitCode {
                         &prob,
                         class,
                         sol_path.as_deref(),
-                        presolve_on,
+                        // A run that serves a sensitivity request presolves
+                        // nothing, and the reason is narrower than it first
+                        // looks — worth writing down, because the obvious
+                        // reason is wrong.
+                        //
+                        // It is NOT that presolve's row space would break the
+                        // pins. This driver postsolves back to the
+                        // extracted-QP space before anything downstream runs
+                        // (the same property `con_map`'s dual recovery needs),
+                        // so `QpSensitivity` is built on the unpresolved `qp`
+                        // and the pin indices stay valid. Measured, not
+                        // reasoned: with presolve left on, the step on
+                        // `convex_qp_sens.nl` still lands within `1e-6` of the
+                        // NLP path's.
+                        //
+                        // What it *is*: on that fixture presolve fixes the
+                        // parameter the pin parametrizes and drops its row
+                        // ("3 → 2 vars, 1 → 0 rows, fixed 1"), so the KKT the
+                        // sensitivity reads is a postsolve reconstruction
+                        // rather than the one the solve converged. The step
+                        // costs four orders of accuracy for it — `5.0e-11`
+                        // against `6.2e-15` — and that is on the one fixture
+                        // that exercises this at all. Whether a reconstructed
+                        // bound multiplier can also move the *active set* the
+                        // sensitivity infers is unmeasured, and a wrong active
+                        // set is a wrong derivative rather than a less
+                        // accurate one.
+                        //
+                        // The NLP path makes the same trade (see
+                        // `presolve_opts.enabled = false` below). Presolving a
+                        // sensitivity run is a real option and a separate
+                        // change, and it needs a fixture that reaches the
+                        // active-set question.
+                        presolve_on && !convex_can_serve_sens,
                         json_cfg,
                         debug_hook.as_ref(),
                         args.ampl,
@@ -1143,6 +1218,16 @@ pub fn main() -> ExitCode {
                         engine_overrides,
                         lp_nlp_fallback,
                         convex_console(&app, json_dbg),
+                        convex_can_serve_sens
+                            .then(|| nl_suffixes.as_ref())
+                            .flatten(),
+                        // Under `auto` the class was our inference, so an
+                        // inexpressible pin is ours to hand back. Under an
+                        // explicit convex `solver_selection` the user named the
+                        // engine, and silently answering from a different one
+                        // would hide that — so there the step is skipped with a
+                        // warning, exactly as it was before this path existed.
+                        matches!(selection, SolverSelection::Auto),
                     ) {
                         return code;
                     }
@@ -2690,6 +2775,12 @@ fn run_convex_qp(
     allow_nlp_fallback: bool,
     // Verdict / timing-statistics switches read off the options list.
     console: ConvexConsole,
+    // The `.nl`'s suffixes, when this run is to serve a parametric sensitivity
+    // step here rather than reroute it. `None` for every other run.
+    sens_suffixes: Option<&nl_reader::NlSuffixes>,
+    // May an inexpressible pin hand the whole model back to the NLP path?
+    // True under `auto`, false under an explicit convex `solver_selection`.
+    sens_may_decline: bool,
 ) -> Option<ExitCode> {
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
@@ -2729,6 +2820,39 @@ fn run_convex_qp(
                 return Some(ExitCode::from(2));
             }
         }
+    };
+
+    // Resolve the sensitivity pins from the `.nl`'s constraint indices into
+    // the extracted QP's equality rows, BEFORE any solve. A refusal here has to
+    // cost nothing: under `auto` it hands the whole model to the NLP path, and
+    // that path owns the one verdict — so nothing may have been printed and no
+    // `.sol` written by the time we find out.
+    let sens_pins = match sens_suffixes {
+        Some(suffixes) => {
+            match pounce_cli::convex_sens::resolve_pins(suffixes, &con_map, &qp, prob.n) {
+                Ok(pins) => Some(pins),
+                Err(why) if sens_may_decline => {
+                    eprintln!(
+                        "pounce: note: the .nl requests a parametric sensitivity step, but \
+                         {} on the extracted convex model; routing to the general NLP \
+                         interior-point path, which expresses it.",
+                        why.describe()
+                    );
+                    return None;
+                }
+                Err(why) => {
+                    eprintln!(
+                        "pounce: warning: the .nl requests a parametric sensitivity step, \
+                         but {} on the extracted convex model, and solver_selection forces \
+                         the convex solver; the request will be skipped. Use \
+                         solver_selection=nlp or auto to obtain it.",
+                        why.describe()
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
     };
 
     // The reported objective must include *both* constant sources: the
@@ -3066,7 +3190,7 @@ fn run_convex_qp(
     let (z_lb_raw, z_ub_raw) = pounce_cli::qp_extract::recover_bound_mults(prob, &sol);
     let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
     let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
-    let qp_bound_suffixes = [
+    let mut qp_bound_suffixes = vec![
         nl_writer::SolSuffix {
             name: "ipopt_zL_out".to_string(),
             target: nl_writer::SolSuffixTarget::Var,
@@ -3078,6 +3202,27 @@ fn run_convex_qp(
             values: nl_writer::SolSuffixValues::Real(z_u_suffix),
         },
     ];
+
+    // The parametric step, on the same factored KKT the solve just produced.
+    // Its `.sol` block is `sens_sol_state_1`, the same name and shape the NLP
+    // path writes, so a consumer cannot tell which engine answered.
+    //
+    // A failure here is reported, never swallowed: by this point the verdict is
+    // committed to the convex path, so the honest outcome is "solved, and here
+    // is why the step is missing" rather than a silently absent suffix — which
+    // is the issue #196 failure mode in a new place.
+    if let Some(pins) = &sens_pins {
+        match pounce_cli::convex_sens::perturbed_x(&qp, &sol, &solve_opts(), pins, backend) {
+            Ok(x_pert) => {
+                qp_bound_suffixes.push(pounce_cli::convex_sens::sens_suffix(x_pert));
+            }
+            Err(why) => eprintln!(
+                "pounce: warning: the parametric sensitivity step was requested but not \
+                 produced on the convex path: {why}. Use solver_selection=nlp for the \
+                 general path's step."
+            ),
+        }
+    }
     recovery.stop();
 
     // The end-of-run verdict, in the shape the NLP path emits it (gh #767).
