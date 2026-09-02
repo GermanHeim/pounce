@@ -44,12 +44,26 @@ changes.
   attempt is not itself feasible within `acceptable_tol`: the retry may not
   return a **strictly worse objective**, and an objective **improvement may not
   be bought with primal slack** (a better objective at a larger constraint
-  violation is refused). Tolerance is `acceptable_tol · max(1, |base objective|)`;
+  violation is refused). Both read the objective in the sense the caller posed
+  — `obj_scaling_factor < 0` is a maximization and `final_objective` is the
+  user's *signed* objective, so without normalizing the sense both rules invert
+  under it, rule 1 refusing genuine improvements and rule 2 admitting strictly
+  worse answers. Tolerance is `acceptable_tol · max(1, |base objective|)`;
   it is not fitted — the smallest move that must be admitted is the gh#884
   reproducer's own `5.8e-11` and the smallest that must be refused is `0.198`,
   four and five orders either side. After: **0** worse-objective promotions,
   42 → 1 objective moves, and the one survivor improves the constraint
   violation as well as the objective. `qpec_small` still promotes.
+
+  **What rule 2 does not do.** It is an exact non-increase with no noise
+  floor, so it fires the same on `2.07e-25 → 1.09e-09` (the whole defect) as
+  on `1e-17 → 1.1e-17` (arithmetic): of the 45 promotions removed, roughly 35
+  are improvements refused because the violation ticked up far below any
+  tolerance. The direction is conservative — the base answer is feasible and
+  in hand — but "refuses purchases, not improvements" holds only above the
+  noise. And it detects *the primal moved*, not *below the optimum*: had
+  `scholtes4`'s retry **held** its violation, `f = -6.6088e-05` would have
+  been admitted. On that model the two coincided.
 
   Separately, `runaway_is_the_whole_residual` tested only a *ratio*, which is
   scale-free and so cannot say the residual is large: answers with an unscaled
@@ -82,9 +96,36 @@ changes.
   `IpoptApplication::answer_restored_from_floor()` now reports that a floor was
   replayed, and the CLI re-reads the point from the last `finalize_solution`
   payload when it was — that payload is always the answer being reported,
-  because the floor restores it *by* calling `finalize_solution`. Pinned by
-  `a_declined_retry_reports_one_answer`, which compares the reported objective
-  against the objective evaluated at the reported point.
+  because the floor restores it *by* calling `finalize_solution`.
+
+  **The frames matter and the first revision of this got one wrong.**
+  `CountingTnlp` sits *inside* the gh#486 variable-scaling wrapper and
+  *outside* the presolve one, so its payload has already had `x /= d`,
+  `z *= d` applied and has *not* been lifted out of the reduced presolve
+  space. The swap must therefore skip the gh#486 correction and keep the
+  lift. Applying the correction on top squares the factor: measured on
+  `mpcc_scholtes4_biactive` under `nlp_scaling_method=curvature-based`
+  (`d = [2, 2, 0.5007]`), a declined retry reported
+  `x = [7.28e-14, 7.28e-14, -3.63e-09]` against the correct
+  `[1.46e-13, 1.46e-13, -1.82e-09]`, with the objective beside it unchanged
+  and right — a silent wrong `.sol` and dual block of exactly the shape this
+  entry removes, one wrapper over. Affects every run where a floor replays,
+  which includes the μ fallback's, on by default.
+
+  Pinned by `a_declined_retry_reports_one_answer` (the point and the
+  objective agree) **and** by
+  `a_declined_retry_reports_one_answer_under_variable_scaling`, which also
+  asserts the point equals the `dual_divergence_retry=no` run's. The second
+  leg is the test: reintroduce the double-application and the unscaled leg
+  stays green while only the scaled one goes red, because a corpus uniform in
+  the dimension a change acts on reports nothing.
+
+  The accessor's contract is **not** honoured by the three other
+  `set_on_converged` consumers — `pounce-sensitivity/src/{solver,
+  convenience}.rs` and `pounce-cli/src/minima/mod.rs` — which read the
+  converged KKT state and factorization rather than the payload, and cannot
+  be rewound. After any floor replay their result describes the attempt that
+  lost. Pre-existing, unfixed, and now annotated at each site.
 
 - **A `σ` demotion could discard a crossover-purified exact vertex (gh#880 /
   gh#888 interaction).** `solve_qp_core` records the `σ` verdict about the

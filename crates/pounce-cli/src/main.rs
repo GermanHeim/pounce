@@ -1876,7 +1876,24 @@ pub fn main() -> ExitCode {
     // variable-scaling substitution undone against the algorithm's own
     // iterate; this swap is for the case where that capture describes a
     // point nobody is reporting.
-    if app.answer_restored_from_floor() {
+    //
+    // **Frame**: `CountingTnlp` sits INSIDE the gh#486 scaling wrapper
+    // (`main.rs` hands `counting` to `optimize_tnlp`, which wraps what it is
+    // handed) and OUTSIDE the presolve one (`counting.inner` is
+    // `post_presolve`, and it captures before forwarding). So this payload
+    // has ALREADY had `x /= d`, `z *= d` applied by
+    // `scaling_tnlp::finalize_solution`, and has NOT been lifted out of the
+    // reduced presolve space. The lift below must therefore still run on it;
+    // the gh#486 correction must not, or it lands twice. Measured before
+    // this flag existed, on `mpcc_scholtes4_biactive` under
+    // `nlp_scaling_method=curvature-based`: a declined retry reported
+    // `x = [7.28e-14, 7.28e-14, -3.63e-09]` against the correct
+    // `[1.46e-13, 1.46e-13, -1.82e-09]` — every component off by exactly the
+    // factor, with the objective beside it unchanged and right. Silent,
+    // plausible, wrong: the shape this whole block exists to remove, one
+    // wrapper over.
+    let capture_is_already_in_model_units = app.answer_restored_from_floor();
+    if capture_is_already_in_model_units {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
         }
@@ -1943,7 +1960,14 @@ pub fn main() -> ExitCode {
     // and report it as though it were in the model's units, which no
     // reader could detect. Both captures come from the same iterate the
     // factors were built against, so a mismatch is a wiring bug.
-    if let Some(d) = app.variable_scaling() {
+    // Skipped when the captures came from the `finalize_solution` payload
+    // (see `capture_is_already_in_model_units` above): that payload is the
+    // output of this very substitution, so correcting it again squares the
+    // factor.
+    if let Some(d) = app
+        .variable_scaling()
+        .filter(|_| !capture_is_already_in_model_units)
+    {
         if let Some((x, _lambda)) = nominal_capture.borrow_mut().as_mut() {
             assert_eq!(
                 x.len(),

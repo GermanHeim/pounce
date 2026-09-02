@@ -156,6 +156,19 @@ fn runaway_is_the_whole_residual(
 ///    and in hand; returning a worse one is a regression no certificate
 ///    buys back.
 /// 2. **An objective *improvement* may not be bought with primal slack.**
+///    Two costs this carries, named rather than hidden (R3). It is an exact
+///    non-increase with **no noise floor**, so it fires the same on
+///    `2.07e-25 -> 1.09e-09` (where the move is the whole defect) as on
+///    `1e-17 -> 1.1e-17` (where which side a retry lands on is arithmetic):
+///    of the 45 promotions this PR removes, ~35 are improvements refused
+///    because the violation ticked up somewhere far below any tolerance. The
+///    direction is conservative — the base answer is feasible and in hand —
+///    but "refuses purchases, not improvements" is only true above the noise.
+///    And the rule detects *the primal moved*, not *below the optimum*: had
+///    `scholtes4`'s retry **held** its violation, `f = -6.6088e-05` would have
+///    been admitted, which the second assertion of
+///    `an_improvement_bought_with_primal_slack_is_refused` states outright.
+///    On that model the two coincided.
 ///    The remedy is for a *dual* defect — the premise is that the primal
 ///    has settled — so a retry that lands further outside the constraints
 ///    *and* reports a better objective has not repaired the runaway, it
@@ -178,12 +191,27 @@ fn runaway_is_the_whole_residual(
 /// (`qpec_small`, `5.8e-11`) and the ones it has to refuse (`r201`,
 /// `0.198`; `scholtes4`, `6.6e-05`) sit four and five orders away from it
 /// on either side.
+///
+/// `sense` is `+1` for a minimization and `-1` for a maximization, and both
+/// objectives are multiplied by it before either rule looks at them.
+/// [`SolveStatistics::final_objective`] is the objective evaluated on the
+/// **user** TNLP — signed, and *not* premultiplied by `obj_scaling_factor` —
+/// and a negative `obj_scaling_factor` is the documented way to pose a
+/// maximization. Without the normalization both rules invert under it: rule 1
+/// would refuse genuine *improvements* (a regression against the behaviour
+/// before this conjunct existed) and rule 2 would admit strictly worse
+/// answers, re-arming the exact class the conjunct was added to block. The
+/// repo has shipped one defect from this sign already —
+/// `masked_certificate_fuzz.rs::the_veto_is_not_disabled_by_a_negative_objective_scaling_factor`,
+/// whose fix took `.abs()` in the residual accessors, which is also what keeps
+/// the detector firing under maximization and so keeps this path reachable.
 fn retry_answer_is_admissible(
     base_obj: Number,
     base_viol: Number,
     retry_obj: Number,
     retry_viol: Number,
     accept_tol: Number,
+    sense: Number,
 ) -> bool {
     // Nothing to compare against: a non-finite or infeasible base answer
     // is not a point worth protecting.
@@ -195,6 +223,10 @@ fn retry_answer_is_admissible(
     if !retry_obj.is_finite() {
         return false;
     }
+    // Both into a minimization frame, so "lower is better" below is true
+    // whichever sense the caller posed.
+    let base_obj = sense * base_obj;
+    let retry_obj = sense * retry_obj;
     let tol = accept_tol * base_obj.abs().max(1.0);
     if retry_obj > base_obj + tol {
         return false; // rule 1: strictly worse feasible point
@@ -722,6 +754,23 @@ impl IpoptApplication {
     /// take `x` and the multipliers from the last `finalize_solution`
     /// payload instead; that one is always the answer being reported,
     /// because the floor restores it *by* calling `finalize_solution`.
+    ///
+    /// The payload is in the **model's own units** and in the **reduced**
+    /// presolve space: `CountingTnlp`-style consumers sit inside the gh#486
+    /// scaling wrapper (so `x /= d`, `z *= d` have already been applied) and
+    /// outside the presolve one (so the row/column lift has not). A caller
+    /// swapping it in must therefore skip its own scaling correction and keep
+    /// its own lift; getting that backwards squares the factor, which is a
+    /// silent wrong answer of exactly the shape this flag exists to remove.
+    ///
+    /// **Not consulted, and known not to be**: the three other
+    /// [`Self::set_on_converged`] consumers —
+    /// `pounce-sensitivity/src/{solver,convenience}.rs` and
+    /// `pounce-cli/src/minima/mod.rs` — read the converged KKT state and the
+    /// factorization, which the `finalize_solution` payload does not carry
+    /// and which cannot be rewound. After any floor replay their result
+    /// describes the attempt that lost. Pre-existing, unfixed, and annotated
+    /// at each site.
     ///
     /// `false` on every solve that never spent a second attempt, which is
     /// almost all of them, so the ordinary path is unaffected.
@@ -3347,12 +3396,27 @@ impl IpoptApplication {
         // measured, `-13.0057 -> -1.2072` on a random QPEC, and
         // `+1.82e-09 -> -6.61e-05` on `scholtes4`, whose `f*` is exactly 0.
         let retry_obj = self.statistics.borrow().final_objective;
+        // `obj_scaling_factor < 0` is how a maximization is posed, and
+        // `final_objective` is the user's signed objective, so the
+        // comparison direction has to follow it (R2).
+        let sense = if self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .map(|(v, _)| v)
+            .unwrap_or(1.0)
+            < 0.0
+        {
+            -1.0
+        } else {
+            1.0
+        };
         let answer_is_admissible = retry_answer_is_admissible(
             certificate_floor.objective,
             certificate_floor.unscaled_constr_viol,
             retry_obj,
             retry_viol,
             self.dual_divergence_retry_accept_tol(),
+            sense,
         );
         let promote = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded)
             && claimed_success_is_real
@@ -8394,6 +8458,14 @@ mod tests {
     //   | scholtes4  | +1.8176e-09 | 2.07e-25  | -6.6088e-05 | 1.09e-09   | rule 2 |
 
     const ACCEPT: Number = 1e-6;
+    /// Minimization, which is every row of the table above.
+    const MIN: Number = 1.0;
+    /// Maximization, i.e. `obj_scaling_factor < 0`.
+    const MAX: Number = -1.0;
+
+    fn admissible(bo: Number, bv: Number, ro: Number, rv: Number) -> bool {
+        retry_answer_is_admissible(bo, bv, ro, rv, ACCEPT, MIN)
+    }
 
     #[test]
     fn the_reproducers_promotion_is_still_admissible() {
@@ -8401,9 +8473,7 @@ mod tests {
         // deliberately, since it buys nine orders of unscaled dual
         // residual. Five orders inside the tolerance, so rule 1 admits
         // it, which is the whole point of having a tolerance at all.
-        assert!(retry_answer_is_admissible(
-            3.586e-28, 1.11e-16, 5.835e-11, 5.47e-12, ACCEPT
-        ));
+        assert!(admissible(3.586e-28, 1.11e-16, 5.835e-11, 5.47e-12));
     }
 
     /// Rule 1: a strictly worse feasible point is never an upgrade.
@@ -8413,26 +8483,23 @@ mod tests {
         // by `pounce verify`. The retry's unscaled KKT error is 2.9e-11
         // against the base attempt's 3.0e+03, so every certificate
         // conjunct passes and only this one refuses it.
-        assert!(!retry_answer_is_admissible(
+        assert!(!admissible(
             -1.3005680756e1,
             2.22e-16,
             -1.2072337962e0,
-            4.55e-13,
-            ACCEPT
+            4.55e-13
         ));
-        assert!(!retry_answer_is_admissible(
+        assert!(!admissible(
             -4.7919265770e0,
             1.07e-14,
             -9.8562977711e-1,
-            7.99e-14,
-            ACCEPT
+            7.99e-14
         ));
-        assert!(!retry_answer_is_admissible(
+        assert!(!admissible(
             -2.9558632401e-1,
             6.25e-17,
             -9.7321185691e-2,
-            6.21e-13,
-            ACCEPT
+            6.21e-13
         ));
     }
 
@@ -8446,21 +8513,19 @@ mod tests {
     /// out. Rule 1 cannot see it: the objective got *better*.
     #[test]
     fn an_improvement_bought_with_primal_slack_is_refused() {
-        assert!(!retry_answer_is_admissible(
+        assert!(!admissible(
             1.8175997416e-9,
             2.07e-25,
             -6.6088333055e-5,
-            1.09e-9,
-            ACCEPT
+            1.09e-9
         ));
         // The same numbers with the primal *held* would be admissible --
         // this is the conjunct that refuses it, not the objective move.
-        assert!(retry_answer_is_admissible(
+        assert!(admissible(
             1.8175997416e-9,
             2.07e-25,
             -6.6088333055e-5,
-            2.07e-25,
-            ACCEPT
+            2.07e-25
         ));
     }
 
@@ -8477,51 +8542,87 @@ mod tests {
         assert!(refuse > ACCEPT * 1.0e4, "{refuse} is not well outside");
         // Scale-relative above 1, absolute below it -- the same
         // convention `sigma_forward_error_is_small` uses for `norm(x)`.
-        assert!(retry_answer_is_admissible(
-            1.0e6,
-            0.0,
-            1.0e6 + 0.5,
-            0.0,
-            ACCEPT
-        ));
-        assert!(!retry_answer_is_admissible(
-            1.0e6,
-            0.0,
-            1.0e6 + 5.0,
-            0.0,
-            ACCEPT
-        ));
+        assert!(admissible(1.0e6, 0.0, 1.0e6 + 0.5, 0.0));
+        assert!(!admissible(1.0e6, 0.0, 1.0e6 + 5.0, 0.0));
     }
 
     /// An infeasible base attempt is not a point worth protecting, so
     /// both rules stand down and the certificate conjuncts decide alone.
+    /// R2: `obj_scaling_factor < 0` poses a maximization, and
+    /// `final_objective` is the user's **signed** objective, so both rules
+    /// have to follow the sense. This is the table above with every
+    /// objective negated: the same three answers must be refused and the
+    /// same one admitted, with `MAX` instead of `MIN`.
+    ///
+    /// Without the normalization each row flips — rule 1 starts refusing
+    /// genuine improvements (a regression against the behaviour before the
+    /// conjunct existed) and rule 2 starts admitting strictly worse
+    /// answers, which is the class it was added to block.
+    #[test]
+    fn the_rules_follow_the_objective_sense() {
+        // qpec_small, mirrored: the retry is worse by 5.8e-11, well inside
+        // the tolerance, so it is still admitted.
+        assert!(retry_answer_is_admissible(
+            -3.586e-28, 1.11e-16, -5.835e-11, 5.47e-12, ACCEPT, MAX
+        ));
+        // r116, mirrored: +13.0057 given up for +1.2072 is now a *worse*
+        // maximum, and rule 1 must still refuse it.
+        assert!(!retry_answer_is_admissible(
+            1.3005680756e1,
+            2.22e-16,
+            1.2072337962e0,
+            4.55e-13,
+            ACCEPT,
+            MAX
+        ));
+        // scholtes4, mirrored: +6.6088e-05 is now an improvement bought
+        // with primal slack, and rule 2 must still refuse it.
+        assert!(!retry_answer_is_admissible(
+            -1.8175997416e-9,
+            2.07e-25,
+            6.6088333055e-5,
+            1.09e-9,
+            ACCEPT,
+            MAX
+        ));
+        // ... and the same improvement with the primal held is admitted.
+        assert!(retry_answer_is_admissible(
+            -1.8175997416e-9,
+            2.07e-25,
+            6.6088333055e-5,
+            2.07e-25,
+            ACCEPT,
+            MAX
+        ));
+    }
+
+    /// The mirror of the above, stated as the property rather than the
+    /// rows: negating both objectives and flipping the sense must leave
+    /// every verdict unchanged.
+    #[test]
+    fn negating_the_objective_and_the_sense_is_inert() {
+        for &(bo, bv, ro, rv) in &[
+            (3.586e-28, 1.11e-16, 5.835e-11, 5.47e-12),
+            (-1.3005680756e1, 2.22e-16, -1.2072337962e0, 4.55e-13),
+            (1.8175997416e-9, 2.07e-25, -6.6088333055e-5, 1.09e-9),
+            (1.8175997416e-9, 2.07e-25, -6.6088333055e-5, 2.07e-25),
+            (-1.0e3, 1.0e-2, 0.0, 1.0e-12),
+        ] {
+            assert_eq!(
+                retry_answer_is_admissible(bo, bv, ro, rv, ACCEPT, MIN),
+                retry_answer_is_admissible(-bo, bv, -ro, rv, ACCEPT, MAX),
+                "verdict moved under (obj, sense) -> (-obj, -sense) at {bo:e}/{ro:e}"
+            );
+        }
+    }
+
     #[test]
     fn an_infeasible_base_attempt_protects_nothing() {
-        assert!(retry_answer_is_admissible(
-            -1.0e3, 1.0e-2, 0.0, 1.0e-12, ACCEPT
-        ));
+        assert!(admissible(-1.0e3, 1.0e-2, 0.0, 1.0e-12));
         // ... and what cannot be measured is refused, not admitted, the
         // same way `runaway_is_the_whole_residual` treats a NaN.
-        assert!(retry_answer_is_admissible(
-            Number::NAN,
-            0.0,
-            0.0,
-            0.0,
-            ACCEPT
-        ));
-        assert!(!retry_answer_is_admissible(
-            0.0,
-            0.0,
-            Number::NAN,
-            0.0,
-            ACCEPT
-        ));
-        assert!(!retry_answer_is_admissible(
-            0.0,
-            0.0,
-            -1.0,
-            Number::NAN,
-            ACCEPT
-        ));
+        assert!(admissible(Number::NAN, 0.0, 0.0, 0.0));
+        assert!(!admissible(0.0, 0.0, Number::NAN, 0.0));
+        assert!(!admissible(0.0, 0.0, -1.0, Number::NAN));
     }
 }

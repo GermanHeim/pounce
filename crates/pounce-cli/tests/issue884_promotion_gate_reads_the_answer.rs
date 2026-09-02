@@ -66,6 +66,7 @@
 //! | drop conjunct 7 (rule 2) | `scholtes4_is_not_promoted_below_its_known_optimum` |
 //! | drop both | both, and `a_declined_retry_reports_one_answer` |
 //! | drop the `answer_restored_from_floor` swap in `main.rs` | `a_declined_retry_reports_one_answer` |
+//! | let the gh#486 correction run on the swapped capture | `a_declined_retry_reports_one_answer_under_variable_scaling` only — the unscaled leg stays green, which is the point |
 //! | tighten the objective tolerance below `5.8e-11` | `the_reproducer_still_promotes` |
 
 use std::path::PathBuf;
@@ -238,6 +239,73 @@ fn a_declined_retry_reports_one_answer() {
          = {:.10e}. stdout:\n{out}",
         r.solution.objective,
     );
+}
+
+/// The same invariant **under a change of variables** — which is the leg
+/// that would have caught R1, and the reason
+/// `a_declined_retry_reports_one_answer` alone was not enough.
+///
+/// `CountingTnlp` sits *inside* the gh#486 scaling wrapper and *outside*
+/// the presolve one, so its `finalize_solution` payload has already had
+/// `x /= d`, `z *= d` applied and has *not* been lifted out of the reduced
+/// presolve space. The CLI's floor swap therefore has to skip the gh#486
+/// correction and keep the presolve lift. Getting that backwards squares
+/// the factor: measured on this fixture under
+/// `nlp_scaling_method=curvature-based` (`d = [2, 2, 0.5007]`), the
+/// declined retry reported `x = [7.28e-14, 7.28e-14, -3.63e-09]` against
+/// the correct `[1.46e-13, 1.46e-13, -1.82e-09]`, with the objective
+/// beside it unchanged and right.
+///
+/// `curvature-based` rather than `user-scaling` deliberately: it derives
+/// its own factors, so the leg needs no suffix in the fixture and cannot
+/// silently become `d = 1` if one is dropped. The assertion is against the
+/// `dual_divergence_retry=no` run rather than a literal, so it stays true
+/// if the model's solution moves.
+#[test]
+fn a_declined_retry_reports_one_answer_under_variable_scaling() {
+    const SCALED: &[&str] = &[
+        "nlp_scaling_method=curvature-based",
+        "bound_relax_factor=0",
+        "tol=1e-8",
+    ];
+    let (r, out) = solve("mpcc_scholtes4_biactive", SCALED);
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "this leg is about the declined path. stdout:\n{out}"
+    );
+    assert!(
+        r.statistics.dual_divergence_signature,
+        "the detector must fire here or the leg tests nothing. stdout:\n{out}"
+    );
+
+    // 1. The reported point and the reported objective agree.
+    let f_at_x = r.solution.x[0] + r.solution.x[1] - r.solution.x[2];
+    assert!(
+        (f_at_x - r.solution.objective).abs() <= 1e-9,
+        "f(solution.x) = {f_at_x:.10e} against solution.objective = {:.10e} \
+         — the scaling correction landed a different number of times on the \
+         point than on the objective. stdout:\n{out}",
+        r.solution.objective,
+    );
+
+    // 2. ...and they are the answer the run without the retry gives, which
+    //    is what pins the *number of times* the correction was applied
+    //    rather than merely its self-consistency.
+    let mut off = SCALED.to_vec();
+    off.push("dual_divergence_retry=no");
+    let (base, _) = solve("mpcc_scholtes4_biactive", &off);
+    assert_eq!(
+        r.solution.x.len(),
+        base.solution.x.len(),
+        "shape moved between the two runs"
+    );
+    for (i, (a, b)) in r.solution.x.iter().zip(&base.solution.x).enumerate() {
+        assert!(
+            (a - b).abs() <= 1e-12 * b.abs().max(1.0),
+            "x[{i}] = {a:.10e} with the retry against {b:.10e} without it — \
+             the declined answer is not the base attempt's point"
+        );
+    }
 }
 
 /// None of the above is reachable at defaults, which is what keeps the

@@ -937,3 +937,70 @@ moves `x`:
 The general lesson, which is the same one this note's corpus section already
 makes one level up: *an absence of observations is not a measurement of
 reachability until you have instrumented the thing you claim is not happening.*
+
+---
+
+## Review of the fix (PR #897): five findings, and what the frames actually are
+
+`107cf3b7` was reviewed and five findings came back. Two were correctness
+gaps in the fix itself; recording them because both are the same *kind* of
+mistake the note above is about.
+
+**R1 — the CLI floor swap double-applied the gh#486 variable-scaling
+correction.** The swap reads the `finalize_solution` payload, and the payload
+is the *output* of that substitution. The wrapper order, traced rather than
+assumed:
+
+```
+ScalingTnlp  (x /= d, z *= d)      <- installed by optimize_tnlp on what it is handed
+  CountingTnlp (captures here)     <- so the capture is in MODEL units
+    PresolveTnlp (row/column lift) <- but NOT lifted out of the reduced space
+      NlProblem
+```
+
+So the swap has to **skip** the gh#486 correction and **keep** the presolve
+lift. The first revision did neither — it ran before both — and the
+correction landed twice. Measured on `mpcc_scholtes4_biactive` under
+`nlp_scaling_method=curvature-based`, `d = [2, 2, 0.5007]`:
+
+| | `x` |
+|---|---|
+| declined retry, before the fix | `[7.28e-14, 7.28e-14, -3.63e-09]` |
+| correct (`dual_divergence_retry=no`) | `[1.46e-13, 1.46e-13, -1.82e-09]` |
+
+Every component off by exactly the factor, objective beside it unchanged and
+right. `a_declined_retry_reports_one_answer` could not see it because every
+run in it is unscaled, where `d = 1` — the corpus-uniformity trap, inside the
+very PR that fixed two instances of it. The new leg
+`..._under_variable_scaling` is mutation-checked and is the *only* test that
+reddens when the double-application is restored.
+
+**R2 — the two new conjuncts assumed minimization.** `final_objective` is the
+user's **signed** objective and `obj_scaling_factor < 0` is the documented way
+to pose a maximization, so both rules invert under it: rule 1 refuses genuine
+improvements, rule 2 admits strictly worse answers. Closed by normalizing the
+sense before comparing, with `negating_the_objective_and_the_sense_is_inert`
+asserting the property rather than re-listing the rows.
+
+**R3 — rule 2 has no noise floor**, and the correctness claim rests on a
+correlation. Named in the code and the changelog rather than papered over: of
+the 45 promotions removed, ~35 are improvements refused because the violation
+ticked up sub-tolerance, and the rule detects "the primal moved", not "below
+the optimum" — had `scholtes4`'s retry held its violation, the wrong answer
+would have been admitted.
+
+**R4 — the accessor's contract binds three other `set_on_converged`
+consumers** that do not honour it and cannot: `pounce-sensitivity/src/{solver,
+convenience}.rs` and `pounce-cli/src/minima/mod.rs` read the converged KKT
+state and factorization, which the payload does not carry and which cannot be
+rewound. Annotated at each site.
+
+**R5 — the σ re-record dropped the status conjunct** the recording site
+defines as part of the bit ("widen the recording, not the reader"). Restored,
+for consistency rather than behaviour.
+
+The lesson is the same one twice over: **a frame is a measurement, not an
+inference.** R1 came from reasoning about which wrapper was outside which
+instead of printing the vectors, and it was wrong in the direction that
+produced a plausible answer. Printing `snapshot_x`, `d`, the `on_converged`
+capture and the payload side by side settled it in one run.

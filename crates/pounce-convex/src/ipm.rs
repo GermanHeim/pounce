@@ -3277,11 +3277,22 @@ fn sigma_verdict_after_crossover(
     recorded: bool,
 ) -> bool {
     match before {
-        Some(before) if before != sol.x.as_slice() => !sigma_forward_error_is_small(
-            prob,
-            sol,
-            SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(tol),
-        ),
+        // The status conjunct is part of the bit's definition at the
+        // recording site — "this answer should be demoted", i.e. currently
+        // labelled `Optimal` AND far from optimal — and that site's comment
+        // says to widen the recording rather than the reader. Repeating it
+        // here keeps the two writers of the same bit agreeing on what it
+        // means. Unreachable today, since `demote_uncertified_sigma_optimum`
+        // re-checks the status and crossover is never-regressing; it is
+        // consistency, not behaviour (R5).
+        Some(before) if before != sol.x.as_slice() => {
+            sol.status == QpStatus::Optimal
+                && !sigma_forward_error_is_small(
+                    prob,
+                    sol,
+                    SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(tol),
+                )
+        }
         _ => recorded,
     }
 }

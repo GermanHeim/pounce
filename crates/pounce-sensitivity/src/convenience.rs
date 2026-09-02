@@ -319,6 +319,20 @@ impl SensSolve {
         let outbox: Rc<RefCell<CallbackOut>> = Rc::new(RefCell::new(CallbackOut::default()));
         let outbox_cb = Rc::clone(&outbox);
 
+        // NOTE (gh#884 follow-up): `set_on_converged` fires once per
+        // *attempt*. When a later attempt loses and an earlier one's answer
+        // is replayed through the three-sink floor -- the mu fallback
+        // (pounce#870, on by DEFAULT) or the gh#884 dual-divergence retry --
+        // the converged KKT state this closure reads belongs to the
+        // DISCARDED attempt, while the status, objective and statistics
+        // reported alongside it are the winner's.
+        // `IpoptApplication::answer_restored_from_floor()` reports that this
+        // happened; the CLI's main path consults it and re-reads the point
+        // from the `finalize_solution` payload. This site does not, because
+        // what it needs is the factorization and the KKT state, which the
+        // payload does not carry and which cannot be rewound. Pre-existing
+        // and unfixed: a sensitivity result taken across a floored solve
+        // describes the attempt that lost.
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
