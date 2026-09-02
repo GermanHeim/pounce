@@ -1,0 +1,255 @@
+//! gh#884 follow-up — the promotion gate must rank the two attempts as
+//! **answers**, not only as certificates.
+//!
+//! `crates/pounce-cli/tests/issue_884_biactive_dual_divergence.rs` owns the
+//! number gh#884 reported and the fact that the retry works. This file owns
+//! the other half: what the retry is allowed to hand back.
+//!
+//! **What was wrong.** The gate promoted on `Solve_Succeeded` + unscaled
+//! KKT error and constraint violation within `acceptable_tol` + a strictly
+//! better unscaled KKT error than the base attempt. Every one of those is a
+//! statement about the *certificate*. The argument that this was enough
+//! reads, in `run_with_dual_divergence_retry`:
+//!
+//! > that deferral exists because the μ flip returns a different *local
+//! > solution* … This retry cannot: conjunct 4 requires the promoted answer
+//! > to satisfy the KKT conditions in the model's own units.
+//!
+//! Any *other* KKT point satisfies the KKT conditions in the model's own
+//! units too, so the inference does not hold. Measured on 400 random QPECs
+//! under the `prod_eq` lowering at `bound_relax_factor=0
+//! mu_strategy_fallback=no tol=1e-8`: **68 promotions, 42 of which moved the
+//! objective materially** — i.e. returned a different local solution — and
+//! **three of which returned a strictly worse feasible point**, worst case
+//! `-13.0057 → -1.2072`, both independently `pounce verify`-feasible.
+//!
+//! **Two fixtures, because the rule branches**, and a green test on the
+//! branch a fixture does not take is worth nothing (CLAUDE.md):
+//!
+//! | fixture | base f | retry f | which rule refuses it |
+//! |---|---|---|---|
+//! | `mpcc_scholtes4_biactive` | `+1.8176e-09` | `-6.6088e-05` | 2 — an improvement bought with primal slack |
+//! | `mpcc_worse_local_solution` | `-1.3006e+01` | `-1.2072e+00` | 1 — a strictly worse feasible point |
+//!
+//! `scholtes4` is the more serious of the two and is why this is a
+//! *correctness* fix rather than a quality one: its `f*` is **exactly 0**,
+//! for the MPCC and for the smooth lowering alike (`x₁x₂ = 0` forces one of
+//! the pair to zero, hence `x₃ ≤ 0`, hence `f = x₁ − x₃ ≥ 0`), so
+//! `-6.6088e-05` is a value no feasible point attains. It was returned
+//! under `EXIT: Optimal Solution Found.`
+//!
+//! That is the failure gh#884's own safety argument names and claims to
+//! exclude — `perturb_always_cd=yes` on `ralph1` reaching `f = -2.71e-5`
+//! below `f* = 0` — and `the_detector_must_not_fire_on_ralph1` is
+//! mutation-checked against it. But the barrier was fitted to `ralph1`'s
+//! scale-relative step (`7.2e-3`, against `qpec_small`'s `4.3e-8`), and
+//! `scholtes4` is the same failure class arriving on the other side of it:
+//! MPCC-LICQ fails, no S-stationary point exists, and its step settles.
+//! A threshold validated against one member of the class it has to exclude
+//! is not evidence about the class.
+//!
+//! **Provenance.** `mpcc_scholtes4_biactive` is `benchmarks/mpcc/cases.py`'s
+//! `scholtes4` — `min x₁+x₂−x₃ s.t. −4x₁+x₃ ≤ 0, −4x₂+x₃ ≤ 0,
+//! 0 ≤ x₁ ⟂ x₂ ≥ 0` — under the `prod_eq` lowering, started at the origin;
+//! its optimum is derived above and in that file. `mpcc_worse_local_solution`
+//! is seed 116 of the random QPEC family in
+//! `dev-notes/mpcc-biactive-dual-divergence.md`; no global optimum is
+//! claimed for it and none is needed — the assertion is only that the base
+//! attempt's feasible point is better than the retry's, which `pounce
+//! verify` establishes on both points independently.
+//!
+//! ## Mutation table
+//!
+//! | change | what goes red |
+//! |---|---|
+//! | drop conjunct 6 (rule 1) | `a_worse_feasible_local_solution_is_not_promoted` |
+//! | drop conjunct 7 (rule 2) | `scholtes4_is_not_promoted_below_its_known_optimum` |
+//! | drop both | both, and `a_declined_retry_reports_one_answer` |
+//! | drop the `answer_restored_from_floor` swap in `main.rs` | `a_declined_retry_reports_one_answer` |
+//! | tighten the objective tolerance below `5.8e-11` | `the_reproducer_still_promotes` |
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_solve_report::SolveReport;
+
+/// The options that put the retry in play. `bound_relax_factor=0` is the
+/// one that matters — at the default relaxation the pair never goes
+/// biactive to working precision — and it is an ordinary documented
+/// option, set by anyone who wants the model they declared.
+const REPRO: &[&str] = &["bound_relax_factor=0", "mu_strategy_fallback=no", "tol=1e-8"];
+
+fn pounce_exe() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
+}
+
+fn fixture(stem: &str) -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests");
+    p.push("fixtures");
+    p.push(format!("{stem}.nl"));
+    p
+}
+
+fn tmp_path(tag: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "pounce_gh884gate_{}_{seq}_{tag}.{ext}",
+        std::process::id()
+    ));
+    p
+}
+
+fn solve(stem: &str, opts: &[&str]) -> (SolveReport, String) {
+    let tag = format!("{stem}_{}", opts.join("_")).replace(['=', '.', '-'], "_");
+    let json = tmp_path(&tag, "json");
+    let sol = tmp_path(&tag, "sol");
+    let mut cmd = Command::new(pounce_exe());
+    cmd.arg(fixture(stem))
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("--json-output")
+        .arg(&json);
+    for o in opts {
+        cmd.arg(o);
+    }
+    let out = cmd.output().expect("spawn pounce");
+    let text = std::fs::read_to_string(&json).unwrap_or_else(|e| {
+        panic!(
+            "no report for {stem} @ {opts:?} (exit {:?}, {e}); stderr:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr),
+        )
+    });
+    let _ = std::fs::remove_file(&json);
+    let _ = std::fs::remove_file(&sol);
+    let report: SolveReport = serde_json::from_str(&text).expect("parse report");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (report, stdout)
+}
+
+/// `scholtes4`'s `f*` is exactly 0, so a *negative* objective is a value
+/// no feasible point of the model attains.
+#[test]
+fn scholtes4_is_not_promoted_below_its_known_optimum() {
+    let (r, out) = solve("mpcc_scholtes4_biactive", REPRO);
+
+    assert!(
+        r.statistics.dual_divergence_signature,
+        "the detector is supposed to fire here — if it stopped, this test \
+         is no longer about the promotion gate. stdout:\n{out}"
+    );
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "the retry was promoted at f = {:.6e}, which is below this model's \
+         exactly-known f* = 0. stdout:\n{out}",
+        r.solution.objective,
+    );
+    // The answer that ships is the base attempt's, at f* to nine digits.
+    assert!(
+        r.solution.objective >= -1e-8,
+        "reported objective {:.6e} is below f* = 0",
+        r.solution.objective,
+    );
+    assert!(
+        r.solution.objective < 1e-6,
+        "reported objective {:.6e} is not f* = 0 either",
+        r.solution.objective,
+    );
+    // And it says which gate refused it, in the words that distinguish
+    // this decline from an ordinary one.
+    assert!(
+        out.contains("declined on the ANSWER, not the certificate"),
+        "no explanation of the decline on stdout:\n{out}"
+    );
+}
+
+/// Rule 1, on a model where the objective moved the *other* way — the
+/// branch `scholtes4` does not take.
+#[test]
+fn a_worse_feasible_local_solution_is_not_promoted() {
+    let (r, out) = solve("mpcc_worse_local_solution", REPRO);
+
+    assert!(
+        r.statistics.dual_divergence_signature,
+        "the detector is supposed to fire here. stdout:\n{out}"
+    );
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "the retry was promoted at f = {:.6e}, giving up the base \
+         attempt's feasible f = -1.3005680756e1. stdout:\n{out}",
+        r.solution.objective,
+    );
+    assert!(
+        r.solution.objective < -1.3e1,
+        "the base attempt's answer was not the one reported: f = {:.10e}",
+        r.solution.objective,
+    );
+}
+
+/// The other side of the gate: over-tightening it costs gh#884 its fix.
+///
+/// `qpec_small`'s promotion moves the objective *worse* by `5.8e-11` —
+/// deliberately, to buy nine orders of unscaled dual residual — so a rule
+/// that refused any worsening at all would refuse the reproducer.
+#[test]
+fn the_reproducer_still_promotes() {
+    let (r, out) = solve("mpcc_qpec_small_biactive", REPRO);
+    assert!(
+        r.statistics.dual_divergence_retry_promoted,
+        "the reproducer lost its fix. stdout:\n{out}"
+    );
+    assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded);
+}
+
+/// One run, one answer.
+///
+/// `set_on_converged` fires once per *attempt*, and the three-sink floor
+/// does not reach it — so before this was fixed a declined retry shipped
+/// the **discarded** attempt's `x` in `solution.x` and the `.sol` while
+/// `status`, `objective` and every statistic beside them had been floored
+/// back. Measured: the `.sol` held `f = -6.3274` and the JSON report next
+/// to it said `-6.1768`.
+///
+/// Checked on `scholtes4` because its objective is `x₁ + x₂ − x₃`, so the
+/// invariant needs no evaluator — the point and the number it is supposed
+/// to have produced are both in the report.
+#[test]
+fn a_declined_retry_reports_one_answer() {
+    let (r, out) = solve("mpcc_scholtes4_biactive", REPRO);
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "this test is about the declined path. stdout:\n{out}"
+    );
+    assert_eq!(r.solution.x.len(), 3, "unexpected model shape");
+    let f_at_x = r.solution.x[0] + r.solution.x[1] - r.solution.x[2];
+    assert!(
+        (f_at_x - r.solution.objective).abs() <= 1e-9,
+        "the reported point and the reported objective are from different \
+         attempts: f(solution.x) = {f_at_x:.10e} against solution.objective \
+         = {:.10e}. stdout:\n{out}",
+        r.solution.objective,
+    );
+}
+
+/// None of the above is reachable at defaults, which is what keeps the
+/// cost of the whole mechanism where gh#884 said it was.
+#[test]
+fn the_default_configuration_reaches_none_of_this() {
+    for stem in ["mpcc_scholtes4_biactive", "mpcc_worse_local_solution"] {
+        let (r, out) = solve(stem, &[]);
+        assert!(
+            !r.statistics.dual_divergence_signature,
+            "{stem} reaches the detector at default options. stdout:\n{out}"
+        );
+        assert_eq!(
+            r.solution.status,
+            ApplicationReturnStatus::SolveSucceeded,
+            "{stem} does not solve cleanly at defaults. stdout:\n{out}"
+        );
+    }
+}

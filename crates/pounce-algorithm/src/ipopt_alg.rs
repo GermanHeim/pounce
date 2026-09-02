@@ -72,7 +72,7 @@ const DUAL_DIV_RETRY_STEP_TOL: Number = 1e-5;
 /// same reason: below it a solve is merely mid-flight. It is what
 /// excludes `eigena2` on the L-BFGS leg, which reaches a settled step of
 /// `7.9e-9` but at an unscaled dual of only `37`.
-const DUAL_DIV_RETRY_DU_FLOOR: Number = 1e2;
+pub(crate) const DUAL_DIV_RETRY_DU_FLOOR: Number = 1e2;
 
 /// gh#884 — primal infeasibility below which the primal counts as
 /// converged for that signature. The failure mode is defined by the

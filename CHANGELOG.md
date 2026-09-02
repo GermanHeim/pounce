@@ -9,6 +9,102 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The gh#884 dual-divergence retry could return an answer *below the known
+  optimum* and label it `Optimal Solution Found`.** The promotion gate ranked
+  the base attempt and the retry on unscaled KKT error alone — a statement
+  about the **certificate** — and let it decide which **point** shipped. The
+  argument that this was safe, in `run_with_dual_divergence_retry` and in the
+  `dual_divergence_retry` option help, was that unlike the μ flip this retry
+  "cannot" return a different local solution "since the promotion gate
+  requires the promoted answer to satisfy the KKT conditions unscaled". Any
+  other KKT point satisfies them too, so the inference never held.
+
+  Measured on 400 random QPECs under the `prod_eq` lowering at
+  `bound_relax_factor=0 mu_strategy_fallback=no tol=1e-8`: **68 promotions, 42
+  of which moved the objective materially** — a different local solution — and
+  **three of which handed back a strictly worse feasible point**, worst case
+  `-13.0057 → -1.2072`, both independently `pounce verify`-feasible.
+
+  Worse, and the reason this is a correctness fix: on MacMPEC's **`scholtes4`**
+  (`min x₁+x₂−x₃ s.t. −4x₁+x₃ ≤ 0, −4x₂+x₃ ≤ 0, 0 ≤ x₁ ⟂ x₂ ≥ 0`, already in
+  `benchmarks/mpcc/cases.py` with a derived `f* = 0`) the retry promoted
+  `f = -6.6088e-05` — a value **no feasible point of the model attains**, since
+  `x₁x₂ = 0` forces `x₃ ≤ 0` and hence `f ≥ 0` — by moving the complementarity
+  row from `2.07e-25` to `1.09e-09`, and reported `Optimal Solution Found`. All
+  three starts. That is precisely the failure gh#884's own safety argument
+  names and claims the detector excludes (`perturb_always_cd=yes` reaching
+  `f = -2.71e-5` below `f* = 0` on `ralph1`); the barrier was fitted to
+  `ralph1`'s scale-relative step and `scholtes4` is the same class on the other
+  side of it — MPCC-LICQ fails, no S-stationary point exists, and its step
+  settles. `ralph1` is still correctly held out.
+
+  Two conjuncts added, both about the *answer*, both skipped when the base
+  attempt is not itself feasible within `acceptable_tol`: the retry may not
+  return a **strictly worse objective**, and an objective **improvement may not
+  be bought with primal slack** (a better objective at a larger constraint
+  violation is refused). Tolerance is `acceptable_tol · max(1, |base objective|)`;
+  it is not fitted — the smallest move that must be admitted is the gh#884
+  reproducer's own `5.8e-11` and the smallest that must be refused is `0.198`,
+  four and five orders either side. After: **0** worse-objective promotions,
+  42 → 1 objective moves, and the one survivor improves the constraint
+  violation as well as the objective. `qpec_small` still promotes.
+
+  Separately, `runaway_is_the_whole_residual` tested only a *ratio*, which is
+  scale-free and so cannot say the residual is large: answers with an unscaled
+  dual residual of `4.4e-01` opened a retry, which is not a runaway by the
+  issue's own description. It now also clears the detector's own
+  `dual_divergence_retry_du_floor`, so the answer-level gate asks about the
+  same magnitude the iterate-level one did; that alone removes 7 of the 68.
+
+  The declined path is documented in the console as a decline **on the answer,
+  not the certificate**, with both attempts' objectives and violations, since
+  otherwise a refused-but-converged retry reads as a contradiction.
+
+  `crates/pounce-cli/tests/issue884_promotion_gate_reads_the_answer.rs` carries
+  both branches on separate fixtures — `mpcc_scholtes4_biactive` for the
+  bought-improvement rule, `mpcc_worse_local_solution` for the worse-objective
+  rule — and a mutation table; dropping either conjunct reddens exactly its own
+  test. Fixture sweep: **empty across all 188 fixture-legs**, since no fixture
+  reaches the retry at default options.
+
+- **A declined retry reported two different answers.** `set_on_converged` fires
+  once per *attempt*, and the three-sink floor (pounce#870) does not reach it —
+  so when a retry converged and was then refused, `solution.x`, the `.sol` and
+  the dual block still carried the **discarded** attempt's point while `status`,
+  `objective` and every statistic beside them had been floored back to the
+  attempt that won. Measured on a declined retry: the `.sol` held `f = -6.3274`
+  while the JSON report next to it said `-6.1768`, and `pounce verify` on the
+  `.sol` confirmed the file carried the loser. Present in both the gh#884 retry
+  and the μ fallback.
+
+  `IpoptApplication::answer_restored_from_floor()` now reports that a floor was
+  replayed, and the CLI re-reads the point from the last `finalize_solution`
+  payload when it was — that payload is always the answer being reported,
+  because the floor restores it *by* calling `finalize_solution`. Pinned by
+  `a_declined_retry_reports_one_answer`, which compares the reported objective
+  against the objective evaluated at the reported point.
+
+- **A `σ` demotion could discard a crossover-purified exact vertex (gh#880 /
+  gh#888 interaction).** `solve_qp_core` records the `σ` verdict about the
+  candidate the cascade returns, and `maybe_crossover` can then replace that
+  interior iterate with an **exact vertex** without re-entering the solver, so
+  the demotion applied at the outermost layer described a point that was no
+  longer the answer. `sigma_verdict`'s module doc anticipated this and asked a
+  future consumer sensitive to the distinction to re-record; gh#888 created one
+  a merge earlier, and it is not a label — the CLI reroutes `ProblemClass::Lp`
+  on `OptimalInaccurate`, so the stale verdict *throws the vertex away* and
+  re-solves on the NLP arm. The verdict is now re-asked of the point actually
+  being returned, through the same estimator with the same cut.
+
+  Reachability, stated plainly: this was **not** reproduced. `σ` engages only
+  when `max(‖P‖∞, ‖c‖∞)·ε > tol`, which 1 of 79 CLI fixtures, 0 of 138
+  Maros-Mészáros problems and 0 of 150 purpose-built degenerate LPs with `‖c‖∞`
+  from `1e8` to `1e13` satisfy. It is fixed as a reasoned defect with unit tests
+  on all three branches rather than a fixture, and the clone that supports it is
+  taken only when a verdict was recorded, so the ordinary path pays nothing.
+
 ### Added
 
 - **`benchmarks/mpcc/`: the MPCC benchmark harness POUNCE has listed as
@@ -256,13 +352,32 @@ changes.
   fallback can fire — so a reroute left no trace in the sweep diff, which is
   the blind spot CLAUDE.md names when it says a routing regression "used to
   leave no trace". With the field in place the sweep shows `scaled_feasible_a`
-  and `airport` answering from `nlp`; both already did so on `main`, and only
-  the instrument changed.
+  and `airport` answering from `nlp`. The two are **not** the same event, and
+  an earlier revision of this entry said they were: `airport` already answered
+  from `nlp` on `main` — verified against a baseline binary, so only the
+  instrument changed there — while `scaled_feasible_a` did **not**. On `main`
+  the convex arm solved it directly in 69 iterations at objective exactly `0`;
+  it reroutes only because this release stopped widening its bounds, which is
+  the status regression described above and the reroute is its repair. The
+  rerouted answer is `1.12e-08` (exact leg) / `2.82e-07` (lbfgs) against a
+  true optimum of `0`.
 
   Net effect of this and the change above, against the shipped binary: the
   fixture sweep shows **0 status flips**, 52 objective moves (all toward the
   declared optimum), total iterations **5618 → 5409**, and 4 engine-column
-  moves that are the new instrument reporting pre-existing reroutes.
+  moves — two of them (`airport`, both legs) the new instrument reporting a
+  pre-existing reroute, and two (`scaled_feasible_a`, both legs) a reroute
+  this release introduced.
+
+  **One convex fixture-leg pair also costs iterations and is not in the
+  aggregate above**: `feasible_x0_wide_scale` goes `32 → 80` on both legs,
+  cvx-qp either side, and reverts to `32` under `bound_relax_factor=1e-8` —
+  so it is the declared model being harder there, the same mechanism as
+  `scaled_feasible_a` without the status flip. It is a 2.5× trajectory
+  regression on one small model, recorded here rather than left inside the
+  "16% fewer iterations excluding those two fixtures" summary, because
+  CLAUDE.md asks that every moved line be explainable and that a measured
+  regression carried as a cost of a fix be named.
 - **`pounce.sensitivity`: the sensitivity analysis layer is now pounce's, and
   `pyomo_pounce` is one of its callers.** Every numeric behind
   `sens_solution()`, `sens_solution_report()`, `sens_active_set_changes()`,
