@@ -33,6 +33,19 @@ pub struct CountingTnlp {
     /// active-set SQP route, whose solve bypasses the IPM-only
     /// `on_converged` hook the `.sol` / JSON writers normally read.
     captured_solution: RefCell<Option<(Vec<Number>, Vec<Number>)>>,
+    /// The `(z_l, z_u)` of that same `finalize_solution`, in the user's
+    /// Ipopt convention (both `>= 0` at an active bound).
+    ///
+    /// Captured for the same reason as `captured_solution` and one more:
+    /// when a losing retry's answer is thrown away and an earlier
+    /// attempt's replayed, `on_converged` has already run for the loser,
+    /// so the CLI's bound-multiplier capture -- the `ipopt_zL_out` /
+    /// `ipopt_zU_out` suffixes -- describes the discarded point. The
+    /// replay is itself a `finalize_solution` call, so this always holds
+    /// the answer being reported. Both sources apply the same
+    /// `Nlp::finalize_solution_z_l` / `_z_u` lift, so they are the same
+    /// numbers and not merely compatible ones.
+    captured_bound_mults: RefCell<Option<(Vec<Number>, Vec<Number>)>>,
 }
 
 impl CountingTnlp {
@@ -45,12 +58,22 @@ impl CountingTnlp {
             n_jac_g: Cell::new(0),
             n_h: Cell::new(0),
             captured_solution: RefCell::new(None),
+            captured_bound_mults: RefCell::new(None),
         }
     }
 
     /// The `(x, lambda)` captured at the last `finalize_solution`, if any.
     pub fn captured_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
         self.captured_solution.borrow().clone()
+    }
+
+    /// The `(z_l, z_u)` captured at that same `finalize_solution`.
+    ///
+    /// `None`, and empty vectors, are distinct: a non-`OrigIpoptNlp` model
+    /// hands back empty bound-multiplier blocks and no suffixes are
+    /// written, which callers must not confuse with "not captured".
+    pub fn captured_bound_mults(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        self.captured_bound_mults.borrow().clone()
     }
 }
 
@@ -110,6 +133,7 @@ impl TNLP for CountingTnlp {
 
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
         *self.captured_solution.borrow_mut() = Some((sol.x.to_vec(), sol.lambda.to_vec()));
+        *self.captured_bound_mults.borrow_mut() = Some((sol.z_l.to_vec(), sol.z_u.to_vec()));
         self.inner
             .borrow_mut()
             .finalize_solution(sol, ip_data, ip_cq);

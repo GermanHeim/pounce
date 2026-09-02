@@ -833,8 +833,15 @@ gradient never produces. The second answer is returned **only** if all of:
 
 1. the retry ends `Solve_Succeeded`;
 2. its **unscaled** KKT error and constraint violation are both within
-   `acceptable_tol`; and
-3. its unscaled KKT error is strictly better than the first attempt's.
+   `acceptable_tol`;
+3. its unscaled KKT error is strictly better than the first attempt's; and
+4. its **answer** is admissible next to the first attempt's — it may not
+   return a strictly worse objective, and an objective *improvement* may
+   not be bought with primal slack (a better objective at a larger
+   constraint violation is refused). Both comparisons use `acceptable_tol`
+   scaled by `max(1, |first objective|)`, and both stand down when the
+   first attempt is not itself feasible within that tolerance, since there
+   is then no admissible answer to protect.
 
 Those two statuses are the whole scope, and they are the two a vanishing
 gradient row produces *directly*: `Solved_To_Acceptable_Level` is gh#884
@@ -851,6 +858,23 @@ are all put back — the retry costs iterations, never the answer. Condition 2
 is what stops the gate reproducing the bug one attempt later: the defect
 *was* a status its own unscaled residual contradicted, so a promotion rule
 reading the status alone would launder it again.
+
+Condition 4 is a **separate** barrier, not a restatement of the others.
+Conditions 1–3 rank the two attempts on their *certificates*, and a
+certificate cannot say which of two feasible points you should receive:
+any other KKT point satisfies the KKT conditions in the model's own units
+just as well. Without condition 4, measured over 400 random QPECs under
+the exact-product lowering, 42 of 68 promotions returned a *different local
+solution* and three returned a strictly worse feasible point — worst case
+`-13.0057` given up for `-1.2072`. On MacMPEC's `scholtes4`, whose optimum
+is exactly `0`, the retry returned `-6.61e-05` — unreachable by any
+feasible point — by moving the complementarity row from `2.07e-25` to
+`1.09e-09`, and reported `Optimal Solution Found`.
+
+When condition 4 is what refuses a retry, the console says so explicitly —
+"declined on the ANSWER, not the certificate" — with both attempts'
+objectives and constraint violations, because a converged retry with a
+clean certificate being refused otherwise reads as a contradiction.
 
 On `qpec_small` the retry takes the unscaled KKT error from
 `7.8966e+04` to `9.9636e-08` — nine orders — at the cost of a primal

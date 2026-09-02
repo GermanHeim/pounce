@@ -1853,6 +1853,66 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // ...and OVERWRITE it, not merely backfill it, when a losing retry's
+    // answer was thrown away and an earlier attempt's replayed.
+    //
+    // `on_converged` fires once per *attempt*. A retry that converged and
+    // was then refused on the answer (gh#884's promotion gate, or the μ
+    // fallback's, pounce#870) has already run it, so `nominal_capture`
+    // holds the **discarded** point while `status`, `objective` and every
+    // statistic beside them were floored back to the attempt that won.
+    // The `.sol` `x`, the JSON's `solution.x` and the dual block all come
+    // from this cell, so without the overwrite one run reports two
+    // different answers: measured on a declined retry, the `.sol` held
+    // `f = -6.3274` and the JSON report beside it said `-6.1768`, with
+    // `pounce verify` on the `.sol` confirming the file carried the loser.
+    //
+    // `captured_solution()` is refreshed by `FinalizeSnapshot::replay`,
+    // which restores the winning attempt by *calling* `finalize_solution`
+    // — so the last capture is always the answer being reported, on this
+    // path and on the ordinary one. Gated on the flag rather than taken
+    // unconditionally because the two agree everywhere else, and
+    // `on_converged`'s capture is the one that has had the gh#486
+    // variable-scaling substitution undone against the algorithm's own
+    // iterate; this swap is for the case where that capture describes a
+    // point nobody is reporting.
+    //
+    // **Frame**: `CountingTnlp` sits INSIDE the gh#486 scaling wrapper
+    // (`main.rs` hands `counting` to `optimize_tnlp`, which wraps what it is
+    // handed) and OUTSIDE the presolve one (`counting.inner` is
+    // `post_presolve`, and it captures before forwarding). So this payload
+    // has ALREADY had `x /= d`, `z *= d` applied by
+    // `scaling_tnlp::finalize_solution`, and has NOT been lifted out of the
+    // reduced presolve space. The lift below must therefore still run on it;
+    // the gh#486 correction must not, or it lands twice. Measured before
+    // this flag existed, on `mpcc_scholtes4_biactive` under
+    // `nlp_scaling_method=curvature-based`: a declined retry reported
+    // `x = [7.28e-14, 7.28e-14, -3.63e-09]` against the correct
+    // `[1.46e-13, 1.46e-13, -1.82e-09]` — every component off by exactly the
+    // factor, with the objective beside it unchanged and right. Silent,
+    // plausible, wrong: the shape this whole block exists to remove, one
+    // wrapper over.
+    let capture_is_already_in_model_units = app.answer_restored_from_floor();
+    if capture_is_already_in_model_units {
+        if let Some(xl) = counting.borrow().captured_solution() {
+            *nominal_capture.borrow_mut() = Some(xl);
+        }
+        // The bound multipliers are the same story one field over: they
+        // also come from `on_converged`, they are also the loser's, and
+        // they are what `ipopt_zL_out` / `ipopt_zU_out` ship to Pyomo and
+        // AMPL for reduced-cost work (gh #296). Both sources apply the
+        // same `finalize_solution_z_l` / `_z_u` lift, so this is the same
+        // number rather than a compatible one. Empty blocks are left
+        // alone: a non-`OrigIpoptNlp` model writes no such suffixes, and
+        // overwriting a populated capture with an empty pair would drop
+        // them rather than correct them.
+        if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
+            if !z_l.is_empty() || !z_u.is_empty() {
+                *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+            }
+        }
+    }
+
     // Presolve row-dropping: both lambda sources above (`on_converged`
     // and the `CountingTnlp` fallback) sit *outside* presolve, so their
     // `lambda` is in the reduced kept-row space — length `m_out`, not the
@@ -1900,7 +1960,14 @@ pub fn main() -> ExitCode {
     // and report it as though it were in the model's units, which no
     // reader could detect. Both captures come from the same iterate the
     // factors were built against, so a mismatch is a wiring bug.
-    if let Some(d) = app.variable_scaling() {
+    // Skipped when the captures came from the `finalize_solution` payload
+    // (see `capture_is_already_in_model_units` above): that payload is the
+    // output of this very substitution, so correcting it again squares the
+    // factor.
+    if let Some(d) = app
+        .variable_scaling()
+        .filter(|_| !capture_is_already_in_model_units)
+    {
         if let Some((x, _lambda)) = nominal_capture.borrow_mut().as_mut() {
             assert_eq!(
                 x.len(),

@@ -22,7 +22,7 @@ use crate::alg_builder::{
     LinearSolverChoice, MuStrategyChoice,
 };
 use crate::hess::lim_mem_quasi_newton::UpdateType;
-use crate::ipopt_alg::IpoptAlgorithm;
+use crate::ipopt_alg::{DUAL_DIV_RETRY_DU_FLOOR, IpoptAlgorithm};
 use crate::ipopt_cq::IpoptCalculatedQuantities;
 use crate::ipopt_data::IpoptData as AlgIpoptData;
 use crate::ipopt_nlp::IpoptNlp;
@@ -99,12 +99,144 @@ const DUAL_DIV_RETRY_DOMINANCE: Number = 1e-6;
 /// compares false everywhere, and writing this so a NaN *passed* would
 /// turn "we cannot tell" into "retry anyway". A non-positive dual
 /// residual cannot be a runaway either, and makes the ratio meaningless.
-fn runaway_is_the_whole_residual(dual_inf: Number, viol: Number, compl: Number) -> bool {
+///
+/// **The dominance ratio alone is not the whole test, and reading it as
+/// one is how a `dual_inf` of `0.44` opened a retry.** The ratio says the
+/// dual residual *dominates* the other two; it cannot say the residual is
+/// large, because a point converged to `1e-30` primal and `4.4e-1` dual
+/// passes it as comfortably as gh#884's `7.9e+04` does. So `dual_inf`
+/// must also clear the same absolute floor the detector's third conjunct
+/// applies to the iterate (`dual_divergence_retry_du_floor`, default
+/// `1e2`) — the doc above says "the entire residual is dual
+/// infeasibility", and without the floor the code only said "the largest
+/// third of it is".
+///
+/// The floor is the *detector's own*, deliberately, rather than a new
+/// constant: the detector fires on an iterate and this asks whether the
+/// **answer** still exhibits what the detector saw, so the two have to be
+/// asking about the same magnitude or the answer-level gate is a strictly
+/// looser copy of the iterate-level one. Measured on the 400-model QPEC
+/// family in `dev-notes/mpcc-biactive-dual-divergence.md`, this alone
+/// removes 7 of 68 promotions, every one of them on an answer whose
+/// reported dual residual was below `1e2` and therefore not a runaway by
+/// the issue's own description.
+fn runaway_is_the_whole_residual(
+    dual_inf: Number,
+    viol: Number,
+    compl: Number,
+    du_floor: Number,
+) -> bool {
     dual_inf.is_finite()
         && dual_inf > 0.0
+        && dual_inf >= du_floor
         && viol.is_finite()
         && compl.is_finite()
         && viol.max(compl) <= DUAL_DIV_RETRY_DOMINANCE * dual_inf
+}
+
+/// Is the retry's answer admissible *as an answer*, next to the base
+/// attempt's — independent of which has the better multiplier?
+///
+/// gh#884's promotion gate ranked the two attempts on unscaled KKT error
+/// alone. That is a statement about the **certificate**, and it was
+/// allowed to decide which **point** shipped, on the argument that
+/// "conjunct 4 requires the promoted answer to satisfy the KKT conditions
+/// in the model's own units" — so, unlike the μ flip, this retry could not
+/// return a different local solution. The inference does not hold: *any*
+/// other KKT point satisfies the KKT conditions in the model's own units
+/// too. Measured on 400 random QPECs (`prod_eq` lowering), 42 of 68
+/// promotions moved the objective materially, i.e. returned a different
+/// local solution, and three returned a **worse feasible point** — worst
+/// case `-13.0057 → -1.2072`, both independently verified feasible.
+///
+/// Two rules, and both are about the *answer* rather than its certificate:
+///
+/// 1. **Never hand back a feasible point whose objective is worse than one
+///    this run already computed.** The base attempt's point is feasible
+///    and in hand; returning a worse one is a regression no certificate
+///    buys back.
+/// 2. **An objective *improvement* may not be bought with primal slack.**
+///    Two costs this carries, named rather than hidden (R3). It is an exact
+///    non-increase with **no noise floor**, so it fires the same on
+///    `2.07e-25 -> 1.09e-09` (where the move is the whole defect) as on
+///    `1e-17 -> 1.1e-17` (where which side a retry lands on is arithmetic):
+///    of the 45 promotions this PR removes, ~35 are improvements refused
+///    because the violation ticked up somewhere far below any tolerance. The
+///    direction is conservative — the base answer is feasible and in hand —
+///    but "refuses purchases, not improvements" is only true above the noise.
+///    And the rule detects *the primal moved*, not *below the optimum*: had
+///    `scholtes4`'s retry **held** its violation, `f = -6.6088e-05` would have
+///    been admitted, which the second assertion of
+///    `an_improvement_bought_with_primal_slack_is_refused` states outright.
+///    On that model the two coincided.
+///    The remedy is for a *dual* defect — the premise is that the primal
+///    has settled — so a retry that lands further outside the constraints
+///    *and* reports a better objective has not repaired the runaway, it
+///    has moved somewhere the model does not reach. This is what
+///    `scholtes4` does: from a base at `f = +1.82e-09` with a constraint
+///    violation of `2.07e-25` it promotes `f = -6.61e-05` at `1.09e-09`,
+///    below the model's exactly-known `f* = 0`, and reports
+///    `Optimal Solution Found`.
+///
+/// Both comparisons are skipped when the base attempt is not itself
+/// feasible within [`IpoptApplication::dual_divergence_retry_accept_tol`]:
+/// there is then no admissible point to protect, and the retry's is
+/// strictly better information.
+///
+/// `tol` is that same acceptable tolerance, scaled by
+/// `max(1, |base_obj|)` so the comparison is relative on a large
+/// objective and absolute on a small one — the convention
+/// `sigma_forward_error_is_small` uses for `‖x‖` and for the same reason.
+/// It is not a fitted constant: the objective moves this has to admit
+/// (`qpec_small`, `5.8e-11`) and the ones it has to refuse (`r201`,
+/// `0.198`; `scholtes4`, `6.6e-05`) sit four and five orders away from it
+/// on either side.
+///
+/// `sense` is `+1` for a minimization and `-1` for a maximization, and both
+/// objectives are multiplied by it before either rule looks at them.
+/// [`SolveStatistics::final_objective`] is the objective evaluated on the
+/// **user** TNLP — signed, and *not* premultiplied by `obj_scaling_factor` —
+/// and a negative `obj_scaling_factor` is the documented way to pose a
+/// maximization. Without the normalization both rules invert under it: rule 1
+/// would refuse genuine *improvements* (a regression against the behaviour
+/// before this conjunct existed) and rule 2 would admit strictly worse
+/// answers, re-arming the exact class the conjunct was added to block. The
+/// repo has shipped one defect from this sign already —
+/// `masked_certificate_fuzz.rs::the_veto_is_not_disabled_by_a_negative_objective_scaling_factor`,
+/// whose fix took `.abs()` in the residual accessors, which is also what keeps
+/// the detector firing under maximization and so keeps this path reachable.
+fn retry_answer_is_admissible(
+    base_obj: Number,
+    base_viol: Number,
+    retry_obj: Number,
+    retry_viol: Number,
+    accept_tol: Number,
+    sense: Number,
+) -> bool {
+    // Nothing to compare against: a non-finite or infeasible base answer
+    // is not a point worth protecting.
+    if !base_obj.is_finite() || !base_viol.is_finite() || base_viol > accept_tol {
+        return true;
+    }
+    // A non-finite retry objective is refused rather than admitted, for
+    // the same reason `runaway_is_the_whole_residual` refuses a NaN.
+    if !retry_obj.is_finite() {
+        return false;
+    }
+    // Both into a minimization frame, so "lower is better" below is true
+    // whichever sense the caller posed.
+    let base_obj = sense * base_obj;
+    let retry_obj = sense * retry_obj;
+    let tol = accept_tol * base_obj.abs().max(1.0);
+    if retry_obj > base_obj + tol {
+        return false; // rule 1: strictly worse feasible point
+    }
+    if retry_obj < base_obj - tol {
+        // Rule 2: an improvement is admissible only if the retry did not
+        // give up primal accuracy to get it.
+        return retry_viol.is_finite() && retry_viol <= base_viol;
+    }
+    true
 }
 
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
@@ -337,6 +469,29 @@ pub struct IpoptApplication {
     /// attempt's answer. Copied into
     /// [`SolveStatistics::dual_divergence_retry_promoted`].
     dual_divergence_retry_promoted: std::cell::Cell<bool>,
+    /// Set when a losing retry's answer was thrown away and an earlier
+    /// attempt's replayed through `FinalizeSnapshot::replay` — by the μ
+    /// fallback (pounce#870) or the gh#884 dual-divergence retry.
+    ///
+    /// It exists because [`Self::set_on_converged`] fires **per attempt**
+    /// and the floor does not reach it. A losing retry that reached
+    /// `Solve_Succeeded` has already run the callback, so a consumer
+    /// capturing the converged iterate there — the CLI's `nominal_capture`,
+    /// which is where `.sol` `x`, the JSON's `solution.x` and the dual
+    /// block all come from — holds the *discarded* attempt's point while
+    /// the status, objective and every statistic beside it have been
+    /// floored back to the attempt that won. Measured before this flag
+    /// existed: on a declined retry the `.sol` carried `f = -6.3274` while
+    /// the JSON report next to it said `-6.1768`, and `pounce verify` on
+    /// the `.sol` confirmed the file held the losing point.
+    ///
+    /// The `finalize_solution` payload does not have this problem — the
+    /// replay *is* a `finalize_solution` call, so the last one always
+    /// carries the answer being reported — which is why the fix is to tell
+    /// the caller "prefer that payload", not to re-run the callback (the
+    /// converged KKT state the callback borrows belongs to the retry by
+    /// then, and cannot be rewound).
+    answer_restored_from_floor: std::cell::Cell<bool>,
     /// The payload of the most recent `finalize_solution` POUNCE sent to the
     /// user's TNLP, so a second-opinion retry that loses can put the winning
     /// attempt's answer back (pounce#870).
@@ -464,6 +619,7 @@ impl IpoptApplication {
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
+            answer_restored_from_floor: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
             last_iter_stats: Rc::new(RefCell::new(None)),
             sqp_warm_start: None,
@@ -585,6 +741,41 @@ impl IpoptApplication {
     /// [`ConvergedCallback`] for the use case (post-optimal sensitivity).
     pub fn set_on_converged(&mut self, cb: ConvergedCallback) {
         self.on_converged = Some(cb);
+    }
+
+    /// Was the reported answer replayed from an earlier attempt's floor,
+    /// after a later attempt lost?
+    ///
+    /// **A caller that captures the solution in [`Self::set_on_converged`]
+    /// must consult this.** That callback fires once per *attempt*, and a
+    /// losing retry that converged has already run it, so the capture
+    /// belongs to the discarded point while everything else — status,
+    /// objective, statistics — has been floored back. When this is `true`,
+    /// take `x` and the multipliers from the last `finalize_solution`
+    /// payload instead; that one is always the answer being reported,
+    /// because the floor restores it *by* calling `finalize_solution`.
+    ///
+    /// The payload is in the **model's own units** and in the **reduced**
+    /// presolve space: `CountingTnlp`-style consumers sit inside the gh#486
+    /// scaling wrapper (so `x /= d`, `z *= d` have already been applied) and
+    /// outside the presolve one (so the row/column lift has not). A caller
+    /// swapping it in must therefore skip its own scaling correction and keep
+    /// its own lift; getting that backwards squares the factor, which is a
+    /// silent wrong answer of exactly the shape this flag exists to remove.
+    ///
+    /// **Not consulted, and known not to be**: the three other
+    /// [`Self::set_on_converged`] consumers —
+    /// `pounce-sensitivity/src/{solver,convenience}.rs` and
+    /// `pounce-cli/src/minima/mod.rs` — read the converged KKT state and the
+    /// factorization, which the `finalize_solution` payload does not carry
+    /// and which cannot be rewound. After any floor replay their result
+    /// describes the attempt that lost. Pre-existing, unfixed, and annotated
+    /// at each site.
+    ///
+    /// `false` on every solve that never spent a second attempt, which is
+    /// almost all of them, so the ordinary path is unaffected.
+    pub fn answer_restored_from_floor(&self) -> bool {
+        self.answer_restored_from_floor.get()
     }
 
     /// Enable per-iteration trajectory capture. After the solve
@@ -1023,6 +1214,7 @@ impl IpoptApplication {
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
         self.dual_divergence_retry_promoted.set(false);
+        self.answer_restored_from_floor.set(false);
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
         // the core's scaling models the objective and the constraint
@@ -2929,6 +3121,7 @@ impl IpoptApplication {
                  solution and statistics alongside its status (pounce#870).",
                 retry_status);
             floor.replay(&tnlp);
+            self.answer_restored_from_floor.set(true);
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             // Third sink: the per-iteration trace. Consumers accumulate that
             // themselves from `intermediate_callback` — the CasADi plugin
@@ -3143,7 +3336,15 @@ impl IpoptApplication {
             (st.final_unscaled_constr_viol, st.final_unscaled_compl)
         };
         let base_dual_inf = self.statistics.borrow().final_unscaled_dual_inf;
-        if !runaway_is_the_whole_residual(base_dual_inf, base_viol, base_compl) {
+        if !runaway_is_the_whole_residual(
+            base_dual_inf,
+            base_viol,
+            base_compl,
+            self.options
+                .get_numeric_value("dual_divergence_retry_du_floor", "")
+                .map(|(v, _)| v)
+                .unwrap_or(DUAL_DIV_RETRY_DU_FLOOR),
+        ) {
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] gh#884: the signature fired mid-trajectory, but the \
                  answer being reported is not a converged point with a runaway \
@@ -3188,9 +3389,39 @@ impl IpoptApplication {
         // alone would reproduce the bug one attempt later.
         let claimed_success_is_real = retry_unscaled_kkt <= self.dual_divergence_retry_accept_tol()
             && retry_viol <= self.dual_divergence_retry_accept_tol();
+        // Conjuncts 6 and 7 — see `retry_answer_is_admissible`. Everything
+        // above this line ranks the two attempts on their *certificates*;
+        // this ranks them as *answers*, which is what a caller receives.
+        // Without it a better multiplier is allowed to buy a worse point:
+        // measured, `-13.0057 -> -1.2072` on a random QPEC, and
+        // `+1.82e-09 -> -6.61e-05` on `scholtes4`, whose `f*` is exactly 0.
+        let retry_obj = self.statistics.borrow().final_objective;
+        // `obj_scaling_factor < 0` is how a maximization is posed, and
+        // `final_objective` is the user's signed objective, so the
+        // comparison direction has to follow it (R2).
+        let sense = if self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .map(|(v, _)| v)
+            .unwrap_or(1.0)
+            < 0.0
+        {
+            -1.0
+        } else {
+            1.0
+        };
+        let answer_is_admissible = retry_answer_is_admissible(
+            certificate_floor.objective,
+            certificate_floor.unscaled_constr_viol,
+            retry_obj,
+            retry_viol,
+            self.dual_divergence_retry_accept_tol(),
+            sense,
+        );
         let promote = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded)
             && claimed_success_is_real
-            && retry_unscaled_kkt < base_unscaled_kkt;
+            && retry_unscaled_kkt < base_unscaled_kkt
+            && answer_is_admissible;
         // Say on the console which of the two answers shipped.
         //
         // The per-attempt end summary cannot: `emit_end_summary` runs
@@ -3214,6 +3445,23 @@ impl IpoptApplication {
                 println!(
                     "gh#884 dual-divergence retry: promoted — unscaled KKT error \
                      {base_unscaled_kkt:.4e} -> {retry_unscaled_kkt:.4e}."
+                );
+            } else if !answer_is_admissible {
+                // A distinct line, because this decline looks like a
+                // contradiction otherwise: the retry converged, its
+                // certificate is clean, and it was still refused. Say
+                // which of the two rules refused it and on what numbers,
+                // so the reader is not left comparing KKT errors that
+                // had nothing to do with it.
+                println!(
+                    "gh#884 dual-divergence retry: declined on the ANSWER, not the \
+                     certificate — the retry converged (unscaled KKT error \
+                     {retry_unscaled_kkt:.4e} against the base attempt's \
+                     {base_unscaled_kkt:.4e}) but its objective {retry_obj:.8e} at \
+                     constraint violation {retry_viol:.4e} is not admissible next to \
+                     the base attempt's {:.8e} at {:.4e}; the base attempt's answer \
+                     is the one reported.",
+                    certificate_floor.objective, certificate_floor.unscaled_constr_viol
                 );
             } else {
                 println!(
@@ -3240,6 +3488,7 @@ impl IpoptApplication {
                  and statistics alongside its status.",
                 retry_status, retry_unscaled_kkt, base_unscaled_kkt);
             floor.replay(&tnlp);
+            self.answer_restored_from_floor.set(true);
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             // The signature belongs to the attempt whose numbers are now
             // reported, and `certificate_floor` does not carry it.
@@ -8102,14 +8351,26 @@ mod tests {
     // is therefore false on Linux no matter what the threshold is, which
     // is why the pin lives here instead.
 
+    /// The dominance rule on its own, with the absolute floor switched
+    /// off (`du_floor = 0`), so each of these tests is about one rule.
+    fn ratio_only(dual_inf: Number, viol: Number, compl: Number) -> bool {
+        runaway_is_the_whole_residual(dual_inf, viol, compl, 0.0)
+    }
+
+    /// The gate as it actually runs: dominance *and* the detector's own
+    /// absolute floor.
+    fn runaway(dual_inf: Number, viol: Number, compl: Number) -> bool {
+        runaway_is_the_whole_residual(dual_inf, viol, compl, DUAL_DIV_RETRY_DU_FLOOR)
+    }
+
     #[test]
     fn a_converged_point_with_a_runaway_multiplier_opens_the_retry() {
         // The gh#884 reproducer, both routes it reaches the gate by.
-        assert!(runaway_is_the_whole_residual(7.90e4, 1.1e-16, 1.1e-9));
-        assert!(runaway_is_the_whole_residual(3.25e11, 2.5e-16, 2.8e-3));
+        assert!(runaway(7.90e4, 1.1e-16, 1.1e-9));
+        assert!(runaway(3.25e11, 2.5e-16, 2.8e-3));
         // deb7 under the rung on Linux: primal exact, complementarity
         // eight orders under its own dual residual. Same shape.
-        assert!(runaway_is_the_whole_residual(5.5743e3, 5.6e-14, 2.08e-5));
+        assert!(runaway(5.5743e3, 5.6e-14, 2.08e-5));
     }
 
     #[test]
@@ -8117,28 +8378,45 @@ mod tests {
         // deb7 under the rung on macOS: complementarity 4.65, five
         // percent of its own KKT error. Not a runaway multiplier on an
         // otherwise-converged point -- just an unconverged point.
-        assert!(!runaway_is_the_whole_residual(9.90e1, 8.0e-13, 4.65e0));
+        assert!(!ratio_only(9.90e1, 8.0e-13, 4.65e0));
         // Either residual alone is enough to close it: the gate takes the
         // max, so a clean complementarity does not excuse a violated
         // constraint. (`1.0e1` against `1.0e6` is a ratio of `1e-5`; note
         // that `1.0e0` there would be `1e-6` exactly, i.e. inside.)
-        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e1, 1.0e-16));
-        assert!(!runaway_is_the_whole_residual(1.0e6, 1.0e-16, 1.0e1));
+        assert!(!ratio_only(1.0e6, 1.0e1, 1.0e-16));
+        assert!(!ratio_only(1.0e6, 1.0e-16, 1.0e1));
+    }
+
+    /// The dominance ratio is scale-free, and that is exactly why it
+    /// cannot be the whole gate: a point converged to `1e-30` primal with
+    /// a dual residual of `4.4e-1` satisfies it as comfortably as
+    /// gh#884's `7.9e+04` does, and `4.4e-1` is not a runaway by any
+    /// reading of the issue. Measured on the 400-model QPEC family, the
+    /// floor alone removes 7 of 68 promotions, every one of them on an
+    /// answer whose reported dual residual was below `1e2`.
+    ///
+    /// The floor is the *detector's*, so this is the answer-level gate
+    /// asking about the same magnitude the iterate-level one did rather
+    /// than being a strictly looser copy of it.
+    #[test]
+    fn a_small_dual_residual_is_not_a_runaway_however_dominant() {
+        // Passes the ratio comfortably (1e-30 / 4.4e-1 = 2.3e-30) ...
+        assert!(ratio_only(4.4e-1, 1.0e-30, 1.0e-30));
+        // ... and is still refused, because it is not a runaway.
+        assert!(!runaway(4.4e-1, 1.0e-30, 1.0e-30));
+        // The two real `r`-family answers that reached the gate this way.
+        assert!(!runaway(4.397e-1, 1.0e-16, 1.0e-16));
+        assert!(!runaway(2.026e1, 1.0e-16, 1.0e-16));
+        // Exactly at the floor is inside; a hair under is outside.
+        assert!(runaway(DUAL_DIV_RETRY_DU_FLOOR, 0.0, 0.0));
+        assert!(!runaway(DUAL_DIV_RETRY_DU_FLOOR * 0.999, 0.0, 0.0));
     }
 
     #[test]
     fn the_threshold_is_where_the_constant_says_it_is() {
         // Exactly at the ratio is inside; a hair past it is outside.
-        assert!(runaway_is_the_whole_residual(
-            1.0,
-            DUAL_DIV_RETRY_DOMINANCE,
-            0.0
-        ));
-        assert!(!runaway_is_the_whole_residual(
-            1.0,
-            DUAL_DIV_RETRY_DOMINANCE * 1.001,
-            0.0
-        ));
+        assert!(ratio_only(1.0, DUAL_DIV_RETRY_DOMINANCE, 0.0));
+        assert!(!ratio_only(1.0, DUAL_DIV_RETRY_DOMINANCE * 1.001, 0.0));
     }
 
     #[test]
@@ -8146,13 +8424,205 @@ mod tests {
         // A NaN compares false everywhere, so the condition is written so
         // that "we cannot tell" declines rather than retries. Each
         // argument in turn.
-        assert!(!runaway_is_the_whole_residual(Number::NAN, 0.0, 0.0));
-        assert!(!runaway_is_the_whole_residual(1.0e6, Number::NAN, 0.0));
-        assert!(!runaway_is_the_whole_residual(1.0e6, 0.0, Number::NAN));
-        assert!(!runaway_is_the_whole_residual(Number::INFINITY, 0.0, 0.0));
+        assert!(!ratio_only(Number::NAN, 0.0, 0.0));
+        assert!(!ratio_only(1.0e6, Number::NAN, 0.0));
+        assert!(!ratio_only(1.0e6, 0.0, Number::NAN));
+        assert!(!ratio_only(Number::INFINITY, 0.0, 0.0));
         // And a dual residual that is not a runaway at all: the ratio
         // would be meaningless, and a zero-dual point is not gh#884.
-        assert!(!runaway_is_the_whole_residual(0.0, 0.0, 0.0));
-        assert!(!runaway_is_the_whole_residual(-1.0, 0.0, 0.0));
+        assert!(!ratio_only(0.0, 0.0, 0.0));
+        assert!(!ratio_only(-1.0, 0.0, 0.0));
+    }
+
+    // ---- the promotion gate reads the ANSWER, not only the certificate --
+    //
+    // gh#884 ranked the two attempts on unscaled KKT error alone and
+    // argued that this could not return a different local solution,
+    // because "conjunct 4 requires the promoted answer to satisfy the KKT
+    // conditions in the model's own units". Any other KKT point does too.
+    // Measured on 400 random QPECs under the `prod_eq` lowering
+    // (`bound_relax_factor=0 mu_strategy_fallback=no tol=1e-8`): 68
+    // promotions, 42 of which moved the objective materially, and three
+    // of which returned a strictly worse *feasible* point.
+    //
+    // Every number below is off a real run, and the two branches are
+    // separated on purpose -- a rule that branches needs a case on each
+    // side or the untaken one stays broken while the test is green.
+    //
+    //   | model      | base f      | base viol | retry f     | retry viol | branch |
+    //   |------------|-------------|-----------|-------------|------------|--------|
+    //   | qpec_small | +3.586e-28  | 1.11e-16  | +5.835e-11  | 5.47e-12   | admit  |
+    //   | r116       | -1.3006e+01 | 2.22e-16  | -1.2072e+00 | 4.55e-13   | rule 1 |
+    //   | r261       | -4.7919e+00 | 1.07e-14  | -9.8563e-01 | 7.99e-14   | rule 1 |
+    //   | r201       | -2.9559e-01 | 6.25e-17  | -9.7321e-02 | 6.21e-13   | rule 1 |
+    //   | scholtes4  | +1.8176e-09 | 2.07e-25  | -6.6088e-05 | 1.09e-09   | rule 2 |
+
+    const ACCEPT: Number = 1e-6;
+    /// Minimization, which is every row of the table above.
+    const MIN: Number = 1.0;
+    /// Maximization, i.e. `obj_scaling_factor < 0`.
+    const MAX: Number = -1.0;
+
+    fn admissible(bo: Number, bv: Number, ro: Number, rv: Number) -> bool {
+        retry_answer_is_admissible(bo, bv, ro, rv, ACCEPT, MIN)
+    }
+
+    #[test]
+    fn the_reproducers_promotion_is_still_admissible() {
+        // `qpec_small`: the retry's objective is *worse*, by 5.8e-11 --
+        // deliberately, since it buys nine orders of unscaled dual
+        // residual. Five orders inside the tolerance, so rule 1 admits
+        // it, which is the whole point of having a tolerance at all.
+        assert!(admissible(3.586e-28, 1.11e-16, 5.835e-11, 5.47e-12));
+    }
+
+    /// Rule 1: a strictly worse feasible point is never an upgrade.
+    #[test]
+    fn a_worse_feasible_objective_is_refused_however_clean_the_certificate() {
+        // r116: -13.0057 -> -1.2072, both independently verified feasible
+        // by `pounce verify`. The retry's unscaled KKT error is 2.9e-11
+        // against the base attempt's 3.0e+03, so every certificate
+        // conjunct passes and only this one refuses it.
+        assert!(!admissible(
+            -1.3005680756e1,
+            2.22e-16,
+            -1.2072337962e0,
+            4.55e-13
+        ));
+        assert!(!admissible(
+            -4.7919265770e0,
+            1.07e-14,
+            -9.8562977711e-1,
+            7.99e-14
+        ));
+        assert!(!admissible(
+            -2.9558632401e-1,
+            6.25e-17,
+            -9.7321185691e-2,
+            6.21e-13
+        ));
+    }
+
+    /// Rule 2: an objective *improvement* bought with primal slack.
+    ///
+    /// `scholtes4` (`benchmarks/mpcc/cases.py`, and now a CLI fixture) has
+    /// `f* = 0` exactly -- for the MPCC and for the smooth lowering alike,
+    /// since `x1*x2 = 0` forces one of them to zero, hence `x3 <= 0`, hence
+    /// `f = x1 - x3 >= 0`. The retry reports `-6.61e-05`, which no feasible
+    /// point reaches, by moving the complementarity row 16 orders further
+    /// out. Rule 1 cannot see it: the objective got *better*.
+    #[test]
+    fn an_improvement_bought_with_primal_slack_is_refused() {
+        assert!(!admissible(
+            1.8175997416e-9,
+            2.07e-25,
+            -6.6088333055e-5,
+            1.09e-9
+        ));
+        // The same numbers with the primal *held* would be admissible --
+        // this is the conjunct that refuses it, not the objective move.
+        assert!(admissible(
+            1.8175997416e-9,
+            2.07e-25,
+            -6.6088333055e-5,
+            2.07e-25
+        ));
+    }
+
+    /// The window the tolerance sits in, from both sides, so it is a
+    /// checkable claim rather than a fitted constant: the smallest move
+    /// that must be admitted is `qpec_small`'s `5.8e-11` and the smallest
+    /// that must be refused is `r201`'s `0.198`, four and five orders
+    /// away from `acceptable_tol` on either side.
+    #[test]
+    fn the_objective_tolerance_is_not_fitted_to_one_model() {
+        let admit = 5.835e-11;
+        let refuse = 0.198;
+        assert!(admit < ACCEPT / 1.0e4, "{admit} is not well inside");
+        assert!(refuse > ACCEPT * 1.0e4, "{refuse} is not well outside");
+        // Scale-relative above 1, absolute below it -- the same
+        // convention `sigma_forward_error_is_small` uses for `norm(x)`.
+        assert!(admissible(1.0e6, 0.0, 1.0e6 + 0.5, 0.0));
+        assert!(!admissible(1.0e6, 0.0, 1.0e6 + 5.0, 0.0));
+    }
+
+    /// An infeasible base attempt is not a point worth protecting, so
+    /// both rules stand down and the certificate conjuncts decide alone.
+    /// R2: `obj_scaling_factor < 0` poses a maximization, and
+    /// `final_objective` is the user's **signed** objective, so both rules
+    /// have to follow the sense. This is the table above with every
+    /// objective negated: the same three answers must be refused and the
+    /// same one admitted, with `MAX` instead of `MIN`.
+    ///
+    /// Without the normalization each row flips — rule 1 starts refusing
+    /// genuine improvements (a regression against the behaviour before the
+    /// conjunct existed) and rule 2 starts admitting strictly worse
+    /// answers, which is the class it was added to block.
+    #[test]
+    fn the_rules_follow_the_objective_sense() {
+        // qpec_small, mirrored: the retry is worse by 5.8e-11, well inside
+        // the tolerance, so it is still admitted.
+        assert!(retry_answer_is_admissible(
+            -3.586e-28, 1.11e-16, -5.835e-11, 5.47e-12, ACCEPT, MAX
+        ));
+        // r116, mirrored: +13.0057 given up for +1.2072 is now a *worse*
+        // maximum, and rule 1 must still refuse it.
+        assert!(!retry_answer_is_admissible(
+            1.3005680756e1,
+            2.22e-16,
+            1.2072337962e0,
+            4.55e-13,
+            ACCEPT,
+            MAX
+        ));
+        // scholtes4, mirrored: +6.6088e-05 is now an improvement bought
+        // with primal slack, and rule 2 must still refuse it.
+        assert!(!retry_answer_is_admissible(
+            -1.8175997416e-9,
+            2.07e-25,
+            6.6088333055e-5,
+            1.09e-9,
+            ACCEPT,
+            MAX
+        ));
+        // ... and the same improvement with the primal held is admitted.
+        assert!(retry_answer_is_admissible(
+            -1.8175997416e-9,
+            2.07e-25,
+            6.6088333055e-5,
+            2.07e-25,
+            ACCEPT,
+            MAX
+        ));
+    }
+
+    /// The mirror of the above, stated as the property rather than the
+    /// rows: negating both objectives and flipping the sense must leave
+    /// every verdict unchanged.
+    #[test]
+    fn negating_the_objective_and_the_sense_is_inert() {
+        for &(bo, bv, ro, rv) in &[
+            (3.586e-28, 1.11e-16, 5.835e-11, 5.47e-12),
+            (-1.3005680756e1, 2.22e-16, -1.2072337962e0, 4.55e-13),
+            (1.8175997416e-9, 2.07e-25, -6.6088333055e-5, 1.09e-9),
+            (1.8175997416e-9, 2.07e-25, -6.6088333055e-5, 2.07e-25),
+            (-1.0e3, 1.0e-2, 0.0, 1.0e-12),
+        ] {
+            assert_eq!(
+                retry_answer_is_admissible(bo, bv, ro, rv, ACCEPT, MIN),
+                retry_answer_is_admissible(-bo, bv, -ro, rv, ACCEPT, MAX),
+                "verdict moved under (obj, sense) -> (-obj, -sense) at {bo:e}/{ro:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_infeasible_base_attempt_protects_nothing() {
+        assert!(admissible(-1.0e3, 1.0e-2, 0.0, 1.0e-12));
+        // ... and what cannot be measured is refused, not admitted, the
+        // same way `runaway_is_the_whole_residual` treats a NaN.
+        assert!(admissible(Number::NAN, 0.0, 0.0, 0.0));
+        assert!(!admissible(0.0, 0.0, Number::NAN, 0.0));
+        assert!(!admissible(0.0, 0.0, -1.0, Number::NAN));
     }
 }

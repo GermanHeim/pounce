@@ -397,11 +397,40 @@ where
     // never-regressing — a no-op for QPs and whenever the vertex is not a
     // strict improvement. Runs against the same un-equilibrated `prob` so the
     // `z`/`s` conventions line up. See [`crate::crossover`].
+    // gh#880 follow-up: the `σ` verdict below is about the point the cascade
+    // returned. Crossover can replace that point without re-entering the
+    // solver, and `sigma_verdict`'s own module doc says a consumer sensitive
+    // to *which* of the two points the bit describes "needs to re-record
+    // after crossover rather than assume". gh#888 created exactly such a
+    // consumer one merge earlier: the CLI reroutes `ProblemClass::Lp` on
+    // `OptimalInaccurate`, so a stale demotion no longer just labels the
+    // answer, it throws it away and re-solves on the NLP arm — discarding a
+    // crossover-purified *exact vertex* on a verdict about the interior
+    // iterate that vertex replaced.
+    //
+    // Kept as a re-record rather than a blanket clear. "Crossover fired, so
+    // the demotion cannot apply" would be an argument from crossover's
+    // never-regressing gate; asking the estimator again is a measurement of
+    // the point actually being returned, and it is the same estimator with
+    // the same cut, so the two sites cannot drift.
+    //
+    // The clone is taken only when there is a verdict to re-record, so the
+    // ordinary path pays nothing. See `sigma_verdict_after_crossover` for the
+    // measured reachability of each half — the crossover half is the majority
+    // case once `qp_crossover=yes`, the uncertified half was not reproducible.
+    let pre_crossover_x = sigma_uncertified.then(|| sol.x.clone());
     let sol = if crate::debug_stop::requested() {
         sol
     } else {
         crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend)
     };
+    let sigma_uncertified = sigma_verdict_after_crossover(
+        prob,
+        &sol,
+        pre_crossover_x.as_deref(),
+        opts.tol,
+        sigma_uncertified,
+    );
     // Crossover declines rather than restamps when the budget runs out mid-
     // refinement, so account for a deadline crossed in there here — where
     // `mark_timed_out`'s verdict rule applies and an `Optimal` cannot be lost.
@@ -3180,6 +3209,94 @@ fn sigma_path_rel_tol(tol: f64) -> f64 {
     (100.0 * tol).min(FALSE_OPTIMUM_REL_TOL)
 }
 
+/// How much slack the `σ` demotion allows before calling a pick "far from
+/// optimal" — see the table at the recording site in `solve_qp_core` for the
+/// window this sits in, which is pinned from both sides by existing tests.
+///
+/// Module-scope rather than function-local because two sites ask the same
+/// question of the same estimator: the cascade, about the pick it is
+/// returning, and `solve_qp_ipm`, about the point `maybe_crossover` may have
+/// replaced it with.
+const SIGMA_DEMOTION_MARGIN: f64 = 10.0;
+
+/// The `σ` demotion verdict, re-asked if [`crate::crossover::maybe_crossover`]
+/// replaced the point it was recorded about.
+///
+/// gh#880 records the verdict inside `solve_qp_core`, about the candidate the
+/// cascade returns. On a pure LP the crossover then purifies that interior
+/// iterate to an **exact vertex** without re-entering the solver, so the
+/// recorded bit describes a point that is no longer the answer.
+/// `sigma_verdict`'s module doc names this and says a consumer sensitive to
+/// which of the two points the bit describes "needs to re-record after
+/// crossover rather than assume".
+///
+/// gh#888 created that consumer one merge earlier, and it is not a label: the
+/// CLI reroutes `ProblemClass::Lp` on `OptimalInaccurate`, so a stale demotion
+/// **discards the purified vertex** and re-solves on the NLP arm. The point
+/// thrown away is the exact one.
+///
+/// Re-asking rather than clearing, deliberately. "Crossover fired, so the
+/// demotion cannot apply" would be an argument from crossover's
+/// never-regressing gate; this is a measurement of the point actually being
+/// returned, through the same estimator with the same cut, so the two sites
+/// cannot drift apart.
+///
+/// `before` is `None` when there was no verdict to re-record — the ordinary
+/// path, which pays nothing, since the clone that produces it is taken only
+/// when the cascade demoted something.
+///
+/// **Reachability, measured rather than assumed** (instrumented build, probes
+/// on `hsde_cost_scale`, `sigma_verdict::record` and the crossover gate):
+///
+/// | | |
+/// |---|---|
+/// | crossover is on by default | **no** — `qp_crossover=yes` opts in |
+/// | crossover *moves* `x` when enabled | **331 of 550** pure LPs |
+/// | `σ` engages (`max(‖P‖∞,‖c‖∞)·ε > tol`) | 336 of those 550; 2 of 96 CLI fixtures |
+/// | cascade records `uncertified` on a pure LP | **0 of 550** |
+///
+/// So the two halves have very different frequencies: the crossover half is
+/// the *majority* case once the option is on, and the uncertified half is what
+/// could not be produced. Note also that
+/// [`sigma_forward_error_is_small`] returns early on `m_eq > 0`, so only a
+/// model with **no equality rows** can be demoted at all — which is most of
+/// why a netlib-shaped LP never is.
+///
+/// With the precondition forced, the effect is total and it is not cosmetic:
+/// on the 182 LPs where crossover moves `x`, the stale verdict reroutes
+/// **182 of 182** to the NLP arm, and scored against HiGHS on the 167 that
+/// solve, keeping the crossover vertex is exact (median relative error `0`,
+/// 167/167 within `1e-8`) while the reroute lands >10× further out on **43**
+/// of them. The point being discarded is the exact one, which is the whole
+/// argument for re-recording.
+fn sigma_verdict_after_crossover(
+    prob: &QpProblem,
+    sol: &QpSolution,
+    before: Option<&[f64]>,
+    tol: f64,
+    recorded: bool,
+) -> bool {
+    match before {
+        // The status conjunct is part of the bit's definition at the
+        // recording site — "this answer should be demoted", i.e. currently
+        // labelled `Optimal` AND far from optimal — and that site's comment
+        // says to widen the recording rather than the reader. Repeating it
+        // here keeps the two writers of the same bit agreeing on what it
+        // means. Unreachable today, since `demote_uncertified_sigma_optimum`
+        // re-checks the status and crossover is never-regressing; it is
+        // consistency, not behaviour (R5).
+        Some(before) if before != sol.x.as_slice() => {
+            sol.status == QpStatus::Optimal
+                && !sigma_forward_error_is_small(
+                    prob,
+                    sol,
+                    SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(tol),
+                )
+        }
+        _ => recorded,
+    }
+}
+
 /// Each un-normalized KKT residual of `sol` over the natural magnitude of its
 /// own terms — the ratio both `σ`-path cuts are applied to.
 fn unscaled_relative_kkt(prob: &QpProblem, sol: &QpSolution) -> f64 {
@@ -3509,7 +3626,6 @@ where
             // reference; that is the noise of an estimator this same change
             // replaces with `residual_compensated`, so it cannot be the
             // reason.)
-            const SIGMA_DEMOTION_MARGIN: f64 = 10.0;
             let far_from_optimal = !sigma_forward_error_is_small(
                 prob,
                 &candidates[pick],
@@ -6785,5 +6901,130 @@ mod complementarity_scale_tests {
             "a slack of 1e-16 on a bound of 0 is complementary; the scale must \
              not collapse to zero underneath it"
         );
+    }
+}
+
+#[cfg(test)]
+mod sigma_crossover_rerecord_tests {
+    //! gh#880 follow-up: the `σ` demotion must describe the point being
+    //! returned, not the one `maybe_crossover` replaced.
+    //!
+    //! Unit tests rather than a fixture because the path is very nearly
+    //! unreachable by construction — `σ` engages only when
+    //! `max(‖P‖∞, ‖c‖∞)·ε > tol`, which 1 of 79 CLI fixtures, 0 of 138
+    //! Maros-Mészáros problems and 0 of 150 purpose-built degenerate LPs
+    //! with `‖c‖∞` from `1e8` to `1e13` satisfy — while the consequence
+    //! is not small: gh#888 reroutes `ProblemClass::Lp` on
+    //! `OptimalInaccurate`, so a stale demotion discards a
+    //! crossover-purified **exact vertex** and re-solves on the NLP arm.
+    //!
+    //! All three branches, because the rule branches.
+    //!
+    //! | mutation | what goes red |
+    //! |---|---|
+    //! | drop the `before != sol.x` guard | `an_unmoved_answer_keeps_its_recorded_verdict` |
+    //! | return `recorded` unconditionally | `a_crossover_that_moved_the_answer_re_asks` |
+    //! | drop the `None` arm (always re-ask) | `no_recorded_verdict_means_nothing_to_re_ask` |
+
+    use super::{QpSolution, QpStatus, sigma_verdict_after_crossover};
+    use crate::qp::{QpProblem, Triplet};
+
+    /// `min ½‖x‖² − xᵀe`, whose unconstrained minimiser is `x = e`.
+    /// `P = I` so the forward-error estimator is exactly `‖x − e‖`.
+    fn unit_problem(n: usize) -> QpProblem {
+        QpProblem {
+            n,
+            p_lower: (0..n).map(|i| Triplet::new(i, i, 1.0)).collect(),
+            c: vec![-1.0; n],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY; n],
+            ub: vec![f64::INFINITY; n],
+        }
+    }
+
+    fn solution_at(x: Vec<f64>) -> QpSolution {
+        QpSolution {
+            status: QpStatus::Optimal,
+            x,
+            y: vec![],
+            z: vec![],
+            z_lb: vec![],
+            z_ub: vec![],
+            obj: 0.0,
+            iters: 0,
+            iterates: vec![],
+        }
+    }
+
+    /// No verdict was recorded, so there is nothing to re-ask and the
+    /// estimator must not run — this is the ordinary path, and it pays
+    /// neither the clone nor the back-solve.
+    #[test]
+    fn no_recorded_verdict_means_nothing_to_re_ask() {
+        let prob = unit_problem(3);
+        // A point far from the optimum, which the estimator *would*
+        // reject if it were consulted. `None` says it is not.
+        let sol = solution_at(vec![100.0, 100.0, 100.0]);
+        assert!(!sigma_verdict_after_crossover(
+            &prob, &sol, None, 1e-8, false
+        ));
+        assert!(sigma_verdict_after_crossover(&prob, &sol, None, 1e-8, true));
+    }
+
+    /// Crossover declined, so the recorded verdict still describes the
+    /// answer and stands unchanged — including when it demoted.
+    #[test]
+    fn an_unmoved_answer_keeps_its_recorded_verdict() {
+        let prob = unit_problem(3);
+        let x = vec![1.0, 1.0, 1.0];
+        let sol = solution_at(x.clone());
+        // Recorded `true` on a point that is in fact exact: the verdict
+        // is carried through regardless, because nothing moved.
+        assert!(sigma_verdict_after_crossover(
+            &prob,
+            &sol,
+            Some(&x),
+            1e-8,
+            true
+        ));
+        assert!(!sigma_verdict_after_crossover(
+            &prob,
+            &sol,
+            Some(&x),
+            1e-8,
+            false
+        ));
+    }
+
+    /// Crossover moved the answer, so the verdict is re-asked of the new
+    /// point — and a demotion recorded about the interior iterate is
+    /// dropped when the vertex it was replaced by is exact.
+    ///
+    /// This is the case gh#888's reroute turns from a label into a
+    /// discarded answer.
+    #[test]
+    fn a_crossover_that_moved_the_answer_re_asks() {
+        let prob = unit_problem(3);
+        let interior = vec![0.5, 0.5, 0.5];
+        // The purified vertex: the exact minimiser of `unit_problem`.
+        let exact = solution_at(vec![1.0, 1.0, 1.0]);
+        assert!(
+            !sigma_verdict_after_crossover(&prob, &exact, Some(&interior), 1e-8, true),
+            "a demotion about the discarded interior iterate survived onto \
+             the exact vertex that replaced it"
+        );
+        // ...and the re-ask is a measurement, not a clear: a moved answer
+        // that is still far from optimal stays demoted.
+        let far = solution_at(vec![1.0e3, 1.0e3, 1.0e3]);
+        assert!(sigma_verdict_after_crossover(
+            &prob,
+            &far,
+            Some(&interior),
+            1e-8,
+            false
+        ));
     }
 }
