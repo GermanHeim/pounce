@@ -438,11 +438,9 @@ changes.
   argmin unchanged by identity — swept over `k = 1e-2 ‥ 1e8` it oscillates six
   times. Only the forward-error arm is recorded, and only with a 10× margin:
   at `cond = 1e10` the realized error is `1.47e-06` against a `1e-06` cut, so
-  the model sits *on* the decision boundary and rounding decides it. The margin
-  is the estimator's own uncertainty — a plain summation of this residual reads
-  `0.29×`–`5.4×` of the truth against a `Fraction` reference — so a verdict
-  inside one order of the cut is inside the instrument's noise and is not
-  reported. With it, the inert rescaling is uniformly `Optimal` across eleven
+  the model sits *on* the decision boundary and rounding decides it — each `k`
+  reaches a slightly different iterate, so this is solve-to-solve variation.
+  With the margin the inert rescaling is uniformly `Optimal` across eleven
   decades.
 
   **The layer is load-bearing.** `OptimalInaccurate` is one of the statuses
@@ -462,6 +460,16 @@ changes.
   errors — so it is pinned instead on rows whose exact value is known by
   construction: on `(1e16, 1, −1e16)` the plain traversal reads `0.0` where the
   truth is `1.0`, losing the answer rather than digits.
+
+  **Scope, since the entry above says "reported `OptimalInaccurate`".** The
+  demotion rides on `sigma_forward_error_is_small`, which opens with
+  `if prob.m_eq() > 0 { return true; }` — it needs the saddle system rather
+  than a barrier diagonal — so it is structurally silent on **every**
+  equality-constrained `σ` model, however far from the optimum that model
+  lands. It is also silent wherever `σ` never engages: a warm solve seeded
+  from a nearby point is forced onto the direct driver, where the whole
+  normalization block is skipped. Both are unchanged by this entry and neither
+  is a regression; they are the boundary of what it claims.
 
   **`OptimalInaccurate` is admitted wherever `Optimal` used to be required.**
   The demotion changes a label, not what the library will do: `optimal_inaccurate`

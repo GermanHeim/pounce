@@ -387,9 +387,8 @@ where
     };
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
-    let (sol, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
-        solve_qp_ipm_core(prob, opts, &mut make_backend, hook)
-    });
+    let (sol, sigma_uncertified) =
+        crate::sigma_verdict::tracking(|| solve_qp_ipm_core(prob, opts, &mut make_backend, hook));
     if crate::deadline::expired() {
         return mark_timed_out(sol);
     }
@@ -1180,7 +1179,14 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        crate::debug_stop::with_scope(|| solve_qp_ipm_scoped(prob, opts, make_backend, Some(hook)))
+        // gh #880: see `solve_socp_ipm`. Outside `debug_stop::with_scope` so
+        // the frame spans everything the scoped body may retry.
+        let (sol, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+            crate::debug_stop::with_scope(|| {
+                solve_qp_ipm_scoped(prob, opts, make_backend, Some(hook))
+            })
+        });
+        demote_uncertified_sigma_optimum(sol, sigma_uncertified)
     })
 }
 
@@ -1205,10 +1211,18 @@ where
         if crate::deadline::expired() {
             timed_out_solution(prob)
         } else {
+            // gh #880: see `solve_socp_ipm`. This entry forces a non-HSDE
+            // options struct today, so it cannot reach `record` — but the
+            // invariant the `record` assertion states is "every entry installs
+            // the frame", and leaving the one exception to be rediscovered is
+            // how F8 happened.
+            let (inner, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+                solve_qp_ipm_warm_inner(prob, opts, warm, make_backend)
+            });
             // One gate over every exit of the body below — see [`finite_or_failed`].
             let sol = finite_or_failed(
                 prob,
-                solve_qp_ipm_warm_inner(prob, opts, warm, make_backend),
+                demote_uncertified_sigma_optimum(inner, sigma_uncertified),
             );
             if crate::deadline::expired() {
                 mark_timed_out(sol)
@@ -1308,7 +1322,18 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_socp_ipm_scoped(prob, cones, opts, make_backend, None)
+        // gh #880: install the verdict frame at every entry that can reach the
+        // cascade, not only the ones a corpus happens to exercise.
+        // `solve_socp_ipm` passes the caller's `opts` through
+        // `solve_socp_symmetric` unchanged, and `use_hsde` defaults to true,
+        // so an all-nonneg (or empty) cone reaches `record` here — unlike
+        // `solve_qp_ipm_warm_inner`, which forces a non-HSDE struct and
+        // cannot. Before this, `solve_socp_ipm` returned the uncertified pick
+        // as a clean `Optimal` on the same model `solve_qp_ipm` demotes.
+        let (sol, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+            solve_socp_ipm_scoped(prob, cones, opts, make_backend, None)
+        });
+        demote_uncertified_sigma_optimum(sol, sigma_uncertified)
     })
 }
 
@@ -1493,9 +1518,13 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        crate::debug_stop::with_scope(|| {
-            solve_socp_ipm_scoped(prob, cones, opts, make_backend, Some(hook))
-        })
+        // gh #880: see `solve_socp_ipm`.
+        let (sol, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+            crate::debug_stop::with_scope(|| {
+                solve_socp_ipm_scoped(prob, cones, opts, make_backend, Some(hook))
+            })
+        });
+        demote_uncertified_sigma_optimum(sol, sigma_uncertified)
     })
 }
 
@@ -1916,9 +1945,16 @@ where
         if crate::deadline::expired() {
             timed_out_solution(prob)
         } else {
+            // gh #880: see `solve_socp_ipm`. This entry also reaches the
+            // cascade through its own HSDE fallback, which calls
+            // `solve_socp_ipm_inner` directly rather than `solve_socp_ipm`,
+            // so the frame has to be here rather than one layer in.
+            let (inner, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+                solve_socp_ipm_warm_scoped(prob, cones, warm, opts, make_backend)
+            });
             let sol = finite_or_failed(
                 prob,
-                solve_socp_ipm_warm_scoped(prob, cones, warm, opts, make_backend),
+                demote_uncertified_sigma_optimum(inner, sigma_uncertified),
             );
             if crate::deadline::expired() {
                 mark_timed_out(sol)
@@ -3037,12 +3073,20 @@ fn sigma_complementarity_is_genuine(
     //
     // gh #880 found this rather than fixing it: the cascade rejected an LP
     // whose relative KKT error was `9.5e-17` and whose `x` was the exact
-    // vertex, and the `Optimal` it returned hid the rejection. It is a
-    // *wasted re-solve* rather than a wrong answer today — nothing downstream
-    // reads the per-candidate verdict, the demotion is the forward-error
-    // arm's — so the corpora cannot see it: identical census errors and
-    // iterations, empty fixture sweep.
-    // `a_converged_slack_on_a_zero_bound_is_negligible` is what holds it.
+    // vertex, and the `Optimal` it returned hid the rejection.
+    //
+    // **Measured inert on both corpora, not structurally inert** — the
+    // distinction matters, and "it cannot produce a wrong answer" is the
+    // argument CLAUDE.md names as the one that shipped gh #544. This guard
+    // *is* the per-candidate verdict: accepting where it used to reject makes
+    // `solve_qp_core` return the normalized solve rather than falling through
+    // to the un-normalized re-solve, the direct driver and the `kkt_error`
+    // pick, so a different candidate can come back and a demotion that would
+    // have been recorded can be suppressed. It simply does not happen on
+    // anything either corpus contains: identical census errors and iteration
+    // counts, and no pre-existing fixture moves in the sweep.
+    // `a_converged_slack_on_a_zero_bound_is_negligible` pins the guard
+    // directly, which is the only evidence a corpus cannot give.
     let negligible = |v: f64, scale: f64| v.abs() <= cut * scale.max(1.0);
     for j in 0..prob.m_ineq() {
         if !orthant[j] {

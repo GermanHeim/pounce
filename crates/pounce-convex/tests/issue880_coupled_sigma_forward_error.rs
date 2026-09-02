@@ -901,27 +901,36 @@ fn a_demoted_answer_still_builds_a_sensitivity_object() {
     );
 }
 
-/// **Does the demotion depend on which public entry you came through?**
-/// Measured: no. This is review finding F1, which predicted from the call
-/// graph that `solve_qp_batch` would return `Optimal` where `solve_qp`
-/// returns `OptimalInaccurate` — the same model, the same options, the label
-/// gh #880 is about.
+/// **Does the demotion depend on which public entry you came through?** It
+/// must not, and this is where each entry gets a row.
 ///
-/// It does not reproduce, and the reason is worth recording because the call
-/// graph really does look like it should. `solve_qp_ipm_warm_inner` reaches
-/// `solve_qp_core` directly (not via `solve_qp_ipm`), so a missing verdict
-/// frame would indeed make `record` a silent no-op — but it reaches it with a
-/// *direct*, non-HSDE options struct, and the whole `σ` block including the
-/// cascade, the gate and `record` lives under `if opts.use_hsde`. Nothing to
-/// record. The demotion these paths do report arrives through the inner cold
-/// HSDE solve, which carries its own frame.
+/// `sigma_verdict::tracking` installs the frame that `record` writes into,
+/// and without one `record` no-ops — so an entry that omits it hands back an
+/// uncertified pick under a bare `Optimal`, which is gh #880 verbatim on that
+/// path. All six public entries install it.
 ///
-/// So the frame is needed exactly where HSDE is live, and adding it to the
-/// other five entries would be dead code — verified by stripping it from all
-/// five and running the suite in a debug build with the `record` assertion
-/// active: nothing fires. What guards the concern instead is that assertion
-/// (`sigma_verdict::record`), which turns the silent no-op into a loud
-/// failure the first time any route reaches the cascade without a frame.
+/// # Why this test has one row per entry rather than one measurement
+///
+/// An earlier revision installed the frame only in `solve_qp_ipm`, on the
+/// strength of a measurement: strip it from the other five, run the suite in
+/// a debug build with the `record` assertion live, observe that nothing
+/// fires. That measurement was of the **corpus**, not of the routes — no test
+/// anywhere drove an all-nonneg `solve_socp_ipm` at a `σ`-engaging magnitude,
+/// so the assertion had nothing to fire on. `solve_socp_ipm` passes the
+/// caller's `opts` through `solve_socp_symmetric` unchanged and `use_hsde`
+/// defaults to true, so it reached `record` unframed and returned this very
+/// model as a clean `Optimal`.
+///
+/// That is CLAUDE.md's branch rule — a corpus uniform in the dimension a
+/// change acts on reports "nothing moves" whatever the truth is — and it is
+/// the same rule this file invokes to justify the CLI fixture. Hence a row
+/// per entry, driven directly, rather than a corpus-wide null result.
+///
+/// `solve_qp_ipm_warm` is the one entry that provably cannot reach `record`
+/// today: `solve_qp_ipm_warm_inner` forces a non-HSDE options struct, so the
+/// whole `σ` block is skipped. It carries the frame anyway, because "every
+/// entry installs it" is the invariant the assertion states and one
+/// documented exception is how the above happened.
 #[test]
 fn every_public_entry_agrees_on_the_verdict() {
     let (prob, exact) = coupled_qp([1.0, 1e12], &TGT, 1.0);
@@ -945,6 +954,16 @@ fn every_public_entry_agrees_on_the_verdict() {
         (rel_x_err(&batched[0].x, &exact) - rel_x_err(&solo.x, &exact)).abs() < 1e-12,
         "and must return the same point"
     );
+
+    // The conic entry, on the same model with an empty cone list. This is the
+    // row that was missing: it reached `record` with no frame and returned
+    // `Optimal` in release while panicking the assertion in debug.
+    let conic = pounce_convex::solve_socp_ipm(&prob, &[], &opts, backend);
+    assert_eq!(
+        conic.status, solo.status,
+        "solve_socp_ipm must agree with solve_qp_ipm about the same model"
+    );
+    assert_eq!(conic.x, solo.x, "and return the same point");
 
     // Seeded from a nearby point the same entry takes the direct driver, where
     // `σ` never engages. Pinned as the *scope*, with the number that makes it
