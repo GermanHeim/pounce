@@ -275,7 +275,16 @@ pub(crate) fn fire(
     state: &mut dyn DebugState,
 ) -> DebugAction {
     match hook.as_mut() {
-        Some(h) => h.at_checkpoint(state),
+        Some(h) => {
+            let action = h.at_checkpoint(state);
+            if action == DebugAction::Stop {
+                // Latch it for the recovery gates in `ipm.rs` (gh #892). This
+                // is the one place a `DebugAction` is read, so routing the
+                // report through here means no driver can forget to make one.
+                crate::debug_stop::mark();
+            }
+            action
+        }
         None => DebugAction::Resume,
     }
 }

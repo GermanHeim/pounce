@@ -28,6 +28,48 @@ small set of commands whose availability is backend-conditional.
 > The checkpoint fire-sites short-circuit when no debugger is installed,
 > so the standard regression suite is bit-for-bit identical with and
 > without the feature compiled in.
+>
+> **Attaching it does not change the solver either.** Every debug entry point
+> is the ordinary solve entry point reached with a hook, not a second
+> implementation of it, so driver selection, scaling, and the verify-and-retry
+> guards are the ones the plain run uses, and the answer, the trajectory and
+> the iteration count are the same. This is worth stating because it was once
+> false: until gh #892 the conic entry point built its own iteration for
+> symmetric cones and never consulted `qp_hsde`, so attaching the debugger to
+> a convex QCQP silently substituted the direct IPM for the default HSDE
+> embedding — different trajectory, and on the reported model a
+> `Numerical failure` where the plain run returned Clarabel's optimum.
+>
+> **Presolve runs under the debugger too**, so the model being solved is the
+> model the plain run solves. It used to be skipped on the convex paths, so
+> that the blocks you inspect were your own rows rather than a reduced set —
+> but the price was a debugged run solving a different, smaller problem, which
+> is the same defect one level up from the driver substitution. On a reduced
+> model the blocks are the reduced ones and `print` falls back to index labels
+> where a name no longer survives; pass `qp_presolve=no` if you would rather
+> step your own rows, and the plain run then agrees with it because both skip
+> the reduction.
+>
+> One consequence to know before you go hunting for it: when presolve *settles*
+> the model — proving it primal-infeasible or unbounded outright — there is no
+> interior-point solve left to step, so **no checkpoint fires and your debug
+> script never runs**. That is the plain run's behaviour faithfully reproduced,
+> but it is a silent no-op at exactly the moment you were most likely trying to
+> find out *why* the model is infeasible. What you get instead is presolve's own
+> one-line record — `Presolve: proved primal infeasible — <trigger>`, naming the
+> screen that decided it and what it tripped on, or `Presolve: proved unbounded
+> below — a free column with a nonzero objective coefficient` — and
+> `qp_presolve=no` puts the iteration back so you can step it.
+>
+> A stopped solve stops. `quit` leaves the run's own non-converged status
+> standing: the recovery machinery that would ordinarily re-solve after a
+> failed or capped solve — the equilibrated retry, the optimality reverify,
+> the LP crossover — declines to start once you have halted the run, because
+> those re-solves run *unhooked* and would otherwise report success for a
+> solve you deliberately stopped.
+>
+> Anything that differs between the debugged and the plain run is a bug;
+> please report it.
 
 ---
 
@@ -1324,6 +1366,14 @@ additionally expose the homogenizing scalars `tau` / `kappa` as 1-element
 blocks (`print tau`). `set <block>` and `goto` work as on the NLP path;
 `set mu` is rejected, because the convex μ is *derived* from `⟨s, z⟩`
 (edit `s`/`z` to move it).
+
+Which blocks you get follows from the driver the *plain* run would have
+used, because it is the driver you get (gh #892). The HSDE embedding is the
+default on every convex arm, so `tau` / `kappa` are normally there; under
+`qp_hsde=no` you are on the direct IPM and they are not. A PSD cone that the
+chordal decomposition splits is debugged in its clique blocks, and a
+Ruiz-equilibrated solve exposes the scaled iterate — in each case, the thing
+the solver is actually iterating on.
 
 ```sh
 pounce model.nl --debug                 # LP / convex-QP (auto-routed) — IPM REPL
