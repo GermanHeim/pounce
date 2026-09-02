@@ -398,7 +398,11 @@ changes.
     you deliberately stopped.
 
   Solves without a debugger attached are bit-identical: the fixture corpus
-  sweep is empty across all 186 legs.
+  sweep is empty across all 186 legs. That sweep is the check for *collateral*
+  damage — only 4 of its fixtures (8 legs) reach the conic arm this touches, so
+  what carries the claim about that arm is the 25-instance measurement above
+  and the CLI checks on `qcqp_ball` / `qcqp_columns_illcond` under both `socp`
+  and `auto`, not the empty diff.
 
 - **A settled iterate with a runaway multiplier no longer ships as
   `Solved_To_Acceptable_Level` (gh#884).** Some models have a solution at

@@ -50,6 +50,15 @@ small set of commands whose availability is backend-conditional.
 > step your own rows, and the plain run then agrees with it because both skip
 > the reduction.
 >
+> One consequence to know before you go hunting for it: when presolve *settles*
+> the model — proving it primal-infeasible or unbounded outright — there is no
+> interior-point solve left to step, so **no checkpoint fires and your debug
+> script never runs**. That is the plain run's behaviour faithfully reproduced,
+> but it is a silent no-op at exactly the moment you were most likely trying to
+> find out *why* the model is infeasible. The `Presolve: proved primal
+> infeasible — <trigger>` line names the screen that decided it, and
+> `qp_presolve=no` puts the iteration back so you can step it.
+>
 > A stopped solve stops. `quit` leaves the run's own non-converged status
 > standing: the recovery machinery that would ordinarily re-solve after a
 > failed or capped solve — the equilibrated retry, the optimality reverify,

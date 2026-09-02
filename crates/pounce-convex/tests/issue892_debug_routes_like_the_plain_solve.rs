@@ -104,6 +104,16 @@ fn assert_same_solve(leg: &str, plain: &QpSolution, debugged: &QpSolution) {
         plain.obj,
         debugged.obj
     );
+    // Length first: `zip` stops at the shorter side, so without this a routing
+    // difference that changed the *shape* of `x` — a different bound
+    // expansion, a reduced model, a cone block split one way and not the other
+    // — would compare the common prefix and pass. That is the exact failure
+    // this file exists to catch, so the instrument must not be blind to it.
+    assert_eq!(
+        plain.x.len(),
+        debugged.x.len(),
+        "{leg}: x length moved under the debugger"
+    );
     for (i, (a, b)) in plain.x.iter().zip(&debugged.x).enumerate() {
         assert!(
             (a - b).abs() <= 1e-12 * (1.0 + a.abs()),

@@ -39,6 +39,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -53,12 +54,22 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// A `--debug-script` holding the issue's script: `continue`, and nothing
-/// else. Written under the target dir so the test needs no fixture of its own.
+/// else. Written under the temp dir so the test needs no fixture of its own.
+///
+/// The name carries a per-call counter as well as the pid, because the four
+/// `#[test]` functions below run as parallel threads of **one** process and
+/// [`assert_unmoved`] deletes its script when it is done. On a pid-only name
+/// all nine calls share one path, and one thread's `remove_file` lands between
+/// another's create and its `--debug-script` read — a race whose window is
+/// wide enough to matter at nine calls, and which green CI is no evidence
+/// against.
 fn continue_script() -> PathBuf {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "pounce_issue892_continue_{}.pdbg",
-        std::process::id()
+        "pounce_issue892_continue_{}_{}.pdbg",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let mut f = std::fs::File::create(&p).expect("write debug script");
     writeln!(f, "continue").expect("write debug script");
