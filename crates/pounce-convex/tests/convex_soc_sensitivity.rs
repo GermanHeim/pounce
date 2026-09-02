@@ -1074,53 +1074,65 @@ fn activity_reads_cone_rows_with_the_orthant_rule_and_says_so() {
     );
 }
 
-/// **The weak-activity screens run on a conic build's orthant rows.**
+/// **Both weak-activity screens run on a conic build**, and the fixture is
+/// shaped so neither half can pass by accident.
 ///
-/// Both screens were `Vec::new()` on every conic build until round 5 of #889,
-/// while their docs promised a "deliberately conservative" screen. A `Nonneg`
-/// block inside a mixed partition is an ordinary orthant block and its rows are
-/// ordinary rows.
+/// Both were `Vec::new()` on every conic build until round 5 of #889, while
+/// their docs promised a "deliberately conservative" screen. A `Nonneg` block
+/// inside a mixed partition is an ordinary orthant block; a variable bound is an
+/// ordinary bound whatever the inequality block holds.
 ///
-/// A *cone* block still never appears, and that is by construction:
+/// A *cone* block still never appears in either, and that is by construction:
 /// `cone_block_face` refuses a collapsed dual at the apex or on the boundary —
 /// the conic analogue of weak activity — so no built conic sensitivity carries
 /// one. The refusal is the report.
 ///
-/// # The fixture has to be non-empty, or it proves nothing
+/// # Three ways this fixture is built not to lie, each from a mistake already made here
 ///
-/// The first version of this test asserted the screens were *empty* on the
-/// strictly complementary `boundary` fixture. That is true with the screens
-/// wired and equally true with them stubbed to `Vec::new()` — the mutation ran
-/// **green**, which is the exact failure this file's header warns about, made
-/// on the test written to close it.
-///
-/// So the fixture is gh#219's weakly active row carried as a `Nonneg` block
-/// beside a strictly interior second-order block: `min ½‖x‖² − 5t` subject to
-/// `x₀ + x₁ = 1`, `x₀ − 2x₁ ≤ −½`, `(t, u, v) ∈ Q₃`. The equality-only optimum
-/// `(½, ½)` hits the inequality exactly, so its slack and its multiplier
-/// vanish together, and the screen must name row 0.
+/// 1. **The screens must be non-empty.** The first version asserted they were
+///    *empty* on a strictly complementary fixture — true wired and true stubbed,
+///    so the mutation ran green. Both halves now name a specific index.
+/// 2. **The bound half needs its own weak bound.** The second version fixed (1)
+///    for rows only; its model had `lb: vec![], ub: vec![]`, so re-stubbing the
+///    *bound* half alone still left the package at 0 failures. Round 6 of #889
+///    found that by running exactly that mutation. `b₁` here is the gh#219 shape
+///    on a bound: costs `(−2, −1)` put the equality-only optimum at `(1, 0)`, so
+///    the bound is active with a vanishing multiplier.
+/// 3. **The `Nonneg` block must not sit at offset 0.** The cone occupies rows
+///    0–2 and the orthant row is row **3**, so `orthant_rows`' bookkeeping has
+///    to add the block offset. With `Nonneg` first, a `push(r)` where
+///    `push(offset + r)` is meant would be invisible; here it returns `[0]`
+///    instead of `[3]`.
 #[test]
 fn the_weak_screens_are_wired_on_a_conic_build() {
+    // 0,1,2 = the cone (t, u, w), on its boundary
+    // 3,4   = the weak-ROW pair, ½‖a‖² s.t. a₀ + a₁ = 1, row a₀ − 2a₁ ≤ −½
+    // 5,6   = the weak-BOUND pair, ½‖b‖² − 2b₀ − b₁ s.t. b₀ + b₁ = 1, b ≥ 0
     let prob = QpProblem {
-        n: 5,
-        p_lower: (0..5).map(|j| tri(j, j, 1.0)).collect(),
-        c: vec![0.0, 0.0, -5.0, 0.0, 0.0],
-        a: vec![tri(0, 0, 1.0), tri(0, 1, 1.0)],
-        b: vec![1.0],
-        g: vec![
-            // row 0: the orthant row, weakly active at (½, ½)
-            tri(0, 0, 1.0),
-            tri(0, 1, -2.0),
-            // rows 1..3: s = (t, u, v), driven strictly interior by the −5t cost
-            tri(1, 2, -1.0),
-            tri(2, 3, -1.0),
-            tri(3, 4, -1.0),
+        n: 7,
+        p_lower: (0..7).map(|j| tri(j, j, 1.0)).collect(),
+        c: vec![0.0, -1.0, -0.2, 0.0, 0.0, -2.0, -1.0],
+        a: vec![
+            tri(0, 3, 1.0),
+            tri(0, 4, 1.0),
+            tri(1, 5, 1.0),
+            tri(1, 6, 1.0),
         ],
-        h: vec![-0.5, 0.0, 0.0, 0.0],
-        lb: vec![],
-        ub: vec![],
+        b: vec![1.0, 1.0],
+        g: vec![
+            // the cone, at offset 0
+            tri(0, 0, -1.0),
+            tri(1, 1, -1.0),
+            tri(2, 2, -1.0),
+            // the orthant row, at offset 3 — see note (3)
+            tri(3, 3, 1.0),
+            tri(3, 4, -2.0),
+        ],
+        h: vec![0.0, 0.0, 0.0, -0.5],
+        lb: vec![-1e19, -1e19, -1e19, -1e19, -1e19, 0.0, 0.0],
+        ub: vec![1e19; 7],
     };
-    let cones = [ConeSpec::Nonneg(1), ConeSpec::SecondOrder(3)];
+    let cones = [ConeSpec::SecondOrder(3), ConeSpec::Nonneg(1)];
     let sol = solve_socp_ipm(&prob, &cones, &opts(), backend);
     assert_eq!(sol.status, QpStatus::Optimal);
 
@@ -1130,16 +1142,22 @@ fn the_weak_screens_are_wired_on_a_conic_build() {
     };
     assert_eq!(
         sens.cone_block_kinds(),
-        [(1, ConeBlockKind::Interior)],
-        "the cone must be interior so it contributes nothing and the orthant \
-         row is the only thing the screen could name"
+        [(0, ConeBlockKind::Boundary)],
+        "the cone must be on its boundary and FIRST, so the orthant row carries \
+         a nonzero block offset"
     );
 
     assert_eq!(
         sens.weakly_active_ineq(),
-        [0],
-        "the orthant row of a mixed partition must still be screened; this \
-         returned empty on every conic build before round 5 of #889"
+        [3],
+        "the orthant row of a mixed partition must be screened, and named in \
+         user-g space — `[0]` here is the missing block offset"
+    );
+    assert_eq!(
+        sens.weakly_active_bound_vars(),
+        [6],
+        "and the bound screen must run too; this half was unguarded until \
+         round 6 of #889 ran the mutation that proved it"
     );
 }
 

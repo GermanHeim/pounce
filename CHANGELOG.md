@@ -95,6 +95,42 @@ changes.
 
 ### Fixed
 
+- **The cone dual-complementarity guards went absolute below unit scale (Rust
+  API).** All three — the second-order ray check, the PSD `⟨S, Z⟩` containment
+  check, and the exponential/power ray check they were modelled on — compared
+  against `FACET_DUAL_REL · max(‖z‖∞, dual_scale)`, and `dual_scale` floors at
+  `1.0`. So on a model whose duals are smaller than unity the test stopped
+  being relative and admitted exactly what it exists to refuse.
+
+  Measured: `s = 1e-6·(1, 0.6, 0.8)` against `z = 1e-6·(1, 0.8, −0.6)` — the
+  tail rotated 90°, maximally non-complementary — was served as a `Boundary`
+  face with `ν = 1e-6` fed into the curvature, and `reduced_hessian` returned
+  `Ok`. `S = Z = 1e-6·diag(1, 0)`, right rank and wrong subspace, likewise. On
+  a mixed model the same hole opens with no global rescaling at all: one
+  block's small dual beside another's large one.
+
+  The threshold is now the block's own `‖z‖∞` (and `‖S‖∞·‖Z‖∞` for PSD), which
+  makes the check **scale-equivariant** — scale `(s, z)` by `c` and residual
+  and threshold scale together. Safe because a genuinely collapsed dual is
+  refused earlier and separately, so the denominator cannot vanish. The
+  exponential/power check is pre-existing and shared the flaw; all three move
+  together rather than leaving the crate with two conventions.
+
+  Found by adversarial review of PR #889, which also confirmed the guards were
+  correct at unit scale — the fixtures closing the original finding were all
+  `O(1)`, so they reached only that branch.
+
+- **`QpSensitivity::reduced_hessian`'s doc described neither its old behaviour
+  nor its new one.** It said "the objective Hessian `P` projected onto the null
+  space of `B = [A; active G rows; ...]`" and `H_R = Zᵀ P Z`. Since the fix one
+  release-note above, the method projects `P + curvature` — the Lagrangian
+  Hessian — over the *active rows*, which on a conic build are a face's
+  combined row `wᵀG` and not rows of `G` at all. The `ReducedHessian` struct
+  doc repeated the same formula. Both corrected, with the orthant path stated
+  explicitly: `curvature` is empty there, so it is exactly `Zᵀ P Z`, the
+  classical definition, unchanged.
+
+
 - **`QpSensitivity::reduced_hessian` was silently wrong on a conic build with a
   curved face (Rust API).** Two defects in one method, both returning `Ok`.
 

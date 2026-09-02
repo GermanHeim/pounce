@@ -682,6 +682,74 @@ fn a_psd_block_whose_dual_range_is_not_in_the_kernel_is_refused() {
     );
 }
 
+/// **The dual-ray refusals are scale-equivariant** — the same tilted duals are
+/// refused a million times smaller.
+///
+/// Round 6 of #889. The threshold used to be
+/// `FACET_DUAL_REL · max(‖z‖∞, dual_scale)`, and `dual_scale` floors at `1.0`,
+/// so below unit scale the test went **absolute** and served exactly the inputs
+/// the round-5 fixtures above prove it refuses at `O(1)`. Measured then: the
+/// second-order case classified `Boundary` with `ν = 1e-6` fed into the
+/// curvature, and `reduced_hessian` returned `Ok`.
+///
+/// The threshold is now the block's own `‖z‖∞` (and `‖S‖∞·‖Z‖∞` for PSD), which
+/// is a ratio of like quantities and therefore invariant. This is the branch the
+/// round-5 fixtures could not reach: every `hand_built_cone` model above is
+/// `O(1)`, where the floored and unfloored readings coincide — `/sens-review`
+/// entries 3 and 6 together, in the fix written to close an entry-6 finding.
+///
+/// Mutation: restore `.max(dual_scale)` / `.max(primal_scale)`. Red here, and
+/// green on the `O(1)` fixtures above, which is the whole point.
+#[test]
+fn the_dual_ray_refusals_hold_below_unit_scale() {
+    const TINY: f64 = 1e-6;
+    let scaled = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x * TINY).collect() };
+
+    // Second-order: the tail rotated 90°, so ⟨s, z⟩ is maximally wrong.
+    assert_nonsmooth(
+        refusal(
+            ConeSpec::SecondOrder(3),
+            &scaled(&[1.0, 0.6, 0.8]),
+            &scaled(&[1.0, 0.8, -0.6]),
+        ),
+        "not on the ray normal to this boundary point",
+    );
+
+    // PSD: range(Z) is S's RANGE rather than its kernel — right rank, wrong
+    // subspace — at the same scale.
+    assert_nonsmooth(
+        refusal(
+            ConeSpec::Psd(2),
+            &scaled(&[1.0, 0.0, 0.0]),
+            &scaled(&[1.0, 0.0, 0.0]),
+        ),
+        "range(Z) is not inside ker(S)",
+    );
+
+    // And the exponential cone, whose check this convention was copied from and
+    // which shared the hole. `smooth_facet_face` is one function for all three,
+    // so leaving it floored would have meant two conventions and no reason.
+    //
+    // At `1e-6` this arm cannot be written: `y = 1e-6` trips the degenerate-ray
+    // guard (`sy <= FACET_ACTIVE_REL · primal_scale`, itself floored) and the
+    // block is refused *before* reaching the ray check — the right answer for
+    // the wrong reason, and no evidence about this fix. `1e-4` clears that guard
+    // while still separating the two rules: the old floored threshold is
+    // `1e-3 · max(1e-4, 1) = 1e-3`, above this residual, so it **accepted**;
+    // the unfloored one is `1e-3 · 1e-4 = 1e-7`, and it refuses.
+    const EXP_SCALE: f64 = 1e-4;
+    let e = std::f64::consts::E;
+    let exp_scaled = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x * EXP_SCALE).collect() };
+    assert_nonsmooth(
+        refusal(
+            ConeSpec::Exponential,
+            &exp_scaled(&[1.0, 1.0, e]),
+            &exp_scaled(&[-1.0, 1.0, 1.0 / e]),
+        ),
+        "not on the ray normal to this face",
+    );
+}
+
 /// The power cone's degenerate faces, where `g = y^α z^{1−α} = 0` and the two
 /// smooth sheets `x = ±g` meet.
 #[test]

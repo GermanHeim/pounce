@@ -781,11 +781,31 @@ const FACET_ACTIVE_REL: f64 = 1e-6;
 /// This is a converged-solution check of the same kind as
 /// [`ORTHANT_GUARD_REL`], and is calibrated the same way — off measured
 /// populations rather than a round number that looks safe. On the four
-/// non-symmetric fixtures above, `‖z − ν∇φ‖∞ / max(‖z‖∞, dual_scale)` runs
-/// `2.8e-8` to `3.4e-5`; a dual deliberately tilted off the ray is `O(1)`. So
-/// `1e-3` sits ~30× above everything converged and ~1000× below a genuine
-/// mismatch. `1e-6`, the first value tried, refused two of the four correct
-/// solutions.
+/// non-symmetric fixtures above, `‖z − ν∇φ‖∞ / ‖z‖∞` runs `2.8e-8` to
+/// `3.4e-5`; a dual deliberately tilted off the ray is `O(1)`. So `1e-3` sits
+/// ~30× above everything converged and ~1000× below a genuine mismatch.
+/// `1e-6`, the first value tried, refused two of the four correct solutions.
+///
+/// # The denominator is the block's own `‖z‖∞`, with no problem-scale floor
+///
+/// It used to be `max(‖z‖∞, dual_scale)`, and `dual_scale` floors at `1.0`. So
+/// below unit scale the test went **absolute** and admitted exactly what it
+/// exists to refuse: round 6 of #889 measured `s = 1e-6·(1, 0.6, 0.8)` against
+/// `z = 1e-6·(1, 0.8, −0.6)` — the tail rotated 90°, maximally
+/// non-complementary — served as a `Boundary` face with `ν = 1e-6` fed into the
+/// curvature. On a mixed model the same hole opens with no global rescaling at
+/// all: one block's small dual beside another's large one.
+///
+/// Dropping the floor makes the check **scale-equivariant** — scale `(s, z)` by
+/// `c` and residual and threshold scale together — which is what a ratio of two
+/// dual-space quantities should be. It is safe only because a genuinely
+/// collapsed dual is refused *earlier and separately*: [`dual_has_collapsed`]
+/// on the second-order path and at `exp_face`/`power_face` before they delegate
+/// here, so `‖z‖∞` is meaningfully nonzero by the time this runs. Without that
+/// ordering the denominator could vanish and the test would reject round-off.
+///
+/// The PSD analogue (`⟨S, Z⟩` against `‖S‖∞·‖Z‖∞`) is the same convention one
+/// degree up: its residual is quadratic in the scale, and so is its threshold.
 const FACET_DUAL_REL: f64 = 1e-3;
 
 fn smooth_facet_face(
@@ -793,7 +813,6 @@ fn smooth_facet_face(
     facet: &SmoothFacet,
     z: &[f64],
     g_rows: &[Vec<(usize, f64)>],
-    dual_scale: f64,
 ) -> Result<ConeBlockFace, ConeError> {
     let grad = &facet.grad;
     let gn2: f64 = grad.iter().map(|v| v * v).sum();
@@ -811,7 +830,7 @@ fn smooth_facet_face(
             .map(|(a, b)| a - nu * b)
             .collect::<Vec<_>>(),
     );
-    if nu <= 0.0 || resid > FACET_DUAL_REL * inf_norm_of(z).max(dual_scale) {
+    if nu <= 0.0 || resid > FACET_DUAL_REL * inf_norm_of(z) {
         return Err(ConeError::new(
             block,
             "the dual is not on the ray normal to this face, so the block is not in \
@@ -925,10 +944,11 @@ fn soc_face(
             .map(|(zi, wi)| zi - nu * wi)
             .collect::<Vec<_>>(),
     );
-    if nu <= 0.0 || dual_resid > FACET_DUAL_REL * inf_norm_of(z).max(dual_scale) {
+    if nu <= 0.0 || dual_resid > FACET_DUAL_REL * inf_norm_of(z) {
         return Err(ConeError::new(
             block,
-            "the dual is not on the ray normal to this boundary point, so the face              being linearized is not the face the solution is on",
+            "the dual is not on the ray normal to this boundary point, so the face \
+             being linearized is not the face the solution is on",
         ));
     }
 
@@ -1045,9 +1065,7 @@ fn psd_face(
     // dual-ray check; the same mismatched-caller-input class, and the same
     // reason it is worth a refusal rather than a caveat.
     let sz_inner: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
-    if sz_inner.abs()
-        > FACET_DUAL_REL * inf_norm_of(s).max(primal_scale) * inf_norm_of(z).max(dual_scale)
-    {
+    if sz_inner.abs() > FACET_DUAL_REL * inf_norm_of(s) * inf_norm_of(z) {
         return Err(ConeError::new(
             block,
             "the PSD block's ranks complement but its subspaces do not — ⟨S, Z⟩ is \
@@ -1210,7 +1228,7 @@ fn exp_face(
         grad: vec![-1.0, (sz / sy).ln() - 1.0, sy / sz],
         hess_factors: vec![(1.0 / sy, vec![0.0, 1.0, -sy / sz])],
     };
-    smooth_facet_face(block, &facet, z, g_rows, dual_scale)
+    smooth_facet_face(block, &facet, z, g_rows)
 }
 
 /// The power cone's smooth facet.
@@ -1281,7 +1299,7 @@ fn power_face(
         grad: vec![-sx.signum(), alpha * g / sy, (1.0 - alpha) * g / sz],
         hess_factors: vec![(k, vec![0.0, 1.0 / sy, -1.0 / sz])],
     };
-    smooth_facet_face(block, &facet, z, g_rows, dual_scale)
+    smooth_facet_face(block, &facet, z, g_rows)
 }
 
 /// The `(x,x)` Hessian a second-order block on its boundary contributes, as
@@ -2921,15 +2939,29 @@ impl QpSensitivity {
         &self.weakly_active_bound_vars
     }
 
-    /// Reduced Hessian of the QP at the optimum: the objective Hessian `P`
-    /// projected onto the null space of the **active constraints**
-    /// `B = [A; active G rows; active bound rows]`. If `Z` is an
-    /// orthonormal basis of `null(B)` (the feasible directions / degrees of
-    /// freedom), the reduced Hessian is `H_R = Zᵀ P Z`. Its eigenvalues are
-    /// the objective's curvatures along feasible directions: all positive
-    /// ⟺ a strict second-order minimizer (always so for a strictly convex
-    /// `P`), and their spread is the conditioning of the QP on the active
-    /// manifold. This mirrors the NLP `Solver.reduced_hessian` /
+    /// Reduced Hessian of the QP at the optimum: the **Hessian of the
+    /// Lagrangian** projected onto the null space of the active constraints
+    /// `B = [A; the active inequality-side rows; active bound rows]`. If `Z` is
+    /// an orthonormal basis of `null(B)` (the feasible directions / degrees of
+    /// freedom), the reduced Hessian is `H_R = Zᵀ (P + C) Z`, where `C` is the
+    /// active faces' curvature. Its eigenvalues are the curvatures along
+    /// feasible directions: all positive ⟺ a strict second-order minimizer, and
+    /// their spread is the conditioning of the QP on the active manifold.
+    ///
+    /// **On the orthant path `C` is empty and this is exactly `Zᵀ P Z`** — the
+    /// classical definition, unchanged, because a linear constraint has no
+    /// Hessian and the Lagrangian's is the objective's. `C` is nonzero only on a
+    /// conic build with a *curved* face, where projecting bare `P` is the same
+    /// omission that made the first draft of the parametric step converge to the
+    /// wrong derivative (round 5 of #889 found this method still doing it; this
+    /// doc described the buggy behaviour before then, and neither behaviour
+    /// after the fix until round 6 caught it).
+    ///
+    /// A second correction in the same breath: `B`'s inequality side is the
+    /// **active rows**, which on a conic build are a face's combined row `wᵀG`
+    /// rather than rows of `G`. "Active G rows" was never true there.
+    ///
+    /// This mirrors the NLP `Solver.reduced_hessian` /
     /// `solve_with_sens(compute_reduced_hessian=True)`.
     ///
     /// The basis `Z` is the null space of `B`, obtained from the
@@ -3031,7 +3063,7 @@ impl QpSensitivity {
             }
         }
 
-        // H_R = Zᵀ P Z, with Z = first `n_dof` columns of `vecs` (the null
+        // H_R = Zᵀ (P + curvature) Z, with Z = first `n_dof` columns of `vecs` (the null
         // space). Column-major throughout: column j of Z is vecs[j*n + ·].
         let z = |j: usize, r: usize| vecs[j * n + r];
         // PZ (n × n_dof), column-major.
@@ -3079,7 +3111,8 @@ impl QpSensitivity {
     }
 }
 
-/// The reduced Hessian `H_R = Zᵀ P Z` of a QP on its active manifold, with
+/// The reduced Hessian `H_R = Zᵀ (P + C) Z` of a QP on its active manifold —
+/// `C` being the active faces' curvature, empty on the orthant path — with
 /// its eigendecomposition. All matrices are column-major and `n_dof × n_dof`
 /// (`n_dof` = degrees of freedom = `n − rank` of the active Jacobian).
 #[derive(Debug, Clone, PartialEq)]

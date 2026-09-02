@@ -1783,7 +1783,19 @@ def sens_solution_report(model, perturb, max_iter=None,
     Takes the same perturbation argument `sens_solution()` takes and
     returns a `SolutionReport`; see `pounce.sensitivity.solution_report`.
     `crossed` and `crossed_rows` come back as `ComponentMap`s keyed by
-    the original model's data objects.
+    the original model's data objects. **`activity`, `row_status` and
+    `refined` do not** -- they stay keyed by solve-space names, and that
+    asymmetry is deliberate rather than an oversight (raised in round 6
+    of #889, which is where it got written down).
+
+    The split is by what the field is: `crossed` and `crossed_rows`
+    name *components the caller then does something with*, so handing
+    back data objects saves a lookup. `activity` and `row_status` are a
+    classification keyed the way the classifier keys it, and `refined`
+    annotates `activity` -- it says which of those entries the reduced
+    rule moved and from what. Remapping `refined` alone would key it
+    differently from the field it explains, which is worse than the
+    asymmetry it would remove.
 
     `refine_activity` re-classifies the entries the cheap classifier
     could not call, using the reduced curvature, and records what moved
