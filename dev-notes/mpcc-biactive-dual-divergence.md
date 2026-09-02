@@ -889,3 +889,51 @@ threshold that separates `scholtes4` from `qpec_small` on the step
 conjunct would be fitted to two models rather than derived from either.
 Whether the detector should exclude the no-S-stationary-point class
 directly is open, and would need a classifier this layer does not have.
+
+---
+
+## Correction: the σ/crossover reachability claim was inferred, not measured
+
+The first version of the σ/crossover fix (PR #897) said "`σ` engages on 1 of 79
+CLI fixtures, 0 of 138 Maros-Mészáros problems and 0 of 150 purpose-built
+degenerate LPs". Two things were wrong with that.
+
+The 1-of-79 figure was quoted from `CLAUDE.md` rather than measured here, and
+it refers to `qcqp_columns_illcond` — a **QCQP**, while crossover is gated to
+pure LPs, so that number cannot bear on this path at all.
+
+The 0-of-150 figure conflated three different outcomes. What was observed was
+"no demotion"; what that can mean is (a) the cascade never ran, (b) it ran and
+certified, or (c) it ran and failed. Only (c) is the precondition. Instrumented
+— probes on `hsde_cost_scale`, `sigma_verdict::record` and the crossover gate —
+the answer is (b): **σ engaged on 149 of those 150 LPs** and the cascade
+certified every one. The corpus was reaching the path the whole time.
+
+Measured properly, over 550 pure LPs (400 built to be as ill-conditioned as
+possible with no equality rows, plus the original 150):
+
+| | |
+|---|---|
+| crossover on by default | **no** — `qp_crossover=yes` opts in |
+| crossover *moves* `x` when enabled | **331 of 550** |
+| `σ` engages | 336 of 550 |
+| cascade records `uncertified` on a pure LP | **0 of 550** |
+
+So the crossover half is the majority case once the option is on, not a rarity;
+the uncertified half is the one that resisted. A structural reason for much of
+that: `sigma_forward_error_is_small` returns early when `m_eq > 0`, and it is
+the only arm recorded, so a model with any equality row can never be demoted.
+
+**The fix's effect is measured**, by forcing the precondition and comparing the
+same binary with and without the re-record. On the 182 LPs where crossover
+moves `x`:
+
+* the stale verdict reroutes **182 of 182** to the NLP arm;
+* scored against HiGHS on the 167 that solve, keeping the crossover vertex is
+  exact — median relative error `0`, **167/167 within `1e-8`** — while the
+  reroute is **>10× further out on 43** of them, losing five to eight
+  significant digits (`h27`: `-4.693742165` against the exact `-4.693769437`).
+
+The general lesson, which is the same one this note's corpus section already
+makes one level up: *an absence of observations is not a measurement of
+reachability until you have instrumented the thing you claim is not happening.*

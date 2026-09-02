@@ -414,10 +414,10 @@ where
     // the point actually being returned, and it is the same estimator with
     // the same cut, so the two sites cannot drift.
     //
-    // The clone is taken only when there is a verdict to re-record, which is
-    // the `σ` path on a pure LP — 1 of 79 CLI fixtures and 0 of 138
-    // Maros-Mészáros problems reach `σ` at all — so the ordinary path pays
-    // nothing.
+    // The clone is taken only when there is a verdict to re-record, so the
+    // ordinary path pays nothing. See `sigma_verdict_after_crossover` for the
+    // measured reachability of each half — the crossover half is the majority
+    // case once `qp_crossover=yes`, the uncertified half was not reproducible.
     let pre_crossover_x = sigma_uncertified.then(|| sol.x.clone());
     let sol = if crate::debug_stop::requested() {
         sol
@@ -3243,10 +3243,32 @@ const SIGMA_DEMOTION_MARGIN: f64 = 10.0;
 ///
 /// `before` is `None` when there was no verdict to re-record — the ordinary
 /// path, which pays nothing, since the clone that produces it is taken only
-/// when the cascade demoted something. Reachability is why this carries unit
-/// tests rather than a fixture: `σ` engages on 1 of 79 CLI fixtures and 0 of
-/// 138 Maros-Mészáros problems, and 150 purpose-built degenerate LPs with
-/// `‖c‖∞` from `1e8` to `1e13` produced no demotion at all.
+/// when the cascade demoted something.
+///
+/// **Reachability, measured rather than assumed** (instrumented build, probes
+/// on `hsde_cost_scale`, `sigma_verdict::record` and the crossover gate):
+///
+/// | | |
+/// |---|---|
+/// | crossover is on by default | **no** — `qp_crossover=yes` opts in |
+/// | crossover *moves* `x` when enabled | **331 of 550** pure LPs |
+/// | `σ` engages (`max(‖P‖∞,‖c‖∞)·ε > tol`) | 336 of those 550; 2 of 96 CLI fixtures |
+/// | cascade records `uncertified` on a pure LP | **0 of 550** |
+///
+/// So the two halves have very different frequencies: the crossover half is
+/// the *majority* case once the option is on, and the uncertified half is what
+/// could not be produced. Note also that
+/// [`sigma_forward_error_is_small`] returns early on `m_eq > 0`, so only a
+/// model with **no equality rows** can be demoted at all — which is most of
+/// why a netlib-shaped LP never is.
+///
+/// With the precondition forced, the effect is total and it is not cosmetic:
+/// on the 182 LPs where crossover moves `x`, the stale verdict reroutes
+/// **182 of 182** to the NLP arm, and scored against HiGHS on the 167 that
+/// solve, keeping the crossover vertex is exact (median relative error `0`,
+/// 167/167 within `1e-8`) while the reroute lands >10× further out on **43**
+/// of them. The point being discarded is the exact one, which is the whole
+/// argument for re-recording.
 fn sigma_verdict_after_crossover(
     prob: &QpProblem,
     sol: &QpSolution,

@@ -98,12 +98,30 @@ changes.
   re-solves on the NLP arm. The verdict is now re-asked of the point actually
   being returned, through the same estimator with the same cut.
 
-  Reachability, stated plainly: this was **not** reproduced. `σ` engages only
-  when `max(‖P‖∞, ‖c‖∞)·ε > tol`, which 1 of 79 CLI fixtures, 0 of 138
-  Maros-Mészáros problems and 0 of 150 purpose-built degenerate LPs with `‖c‖∞`
-  from `1e8` to `1e13` satisfy. It is fixed as a reasoned defect with unit tests
-  on all three branches rather than a fixture, and the clone that supports it is
-  taken only when a verdict was recorded, so the ordinary path pays nothing.
+  **Reachability, measured** on an instrumented build (probes on
+  `hsde_cost_scale`, `sigma_verdict::record` and the crossover gate) rather
+  than inferred from an absence:
+
+  | | |
+  |---|---|
+  | crossover on by default | **no** — `qp_crossover=yes` opts in |
+  | crossover *moves* `x` when enabled | **331 of 550** pure LPs |
+  | `σ` engages | 336 of those 550; 2 of 96 CLI fixtures |
+  | cascade records `uncertified` on a pure LP | **0 of 550** |
+
+  The two halves are not equally rare: the crossover half is the *majority*
+  case once the option is on, and it is the uncertified half that could not be
+  produced. `sigma_forward_error_is_small` also returns early on `m_eq > 0`, so
+  only a model with no equality rows can be demoted at all — most of why a
+  netlib-shaped LP never is.
+
+  With the precondition forced, the effect is total and not cosmetic: on the
+  182 LPs where crossover moves `x`, the stale verdict reroutes **182 of 182**
+  to the NLP arm, and against HiGHS on the 167 that solve, keeping the
+  crossover vertex is exact (median relative error `0`, 167/167 within `1e-8`)
+  while the reroute lands **>10× further out on 43** of them. So the fix ships
+  with its effect measured and its trigger unreproduced — the honest split, and
+  the reason it also carries unit tests on all three branches of the helper.
 
 ### Added
 
