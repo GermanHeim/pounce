@@ -1,5 +1,54 @@
 # The QP suite's +515 iterations, and who owns them
 
+> **REVERSED (2026-09-01).** This note concluded that `4c02817d` "is right and
+> the cost is the honest price of correctness". It is not. The note measured
+> **iterations** and **arm parity**; it never measured **accuracy against an
+> independent optimum**, and that is the axis on which the commit was wrong.
+>
+> Scored against the published Maros–Mészáros optima (DOC 97/6) the widened
+> convex arm is **130/138 correct**; without the widening it is **138/138**,
+> and the 8 it recovers — `YAO` and `LISWET1/7/8/9/10/11/12` — are exactly the
+> set `benchmarks/qp_four_way.md` had already listed under *Ipopt-MA57's wrong
+> objectives*, in a report generated before this commit. HiGHS, which is not an
+> interior-point method, returns `36.1224020850` on `LISWET1` against the
+> widened `27.1221`.
+>
+> The sentence below — *"The cheap old iteration counts were the cost of
+> solving an easier, wrong model"* — is exactly backwards. The cheap counts
+> were the cost of solving the **declared** model. Read literally, this note
+> calls `36.1224` "the exact optimum" one paragraph before replacing it.
+>
+> The +515 iterations are gone with it: the convex arm now runs the suite in
+> **2658 iterations against 3164**, and `QSCFXM1`, the family this note is
+> named for, is back to **30 iterations from 131** — and four orders more
+> accurate at the same time (`1.8e-13` against `9.1e-09`). Every claim below
+> about *what* moved and *why* still holds; only the verdict on whether it
+> should have is reversed. gh #760 is closed by that reversal.
+>
+> What the widening does buy, and the only thing it does buy on this arm, is
+> lifting a degeneracy on two ill-scaled stress fixtures
+> (`scaled_feasible_a`, `feasible_x0_wide_scale`). Excluding those, the convex
+> fixture corpus takes **16% fewer** iterations without it.
+>
+> The mechanism, stated once: a widening of `δ` moves the optimum by `δ` times
+> the bound's multiplier, and nothing bounds that product. On `LISWET1` the
+> multipliers sum to `1.6e9`. On a 46-variable netlib LP
+> (`issue745_netlib_problem.nl`) a `1e-8` widening moves the objective from
+> `0` to `-1.6` — the entire answer. The error is also one-signed, since
+> widening only ever enlarges the feasible set, so it is a systematic
+> optimistic bias rather than noise, and it does not close as `tol` tightens
+> because it is a change to the model and not a convergence slop.
+>
+> The lesson for the next reader is the one this repository keeps relearning,
+> one level up from gh #690/#760: *a corpus uniform in the dimension a change
+> acts on reports "small and mixed" no matter how large its models are.* Here
+> the uniform dimension was the **reference**. Every number this note checked
+> came from POUNCE or from Ipopt, and Ipopt carries the same widening, so no
+> comparison it could run was capable of seeing the error.
+> `crates/pounce-cli/tests/declared_optimum_sentinel.rs` is the guard that
+> holds two optima from outside this solver family, and is mutation-checked to
+> go red if the widening is ever made the convex default again.
+
 `4c02817d` — "Apply bound_relax_factor on the convex arm too" (Refs #744,
 #745) — raised POUNCE's iteration counts across the 138-problem
 Maros–Mészáros QP suite. This note is the record CLAUDE.md asks for: *a

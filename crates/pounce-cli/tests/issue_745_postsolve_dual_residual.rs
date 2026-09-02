@@ -86,9 +86,29 @@ fn solve(fixture: &str, tag: &str) -> Residuals {
     }
 }
 
-/// Ipopt/MA57 on the same model. The pre-fix answer, `-1.6001171170`, is
-/// wrong in the *fourth* decimal — a converged solve reported as such.
-const IPOPT_OBJ: f64 = -1.5996991454255909;
+/// The declared model's optimum, and it is `0`.
+///
+/// This assertion used to hold the Ipopt/MA57 answer, `-1.5996991454`. That
+/// number is not this model's optimum — it is the optimum of the model
+/// Ipopt solves, which carries the `bound_relax_factor` widening. On a
+/// 46-variable, 12-row LP a `1e-8` widening buys the whole `-1.6`: some bound
+/// here has a multiplier of order `1.6e8`, and the widening's error is
+/// `delta` times that multiplier.
+///
+/// HiGHS, on this fixture's `.nl` reconstructed as an LP and checked against
+/// the `.nl` evaluator at a random point, returns **`0.0` exactly** from both
+/// its simplex and its interior-point solver. POUNCE's convex arm now returns
+/// `6.0e-08`, and `bound_relax_factor=1e-8` reproduces `-1.5999999` — the
+/// Ipopt number, from the Ipopt model.
+///
+/// Keeping the old reference here would pin a 100%-wrong objective, which is
+/// how the same mistake reached `LISWET1` (33%) and `benchmarks/qp`'s
+/// `ipopt_ma57.json`. The assertion's *purpose* is unchanged and better
+/// served: the postsolve repair must move toward the optimum, not merely
+/// toward a smaller residual.
+const DECLARED_OPT: f64 = 0.0;
+/// Absolute, not relative: the optimum is zero.
+const OPT_TOL: f64 = 1e-6;
 
 /// What the solver claims when it says `Solve_Succeeded`: `tol` is `1e-8`,
 /// and every residual in the summary must actually be at that scale. `1e-6`
@@ -117,13 +137,15 @@ fn postsolve_does_not_invent_a_dual_residual() {
         "constraint violation {:.6e}",
         r.primal
     );
-    // The wrong duals came with a wrong point. Ipopt's own answer is the
-    // check that the repair moved *towards* the optimum, not merely towards
-    // a smaller residual.
-    let rel = (r.objective - IPOPT_OBJ).abs() / IPOPT_OBJ.abs();
+    // The wrong duals came with a wrong point, so the objective is the check
+    // that the repair moved *towards* the optimum and not merely towards a
+    // smaller residual.
     assert!(
-        rel < 1e-3,
-        "objective {:.10e} vs Ipopt/MA57 {IPOPT_OBJ:.10e} (rel {rel:.2e})",
+        (r.objective - DECLARED_OPT).abs() < OPT_TOL,
+        "objective {:.10e}, want {DECLARED_OPT:.10e} ± {OPT_TOL:.0e} — the \
+         declared model's optimum, as HiGHS returns it from both its simplex \
+         and its interior-point solver. `bound_relax_factor=1e-8` gets \
+         -1.5999999 here instead, which is the model Ipopt solves.",
         r.objective
     );
 }

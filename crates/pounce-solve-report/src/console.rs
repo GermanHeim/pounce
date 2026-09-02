@@ -527,6 +527,25 @@ pub fn print_summary(
              Set primal_noise_floor_kappa = 0 to disable.)"
         );
     }
+    // How far outside the model AS DECLARED the returned point sits. This arm
+    // applies the `bound_relax_factor` widening by design -- a feasible-iterate
+    // log-barrier needs `x` strictly inside its bounds -- so the residuals
+    // above are honest residuals of the WIDENED model, and on a row-degenerate
+    // one the two differ by orders: netlib `wood1p` prints `1.71e-14` above at
+    // a point `9.84e-09` outside the declared model. Printed only when a
+    // widening was applied and it actually moved the number, so the block
+    // stays byte-identical to upstream's on everything else.
+    if stats.final_declared_constr_viol.is_finite()
+        && stats.final_declared_constr_viol > stats.final_constr_viol * 10.0
+        && stats.final_declared_constr_viol > 0.0
+    {
+        println!();
+        println!(
+            "Violation of the model as declared (before the \
+             bound_relax_factor widening): {}",
+            fmt_ipopt(stats.final_declared_constr_viol)
+        );
+    }
     println!();
     println!();
     println!(
@@ -653,6 +672,14 @@ pub fn print_convex_summary(
     dual_inf: f64,
     complementarity: f64,
     kkt_error: f64,
+    // How far outside the model AS DECLARED the point sits, when the solve
+    // applied the `bound_relax_factor` widening and the two differ. The
+    // residuals above measure the widened model the solver was handed — the
+    // model its convergence test is about — so without this line a reader
+    // takes `Constraint violation....: 8.68e-13` for their own model's
+    // feasibility when the point is `4.99e-06` outside a declared row
+    // (netlib `afiro`, gh #744/#745). `None` when no widening applied.
+    declared_primal_inf: Option<f64>,
 ) {
     println!();
     println!();
@@ -668,6 +695,19 @@ pub fn print_convex_summary(
     row("Variable bound violation", 0.0);
     row("Complementarity.........", complementarity);
     row("Overall NLP error.......", kkt_error);
+    // Only when the widening actually moved the number: on the vast majority
+    // of models the point satisfies the declared rows to the same order and
+    // an extra line would be noise.
+    if let Some(d) = declared_primal_inf {
+        if d > primal_inf * 10.0 && d > 0.0 {
+            println!();
+            println!(
+                "Violation of the model as declared (before the \
+                 bound_relax_factor widening): {}",
+                fmt_ipopt(d)
+            );
+        }
+    }
     println!();
 }
 

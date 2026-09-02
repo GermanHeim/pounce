@@ -1150,6 +1150,43 @@ pub fn main() -> ExitCode {
                 // Reaching here means the convex attempt declined and the NLP
                 // path below owns the verdict; charge it for the time it spent.
                 charge_wall_budget(app.options_mut(), convex_t0.elapsed());
+                // ...and make that path solve the model the caller DECLARED,
+                // which is the whole point of the reroute.
+                //
+                // Without this the fallback hands the model to the one arm
+                // that still applies `bound_relax_factor`, so a route
+                // introduced to rescue a declined solve answers a different
+                // question than the one asked. Measured on
+                // `scaled_feasible_a`: the rerouted point sits **2679.85**
+                // outside the declared model — its rows reach `|b| = 2.65e13`
+                // and the row width is relative (gh #385) — while reporting
+                // `Solve_Succeeded` at `Constraint violation 7.45e-09`. That
+                // is the exact failure this branch exists to remove, reached
+                // through the mechanism added to repair its one regression.
+                //
+                // Unset-means-declared is the same rule the convex arm now
+                // follows, so `pounce foo.nl` solves one model whichever arm
+                // answers. An explicit `bound_relax_factor` is still honoured
+                // and still buys Ipopt's model, exactly as
+                // `solver_selection=nlp` does — neither is a default.
+                if !matches!(
+                    app.options().get_numeric_value("bound_relax_factor", ""),
+                    Ok((_, true))
+                ) {
+                    // The discarded `Result<bool, _>` is dead, and provably so
+                    // rather than incidentally: `Ok(false)` means "clobber
+                    // refused, nothing written", which here would silently
+                    // leave the widening on — the very defect this restores.
+                    // It cannot happen, because the guard above is exactly
+                    // complementary to the refusal. `get_numeric_value`
+                    // reports `set == true` iff the tag is in the user's map
+                    // (`options_list.rs`, `find_tag`), and `will_allow_clobber`
+                    // returns true iff it is ABSENT from that same map. Guard
+                    // false ⟹ absent ⟹ clobber allowed ⟹ the write lands.
+                    let _ =
+                        app.options_mut()
+                            .set_numeric_value("bound_relax_factor", 0.0, true, true);
+                }
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -1991,6 +2028,11 @@ pub fn main() -> ExitCode {
             builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
         }
+        // The arm that produced this verdict, not the one routing
+        // picked: a convex solve that declines its own result lands
+        // here (gh #535) after the `Selected solver:` banner has
+        // already said `pounce-convex`.
+        builder.solution.engine = "nlp".to_string();
         builder.solution.status = status;
         // Same source of truth as the `.sol` writer below — a run must not
         // report 201 in one output and 200 in the other.
@@ -2274,7 +2316,20 @@ fn lp_declines_to_nlp(
 ) -> bool {
     use pounce_convex::QpStatus;
     allow_nlp_fallback
-        && class == pounce_cli::dispatch::ProblemClass::Lp
+        // gh #535 gated this on `Lp`. A convex QP that fails to certify is
+        // the same situation and has the same answer -- it is also a valid
+        // NLP, and the general path routinely certifies the badly-scaled and
+        // degenerate models the interior path stalls on. `scaled_feasible_a`
+        // is the case: 20 orders of Jacobian spread, and the convex arm needs
+        // 3596 iterations where the NLP arm takes 22. The convex arm already
+        // says so itself -- it emits the gh #293 scaling warning on that model
+        // before returning IterationLimit -- so declining is a verdict it has
+        // already reasoned its way to.
+        && matches!(
+            class,
+            pounce_cli::dispatch::ProblemClass::Lp
+                | pounce_cli::dispatch::ProblemClass::ConvexQp
+        )
         && matches!(
             status,
             QpStatus::OptimalInaccurate | QpStatus::IterationLimit | QpStatus::NumericalFailure
@@ -2346,32 +2401,70 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
-/// The `bound_relax_factor` widening the convex path must apply so that the
-/// model it solves is the one the NLP path solves.
+/// The `bound_relax_factor` widening the convex path applies — **none by
+/// default**. Setting the option explicitly still buys Ipopt's behaviour.
 ///
-/// Reads the same two options `Application` feeds `OrigIpoptNlp::relax_bounds`
-/// — `bound_relax_factor` (Ipopt default `1e-8`) and `constr_viol_tol`
-/// (default `1e-4`) — and uses the same defaults when the user set neither,
-/// so `pounce foo.nl` and `pounce foo.nl solver_selection=nlp` agree.
+/// gh #744/#745 made this arm widen bounds like the NLP arm, so one binary
+/// would not solve two models depending on `solver_selection`. The goal was
+/// right and the direction was backwards: it converged the arms on the NLP
+/// arm's *internal perturbation* rather than on the model the user declared.
 ///
-/// gh #744 / #745: before this, the convex arm ignored both and solved the
-/// model exactly as declared. On the constraint-degenerate families
-/// (`LISWET*`, `YAO`, `POWELL20`, the `pldd*`/`delf*`/`large*` LPs) that made
-/// the two arms of the same binary disagree by up to 33% in the objective —
-/// the convex arm reporting the exact optimum and the NLP arm the relaxed one.
-/// See [`pounce_cli::qp_extract::BoundRelax`] for why so small a widening
-/// moves the objective so far.
+/// A widening of `δ` moves the optimum by `δ` times the bound's multiplier,
+/// and nothing bounds that product. On `LISWET1` — every one of 10 000
+/// monotonicity rows active, multipliers summing to `1.6e9` — a `1e-8`
+/// widening buys `9.0` of objective:
+///
+/// | | objective |
+/// |---|---|
+/// | widened (gh #744 default) | `27.1220506` |
+/// | as declared (this default) | **`36.1224021`** |
+/// | HiGHS, independently | **`36.1224020850`** |
+/// | Maros–Mészáros DOC 97/6 ground truth | **`36.1224`** |
+///
+/// The error is also **one-signed** — widening only ever enlarges the
+/// feasible set — so it is a systematic optimistic bias, not noise, and it
+/// does not close as `tol` tightens because it is a change to the model
+/// rather than a convergence slop.
+///
+/// `benchmarks/qp_four_way.md`, generated before gh #744, is the record: it
+/// scores every engine against DOC 97/6 and put the unrelaxed convex arm at
+/// **137/138 correct, 0 solved-but-wrong**, listing `LISWET1(re=2.5e-01)`
+/// among Ipopt-MA57's wrong objectives. gh #744 moved this arm into that
+/// column. Measured against HiGHS over the 91-instance netlib LP corpus,
+/// going back to the declared model takes the median objective error from
+/// `1.2e-08` to `3.8e-11` and instances within `1e-8` from 37 to 84.
+///
+/// The NLP arm keeps its widening and must: it is a feasible-iterate
+/// log-barrier that needs `x` strictly inside its bounds, and matching Ipopt
+/// is that arm's contract. Disabling it there is not a near miss but a
+/// failure — the fixture sweep at `bound_relax_factor=0` turns
+/// `square_flowsheet_resto` into `InfeasibleProblemDetected` and takes
+/// `cresc4` from 105 iterations to 3000. This arm needs none of it: the IPM
+/// is infeasible-start, strict interiority lives in the `(s, z)` slack/dual
+/// pair that `init_iterate`/`recenter_warm` place, not in the geometry of the
+/// declared box — which is why fixed variables (`lb == ub`, zero width) have
+/// always shipped through here un-widened without incident.
+///
+/// So the arms now differ on constraint-degenerate models, by construction
+/// and on purpose. That difference is reported rather than hidden:
+/// `final_declared_constr_viol` measures the returned point against the model
+/// as declared on either arm.
 fn convex_bound_relax(app: &IpoptApplication) -> pounce_cli::qp_extract::BoundRelax {
     let opt = app.options();
-    let num = |name: &str, default: f64| {
+    let set_value = |name: &str| {
         opt.get_numeric_value(name, "")
             .ok()
             .and_then(|(v, set)| set.then_some(v))
-            .unwrap_or(default)
     };
-    pounce_cli::qp_extract::BoundRelax {
-        factor: num("bound_relax_factor", 1e-8),
-        cap: num("constr_viol_tol", 1e-4),
+    match set_value("bound_relax_factor") {
+        // Unset: solve the model as declared.
+        None => pounce_cli::qp_extract::BoundRelax::NONE,
+        // Set: the caller asked for the widening by name, so give them
+        // exactly the NLP arm's model -- `constr_viol_tol` caps it there too.
+        Some(factor) => pounce_cli::qp_extract::BoundRelax {
+            factor,
+            cap: set_value("constr_viol_tol").unwrap_or(1e-4),
+        },
     }
 }
 
@@ -2766,11 +2859,11 @@ fn run_convex_qp(
         eprintln!(
             "pounce: note: the convex ({}) solve did not certify a KKT point \
              after {} iterations in {elapsed:.3}s (KKT error {:.2e} against \
-             tol {:.1e}); an LP is also a valid NLP, so it is being re-solved \
-             on the general NLP interior-point path, which certifies the \
-             degenerate, rank-deficient LPs the interior path stalls on (gh \
-             #133). Use solver_selection=qp-ipm to see the convex result \
-             instead.",
+             tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
+             being re-solved on the general NLP interior-point path, which \
+             certifies the degenerate, rank-deficient and badly-scaled models \
+             the interior path stalls on (gh #133, gh #535). Use \
+             solver_selection=qp-ipm to see the convex result instead.",
             class.name(),
             sol.iters,
             res.kkt_error(),
@@ -2839,6 +2932,17 @@ fn run_convex_qp(
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
     let res = sol.kkt_residuals(&qp);
+    // ... but `qp` is the model the SOLVER was handed, whose inequality rows
+    // and variable box carry the `bound_relax_factor` widening
+    // (`qp_extract::BoundRelax`). That is the right model for the convergence
+    // test — pounce-convex's acceptance tests call `kkt_residuals` on it by
+    // design, and gh #744/#745 made the widening deliberate so this arm
+    // solves what the NLP arm solves — and the wrong one to REPORT as the
+    // caller's feasibility. On `afiro` the returned point sits 4.99e-06
+    // outside the declared row `b = 500` (exactly `1e-8·500`) while this
+    // reads 8.68e-13. Report the declared model's numbers instead; every
+    // solver decision still reads `res`, so no trajectory moves.
+    let reported_res = pounce_cli::qp_extract::declared_residuals_qp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
     print::print_convex_summary(
@@ -2848,6 +2952,7 @@ fn run_convex_qp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        reported_res.map(|d| d.primal_infeasibility),
     );
 
     // Recover per-constraint duals once (mapped from the QP multipliers back
@@ -2918,6 +3023,12 @@ fn run_convex_qp(
         builder.problem.n_constraints = lambda.len() as _;
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
+        builder.solution.engine = if use_active_set {
+            "qp-active-set"
+        } else {
+            "cvx-qp"
+        }
+        .to_string();
         builder.solution.status = qp_status_to_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
@@ -2932,6 +3043,12 @@ fn run_convex_qp(
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;
         builder.stats.final_kkt_error = res.kkt_error();
+        // How far outside the model AS DECLARED the returned point sits —
+        // `final_constr_viol` measures the `bound_relax_factor`-widened model
+        // the solver was handed, which understates it by the widening.
+        builder.stats.final_declared_constr_viol = reported_res
+            .map(|d| d.primal_infeasibility)
+            .unwrap_or(f64::NAN);
         // Per-iteration convergence trace at Full detail (the convex IPM's
         // iterate records map onto the report's IterRecord schema, shared with
         // the NLP path so the harness reads one format).
@@ -3193,6 +3310,11 @@ fn run_convex_socp(
     // orthant-only `kkt_residuals` reported a large bogus constraint violation
     // and NLP error for a solved problem (pounce#209).
     let res = sol.kkt_residuals_conic(&qp, &cones);
+    // Declared-model numbers for reporting, as on the QP path above: `qp`
+    // carries the `bound_relax_factor` widening, so measuring against it
+    // understates how far the returned point sits outside the model the
+    // caller wrote. `res` still drives every solver decision.
+    let reported_res = pounce_cli::qp_extract::declared_residuals_socp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
     print::print_convex_summary(
@@ -3202,6 +3324,7 @@ fn run_convex_socp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        reported_res.map(|d| d.primal_infeasibility),
     );
 
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
@@ -3260,6 +3383,7 @@ fn run_convex_socp(
         builder.problem.n_constraints = lambda.len() as _;
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
+        builder.solution.engine = "cvx-qcqp".to_string();
         builder.solution.status = qp_status_to_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
@@ -3272,6 +3396,12 @@ fn run_convex_socp(
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;
         builder.stats.final_kkt_error = res.kkt_error();
+        // How far outside the model AS DECLARED the returned point sits —
+        // `final_constr_viol` measures the `bound_relax_factor`-widened model
+        // the solver was handed, which understates it by the widening.
+        builder.stats.final_declared_constr_viol = reported_res
+            .map(|d| d.primal_infeasibility)
+            .unwrap_or(f64::NAN);
         if matches!(detail, ReportDetail::Full) {
             builder.iterations = sol
                 .iterates
@@ -3797,13 +3927,24 @@ mod lp_nlp_fallback_tests {
         ));
     }
 
-    /// The issue scopes the fallback to `P = 0`. A convex QP that stalls is a
-    /// different and unmeasured population, so no status reroutes it — nor
-    /// does any class the convex QP driver never sees.
+    /// gh #535 scoped the fallback to `P = 0` because a convex QP that stalls
+    /// was "a different and unmeasured population". It has been measured
+    /// since: `scaled_feasible_a` is a convex QP with 20 orders of Jacobian
+    /// spread on which the convex arm needs 3596 iterations and the NLP arm
+    /// 22, and the convex arm emits the gh #293 scaling warning on it before
+    /// returning `IterationLimit`. So `ConvexQp` reroutes too.
+    ///
+    /// `ConvexQcqp` deliberately does NOT: the conic arm has its own failure
+    /// modes and no measurement behind it, which is the same reason `Lp` was
+    /// alone to begin with. Widen it when there is a fixture that says so.
     #[test]
-    fn only_the_lp_class_reroutes() {
-        for class in [
+    fn only_the_convex_qp_classes_reroute() {
+        assert!(lp_declines_to_nlp(
             ProblemClass::ConvexQp,
+            QpStatus::IterationLimit,
+            true
+        ));
+        for class in [
             ProblemClass::ConvexQcqp,
             ProblemClass::NonconvexQp,
             ProblemClass::Nlp,

@@ -2332,6 +2332,41 @@ impl IpoptNlp for OrigIpoptNlp {
         Some((dl, du))
     }
 
+    fn declared_box_violation(&self, x: &dyn Vector) -> Option<Number> {
+        // Mirrors the `honor_original_bounds` projection just above
+        // ([`Self::finalize_solution_x`]): same lift, same maps, same
+        // declared bounds — it reports the distance instead of removing it.
+        // Fixed variables are spliced in at their exact value, so only the
+        // free block can have drifted past a bound.
+        let x_l = self.declared_x_l.borrow();
+        let x_u = self.declared_x_u.borrow();
+        if x_l.is_none() && x_u.is_none() {
+            return None;
+        }
+        let full = self.lift_x_to_full(x);
+        let cls = self.adapter.borrow().classification().clone();
+        let mut worst = 0.0_f64;
+        if let Some(x_l) = x_l.as_ref() {
+            for (i, &var_idx) in cls.x_l_map.iter().enumerate() {
+                let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+                let viol = x_l[i] - full[full_idx];
+                if viol.is_finite() && viol > worst {
+                    worst = viol;
+                }
+            }
+        }
+        if let Some(x_u) = x_u.as_ref() {
+            for (i, &var_idx) in cls.x_u_map.iter().enumerate() {
+                let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+                let viol = full[full_idx] - x_u[i];
+                if viol.is_finite() && viol > worst {
+                    worst = viol;
+                }
+            }
+        }
+        Some(worst)
+    }
+
     fn declared_x_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
         // No scaling to reapply, unlike `declared_d_bounds`: pounce models
         // objective and constraint scaling only, so nothing has touched the

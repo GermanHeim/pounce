@@ -71,6 +71,24 @@ pub struct SolveStatistics {
     // certificate in its own units. Equal to the scaled fields when no
     // nlp_scaling is active. `final_unscaled_kkt_error` is the plain
     // max-norm of the three (no s_d/s_c optimality scaling). (pounce#173)
+    /// Primal violation measured against the model **as declared**, before
+    /// the `bound_relax_factor` widening the convex arm applies
+    /// (`qp_extract::BoundRelax`, gh #744/#745).
+    ///
+    /// `final_constr_viol` measures the model the solver was HANDED, whose
+    /// inequality rows and variable box are widened by
+    /// `min(factor, cap)·|b|`. That is the right model for the convergence
+    /// test, and it is what every acceptance gate reads — but it is not how
+    /// far the returned point sits outside the model the caller wrote. On
+    /// netlib `afiro` the point is `4.99e-06` outside a declared row
+    /// `b = 500` (exactly `1e-8·500`) while `final_constr_viol` reads
+    /// `8.68e-13`; on `25fv47` it is `1.97e-05` against `2.19e-11`.
+    ///
+    /// Reported so a caller can tell the two apart rather than reading the
+    /// widened number as its own model's feasibility. `NaN` when the solve
+    /// applied no widening (the two coincide) or on paths that do not
+    /// compute it.
+    pub final_declared_constr_viol: Number,
     pub final_unscaled_dual_inf: Number,
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
@@ -289,6 +307,7 @@ impl Default for SolveStatistics {
             final_compl: Number::NAN,
             final_kkt_error: Number::NAN,
             final_unscaled_dual_inf: Number::NAN,
+            final_declared_constr_viol: Number::NAN,
             final_unscaled_constr_viol: Number::NAN,
             final_unscaled_compl: Number::NAN,
             final_unscaled_kkt_error: Number::NAN,

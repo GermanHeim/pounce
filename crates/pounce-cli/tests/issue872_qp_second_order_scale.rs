@@ -115,12 +115,30 @@ fn the_verdict_survives_a_change_of_variable_units() {
 /// test is what stops that text drifting back.
 #[test]
 fn certify_second_order_no_does_reach_a_standalone_qp_solve() {
-    let with = run("nonconvex_qp_eq.nl", &["solver_selection=qp-active-set"]);
+    // Both legs opt into the `bound_relax_factor` widening, because that is
+    // what makes the escape OBSERVABLE on this fixture and so what makes the
+    // with/without contrast a test of the option rather than of the bounds.
+    //
+    // The origin has `x0` exactly on its declared lower bound with multiplier
+    // zero. Widening that bound gives the curvature search strict room and it
+    // escapes to -1. On the model as declared -- the convex arm's default
+    // since the widening was found to move answers -- this engine instead
+    // REFUSES (`InternalError`, srn=500, the rendering gh #848 documents for
+    // `NumericalFailure`), which `the_declared_model_is_refused_not_certified`
+    // below pins. It does not certify the saddle, so nothing is reported
+    // wrongly; the escape is simply unavailable there. Recovering it on the
+    // declared model is a `pounce-qp` matter, tracked separately.
+    const RELAX: &str = "bound_relax_factor=1e-8";
+    let with = run(
+        "nonconvex_qp_eq.nl",
+        &["solver_selection=qp-active-set", RELAX],
+    );
     let without = run(
         "nonconvex_qp_eq.nl",
         &[
             "solver_selection=qp-active-set",
             "sqp_qp_certify_second_order=no",
+            RELAX,
         ],
     );
     let with_obj = objective(&with).expect("an objective line");
@@ -166,5 +184,32 @@ fn a_convex_model_at_the_same_tiny_scale_still_reaches_the_convex_engine() {
     assert!(
         (obj - (-4.98)).abs() < 1e-6,
         "expected −4.98, got {obj}\n{out}"
+    );
+}
+
+/// On the model as declared, the standalone active-set engine cannot make the
+/// escape and says so rather than certifying the saddle.
+///
+/// This is the property that actually matters, and it is gh #871's: before
+/// that fix this fixture came back `EXIT: Optimal Solution Found.` at `f = 0`.
+/// It now refuses. The refusal is weaker than the escape the widened model
+/// gets, and it is honest, which the certified saddle was not.
+///
+/// Note the routing: at the default `solver_selection=auto` this fixture goes
+/// to the NLP arm, which relaxes and reaches `-1`. A caller has to ask for
+/// `qp-active-set` by name to see the refusal.
+#[test]
+fn the_declared_model_is_refused_not_certified() {
+    let out = run("nonconvex_qp_eq.nl", &["solver_selection=qp-active-set"]);
+    let obj = objective(&out).expect("an objective line");
+    assert!(
+        obj > -1e-6,
+        "on the declared model this engine does not reach -1; if it now does, \
+         the escape was recovered and this test should become the positive \
+         assertion, got {obj}\n{out}"
+    );
+    assert!(
+        !out.contains("Optimal Solution Found"),
+        "the saddle must not be certified as optimal (gh #871)\n{out}"
     );
 }

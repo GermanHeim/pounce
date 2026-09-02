@@ -76,6 +76,193 @@ changes.
   from the first fixed variable on (gh#450, gh#672 finding 1). The fixture
   asserts the index spaces really do diverge before trusting the leg.
 
+- **`final_declared_constr_viol`: how far outside the model you WROTE the
+  returned point sits.** Both arms could widen every inequality row and the
+  variable box by `min(bound_relax_factor, constr_viol_tol)·|b|` before the
+  solve — the convex arm by default at the time this landed, and see the
+  **Changed** entry below, which turns that off for the convex arm in the
+  same release; the NLP arm still does and must. Either way the widened
+  model is the one the convergence test is about, but `final_constr_viol`
+  measured *only* it, and nothing reported the difference.
+
+  On netlib `afiro` — 32 variables, 27 rows, a textbook LP — the solve reports
+
+  ```
+  Constraint violation....:   8.6816269397990406e-13
+  EXIT: Optimal Solution Found.
+  ```
+
+  while the returned point sits `4.99e-06` outside the declared row `b = 500`.
+  That is `1e-8 · 500`, the widening exactly. `25fv47` reports `2.19e-11`
+  against a declared `1.97e-05`; `shell` `2.59e-03`. A caller reading the
+  block concluded their model held to `1e-13`.
+
+  The visible half is the objective. `crates/pounce-cli/tests/fixtures/declared_row_relaxation.nl`
+  is the shape at its minimum — `min -x-y s.t. x+y <= 500` — where the solve
+  prints `Constraint violation....: 0.0` and returns `-500.0000005`, i.e.
+  *better* than the declared optimum `-500`, by one widening. Against a
+  published reference that reads as a solver beating the known answer.
+
+  `final_constr_viol` is unchanged and still measures the widened model: it is
+  what every acceptance gate reads and what gh #712's success-verdict
+  invariant is asserted on, and redefining it broke
+  `issue_689_direct_driver_scaled_feasible.rs` exactly as it should have. The
+  declared measurement is reported *beside* it — in the JSON as
+  `final_declared_constr_viol` (additive to `pounce.solve-report/v1`; `NaN`
+  when no widening applied, so readers predating it are unaffected), and in the
+  console block as one extra line, printed only when the two actually differ:
+
+  ```
+  Violation of the model as declared (before the bound_relax_factor widening): 4.9942972850658407e-06
+  ```
+
+  No trajectory moves. The solver's own residual is untouched, and across the
+  91-instance netlib corpus iteration counts and engine selection are
+  identical before and after (0 changes of either). The declared number costs
+  one extra `O(nnz)` extraction after the solve has already run, skipped
+  entirely when the widening is inactive.
+
+  Found while benchmarking POUNCE against HiGHS: 6 of 91 netlib LPs returned
+  `SolveSucceeded` with a declared-model violation above `1e-6`, and the
+  reported statistic disclosed none of them.
+
+  **Reported on the NLP arm too**, which is where it now matters most: that arm
+  keeps the widening (a feasible-iterate log-barrier needs `x` strictly inside
+  its bounds) and its `final_constr_viol` is the *internal slack* measure, not
+  a statement about the user's model at all. On netlib `wood1p` it reports
+  `1.71e-14` at a point `7.96e-09` outside the declared rows and `9.84e-09`
+  outside the declared box — five orders between the number shown and the
+  number that matters — while returning an objective `4.4e-05` from the
+  optimum HiGHS reports. The row half comes from
+  `curr_unscaled_nlp_constraint_violation_max`, which already judged against
+  declared bounds; the box half needed a lift out of the compressed bound
+  spaces, so `Nlp::declared_box_violation` owns it and mirrors the
+  `honor_original_bounds` projection exactly — same lift, same maps, same
+  declared bounds, reporting the distance instead of removing it.
+
+### Changed
+
+- **The convex arm solves the model you declared; `bound_relax_factor` is now
+  opt-in there (reverses gh#744/gh#745, closes gh#760).** Scored against the
+  published Maros–Mészáros optima (DOC 97/6), the convex arm goes from
+  **130/138 to 138/138 correct**, with **0** newly wrong and **0** status
+  changes.
+
+  gh#744 taught this arm to widen its bounds like the NLP arm — `min(factor,
+  cap)·|b|` on inequality rows and the variable box, Ipopt's default `1e-8` —
+  so one binary would not solve two models depending on `solver_selection`.
+  The goal was right; the direction was backwards. It converged the arms on
+  one arm's *internal perturbation* rather than on the model the caller wrote.
+
+  A widening of `δ` moves the optimum by `δ` times the bound's multiplier, and
+  nothing bounds that product. On `LISWET1` — 10 000 monotonicity rows active,
+  multipliers summing to `1.6e9` — it buys `9.0` of objective:
+
+  | | objective |
+  |---|---|
+  | widened (previous default) | `27.1220506` |
+  | as declared (new default) | **`36.1224021`** |
+  | HiGHS, independently | **`36.1224020850`** |
+  | DOC 97/6 ground truth | **`36.1224`** |
+
+  On a 46-variable netlib LP the same `1e-8` moves the objective from `0` to
+  `-1.6` — the whole answer. The error is one-signed (widening only enlarges
+  the feasible set) so it is a systematic optimistic bias, and it does **not**
+  close as `tol` tightens, because it is a change to the model rather than
+  convergence slop.
+
+  It also cost speed. gh#760's +515 iterations are reversed: the QP suite runs
+  in **2658 iterations against 3164**, `QSCFXM1` in **30 against 131** — and
+  four orders more accurate at the same time (`1.8e-13` vs `9.1e-09`). Over the
+  91-instance netlib LP corpus, against HiGHS: median objective error
+  `1.2e-08 → 3.8e-11`, instances within `1e-8` **37 → 84**, iterations
+  `3121 → 2373`.
+
+  **The NLP arm is unchanged and must be.** It is a feasible-iterate
+  log-barrier that needs `x` strictly inside its bounds; disabling the widening
+  there is not a near miss but a failure — the fixture sweep at
+  `bound_relax_factor=0` turns `square_flowsheet_resto` into
+  `InfeasibleProblemDetected` and takes `cresc4` from 105 iterations to 3000.
+  The convex arm needs none of it: its IPM is infeasible-start, strict
+  interiority lives in the `(s, z)` pair `init_iterate`/`recenter_warm` place
+  rather than in the geometry of the declared box, which is why fixed variables
+  (`lb == ub`, zero width) have always shipped through un-widened. The sweep
+  confirms the blast radius: **0 status flips, 0 objective moves and identical
+  iteration counts on all 94 NLP-arm fixture-legs.**
+
+  `pounce foo.nl bound_relax_factor=1e-8` still reproduces the NLP arm's model
+  exactly, so Ipopt parity remains one option away, and
+  `final_declared_constr_viol` reports how far outside the declared model any
+  returned point sits.
+
+  **Costs, stated plainly.** Two convex fixture-legs flip
+  `SolveSucceeded → MaximumIterationsExceeded` (`scaled_feasible_a`): the
+  widening had been lifting a degeneracy there. At the iteration cap its
+  objective is already `0.0`, the true optimum, so this is honest
+  non-convergence rather than a wrong answer, and
+  `issue_689_direct_driver_scaled_feasible.rs` already described it as the
+  expected behaviour on the declared model. Separately, on the explicitly
+  selected `solver_selection=qp-active-set` engine, `nonconvex_qp_eq` loses its
+  negative-curvature escape and refuses (`InternalError`) instead of reaching
+  `-1`; it does not certify the saddle, and default `auto` routing is
+  unaffected. Excluding those two fixtures the convex corpus takes **16%
+  fewer** iterations.
+
+  **Why it survived:** every reference the suite compared against came from
+  POUNCE or from Ipopt-MA57, and Ipopt carries the same widening, so no check
+  in CI could see it. The one artifact that used independent ground truth —
+  `benchmarks/qp_four_way.md`, scored on DOC 97/6 — had the answer all along:
+  it put the *unrelaxed* convex arm at 137/138 correct and listed
+  `LISWET1(re=2.5e-01)` among Ipopt-MA57's wrong objectives.
+  `crates/pounce-cli/tests/declared_optimum_sentinel.rs` now holds two optima
+  from outside this solver family and is mutation-checked to go red if the
+  widening ever becomes the convex default again;
+  `benchmarks/qp/README.md` and the report generator now say in the open that
+  `ipopt_ma57.json` is a status and timing reference, not an objective oracle.
+
+- **A convex QP the specialized arm cannot certify is now handed to the NLP
+  arm, as an LP already was (extends gh#535).** That fallback was scoped to
+  `ProblemClass::Lp` because a stalling convex QP was "a different and
+  unmeasured population". It is measured now: `scaled_feasible_a` is a convex
+  QP with 20 orders of Jacobian spread where the convex driver needs **3596**
+  iterations and the general path **22** — and the convex driver already knows,
+  emitting the gh#293 scaling warning before returning `IterationLimit`.
+
+  This is what restores the one status regression the `bound_relax_factor`
+  change above would otherwise have carried, and it restores it *without*
+  relaxing anybody's model. On that fixture the widening had been relaxing a
+  row by **2.65e5 in absolute terms** — its rows reach `|b| = 2.65e13` and the
+  row width is relative by design (gh#385) — so the old 69-iteration success
+  was a much easier problem, not a better solve. The declared model now
+  reaches its optimum in about 20 iterations by rerouting.
+
+  `ConvexQcqp` deliberately does not reroute: the conic arm has its own failure
+  modes and no fixture behind it, which is why `Lp` was alone to begin with.
+
+  **The rerouted solve runs on the declared model too.** Without that the
+  fallback would hand the model to the one arm that still widens, so a route
+  added to rescue a declined solve would answer a different question: measured
+  on `scaled_feasible_a`, the rerouted point sat **2679.85** outside the
+  declared model while reporting `Solve_Succeeded` — the exact failure this
+  release removes, reached through the mechanism added to repair its one
+  regression, and caught by this release's own new statistic. Unset means
+  declared, the same rule the convex arm follows, so `pounce foo.nl` solves one
+  model whichever arm answers; an explicit `bound_relax_factor` still buys
+  Ipopt's model on this path as everywhere else.
+
+  `solution.engine` now records **which arm produced the verdict**, and
+  `scripts/sweep-fixtures.sh` prefers it over the `Selected solver:` banner.
+  The banner names the engine *routing* chose, and it is printed before a
+  fallback can fire — so a reroute left no trace in the sweep diff, which is
+  the blind spot CLAUDE.md names when it says a routing regression "used to
+  leave no trace". With the field in place the sweep shows `scaled_feasible_a`
+  and `airport` answering from `nlp`; both already did so on `main`, and only
+  the instrument changed.
+
+  Net effect of this and the change above, against the shipped binary: the
+  fixture sweep shows **0 status flips**, 52 objective moves (all toward the
+  declared optimum), total iterations **5618 → 5409**, and 4 engine-column
+  moves that are the new instrument reporting pre-existing reroutes.
 - **`pounce.sensitivity`: the sensitivity analysis layer is now pounce's, and
   `pyomo_pounce` is one of its callers.** Every numeric behind
   `sens_solution()`, `sens_solution_report()`, `sens_active_set_changes()`,

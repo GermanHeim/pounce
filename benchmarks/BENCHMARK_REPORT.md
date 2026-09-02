@@ -2,6 +2,24 @@
 
 Generated: 2026-08-29 11:16:03
 
+> **STALE (2026-09-01).** Generated before `bound_relax_factor` was made opt-in
+> on the convex arm. Every objective produced by the convex (LP / convex-QP)
+> route in this report is the widened model's, and moves — toward the published
+> optima — on a rerun. Measured deltas: Maros-Meszaros QP **130/138 → 138/138**
+> correct against DOC 97/6 with iterations 3164 → 2658; the 91-instance netlib
+> LP subset goes from 37/91 to 84/91 within `1e-8` of HiGHS with iterations
+> 3121 → 2373. Statuses and timings are otherwise unchanged (the fixture sweep
+> shows 0 status flips and 0 engine flips).
+>
+> **Not regenerated here**: a faithful rebuild reruns every suite, and most
+> suites' inputs (`.mat` / MPS downloads and their generated `.nl`) are not
+> present on this machine. Refresh with `make -C benchmarks all` then
+> `make -C benchmarks benchmark-report`.
+>
+> Note also that `ipopt_ma57.json`, the reference these suites compare against,
+> is a **status and timing** reference and not an objective oracle — see
+> `benchmarks/qp/README.md`.
+
 ## Provenance
 
 | Component | Version / Detail |

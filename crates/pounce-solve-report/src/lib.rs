@@ -340,6 +340,21 @@ pub struct ProblemInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionInfo {
+    /// Which engine produced this verdict: `"cvx-qp"`, `"cvx-qcqp"`,
+    /// `"qp-active-set"` or `"nlp"`.
+    ///
+    /// The `Selected solver:` banner names the engine *routing* chose, which
+    /// is not always the one that answered: a convex solve that declines its
+    /// own result hands the model to the NLP arm (gh #535), and the banner
+    /// has already been printed by then. `scripts/sweep-fixtures.sh` scraped
+    /// that banner because the report carried nothing better, so a reroute
+    /// left no trace in the sweep diff — the precise blind spot CLAUDE.md
+    /// names when it says a routing regression "used to leave no trace".
+    ///
+    /// Empty when a path does not set it, which a consumer should read as
+    /// "unknown" rather than as any particular arm.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine: String,
     /// `SolveSucceeded`, `MaximumIterationsExceeded`, etc. The string
     /// form is the Rust enum variant name verbatim.
     pub status: ApplicationReturnStatus,
@@ -431,6 +446,25 @@ pub struct StatisticsInfo {
     pub final_dual_inf: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_constr_viol: Number,
+    /// Primal violation against the model **as declared**, before the convex
+    /// arm's `bound_relax_factor` widening (`qp_extract::BoundRelax`, gh
+    /// #744/#745).
+    ///
+    /// `final_constr_viol` measures the model the solver was HANDED, whose
+    /// inequality rows and variable box are widened by `min(factor,cap)·|b|`.
+    /// That is the model its convergence test is about and every acceptance
+    /// gate reads — and it is not how far the returned point sits outside the
+    /// model the caller wrote. On netlib `afiro` the point is `4.99e-06`
+    /// outside a declared row `b = 500` (exactly `1e-8·500`) while
+    /// `final_constr_viol` reads `8.68e-13`; `25fv47` reports `2.19e-11`
+    /// against `1.97e-05`.
+    ///
+    /// `NaN` when the solve applied no widening (the two coincide by
+    /// construction) or on a path that does not compute it — every NLP-arm
+    /// solve today. Additive to `pounce.solve-report/v1`: readers predating
+    /// it are unaffected.
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
+    pub final_declared_constr_viol: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_compl: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
@@ -513,6 +547,7 @@ impl ReportBuilder {
                 nnz_h_lag: None,
             },
             solution: SolutionInfo {
+                engine: String::new(),
                 status: ApplicationReturnStatus::InternalError,
                 // Overwritten from `status` by `finish`; see the field docs.
                 status_upstream: String::new(),
@@ -554,6 +589,7 @@ impl ReportBuilder {
             final_scaled_objective: src.final_scaled_objective,
             final_dual_inf: src.final_dual_inf,
             final_constr_viol: src.final_constr_viol,
+            final_declared_constr_viol: src.final_declared_constr_viol,
             final_compl: src.final_compl,
             final_kkt_error: src.final_kkt_error,
             final_kkt_error_above_noise: src.final_kkt_error_above_noise,
@@ -642,6 +678,9 @@ fn empty_stats() -> StatisticsInfo {
         final_scaled_objective: 0.0,
         final_dual_inf: 0.0,
         final_constr_viol: 0.0,
+        // not "uncomputed": this is the pre-solve placeholder, and 0.0 is
+        // what every residual beside it carries here.
+        final_declared_constr_viol: 0.0,
         final_compl: 0.0,
         final_kkt_error: 0.0,
         final_kkt_error_above_noise: 0.0,

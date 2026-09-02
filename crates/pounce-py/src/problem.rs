@@ -1403,6 +1403,15 @@ pub(crate) fn build_info_dict<'py>(
     info.set_item("final_kkt_error", stats.final_kkt_error)?;
     info.set_item("final_dual_inf", stats.final_dual_inf)?;
     info.set_item("final_constr_viol", stats.final_constr_viol)?;
+    // How far outside the model AS DECLARED the point sits, when the solve
+    // widened bounds by `bound_relax_factor` (gh #744/#745). `NaN` when it did
+    // not. Every Python caller is on the NLP arm, which widens by default, and
+    // `final_constr_viol` there is the internal slack measure -- so without
+    // this the two can differ by orders with nothing in the dict saying so.
+    info.set_item(
+        "final_declared_constr_viol",
+        stats.final_declared_constr_viol,
+    )?;
     info.set_item("final_compl", stats.final_compl)?;
     // Unscaled (user-original-space) counterparts of the four residuals
     // above — the nlp_scaling divided back out so a consumer can verify a

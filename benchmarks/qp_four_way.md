@@ -1,5 +1,28 @@
 # POUNCE-QP vs Clarabel vs POUNCE-NLP vs POUNCE active-set — Maros-Meszaros QP benchmark
 
+> **STALE for the pounce QP-IPM column (2026-09-01).** This report was
+> generated at 0.9.0, before `bound_relax_factor` was made opt-in on the convex
+> arm. Its pounce QP-IPM figures are from the *unrelaxed* arm, and are the
+> evidence that reversing gh #744 was right — 137/138 correct, 0
+> solved-but-wrong, while `LISWET1(re=2.5e-01)` sits in Ipopt-MA57's wrong
+> column and `LISWET1(re=2.7e-01)` in Clarabel's, against a ground truth of
+> `36.1224`.
+>
+> Re-measured on 2026-09-01 against the same DOC 97/6 optima and the same
+> `|obj-opt| <= 1e-5 + 1e-4·max(|obj|,|opt|)` rule, the convex arm is
+> **138/138 correct** (from **130/138** with the widening), recovering `YAO`
+> and `LISWET1/7/8/9/10/11/12` — precisely this file's list of Ipopt-MA57's
+> wrong objectives — with 0 newly wrong, 0 status changes, and total iterations
+> 3164 → 2658.
+>
+> The Clarabel and Ipopt columns are unaffected: neither solver changed.
+>
+> **Not regenerated here** because a faithful run needs Clarabel installed and
+> it was not available on this machine; a partial regeneration would drop arms
+> and be worse than this note. To refresh:
+> `python3 benchmarks/scripts/compare_qp_four_way.py` after
+> `cargo build --release --bin pounce` and `pip install clarabel`.
+
 138 problems; 138 with ground-truth optima (DOC 97/6, BPMPD reference). A solve is **correct** when `|obj-opt| <= 1e-05 + 0.0001·max(|obj|,|opt|)`.
 
 Produced by **pounce 0.9.0 (commit 87051c11+dirty, built 2026-07-28T19:36:41Z)**. Numbers here are only comparable to another run of the same binary: the previous committed report was six weeks stale, and the NLP column moved 129/138 → 105/138 across that gap on nothing but binary drift. Rebuild before regenerating (`cargo build --release --bin pounce`).

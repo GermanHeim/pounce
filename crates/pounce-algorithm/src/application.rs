@@ -4414,6 +4414,23 @@ impl IpoptApplication {
                 // forgives, so the raw number was never an exact statement
                 // about the original NLP either.
                 stats.final_constr_viol = cq.curr_primal_infeasibility_max();
+                // How far outside the model AS DECLARED the returned point
+                // sits. The line above is the internal slack measure the
+                // convergence test reads, on the `bound_relax_factor`-widened
+                // model this arm genuinely solves; the widening stays here
+                // because a feasible-iterate log-barrier needs `x` strictly
+                // inside its bounds (the convex arm's does not -- see
+                // `qp_extract::BoundRelax`). The two can differ by orders and
+                // nothing used to say so: on netlib `wood1p` this reports
+                // `1.71e-14` at a point `7.96e-09` outside the declared rows
+                // and `9.84e-09` outside the declared box. Only reported when
+                // a widening was applied; without one the two coincide and
+                // `NaN` says "nothing to add".
+                stats.final_declared_constr_viol = if bound_relax_factor > 0.0 {
+                    cq.curr_declared_primal_violation_max()
+                } else {
+                    Number::NAN
+                };
                 // Infinity-norm complementarity, max over all four bound
                 // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
                 // empty-bound blocks return `0` from amax(), so the max is
