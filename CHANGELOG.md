@@ -33,16 +33,21 @@ changes.
   refusal is at build time, so counting a bound would take the release path
   away from a model fix-relax could serve.
 
-  Three things it does not promise. It is **necessary, not sufficient** — a
+  Both sides of that comparison are ranks. `rank(A)` rather than `A`'s row
+  count matters whenever an equality is redundant: the reachable perturbations
+  are `range(A)`, so a duplicated row does not shrink the space a step has to
+  reach, and a `db` outside `range(A)` makes the *perturbed problem* infeasible
+  rather than the derivative unrepresentable. Reading the row count instead
+  over-refused by exactly the redundancy.
+
+  Two things it still does not promise. It is **necessary, not sufficient** — a
   subtler dependency between `A`'s rows and `B`'s can make one particular `db`
-  unreachable while the count passes. It is coarse the other way too: when
-  `n − rank(B) < m_eq` the image of `A` restricted to `ker(B)` is a *proper
+  unreachable while the count passes. And it is coarse the other way too: when
+  `n − rank(B) < rank(A)` the image of `A` restricted to `ker(B)` is a *proper
   subspace*, not empty, so some `db` remain reachable and would be answered
   correctly — refusing at build time takes those away as well (deliberate,
   since a build serves every later `db` and cannot know which are coming, but
-  stronger than "no answer exists here"). And it compares against the **row
-  count** of `A` where the geometry wants `rank(A)`, so a redundant equality
-  makes it over-refuse by exactly the redundancy.
+  stronger than "no answer exists here").
 
   `ill_conditioned()` is what covers the first case, and what flags the
   bound-pinned model the exclusion deliberately serves — **but only after a

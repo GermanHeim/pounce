@@ -431,8 +431,9 @@ fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)
 /// Rank of a set of sparse rows over `n` columns, by Gaussian elimination with
 /// partial pivoting on the dense restriction to their combined support.
 ///
-/// Called only on the **active rows** of a build that carries an apex block,
-/// and only on rows that cannot be released (see [`apex_can_absorb_db`]).
+/// Called only by [`apex_can_absorb_db`], on a build that carries an apex block
+/// — twice per such build: once on the active rows that cannot be released, and
+/// once on `A` to get `rank(A)` rather than its row count.
 ///
 /// # Cost, stated honestly
 ///
@@ -541,8 +542,16 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// necessary condition, cheap and needing only a rank, is
 ///
 /// ```text
-///   n − rank(B)  ≥  m_eq
+///   n − rank(B)  ≥  rank(A)
 /// ```
+///
+/// `rank(A)`, not `A`'s row count. A redundant equality does not shrink the
+/// space a step has to reach: the reachable perturbations are `range(A)`, of
+/// dimension `rank(A)`, and a `db` outside it makes the *perturbed problem*
+/// infeasible rather than the derivative unrepresentable. Counting rows instead
+/// over-refuses by exactly the redundancy — raised in the third review of #889,
+/// and `an_apex_with_a_redundant_equality_is_served` is the model where the two
+/// readings disagree.
 ///
 /// # `B` is the rows that cannot be released, and that is the whole subtlety
 ///
@@ -597,16 +606,6 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// deliberate (the build serves every later `db`, and cannot know which are
 /// coming), but it is a stronger action than "no answer exists here".
 ///
-/// And a third, narrower one, raised in the third review of #889: `m_eq` is the
-/// **row count** of `A`, where the condition being derived wants `rank(A)`. A
-/// redundant equality makes the count stricter than the geometry, so the guard
-/// over-refuses by exactly the redundancy. Left as it is rather than fixed: the
-/// correction is another `row_rank`, it errs toward refusing (the safe
-/// direction for a new refusal, as the tolerance does), and demonstrating a fix
-/// needs a redundant-equality fixture that does not exist here yet. Recorded
-/// because a doc block that lists two directions of coarseness and omits a
-/// third is worse than one that lists none.
-///
 /// Found by adversarial review of #889: `min t s.t. u = b₀, v = b₁,
 /// (t,u,v) ∈ Q₃` — the parametric distance function — classifies `Apex` once
 /// `‖b‖` drops under `CONE_APEX_REL`, and returned `du/db₀ = 0.5` where primal
@@ -615,11 +614,15 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// branch finds it. Only the classifier changed its mind — which is why the
 /// error this raises is [`SensError::ActiveSetOverdetermined`] and **not**
 /// `NonsmoothConePoint`.
-fn apex_can_absorb_db(n: usize, m_eq: usize, active_rows: &[Vec<(usize, f64)>]) -> bool {
-    if m_eq == 0 {
+fn apex_can_absorb_db(
+    n: usize,
+    eq_rows: &[Vec<(usize, f64)>],
+    active_rows: &[Vec<(usize, f64)>],
+) -> bool {
+    if eq_rows.is_empty() {
         return true;
     }
-    n.saturating_sub(row_rank(active_rows, n)) >= m_eq
+    n.saturating_sub(row_rank(active_rows, n)) >= row_rank(eq_rows, n)
 }
 
 /// A point on a face defined by one smooth concave inequality `φ(s) ≥ 0`,
@@ -1889,7 +1892,7 @@ impl QpSensitivity {
         // that is the only face that pins unconditionally, and because the
         // rank costs something; see `apex_can_absorb_db`.
         if let Some(&(block, _)) = cone_kinds.iter().find(|&&(_, k)| k == ConeBlockKind::Apex)
-            && !apex_can_absorb_db(n, m_eq, &active_rows)
+            && !apex_can_absorb_db(n, &group_rows_by_index(&prob.a, m_eq), &active_rows)
         {
             return Err(SensError::ActiveSetOverdetermined {
                 block,
@@ -2871,22 +2874,70 @@ mod tests {
 
     #[test]
     fn apex_can_absorb_db_is_a_dimension_count() {
+        let e0 = row(&[(0, 1.0)]);
+        let e1 = row(&[(1, 1.0)]);
+        let e2 = row(&[(2, 1.0)]);
+
         // No equalities: nothing to absorb, so nothing to refuse.
-        assert!(apex_can_absorb_db(
+        assert!(apex_can_absorb_db(3, &[], &[e0.clone(), e1.clone()]));
+
+        // The reviewer's minimal case, as rows: n = 3, two independent
+        // equalities, and an apex pinning all three coordinates leaves
+        // `ker(B) = {0}`.
+        let apex_rows = [e0.clone(), e1.clone(), e2.clone()];
+        assert!(!apex_can_absorb_db(
             3,
-            0,
-            &[row(&[(0, 1.0)]), row(&[(1, 1.0)])]
+            &[e0.clone(), e1.clone()],
+            &apex_rows
         ));
 
-        // The reviewer's minimal case, as rows: n = 3, m_eq = 2, and an apex
-        // pinning all three coordinates leaves `ker(B) = {0}`.
-        let apex_rows = [row(&[(0, 1.0)]), row(&[(1, 1.0)]), row(&[(2, 1.0)])];
-        assert!(!apex_can_absorb_db(3, 2, &apex_rows));
-
         // One coordinate free is enough for one equality, and not for two.
+        let two_pinned = [e0.clone(), e1.clone()];
+        assert!(apex_can_absorb_db(3, &[e0.clone()], &two_pinned));
+        assert!(!apex_can_absorb_db(
+            3,
+            &[e0.clone(), e1.clone()],
+            &two_pinned
+        ));
+    }
+
+    /// **The equality side is a rank, not a row count.**
+    ///
+    /// Raised in the third review of #889. `A`'s redundant rows do not shrink
+    /// the space a step must reach: the reachable perturbations are `range(A)`,
+    /// of dimension `rank(A)`, and a `db` outside that makes the *perturbed
+    /// problem* infeasible rather than the derivative unrepresentable. Reading
+    /// the row count instead over-refuses by exactly the redundancy.
+    ///
+    /// Two independent equalities against one free coordinate must refuse;
+    /// the same two rows made proportional must not, because they are one
+    /// equality written twice.
+    ///
+    /// Mutation: compare against `eq_rows.len()`. Red here, and on
+    /// `an_apex_with_a_redundant_equality_is_served` in
+    /// `tests/convex_soc_sensitivity.rs`, which reaches the same branch
+    /// through a solved model.
+    #[test]
+    fn a_redundant_equality_does_not_cost_a_dimension() {
         let two_pinned = [row(&[(0, 1.0)]), row(&[(1, 1.0)])];
-        assert!(apex_can_absorb_db(3, 1, &two_pinned));
-        assert!(!apex_can_absorb_db(3, 2, &two_pinned));
+
+        let independent = [row(&[(0, 1.0), (2, 1.0)]), row(&[(1, 1.0), (2, 1.0)])];
+        assert_eq!(row_rank(&independent, 3), 2);
+        assert!(
+            !apex_can_absorb_db(3, &independent, &two_pinned),
+            "one free coordinate cannot absorb two independent equalities"
+        );
+
+        let redundant = [row(&[(0, 1.0), (2, 1.0)]), row(&[(0, 2.0), (2, 2.0)])];
+        assert_eq!(
+            row_rank(&redundant, 3),
+            1,
+            "the second row is the first, doubled"
+        );
+        assert!(
+            apex_can_absorb_db(3, &redundant, &two_pinned),
+            "…but two copies of one equality are still one equality"
+        );
     }
 
     /// **The bound-exclusion, at the only shape that can convict it.**
@@ -2912,9 +2963,11 @@ mod tests {
     /// compile-checkable, it is just not a one-line edit.
     #[test]
     fn an_active_bound_is_not_stacked_into_the_apex_rank() {
+        // Two independent equalities, on coordinates the apex does not pin.
+        let eqs = [row(&[(0, 1.0), (2, 1.0)]), row(&[(1, 1.0), (3, 1.0)])];
         let apex_rows = [row(&[(0, 1.0)]), row(&[(1, 1.0)])];
         assert!(
-            apex_can_absorb_db(4, 2, &apex_rows),
+            apex_can_absorb_db(4, &eqs, &apex_rows),
             "two free coordinates absorb two equalities"
         );
 
@@ -2924,7 +2977,7 @@ mod tests {
         let with_bound = [row(&[(0, 1.0)]), row(&[(1, 1.0)]), row(&[(2, 1.0)])];
         assert_eq!(row_rank(&with_bound, 4), 3);
         assert!(
-            !apex_can_absorb_db(4, 2, &with_bound),
+            !apex_can_absorb_db(4, &eqs, &with_bound),
             "…so had the bound been stacked, this build would have been refused"
         );
     }

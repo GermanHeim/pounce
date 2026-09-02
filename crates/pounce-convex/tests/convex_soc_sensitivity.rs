@@ -753,6 +753,66 @@ fn a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it() {
     }
 }
 
+/// **The equality side is `rank(A)`, not `A`'s row count** — the third
+/// direction of coarseness, on a solved model.
+///
+/// Raised in the third review of #889, where I first recorded it as a known
+/// limitation rather than fixing it, on the grounds that no redundant-equality
+/// fixture existed. That is a reason to write one, not a reason to ship the
+/// coarser rule, and this is it: [`apex`] with its single equality written
+/// twice, the second copy scaled by 2.
+///
+/// `rank(active_rows) = 3` and `n − 3 = 1`, so the row count `m_eq = 2`
+/// refuses and `rank(A) = 1` serves. Serving is right: a redundant equality
+/// does not shrink the space a step must reach. The reachable perturbations
+/// are `range(A)`, of dimension 1 — and a `db` outside it (perturbing `b₀`
+/// alone here) makes the *perturbed problem infeasible*, which is a different
+/// failure from the derivative being unrepresentable and not one this guard
+/// exists to report.
+///
+/// So the step is taken along `db = (δ, 2δ) ∈ range(A)`, and the answer is the
+/// unperturbed model's: `x₀` is pinned at the apex, so `x₂` takes all of it.
+///
+/// Mutation: compare against `eq_rows.len()`. This goes red as
+/// `ActiveSetOverdetermined`, which is what it did before the fix.
+#[test]
+fn an_apex_with_a_redundant_equality_is_served() {
+    let prob = QpProblem {
+        a: vec![
+            tri(0, 0, 1.0),
+            tri(0, 2, 1.0),
+            tri(1, 0, 2.0),
+            tri(1, 2, 2.0),
+        ],
+        b: vec![1.0, 2.0],
+        ..apex(1.0)
+    };
+    let sol = solve(&prob);
+    let mut sens = sens_for(&prob, &sol);
+    assert_eq!(
+        sens.cone_block_kinds(),
+        [(0, ConeBlockKind::Apex)],
+        "the fixture must reach the apex branch, or the guard is never consulted"
+    );
+
+    let delta = 1e-6;
+    let dx = sens.parametric_step(&[0, 1], &[delta, 2.0 * delta]);
+    assert!(
+        (dx[2] / delta - 1.0).abs() < 1e-9,
+        "x₀ is pinned at the apex, so x₂ absorbs db: got dx₂/db₀ = {}",
+        dx[2] / delta
+    );
+    assert!(
+        (dx[0] / delta).abs() < 1e-9,
+        "and x₀ does not move: got dx₀/db₀ = {}",
+        dx[0] / delta
+    );
+    assert!(
+        !sens.ill_conditioned(),
+        "a served build whose step is exact must not be flagged"
+    );
+}
+
 /// The guard must not fire on an apex that *can* absorb `db`, or it would
 /// refuse the flat, exact case the apex branch exists to serve.
 ///

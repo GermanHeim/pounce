@@ -432,22 +432,24 @@ wrong call on the second, which is why they are not one variant.
   fires where the *classifier* switched to `Apex`, and a decade further from
   the tip the boundary face returns the same derivative.
 
+  Both sides are ranks: `n − rank(B) < rank(A)`, not `A`'s row count. A
+  redundant equality does not shrink the space a step must reach, so counting
+  rows would refuse a model that is perfectly answerable.
+
   `B` is the active rows that cannot be **released**: the cone faces and the
   active orthant rows. Active variable bounds are deliberately excluded, even
   though a bound pins its coordinate for the plain `parametric_step` — the
   release path can open a bound, and refusing at build time would take that
   path away too.
 
-  Three limits worth knowing. It is a *dimension* count, so it is **necessary,
+  Two limits worth knowing. It is a *dimension* count, so it is **necessary,
   not sufficient**: a subtler dependency between `A`'s rows and `B`'s can leave
-  one particular `db` unreachable while the count passes. It is coarse in the
-  other direction too — when `n − rank(B) < m_eq` the reachable `db` form a
+  one particular `db` unreachable while the count passes. And it is coarse in
+  the other direction — when `n − rank(B) < rank(A)` the reachable `db` form a
   proper subspace rather than nothing, so a build-time refusal also declines
   directions it could have answered (deliberate, since a build serves every
   later `db` and cannot know which are coming, but stronger than "no answer
-  exists here"). And it compares against the **row count** of `A` where the
-  geometry wants `rank(A)`, so a redundant equality makes it over-refuse by
-  exactly the redundancy.
+  exists here").
 
   What covers the first case — and the bound-pinned model the exclusion above
   deliberately serves — is `ill_conditioned()`. **That means after a step, not
