@@ -403,6 +403,129 @@ fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)
         .collect()
 }
 
+/// Rank of a set of sparse rows over `n` columns, by Gaussian elimination with
+/// partial pivoting on the dense restriction to their combined support.
+///
+/// Only ever called on the **active** rows, which are few next to `n` on the
+/// models that reach it, and only when an apex block is present — see
+/// [`apex_can_absorb_db`] for why that gate matters.
+fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
+    if rows.is_empty() || n == 0 {
+        return 0;
+    }
+    // Dense over the combined support: a cone block touches a handful of
+    // columns even when the model has thousands.
+    let mut cols: Vec<usize> = rows
+        .iter()
+        .flat_map(|r| r.iter().map(|&(c, _)| c))
+        .collect();
+    cols.sort_unstable();
+    cols.dedup();
+    let w = cols.len();
+    let index_of = |c: usize| cols.binary_search(&c).expect("column is in the support");
+    let mut m: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|r| {
+            let mut row = vec![0.0; w];
+            for &(c, v) in r {
+                row[index_of(c)] += v;
+            }
+            row
+        })
+        .collect();
+
+    // `√ε` relative to the largest entry: below that a pivot is round-off, and
+    // counting it inflates the rank, which would make the guard below *miss* a
+    // rank deficiency rather than invent one.
+    let scale = m
+        .iter()
+        .flat_map(|r| r.iter())
+        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    if scale == 0.0 {
+        return 0;
+    }
+    let tol = f64::EPSILON.sqrt() * scale;
+
+    let mut rank = 0;
+    for col in 0..w {
+        let Some(piv) = (rank..m.len()).max_by(|&a, &b| {
+            m[a][col]
+                .abs()
+                .partial_cmp(&m[b][col].abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            break;
+        };
+        if m[piv][col].abs() <= tol {
+            continue;
+        }
+        m.swap(rank, piv);
+        let inv = 1.0 / m[rank][col];
+        for r in rank + 1..m.len() {
+            let f = m[r][col] * inv;
+            if f == 0.0 {
+                continue;
+            }
+            for c in col..w {
+                m[r][c] -= f * m[rank][c];
+            }
+        }
+        rank += 1;
+        if rank == m.len() {
+            break;
+        }
+    }
+    rank
+}
+
+/// Can an apex-pinned active set still absorb an arbitrary `db`?
+///
+/// An apex block is the one face that pins its **whole** block unconditionally:
+/// `s = 0` is the cone's tip, so `ds_block = 0` and every row of the block
+/// enters `B_a`. Every other face pins one row, or none. That difference is
+/// what makes this check apex-specific.
+///
+/// The step then lives in `ker(B_a)`, while feasibility of the perturbed
+/// problem needs `A·dx = db`. So the apex model can answer at all only if
+/// `A` restricted to `ker(B_a)` is still onto `R^{m_eq}` — and a necessary
+/// condition for that, cheap and needing only a rank, is
+///
+/// ```text
+///   n − rank(B_a)  ≥  m_eq
+/// ```
+///
+/// **Necessary, not sufficient**, and deliberately so. When it fires the
+/// refusal is always right: a space of dimension below `m_eq` cannot map onto
+/// `R^{m_eq}`, so some `db` is unreachable and the returned step would be a
+/// least-squares compromise rather than a derivative. It can still pass while a
+/// subtler dependency between `A`'s rows and `B_a`'s makes a *particular* `db`
+/// unreachable; the full test is a rank of the stacked `[A; B_a]`, which costs
+/// far more on a model with many equalities for a case this coarse one already
+/// covers. What catches the remainder is
+/// [`ill_conditioned`](QpSensitivity::ill_conditioned) — the step's own
+/// residual, which separates cleanly here (`0.5` against `~1e-13`).
+///
+/// Found by adversarial review of #889: `min t s.t. u = b₀, v = b₁,
+/// (t,u,v) ∈ Q₃` — the parametric distance function — classifies `Apex` once
+/// `‖b‖` drops under `CONE_APEX_REL`, and returned `du/db₀ = 0.5` where primal
+/// feasibility *alone* forces `1`. The problem is smooth on both sides of that
+/// cliff: at `‖b‖ = 1.12e-8` the true derivative still exists and the boundary
+/// branch finds it. Only the classifier changed its mind.
+fn apex_can_absorb_db(
+    n: usize,
+    m_eq: usize,
+    active_rows: &[Vec<(usize, f64)>],
+    active_bounds: &[(usize, bool)],
+) -> bool {
+    if m_eq == 0 {
+        return true;
+    }
+    let mut rows: Vec<Vec<(usize, f64)>> = active_rows.to_vec();
+    // An active bound pins its coordinate exactly as a face row does.
+    rows.extend(active_bounds.iter().map(|&(j, _)| vec![(j, 1.0)]));
+    n.saturating_sub(row_rank(&rows, n)) >= m_eq
+}
+
 /// A point on a face defined by one smooth concave inequality `φ(s) ≥ 0`,
 /// active at `φ(s) = 0`.
 ///
@@ -1664,7 +1787,35 @@ impl QpSensitivity {
         let n_active = active_rows.len() + active_bounds.len();
         let dim = n + m_eq + n_active;
         let active_bound_vars: Vec<usize> = active_bounds.iter().map(|&(j, _)| j).collect();
+
+        // An apex pins its whole block, which can leave the equality block
+        // unable to absorb `db` at all. Gated on an apex being present because
+        // that is the only face that pins unconditionally, and because the
+        // rank costs something; see `apex_can_absorb_db`.
+        if let Some(&(block, _)) = cone_kinds.iter().find(|&&(_, k)| k == ConeBlockKind::Apex)
+            && !apex_can_absorb_db(n, m_eq, &active_rows, &active_bounds)
+        {
+            return Err(SensError::NonsmoothConePoint {
+                block,
+                what: "the block is pinned at the cone apex, which leaves the equality \
+                       rows unable to absorb an arbitrary perturbation: the active set \
+                       has no room left for dx, so the step would be a least-squares \
+                       compromise rather than a derivative",
+            });
+        }
+
         let pat = assemble_kkt(prob, &active_rows, &active_bounds, &curvature, reg);
+        // `KktPattern::dim` is the assembler's own count of the same quantity
+        // this function derives independently. It existed as a field nothing
+        // read — one dead-code warning, and the reviewer of #889 asked the
+        // right question about it: a dimension check IS the natural reason for
+        // it to be there, so here it is. A mismatch means the assembler and the
+        // caller disagree about the KKT's shape, which would corrupt every
+        // index into it.
+        debug_assert_eq!(
+            pat.dim, dim,
+            "assemble_kkt and finish must agree on the KKT dimension"
+        );
         let release_slots = release_slots(&pat, n + m_eq, active_rows.len(), &active_bounds);
         let KktPattern {
             airn: kkt_airn,
@@ -1914,6 +2065,22 @@ impl QpSensitivity {
     /// wherever the information survives in double precision; the achieved
     /// relative residual is recorded for
     /// [`last_step_residual`](Self::last_step_residual) (gh #284).
+    ///
+    /// # The step is meaningful only when `ill_conditioned()` is false
+    ///
+    /// This returns a bare `Vec` and cannot signal failure. Check
+    /// [`ill_conditioned`](Self::ill_conditioned) after the call, or the step
+    /// may be a least-squares compromise rather than a derivative — the
+    /// active set can be rank-deficient in ways the build cannot always rule
+    /// out cheaply (see `apex_can_absorb_db` for the one it does).
+    ///
+    /// Note **which** clause of that flag does the work here: on a
+    /// rank-deficient active set the *regularized* matrix is perfectly well
+    /// conditioned — `kkt_cond_estimate` reads `~2e10`, far under its
+    /// threshold — and it is the step's **residual** that fires. That is
+    /// exactly the trap gh#328 named, and review of #889 confirmed the
+    /// separation independently over 33 conic probes: residual `0.5` on every
+    /// wrong step, `~1e-13` on every correct one, no overlap.
     pub fn step_from_db(&mut self, db: &[f64]) -> Vec<f64> {
         assert_eq!(db.len(), self.m_eq, "db must have length m_eq");
         let mut rhs = vec![0.0 as Number; self.dim];
@@ -2308,7 +2475,21 @@ impl QpSensitivity {
         self.dim
     }
 
-    /// Inequality rows (indices into `G`) in the active set.
+    /// Provenance for the active inequality rows — **not** always usable as an
+    /// index into `G`.
+    ///
+    /// For an orthant row it *is* the row of `G`, which is what this accessor
+    /// originally documented. A **curved cone face** contributes rows that are
+    /// linear combinations of the block's rows — one `wᵀG` for a second-order
+    /// or non-symmetric boundary, `q(q+1)/2` of them for a PSD face — and no
+    /// single `G` row stands behind any of them. Those entries carry the
+    /// block's first row as provenance instead.
+    ///
+    /// So `prob.g[sens.active_ineq()[k]]` is a real, plausible, **wrong** row
+    /// whenever a cone block is active: the gh#450 shape, in this arm's own
+    /// index space. Use [`cone_block_kinds`](Self::cone_block_kinds) to learn
+    /// which blocks contributed faces, and read this as "which block a row came
+    /// from" rather than "which `G` row it is". Raised in review of #889.
     pub fn active_ineq(&self) -> &[usize] {
         &self.active_ineq
     }

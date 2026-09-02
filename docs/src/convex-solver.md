@@ -411,6 +411,14 @@ does not exist, or cannot be computed from the numbers to hand:
   `y^α z^{1−α} = 0`, i.e. one of those faces, so with `y, z > 0` the two smooth
   sheets `x = ±g` never meet. A guard there would be unreachable code that
   reads like coverage.
+- **an apex-pinned block whose active set cannot absorb `db`.** The apex is the
+  one face that pins its *whole* block, so the step lives in `ker(B_a)` while
+  feasibility needs `A·dx = db`. Where no room is left — `n − rank(B_a) < m_eq`
+  — no step satisfies both, and what would come back is a least-squares
+  compromise. Note this is a *dimension* count: necessary, never a false
+  refusal, and not sufficient. `ill_conditioned()` catches the subtler cases,
+  and on those it is the step's **residual** rather than the condition estimate
+  that fires — the regularized matrix is perfectly well conditioned there.
 - **a non-symmetric dual off the facet's normal ray.** At a facet interior the
   normal cone *is* `ℝ₊∇φ`, so `z = ν∇φ` is the optimality condition, not an
   approximation.

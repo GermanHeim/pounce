@@ -875,7 +875,9 @@ impl PyQpSensitivity {
                  internally as an orthant problem — please report it."
             )),
             SensError::NonsmoothConePoint { block, what } => PyValueError::new_err(format!(
-                "QpSensitivity: cone block {block} sits at a nonsmooth point ({what}).                  This should be unreachable from Python, which exposes no `cones=`                  argument — please report it."
+                "QpSensitivity: cone block {block} sits at a nonsmooth point ({what}). \
+                 This should be unreachable from Python, which exposes no `cones=` \
+                 argument — please report it."
             )),
             // `build` does not run the bound refinement, so it cannot raise
             // this. Named rather than swallowed for the same reason as above.

@@ -37,6 +37,13 @@
 //!
 //! - **Any cone family but `SecondOrder`.** `Psd`, `Exponential` and `Power`
 //!   are refused; `conic_sensitivity_refused.rs` owns that.
+//! - **Whether a *particular* `db` is reachable.** `apex_can_absorb_db` is a
+//!   dimension count — necessary, not sufficient. It convicts an active set
+//!   with no room left at all, which is the case adversarial review of #889
+//!   found; it can still pass while a subtler dependency between `A`'s rows
+//!   and `B_a`'s makes one direction unreachable. `ill_conditioned()` is what
+//!   covers the remainder, and that review measured the separation (residual
+//!   `0.5` on every wrong step, `~1e-13` on every right one, over 33 probes).
 //! - **Release / fix-relax on a conic build.** Every fixture here is
 //!   bound-free, so `release_slots` is empty and the release path is never
 //!   entered. `convex_sens_release.rs` owns it, on orthant models. A cone row
@@ -70,6 +77,7 @@
 //! | the near-apex threshold `SOC_APEX_REL` → `0.0` at that one site | `a_boundary_point_too_close_to_the_apex_is_refused` | pins that the thin band is actually reached rather than dead code |
 //! | the `gap < −SOC_BOUNDARY_REL` arm disabled | `a_slack_outside_the_cone_is_refused` | otherwise it falls through and builds a normal from `s₀ < ‖s₁‖` |
 //! | the interior complementarity arm disabled | `an_interior_block_that_does_not_complement_is_refused` | |
+//! | the `apex_can_absorb_db` guard disabled | `an_apex_that_cannot_absorb_db_is_refused` — **and only it** | run after the guard landed. It fails with the defect in the message (`du/db₀ = 0.5`, `|A·dx − db| = 5e-10`) rather than a bare assertion, so a regression reads as what it is |
 //! | `primal_scale` replaced by a bare `1.0` in `build_conic` | `the_apex_decision_is_relative_to_the_problems_scale` — **and nothing else** | that test was written *because* the first run of this mutation was green across the whole crate: every other fixture here is `O(1)`, where the relative and absolute readings coincide. A scale-convention change with no failing test is exactly `/sens-review` entry 3 |
 
 use pounce_convex::QpOptions;
@@ -404,6 +412,118 @@ fn the_boundary_face_carries_curvature_the_orthant_case_does_not() {
 // ---------------------------------------------------------------------------
 // The apex face: flat, hence exact.
 // ---------------------------------------------------------------------------
+
+/// **The hard half of the apex branch**, and the one no fixture reached.
+///
+/// `apex()` is the *easy* half: its equality is `x₀ + x₂ = b` with `x₂`
+/// **outside** the cone block, so the perturbation is absorbed by a variable
+/// the apex never pinned. Every apex assertion in this crate was shaped that
+/// way — here, in `convex_cone_sensitivity.rs`, and in
+/// `conic_sensitivity_refused.rs`. So the branch was never untested; the
+/// branch's *other side* was, which is a sharper statement and exactly what
+/// `/sens-review` entry 6 is about: "a fixture that always takes one branch
+/// says nothing about the other, and it stays green while the other branch is
+/// broken."
+///
+/// The fixture is the parametric distance function, `min t s.t. u = b₀,
+/// v = b₁, (t, u, v) ∈ Q₃` — about as ordinary as a parametric SOCP gets. Both
+/// equalities pin coordinates the apex also pins, so `ker(B_a)` has dimension
+/// zero while `m_eq = 2`: no `dx` satisfies `A·dx = db` at all.
+///
+/// Before the guard this returned `du/db₀ = 0.5`, where **primal feasibility
+/// alone** forces `1` — a least-squares compromise between "`u` must move with
+/// `b₀`" and "`u` must stay at the apex". Found by adversarial review of #889,
+/// judged against the oracle-free identity `A·dx = db`; that identity needs no
+/// cone, no dual and no re-solve, which is why it can convict a step for which
+/// no solver oracle was accurate enough to adjudicate.
+///
+/// Two things make this a refusal rather than a caveat. The problem is
+/// **smooth on both sides of the cliff**: at `‖b‖ = 1.12e-8` the true
+/// derivative still exists, is still `0.894427`, and the boundary branch finds
+/// it — only the classifier changes its mind. And `primal_scale` floors at
+/// `1.0`, so `CONE_APEX_REL` is an *absolute* `1e-8` for any model whose data
+/// is `O(1)` or smaller: a well-fitting least-squares model, or one in units
+/// where the optimal residual is naturally `~1e-9`, lands here.
+#[test]
+fn an_apex_that_cannot_absorb_db_is_refused() {
+    // b = (2, 1)·k, so the exact dt/db₀ is 2/√5 = 0.894427 at every k.
+    let model = |k: f64| QpProblem {
+        n: 3,
+        p_lower: vec![],
+        c: vec![1.0, 0.0, 0.0],
+        a: vec![tri(0, 1, 1.0), tri(1, 2, 1.0)],
+        b: vec![2.0 * k, k],
+        // s = (t, u, v) ∈ SOC(3), as h − Gx with h = 0.
+        g: vec![tri(0, 0, -1.0), tri(1, 1, -1.0), tri(2, 2, -1.0)],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let delta = 1e-9;
+
+    // Above the cliff the block is a boundary face and the answer is right.
+    // This half must keep working, or the guard is just breaking the feature.
+    let prob = model(1e-6);
+    let sol = solve(&prob);
+    let mut sens = sens_for(&prob, &sol);
+    assert_eq!(sens.cone_block_kinds(), [(0, ConeBlockKind::Boundary)]);
+    let dx = sens.parametric_step(&[0], &[delta]);
+    assert!(
+        (dx[0] / delta - 2.0 / 5.0_f64.sqrt()).abs() < 1e-6,
+        "above the cliff the derivative exists and must be found: got {}",
+        dx[0] / delta
+    );
+    assert!(
+        (dx[1] / delta - 1.0).abs() < 1e-9,
+        "A·dx = db is primal feasibility alone, so du/db₀ is exactly 1; got {}",
+        dx[1] / delta
+    );
+
+    // Below it the block classifies Apex and pins all three coordinates, so
+    // `ker(B_a)` is trivial and no step can satisfy `A·dx = db`.
+    for k in [1e-9, 1e-16] {
+        let prob = model(k);
+        let sol = solve(&prob);
+        match QpSensitivity::build_conic(&prob, &SOC3, &sol, &opts(), 1e-7, backend) {
+            Err(SensError::NonsmoothConePoint { block, what }) => {
+                assert_eq!(block, 0);
+                assert!(
+                    what.contains("absorb"),
+                    "the refusal must name the reason; got {what:?}"
+                );
+            }
+            Err(other) => panic!("k = {k:e} must be refused as unabsorbable, got {other:?}"),
+            Ok(mut sens) => {
+                // Report what the accepted step actually does, so a regression
+                // reads as the defect rather than as a bare assertion failure.
+                let dx = sens.parametric_step(&[0], &[delta]);
+                panic!(
+                    "k = {k:e} was ACCEPTED at the apex. du/db₀ = {} where primal \
+                     feasibility alone forces 1, and |A·dx − db| = {:e}. That is the \
+                     least-squares compromise this guard exists to refuse.",
+                    dx[1] / delta,
+                    (dx[1] - delta).abs().max(dx[2].abs())
+                );
+            }
+        }
+    }
+}
+
+/// The guard must not fire on an apex that *can* absorb `db`, or it would
+/// refuse the flat, exact case the apex branch exists to serve.
+///
+/// `apex()`'s geometry stated as the property that matters: `m_eq = 1`, and
+/// `x₂` sits outside the block, so `ker(B_a)` still has room.
+#[test]
+fn an_apex_that_can_absorb_db_is_still_served() {
+    let prob = apex(1.0);
+    let sol = solve(&prob);
+    assert_eq!(
+        sens_for(&prob, &sol).cone_block_kinds(),
+        [(0, ConeBlockKind::Apex)],
+        "the absorbable apex must still classify and build"
+    );
+}
 
 /// At the apex the whole block is active: `ds = 0`, so every row of `G` for the
 /// block enters and the cone coordinates cannot move at all. The perturbation

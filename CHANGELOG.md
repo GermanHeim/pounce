@@ -11,6 +11,55 @@ changes.
 
 ### Added
 
+- **An apex-pinned cone block that cannot absorb the perturbation is refused
+  (Rust API).** A cone block at its apex pins its *whole* block — `s = 0` is the
+  tip, so `ds = 0` and every row enters the active set. It is the one face that
+  pins unconditionally, and nothing checked that the equality rows could still
+  absorb an arbitrary `db`. Where they cannot, `[A; B_a]` is rank-deficient and
+  the returned step is a least-squares compromise rather than a derivative.
+
+  Measured on the parametric distance function `min t s.t. u = b₀, v = b₁,
+  (t,u,v) ∈ Q₃` — about as ordinary as a parametric SOCP gets: once `‖b‖` falls
+  under `CONE_APEX_REL` the block classifies `Apex` and `du/db₀` comes back
+  `0.5`, where **primal feasibility alone** forces `1`. `build_conic` now
+  returns `SensError::NonsmoothConePoint` there. The guard is a dimension count
+  (`n − rank(B_a) ≥ m_eq`), so it is necessary rather than sufficient and never
+  refuses a case it should serve; `ill_conditioned()` covers the remainder.
+
+  Two things make this worth refusing rather than caveating. The problem is
+  **smooth on both sides of the cliff** — at `‖b‖ = 1.12e-8` the derivative
+  still exists, is still `0.894427`, and the boundary branch finds it; only the
+  classifier changes its mind. And `primal_scale` floors at `1.0`, which makes
+  `CONE_APEX_REL` an *absolute* `1e-8` for any model whose data is `O(1)` or
+  smaller — a well-fitting least-squares model lands there.
+
+  Found by adversarial review of PR #889, judged against the oracle-free
+  identity `A·dx = db`. Every apex fixture in the crate took the branch where
+  the perturbation is absorbed by a variable *outside* the block, so the other
+  side of the branch was never executed — `/sens-review` entry 6, on a rule this
+  crate's own test headers quote.
+
+### Fixed
+
+- **`QpSensitivity::active_ineq()` documented a `G` index it does not always
+  return.** For an orthant row it is the row of `G`; for a **curved cone face**
+  the rows are linear combinations and the entry is block provenance, so
+  `prob.g[sens.active_ineq()[k]]` was a real, plausible, wrong row — the gh#450
+  shape in this arm's index space. Doc-only; the values were always correct as
+  provenance.
+- **`parametric_step` / `step_from_db` now say the step is meaningful only when
+  `ill_conditioned()` is false**, and which clause of that flag does the work: on
+  a rank-deficient active set the *regularized* matrix is well conditioned
+  (`kkt_cond_estimate ≈ 2e10`, far under threshold) and it is the **residual**
+  that fires — the trap gh#328 named, confirmed independently over 33 conic
+  probes.
+- **A malformed `NonsmoothConePoint` message in the Python binding** — missing
+  line continuations put ~18 literal spaces mid-sentence.
+- **`KktPattern::dim` was written and never read.** It now carries the
+  `debug_assert_eq!` that is its reason to exist: a mismatch means the assembler
+  and its caller disagree about the KKT's shape, which would corrupt every index
+  into it.
+
 - **`solution_report` refines the activity classes the cheap rule cannot call
   (Python).** `pounce.sensitivity.solution_report` reported the classifier's
   verdict raw, and that classifier normalizes a variable's barrier diagonal by
