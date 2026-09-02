@@ -78,7 +78,11 @@ use pounce_solve_report::SolveReport;
 /// one that matters — at the default relaxation the pair never goes
 /// biactive to working precision — and it is an ordinary documented
 /// option, set by anyone who wants the model they declared.
-const REPRO: &[&str] = &["bound_relax_factor=0", "mu_strategy_fallback=no", "tol=1e-8"];
+const REPRO: &[&str] = &[
+    "bound_relax_factor=0",
+    "mu_strategy_fallback=no",
+    "tol=1e-8",
+];
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))

@@ -8503,13 +8503,25 @@ mod tests {
         // ... and what cannot be measured is refused, not admitted, the
         // same way `runaway_is_the_whole_residual` treats a NaN.
         assert!(retry_answer_is_admissible(
-            Number::NAN, 0.0, 0.0, 0.0, ACCEPT
+            Number::NAN,
+            0.0,
+            0.0,
+            0.0,
+            ACCEPT
         ));
         assert!(!retry_answer_is_admissible(
-            0.0, 0.0, Number::NAN, 0.0, ACCEPT
+            0.0,
+            0.0,
+            Number::NAN,
+            0.0,
+            ACCEPT
         ));
         assert!(!retry_answer_is_admissible(
-            0.0, 0.0, -1.0, Number::NAN, ACCEPT
+            0.0,
+            0.0,
+            -1.0,
+            Number::NAN,
+            ACCEPT
         ));
     }
 }

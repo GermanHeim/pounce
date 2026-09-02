@@ -3264,7 +3264,6 @@ fn sigma_verdict_after_crossover(
     }
 }
 
-
 /// Each un-normalized KKT residual of `sol` over the natural magnitude of its
 /// own terms — the ratio both `σ`-path cuts are applied to.
 fn unscaled_relative_kkt(prob: &QpProblem, sol: &QpSolution) -> f64 {
