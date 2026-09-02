@@ -25,7 +25,7 @@ changes.
   `0.5`, where **primal feasibility alone** forces `1`. `build_conic` now
   returns the new `SensError::ActiveSetOverdetermined` there.
 
-  The criterion is a dimension count, `n − rank(B) ≥ m_eq`, where **`B` is the
+  The criterion is `rank([A; B]) == rank(A) + rank(B)`, where **`B` is the
   active rows that cannot be *released*** — the cone faces and the active
   orthant rows. Active variable bounds are deliberately **not** in `B`, even
   though a bound does pin its coordinate for the plain `parametric_step`:
@@ -33,31 +33,36 @@ changes.
   refusal is at build time, so counting a bound would take the release path
   away from a model fix-relax could serve.
 
-  Both sides of that comparison are ranks. `rank(A)` rather than `A`'s row
-  count matters whenever an equality is redundant: the reachable perturbations
-  are `range(A)`, so a duplicated row does not shrink the space a step has to
-  reach, and a `db` outside `range(A)` makes the *perturbed problem* infeasible
-  rather than the derivative unrepresentable. Reading the row count instead
-  over-refused by exactly the redundancy.
+  That criterion is **exact**. The quantity that matters is `dim A(ker B)`, the
+  perturbations the step can actually reach, and the rank identity gives it as
+  `rank([A;B]) − rank(B)`; requiring that to be all of `range(A)` rearranges to
+  the line above. It is `rank(A)` and not `A`'s row count because a redundant
+  equality does not shrink the space a step must reach.
 
-  Two things it still does not promise. It is **necessary, not sufficient** — a
-  subtler dependency between `A`'s rows and `B`'s can make one particular `db`
-  unreachable while the count passes. And it is coarse the other way too: when
-  `n − rank(B) < rank(A)` the image of `A` restricted to `ker(B)` is a *proper
-  subspace*, not empty, so some `db` remain reachable and would be answered
-  correctly — refusing at build time takes those away as well (deliberate,
-  since a build serves every later `db` and cannot know which are coming, but
-  stronger than "no answer exists here").
+  An earlier dimension count, `n − rank(B) ≥ rank(A)`, is implied by this and
+  strictly weaker — and the gap was not academic. Move a model's equality onto
+  coordinates the apex pins and the count passes while `A(ker B) = {0}`, so no
+  perturbation is reachable at all; that model was **served**, returning
+  `dx/db = (⅓, ⅓, 0, 0)` against `|A·dx − db|/δ = 0.333`, identically at every
+  step size. The exact criterion refuses it and reproduces every other verdict
+  in the crate.
 
-  `ill_conditioned()` is what covers the first case, and what flags the
-  bound-pinned model the exclusion deliberately serves — **but only after a
-  step is taken, never at build time.** It is the *residual* clause that fires;
-  the regularized KKT is well conditioned on these models (`3.0e10` against a
-  `1e14` threshold), so a caller checking `ill_conditioned()` immediately after
-  `build_conic` gets `false` on a build whose plain step will miss `A·dx = db`
-  by a third. Measured on a four-variable model where the plain step is wrong
-  by that third, `parametric_step_bounded` reproduces the re-solve exactly, and
-  the residual reads `0.333` against a `1e-6` threshold.
+  It is still not a promise that *every* `db` would have failed: a build serves
+  every later perturbation and cannot know which are coming, so it refuses on
+  one unreachable direction — deliberate, and stronger than "no answer exists
+  here".
+
+  **The complementary case is not a refusal.** Ask a served build for a `db`
+  outside `range(A)`, or take a plain step on a bound-pinned model the bound
+  exclusion deliberately serves, and the perturbed problem is infeasible: no
+  derivative exists, and a least-squares answer comes back.
+  `ill_conditioned()` is what tells the caller — **only after a step, never at
+  build time.** It is the *residual* clause that fires; the regularized KKT is
+  well conditioned on these models (`3.0e10` against a `1e14` threshold), so
+  checking `ill_conditioned()` immediately after `build_conic` returns `false`.
+  Measured residuals across the three shapes: `0.5`, `0.333`, `0.8`, against a
+  `1e-6` threshold and `~1e-13` on a correct step. Where a bound is what pins
+  the model, `parametric_step_bounded` reproduces the re-solve exactly.
 
   Two things make this worth refusing rather than caveating. The problem is
   **smooth on both sides of the cliff** — at `‖b‖ = 1.12e-8` the derivative

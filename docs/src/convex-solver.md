@@ -426,39 +426,50 @@ wrong call on the second, which is why they are not one variant.
 
 - **an apex-pinned block whose active set cannot absorb `db`.** The apex is the
   one face that pins its *whole* block, so the step lives in `ker(B)` while
-  feasibility needs `A·dx = db`. Where no room is left — `n − rank(B) < m_eq` —
-  no step satisfies both, and what would come back is a least-squares
-  compromise. The model itself is usually perfectly smooth here: the guard
-  fires where the *classifier* switched to `Apex`, and a decade further from
-  the tip the boundary face returns the same derivative.
+  feasibility needs `A·dx = db`. Where the two cannot both hold, what would
+  come back is a least-squares compromise rather than a derivative. The model
+  itself is usually perfectly smooth here: the guard fires where the
+  *classifier* switched to `Apex`, and a decade further from the tip the
+  boundary face returns the same derivative.
 
-  Both sides are ranks: `n − rank(B) < rank(A)`, not `A`'s row count. A
-  redundant equality does not shrink the space a step must reach, so counting
-  rows would refuse a model that is perfectly answerable.
+  The criterion is
 
-  `B` is the active rows that cannot be **released**: the cone faces and the
-  active orthant rows. Active variable bounds are deliberately excluded, even
-  though a bound pins its coordinate for the plain `parametric_step` — the
-  release path can open a bound, and refusing at build time would take that
-  path away too.
+  ```text
+  rank([A; B])  ==  rank(A) + rank(B)
+  ```
 
-  Two limits worth knowing. It is a *dimension* count, so it is **necessary,
-  not sufficient**: a subtler dependency between `A`'s rows and `B`'s can leave
-  one particular `db` unreachable while the count passes. And it is coarse in
-  the other direction — when `n − rank(B) < rank(A)` the reachable `db` form a
-  proper subspace rather than nothing, so a build-time refusal also declines
-  directions it could have answered (deliberate, since a build serves every
-  later `db` and cannot know which are coming, but stronger than "no answer
-  exists here").
+  which is **exact**, not a dimension count. The quantity that matters is
+  `dim A(ker B)` — the perturbations the step can actually reach — and the rank
+  identity gives it as `rank([A;B]) − rank(B)`; requiring that to be all of
+  `range(A)` rearranges to the line above. An earlier dimension count
+  `n − rank(B) ≥ rank(A)` is implied by it and strictly weaker: it passed a
+  model whose equality lay entirely inside the pinned coordinates, where
+  `A(ker B) = {0}` and *no* perturbation is reachable, and that model was served
+  with an answer 33% off at every step size.
 
-  What covers the first case — and the bound-pinned model the exclusion above
-  deliberately serves — is `ill_conditioned()`. **That means after a step, not
-  at build time.** It is the step's *residual* clause that fires, never the
-  condition estimate: the regularized KKT is perfectly well conditioned on
-  these models (`3.0e10` against a `1e14` threshold on the measured one), so
-  checking `ill_conditioned()` straight after `build_conic` returns `false` on
-  a build whose plain step will miss `A·dx = db` by a third. Take the step,
-  then check — and where a bound is what pins the model,
+  `rank(A)`, not `A`'s row count — a redundant equality does not shrink the
+  space a step must reach. And `B` is the active rows that cannot be
+  **released**: the cone faces and the active orthant rows. Active variable
+  bounds are deliberately excluded, even though a bound pins its coordinate for
+  the plain `parametric_step` — the release path can open a bound, and refusing
+  at build time would take that path away too.
+
+  One thing it is not: a promise that *every* `db` would have failed. A build
+  serves every later perturbation and cannot know which are coming, so it
+  refuses on the existence of one unreachable direction. That is deliberate,
+  and stronger than "no answer exists here".
+
+  **The complementary case is not a refusal at all.** Ask a *served* build for
+  a `db` outside `range(A)` — or take a plain step on a bound-pinned model the
+  exclusion above deliberately serves — and the perturbed problem is simply
+  infeasible: there is no derivative, and what comes back is a least-squares
+  answer to an unanswerable question. `ill_conditioned()` is what tells you,
+  **after the step and never at build time.** It is the *residual* clause that
+  fires, never the condition estimate: the regularized KKT is perfectly well
+  conditioned on these models (`3.0e10` against a `1e14` threshold), so
+  checking `ill_conditioned()` straight after `build_conic` returns `false`.
+  Measured residuals are `0.333` and `0.8` against a `1e-6` threshold. Take the
+  step, then check — and where a bound is what pins the model,
   `parametric_step_bounded` reproduces the re-solve exactly.
 
 Two of these thresholds are calibrated against the **non-symmetric** driver,

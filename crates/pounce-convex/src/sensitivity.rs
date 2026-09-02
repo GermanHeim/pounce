@@ -83,8 +83,16 @@ use std::rc::Rc;
 /// KKT build and the reduced-Hessian assembly re-scanned *all* of `G` once
 /// per active row (`O(n_active · nnz(G))`); the grouping is a single
 /// `O(nnz(G))` pass and each lookup is then proportional to that row's
-/// own nonzeros. `n_rows` is the number of inequality rows (`m_ineq`), so
-/// every `t.row` is a valid index.
+/// own nonzeros.
+///
+/// `n_rows` must bound every `t.row` — that is what makes the raw `rows[t.row]`
+/// safe. **Two callers rely on it and they are not the same shape**: the
+/// inequality path passes `prob.g` with `m_ineq`, and [`apex_can_absorb_db`]'s
+/// caller passes `prob.a` with `m_eq = prob.b.len()`. A `QpProblem` whose `a`
+/// carried a triplet with `row >= b.len()` would be malformed — an equality
+/// with no right-hand side — so it holds on both, but it is the *problem's*
+/// invariant rather than this function's, and the second caller arrived in #889
+/// long after this sentence said "the number of inequality rows".
 pub(crate) fn group_rows_by_index(triplets: &[Triplet], n_rows: usize) -> Vec<Vec<(usize, f64)>> {
     let mut rows = vec![Vec::new(); n_rows];
     for t in triplets {
@@ -437,29 +445,39 @@ fn outer_triplets(terms: &[(f64, Vec<(usize, f64)>)]) -> Vec<(usize, usize, f64)
 ///
 /// # Cost, stated honestly
 ///
-/// `O(r² · w)` for `r` rows over a combined support of width `w`. A cone face
-/// contributes one row (second-order, exponential, power) or `q(q+1)/2` (PSD),
-/// each touching a handful of columns — but a **mixed partition's orthant rows
-/// are also in here**, and there can be many of them on a large model. The
-/// apex gate is what keeps that off the common path, not the row count: an
-/// apex is rare, and a build without one never calls this.
+/// `O(r² · w)` for `r` rows over a combined support of width `w`, as a dense
+/// `r × w` array.
+///
+/// Three calls per apex-carrying build, and they are not the same size. On `B`
+/// a cone face contributes one row (second-order, exponential, power) or
+/// `q(q+1)/2` (PSD), each touching a handful of columns — though a **mixed
+/// partition's orthant rows are also in there**, and there can be many. On `A`,
+/// and on the stacked `[A; B]`, the support is typically **every column**, so
+/// an apex build on a model with many equalities allocates an `m_eq × n` dense
+/// array. That is the honest cost of the exact criterion, and it is not what
+/// the cone-face reasoning alone would suggest.
+///
+/// The apex gate is what keeps all of it off the common path, not the row
+/// count: an apex is rare, and a build without one never calls this.
 ///
 /// # The tolerance biases toward *missing* a deficiency, deliberately
 ///
-/// The guard passes iff `n − rank ≥ m_eq`, so **rank up ⇒ refuse**. Counting a
-/// round-off pivot would inflate the rank and make the guard *invent* a
-/// deficiency on a model that is fine; dropping small pivots — which is what
-/// `√ε · scale` does — deflates the rank and makes it *miss* one.
+/// The guard refuses unless `rank([A;B]) == rank(A) + rank(B)`. Undercounting
+/// the stacked rank breaks that equality and **refuses**; undercounting either
+/// part restores it and **passes**. The stacked elimination is the longest, and
+/// so the one with the most opportunity to drop a marginal pivot, which biases
+/// the guard toward *missing* a deficiency rather than inventing one.
 ///
 /// Missing is the right way to err for a refusal this new: a missed deficiency
-/// leaves the step to `ill_conditioned()`, which catches it (measured: residual
-/// `0.5` against `~1e-13`, no overlap), while an invented one breaks a working
-/// model at build time with no recourse. `scale` is the global maximum taken
-/// once before elimination and does not shrink as entries do, which biases the
-/// same way.
+/// leaves the step to `ill_conditioned()`, which catches it (measured across
+/// three shapes now — residual `0.5`, `0.333` and `0.8` against a `1e-6`
+/// threshold, no overlap with the `~1e-13` of a correct step), while an
+/// invented one breaks a working model at build time with no recourse.
 ///
-/// (An earlier version of this comment had both halves backwards. The number
-/// was always this one; only the argument for it was wrong.)
+/// (An earlier version of this comment had both halves backwards, and a later
+/// one described a global scale this function no longer uses. The threshold has
+/// been `√ε` throughout; only what it is measured against, and the argument for
+/// its direction, have changed.)
 fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
     if rows.is_empty() || n == 0 {
         return 0;
@@ -485,17 +503,39 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
         })
         .collect();
 
-    // `√ε` relative to the largest entry: below that a pivot is round-off, and
-    // counting it inflates the rank, which would make the guard below *miss* a
-    // rank deficiency rather than invent one.
-    let scale = m
-        .iter()
-        .flat_map(|r| r.iter())
-        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    if scale == 0.0 {
+    // Equilibrate: divide each row by its own largest entry, and drop rows that
+    // are entirely zero. Only then is a single scalar tolerance meaningful.
+    //
+    // A *global* max was enough while these rows were cone faces and active
+    // orthant rows, whose entries the cone geometry and `G` fix within an order
+    // or two of each other. It stopped being enough when `A` joined them
+    // (#889, fourth review): `A`'s row scaling is the user's, so one equality
+    // carrying `1e10` coefficients would set `tol = √ε · 1e10 ≈ 0.15` for every
+    // pivot in the elimination, and two genuinely independent `O(1)` equalities
+    // elsewhere in `A` would collapse to rank 1 — the guard passing where it
+    // must refuse, on a model that is merely badly scaled rather than
+    // degenerate. Row-wise, `tol` means the same thing on `A` that it always
+    // meant on the face rows.
+    let mut any = false;
+    for row in &mut m {
+        let s = row.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        if s > 0.0 {
+            for v in row.iter_mut() {
+                *v /= s;
+            }
+            any = true;
+        }
+    }
+    if !any {
         return 0;
     }
-    let tol = f64::EPSILON.sqrt() * scale;
+    // `√ε` on rows whose largest entry is now exactly 1: below that a pivot is
+    // round-off, and counting it inflates the rank. Rank up ⇒ refuse, so
+    // dropping small pivots deflates the rank and biases the guard toward
+    // *missing* a deficiency rather than inventing one — the safe direction for
+    // a refusal, since a miss is left to `ill_conditioned()` while an invention
+    // breaks a working model at build time with no recourse.
+    let tol = f64::EPSILON.sqrt();
 
     let mut rank = 0;
     for col in 0..w {
@@ -537,21 +577,47 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 /// difference is what makes this check apex-gated.
 ///
 /// The step then lives in `ker(B)` for the active rows `B`, while feasibility
-/// of the perturbed problem needs `A·dx = db`. So the apex model can answer at
-/// all only if `A` restricted to that kernel is still onto `R^{m_eq}` — and a
-/// necessary condition, cheap and needing only a rank, is
+/// of the perturbed problem needs `A·dx = db`. So the apex model can answer
+/// every `db` it may be asked for only if `A` restricted to that kernel still
+/// covers `range(A)` — which holds exactly when
 ///
 /// ```text
-///   n − rank(B)  ≥  rank(A)
+///   rank([A; B])  ==  rank(A) + rank(B)
 /// ```
 ///
-/// `rank(A)`, not `A`'s row count. A redundant equality does not shrink the
-/// space a step has to reach: the reachable perturbations are `range(A)`, of
-/// dimension `rank(A)`, and a `db` outside it makes the *perturbed problem*
-/// infeasible rather than the derivative unrepresentable. Counting rows instead
-/// over-refuses by exactly the redundancy — raised in the third review of #889,
-/// and `an_apex_with_a_redundant_equality_is_served` is the model where the two
-/// readings disagree.
+/// # Why this, and not a dimension count
+///
+/// The quantity that matters is `dim A(ker B)`: the space of perturbations the
+/// step can actually reach. The rank identity gives it directly —
+/// `dim A(ker B) = rank([A; B]) − rank(B)` — and we need that to be all of
+/// `range(A)`, i.e. `rank(A)`. Rearranged, that is the line above.
+///
+/// `rank(A)` and not `A`'s **row count**: a redundant equality does not shrink
+/// the space a step has to reach. The reachable perturbations are `range(A)`,
+/// and a `db` outside it makes the *perturbed problem* infeasible rather than
+/// the derivative unrepresentable — a different failure, and not this guard's
+/// to report. `an_apex_with_a_redundant_equality_is_served` is the model where
+/// those two readings disagree.
+///
+/// This condition is **exact**, where the earlier dimension count
+/// `n − rank(B) ≥ rank(A)` was only necessary. It implies that count strictly
+/// (`rank([A;B]) ≤ n`), so it refuses a superset — and it refuses exactly the
+/// models the count let through with a wrong answer.
+///
+/// The fourth review of #889 is why. Move [`apex`]'s equality onto coordinates
+/// the apex pins, `x₀ + x₁ = b`: `rank(A) = 1`, `rank(B) = 3`, `4 − 3 ≥ 1`, so
+/// the count passes — but `ker(B) = span(e₂)` and `A e₂ = 0`, so `A(ker B)` is
+/// `{0}` and **no** nonzero `db` is reachable at all. Measured, it was served,
+/// and returned `dx/db = (⅓, ⅓, 0, 0)` against `|A·dx − db|/δ = 0.333` at every
+/// step size — the guard's own motivating defect, one model past the guard.
+/// `an_equality_inside_the_pinned_coordinates_is_refused` pins it.
+///
+/// That model is not a "subtle dependency" of the kind a coarse rule may fairly
+/// leave to a residual flag: the equality lives *entirely inside* the pinned
+/// coordinates. The earlier doc claimed the count "already covers" this case
+/// and priced the exact test as costing "far more". Neither survived
+/// measurement: it did not cover it, and the exact test is one more
+/// elimination, on rows already assembled.
 ///
 /// # `B` is the rows that cannot be released, and that is the whole subtlety
 ///
@@ -592,19 +658,23 @@ fn row_rank(rows: &[Vec<(usize, f64)>], n: usize) -> usize {
 ///
 /// # What the condition does and does not promise
 ///
-/// **Necessary, not sufficient.** When it fires the refusal is right: a space
-/// of dimension below `m_eq` cannot map onto `R^{m_eq}`. It can still pass
-/// while a subtler dependency between `A`'s rows and `B`'s makes a particular
-/// `db` unreachable; the full test is a rank of the stacked `[A; B]`, which
-/// costs far more on a model with many equalities for a case this coarse one
-/// already covers.
+/// **Exact for the question it asks, and still a build-time decision.** When it
+/// refuses, `A(ker B)` really is a proper subspace of `range(A)`: some `db`
+/// direction the caller may later ask for is unreachable, and the step for it
+/// would be a least-squares compromise rather than a derivative.
 ///
-/// And it is coarse in the other direction too, which is worth saying plainly:
-/// when `n − rank(B) < m_eq` the image of `A|ker(B)` is a *proper subspace*,
-/// not empty — so some `db` are still reachable and would be answered
-/// correctly. Refusing at build time takes those away as well. That is
-/// deliberate (the build serves every later `db`, and cannot know which are
-/// coming), but it is a stronger action than "no answer exists here".
+/// It is not a promise that *every* `db` would have failed. A build serves
+/// every later perturbation and cannot know which are coming, so it refuses on
+/// the existence of one bad direction — deliberate, and a stronger action than
+/// "no answer exists here", which is worth stating rather than implying.
+///
+/// The complementary case — a `db` the caller asks for that is outside
+/// `range(A)` entirely, on a build this guard *served* — is not a refusal at
+/// all: the perturbed problem is infeasible, so there is no derivative to
+/// report. The step comes back a least-squares answer to an unanswerable
+/// question, and [`ill_conditioned`](QpSensitivity::ill_conditioned) is what
+/// tells the caller so (measured on the redundant-equality fixture: residual
+/// `0.8` against a `1e-6` threshold). After a step, never at build time.
 ///
 /// Found by adversarial review of #889: `min t s.t. u = b₀, v = b₁,
 /// (t,u,v) ∈ Q₃` — the parametric distance function — classifies `Apex` once
@@ -619,10 +689,14 @@ fn apex_can_absorb_db(
     eq_rows: &[Vec<(usize, f64)>],
     active_rows: &[Vec<(usize, f64)>],
 ) -> bool {
-    if eq_rows.is_empty() {
+    let rank_a = row_rank(eq_rows, n);
+    if rank_a == 0 {
         return true;
     }
-    n.saturating_sub(row_rank(active_rows, n)) >= row_rank(eq_rows, n)
+    let rank_b = row_rank(active_rows, n);
+    let stacked: Vec<Vec<(usize, f64)>> =
+        eq_rows.iter().chain(active_rows.iter()).cloned().collect();
+    row_rank(&stacked, n) == rank_a + rank_b
 }
 
 /// A point on a face defined by one smooth concave inequality `φ(s) ≥ 0`,
@@ -2848,11 +2922,11 @@ mod tests {
 
     /// The tolerance's bias direction, as behaviour rather than prose.
     ///
-    /// `row_rank` drops pivots under `√ε · scale`, so a row that differs from
-    /// a dependent one only at round-off is **not** counted. That deflates the
-    /// rank, which — since the guard passes iff `n − rank ≥ m_eq` — biases it
-    /// toward *missing* a deficiency rather than inventing one. Erring that
-    /// way is deliberate for a new refusal: a missed deficiency is left to
+    /// `row_rank` equilibrates each row and drops pivots under `√ε`, so a row
+    /// that differs from a dependent one only at round-off is **not** counted.
+    /// That deflates the rank, which biases the guard toward *passing* — toward
+    /// missing a deficiency rather than inventing one. Erring that way is
+    /// deliberate for a new refusal: a missed deficiency is left to
     /// `ill_conditioned()`, an invented one breaks a working model at build
     /// time with no recourse. The comment on `row_rank` had this backwards
     /// once (re-review of #889); this test is what would catch it flipping.
@@ -2891,14 +2965,114 @@ mod tests {
             &apex_rows
         ));
 
-        // One coordinate free is enough for one equality, and not for two.
+        // One free coordinate is enough for one equality — but only if the
+        // equality can *reach* it. On `e₂`, the free one, it can:
         let two_pinned = [e0.clone(), e1.clone()];
-        assert!(apex_can_absorb_db(3, &[e0.clone()], &two_pinned));
+        assert!(apex_can_absorb_db(3, &[e2.clone()], &two_pinned));
+
+        // On `e₀`, which `B` pins, it cannot: `A(ker B) = {0}`. The dimension
+        // count passed this (`3 − 2 = 1 ≥ 1`) and it is exactly the wrong
+        // answer the fourth review of #889 measured; the exact criterion
+        // refuses it. `the_criterion_is_exact_not_a_dimension_count` owns the
+        // full argument.
+        assert!(!apex_can_absorb_db(3, &[e0.clone()], &two_pinned));
+
+        // Two equalities against one free coordinate: refused either way.
         assert!(!apex_can_absorb_db(
             3,
             &[e0.clone(), e1.clone()],
             &two_pinned
         ));
+    }
+
+    /// **`row_rank` equilibrates, so one badly scaled row cannot erase the
+    /// others.**
+    ///
+    /// Raised in the fourth review of #889. The tolerance was `√ε` times a
+    /// *global* maximum, which was fine while these rows were cone faces and
+    /// active orthant rows — the cone geometry and `G` keep those within an
+    /// order or two of each other. `A` joined them in the third review, and
+    /// `A`'s row scaling is the user's: one equality carrying `1e10`
+    /// coefficients sets `tol ≈ 0.15` for every pivot, and two genuinely
+    /// independent `O(1)` rows collapse to rank 1. `rank(A)` deflated that way
+    /// makes the guard pass where it must refuse — silently, on a model that is
+    /// merely badly scaled rather than degenerate.
+    ///
+    /// Mutation: restore the global `scale`. Red here, and nowhere else — every
+    /// other fixture in the crate is unit-scaled, which is exactly why this
+    /// needed writing rather than assuming.
+    #[test]
+    fn row_rank_is_not_fooled_by_one_huge_row() {
+        // Two independent rows whose independence shows up only in a modest
+        // pivot (0.05 after eliminating column 0), plus one row 1e10 larger on
+        // a column of its own. True rank 3.
+        //
+        // Equilibrated, that pivot is 0.048 against a `√ε` tolerance and
+        // survives. Against a *global* max the tolerance is `√ε · 1e10 ≈ 0.15`,
+        // the pivot is dropped, and the two independent rows read as one —
+        // rank 2. That is the mutation, and this arithmetic is what makes it
+        // bite; a fixture whose rows are all the same size cannot.
+        let three = [
+            row(&[(0, 1.0), (1, 1.0)]),
+            row(&[(0, 1.0), (1, 1.05)]),
+            row(&[(2, 1e10)]),
+        ];
+        assert_eq!(
+            row_rank(&three, 3),
+            3,
+            "a huge row on its own column must not raise the tolerance for the others"
+        );
+
+        // And a big row that really is dependent still does not buy a rank.
+        let dependent = [
+            row(&[(0, 1.0), (2, 1.0)]),
+            row(&[(1, 1.0), (2, 1.0)]),
+            row(&[(0, 1e10), (1, 1e10), (2, 2e10)]),
+        ];
+        assert_eq!(row_rank(&dependent, 3), 2);
+    }
+
+    /// **The criterion is exact, not a dimension count**, and this is the input
+    /// where the two disagree.
+    ///
+    /// `dim A(ker B) = rank([A;B]) − rank(B)`, and the step can reach every
+    /// `db` only when that equals `rank(A)`. The dimension count
+    /// `n − rank(B) ≥ rank(A)` is implied by it and strictly weaker.
+    ///
+    /// Here `A` lives entirely inside the coordinates `B` pins: `n = 4`,
+    /// `rank(A) = 1`, `rank(B) = 3`, so `4 − 3 ≥ 1` passes — while
+    /// `ker(B) = span(e₂)`, `A e₂ = 0`, and `A(ker B) = {0}`, so no nonzero
+    /// `db` is reachable at all. `rank([A;B]) = 3 ≠ 1 + 3` refuses it.
+    ///
+    /// `an_equality_inside_the_pinned_coordinates_is_refused` in
+    /// `tests/convex_soc_sensitivity.rs` is the same shape as a solved model,
+    /// and carries the measurement (served, `dx/db = (⅓, ⅓, 0, 0)`, off by a
+    /// third at every step size) that made this worth fixing rather than
+    /// documenting.
+    ///
+    /// Mutation: `n.saturating_sub(rank_b) >= rank_a`. Red here and there, and
+    /// on nothing else — the exact rule reproduces every other verdict in the
+    /// crate.
+    #[test]
+    fn the_criterion_is_exact_not_a_dimension_count() {
+        // B pins x₀, x₁, x₃; A is x₀ + x₁ = b, inside the pinned set.
+        let b_rows = [row(&[(0, 1.0)]), row(&[(1, 1.0)]), row(&[(3, 1.0)])];
+        let a_rows = [row(&[(0, 1.0), (1, 1.0)])];
+
+        assert_eq!(row_rank(&a_rows, 4), 1);
+        assert_eq!(row_rank(&b_rows, 4), 3);
+        assert!(
+            4_usize.saturating_sub(3) >= 1,
+            "the dimension count passes this, which is the whole point"
+        );
+        assert!(
+            !apex_can_absorb_db(4, &a_rows, &b_rows),
+            "…and the exact criterion refuses it: A(ker B) = {{0}}"
+        );
+
+        // Move the equality onto a free coordinate and it is answerable again.
+        let free = [row(&[(0, 1.0), (2, 1.0)])];
+        assert!(apex_can_absorb_db(4, &free, &b_rows));
     }
 
     /// **The equality side is a rank, not a row count.**

@@ -37,16 +37,21 @@
 //!
 //! - **Any cone family but `SecondOrder`.** `Psd`, `Exponential` and `Power`
 //!   are refused; `conic_sensitivity_refused.rs` owns that.
-//! - **Whether a *particular* `db` is reachable.** `apex_can_absorb_db` is a
-//!   dimension count over the active rows that **cannot be released** — cone
-//!   faces and active orthant rows; active variable bounds are excluded, see
-//!   `an_active_bound_does_not_count_as_an_apex_pin`. It is necessary, not
-//!   sufficient: it convicts an active set with no room left at all, which is
-//!   the case adversarial review of #889 found, and can still pass while a
-//!   subtler dependency between `A`'s rows and the active ones makes a
-//!   particular direction unreachable. `ill_conditioned()` covers the
-//!   remainder, and that review measured the separation (residual `0.5` on
-//!   every wrong step, `~1e-13` on every right one, over 33 probes).
+//! - **Whether a `db` the caller actually asks for is answerable.**
+//!   `apex_can_absorb_db` decides whether *every* `db` in `range(A)` is
+//!   reachable — `rank([A;B]) == rank(A) + rank(B)`, over the active rows that
+//!   **cannot be released** (cone faces and active orthant rows; variable
+//!   bounds excluded, see `an_active_bound_does_not_count_as_an_apex_pin`).
+//!   That is exact for the question it asks, and it is a *build-time* question:
+//!   a build serves every later perturbation, so one unreachable direction
+//!   refuses all of them.
+//!
+//!   What it says nothing about is a `db` outside `range(A)` entirely, on a
+//!   build it served — there the perturbed problem is infeasible and no
+//!   derivative exists. `ill_conditioned()` is the only thing that tells the
+//!   caller, **after the step and never at build time**; the measured
+//!   separation is residual `0.5` / `0.333` / `0.8` across the three shapes in
+//!   this file against `~1e-13` on a correct step, with no overlap.
 //! - **The guard's arithmetic about a bound** is covered twice over, at two
 //!   levels, and neither is redundant.
 //!   `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank`
@@ -92,6 +97,8 @@
 //! | the `apex_can_absorb_db` guard disabled | `an_apex_that_cannot_absorb_db_is_refused` — **and only it** | run after the guard landed. It fails with the defect in the message (`du/db₀ = 0.5`, `|A·dx − db| = 5e-10`) rather than a bare assertion, so a regression reads as what it is |
 //! | `apex_can_absorb_db` stacks a unit row per active bound (the rule as first written) | `sensitivity::tests::an_active_bound_is_not_stacked_into_the_apex_rank` — **and only it**, across all 267 tests in the crate | re-review of #889. The mutation changes the signature, so `finish` and both unit call sites move with it; it is still compile-checkable, just not a one-line edit |
 //! | the same stacking applied at the **call site** in `finish`, leaving the signature alone | `a_bound_pinned_apex_is_served_by_fix_relax_and_flagged_without_it` — **and only it** | two measurements, and the first one's *conclusion* was wrong. Run before that fixture existed, this mutation left the whole crate green, and the table here concluded "no non-degenerate model can separate the two rules, so an integration fixture cannot carry this line". The counting argument is sound — discrimination forces `[A; B; bounds]` to be dependent, i.e. primal degeneracy — but *must be degenerate* is not *cannot be written*: degenerate is ordinary. The third review of #889 wrote the model, it is four variables long, and the mutation is red on it. The green run measured this crate's corpus, not a possibility |
+//! | `apex_can_absorb_db` reverts to the dimension count `n − rank(B) ≥ rank(A)` | `an_equality_inside_the_pinned_coordinates_is_refused`, plus `sensitivity::tests::{the_criterion_is_exact_not_a_dimension_count, apex_can_absorb_db_is_a_dimension_count}` — **and nothing else in the crate** | fourth review of #889. The count is implied by the exact criterion and strictly weaker: it passes a model whose equality lives entirely inside the pinned coordinates, where `A(ker B) = {0}` and no `db` is reachable at all. Served, it returned `dx/db = (⅓,⅓,0,0)` at 33% error, identically at every step size |
+//! | `row_rank` uses a global max instead of equilibrating each row | `sensitivity::tests::row_rank_is_not_fooled_by_one_huge_row` — **and only it** | the global scale was harmless while these rows were cone faces; `A` joined them and `A`'s row scaling is the user's. Every other fixture in the crate is unit-scaled, where the two readings coincide — so this test had to be built to make the mutation bite (a modest pivot next to a `1e10` row), not just picked |
 //! | `primal_scale` replaced by a bare `1.0` in `build_conic` | `the_apex_decision_is_relative_to_the_problems_scale` — **and nothing else** | that test was written *because* the first run of this mutation was green across the whole crate: every other fixture here is `O(1)`, where the relative and absolute readings coincide. A scale-convention change with no failing test is exactly `/sens-review` entry 3 |
 
 use pounce_convex::QpOptions;
@@ -811,6 +818,102 @@ fn an_apex_with_a_redundant_equality_is_served() {
         !sens.ill_conditioned(),
         "a served build whose step is exact must not be flagged"
     );
+
+    // **The other branch**, and the one the doc's argument rests on. Serving
+    // this build is justified by "a `db` outside `range(A)` makes the
+    // *perturbed problem* infeasible, which is not this guard's to report" —
+    // but whether the caller can *tell* is reportable, and was unmeasured
+    // until the fourth review of #889 asked (`/sens-review` entry 6).
+    //
+    // Perturbing `b₀` alone gives `db = (δ, 0) ∉ range(A) = span{(1,2)}`. What
+    // comes back is a least-squares answer to an unanswerable question — and
+    // `ill_conditioned()` fires on it, residual `0.8` against a `1e-6`
+    // threshold. That is the sentence the doc was missing, and it is what makes
+    // serving the build defensible rather than merely permitted.
+    let dx_off = sens.parametric_step(&[0], &[delta]);
+    assert!(
+        (dx_off[2] / delta - 1.0).abs() > 0.1,
+        "an infeasible db cannot be answered correctly; got dx₂/db₀ = {}",
+        dx_off[2] / delta
+    );
+    assert!(
+        sens.ill_conditioned(),
+        "…and the caller must be able to tell: ill_conditioned() has to fire"
+    );
+    let resid = sens
+        .last_step_residual()
+        .expect("a step was taken, so there is a residual");
+    assert!(
+        resid > 1e-2,
+        "and not marginally: {resid} against STEP_UNRELIABLE_RESIDUAL = 1e-6"
+    );
+}
+
+/// **An equality living inside the coordinates the apex pins is refused** —
+/// the case the *dimension count* let through with a wrong answer.
+///
+/// Found by the fourth review of #889, and it is the guard's own motivating
+/// defect one model past the guard. Take [`apex`] and move its equality onto
+/// `(x₀, x₁)`, both of which the apex pins:
+///
+/// ```text
+///   min ½‖x‖² − x₂ + 5t   s.t.  x₀ + x₁ = b,  (t, x₀, x₁) ∈ Q₃
+/// ```
+///
+/// `n = 4`, `rank(A) = 1`, `rank(B) = 3`, so `n − rank(B) = 1 ≥ 1` and the
+/// dimension count **passes**. But `ker(B) = span(e₂)` and `A e₂ = 0`, so
+/// `A(ker B) = {0}`: *no* nonzero `db` is reachable at all. Measured before the
+/// fix, the build was served and returned
+///
+/// ```text
+///   dx/db = (⅓, ⅓, 0, 0)      |A·dx − db| / δ = 0.333
+/// ```
+///
+/// identically at `δ = 1e-4, 1e-5, 1e-6` — a least-squares compromise reported
+/// as a derivative, 33% off, at every step size. This is not the "subtler
+/// dependency" a coarse rule may fairly leave to a residual flag: the equality
+/// lives *entirely inside* the pinned coordinates.
+///
+/// The exact criterion `rank([A;B]) == rank(A) + rank(B)` refuses it —
+/// `3 ≠ 1 + 3` — and reproduces every other verdict in the crate, which is why
+/// it replaced the count rather than supplementing it.
+///
+/// Mutation: `n.saturating_sub(rank_b) >= rank_a`. This test goes red as
+/// "was accepted", with the wrong derivative in the message.
+#[test]
+fn an_equality_inside_the_pinned_coordinates_is_refused() {
+    let prob = QpProblem {
+        a: vec![tri(0, 0, 1.0), tri(0, 1, 1.0)],
+        b: vec![0.0],
+        ..apex(0.0)
+    };
+    let sol = solve(&prob);
+    match QpSensitivity::build_conic(&prob, &SOC3, &sol, &opts(), 1e-7, backend) {
+        Err(SensError::ActiveSetOverdetermined { block, what }) => {
+            assert_eq!(block, 0);
+            assert!(
+                what.contains("absorb"),
+                "the refusal must name the reason; got {what:?}"
+            );
+        }
+        Err(other) => panic!("must be refused as unabsorbable, got {other:?}"),
+        Ok(mut sens) => {
+            // Report the defect rather than a bare assertion, so a regression
+            // reads as what it is.
+            let delta = 1e-4;
+            let dx = sens.parametric_step(&[0], &[delta]);
+            panic!(
+                "ACCEPTED. dx/db = ({}, {}, {}, {}) and |A·dx − db|/δ = {:e}, where \
+                 A(ker B) = {{0}} means no nonzero db is reachable at all. That is \
+                 the least-squares compromise the exact criterion exists to refuse.",
+                dx[0] / delta,
+                dx[1] / delta,
+                dx[2] / delta,
+                dx[3] / delta,
+                ((dx[0] + dx[1]) - delta).abs() / delta
+            );
+        }
+    }
 }
 
 /// The guard must not fire on an apex that *can* absorb `db`, or it would
