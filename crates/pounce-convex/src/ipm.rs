@@ -3435,6 +3435,16 @@ where
                 &candidates[pick],
                 SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(opts.tol),
             );
+            // NOTE the bit recorded is narrower than the module's parameter
+            // name suggests: it is "this answer should be demoted", i.e. the
+            // pick is *currently* labelled `Optimal` **and** it is far from
+            // optimal. An uncertified pick that already carries a non-`Optimal`
+            // status records `false`, because there is nothing to demote. That
+            // is exactly what `demote_uncertified_sigma_optimum` needs and the
+            // two checks are deliberately redundant, but a second consumer —
+            // a diagnostic, a log line, a sensitivity gate — would
+            // under-report uncertified points if it read this bit as "the
+            // cascade certified nothing". Widen the recording, not the reader.
             crate::sigma_verdict::record(
                 candidates[pick].status == QpStatus::Optimal && far_from_optimal,
             );

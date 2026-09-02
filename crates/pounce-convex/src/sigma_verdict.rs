@@ -12,12 +12,29 @@
 //! for one bit. This mirrors [`crate::deadline`], including its
 //! outermost-frame-owns-the-slot discipline and RAII reset.
 //!
-//! The discipline that makes it correct is that [`record`] is called on
-//! **every** exit from the cascade, not only the uncertified one, and
-//! [`clear`] runs at the top of every solve attempt. A retry that re-enters
-//! the solver overwrites the verdict with its own, so the slot always
-//! describes the attempt whose answer is actually being returned — never a
-//! stale `true` from an attempt that was superseded.
+//! The discipline that makes it correct is **clear-at-entry plus
+//! record-at-the-one-exit**, and it is worth stating precisely because the
+//! module's whole correctness argument is the discipline. [`clear`] runs at
+//! the top of every [`crate::ipm::solve_qp_core`] attempt; there is exactly
+//! one [`record`] call, on the branch that returns an uncertified pick. Every
+//! other exit from the cascade is covered by the `clear` that already ran,
+//! not by a `record` of its own — so do not "restore" missing `record` calls,
+//! and do not remove the `clear` on the belief that the `record`s cover it.
+//! Either edit breaks it in opposite directions.
+//!
+//! A retry that re-enters the solver clears first and records its own verdict,
+//! so the slot describes the last attempt to run — never a stale `true` from
+//! an attempt that was superseded.
+//!
+//! **What the slot does not cover.** It is recorded about the answer
+//! `solve_qp_core` returns. [`crate::crossover::maybe_crossover`] can replace
+//! that answer afterwards without re-entering the solver, so on a pure LP the
+//! verdict describes the interior iterate rather than the purified vertex.
+//! That is sound here because the verdict is the forward-error arm's, measured
+//! against data the crossover does not change, and because crossover only ever
+//! moves to an *exact* vertex — but a future consumer of this bit that is
+//! sensitive to which of the two points it describes needs to re-record after
+//! crossover rather than assume.
 
 use std::cell::Cell;
 

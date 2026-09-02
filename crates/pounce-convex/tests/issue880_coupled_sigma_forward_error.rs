@@ -789,6 +789,8 @@ fn the_cond_1e12_floor_is_a_carve_out() {
 /// | set `SIGMA_DEMOTION_MARGIN` to `1.0` | same test fails: `cond 1e10` sits on the cut and rounding decides it |
 /// | move the demotion into `solve_qp_core`'s terminal branch | the Ruiz retry's clean `Optimal` is accepted instead: census worst error `3.06e-04` -> `3.93e+01` |
 /// | drop `sigma_verdict::clear()` at the top of `solve_qp_core` | a retry inherits a superseded attempt's verdict |
+/// | restore the narrow `Optimal` gate in `QpSensitivity::build` | `a_demoted_answer_still_builds_a_sensitivity_object` fails with `NotOptimal` |
+/// | drop the `lo` correction in `residual_compensated` | both `compensated_residual_tests` fail |
 #[test]
 fn the_demotion_population_is_exactly_the_uncertifiable_instances() {
     // Uncertifiable: at `cond = 1e12` the estimator's own f64 floor is
@@ -831,4 +833,70 @@ fn the_demotion_population_is_exactly_the_uncertifiable_instances() {
     let (prob4, _) = coupled_qp([1.0, 1e2], &TGT, 1.0);
     let sol4 = solve_qp_ipm(&prob4, &QpOptions::default(), backend);
     assert_eq!(sol4.status, QpStatus::Optimal);
+}
+
+/// The big-coefficient LP keeps a clean `Optimal`, and this is pinned
+/// separately because it is the member of the `σ` population with the most
+/// surprising downstream consequence.
+///
+/// `c₁ = 1e10` puts this LP's *absolute* KKT error above `tol` on data
+/// magnitude alone, so the gate's absolute arm cannot pass it however exact
+/// `x` is — and the cascade does reject candidates on it. What keeps it
+/// `Optimal` is that the recorded verdict is the **forward-error arm's**, and
+/// this vertex is exact: `Δ` is at the solve's own noise. Record the whole
+/// gate instead and this test goes red, which is the point of having it.
+///
+/// The consequence being guarded is not cosmetic. `OptimalInaccurate` reaches
+/// `QpSensitivity::build`, `pounce-py`'s payload gate, `QpResult.success` and
+/// `minimize`'s `success`; an exact vertex must not travel through any of
+/// them as a non-success.
+#[test]
+fn the_exact_vertex_lp_keeps_a_clean_optimal() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![],
+        c: vec![1.0, 1e10],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, -1.0), Triplet::new(1, 1, -1.0)],
+        h: vec![0.0, 0.0],
+        lb: vec![0.0, 0.0],
+        ub: vec![5.0, 5.0],
+    };
+    let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "an exact vertex must not be demoted: x = {:?}",
+        sol.x
+    );
+    assert!(rel_x_err(&sol.x, &[0.0, 0.0]) < 1e-6, "x = {:?}", sol.x);
+}
+
+/// A demoted answer still builds a sensitivity object (gh #880, review
+/// finding 1).
+///
+/// The demotion is a change of *label*, not of capability. This population
+/// arrived as a clean `Optimal` before and built derivatives; narrowing that
+/// would be a second, unrelated change, and it is the one the repo has
+/// already ruled on in the other direction — `_curve_fit.py` (gh #119 / #123)
+/// records that treating `Solved_To_Acceptable_Level` as a non-success
+/// "reported `success=False` at a verified optimum ... and callers gating on
+/// `.success` discarded valid fits".
+///
+/// Mutation: restore `sol.status != QpStatus::Optimal` in
+/// `QpSensitivity::build` and this fails with `NotOptimal`.
+#[test]
+fn a_demoted_answer_still_builds_a_sensitivity_object() {
+    let (prob, _) = coupled_qp([1.0, 1e12], &TGT, 1.0);
+    let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+    assert_eq!(
+        sol.status,
+        QpStatus::OptimalInaccurate,
+        "premise: this is the demoted population"
+    );
+    assert!(
+        pounce_convex::QpSensitivity::build_default(&prob, &sol, backend).is_ok(),
+        "a demoted answer must still yield derivatives"
+    );
 }

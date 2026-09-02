@@ -354,7 +354,8 @@ impl QpSensitivity {
     /// good default for `active_tol` is `1e-7` (see
     /// [`build_default`](Self::build_default)).
     ///
-    /// Returns [`SensError::NotOptimal`] if `sol` is not optimal, or
+    /// Returns [`SensError::NotOptimal`] unless `sol` is `Optimal` or
+    /// `OptimalInaccurate` (see gh #880), or
     /// [`SensError::FactorizationFailed`] if the active-set KKT is singular.
     pub fn build<F>(
         prob: &QpProblem,
@@ -366,7 +367,18 @@ impl QpSensitivity {
     where
         F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
     {
-        if sol.status != QpStatus::Optimal {
+        // gh #880 admits `OptimalInaccurate` here. That status now also means
+        // "the `σ` cascade could not certify this point to `tol`", and such a
+        // point previously arrived as a clean `Optimal` and built a
+        // sensitivity object. The issue is about a wrong *label*; narrowing
+        // what the library will do for that population would be a second,
+        // unrelated change, and it is the one the repo has already ruled on
+        // in the other direction — `_curve_fit.py` (gh #119 / #123) records
+        // that treating `Solved_To_Acceptable_Level` as a non-success
+        // "reported `success=False` at a verified optimum ... and callers
+        // gating on `.success` discarded valid fits". The derivative at a
+        // less accurate point is less accurate, exactly as it was before.
+        if !matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate) {
             return Err(SensError::NotOptimal);
         }
         let n = prob.n;

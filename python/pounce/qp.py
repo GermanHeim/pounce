@@ -191,7 +191,17 @@ class QpResult:
 
     @property
     def success(self) -> bool:
-        return self.status == "optimal"
+        # ``optimal_inaccurate`` counts, and this is the repo's settled
+        # convention rather than a judgement made here: `_curve_fit.py`
+        # (gh #119 / #123) records that treating
+        # ``Solved_To_Acceptable_Level`` as a non-success "reported
+        # ``success=False`` at a verified optimum ... and callers gating on
+        # ``.success`` discarded valid fits". gh #880 makes that reachable on
+        # the convex arm too — the `σ` cascade now reports a point it could
+        # not certify to ``tol`` as ``optimal_inaccurate`` instead of claiming
+        # a clean optimum — so the two arms would otherwise disagree about the
+        # same converged-to-acceptable answer.
+        return self.status in ("optimal", "optimal_inaccurate")
 
     @property
     def kkt_error(self) -> Optional[float]:

@@ -463,6 +463,17 @@ changes.
   construction: on `(1e16, 1, −1e16)` the plain traversal reads `0.0` where the
   truth is `1.0`, losing the answer rather than digits.
 
+  **`OptimalInaccurate` is admitted wherever `Optimal` used to be required.**
+  The demotion changes a label, not what the library will do: `optimal_inaccurate`
+  now counts as success in `QpResult.success` and `minimize`, and
+  `QpSensitivity::build` (and `pounce-py`'s payload gate) build for it. That is
+  the repo's settled convention rather than a new judgement — `_curve_fit.py`
+  (gh#119/#123) records that treating `Solved_To_Acceptable_Level` as a
+  non-success "reported `success=False` at a verified optimum … and callers
+  gating on `.success` discarded valid fits". Without this the demoted
+  population, which previously arrived as a clean `Optimal`, would silently
+  lose derivatives and `success`.
+
   No fixture moves: `scripts/sweep-fixtures.sh` is empty across both legs and
   all 79 fixtures (status, objective, iterations, engine), consistent with only
   1 of 79 reaching `σ`. The sweep tests in
