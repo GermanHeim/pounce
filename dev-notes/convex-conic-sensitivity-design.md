@@ -143,6 +143,16 @@ That leaves **one** model exercising the change and none of any size. The
 sweep shows containment; it says nothing about magnitude. A large LP with
 sensitivity suffixes is the measurement nobody has made.
 
+Re-measured after merging `origin/main`, which had landed
+`8c38e55` (`bound_relax_factor` is opt-in on the convex arm) and `837e3c2`
+(*"the reroute must solve the declared model, **and the sweep must see it**"*)
+— both of which move what the sweep reports, and one of which says so in its
+subject. The corpus had also grown from 79 fixtures to 93. Same result:
+still three fixtures carrying the sIPOPT suffixes, still one classifying
+convex, still **exactly one line moving**. Main's reroute decides what
+happens when the convex solve *declines*; this gate decides whether the model
+reaches the convex path at all, and the two do not interact on any fixture.
+
 ## Still open
 
 - `sens_jacobian` / `Jacobian` live only in the Pyomo layer, so a bare-`.nl`
