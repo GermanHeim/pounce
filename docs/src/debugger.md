@@ -28,6 +28,26 @@ small set of commands whose availability is backend-conditional.
 > The checkpoint fire-sites short-circuit when no debugger is installed,
 > so the standard regression suite is bit-for-bit identical with and
 > without the feature compiled in.
+>
+> **Attaching it does not change the solver either.** Every debug entry point
+> is the ordinary solve entry point reached with a hook, not a second
+> implementation of it, so driver selection, scaling, and the verify-and-retry
+> guards are the ones the plain run uses, and the answer, the trajectory and
+> the iteration count are the same. This is worth stating because it was once
+> false: until gh #892 the conic entry point built its own iteration for
+> symmetric cones and never consulted `qp_hsde`, so attaching the debugger to
+> a convex QCQP silently substituted the direct IPM for the default HSDE
+> embedding — different trajectory, and on the reported model a
+> `Numerical failure` where the plain run returned Clarabel's optimum.
+>
+> The one thing the debugger still changes is **presolve**, which the CLI
+> skips while a debugger is attached (on every engine, not just the convex
+> ones) so that the `x`/`s`/`y`/`z` blocks you inspect are the model you
+> wrote rather than a reduced one. On a model presolve can reduce, that is a
+> different — smaller — problem being solved, so expect the iteration count to
+> move; add `qp_presolve=no` to the plain run to compare like with like.
+> Anything *else* that differs between the debugged and the plain run is a
+> bug; please report it.
 
 ---
 
@@ -1324,6 +1344,14 @@ additionally expose the homogenizing scalars `tau` / `kappa` as 1-element
 blocks (`print tau`). `set <block>` and `goto` work as on the NLP path;
 `set mu` is rejected, because the convex μ is *derived* from `⟨s, z⟩`
 (edit `s`/`z` to move it).
+
+Which blocks you get follows from the driver the *plain* run would have
+used, because it is the driver you get (gh #892). The HSDE embedding is the
+default on every convex arm, so `tau` / `kappa` are normally there; under
+`qp_hsde=no` you are on the direct IPM and they are not. A PSD cone that the
+chordal decomposition splits is debugged in its clique blocks, and a
+Ruiz-equilibrated solve exposes the scaled iterate — in each case, the thing
+the solver is actually iterating on.
 
 ```sh
 pounce model.nl --debug                 # LP / convex-QP (auto-routed) — IPM REPL

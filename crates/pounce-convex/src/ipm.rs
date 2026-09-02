@@ -341,11 +341,26 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_qp_ipm_scoped(prob, opts, make_backend)
+        solve_qp_ipm_scoped(prob, opts, make_backend, None)
     })
 }
 
-fn solve_qp_ipm_scoped<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+/// The body of [`solve_qp_ipm`], with an optional [`DebugHook`] threaded to
+/// the *primary* solve.
+///
+/// `hook` is what makes [`solve_qp_ipm_debug`] the same function as
+/// [`solve_qp_ipm`] rather than a parallel one (gh #892). It is handed to the
+/// first driver invocation only; the recovery re-solves below (the
+/// equilibrated retry, the reverify, the infeasibility twin) run unhooked, so
+/// the debugger observes the solve the caller asked for and every fallback
+/// still runs exactly as it does without a debugger attached. The *answer* is
+/// therefore identical with and without the hook.
+fn solve_qp_ipm_scoped<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
+) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -372,7 +387,7 @@ where
     };
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
-    let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
+    let sol = solve_qp_ipm_core(prob, opts, &mut make_backend, hook);
     if crate::deadline::expired() {
         return mark_timed_out(sol);
     }
@@ -397,7 +412,12 @@ where
 /// orthant solve with optional Ruiz equilibration, returning a solution in the
 /// original problem's coordinates. Factored out so [`solve_qp_ipm`] can layer
 /// the LP-crossover refinement on top.
-fn solve_qp_ipm_core<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+fn solve_qp_ipm_core<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
+) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -415,9 +435,15 @@ where
     // See `crate::equilibrate`.
     let mut make_backend = make_backend;
     if opts.equilibrate && !opts.use_hsde {
-        return equilibrated_solve(prob, opts, /* use_hsde */ false, &mut make_backend);
+        return equilibrated_solve(
+            prob,
+            opts,
+            /* use_hsde */ false,
+            &mut make_backend,
+            hook,
+        );
     }
-    let sol = solve_qp_ipm_unscaled(prob, opts, &mut make_backend);
+    let sol = solve_qp_ipm_unscaled(prob, opts, &mut make_backend, hook);
     // HSDE robustness fallback. The self-dual driver normally conditions itself
     // through its per-cone NT scaling and so deliberately skips Ruiz pre-scaling
     // (see the comment above). But on a *severely* ill-scaled system — e.g. the
@@ -507,6 +533,7 @@ where
             &retry_opts,
             /* use_hsde */ true,
             &mut make_backend,
+            None,
         );
         // An `Optimal` from this retry has to earn the same way the one in
         // [`verify_or_repair_optimum`] does (gh #712). This retry runs *inside*
@@ -564,7 +591,13 @@ where
         if crate::deadline::expired() {
             return mark_timed_out(sol);
         }
-        let verify = equilibrated_solve(prob, opts, /* use_hsde */ false, &mut make_backend);
+        let verify = equilibrated_solve(
+            prob,
+            opts,
+            /* use_hsde */ false,
+            &mut make_backend,
+            None,
+        );
         if verify.status == QpStatus::Optimal {
             return verify;
         }
@@ -612,7 +645,7 @@ where
             c: vec![0.0; prob.n],
             ..prob.clone()
         };
-        if solve_qp_ipm_unscaled(&twin, opts, &mut make_backend).status
+        if solve_qp_ipm_unscaled(&twin, opts, &mut make_backend, None).status
             == QpStatus::PrimalInfeasible
         {
             let mut infeasible = sol;
@@ -652,6 +685,7 @@ fn equilibrated_solve<F>(
     opts: &QpOptions,
     use_hsde: bool,
     make_backend: &mut F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -666,7 +700,11 @@ where
         obj_constant: opts.obj_constant * scaling.sigma(),
         ..*opts
     };
-    let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
+    // A hook rides into the *scaled* problem: this is the driver the caller's
+    // solve actually runs, so it is the one a debugger has to watch, and the
+    // blocks it sees are the Ruiz-scaled ones (the returned solution is
+    // unscaled below, as always).
+    let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend, hook);
     scaling.unscale_solution(prob, &mut sol);
     if use_hsde {
         sol
@@ -967,7 +1005,7 @@ where
     {
         return sol;
     }
-    let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend);
+    let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend, None);
     let genuine = |c: &QpSolution| {
         c.status == QpStatus::Optimal && optimum_is_genuine(prob, c, opts.tol, opts.obj_constant)
     };
@@ -1010,7 +1048,7 @@ where
     // function's neighbour already makes to refute a spurious unboundedness
     // certificate, on the same LP/QP-only entry point, so it carries no new
     // exposure to cone-carrying problems.
-    let direct = equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend);
+    let direct = equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend, None);
     let best = [retry, direct]
         .into_iter()
         .filter(genuine)
@@ -1030,17 +1068,22 @@ where
 /// The bounds-aware orthant solve without equilibration (the historical
 /// [`solve_qp_ipm`] body). Factored out so [`solve_qp_ipm`] can wrap it with
 /// Ruiz scaling.
-fn solve_qp_ipm_unscaled<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+fn solve_qp_ipm_unscaled<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
+) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     if !prob.has_bounds() {
         let cone = CompositeCone::single_nonneg(prob.m_ineq());
-        return solve_qp_core(prob, &cone, opts, None, make_backend);
+        return solve_qp_core(prob, &cone, opts, None, make_backend, hook);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let cone = CompositeCone::single_nonneg(expanded.m_ineq());
-    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
+    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend, hook);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -1049,11 +1092,21 @@ where
 /// the Newton step, after the step is applied, and at termination) so a
 /// debugger can step, inspect, and break on the solve.
 ///
-/// Targets the direct (non-HSDE) convex IPM, so the debugged `x` block is
-/// the user's variables (finite bounds are expanded into a trailing
-/// nonnegative block, as in [`solve_qp_ipm`], and surface in the `s`/`z`
-/// blocks). Apart from the hook the result is identical to
-/// [`solve_qp_ipm`].
+/// **This is [`solve_qp_ipm`] with a hook, not a parallel implementation.**
+/// It is the same function body, reached with `hook = Some(..)`, so driver
+/// selection (`use_hsde`), Ruiz equilibration, the `σ` cost normalization,
+/// every verify-and-retry guard and the LP crossover all run exactly as they
+/// do without a debugger attached, and the returned solution is unchanged.
+/// That identity is the point (gh #892): a debugger that substitutes a
+/// different algorithm is debugging a run the user never shipped.
+///
+/// The hook rides the *primary* solve. The recovery re-solves — the
+/// equilibrated retry, the `σ` re-solve, the reverify, the infeasibility twin
+/// — run unhooked, so what the debugger observes is the solve proper. Which
+/// blocks it sees follows from the driver that solve actually uses: the HSDE
+/// drivers expose the embedding (with `tau`/`kappa`), the direct driver the
+/// user's variables; finite bounds are expanded into a trailing nonnegative
+/// block either way and surface in `s`/`z`.
 pub fn solve_qp_ipm_debug<F>(
     prob: &QpProblem,
     opts: &QpOptions,
@@ -1064,61 +1117,8 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_qp_ipm_debug_scoped(prob, opts, hook, make_backend)
+        solve_qp_ipm_scoped(prob, opts, make_backend, Some(hook))
     })
-}
-
-fn solve_qp_ipm_debug_scoped<F>(
-    prob: &QpProblem,
-    opts: &QpOptions,
-    hook: &mut dyn DebugHook,
-    mut make_backend: F,
-) -> QpSolution
-where
-    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
-{
-    if crate::deadline::expired() {
-        return timed_out_solution(prob);
-    }
-    // Screen the variable box before bound expansion, as the non-debug path
-    // does (gh #295, gh #491).
-    let snapped;
-    let prob = match screen_variable_box(prob) {
-        BoxScreen::Feasible => prob,
-        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
-        BoxScreen::Snapped(p) => {
-            snapped = p;
-            &snapped
-        }
-    };
-    // Build the factorization and run the core loop directly with the hook
-    // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
-    // carry the borrowed hook through its generic plumbing). When the HSDE
-    // driver is selected, debug it instead — it self-starts and builds its
-    // own factorization.
-    let run = |p: &QpProblem, cone: &CompositeCone, mk: &mut F, hook: &mut dyn DebugHook| {
-        if opts.use_hsde {
-            return crate::hsde::solve_conic_hsde(p, cone, opts, mk, Some(hook));
-        }
-        match build_factorization(p, cone, opts, mk) {
-            Ok((kkt, mut fact)) => run_ipm(p, cone, opts, &kkt, &mut fact, None, Some(hook)),
-            Err(()) => failed_solution(
-                p,
-                vec![0.0; p.n],
-                vec![0.0; p.m_eq()],
-                vec![0.0; p.m_ineq()],
-                0,
-            ),
-        }
-    };
-    if !prob.has_bounds() {
-        let cone = CompositeCone::single_nonneg(prob.m_ineq());
-        return run(prob, &cone, &mut make_backend, hook);
-    }
-    let (expanded, bound_rows) = expand_bounds(prob);
-    let cone = CompositeCone::single_nonneg(expanded.m_ineq());
-    let sol = run(&expanded, &cone, &mut make_backend, hook);
-    split_bound_duals(prob, &bound_rows, sol)
 }
 
 /// Solve a convex QP starting from a warm point (typically a previous
@@ -1216,7 +1216,7 @@ where
             z: warm.z.clone(),
         };
         let cone = CompositeCone::single_nonneg(prob.m_ineq());
-        return solve_qp_core(prob, &cone, &direct, Some(&w), make_backend);
+        return solve_qp_core(prob, &cone, &direct, Some(&w), make_backend, None);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let w = WarmStart {
@@ -1225,7 +1225,7 @@ where
         z: merge_bound_duals(prob, &bound_rows, warm),
     };
     let cone = CompositeCone::single_nonneg(expanded.m_ineq());
-    let sol = solve_qp_core(&expanded, &cone, &direct, Some(&w), make_backend);
+    let sol = solve_qp_core(&expanded, &cone, &direct, Some(&w), make_backend, None);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -1245,18 +1245,36 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        if crate::deadline::expired() {
-            timed_out_solution(prob)
-        } else {
-            // One gate over every exit of the body below — see [`finite_or_failed`].
-            let sol = finite_or_failed(prob, solve_socp_ipm_inner(prob, cones, opts, make_backend));
-            if crate::deadline::expired() {
-                mark_timed_out(sol)
-            } else {
-                sol
-            }
-        }
+        solve_socp_ipm_scoped(prob, cones, opts, make_backend, None)
     })
+}
+
+/// The body of [`solve_socp_ipm`], with an optional [`DebugHook`] threaded to
+/// the primary solve. See [`solve_socp_ipm_debug`] for why the debugger enters
+/// here rather than through a path of its own (gh #892).
+fn solve_socp_ipm_scoped<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if crate::deadline::expired() {
+        return timed_out_solution(prob);
+    }
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    let sol = finite_or_failed(
+        prob,
+        solve_socp_ipm_inner(prob, cones, opts, make_backend, hook),
+    );
+    if crate::deadline::expired() {
+        mark_timed_out(sol)
+    } else {
+        sol
+    }
 }
 
 fn solve_socp_ipm_inner<F>(
@@ -1264,6 +1282,7 @@ fn solve_socp_ipm_inner<F>(
     cones: &[ConeSpec],
     opts: &QpOptions,
     make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -1310,7 +1329,7 @@ where
         );
     }
     if has_nonsym {
-        return solve_nonsym(prob, cones, opts, make_backend, None);
+        return solve_nonsym(prob, cones, opts, make_backend, hook);
     }
     // Sparsity: split any block-diagonal PSD cone into independent smaller
     // cones (one dense O(m²) KKT block → several small ones, exploited by the
@@ -1324,12 +1343,12 @@ where
         let mut make_backend = make_backend;
         let (prob1, cones1, row_map) = decompose_psd(prob, cones);
         let (prob2, cones2, recon) = chordal_decompose(&prob1, &cones1);
-        let run = |o: &QpOptions, mk: &mut F| {
-            let sol2 = solve_socp_symmetric(&prob2, &cones2, o, mk);
+        let run = |o: &QpOptions, mk: &mut F, hook: Option<&mut dyn DebugHook>| {
+            let sol2 = solve_socp_symmetric(&prob2, &cones2, o, mk, hook);
             let sol1 = chordal_reconstruct(sol2, &recon, &prob1);
             remap_decomposed_z(sol1, &row_map, prob.m_ineq())
         };
-        let sol = run(opts, &mut make_backend);
+        let sol = run(opts, &mut make_backend, hook);
         // gh #226: the direct symmetric driver is known-weak on PSD programs
         // whose optimum sits on the cone boundary (a rank-deficient slack,
         // where the NT scaling's condition number blows up) — a small
@@ -1352,7 +1371,7 @@ where
                 use_hsde: true,
                 ..*opts
             };
-            let retry = run(&hsde_opts, &mut make_backend);
+            let retry = run(&hsde_opts, &mut make_backend, None);
             if hsde_retry_is_upgrade(sol.status, retry.status) {
                 return retry;
             }
@@ -1360,7 +1379,7 @@ where
         return sol;
     }
     let mut make_backend = make_backend;
-    let sol = solve_socp_symmetric(prob, cones, opts, &mut make_backend);
+    let sol = solve_socp_symmetric(prob, cones, opts, &mut make_backend, hook);
     // gh #414: a cone program whose cones are *all* nonnegative is an LP/QP
     // wearing the conic entry point's clothes (`solver_selection=socp` on a
     // box-constrained QP lands here), and it inherits the same false `Optimal`
@@ -1375,11 +1394,30 @@ where
 }
 
 /// Debug-enabled [`solve_socp_ipm`]: fires the interactive [`DebugHook`] at
-/// each interior-point checkpoint. Exponential / power cones run on the
-/// non-symmetric HSDE driver; all other cones (orthant / SOC / PSD) run on
-/// the direct symmetric IPM. Under the debugger a PSD cone is solved
-/// *directly* (no chordal decomposition) so the debugged `x`/`s`/`y`/`z`
-/// blocks correspond to the user's problem; the solution is unchanged.
+/// each interior-point checkpoint.
+///
+/// **This is [`solve_socp_ipm`] with a hook, not a parallel implementation.**
+/// It enters the same body with `hook = Some(..)`, so cone routing, driver
+/// selection (`use_hsde`), the `σ` cost normalization, the PSD chordal
+/// decomposition and every verify-and-retry guard run exactly as they do
+/// without a debugger, and the returned solution is unchanged.
+///
+/// gh #892 is why that identity is spelled out. This entry point used to
+/// build its own factorization and call the core loop directly for symmetric
+/// cones, which never consulted `use_hsde` — so attaching the debugger
+/// silently substituted the *direct* IPM for the default HSDE embedding, and
+/// with it dropped the `σ` normalization and the equilibrate-and-verify
+/// guards. On a 5-variable convex QCQP that turned an `Optimal` agreeing with
+/// Clarabel to `1.3e-10` into `NumericalFailure`; the iteration count moved on
+/// every instance tried. A debugger that changes the trajectory is debugging a
+/// run the user never shipped.
+///
+/// The hook rides the *primary* solve; the recovery re-solves (the HSDE retry
+/// on a failed PSD solve, the `σ` re-solves, [`verify_or_repair_optimum`]) run
+/// unhooked. Which blocks the hook sees therefore follows from the driver that
+/// solve actually uses — the HSDE drivers expose the embedding, with
+/// `tau`/`kappa`; the direct driver (`qp_hsde=no`) exposes the user's
+/// variables — and a decomposed PSD cone is debugged in its clique blocks.
 pub fn solve_socp_ipm_debug<F>(
     prob: &QpProblem,
     cones: &[ConeSpec],
@@ -1391,73 +1429,8 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     crate::deadline::with_deadline(opts.time_limit, || {
-        solve_socp_ipm_debug_scoped(prob, cones, opts, hook, make_backend)
+        solve_socp_ipm_scoped(prob, cones, opts, make_backend, Some(hook))
     })
-}
-
-fn solve_socp_ipm_debug_scoped<F>(
-    prob: &QpProblem,
-    cones: &[ConeSpec],
-    opts: &QpOptions,
-    hook: &mut dyn DebugHook,
-    mut make_backend: F,
-) -> QpSolution
-where
-    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
-{
-    if crate::deadline::expired() {
-        return timed_out_solution(prob);
-    }
-    if !cone_dims_cover(cones, prob.m_ineq()) {
-        return failed_solution(
-            prob,
-            vec![0.0; prob.n],
-            vec![0.0; prob.m_eq()],
-            vec![0.0; prob.m_ineq()],
-            0,
-        );
-    }
-    let has_nonsym = cones
-        .iter()
-        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
-    let has_psd = cones.iter().any(|c| matches!(c, ConeSpec::Psd(_)));
-    if has_nonsym && has_psd {
-        return failed_solution(
-            prob,
-            vec![0.0; prob.n],
-            vec![0.0; prob.m_eq()],
-            vec![0.0; prob.m_ineq()],
-            0,
-        );
-    }
-    if has_nonsym {
-        return solve_nonsym(prob, cones, opts, make_backend, Some(hook));
-    }
-    // Symmetric cones: debug the direct IPM (build the factorization and run
-    // the core loop with the hook), bound-expanded as in
-    // `solve_socp_symmetric`. PSD is solved directly here (no decomposition).
-    let run = |p: &QpProblem, cone: &CompositeCone, mk: &mut F, hook: &mut dyn DebugHook| {
-        match build_factorization(p, cone, opts, mk) {
-            Ok((kkt, mut fact)) => run_ipm(p, cone, opts, &kkt, &mut fact, None, Some(hook)),
-            Err(()) => failed_solution(
-                p,
-                vec![0.0; p.n],
-                vec![0.0; p.m_eq()],
-                vec![0.0; p.m_ineq()],
-                0,
-            ),
-        }
-    };
-    if !prob.has_bounds() {
-        let cone = CompositeCone::from_specs(cones);
-        return run(prob, &cone, &mut make_backend, hook);
-    }
-    let (expanded, bound_rows) = expand_bounds(prob);
-    let mut specs = cones.to_vec();
-    specs.push(ConeSpec::Nonneg(bound_rows.len()));
-    let cone = CompositeCone::from_specs(&specs);
-    let sol = run(&expanded, &cone, &mut make_backend, hook);
-    split_bound_duals(prob, &bound_rows, sol)
 }
 
 /// The symmetric-cone solve (orthant / SOC / PSD): expand finite bounds into
@@ -1468,20 +1441,21 @@ fn solve_socp_symmetric<F>(
     cones: &[ConeSpec],
     opts: &QpOptions,
     make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     if !prob.has_bounds() {
         let cone = CompositeCone::from_specs(cones);
-        return solve_qp_core(prob, &cone, opts, None, make_backend);
+        return solve_qp_core(prob, &cone, opts, None, make_backend, hook);
     }
     // Bounds expand into a trailing nonnegative block after the user cones.
     let (expanded, bound_rows) = expand_bounds(prob);
     let mut specs = cones.to_vec();
     specs.push(ConeSpec::Nonneg(bound_rows.len()));
     let cone = CompositeCone::from_specs(&specs);
-    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
+    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend, hook);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -1956,7 +1930,14 @@ where
             y: warm.y.clone(),
             z: merge_bound_duals(prob, &bound_rows, warm),
         };
-        let sol = solve_qp_core(&expanded, &cone, &direct_opts, Some(&w), &mut make_backend);
+        let sol = solve_qp_core(
+            &expanded,
+            &cone,
+            &direct_opts,
+            Some(&w),
+            &mut make_backend,
+            None,
+        );
         split_bound_duals(prob, &bound_rows, sol)
     };
 
@@ -1967,7 +1948,7 @@ where
             use_hsde: true,
             ..*opts
         };
-        let retry = solve_socp_ipm_inner(prob, cones, &hsde_opts, &mut make_backend);
+        let retry = solve_socp_ipm_inner(prob, cones, &hsde_opts, &mut make_backend, None);
         if hsde_retry_is_upgrade(direct.status, retry.status) {
             return retry;
         }
@@ -2260,11 +2241,12 @@ fn cost_normalized_hsde_solve<F>(
     inner: &QpOptions,
     sigma: f64,
     make_backend: &mut F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let mut sol = crate::hsde::solve_conic_hsde(scaled, cone, inner, make_backend, None);
+    let mut sol = crate::hsde::solve_conic_hsde(scaled, cone, inner, make_backend, hook);
     for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
         *v *= sigma;
     }
@@ -3065,7 +3047,7 @@ fn direct_driver_fallback(
         use_hsde: false,
         ..*opts
     };
-    solve_qp_ipm_core(prob, &direct, make_backend)
+    solve_qp_ipm_core(prob, &direct, make_backend, None)
 }
 
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
@@ -3076,6 +3058,7 @@ fn solve_qp_core<F>(
     opts: &QpOptions,
     warm: Option<&WarmStart>,
     mut make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -3121,7 +3104,8 @@ where
                 obj_constant: opts.obj_constant / sigma,
                 ..*opts
             };
-            let sol = cost_normalized_hsde_solve(&scaled, cone, &inner, sigma, &mut make_backend);
+            let sol =
+                cost_normalized_hsde_solve(&scaled, cone, &inner, sigma, &mut make_backend, hook);
             // gh #324: the cost normalization divides the objective by σ (sized
             // to ‖P‖∞). When ‖c‖ ≪ σ — a huge Hessian coefficient paired with a
             // modest gradient, e.g. `P = diag(1e-10, 1e10)`, `c = [-1, -1]` — the
@@ -3257,7 +3241,7 @@ where
             );
             return candidates.swap_remove(pick);
         }
-        return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, None);
+        return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, hook);
     }
 
     // Build the fixed KKT pattern and an initial factorization, then run
@@ -3281,7 +3265,7 @@ where
     if crate::deadline::expired() {
         return timed_out_solution(prob);
     }
-    run_ipm(prob, cone, opts, &kkt, &mut fact, warm, None)
+    run_ipm(prob, cone, opts, &kkt, &mut fact, warm, hook)
 }
 
 /// Build the constant KKT pattern for `prob` and a `Factorization` over
@@ -5844,7 +5828,7 @@ mod false_optimum_metric_tests {
             obj_constant: opts.obj_constant / sigma,
             ..*opts
         };
-        let sol = cost_normalized_hsde_solve(&scaled, &cone, &inner, sigma, &mut backend);
+        let sol = cost_normalized_hsde_solve(&scaled, &cone, &inner, sigma, &mut backend, None);
         split_bound_duals(prob, &bound_rows, sol)
     }
 
@@ -5971,7 +5955,7 @@ mod false_optimum_metric_tests {
             ub: vec![5.0, 5.0],
         };
         let opts = QpOptions::default();
-        let sol = solve_qp_ipm_unscaled(&prob, &opts, backend);
+        let sol = solve_qp_ipm_unscaled(&prob, &opts, backend, None);
         assert_eq!(sol.status, QpStatus::Optimal);
         assert!(
             sol.kkt_residuals(&prob).kkt_error() <= opts.tol,
