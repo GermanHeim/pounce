@@ -161,7 +161,7 @@ pub enum AlphaForY {
     /// Use the primal step length (upstream default).
     Primal,
     /// Use the dual step length. Selected by the Mehrotra cascade
-    /// (`alpha_for_y=bound_mult`).
+    /// (`alpha_for_y=bound-mult`).
     BoundMult,
     /// Always take a full step on the equality multipliers.
     Full,
