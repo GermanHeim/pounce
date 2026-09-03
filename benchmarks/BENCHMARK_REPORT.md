@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-09-03 01:28:49
+Generated: 2026-09-03 14:37:55
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.11.0 (main @ 5492ab46-dirty) |
+| POUNCE | v0.11.0 (main @ 5e3dc2ff) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -31,7 +31,7 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 > Override — **mittelmann**: Ipopt reference at 1800s (regenerated 2026-08-07, threads pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)).
 > Reason given: the 300s max_cpu_time in the base stamp was reached at ~90s wall on unpinned multithreaded BLAS, leaving 6 instances truncated; see dev-notes/research/mittelmann-post-546-sweep.md
 > POUNCE ran this suite at 300s (recorded in `pounce.env.json`) against the reference's 1800s, so the two columns are **not** held to the same clock here.
-> Decided by that gap: **WM_CFy** — POUNCE cut off at 300s (106 iters), Ipopt Optimal at 1147s (556 iters), i.e. past POUNCE's cutoff. It is counted here as an Ipopt-only solve, on a limit POUNCE was never given. Measured out of band on 2026-08-11 at the reference's own 1800s limit (same host, threads pinned, binary from ce41b5bc): POUNCE returns `Optimal Solution Found` in 673s / 239 iterations, vs Ipopt's 1147s / 556. Objectives differ by 0.136% (two local optima; Ipopt's is the better point). Deliberately not merged into the results, which record the sweep as configured — see dev-notes/research/wm-cfy-timelimit.md.
+> Decided by that gap: **WM_CFy** — POUNCE cut off at 300s (103 iters), Ipopt Optimal at 1147s (556 iters), i.e. past POUNCE's cutoff. It is counted here as an Ipopt-only solve, on a limit POUNCE was never given. Measured out of band on 2026-08-11 at the reference's own 1800s limit (same host, threads pinned, binary from ce41b5bc): POUNCE returns `Optimal Solution Found` in 673s / 239 iterations, vs Ipopt's 1147s / 556. Objectives differ by 0.136% (two local optima; Ipopt's is the better point). Deliberately not merged into the results, which record the sweep as configured — see dev-notes/research/wm-cfy-timelimit.md.
 
 ## Executive Summary
 
@@ -136,16 +136,16 @@ On 679 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 34.7ms | 44.3ms |
-| Total time | 281.58s | 234.62s |
+| Median time | 33.6ms | 44.3ms |
+| Total time | 279.98s | 234.62s |
 | Mean iterations | 47.0 | 46.9 |
 | Median iterations | 15 | 16 |
 
 - **Geometric mean speedup**: 1.0x
 - **Median speedup**: 1.1x
-- POUNCE faster: 480/679 (71%)
+- POUNCE faster: 489/679 (72%)
 - POUNCE 10x+ faster: 1/679
-- Ipopt faster: 199/679
+- Ipopt faster: 190/679
 
 ## Electrolyte Suite — Performance
 
@@ -153,8 +153,8 @@ On 13 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 29.6ms | 37.6ms |
-| Total time | 390.9ms | 503.3ms |
+| Median time | 29.1ms | 37.6ms |
+| Total time | 384.1ms | 503.3ms |
 | Mean iterations | 12.3 | 12.2 |
 | Median iterations | 10 | 10 |
 
@@ -170,8 +170,8 @@ On 4 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 33.0ms | 41.9ms |
-| Total time | 132.4ms | 157.2ms |
+| Median time | 33.9ms | 41.9ms |
+| Total time | 132.1ms | 157.2ms |
 | Mean iterations | 15.5 | 15.5 |
 | Median iterations | 17 | 17 |
 
@@ -187,8 +187,8 @@ On 1 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 7.25s | 1.76s |
-| Total time | 7.25s | 1.76s |
+| Median time | 7.15s | 1.76s |
+| Total time | 7.15s | 1.76s |
 | Mean iterations | 20.0 | 33.0 |
 | Median iterations | 20 | 33 |
 
@@ -204,12 +204,12 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 98.5ms | 122.5ms |
-| Total time | 636.1ms | 696.0ms |
+| Median time | 101.5ms | 122.5ms |
+| Total time | 654.1ms | 696.0ms |
 | Mean iterations | 198.2 | 205.2 |
 | Median iterations | 183 | 209 |
 
-- **Geometric mean speedup**: 1.1x
+- **Geometric mean speedup**: 1.0x
 - **Median speedup**: 0.9x
 - POUNCE faster: 2/6 (33%)
 - POUNCE 10x+ faster: 0/6
@@ -221,12 +221,12 @@ On 3 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 88.8ms | 113.3ms |
-| Total time | 279.0ms | 374.0ms |
+| Median time | 102.5ms | 113.3ms |
+| Total time | 298.1ms | 374.0ms |
 | Mean iterations | 39.7 | 39.7 |
 | Median iterations | 20 | 20 |
 
-- **Geometric mean speedup**: 1.4x
+- **Geometric mean speedup**: 1.3x
 - **Median speedup**: 1.3x
 - POUNCE faster: 3/3 (100%)
 - POUNCE 10x+ faster: 0/3
@@ -238,8 +238,8 @@ On 5 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 2.52s | 573.2ms |
-| Total time | 11.10s | 9.43s |
+| Median time | 2.54s | 573.2ms |
+| Total time | 11.38s | 9.43s |
 | Mean iterations | 309.6 | 305.6 |
 | Median iterations | 5 | 2 |
 
@@ -255,12 +255,12 @@ On 40 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 5.74s | 6.88s |
-| Total time | 850.98s | 1488.30s |
+| Median time | 6.26s | 6.88s |
+| Total time | 848.13s | 1488.30s |
 | Mean iterations | 153.6 | 110.7 |
 | Median iterations | 55 | 55 |
 
-- **Geometric mean speedup**: 0.9x
+- **Geometric mean speedup**: 1.0x
 - **Median speedup**: 0.7x
 - POUNCE faster: 14/40 (35%)
 - POUNCE 10x+ faster: 4/40
@@ -272,16 +272,16 @@ On 133 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 82.7ms | 92.9ms |
-| Total time | 85.57s | 172.97s |
+| Median time | 84.3ms | 92.9ms |
+| Total time | 85.71s | 172.97s |
 | Mean iterations | 18.6 | 75.6 |
 | Median iterations | 18 | 24 |
 
 - **Geometric mean speedup**: 1.2x
-- **Median speedup**: 1.2x
-- POUNCE faster: 84/133 (63%)
+- **Median speedup**: 1.1x
+- POUNCE faster: 83/133 (62%)
 - POUNCE 10x+ faster: 3/133
-- Ipopt faster: 49/133
+- Ipopt faster: 50/133
 
 ## LP Suite — Performance
 
@@ -289,16 +289,16 @@ On 352 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 149.4ms | 157.8ms |
-| Total time | 157.57s | 422.20s |
+| Median time | 150.0ms | 157.8ms |
+| Total time | 157.66s | 422.20s |
 | Mean iterations | 25.2 | 107.3 |
 | Median iterations | 23 | 56 |
 
 - **Geometric mean speedup**: 1.1x
 - **Median speedup**: 1.0x
-- POUNCE faster: 177/352 (50%)
+- POUNCE faster: 179/352 (51%)
 - POUNCE 10x+ faster: 10/352
-- Ipopt faster: 175/352
+- Ipopt faster: 173/352
 
 ## Failure Analysis
 
@@ -445,12 +445,12 @@ These suites currently run POUNCE only — no Ipopt-side comparison is captured 
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.09s |
-| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 724 | 300.07s |
-| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 37.84s |
-| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 122.80s |
+| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.10s |
+| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 725 | 300.07s |
+| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 38.01s |
+| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 122.99s |
 
-POUNCE: **2/4 Optimal** in 760.80s total
+POUNCE: **2/4 Optimal** in 761.17s total
 
 ## Dedicated Convex Solver vs. General NLP (head-to-head)
 
@@ -485,16 +485,16 @@ On 362 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 148.3ms | 209.5ms |
-| Total time | 161.69s | 694.23s |
+| Median time | 148.9ms | 201.7ms |
+| Total time | 161.68s | 683.82s |
 | Mean iterations | 25.2 | 117.4 |
 | Median iterations | 23 | 57 |
 
-- **Geometric-mean speedup (convex over nlp)**: 1.5x
+- **Geometric-mean speedup (convex over nlp)**: 1.4x
 - **Median speedup**: 1.2x
-- pounce-convex faster: 278/362 (77%)
-- pounce-convex 10x+ faster: 16/362
-- pounce-nlp faster: 84/362
+- pounce-convex faster: 256/362 (71%)
+- pounce-convex 10x+ faster: 12/362
+- pounce-nlp faster: 106/362
 
 ### QP — convex vs NLP
 
@@ -509,16 +509,16 @@ On 136 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 84.5ms | 90.9ms |
-| Total time | 163.51s | 1258.60s |
+| Median time | 79.0ms | 95.9ms |
+| Total time | 163.10s | 210.32s |
 | Mean iterations | 18.9 | 75.9 |
 | Median iterations | 18 | 25 |
 
-- **Geometric-mean speedup (convex over nlp)**: 1.0x
-- **Median speedup**: 0.9x
-- pounce-convex faster: 54/136 (40%)
-- pounce-convex 10x+ faster: 5/136
-- pounce-nlp faster: 82/136
+- **Geometric-mean speedup (convex over nlp)**: 1.1x
+- **Median speedup**: 1.0x
+- pounce-convex faster: 74/136 (54%)
+- pounce-convex 10x+ faster: 4/136
+- pounce-nlp faster: 62/136
 
 ### Mittelmann — exact vs L-BFGS
 
@@ -533,16 +533,16 @@ On 32 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 7.62s | 9.79s |
-| Total time | 856.99s | 989.49s |
+| Median time | 7.97s | 9.71s |
+| Total time | 866.06s | 988.12s |
 | Mean iterations | 76.5 | 229.7 |
 | Median iterations | 48 | 70 |
 
 - **Geometric-mean speedup (convex over nlp)**: 1.5x
-- **Median speedup**: 1.9x
-- pounce-convex faster: 24/32 (75%)
+- **Median speedup**: 1.8x
+- pounce-convex faster: 22/32 (69%)
 - pounce-convex 10x+ faster: 0/32
-- pounce-nlp faster: 8/32
+- pounce-nlp faster: 10/32
 
 ---
 *Generated by benchmark_report.py*
