@@ -1412,6 +1412,11 @@ pub(crate) fn build_info_dict<'py>(
         "final_declared_constr_viol",
         stats.final_declared_constr_viol,
     )?;
+    // Its variable-box half on its own — Ipopt's `Variable bound violation`.
+    // Reported separately because the two are indistinguishable once maxed
+    // together, and a box violation is the one a bound-pinned solution on a
+    // large-multiplier model actually incurs.
+    info.set_item("final_declared_box_viol", stats.final_declared_box_viol)?;
     info.set_item("final_compl", stats.final_compl)?;
     // Unscaled (user-original-space) counterparts of the four residuals
     // above — the nlp_scaling divided back out so a consumer can verify a

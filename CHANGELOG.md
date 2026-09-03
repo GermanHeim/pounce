@@ -11,6 +11,42 @@ changes.
 
 ### Fixed
 
+- **The `Variable bound violation` row of the end-of-run summary was a
+  hardcoded `0.0`** (gh#900), on both the NLP and the convex printer, so it
+  read `0.00e+00` on every solve — including the ones where the returned point
+  genuinely sits outside the box the caller wrote. It is the row a reader is
+  told to check, and it is the only trace in an Ipopt-style log of an answer
+  bought by the `bound_relax_factor` widening.
+
+  On `min 1e8·x + ½x² s.t. x ≥ 0` — strictly convex, so `x* = 0` and `f* = 0`
+  uniquely, and `f'(x) > 0` everywhere feasible — the NLP arm widens by default
+  and returns `f = -0.99999090909`, a value for a quantity that cannot go below
+  zero, under `EXIT: Optimal Solution Found`. It now prints
+  `Variable bound violation: 9.9999090909090909e-09` on that row, which is what
+  Ipopt 3.14.20/MA57 prints on the same model, rather than a zero. The shift is
+  `δ · λ` with `λ = 1e8`; the same mechanism accounts for the LISWET/YAO family
+  in `benchmarks/BENCHMARK_REPORT.md`, where it moves LISWET1 from the published
+  `36.12240` to `27.12208`.
+
+  The number was uncomputed rather than mis-printed — recorded as a limitation
+  in `dev-notes/code-review-progress.md` L26(b) — and the metric that closes it
+  (`Nlp::declared_box_violation`) arrived later, for `honor_original_bounds` and
+  gh#744/#745. It is now surfaced as `SolveStatistics::final_declared_box_viol`,
+  as `final_declared_box_viol` in `pounce.solve-report/v1` (additive) and in the
+  Python `info` dict, and as `QpResiduals::bound_violation` on the convex arm.
+  `0.0` on an unwidened solve is now a measurement rather than a placeholder.
+
+  Alongside it, the POUNCE-only `Violation of the model as declared (before the
+  bound_relax_factor widening)` line — which is strictly better than upstream's
+  row, covering the declared *rows* as well as the box — **is now bold red**. It
+  is the one line in the block that reports a defect in the *answer* rather
+  than a residual of the solve, and it was plain text in a wall of
+  sixteen-digit residuals. Emitted through
+  `anstream`, so it is stripped for a non-TTY stdout and under `NO_COLOR`:
+  redirected logs, the benchmark harness's stdout scrapes and Ipopt-diffing
+  consumers are byte-for-byte unaffected. The upstream-compatible residual
+  table above it is deliberately left unstyled.
+
 - **The gh#884 dual-divergence retry could return an answer *below the known
   optimum* and label it `Optimal Solution Found`.** The promotion gate ranked
   the base attempt and the retry on unscaled KKT error alone — a statement

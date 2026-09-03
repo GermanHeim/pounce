@@ -4680,6 +4680,13 @@ impl IpoptApplication {
                 } else {
                     Number::NAN
                 };
+                // The box half of the same measurement, unconditionally: this
+                // one is a *summary line* (Ipopt's `Variable bound
+                // violation`), not an extra warning, so it has to carry a real
+                // number on every solve rather than only on a widened one. At
+                // `bound_relax_factor = 0` the honest number is `0` and the
+                // accessor returns it by measurement, not by assumption.
+                stats.final_declared_box_viol = cq.curr_declared_box_violation_max();
                 // Infinity-norm complementarity, max over all four bound
                 // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
                 // empty-bound blocks return `0` from amax(), so the max is

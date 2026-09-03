@@ -250,6 +250,7 @@ fn build_result<'py>(
         "final_declared_constr_viol",
         r.stats.final_declared_constr_viol,
     )?;
+    info.set_item("final_declared_box_viol", r.stats.final_declared_box_viol)?;
     info.set_item("final_compl", r.stats.final_compl)?;
     // Unscaled (user-space) residuals — see `build_info_dict` in
     // problem.rs (pounce#173). Mirrored here so the batch path's `info`
