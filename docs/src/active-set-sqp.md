@@ -145,6 +145,80 @@ mirror `SqpOptions::default()`.
 | `sqp_print_level`       | `0`         | 0=silent, 1=per-iter summary, 2+=trace             |
 | `sqp_lbfgs_max_history` | `6`         | L-BFGS history size                                |
 
+#### The inner QP subproblem (`sqp_qp_*`)
+
+Each outer SQP iteration solves a QP subproblem with the `pounce-qp`
+active-set engine. These knobs control that inner solve, and are read
+only on the SQP path.
+
+| Option                                      | Default  | Meaning                                                     |
+| ------------------------------------------- | -------- | ----------------------------------------------------------- |
+| `sqp_qp_feas_tol`                           | `1e-9`   | QP constraint-feasibility tolerance                          |
+| `sqp_qp_opt_tol`                            | `1e-9`   | QP optimality (KKT) tolerance                                |
+| `sqp_qp_max_iter`                           | `200`    | active-set pivots per QP solve                               |
+| `sqp_qp_elastic_gamma`                      | `1e6`    | penalty on the elastic (phase-1) slacks                      |
+| `sqp_qp_anti_cycling`                       | `expand` | `expand` (Harris two-pass), `bland`, or `none`               |
+| `sqp_qp_certify_second_order`               | `no`     | check second-order optimality before certifying the QP       |
+| `sqp_qp_use_homotopy`                       | `no`     | trace the parametric homotopy on a cold QP solve             |
+| `sqp_qp_use_schur_updates`                  | `no`     | absorb working-set changes as rank-2 Schur updates           |
+| `sqp_qp_max_schur_updates_before_refactor`  | `50`     | updates to absorb before refactoring (Schur path only)       |
+
+Three of these are worth more than a table row.
+
+**`sqp_qp_certify_second_order`** is the one that changes answers rather
+than speed. Every `Optimal` the active-set engine returns is a
+*first-order* verdict — vanishing projected gradient, sign-admissible
+working-set multipliers — and a saddle point of an indefinite Hessian
+satisfies that exactly. Set it to `yes` and the engine must also fail to
+find a direction `d` with `A_W d = 0` and `dᵀHd < 0` before certifying;
+where it finds one it follows it to the next blocking row (gh #848).
+This fixes real wrong answers on this path — a constrained *maximum*
+reported as `Solve_Succeeded`.
+
+It is `no` by default anyway, because here the QP is a **local model**
+and its second-order verdict is not the NLP's: at iteration 0 the
+multipliers are still zero, so HS071 started at its own solution reports
+negative curvature and takes five iterations instead of one. Making it
+the default needs Hessian modification first (gh #856). The check is
+skipped outright when the Hessian is known positive semidefinite, so
+quasi-Newton runs (`sqp_hessian=damped-bfgs` or `lbfgs`) pay nothing
+either way.
+
+Note the asymmetry with **standalone** QP solves
+(`solver_selection=qp-active-set`, `pounce.qp.solve_qp`): there the QP
+*is* the question, so certification is on by default. Setting this option
+explicitly reaches those solves too, and setting it to `no` there is a
+way to get a saddle certified as `Optimal` (gh #872).
+
+**`sqp_qp_use_schur_updates`** keeps a cached factor of the
+fixed-dimension `K_max` matrix and absorbs each working-set change as a
+Sherman-Morrison-Woodbury rank-2 update, refactoring every
+`sqp_qp_max_schur_updates_before_refactor` updates (Kirches 2011;
+qpOASES-extended). With it off, each iteration assembles a fresh
+active-set KKT and factors it from scratch — algorithmically identical,
+but every working-set change repeats the full symbolic analysis, which
+measured 32% of runtime on Q25FV47.
+
+Its default of `no` is a measured choice, not an oversight. On
+Maros-Meszaros the update path is 28–88× faster where it works
+(Q25FV47: 19.7 s → 0.5 s), but it is less robust: of the 46 instances
+the default path solves correctly, enabling updates breaks 9
+(`InternalError`, `TimeOut`, or a wrong objective), and total wall over
+that set rises 107 s → 251 s on the new timeouts. Treat it as opt-in for
+warm-started workloads where the speedup dominates, not as a general
+accelerator.
+
+**`sqp_qp_use_homotopy`** changes the cold-start path: the solve starts
+from the box-only relaxation (all general rows dropped, which the box
+fast path solves directly) and tightens the row bounds toward their
+targets along `t ∈ [0, 1]`, jumping the working set wherever a row
+becomes binding or an active multiplier reaches zero. The iterate stays
+feasible for the `t`-problem throughout, so there is no phase-1 to stall
+in — the failure mode the conventional path hits on degenerate
+netlib-derived QPs. Default `no` while it is evaluated against the
+conventional path; see
+[the warm-start benchmark](warm-start-benchmark.md) for measurements.
+
 ### Algorithm-path isolation guarantees
 
 The two solver paths share the TNLP layer, the `OrigIpoptNlp`

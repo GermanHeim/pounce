@@ -4907,7 +4907,7 @@ impl IpoptApplication {
                 builder.init.slack_bound_frac = 0.2;
                 builder.init.bound_mult_init_val = 10.0;
                 builder.init.constr_mult_init_max = 0.0;
-                // `alpha_for_y=bound_mult` — Mehrotra wants the
+                // `alpha_for_y=bound-mult` — Mehrotra wants the
                 // equality multipliers to advance with the dual
                 // alpha so they stay in step with z/v. Mirrors
                 // upstream `IpIpoptAlg.cpp:InitializeImpl`.

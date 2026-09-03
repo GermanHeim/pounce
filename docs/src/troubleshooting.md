@@ -27,8 +27,8 @@ walks through adding it.
 |---|---|
 | Exit "Solved To Acceptable Level" but you need strict optimality | [Ruiz linear-system scaling](#ruiz-scaling-on-the-augmented-kkt-system) |
 | Hundreds of small steps, slow convergence on a problem with loose bounds | [FBBT on nonlinear constraints](#fbbt-feasibility-based-bound-tightening) |
-| `Search Direction is becoming Too Small` early in the iter table | [Ruiz linear-system scaling](#ruiz-scaling-on-the-augmented-kkt-system), then [μ-strategy switch](#mu-strategy-monotone-vs-adaptive) |
-| Restoration phase fires repeatedly | [ℓ₁ exact-penalty wrapper](#l1-exact-penalty-barrier-wrapper) |
+| `Search Direction is becoming Too Small` early in the iter table | [Ruiz linear-system scaling](#ruiz-scaling-on-the-augmented-kkt-system), then [μ-strategy switch](#monotone-vs-adaptive) |
+| Restoration phase fires repeatedly | [ℓ₁ exact-penalty wrapper](#restoration--ℓ₁-exact-penalty-wrapper) |
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
@@ -228,7 +228,7 @@ pounce problem.nl mehrotra_algorithm=yes
 ```
 
 This sets a Mehrotra-canonical configuration (`adaptive_mu_globalization=never-monotone-mode`,
-`accept_every_trial_step=yes`, `alpha_for_y=bound_mult`, larger
+`accept_every_trial_step=yes`, `alpha_for_y=bound-mult`, larger
 `bound_push` and `bound_mult_init_val`). On well-conditioned LP-like
 problems it routinely cuts iteration counts in half. On nonconvex
 NLPs it can destabilize — see

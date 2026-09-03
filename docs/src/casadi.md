@@ -361,7 +361,8 @@ warm = ca.nlpsol("warm", "pounce", nlp, {"pounce": {
     "warm_start_init_point": "yes",
     "mu_init": 1e-6,
 }})
-sol2 = warm(x0=sol["x"], lam_g0=sol["lam_g"], lam_x0=sol["lam_x"], p=p_next, ...)
+sol2 = warm(x0=sol["x"], lam_g0=sol["lam_g"], lam_x0=sol["lam_x"],
+            p=p_next)   # ...plus whatever else your call already passes
 ```
 
 On the 20-step MPC in
@@ -582,8 +583,10 @@ and that is where a `σ` disagreement first shows.
 the blunt instrument if you suspect it but cannot change the formula:
 
 ```python
-"pounce": {"hessian_approximation": "limited-memory",
-           "limited_memory_init_val_max": 10.0}   # default 1e8
+solver = ca.nlpsol("solver", "pounce", nlp, {
+    "pounce": {"hessian_approximation": "limited-memory",
+               "limited_memory_init_val_max": 10.0},   # default 1e8
+})
 ```
 
 > **Changed in #677.** Every release before this used `scalar2` and
@@ -625,9 +628,11 @@ constraint violation is under `recalc_y_feas_tol`, side-stepping the
 Hessian approximation:
 
 ```python
-"pounce": {"hessian_approximation": "limited-memory",
-           "recalc_y": "yes",
-           "recalc_y_feas_tol": 1e-6}   # the default gate
+solver = ca.nlpsol("solver", "pounce", nlp, {
+    "pounce": {"hessian_approximation": "limited-memory",
+               "recalc_y": "yes",
+               "recalc_y_feas_tol": 1e-6},   # the default gate
+})
 ```
 
 Each firing costs an extra augmented-system solve.
