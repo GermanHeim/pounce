@@ -61,7 +61,8 @@ export IPOPT_LINEAR_SOLVER
 	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
 	warmstart-ipopt warmstart-transfer warmstart-composite warmstart-all \
 	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
-	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report
+	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
+	pounce-bin
 
 # Show available targets
 help:
@@ -150,7 +151,10 @@ QP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/qp_convex
 LBFGS_DIR       := $(REPO_ROOT)/benchmarks/lbfgs
 
 # Ensure POUNCE_BIN exists; helps when a target is run before any cargo
-# build. Cheap when already built.
+# build. Cheap when already built. Existence-only on purpose, so a
+# single-suite target run against a hand-built binary still works -- a full
+# sweep gets the `pounce-bin` step below instead, which is the one that
+# guarantees the binary matches the tree.
 $(POUNCE_BIN):
 	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) --bin pounce
 
@@ -581,7 +585,25 @@ gams-rerun: gams-bench
 # to force a full rebuild. Each sub-target runs via `-$(MAKE)` so a
 # single failure (missing toolchain, broken instance) doesn't abort the
 # rest — the report at the end always lands.
-benchmark:
+# Rebuild the sweep binary, letting cargo decide whether anything moved.
+#
+# The `$(POUNCE_BIN)` rule above has no prerequisites, so before gh#840 a
+# sweep reused whatever target/release/pounce happened to be lying around:
+# 0.11.0's first release run put all 14 suites through a binary stamped
+# `main @ 5492ab46-dirty` -- 27 commits behind the tag, built from an unclean
+# tree -- and recorded that in exactly one line of the report's provenance
+# table. Three and a half hours of measurement described a binary nobody
+# could rebuild.
+#
+# Phony, so cargo is always consulted. cargo leaves the binary's mtime alone
+# when it has nothing to do, so the suite file-targets that depend on
+# $(POUNCE_BIN) stay incremental: only a genuinely rebuilt binary invalidates
+# them. A prerequisite rather than a `-$(MAKE)` line in the recipe, so a
+# broken build stops the sweep instead of silently measuring the old binary.
+pounce-bin:
+	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) --bin pounce
+
+benchmark: pounce-bin
 	-$(MAKE) vanderbei-run
 	-$(MAKE) electrolyte-run
 	-$(MAKE) grid-run
