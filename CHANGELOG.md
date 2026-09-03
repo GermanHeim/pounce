@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.11.0] - 2026-09-03
+
 ### Added
 
 - **An apex-pinned cone block that cannot absorb the perturbation is refused
@@ -2002,8 +2005,8 @@ changes.
   With the restore narrowed that way the 81-fixture, two-leg sweep is
   **completely unmoved**.
 
+### Earlier in 0.11.0
 
-## [0.11.0] - 2026-08-31
 - **The negative-curvature escape now finds the witness it is asked for, on
   saddles whose curvature lies along a coordinate axis (gh #797 follow-up).**
   gh #797 added the second-order question and `neg_curv_escapes` to answer it;
