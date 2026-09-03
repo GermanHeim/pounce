@@ -1203,12 +1203,40 @@ impl IpoptCalculatedQuantities {
     /// HiGHS reports.
     pub fn curr_declared_primal_violation_max(&self) -> Number {
         let rows = self.curr_unscaled_nlp_constraint_violation_max();
+        rows.max(self.curr_declared_box_violation_max())
+    }
+
+    /// How far the current iterate sits outside the **declared** variable box
+    /// — the box the user wrote, before the `bound_relax_factor` widening.
+    ///
+    /// The box half of [`Self::curr_declared_primal_violation_max`] on its
+    /// own, because that is the quantity Ipopt's summary block reports as
+    /// `Variable bound violation` and the aggregate cannot answer it: maxed
+    /// together with the row term, a box violation and a row violation are
+    /// indistinguishable. POUNCE printed a hardcoded `0.0` on that line until
+    /// this existed, which is the correct value on an unwidened solve and a
+    /// false reassurance on exactly the class where the line earns its keep —
+    /// the toy `min 1e8·x + x²/2 s.t. x ≥ 0` returns `x = −1e-8` at
+    /// `bound_relax_factor = 1e-8`, an objective of `−1` for a quantity that
+    /// cannot go below `0`, under `Optimal Solution Found`.
+    ///
+    /// `0.0` when the NLP does not track a declared box
+    /// (`Nlp::declared_box_violation` returns `None`). That is not a fallback
+    /// stand-in: `relax_bounds` snapshots the box on every solve of this arm
+    /// *whether or not* it then widens it, so an untracked box means no
+    /// widening pass ran at all, the declared box and the live one are the
+    /// same object, and a feasible-iterate log-barrier keeps `x` strictly
+    /// inside the live one by construction.
+    ///
+    /// Measured on the iterate, not on the finalized `x`: with
+    /// `honor_original_bounds` the reported point is projected back into the
+    /// declared box, so reading it there would report `0` for every solve and
+    /// say nothing about the point the objective above it was evaluated at.
+    /// Upstream reports the same pre-projection quantity.
+    pub fn curr_declared_box_violation_max(&self) -> Number {
         let iv = self.curr_iv();
         let nlp = self.nlp.borrow();
-        match nlp.declared_box_violation(&*iv.x) {
-            Some(box_viol) => rows.max(box_viol),
-            None => rows,
-        }
+        nlp.declared_box_violation(&*iv.x).unwrap_or(0.0)
     }
 
     /// Largest primal infeasibility of a constraint row **relative to that

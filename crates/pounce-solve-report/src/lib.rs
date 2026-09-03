@@ -465,6 +465,18 @@ pub struct StatisticsInfo {
     /// it are unaffected.
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_declared_constr_viol: Number,
+    /// How far the returned point sits outside the **declared** variable box —
+    /// the box the caller wrote, before the `bound_relax_factor` widening.
+    /// Ipopt's `Variable bound violation`, and the box half of
+    /// `final_declared_constr_viol` reported on its own: maxed together, a box
+    /// violation and a row violation cannot be told apart.
+    ///
+    /// Variable bounds carry no scaling, so there is one number rather than a
+    /// scaled/unscaled pair. `NaN` on a path that does not compute it.
+    /// Additive to `pounce.solve-report/v1`: readers predating it are
+    /// unaffected.
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
+    pub final_declared_box_viol: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_compl: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
@@ -590,6 +602,7 @@ impl ReportBuilder {
             final_dual_inf: src.final_dual_inf,
             final_constr_viol: src.final_constr_viol,
             final_declared_constr_viol: src.final_declared_constr_viol,
+            final_declared_box_viol: src.final_declared_box_viol,
             final_compl: src.final_compl,
             final_kkt_error: src.final_kkt_error,
             final_kkt_error_above_noise: src.final_kkt_error_above_noise,
@@ -681,6 +694,7 @@ fn empty_stats() -> StatisticsInfo {
         // not "uncomputed": this is the pre-solve placeholder, and 0.0 is
         // what every residual beside it carries here.
         final_declared_constr_viol: 0.0,
+        final_declared_box_viol: 0.0,
         final_compl: 0.0,
         final_kkt_error: 0.0,
         final_kkt_error_above_noise: 0.0,

@@ -89,6 +89,19 @@ pub struct SolveStatistics {
     /// applied no widening (the two coincide) or on paths that do not
     /// compute it.
     pub final_declared_constr_viol: Number,
+    /// How far the returned point sits outside the **declared** variable box
+    /// — the box the caller wrote, before the `bound_relax_factor` widening.
+    /// This is Ipopt's `Variable bound violation`, and it is the box half of
+    /// [`Self::final_declared_constr_viol`] reported on its own, because once
+    /// the two are maxed together a box violation cannot be told from a row
+    /// violation.
+    ///
+    /// Variable bounds carry no scaling — POUNCE scales the objective and the
+    /// constraint rows only — so there is no scaled/unscaled pair here; the
+    /// one number is right in both columns.
+    ///
+    /// `NaN` on a path that does not compute it.
+    pub final_declared_box_viol: Number,
     pub final_unscaled_dual_inf: Number,
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
@@ -308,6 +321,7 @@ impl Default for SolveStatistics {
             final_kkt_error: Number::NAN,
             final_unscaled_dual_inf: Number::NAN,
             final_declared_constr_viol: Number::NAN,
+            final_declared_box_viol: Number::NAN,
             final_unscaled_constr_viol: Number::NAN,
             final_unscaled_compl: Number::NAN,
             final_unscaled_kkt_error: Number::NAN,

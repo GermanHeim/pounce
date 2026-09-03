@@ -512,6 +512,20 @@ fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
 pub struct QpResiduals {
     /// Primal infeasibility: `max(|Ax − b|, max(0, Gx − h), bound violations)`.
     pub primal_infeasibility: f64,
+    /// The variable-box half of [`Self::primal_infeasibility`] on its own:
+    /// `max_i max(lb_i − x_i, x_i − ub_i, 0)`, how far the returned `x` sits
+    /// outside the box of the problem it is measured against.
+    ///
+    /// Separated because the console summary reports it as its own line —
+    /// Ipopt's `Variable bound violation` — and the aggregate above cannot
+    /// answer that question: a row violation and a box violation are
+    /// indistinguishable once maxed together, and on this arm they have
+    /// different causes. Measured against `prob`, so pairing it with a
+    /// re-extraction at `BoundRelax::NONE`
+    /// (`pounce_cli::qp_extract::declared_residuals_qp`) is what makes it the
+    /// violation of the box the *caller* declared rather than the widened one
+    /// the solver was handed.
+    pub bound_violation: f64,
     /// Dual infeasibility (stationarity):
     /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞`.
     pub dual_infeasibility: f64,
@@ -678,10 +692,16 @@ impl QpSolution {
             primal_infeasibility = primal_infeasibility.max((-s[i]).max(0.0));
             complementarity = complementarity.max((self.z[i] * s[i]).abs());
         }
+        // Accumulated separately as well as folded in: the summary block
+        // reports the box term on its own line (Ipopt's `Variable bound
+        // violation`), and once maxed into the aggregate above it can no
+        // longer be told apart from a row violation.
+        let mut bound_violation = 0.0_f64;
         for i in 0..n {
-            primal_infeasibility = primal_infeasibility.max((prob.lb_of(i) - self.x[i]).max(0.0));
-            primal_infeasibility = primal_infeasibility.max((self.x[i] - prob.ub_of(i)).max(0.0));
+            bound_violation = bound_violation.max((prob.lb_of(i) - self.x[i]).max(0.0));
+            bound_violation = bound_violation.max((self.x[i] - prob.ub_of(i)).max(0.0));
         }
+        primal_infeasibility = primal_infeasibility.max(bound_violation);
 
         for i in 0..n {
             let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
@@ -695,6 +715,7 @@ impl QpSolution {
 
         QpResiduals {
             primal_infeasibility,
+            bound_violation,
             dual_infeasibility,
             complementarity,
         }

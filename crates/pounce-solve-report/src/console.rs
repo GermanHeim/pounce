@@ -455,6 +455,39 @@ pub struct EvalCounts {
     pub n_h: u64,
 }
 
+/// Emit the "the point is outside the model you wrote" warning, in bold red.
+///
+/// This is the one line in the summary block that reports a *defect in the
+/// answer* rather than a residual of the solve, and it is easy to read past in
+/// a wall of sixteen-digit residuals — which is the whole failure mode it
+/// exists to catch: on the LISWET/YAO family a `1e-8` widening moves the
+/// optimum by 25% under `EXIT: Optimal Solution Found`, and the only trace in
+/// the log is a number nobody looks at.
+///
+/// Written through `anstream::stdout()`, which strips the ANSI when stdout is
+/// not a TTY or `NO_COLOR` is set — so redirected logs, the benchmark
+/// harness's scrapes and every `assert!(stdout.contains(...))` in the test
+/// suite see the plain text, byte-for-byte as before. It is deliberately kept
+/// *out* of the upstream-compatible residual table above: that block is
+/// diffed against `ipopt`'s own output, and this line has no counterpart
+/// there to diff against.
+fn print_declared_violation(value: Number) {
+    use std::io::Write as _;
+    let style = anstyle::Style::new()
+        .bold()
+        .fg_color(Some(anstyle::AnsiColor::Red.into()));
+    let mut out = anstream::stdout();
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{}Violation of the model as declared (before the \
+         bound_relax_factor widening): {}{}",
+        style.render(),
+        fmt_ipopt(value),
+        style.render_reset()
+    );
+}
+
 pub fn print_summary(
     status: ApplicationReturnStatus,
     stats: &SolveStatistics,
@@ -496,7 +529,18 @@ pub fn print_summary(
         stats.final_constr_viol,
         stats.final_unscaled_constr_viol,
     );
-    row("Variable bound violation", 0.0, 0.0);
+    // Was a hardcoded `0.0` until gh#900: the row asserted a measurement the
+    // solver never took, and it read `0.00e+00` on exactly the solves where it
+    // matters — a `bound_relax_factor`-widened run whose point sits outside
+    // the box the caller wrote. Variable bounds carry no scaling (POUNCE
+    // scales the objective and the constraint rows only), so the one number is
+    // correct in both columns rather than being duplicated for want of a
+    // second.
+    row(
+        "Variable bound violation",
+        stats.final_declared_box_viol,
+        stats.final_declared_box_viol,
+    );
     row(
         "Complementarity.........",
         stats.final_compl,
@@ -539,12 +583,7 @@ pub fn print_summary(
         && stats.final_declared_constr_viol > stats.final_constr_viol * 10.0
         && stats.final_declared_constr_viol > 0.0
     {
-        println!();
-        println!(
-            "Violation of the model as declared (before the \
-             bound_relax_factor widening): {}",
-            fmt_ipopt(stats.final_declared_constr_viol)
-        );
+        print_declared_violation(stats.final_declared_constr_viol);
     }
     println!();
     println!();
@@ -672,6 +711,13 @@ pub fn print_convex_summary(
     dual_inf: f64,
     complementarity: f64,
     kkt_error: f64,
+    // How far the returned `x` sits outside the **declared** variable box —
+    // `QpResiduals::bound_violation` measured against a re-extraction at
+    // `BoundRelax::NONE`, falling back to the solved model's own box when no
+    // widening was applied (the two coincide there). Ipopt's `Variable bound
+    // violation` line, which this arm printed as a hardcoded `0.0` until
+    // gh#900.
+    bound_violation: f64,
     // How far outside the model AS DECLARED the point sits, when the solve
     // applied the `bound_relax_factor` widening and the two differ. The
     // residuals above measure the widened model the solver was handed — the
@@ -692,7 +738,7 @@ pub fn print_convex_summary(
     row("Objective...............", objective);
     row("Dual infeasibility......", dual_inf);
     row("Constraint violation....", primal_inf);
-    row("Variable bound violation", 0.0);
+    row("Variable bound violation", bound_violation);
     row("Complementarity.........", complementarity);
     row("Overall NLP error.......", kkt_error);
     // Only when the widening actually moved the number: on the vast majority
@@ -700,12 +746,7 @@ pub fn print_convex_summary(
     // an extra line would be noise.
     if let Some(d) = declared_primal_inf {
         if d > primal_inf * 10.0 && d > 0.0 {
-            println!();
-            println!(
-                "Violation of the model as declared (before the \
-                 bound_relax_factor widening): {}",
-                fmt_ipopt(d)
-            );
+            print_declared_violation(d);
         }
     }
     println!();

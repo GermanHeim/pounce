@@ -3169,6 +3169,16 @@ fn run_convex_qp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        // Ipopt's `Variable bound violation`, measured against the box the
+        // caller declared when a widening was applied and against the solved
+        // box otherwise — where the two are the same object, so it is one
+        // measurement either way and never a stand-in for one. This arm
+        // printed a hardcoded `0.0` here until gh#900, which is the right
+        // number on an unwidened solve and a false reassurance on the class
+        // the line exists for.
+        reported_res
+            .map(|d| d.bound_violation)
+            .unwrap_or(res.bound_violation),
         reported_res.map(|d| d.primal_infeasibility),
     );
 
@@ -3287,6 +3297,12 @@ fn run_convex_qp(
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
             .unwrap_or(f64::NAN);
+        // Unconditional, unlike the line above: this is a summary *row*, not a
+        // warning that only fires when a widening moved the answer, so it
+        // carries a real number on every solve.
+        builder.stats.final_declared_box_viol = reported_res
+            .map(|d| d.bound_violation)
+            .unwrap_or(res.bound_violation);
         // Per-iteration convergence trace at Full detail (the convex IPM's
         // iterate records map onto the report's IterRecord schema, shared with
         // the NLP path so the harness reads one format).
@@ -3580,6 +3596,16 @@ fn run_convex_socp(
         res.dual_infeasibility,
         res.complementarity,
         res.kkt_error(),
+        // Ipopt's `Variable bound violation`, measured against the box the
+        // caller declared when a widening was applied and against the solved
+        // box otherwise — where the two are the same object, so it is one
+        // measurement either way and never a stand-in for one. This arm
+        // printed a hardcoded `0.0` here until gh#900, which is the right
+        // number on an unwidened solve and a false reassurance on the class
+        // the line exists for.
+        reported_res
+            .map(|d| d.bound_violation)
+            .unwrap_or(res.bound_violation),
         reported_res.map(|d| d.primal_infeasibility),
     );
 
@@ -3658,6 +3684,12 @@ fn run_convex_socp(
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
             .unwrap_or(f64::NAN);
+        // Unconditional, unlike the line above: this is a summary *row*, not a
+        // warning that only fires when a widening moved the answer, so it
+        // carries a real number on every solve.
+        builder.stats.final_declared_box_viol = reported_res
+            .map(|d| d.bound_violation)
+            .unwrap_or(res.bound_violation);
         if matches!(detail, ReportDetail::Full) {
             builder.iterations = sol
                 .iterates

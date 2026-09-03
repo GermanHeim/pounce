@@ -972,6 +972,11 @@ pub(crate) fn equilibrated_kkt_rel_parts(
     .max(1.0);
     QpResiduals {
         primal_infeasibility: res.primal_infeasibility / pscale,
+        // The box term rides the same primal normalizer as the aggregate it is
+        // part of; no caller of this function reads it (the adjudication looks
+        // at the three aggregates), but leaving it unnormalized would make it
+        // incomparable with the `primal_infeasibility` beside it.
+        bound_violation: res.bound_violation / pscale,
         dual_infeasibility: res.dual_infeasibility / gscale,
         complementarity: resolvable_complementarity(&scaled, &ssol) / cscale,
     }
