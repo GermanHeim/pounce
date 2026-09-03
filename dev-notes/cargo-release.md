@@ -150,6 +150,41 @@ note they all share the `pounce-` prefix under account `jkitchin`.
    release commit for the same reason. Its dry run is meaningful only when
    run against a tree whose version is *already* published.
 
+   **Give this step its own `CARGO_TARGET_DIR`.** `cargo package` verifies a
+   crate by compiling the *packaged* tarball, whose dependencies resolve to a
+   local registry rather than to the workspace paths. Those registry builds
+   land in the ordinary `target/` directory, and cargo fingerprints a registry
+   dependency by `name@version` — which does not move between the bump commit
+   and the tag. An rlib built by an earlier packaging run of the *same*
+   version is therefore reused, however much the source has changed since.
+
+   Cutting 0.11.0 hit it. Verifying `pounce-solve-report` failed with `E0609:
+   no field final_declared_box_viol on type &SolveStatistics`, in a tree where
+   `cargo check -p pounce-solve-report` passed and the packaged
+   `pounce-nlp-0.11.0.crate` — checksum matching the one cargo had just written
+   into the packaged lock — contained the field. The giveaway is in the error
+   itself: the struct the compiler saw had 36 fields against the source's 52.
+   `libpounce_nlp-6b0dfeb5fac168ba.rlib` had been built three days earlier,
+   before gh#900 added the field, and was reused rather than rebuilt.
+   `rm -rf target/package` does **not** clear it — the stale artifact is in
+   `target/debug/deps`, not under `target/package`.
+
+   So run the step as
+
+       CARGO_TARGET_DIR=$(mktemp -d) cargo package --workspace \
+         --exclude pounce-py --exclude pounce-studio-pyo3 \
+         --exclude iter-diff --exclude pounce-wasm
+
+   The loud direction is the one above: a real-looking compile error in a tree
+   that is fine. The quiet direction is worse, and is the reason this note
+   exists — with a warm `target/`, a defect introduced *after* an earlier
+   packaging run of the same version passes this step, because the step never
+   compiles the code carrying it.
+
+   CI is unaffected: `release-crates.yml` runs on a fresh checkout with no
+   `target/`. This bites local pre-flight only, which is exactly where the
+   step is supposed to earn its keep.
+
 ### Real release
 
 The crates.io publish is automated by `.github/workflows/release-crates.yml`
