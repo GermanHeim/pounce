@@ -9,6 +9,583 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **An apex-pinned cone block that cannot absorb the perturbation is refused
+  (Rust API).** A cone block at its apex pins its *whole* block — `s = 0` is the
+  tip, so `ds = 0` and every row enters the active set. It is the one face that
+  pins unconditionally, and nothing checked that the equality rows could still
+  absorb an arbitrary `db`. Where they cannot, the active-set block is
+  rank-deficient and the returned step is a least-squares compromise rather
+  than a derivative.
+
+  Measured on the parametric distance function `min t s.t. u = b₀, v = b₁,
+  (t,u,v) ∈ Q₃` — about as ordinary as a parametric SOCP gets: once `‖b‖` falls
+  under `CONE_APEX_REL` the block classifies `Apex` and `du/db₀` comes back
+  `0.5`, where **primal feasibility alone** forces `1`. `build_conic` now
+  returns the new `SensError::ActiveSetOverdetermined` there.
+
+  The criterion is `rank([A; B]) == rank(A) + rank(B)`, where **`B` is the
+  active rows that cannot be *released*** — the cone faces and the active
+  orthant rows. Active variable bounds are deliberately **not** in `B`, even
+  though a bound does pin its coordinate for the plain `parametric_step`:
+  `release_slots` exists so `parametric_step_bounded` can open one, and the
+  refusal is at build time, so counting a bound would take the release path
+  away from a model fix-relax could serve.
+
+  That criterion is **exact**. The quantity that matters is `dim A(ker B)`, the
+  perturbations the step can actually reach, and the rank identity gives it as
+  `rank([A;B]) − rank(B)`; requiring that to be all of `range(A)` rearranges to
+  the line above. It is `rank(A)` and not `A`'s row count because a redundant
+  equality does not shrink the space a step must reach.
+
+  An earlier dimension count, `n − rank(B) ≥ rank(A)`, is implied by this and
+  strictly weaker — and the gap was not academic. Move a model's equality onto
+  coordinates the apex pins and the count passes while `A(ker B) = {0}`, so no
+  perturbation is reachable at all; that model was **served**, returning
+  `dx/db = (⅓, ⅓, 0, 0)` against `|A·dx − db|/δ = 0.333`, identically at every
+  step size. The exact criterion refuses it and reproduces every other verdict
+  in the crate.
+
+  It is still not a promise that *every* `db` would have failed: a build serves
+  every later perturbation and cannot know which are coming, so it refuses on
+  one unreachable direction — deliberate, and stronger than "no answer exists
+  here".
+
+  **The complementary case is not a refusal.** Ask a served build for a `db`
+  outside `range(A)`, or take a plain step on a bound-pinned model the bound
+  exclusion deliberately serves, and the perturbed problem is infeasible: no
+  derivative exists, and a least-squares answer comes back.
+  `ill_conditioned()` is what tells the caller — **only after a step, never at
+  build time.** It is the *residual* clause that fires; the regularized KKT is
+  well conditioned on these models (`3.0e10` against a `1e14` threshold), so
+  checking `ill_conditioned()` immediately after `build_conic` returns `false`.
+  Measured residuals across the three shapes: `0.5`, `0.333`, `0.8`, against a
+  `1e-6` threshold and `~1e-13` on a correct step. Where a bound is what pins
+  the model, `parametric_step_bounded` reproduces the re-solve exactly.
+
+  Two things make this worth refusing rather than caveating. The problem is
+  **smooth on both sides of the cliff** — at `‖b‖ = 1.12e-8` the derivative
+  still exists, is still `0.894427`, and the boundary branch finds it; only the
+  classifier changes its mind. And `primal_scale` floors at `1.0`, which makes
+  `CONE_APEX_REL` an *absolute* `1e-8` for any model whose data is `O(1)` or
+  smaller — a well-fitting least-squares model lands there.
+
+  Found by adversarial review of PR #889, judged against the oracle-free
+  identity `A·dx = db`. Every apex fixture in the crate took the branch where
+  the perturbation is absorbed by a variable *outside* the block, so the other
+  side of the branch was never executed — `/sens-review` entry 6, on a rule this
+  crate's own test headers quote.
+
+- **New `SensError::ActiveSetOverdetermined { block, what }` (Rust API,
+  breaking for exhaustive `match`).** It is the sibling of
+  `NonsmoothConePoint`, and the split is the point: that one means *there is no
+  single `dx/db` here* — a kink, a collapsed normal, a two-valued derivative.
+  The new one means *the derivative exists and this active set cannot express
+  it*. The apex refusal above is exactly the second case — the problem is
+  smooth on both sides of the classification cliff, and at `‖b‖` a decade
+  larger the boundary face finds the same derivative — so a caller matching
+  `NonsmoothConePoint` to decide "genuinely nondifferentiable, fall back to a
+  subgradient" would have made the wrong call on a smooth model.
+
+  `SensError` is not `#[non_exhaustive]`, so this breaks a downstream
+  exhaustive `match`. Stated rather than left to be discovered; the whole conic
+  refusal surface is new in this same unreleased cycle and the crate is pre-1.0.
+  Raised in re-review of PR #889.
+
+### Fixed
+
+- **The cone dual-complementarity guards went absolute below unit scale (Rust
+  API).** All three — the second-order ray check, the PSD `⟨S, Z⟩` containment
+  check, and the exponential/power ray check they were modelled on — compared
+  against `FACET_DUAL_REL · max(‖z‖∞, dual_scale)`, and `dual_scale` floors at
+  `1.0`. So on a model whose duals are smaller than unity the test stopped
+  being relative and admitted exactly what it exists to refuse.
+
+  Measured: `s = 1e-6·(1, 0.6, 0.8)` against `z = 1e-6·(1, 0.8, −0.6)` — the
+  tail rotated 90°, maximally non-complementary — was served as a `Boundary`
+  face with `ν = 1e-6` fed into the curvature, and `reduced_hessian` returned
+  `Ok`. `S = Z = 1e-6·diag(1, 0)`, right rank and wrong subspace, likewise. On
+  a mixed model the same hole opens with no global rescaling at all: one
+  block's small dual beside another's large one.
+
+  The threshold is now the block's own `‖z‖∞` (and `‖S‖∞·‖Z‖∞` for PSD), which
+  makes the check **scale-equivariant** — scale `(s, z)` by `c` and residual
+  and threshold scale together. Safe because a genuinely collapsed dual is
+  refused earlier and separately, so the denominator cannot vanish. The
+  exponential/power check is pre-existing and shared the flaw; all three move
+  together rather than leaving the crate with two conventions.
+
+  Found by adversarial review of PR #889, which also confirmed the guards were
+  correct at unit scale — the fixtures closing the original finding were all
+  `O(1)`, so they reached only that branch.
+
+- **`QpSensitivity::reduced_hessian`'s doc described neither its old behaviour
+  nor its new one.** It said "the objective Hessian `P` projected onto the null
+  space of `B = [A; active G rows; ...]`" and `H_R = Zᵀ P Z`. Since the fix one
+  release-note above, the method projects `P + curvature` — the Lagrangian
+  Hessian — over the *active rows*, which on a conic build are a face's
+  combined row `wᵀG` and not rows of `G` at all. The `ReducedHessian` struct
+  doc repeated the same formula. Both corrected, with the orthant path stated
+  explicitly: `curvature` is empty there, so it is exactly `Zᵀ P Z`, the
+  classical definition, unchanged.
+
+
+- **`QpSensitivity::reduced_hessian` was silently wrong on a conic build with a
+  curved face (Rust API).** Two defects in one method, both returning `Ok`.
+
+  This PR made `active_ineq` **provenance** on the conic path — the `G` rows a
+  cone block contributed — while the rows that are actually active live in
+  `active_rows`. The KKT assembly and the parametric step were moved over;
+  `reduced_hessian` was not, and kept indexing raw `G` with the provenance
+  index. That is gh#450's shape (a real, plausible, wrong row) and it
+  contradicted the `active_rows` field doc, which has said "the assembly and
+  the reduced Hessian both read this" since the field was added.
+
+  Separately it projected bare `P`, where a curved face makes the second-order
+  object the Hessian of the **Lagrangian**. The NLP arm has always included
+  constraint curvature — it computes `H_R = B K⁻¹ Bᵀ` off the converged KKT —
+  and this method's doc says it mirrors that, so the convex arm now does too.
+  On the orthant path `curvature` is empty and this is exactly `P`, the
+  classical definition.
+
+  Measured on the `boundary` fixture with `P = diag(1, 1, 9)`: `1.0000` shipped,
+  `1.0506` is the correct face row without curvature, and `9.9368` is right.
+  Found by adversarial review of PR #889.
+
+- **The second-order and PSD cones accepted a dual that is not complementary
+  (Rust API).** At a boundary point the normal cone *is* `ℝ₊w`, so `z = νw` is
+  the optimality condition rather than an approximation — and `ν` is fed
+  straight into the curvature, so a tilted dual does not degrade the answer, it
+  linearizes a different problem's face. The exponential and power cones have
+  refused this since they were written (`FACET_DUAL_REL`); `soc_face` did not,
+  and was served `s = (1, 0.6, 0.8)` against `z = (1, 0.8, −0.6)` with
+  `⟨s, z⟩ = 1.0`.
+
+  `psd_face` had the analogous gap one level up: it checked strict
+  complementarity by **rank counting alone**, so a `Z` of the right rank in a
+  mismatched eigenbasis passed while `range(Z)` sat in `S`'s range rather than
+  its kernel. Both matrices are PSD there, so `⟨S, Z⟩ = 0` is equivalent to the
+  range containment and is one inner product.
+
+  Reachable whenever the caller's solution does not match the partition handed
+  beside it — a stale solution, a mislabeled block — which is the same
+  mismatched-input class `NotOrthantComplementary` already refuses.
+
+- **`build_conic` refused `OptimalInaccurate` where `build` admits it.** The
+  status check sat *before* the all-`Nonneg` delegation whose comment says the
+  two entry points "cannot answer differently on the same input", so an
+  all-orthant partition carrying that status was served by one and refused by
+  the other. Now matches `build`, per gh#880's decision.
+
+- **The weak-activity screens were empty on every conic build.**
+  `weakly_active_ineq()` and `weakly_active_bound_vars()` returned `[]`
+  regardless, while their docs promised a "deliberately conservative" screen.
+  The orthant rows of a mixed partition and every variable bound are now
+  screened as the plain path screens them. A *cone* block still never appears,
+  and that is by construction: a collapsed dual at the apex or on the boundary
+  is refused at build time, so the refusal is the report.
+
+- **`activity()` reads cone rows with the orthant rule**, which is now
+  documented at the accessor with the measurement (on the `boundary` fixture a
+  binding block's negative-dual tail rows classify as *inactive*). Not refused:
+  the report is still correct for every orthant row and bound of a mixed
+  partition. Use `cone_block_kinds()` for what a cone block is doing.
+
+
+- **`QpSensitivity::active_ineq()` documented a `G` index it does not always
+  return.** For an orthant row it is the row of `G`; for a **curved cone face**
+  the rows are linear combinations and the entry is block provenance, so
+  `prob.g[sens.active_ineq()[k]]` was a real, plausible, wrong row — the gh#450
+  shape in this arm's index space. Doc-only; the values were always correct as
+  provenance.
+- **`parametric_step` / `step_from_db` now say the step is meaningful only when
+  `ill_conditioned()` is false**, and which clause of that flag does the work: on
+  a rank-deficient active set the *regularized* matrix is well conditioned
+  (`kkt_cond_estimate ≈ 2e10`, far under threshold) and it is the **residual**
+  that fires — the trap gh#328 named, confirmed independently over 33 conic
+  probes.
+- **A malformed `NonsmoothConePoint` message in the Python binding** — missing
+  line continuations put ~18 literal spaces mid-sentence.
+- **`KktPattern::dim` was written and never read.** It now carries the
+  `assert_eq!` that is its reason to exist: a mismatch means the assembler and
+  its caller disagree about the KKT's shape, which would corrupt every index
+  into it. `assert_eq!` rather than `debug_assert_eq!` — the stated hazard is a
+  release-build one (every wheel and every CLI binary is a release build), and
+  one `usize` comparison per build is not a cost worth trading for it.
+
+- **`solution_report` refines the activity classes the cheap rule cannot call
+  (Python).** `pounce.sensitivity.solution_report` reported the classifier's
+  verdict raw, and that classifier normalizes a variable's barrier diagonal by
+  the Hessian's **diagonal** and a row's by the curvature along the row's own
+  gradient — while the multiplier that produced it is generated by the
+  *reduced* curvature. The ratio is `reduced/diagonal`, which is
+  μ-independent, so **a genuine kink whose coordinate is coupled reports
+  `"ambiguous"` and stays there however tightly the problem is re-solved.**
+  That is gh#763 and gh#804, reaching the report a caller actually looks at.
+
+  `Solver.reduced_activity` / `reduced_row_activity` have answered that
+  question since gh#763 and had **zero callers** outside their own tests. The
+  report now spends them — on the ambiguous entries only, one back-solve each,
+  which is the "on demand, never the default" shape CLAUDE.md prescribes — and
+  records what moved under the new `SolutionReport.refined`, mapping
+  `name -> (before, after)`. `refine_activity=False` opts out.
+
+  A caller reading a class can now tell which rule produced it, which is the
+  thing that was missing: `"ambiguous"` and "refined to weakly_active" are
+  different answers and used to be indistinguishable.
+
+  **Budget it by the ambiguous population, not the model size.** Measured in
+  review on a 62k-variable Radau collocation column: 675 ambiguous entries at
+  about 29 ms each, taking the call from 0.67 s to 20.2 s. `len(rep.refined)`
+  says what a given model spent. Switching it off is not purely a saving —
+  unrefined `"ambiguous"` mixes genuine kinks with genuine non-kinks, so the
+  `asnmpc_cstr` guard, which reads these classes, is *wider* without it.
+
+- **The `pounce-rs` facade names the sensitivity result types, not just the
+  drivers.** It re-exported the things you *call* — `SensSolve`, `Solver`, the
+  Schur stack — and none of the things they *return*, so a caller reaching
+  `Solver::classify_activity` through the facade had to name `ActivityReport`
+  through `pounce-sensitivity` directly, which is the dependency the facade
+  exists to remove. Added: `ActivityReport`, `RefineStop`, `PathSegment`,
+  `WeakBound`, `BoundMultiplier`, `BoundRow`, `CorrectorReport`,
+  `SensOptionOverrides`, and the index newtypes `VarX` / `FullX` /
+  `VarToFull` / `FullXSlice`. `FullX` still has no public constructor — it is
+  obtainable only through a `VarToFull`, and the facade does not change that.
+
+- **`Solver::compute_reduced_hessian_eigen` (Rust).** The reduced Hessian's
+  spectrum — what answers "is this parameter identifiable, and along which
+  direction" — was available only through the one-shot
+  `SensSolve::with_reduced_hessian_eigen`. A caller holding a `Solver`, which
+  already has the factor *and* the matrix, had to **re-solve the whole NLP**
+  through the one-shot builder to decompose it. Asserted equal to the one-shot
+  path's values and sign-pinned eigenvectors, so closing the gap did not
+  invent a second answer.
+
+### Fixed
+
+- **Documentation defects in the solver-landscape pages**, each verified
+  against the code before being changed:
+
+  - `choosing-a-solver.md` claimed "`QpSensitivity` does the same for the
+    convex QP". It now says what is shared (the parametric step, fix-relax,
+    path following, activity classification, cone faces, over a common core)
+    and what is not (the corrector, the covariance statistics, and the two
+    reduced Hessians, which are different computations behind one word).
+  - The same page's LP/QP section said `auto` "sends LP/convex-QP problems
+    here automatically" next to a mention of post-optimal sensitivity, which
+    implied a path that did not exist. It does now, and the page links to what
+    still routes away.
+  - `sensitivity.md` said "Four entry points" at the top and "All three entry
+    points are verified" at the bottom. **Both numbers were right** — there
+    are four, and three carry the `parametric_cpp` golden cross-check; the
+    Pyomo layer has none. The phrasing made them read as a contradiction and
+    now names which one is which.
+  - `sensitivity.md` was NLP-only, with zero mentions of the convex arm across
+    1779 lines. It has a section on it now, including what the two arms
+    deliberately do not share.
+  - `python.md`'s only mention of `QpSensitivity` was a thread-affinity note.
+    There is a post-optimal sensitivity section now covering both arms.
+  - `images/solver-landscape.svg` said `QpSensitivity (convex QP)`; the arm
+    covers cones too.
+
+  New `dev-notes/convex-conic-sensitivity-design.md` records the decisions and
+  the measurements behind the convex/conic arm — including the three **green
+  mutations** that exposed blind fixtures, and the CLI presolve guard whose
+  stated reason turned out not to be what it does.
+
+### Added
+
+- **An LP/QP sensitivity request is served on the convex path instead of
+  rerouting the whole model (CLI).** Issue #196's fix was to *decline* the
+  convex fast path whenever a `.nl` carried the sIPOPT `sens_*` suffixes:
+  `auto` sent the model to the general NLP filter interior-point engine, and an
+  explicit `solver_selection=qp-ipm` warned that the request "will be skipped".
+  Correct at the time — only the general engine could answer — and expensive,
+  because an LP or convex QP paid the general engine's cost for a question the
+  specialized engine can now answer itself.
+
+  The decline is narrowed to the capability that is genuinely missing.
+  `pounce_cli::convex_sens` resolves the `.nl`'s pins into the extracted QP's
+  equality rows and takes the step through `pounce_convex::QpSensitivity`,
+  writing the same `sens_sol_state_1` block under the same name, so a `.sol`
+  consumer cannot tell which engine answered. The banner now names the engine
+  that actually ran.
+
+  What still routes to the NLP path, each a capability statement rather than an
+  oversight: a **reduced-Hessian** request (`QpSensitivity::reduced_hessian` is
+  a null-space projection where the CLI's sIPOPT path takes the Schur route —
+  serving it here would silently change which number `--compute-red-hessian`
+  returns, and CLAUDE.md names keeping them separate as a non-goal); the
+  **conic** route (`build_conic` can answer for every family now, but the CLI's
+  conic dispatch extracts through a different provenance map and that plumbing
+  is not written); the **active-set** engine; and any pin that is not a unit
+  equality row.
+
+  **The index space is the risk.** The request arrives in the `.nl`'s own
+  constraint indices while `parametric_step` takes indices into the extracted
+  QP's equality right-hand side `b` — a different space, because extraction
+  splits ranges and separates the equality and inequality blocks.
+  `qp_extract::ConRowMap` is the single source of truth and is read rather than
+  reconstructed.
+
+  A run that serves a sensitivity request also switches the **convex presolve
+  off**, and the reason is narrower than it looks. It is *not* that presolve's
+  row space breaks the pins: this driver postsolves back to the extracted-QP
+  space before anything downstream runs, so the pin indices stay valid, and
+  with presolve left on the step still lands within `1e-6` of the NLP path's —
+  measured, not reasoned. What presolve costs is accuracy and an unanswered
+  question. On the one fixture that exercises it, presolve fixes the parameter
+  the pin parametrizes and drops its row (`3 → 2 vars, 1 → 0 rows`), so the
+  sensitivity reads a postsolve reconstruction rather than the converged KKT:
+  the step lands `5.0e-11` from the analytic answer instead of `6.2e-15`.
+  Whether a reconstructed bound multiplier can also move the *active set* the
+  sensitivity infers — a wrong derivative rather than a less accurate one — is
+  unmeasured, and needs a model whose active set is nontrivial. The NLP path
+  makes the same trade.
+
+  One hazard the NLP arm has and this one does not, stated so nobody hunts for
+  it: there is no var-x/full-x split, because the extractor keeps variables 1:1
+  with the `.nl` — no `lift_x_to_full`, and no gh#450 to reproduce.
+
+  *Trajectory sweep* (`scripts/sweep-fixtures.sh`, both legs, against a
+  pre-change binary): **exactly one fixture moves**, `convex_qp_sens`, whose
+  engine column goes `nlp → cvx-qp` on both legs — the routing change itself
+  and nothing else. Three fixtures carry the sIPOPT suffixes, but carrying them
+  is necessary and not sufficient: `parametric.nl` and
+  `parametric_red_hessian.nl` both classify **NLP**, so `auto` never routed
+  them to the convex path and the gate never applied to them. That leaves the
+  corpus with exactly one model exercising this change, and none of any size —
+  so the sweep shows the change is contained and says nothing about magnitude
+  at scale.
+
+  *Surfaces:* CLI. Python and Pyomo are unaffected — `pounce.qp.QpSensitivity`
+  solves internally and has no `.nl` route.
+
+- **Two conic thresholds are calibrated off measured populations, and the
+  measurements are recorded** (`FACET_ACTIVE_REL`, `FACET_DUAL_REL`). The
+  exponential and power cones route to the non-symmetric HSDE driver, whose
+  achieved accuracy is well short of the symmetric IPM's, so a threshold that
+  is right for a second-order block refuses correct non-symmetric solutions.
+  Across four fixtures at two tolerances, `|φ|/primal_scale` runs `4.1e-10` to
+  `2.1e-9` and the dual-parallelism residual runs `2.8e-8` to `3.4e-5`; the
+  first value tried for the latter, `1e-6`, refused two of the four correct
+  solutions. The constants are `1e-6` and `1e-3`, each with its measured
+  population and its failure mode written at the definition.
+
+- **Conic sensitivity on the convex arm, every `ConeSpec` family (Rust API).**
+  `QpSensitivity::build_conic` now answers for cones instead of refusing them.
+  Each block is classified by the *face* its slack sits on —
+  `ConeBlockKind::{Interior, Apex, Boundary}`, reported by the new
+  `cone_block_kinds()` — and contributes that face's rows and curvature:
+
+  | family | boundary face | rows |
+  |---|---|---|
+  | `SecondOrder(k)` | `s₀ = ‖s₁‖ > 0` | 1, `wᵀG` with `w = (1, −s₁/s₀)` |
+  | `Psd(n)` at rank `r` | the constant-rank manifold | `q(q+1)/2`, `q = n − r` |
+  | `Exponential` | `y·log(z/y) − x = 0`, `y, z > 0` | 1, `∇φᵀG` |
+  | `Power(α)` | `y^α z^{1−α} − |x| = 0`, `y, z > 0` | 1, `∇φᵀG` |
+
+  `Interior` contributes nothing; `Apex` (`s ≈ 0`, and for a PSD block the
+  rank-zero end of the same stratification) pins the whole block on a face that
+  is a single point, hence flat, hence an exact predictor.
+
+  `SensError::UnsupportedCone` is **removed**. There is no unsupported family
+  left, and the `match` that dispatches the face decomposition is exhaustive
+  over `ConeSpec`, so a family added later is a compile error rather than a
+  runtime refusal — a stronger promise than a message, and an empty error
+  category is a documentation hazard. What is refused is a *point*, not a
+  family: see `SensError::NonsmoothConePoint` below.
+
+  **A boundary face is curved, and its curvature is part of the answer, not a
+  refinement.** The sensitivity KKT's `(x,x)` block is `P` plus the active
+  face's own Hessian — `(ν/s₀)·(Σ_{r≥1} gᵣgᵣᵀ − uuᵀ)` for a second-order
+  block, `−ν·Gᵀ∇²φ G` for a non-symmetric one, and
+  `2·Σ_{l,k} (λ_k/a_l)·c_lk c_lkᵀ` for a PSD block at constant rank (from the
+  Schur complement `C − BᵀA⁻¹B`, with `a_l, ũ_l` the slack's positive
+  eigenpairs, `λ_k, w̃_k` the dual's, and `c_lk = Gᵀ svec(sym(ũ_l w̃_kᵀ))`).
+  Written without it — which is the natural first draft, since every orthant row and
+  variable bound is a hyperplane carrying none — the step converges to the
+  **wrong derivative**, not to an approximate one: on the fixture in
+  `crates/pounce-convex/tests/convex_soc_sensitivity.rs`, `dx/db` reads
+  `(0.348, 0.652)` where the true answer is `(0.5, 0.5)`, at every perturbation
+  size. Nothing internal complains, because the step solves exactly the KKT it
+  was handed. The re-solve oracle in that file is what found it, and it is the
+  only guard in the crate that reads a number the sensitivity layer did not
+  produce.
+
+  New refusals, all `SensError::NonsmoothConePoint { block, what }`, covering
+  the points where `dx/db` does not exist or cannot be computed from the numbers
+  to hand: a collapsed dual at the apex or on the boundary (the conic analogue
+  of a weakly active row — two-valued, exactly as on the NLP arm), a
+  second-order boundary point too close to the apex for its normal to mean
+  anything, a slack outside the cone beyond the solve tolerance, a
+  strictly-interior block that does not complement, a PSD block where strict
+  complementarity fails (`rank Z ≠ n − rank S`, so a direction exists along
+  which slack and multiplier vanish together), the exponential and power cones'
+  degenerate `y = 0` / `z = 0` faces where the boundary has no tangent plane,
+  and a non-symmetric dual that is not on the ray normal to the facet being
+  linearized.
+
+  There is deliberately **no** guard for the power cone's `|x| = 0` kink: a
+  boundary point with `x = 0` needs `y^α z^{1−α} = 0`, i.e. `y = 0` or `z = 0`,
+  which the face guard already refuses. With `y, z > 0` the two sheets `x = ±g`
+  are each smooth and never meet, so a kink guard there would be unreachable
+  code that reads like coverage. The geometry is asserted instead of the
+  branch. Refusing is the same posture the orthant guard shipped with:
+  a cone read as the wrong face returns a plausible number that is not a
+  derivative.
+
+  The apex/boundary decision is relative to the problem's primal scale — the
+  same quantity `build`'s orthant guard uses, so the two cannot disagree about
+  what "zero" means on one solution.
+
+  *Surfaces:* Rust API only. The CLI and Python do not yet route a conic model
+  to `build_conic`; Python's `pounce.qp.QpSensitivity` solves internally with
+  `solve_qp_ipm` and exposes no `cones=`, so it is unaffected.
+
+- **The convex QP sensitivity gains activity classification, sharing the NLP
+  arm's rule (Rust API).** `QpSensitivity::activity()` reports, per variable and
+  per inequality row, what the bound is doing at the optimum: holding its
+  coordinate, doing nothing, or vanishing together with its multiplier at a
+  kink. Previously the convex arm had one boolean weak-activity screen against a
+  fixed relative threshold and two flat index lists — no `AMBIGUOUS`, no
+  μ-scaling, no statuses at all.
+
+  The decision is `pounce_sens_core::activity_kernel`, lifted out of the NLP
+  arm's `activity.rs` and now called by both, so the two cannot drift on what a
+  kink is. Only the *rule* is shared: deriving `Σ`, `q` and `μ` is where the arms
+  genuinely differ, and the convex arm reconstructs them from
+  `(problem, solution)` because `QpSolution` carries no barrier iterate. The
+  NLP arm's plumbing — which reads the filter-IPM's eight-block iterate through
+  an `IpoptData` handle — did not move, and its 30 test files were not edited.
+
+  **`AMBIGUOUS` does not mean "probably not a kink"**, on this arm either. A
+  genuine kink lands there whenever its coordinate is coupled, because the cheap
+  curvature is a diagonal (variable) or a directional one (row) while the
+  multiplier is generated by the *reduced* curvature — the ratio is
+  `reduced/diagonal`, which is μ-independent, so re-solving tighter does not
+  separate it. That inference is what shipped gh#763 on the NLP arm, so it is
+  pinned here as a test rather than a caveat: two fixtures differing only in
+  coupling, asserted to land in *different* classes, the decoupled one certified
+  `WEAKLY_ACTIVE` and the coupled one `AMBIGUOUS` at every tolerance tried.
+
+  A row's curvature is `∇gᵀP∇g / ‖∇g‖²` with `Σ` weighted by `‖∇g‖²`, so the
+  verdict does not move when a row is multiplied through by a constant. The
+  first draft got only half of that weighting right, which leaves the ratio
+  scaling as `c⁻⁸`; the scale-invariance test caught it before it was committed.
+
+- **The convex QP sensitivity gains bound *release* and path following (Rust
+  API).** `QpKktBacksolver` now implements the release half of the
+  `SensBacksolver` contract, so `refine_step_onto_bounds` can take a bound out
+  of the active set rather than only pinning coordinates onto one, and the new
+  `QpSensitivity::parametric_step_path` walks a perturbation breakpoint by
+  breakpoint. For a QP the solution path is piecewise affine, so within a
+  segment the walk is exact; each `PathSegment` records the fraction of the
+  perturbation at which a bound was reached or freed.
+
+  Releasing is structurally cheaper on this arm than on the NLP one, and the
+  reason is worth stating: the NLP's release *must* re-factor because an active
+  bound puts `σ = z/s` on the `x` diagonal, and on a tightly converged bound
+  that term destroys the released system's information in the converged factor —
+  the better the solve converged, the worse a recovered answer would be. The
+  convex active-set KKT has no barrier term; the bound is an explicit row.
+  Neutralizing it leaves the **sparsity pattern unchanged**, so a release costs
+  one numeric refactorization and the symbolic factorization is reused. No
+  public signature changed to make this possible: the adapter stores one spare
+  linear-solver instance drawn at build rather than boxing the caller's factory,
+  which would have needed an `F: 'static` bound on a published method.
+
+  This also discharges a debt the previous release recorded. That one noted, as
+  a measured result, that `natural_units_factor = None` was correct but
+  **unguarded** — its only consumer is the release path, so with release off,
+  returning garbage from it turned nothing red. It is load-bearing now, and
+  guarded: `crates/pounce-convex/tests/convex_sens_release.rs` checks released
+  steps against an **independent re-solve of the perturbed problem** at a
+  tolerance two orders tighter than the base solve, and a mis-scaled factor
+  fails all three of its oracle legs. On the fixture, holding the active set is
+  wrong by the entire released distance; the released step reaches the re-solve,
+  and the path walk reports the breakpoint at its closed-form location.
+
+- **The convex QP sensitivity gains bound-respecting steps, by reaching the
+  shared core rather than reimplementing it (Rust API).**
+  `QpSensitivity::parametric_step_bounded` is the convex arm's `fix_relax`: a
+  linear predictor can point outside the variable box, and clipping the
+  offending coordinate leaves every other one at its unclipped value, so the
+  result satisfies the bounds and no longer satisfies the constraints. It
+  instead pins the crossing coordinate at its bound and re-solves, so the others
+  move with it.
+
+  The computation is `pounce_sens_core::boundcheck::refine_step_onto_bounds` —
+  the same code the NLP arm runs. The new `QpKktBacksolver` implements
+  `SensBacksolver` over the convex active-set KKT, which is all that machinery
+  needed: it is generic over the trait, derives its variable count from slice
+  lengths, and reads bounds only through `BoundRow`. Also new:
+  `QpSensitivity::backsolver()` (the handle), `duality_measure()` (the achieved
+  complementarity, derived from `(prob, sol)` rather than added as a
+  `QpSolution` field — that type is all-public and constructed by literal in
+  dozens of places), and `lp_without_crossover()`.
+
+  In this phase the refinement **pins only**. A bound whose multiplier the step
+  drives negative is not released, so a perturbation pulling a variable off a
+  bound still holds it there; `QpKktBacksolver::supports_release()` reports
+  `false` and a test pins that limit rather than leaving it implied.
+
+  A latent sign defect had to be fixed first. In the `Gx ≤ h` orientation the
+  convex form uses, an active lower bound is the row `−eⱼᵀ` and an upper bound
+  `+eⱼᵀ`; the assembly emitted `+1` for both. That is invisible while the active
+  block's right-hand side is zero — `eⱼᵀ dx = 0` and `−eⱼᵀ dx = 0` are the same
+  constraint — which is why 774 lines of inline tests never caught it, and it
+  becomes load-bearing the moment anything reads the recovered multiplier block,
+  which a release decision does. Verified by mutation: restoring the `+1` turns
+  exactly one test red and leaves every other test in the crate green.
+
+  `lp_without_crossover()` names a hazard rather than fixing one. At a
+  degenerate LP vertex the active-set KKT is rank-deficient and `dx/db` is not
+  single-valued — measured on a two-variable example, the step comes back
+  summing to half the perturbation it should. That case is already caught by
+  `ill_conditioned()`; the flag says *why* and points at `qp_crossover=yes`.
+  Reading `opts.crossover` means the options handed to `build` must be the
+  options the solve actually ran with.
+
+### Changed
+
+- **New crate `pounce-sens-core`: the engine-agnostic half of the sensitivity
+  layer (Rust API; no behavior change).** POUNCE has two independent
+  sensitivity implementations — `pounce-sensitivity` for the NLP filter-IPM and
+  `QpSensitivity` for the convex QP — sharing no code. The obstacle to sharing
+  was packaging, not design: `crates/pounce-sensitivity/src/boundcheck.rs`'s
+  fix-relax, path-following and directional-derivative machinery is already
+  generic over `SensBacksolver`, a trait whose entire required surface is
+  `dim()` and `solve(rhs, lhs)`, but it sat in a crate that pulls in the whole
+  NLP engine, so the convex arm could not reach it.
+
+  Eight modules move to the new crate — `backsolver`, `boundcheck`,
+  `schur_data`, `schur_driver`, `p_calculator`, `step_calc`, `reduced_hessian`,
+  `sens_app` — which depends only on `pounce-common` and `pounce-linalg`. Both
+  arms can now depend on it without depending on each other.
+
+  **`pounce-sensitivity`'s API is unchanged.** Every moved module is re-exported
+  at its original path, so `pounce_sensitivity::boundcheck::refine_step_onto_bounds`,
+  `pounce_sensitivity::SensBacksolver` and the rest resolve exactly as before;
+  `pounce-rs`'s facade needed no edit. Six of the eight files moved with zero
+  line changes. The two exceptions are the whole of the hand-written diff:
+  `boundcheck::path_direction` becomes `pub` (it was `pub(crate)`, which no
+  longer reaches `solver.rs` across a crate boundary — this is new public
+  surface), and four intra-doc links that pointed from the moved files back into
+  `pounce-sensitivity` are demoted to code spans, since the core cannot link to
+  a crate that depends on it.
+
+  Two parts deliberately did **not** move, and the core's crate doc says so: the
+  corrector and activity classification's plumbing both read the filter-IPM's
+  own eight-block iterate through an `IpoptData` handle and call methods that
+  are not on the trait. Generalizing either means abstracting
+  `IpoptData`/`CalculatedQuantities` behind another trait — a larger change than
+  this one.
+
+  The crates.io publish set goes 20 → 21; `pounce-sens-core` sits between
+  `pounce-linalg` and `pounce-linsol` in the topological publish order.
+
 ### Fixed
 
 - **The gh#884 dual-divergence retry could return an answer *below the known
@@ -163,6 +740,39 @@ changes.
   while the reroute lands **>10× further out on 43** of them. So the fix ships
   with its effect measured and its trigger unreproduced — the honest split, and
   the reason it also carries unit tests on all three branches of the helper.
+- **The convex sensitivity builder no longer reads a solved conic program as
+  an LP/QP (Rust API).** `solve_socp_ipm` and `solve_qp_ipm` return the same
+  `QpSolution`, and the cone partition travels beside it as a separate
+  `&[ConeSpec]` argument that `QpSensitivity::build` never saw. A Rust caller
+  could hand `build` a solved SOCP, QCQP or exponential-cone program and get a
+  `dx/db` back: every cone row was read as a nonnegative-orthant row, so the
+  active-set KKT was assembled from rows that are not the active object and
+  the answer was not a derivative. Nothing warned. `build` now checks that the
+  inequality block complements **row by row** — an orthant row has `sᵢ ≥ 0`,
+  `zᵢ ≥ 0` and `sᵢzᵢ ≈ μ` individually, where a cone satisfies only the block
+  inner product `⟨s, z⟩ = 0` — and refuses with the new
+  `SensError::NotOrthantComplementary { row, what }`. Python was never exposed:
+  `pounce.qp.QpSensitivity` solves internally with `solve_qp_ipm` and accepts
+  no `cones=`.
+
+  New `QpSensitivity::build_conic(prob, cones, sol, opts, active_tol, backend)`
+  is the entry point for a problem that carries cones. An all-`Nonneg`
+  partition *is* the orthant problem and behaves exactly as `build`. (This
+  change originally refused every other family with a
+  `SensError::UnsupportedCone`; the conic entry above implements them all in
+  the same release, and that variant no longer exists.)
+
+  One limit is documented and pinned rather than hidden: a second-order cone at
+  its apex with a zero dual tail is row-wise indistinguishable from orthant
+  degeneracy, which is a legitimate input, so only `build_conic` — which is
+  told — catches it. See `crates/pounce-convex/tests/conic_sensitivity_refused.rs`.
+
+- **`pounce-qp`'s crate documentation claimed a call path that does not
+  exist.** It stated the active-set engine "is reached from Python … through
+  `QpSensitivity`". It is not: `QpSensitivity` solves with `solve_qp_ipm` and
+  factors its own hand-assembled active-set KKT through `pounce_linsol`,
+  never constructing a `ParametricActiveSetSolver`. The engine *is* reached by
+  LP crossover (`qp_crossover=yes`), which the text omitted.
 
 ### Added
 

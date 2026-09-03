@@ -68,39 +68,52 @@
 
 pub mod activity;
 pub mod algorithm_backsolver;
-pub mod backsolver;
-pub mod boundcheck;
 pub mod convenience;
 pub mod corrector;
 pub mod diff_handoff;
 pub mod index;
 pub mod options;
-pub mod p_calculator;
-pub mod reduced_hessian;
-pub mod schur_data;
-pub mod schur_driver;
-pub mod sens_app;
 pub mod solver;
-pub mod step_calc;
 mod vec_util;
 
+/// The engine-agnostic core, for anything not surfaced below.
+///
+/// The half of this crate that does not know which solver produced the KKT
+/// system — the `SensBacksolver` contract, `boundcheck`'s fix-relax / path /
+/// directional machinery, and the Schur-complement stack — lives in
+/// `pounce-sens-core` so the convex arm can reach it without pulling in the
+/// NLP engine.
+pub use pounce_sens_core;
+
+// Re-exporting the *modules*, not merely their items, is what keeps this
+// crate's published API unchanged across that move: a `pub use` of a module
+// creates a valid path at that name, so
+// `pounce_sensitivity::boundcheck::refine_step_onto_bounds` still resolves for
+// `pounce-cli` and for this crate's own tests, and the internal
+// `crate::backsolver::SensBacksolver` spellings in `solver.rs`, `activity.rs`
+// and `corrector.rs` needed no edit at all.
+pub use pounce_sens_core::{
+    backsolver, boundcheck, p_calculator, reduced_hessian, schur_data, schur_driver, sens_app,
+    step_calc,
+};
+
 pub use algorithm_backsolver::PdSensBacksolver;
-pub use backsolver::{DenseLuBacksolver, SensBacksolver};
 pub use convenience::{SensResult, SensSolve};
 pub use diff_handoff::{DEFAULT_ACTIVE_TOL, DiffHandoff};
-// Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
-// re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
 pub use options::{
     DEFAULT_SENS_BOUND_EPS, SensOptionOverrides, pdpert_verdict, release_floor_from_options,
 };
-pub use p_calculator::{IndexPCalculator, PCalculator};
+pub use pounce_sens_core::backsolver::{DenseLuBacksolver, SensBacksolver};
+pub use pounce_sens_core::p_calculator::{IndexPCalculator, PCalculator};
+pub use pounce_sens_core::reduced_hessian::compute_reduced_hessian;
+pub use pounce_sens_core::schur_data::{IndexSchurData, SchurData};
+pub use pounce_sens_core::schur_driver::{DenseGenSchurDriver, SchurDriver};
+pub use pounce_sens_core::sens_app::{SensApplication, SensOptions, register_options};
+pub use pounce_sens_core::step_calc::{SensStepCalc, StdStepCalc, WithBacksolver};
+// Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
+// re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
 pub use pounce_linalg::symmetric_eigen;
-pub use reduced_hessian::compute_reduced_hessian;
-pub use schur_data::{IndexSchurData, SchurData};
-pub use schur_driver::{DenseGenSchurDriver, SchurDriver};
-pub use sens_app::{SensApplication, SensOptions, register_options};
 pub use solver::{ConvergedState, Solver, SolverError};
-pub use step_calc::{SensStepCalc, StdStepCalc, WithBacksolver};
 
 /// Run a sensitivity-producing solve in the original TNLP coordinate system.
 ///

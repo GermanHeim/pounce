@@ -49,6 +49,33 @@
 //! [`IndexSchurData`] / [`PdSensBacksolver`] / [`DenseGenSchurDriver`] stack —
 //! every piece is re-exported below, and [`pounce_sensitivity`] itself is
 //! re-exported for anything not listed.
+//!
+//! # The diagnostics, not just the drivers
+//!
+//! The facade used to name only the things you *call* — [`SensSolve`],
+//! [`Solver`], the Schur stack — and none of the things they *return*. A
+//! caller could reach `Solver::classify_activity` through the facade and then
+//! had to name its result type through `pounce_sensitivity` directly, which is
+//! the dependency the facade exists to remove. Every result and diagnostic
+//! type on the session API is re-exported here now:
+//!
+//! * [`ActivityReport`] — what each bound is doing at the optimum. Read
+//!   [`pounce_sensitivity::activity`]'s note on `AMBIGUOUS` before acting on a
+//!   status: it is not "probably not a kink", and the reduced-curvature
+//!   accessors ([`Solver::reduced_activity`], [`Solver::reduced_row_activity`])
+//!   are what settle it.
+//! * [`RefineStop`] — why `mode = fix_relax` stopped refining;
+//!   [`PathSegment`] — one leg of a path-following step;
+//!   [`WeakBound`] / [`BoundMultiplier`] / [`BoundRow`] — the bound-geometry
+//!   records `boundcheck` reads and returns.
+//! * [`CorrectorReport`] — what the corrector's iterations did, including the
+//!   residual split that says whether they helped.
+//! * [`SensOptionOverrides`] — the option layer between an `OptionsList` and
+//!   the step.
+//! * [`VarX`] / [`FullX`] / [`VarToFull`] / [`FullXSlice`] — the index
+//!   newtypes. `FullX` has no public constructor by design: it is obtainable
+//!   only by putting a `VarX` through a `VarToFull`, so "this number is in
+//!   full-x" is asserted once per map rather than once per read.
 
 pub use pounce_sensitivity::{
     ConvergedState, DEFAULT_ACTIVE_TOL, DenseGenSchurDriver, DenseLuBacksolver, DiffHandoff,
@@ -57,6 +84,14 @@ pub use pounce_sensitivity::{
     SolverError, StdStepCalc, WithBacksolver, compute_reduced_hessian, register_options,
     symmetric_eigen,
 };
+
+/// Result and diagnostic types from the session API.
+pub use pounce_sensitivity::activity::ActivityReport;
+pub use pounce_sensitivity::backsolver::BoundRow;
+pub use pounce_sensitivity::boundcheck::{BoundMultiplier, PathSegment, RefineStop, WeakBound};
+pub use pounce_sensitivity::corrector::CorrectorReport;
+pub use pounce_sensitivity::index::{FullX, FullXSlice, VarToFull, VarX};
+pub use pounce_sensitivity::options::SensOptionOverrides;
 
 /// The underlying crate, for anything not surfaced above.
 pub use pounce_sensitivity;

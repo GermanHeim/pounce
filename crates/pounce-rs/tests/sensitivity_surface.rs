@@ -219,3 +219,46 @@ fn reduced_hessian_is_reachable_through_the_facade() {
         "reduced Hessian must be symmetric: {rh:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The diagnostics, reachable through the facade alone.
+// ---------------------------------------------------------------------------
+
+/// Every result and diagnostic type on the session API must be nameable
+/// through `pounce_rs` without depending on `pounce-sensitivity` — which is
+/// the whole point of the facade, and was true of the things you *call*
+/// (`SensSolve`, `Solver`, the Schur stack) but not of anything they
+/// *return*.
+///
+/// This is a compile-time assertion wearing a test's clothes: the function
+/// body never runs, and the paths below are the assertion. A re-export
+/// dropped from `pounce_rs::sensitivity` fails the build here rather than in
+/// a downstream crate.
+///
+/// It cannot check that the types are *useful* — `sensitivity_returns_the_
+/// golden_dx` does that for the step — only that the facade names them.
+#[test]
+fn every_session_diagnostic_type_is_nameable_through_the_facade() {
+    #[allow(dead_code)]
+    fn names_them_all(
+        _: &pounce_rs::sensitivity::ActivityReport,
+        _: &pounce_rs::sensitivity::RefineStop,
+        _: &pounce_rs::sensitivity::PathSegment,
+        _: &pounce_rs::sensitivity::WeakBound,
+        _: &pounce_rs::sensitivity::BoundMultiplier,
+        _: &pounce_rs::sensitivity::BoundRow,
+        _: &pounce_rs::sensitivity::CorrectorReport,
+        _: &pounce_rs::sensitivity::SensOptionOverrides,
+        _: &pounce_rs::sensitivity::VarX,
+        _: &pounce_rs::sensitivity::FullX,
+        _: &pounce_rs::sensitivity::VarToFull,
+        _: &pounce_rs::sensitivity::FullXSlice<'_, f64>,
+    ) {
+    }
+    // `FullX` has no public constructor on purpose: it is reachable only by
+    // putting a `VarX` through a `VarToFull`, so "this index is in full-x" is
+    // asserted once per map instead of once per read. Naming it here must not
+    // quietly become a way to build one.
+    let row = pounce_rs::sensitivity::VarX::new(0);
+    assert_eq!(row.get(), 0);
+}

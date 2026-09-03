@@ -372,11 +372,51 @@ question:
 |---|---|---|
 | `obj_scaling_factor < 0` (maximize) | re-routes to the NLP path | **refused** (exit 2) — running would report the minimizer |
 | `nlp_scaling_method=user-scaling` with `scaling_factor` suffixes | re-routes to the NLP path | warns; the scaling is skipped |
-| sIPOPT `sens_*` suffixes, `--compute-red-hessian` | re-routes to the NLP path | warns; the step is skipped |
+| `--compute-red-hessian` (or `compute_red_hessian=yes`) | re-routes to the NLP path | warns; the step is skipped |
+| sIPOPT `sens_*` suffixes whose pin is **not** a unit equality row | re-routes to the NLP path | warns; the step is skipped |
 
 A *positive* `obj_scaling_factor` is not in this table: it only rescales
 conditioning, and the convex path reports natural units either way, so
 both paths give the same answer.
+
+### Sensitivity is served here, not routed away
+
+A plain **parametric sensitivity request** — the sIPOPT `sens_*` suffixes,
+without a reduced-Hessian request — is no longer in the table above. On an LP
+or convex QP the convex path computes it directly, through
+`pounce_convex::QpSensitivity`, and writes the same `sens_sol_state_1` block
+the NLP path writes; a `.sol` consumer cannot tell which engine answered, and
+the banner names the one that did.
+
+This was a reroute until the convex arm grew a parametric step of its own.
+It is worth knowing which way it goes, because the two engines have very
+different costs on a large LP and the answer is the same either way.
+
+Three things keep it in the table:
+
+- **A reduced-Hessian request.** `QpSensitivity` has one, but it is a
+  *different computation* behind the same word — a null-space projection where
+  the CLI's sIPOPT path takes the Schur route. Serving it here would silently
+  change which number `--compute-red-hessian` returns.
+- **A conic model.** Every cone family has a face decomposition now (see
+  [The convex/conic solver](convex-solver.md#cones-the-face-not-the-rows)), but
+  the CLI's conic dispatch extracts through its own provenance map and mapping
+  pins through that is unwritten.
+- **A pin that is not `x_p = p₀` with a unit coefficient.** The convex step
+  perturbs the equality right-hand side `b`; an inequality pin lives in `h`,
+  which is a different perturbation. Rather than answer a different question,
+  the model goes to the path that has always handled it.
+
+**Presolve is switched off for a run that serves a sensitivity request**, on
+this path exactly as on the NLP one — but not for the reason it looks like.
+The convex driver postsolves back to the extracted-QP space before anything
+downstream runs, so the pins stay valid with presolve on and the step is still
+within `1e-6` of the NLP path's. What presolve costs is accuracy: it can fix
+the very parameter the pin parametrizes and drop its row, leaving the
+sensitivity to read a postsolve reconstruction rather than the KKT the solve
+converged — four orders on the fixture that exercises it. Whether that can also
+move the *active set* the sensitivity infers, which would be a wrong derivative
+rather than a less accurate one, is not yet measured.
 
 ### When the convex path cannot certify an LP
 

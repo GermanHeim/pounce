@@ -13,6 +13,12 @@ categories = ["mathematics", "science"]
 [dependencies]
 pounce-common.workspace = true
 pounce-linsol.workspace = true
+# The engine-agnostic sensitivity core: the `SensBacksolver` contract and the
+# fix-relax / path / directional machinery built on it. This crate implements
+# the trait over the convex active-set KKT so the convex arm reaches the same
+# parametric machinery the NLP arm uses, without depending on the NLP engine.
+# Acyclic: pounce-sens-core depends only on pounce-common / pounce-linalg.
+pounce-sens-core.workspace = true
 # Dense symmetric eigensolver (cyclic Jacobi) for the QP reduced Hessian,
 # shared with the NLP sensitivity path.
 pounce-linalg.workspace = true

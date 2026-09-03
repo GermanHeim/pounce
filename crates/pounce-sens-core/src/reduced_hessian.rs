@@ -20,7 +20,8 @@
 //! In pounce we default `obj_scal = 1.0` so the operation reduces to
 //! `H_R = -S = B K⁻¹ Bᵀ`. Unlike upstream, no NLP-side scaling needs
 //! folding in here: since pounce#128 the live-factor backsolver
-//! ([`crate::PdSensBacksolver`]) conjugates every back-solve by the
+//! (`PdSensBacksolver`, in `pounce-sensitivity` — a downstream crate, so not
+//! linkable from here) conjugates every back-solve by the
 //! NLP scaling diagonal, so `K⁻¹` is already the natural-units KKT
 //! inverse and `obj_scal` survives purely as a user-side extra
 //! multiplier.

@@ -115,37 +115,17 @@ use crate::PdSensBacksolver;
 use crate::backsolver::SensBacksolver;
 use crate::vec_util::dense_to_vec;
 
-/// No finite bound on this variable or row: nothing to classify.
-pub const UNBOUNDED: i8 = -1;
-/// `r = O(μ)`: the bound is not doing anything.
-pub const INACTIVE: i8 = 0;
-/// `r = O(1)`: slack and multiplier vanish together; kept, flagged.
-pub const WEAKLY_ACTIVE: i8 = 1;
-/// `r = O(1/μ)`: the bound holds the variable; projected out.
-pub const STRONGLY_ACTIVE: i8 = 2;
-/// `r` in a gap between the band and a `μ`-edge: undetermined at this
-/// `μ`; re-solving tighter separates it.
-///
-/// **Not "probably not a kink".** A genuine kink lands here whenever
-/// its coordinate is coupled, because `r` is `reduced/diagonal` and
-/// only the reduced curvature generates the multiplier — and that `r`
-/// is `μ`-independent, so re-solving does NOT separate that case. See
-/// the module docs and [`reduced_activity`], which answers it
-/// (gh#763). A row lands here on the same terms, its `r` being
-/// `reduced/directional`; [`reduced_row_activity`] answers that one
-/// (gh#804).
-pub const AMBIGUOUS: i8 = 3;
-/// The curvature `q` is below noise scale: the bound question does not
-/// arise, and the direction is poorly identified.
-pub const UNIDENTIFIED: i8 = 4;
-/// `lb == ub`: the variable was removed from the solve as a parameter
-/// (`fixed_variable_treatment = make_parameter`), so there is no
-/// barrier geometry to classify.
-pub const FIXED: i8 = 5;
-/// An equality constraint: always active by construction, with no
-/// slack or multiplier pair on the barrier, so outside this
-/// classification.
-pub const EQUALITY: i8 = 6;
+// The status codes and the classification rule now live in
+// `pounce-sens-core`, so the convex arm decides what a kink is with the same
+// code rather than a parallel one. Re-exported here because
+// `pounce_sensitivity::activity::WEAKLY_ACTIVE` (and its siblings) is the path
+// `pounce-py` and four test files already use.
+pub use pounce_sens_core::activity_kernel::{
+    AMBIGUOUS, EQUALITY, FIXED, INACTIVE, STRONGLY_ACTIVE, UNBOUNDED, UNIDENTIFIED, WEAKLY_ACTIVE,
+};
+use pounce_sens_core::activity_kernel::{
+    Entry, NOT_CLASSIFIED, classify_entry, off_path, sign_of, zero_gradient_row,
+};
 
 /// Per-variable and per-row classification of a converged solve.
 ///
@@ -226,42 +206,6 @@ pub struct ActivityReport {
     pub row_sigma: Vec<Number>,
 }
 
-/// The classification rule of the roadmap's item 0.
-fn classify(r: Number, mu: Number) -> i8 {
-    if mu > 1e-4 {
-        // The band is fixed at [1e-1, 1e1] while the μ-edges √μ and
-        // 1/√μ move with the solve: they meet the band at μ = 1e-2,
-        // and a full decade separates them from it at μ = 1e-4. Above
-        // 1e-4 that margin is what's thinning, so only the two calls
-        // that stay clear are made and the middle is honest refusal.
-        if r < 1e-1 {
-            INACTIVE
-        } else if r > 1e1 {
-            STRONGLY_ACTIVE
-        } else {
-            AMBIGUOUS
-        }
-    } else if r < mu.sqrt() {
-        INACTIVE
-    } else if r > 1.0 / mu.sqrt() {
-        STRONGLY_ACTIVE
-    } else if (1e-1..=1e1).contains(&r) {
-        WEAKLY_ACTIVE
-    } else {
-        AMBIGUOUS
-    }
-}
-
-fn sign_of(x: Number) -> i8 {
-    if x > 0.0 {
-        1
-    } else if x < 0.0 {
-        -1
-    } else {
-        0
-    }
-}
-
 /// Scatter a compressed (bounded-entries-only) vector to full length
 /// through its expansion matrix. Entries without that bound stay 0.
 fn expand(compressed: &[Number], px: &Rc<dyn Matrix>, n: usize) -> Vec<Number> {
@@ -323,87 +267,6 @@ fn hessian_diagonal(hess: &Rc<dyn pounce_linalg::SymMatrix>, n: usize) -> Vec<Nu
         *d = he.values_mut()[i];
     }
     diag
-}
-
-/// A bounded row whose gradient vanishes at the iterate has no
-/// direction to measure curvature along: unidentified, exactly as a
-/// below-floor `q`, never `unbounded` (the bounds are real). The
-/// ratio is the raw `Σ/floor` lower bound; the geometric weight is
-/// degenerate at zero gradient.
-fn zero_gradient_row(sigma: Number, floor: Number) -> Entry {
-    Entry {
-        status: UNIDENTIFIED,
-        ratio: sigma / floor,
-        q_sign: 0,
-        off_path: false,
-        contaminated: false,
-        sigma,
-    }
-}
-
-/// Central-path check for one side: `s·z` within a factor of ten of `μ`.
-fn off_path(s: Number, z: Number, mu: Number) -> bool {
-    let comp = s * z;
-    comp > 10.0 * mu || comp < 0.1 * mu
-}
-
-/// Classified inactive yet `r` well above the `O(μ)` an inactive
-/// bound should carry: barrier curvature where none should be. The
-/// threshold is μ-relative because `inactive` MEANS `r = O(μ)`; a
-/// fixed constant can never sit below the inactive edge `√μ` at any
-/// converged μ (second review).
-fn contaminated(status: i8, r: Number, mu: Number) -> bool {
-    status == INACTIVE && r > 100.0 * mu
-}
-
-/// One classified entry in internal space, before the user-space
-/// scatter.
-#[derive(Clone, Copy)]
-struct Entry {
-    status: i8,
-    ratio: Number,
-    q_sign: i8,
-    off_path: bool,
-    contaminated: bool,
-    /// The RAW barrier diagonal, whatever weight classification used.
-    sigma: Number,
-}
-
-const NOT_CLASSIFIED: Entry = Entry {
-    status: UNBOUNDED,
-    ratio: Number::NAN,
-    q_sign: 0,
-    off_path: false,
-    contaminated: false,
-    sigma: 0.0,
-};
-
-/// Classify one bounded variable or row from its `Σ` and signed `q`.
-/// `off_path` is the caller's to fill: it reads the per-side slack and
-/// multiplier, not the ratio.
-fn classify_entry(sigma: Number, q_signed: Number, floor: Number, mu: Number) -> Entry {
-    let q_sign = sign_of(q_signed);
-    let q = q_signed.abs();
-    if q < floor {
-        return Entry {
-            status: UNIDENTIFIED,
-            ratio: sigma / floor,
-            q_sign,
-            off_path: false,
-            contaminated: false,
-            sigma,
-        };
-    }
-    let r = sigma / q;
-    let status = classify(r, mu);
-    Entry {
-        status,
-        ratio: r,
-        q_sign,
-        off_path: false,
-        contaminated: contaminated(status, r, mu),
-        sigma,
-    }
 }
 
 /// The per-variable pieces both classifiers measure against, with the
@@ -1529,82 +1392,4 @@ pub(crate) fn hessian_vec(bs: &PdSensBacksolver, v_full: &[Number]) -> Result<Ve
         out[nl.var_x_to_full_x(i as Index) as usize] = *slot * dx / obj_scale;
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tight_mu_walks_all_five_regions() {
-        let mu = 1e-10; // edges at 1e-5 and 1e5
-        assert_eq!(classify(0.9e-5, mu), INACTIVE);
-        assert_eq!(classify(1.1e-5, mu), AMBIGUOUS); // gap: edge..band
-        assert_eq!(classify(0.5, mu), WEAKLY_ACTIVE);
-        assert_eq!(classify(50.0, mu), AMBIGUOUS); // gap: band..edge
-        assert_eq!(classify(2e5, mu), STRONGLY_ACTIVE);
-    }
-
-    #[test]
-    fn band_edges_are_inclusive_and_mu_edges_separate() {
-        let mu = 1e-10;
-        assert_eq!(classify(1e-1, mu), WEAKLY_ACTIVE);
-        assert_eq!(classify(1e1, mu), WEAKLY_ACTIVE);
-        // either side of each μ-edge (exactly-on is float-fragile:
-        // √(1e-10) is not exactly 1e-5)
-        assert_eq!(classify(0.99e-5, mu), INACTIVE);
-        assert_eq!(classify(1.01e-5, mu), AMBIGUOUS);
-        assert_eq!(classify(0.99e5, mu), AMBIGUOUS);
-        assert_eq!(classify(1.01e5, mu), STRONGLY_ACTIVE);
-    }
-
-    #[test]
-    fn loose_mu_refuses_the_weak_call() {
-        // μ > 1e-4: three statuses only, the band reports ambiguous
-        for mu in [1e-3, 1e-2, 1e-1] {
-            assert_eq!(classify(0.05, mu), INACTIVE);
-            assert_eq!(classify(1.0, mu), AMBIGUOUS);
-            assert_eq!(classify(50.0, mu), STRONGLY_ACTIVE);
-        }
-        // at μ = 1e-4 exactly the μ-branch is not taken: the weak call
-        // is available, with a decade of margin edge-to-band
-        assert_eq!(classify(1.0, 1e-4), WEAKLY_ACTIVE);
-    }
-
-    #[test]
-    fn off_path_is_a_factor_of_ten_both_ways() {
-        let mu = 1e-2;
-        assert!(!off_path(1.0, 1e-2, mu)); // s·z = μ exactly
-        assert!(!off_path(0.5, 1e-2, mu)); // within 10×
-        assert!(off_path(1.0, 0.2, mu)); // 20× above
-        assert!(off_path(1.0, 5e-4, mu)); // 20× below
-    }
-
-    #[test]
-    fn contamination_is_mu_relative_and_inactive_only() {
-        let mu = 1e-10; // inactive edge at 1e-5, threshold at 1e-8
-        assert!(contaminated(INACTIVE, 1e-6, mu));
-        assert!(!contaminated(INACTIVE, 5e-9, mu));
-        assert!(!contaminated(WEAKLY_ACTIVE, 1.0, mu));
-        assert!(!contaminated(STRONGLY_ACTIVE, 1e5, mu));
-        // the flag is reachable: 100μ sits below the inactive edge √μ
-        // whenever μ < 1e-4, so an inactive r can exceed it
-        assert!(100.0 * mu < mu.sqrt());
-    }
-
-    #[test]
-    fn below_floor_reports_unidentified_with_the_sign() {
-        let e = classify_entry(0.5, 1e-12, 1e-8, 1e-10);
-        assert_eq!(e.status, UNIDENTIFIED);
-        assert_eq!(e.q_sign, 1);
-        let e = classify_entry(0.5, -1e-12, 1e-8, 1e-10);
-        assert_eq!(e.status, UNIDENTIFIED);
-        assert_eq!(e.q_sign, -1);
-        // negative curvature above the floor classifies on |q| but
-        // keeps its sign visible
-        let e = classify_entry(1.0, -2.0, 1e-8, 1e-10);
-        assert_eq!(e.status, WEAKLY_ACTIVE);
-        assert_eq!(e.q_sign, -1);
-        assert_eq!(e.ratio, 0.5);
-    }
 }

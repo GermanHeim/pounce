@@ -13,12 +13,13 @@ are documentation, not a second source of truth to keep hand-synced.
 ## What publishes, what does not
 
 The publishable set is exactly "every workspace member without
-`publish = false`". As of this writing that is these 20:
+`publish = false`". As of this writing that is these 21:
 
 | Crate                  | Publishes? | Role                                         |
 | ---------------------- | ---------- | -------------------------------------------- |
 | `pounce-common`        | yes        | foundation: types, exceptions, journal       |
 | `pounce-linalg`        | yes        | dense/sparse linear-algebra primitives       |
+| `pounce-sens-core`     | yes        | engine-agnostic sensitivity core (`SensBacksolver`) |
 | `pounce-linsol`        | yes        | symmetric linear-solver trait layer          |
 | `pounce-feral`         | yes        | pure-Rust sparse LDLᵀ backend                |
 | `pounce-hsl`           | yes        | optional HSL/MA57 backend (user supplies HSL)|
@@ -55,7 +56,7 @@ layered view (each layer depends only on earlier layers):
 
 Layer 0: `pounce-common`, `pounce-studio-core` (leaves)
 Layer 1: `pounce-linalg`
-Layer 2: `pounce-linsol`, `pounce-nlp`
+Layer 2: `pounce-linsol`, `pounce-nlp`, `pounce-sens-core`
 Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
          `pounce-nl`, `pounce-observability`, `pounce-presolve`, `pounce-qp`,
          `pounce-solve-report`
@@ -190,7 +191,7 @@ crates and drives `release-crates.yml`.)
 
 | Surface                 | Workflow                              | Trigger                  |
 | ----------------------- | ------------------------------------- | ------------------------ |
-| crates.io (20 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
+| crates.io (21 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
 | PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
 | PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
 | ghcr.io container images| `release-docker.yml`                  | `v*` tag / push to main  |

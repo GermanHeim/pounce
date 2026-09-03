@@ -73,7 +73,11 @@ it returns the **global** optimum, detects primal/dual infeasibility, and
 offers warm-starting, batched and multiple-RHS solving, a build-once /
 solve-many `QpFactorization` handle, and post-optimal **sensitivity**
 (`QpSensitivity` — the sIPOPT analog). The CLI's `auto` routing classifies
-an `.nl` and sends LP/convex-QP problems here automatically.
+an `.nl` and sends LP/convex-QP problems here automatically, and a `.nl`
+carrying the sIPOPT `sens_*` suffixes is now **answered here** rather than
+rerouted to the general NLP engine — see
+[LP/QP routing](lp-qp-routing.md#sensitivity-is-served-here-not-routed-away)
+for what still routes away and why.
 
 - Python: `pounce.qp.solve_qp` (and `solve_qp_batch`, `solve_qp_multi_rhs`).
 
@@ -221,8 +225,17 @@ These are not solvers you select, but stages and tools the solvers share:
   the objective; `pounce-l1penalty` offers an ℓ₁-exact penalty
   reformulation for degenerate / LICQ-violating problems.
 - **Sensitivity** — `pounce-sensitivity` gives sIPOPT-style parametric
-  steps and reduced Hessians for the NLP; `QpSensitivity` does the same for
-  the convex QP. See [Sensitivity Analysis](sensitivity.md).
+  steps and reduced Hessians for the NLP. `QpSensitivity` does the same
+  **kind** of thing for the convex QP and conic arms — the parametric step,
+  fix-relax, path following, activity classification, and a face
+  decomposition for every cone family — over a shared core
+  (`pounce-sens-core`), so the two cannot drift on what a kink is. They are
+  not the same surface: the NLP arm additionally has the corrector, the
+  covariance/identifiability statistics, and the directional decision at a
+  kink, and the two reduced Hessians are different computations behind one
+  word (sIPOPT's Schur route vs a null-space projection). See
+  [Sensitivity Analysis](sensitivity.md) and
+  [The convex/conic solver](convex-solver.md#post-optimal-sensitivity-qpsensitivity).
 - **Cone library** (`pounce-convex`) — nonnegative, second-order,
   exponential, power, and (for small dense problems) positive-semidefinite
   cones, so small SDPs solve as a convex class. The PSD cone cannot yet be

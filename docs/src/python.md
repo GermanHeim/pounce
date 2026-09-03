@@ -451,6 +451,45 @@ built and dropped where it belongs), which is what `pounce.jax`'s
 `PanicException` — note that this derives from `BaseException`, so an
 `except Exception` will *not* catch it.
 
+## Post-optimal sensitivity
+
+Two APIs, one per solver arm, sharing a decision core.
+
+For an **NLP**, `pounce.sensitivity` is the sIPOPT port: solve once, then
+reuse the converged KKT factor for a first-order step in a parameter, a
+reduced Hessian, activity classification, covariance and identifiability
+statistics. `pounce.Solver` is the session form.
+
+```python
+from pounce.sensitivity import solve_for_sensitivity, solution, solution_report
+
+sess = solve_for_sensitivity(problem, pins={"p": 1})
+x_new = solution(sess, [1], [0.05])          # first-order step
+rep   = solution_report(sess, [1], [0.05])   # what it did about the bounds
+rep.activity["k"], rep.refined               # class, and whether it was refined
+```
+
+`solution_report` classifies every bound and row. Read `rep.refined` before
+acting on a class: the cheap classifier reports `"ambiguous"` for a genuine
+kink whenever the coordinate is coupled — that class is **not** "probably not
+a kink" — and the report re-classifies those entries with the reduced
+curvature, at one back-solve each, recording `name -> (before, after)`. Pass
+`refine_activity=False` to skip it — at a price in both directions: the cost
+scales with the ambiguous population (measured at 62k: 675 entries, ~29 ms
+each, 0.67 s against 20.2 s), and skipping leaves genuine kinks sitting in
+`"ambiguous"`. [The sensitivity chapter](sensitivity.md) has the trade-off.
+
+For an **LP, convex QP or conic program**, `pounce.qp.QpSensitivity` is the
+counterpart. It solves internally with the convex interior-point solver and
+exposes no `cones=` argument, so a Python caller cannot hand it a conic
+solution by accident — the Rust API's `build_conic` is where cones are
+declared, and where every cone family's face decomposition lives. See
+[Sensitivity Analysis](sensitivity.md#the-convex-arm-qpsensitivity) for what
+the two arms do and do not share.
+
+Both hold a factorization and are **thread-affine** — see
+[Sharing one `NlProblem` across threads](#sharing-one-nlproblem-across-threads).
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

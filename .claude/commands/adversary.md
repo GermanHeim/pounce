@@ -97,6 +97,7 @@ does not clearly discriminate. Keep all families moving.
 | `pounce-restoration/*` | `nlp` — infeasible / badly-scaled / hard starts |
 | `pounce-presolve/*` | `lp`, `qp` (redundant rows, fixed vars, dup columns) |
 | `pounce-sensitivity/*` | `sensitivity`, `diff` |
+| `pounce-sens-core/*` | `sensitivity`, `diff` — reached through both arms |
 | `pounce-algorithm/batch.rs` | `batch` |
 | `pounce-linalg/*` | any — reached through every solve |
 

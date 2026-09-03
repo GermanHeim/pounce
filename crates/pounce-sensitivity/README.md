@@ -30,17 +30,27 @@ authors, volume/issue/pages all confirmed.
 The port follows the upstream sIPOPT contrib at
 [`ref/Ipopt/contrib/sIPOPT/src/`][upstream-src]
 in this repo (EPL-2.0, © Hans Pirnay 2009–2011 per the headers).
-Phase-A files mapped:
-
-| pounce-sensitivity                        | upstream                                                                                          |
-|-------------------------------------------|---------------------------------------------------------------------------------------------------|
-| `src/schur_data.rs` — `SchurData` trait   | [`SensSchurData.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensSchurData.hpp) (lines 17–177)        |
-| `src/schur_data.rs` — `IndexSchurData` | [`SensIndexSchurData.{hpp,cpp}`](../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.hpp)       |
-| `src/p_calculator.rs` — `PCalculator` trait | [`SensPCalculator.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensPCalculator.hpp) (lines 17–133)   |
-| `src/backsolver.rs` — `SensBacksolver` trait | [`SensBacksolver.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensBacksolver.hpp)                    |
 
 Every public item in this crate documents the upstream symbol it mirrors,
 with line numbers when they're stable.
+
+## Relationship to `pounce-sens-core`
+
+The engine-agnostic half of the port lives in
+[`pounce-sens-core`](../pounce-sens-core): the `SensBacksolver` contract, the
+fix-relax / path / directional machinery in `boundcheck`, and the
+Schur-complement stack. This crate is the **NLP filter-IPM implementation** of
+that contract — `PdSensBacksolver`, the `Solver` session, the sIPOPT option
+surface, the corrector, and activity classification, all of which read the
+filter-IPM's own iterate and do not generalize.
+
+The split exists so `pounce-convex` can reach the same parametric machinery
+without depending on the NLP engine. It does not change this crate's API:
+every module and item that lived here before is re-exported at its original
+path, so `pounce_sensitivity::boundcheck::refine_step_onto_bounds` and
+`pounce_sensitivity::SensBacksolver` resolve exactly as they did. The
+upstream-file mapping table for the moved files now lives in that crate's
+README.
 
 ## License
 

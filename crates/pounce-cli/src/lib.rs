@@ -8,6 +8,7 @@ pub mod cbf;
 pub mod check_x0;
 pub mod citations;
 pub mod cli;
+pub mod convex_sens;
 pub mod counting_tnlp;
 pub mod debug_repl;
 pub mod no_hessian_tnlp;
