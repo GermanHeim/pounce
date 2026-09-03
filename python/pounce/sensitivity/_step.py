@@ -517,7 +517,9 @@ class SolutionReport:
         constraints. Both are empty when `bounds_relaxed` is true.
 
         Entries the cheap classifier could not call are **refined**
-        before they get here, which is what `refined` records. The
+        before they get here -- unless `refine_activity=False`, which
+        leaves the cheap class standing and `refined` empty. Either
+        way `refined` is what says which reading produced a verdict. The
         classifier normalizes a variable's barrier diagonal by the
         Hessian's diagonal and a row's by the curvature along the row's
         own gradient, while the multiplier that produced it is
@@ -799,8 +801,27 @@ def solution_report(session, pin_rows, deltas, max_iter=None,
     kink is ambiguous to the cheap rule at every tolerance, so leaving
     it unrefined reports "undetermined" for a question that has an
     answer -- the gh#763 misreading, in the report a caller actually
-    looks at. It costs one back-solve per ambiguous entry and nothing
-    when none are; pass False to skip it.
+    looks at.
+
+    It costs one back-solve per ambiguous entry, so the price is set by
+    the **ambiguous population**, not by the model size, and the two are
+    not the same thing. Measured in review of #889 on a 62k-variable
+    Radau collocation column: 675 ambiguous entries, ~29 ms each, and
+    the call goes 0.67 s -> 20.2 s against the same call with the
+    refinement off. Nothing when none are ambiguous. Pass False to skip
+    it, at the price the next paragraph names.
+
+    What skipping costs is not speed-for-nothing: a coupled kink is
+    ambiguous to the cheap rule at every tolerance, so the entries that
+    come back "ambiguous" unrefined are a *mixture* of genuine kinks and
+    genuine non-kinks, and no amount of re-solving separates them. A
+    caller who reads that class as "probably not a kink" has made the
+    gh#763 inference. `python/pounce/examples/asnmpc_cstr.py` is the
+    worked case: it calls this in a latency-measured control loop, and
+    its online guard is narrower *because* the refinement runs, so
+    switching it off there widens the guard rather than only speeding it
+    up. Decide it that way round -- what the class is for -- rather than
+    on the timing alone.
 
     max_iter is accepted for positional compatibility and does nothing.
     It used to budget the directional decision here, so passing it, in

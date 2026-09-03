@@ -474,7 +474,10 @@ acting on a class: the cheap classifier reports `"ambiguous"` for a genuine
 kink whenever the coordinate is coupled — that class is **not** "probably not
 a kink" — and the report re-classifies those entries with the reduced
 curvature, at one back-solve each, recording `name -> (before, after)`. Pass
-`refine_activity=False` to skip it.
+`refine_activity=False` to skip it — at a price in both directions: the cost
+scales with the ambiguous population (measured at 62k: 675 entries, ~29 ms
+each, 0.67 s against 20.2 s), and skipping leaves genuine kinks sitting in
+`"ambiguous"`. [The sensitivity chapter](sensitivity.md) has the trade-off.
 
 For an **LP, convex QP or conic program**, `pounce.qp.QpSensitivity` is the
 counterpart. It solves internally with the convex interior-point solver and

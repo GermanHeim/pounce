@@ -759,6 +759,23 @@ returning, at one back-solve per ambiguous entry and none when there are
 none, and `refined` names each one that moved. Pass `refine_activity=False`
 to skip it and take the cheap verdict as-is.
 
+**What that costs scales with the ambiguous population, not the model
+size**, and on a collocation model the two are far apart. Measured in
+review of gh#889 on a 62k-variable Radau collocation column: 675 entries
+were ambiguous, each costs about 29 ms, and the call runs 0.67 s with the
+refinement off against 20.2 s with it on. Budget it as
+`ambiguous × one back-solve`, and read `len(rep.refined)` afterwards for
+what a given model actually spent.
+
+Skipping is not free either, which is the half worth stating: the entries
+that come back `"ambiguous"` unrefined are a *mixture* of genuine kinks and
+genuine non-kinks that no tolerance separates, so the cheap band is wider
+in the direction that matters. `python/pounce/examples/asnmpc_cstr.py`
+calls the report inside a latency-measured control loop and its online
+guard is narrower **because** the refinement runs — there, switching it off
+widens the guard rather than only making the call quicker. Decide it on
+what the class is for, not on the timing alone.
+
 `refine_stop` says why the `"fix_relax"` refinement stopped, one of
 `"settled"`, `"iteration_limit"`, `"degrees_of_freedom"` or
 `"worse_than_plain"`, and is None under the other two modes. A pass

@@ -235,6 +235,13 @@ changes.
   thing that was missing: `"ambiguous"` and "refined to weakly_active" are
   different answers and used to be indistinguishable.
 
+  **Budget it by the ambiguous population, not the model size.** Measured in
+  review on a 62k-variable Radau collocation column: 675 ambiguous entries at
+  about 29 ms each, taking the call from 0.67 s to 20.2 s. `len(rep.refined)`
+  says what a given model spent. Switching it off is not purely a saving —
+  unrefined `"ambiguous"` mixes genuine kinks with genuine non-kinks, so the
+  `asnmpc_cstr` guard, which reads these classes, is *wider* without it.
+
 - **The `pounce-rs` facade names the sensitivity result types, not just the
   drivers.** It re-exported the things you *call* — `SensSolve`, `Solver`, the
   Schur stack — and none of the things they *return*, so a caller reaching

@@ -1803,7 +1803,14 @@ def sens_solution_report(model, perturb, max_iter=None,
     kink -- routine on a collocation model -- is "ambiguous" to the
     cheap rule at every tolerance, and reading that class as "probably
     not a kink" is what shipped gh#763. It costs one back-solve per
-    ambiguous entry and nothing when there are none.
+    ambiguous entry and nothing when there are none -- so the price is
+    set by the ambiguous population rather than the model size. Measured
+    in review of #889 on a 62k-variable Radau collocation column: 675
+    ambiguous entries at ~29 ms each, 0.67 s -> 20.2 s. Passing
+    `refine_activity=False` buys that back and leaves the cheap class
+    standing, which on a collocation model means genuine kinks stay in
+    "ambiguous"; `pounce.sensitivity`'s `solution_report` docstring
+    carries the full trade-off.
     """
     session = _model_session(model, _NO_SESSION_PARAM)
     pin_idx, deltas = _perturbation_deltas(session, perturb)
