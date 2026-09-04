@@ -85,6 +85,26 @@ ROUTES: Dict[str, Route] = {
         continuation=True,
         why="Scholtes continuation with full primal/dual/barrier warm starts.",
     ),
+    # The finish that a *square* model can actually run. Same feasible
+    # set as the NCP equality finish -- with `G, H >= 0` the inequality
+    # `G*H <= 0` is active only where `G*H = 0` -- but stated as an
+    # inequality, so it does not count against the `n_x_var < n_c`
+    # degrees-of-freedom gate. See the README: on this fixture the
+    # equality finish is refused at all 34 temperatures and this one
+    # succeeds at all 34.
+    "scholtes_then_ineq": Route(
+        name="scholtes_then_ineq",
+        lowering="scholtes",
+        options={},
+        warm="full",
+        continuation=True,
+        why=(
+            "Scholtes continuation with full warm starts, then one direct "
+            "G*H <= 0 solve seeded from it. Same feasible set as the NCP "
+            "equality finish, without adding an equality row."
+        ),
+        finish="prod_ineq",
+    ),
     "scholtes_then_ncp": Route(
         name="scholtes_then_ncp",
         lowering="scholtes",

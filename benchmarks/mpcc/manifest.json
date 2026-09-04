@@ -92,6 +92,13 @@
       "options": {},
       "why": "Scholtes continuation with full primal/dual/barrier warm starts."
     },
+    "scholtes_then_ineq": {
+      "lowering": "scholtes",
+      "warm": "full",
+      "continuation": true,
+      "options": {},
+      "why": "Scholtes continuation with full warm starts, then one direct G*H <= 0 solve seeded from it. Same feasible set as the NCP equality finish, without adding an equality row."
+    },
     "scholtes_then_ncp": {
       "lowering": "scholtes",
       "warm": "full",

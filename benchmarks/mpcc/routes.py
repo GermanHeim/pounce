@@ -189,6 +189,33 @@ ROUTES: Dict[str, Route] = {
     # a cold start on the cases where a pair is biactive. Run in
     # sequence they cover each other, which is a measurement (see the
     # route summary) rather than a hope.
+    # The same composition finishing on `G*H <= 0` instead of `G*H = 0`.
+    # The two lowerings have **identical feasible sets** -- with
+    # `G, H >= 0` the inequality is active only at `G*H = 0` -- so this
+    # is not a weaker finish; it is the same finish stated without
+    # adding an equality row. That distinction is invisible on this
+    # corpus and decisive off it: an equality row counts against the
+    # `n_x_var < n_c` degrees-of-freedom gate that
+    # `application.rs` mirrors from upstream Ipopt
+    # (`IpOrigIpoptNLP.cpp:299`), and a *square* source model -- which
+    # every equilibrium-stage process model is -- has no slack to spare.
+    # gh#776's Gate 1 flash is refused by that gate at every one of its
+    # 34 temperatures, so `scholtes_then_ncp` runs only its continuation
+    # half there. This arm exists to measure whether the inequality
+    # finish can simply replace the equality one.
+    "scholtes_then_ineq": Route(
+        name="scholtes_then_ineq",
+        lowering="scholtes",
+        options={},
+        warm="full",
+        continuation=True,
+        why=(
+            "Scholtes continuation with full warm starts, then one direct "
+            "G*H <= 0 solve seeded from it. Same feasible set as the NCP "
+            "equality finish, without adding an equality row."
+        ),
+        finish="prod_ineq",
+    ),
     "scholtes_then_ncp": Route(
         name="scholtes_then_ncp",
         lowering="scholtes",
