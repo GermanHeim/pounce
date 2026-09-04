@@ -93,6 +93,10 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/site/demo/python/__pycache__"
           test -s "$GITHUB_WORKSPACE/site/demo/pounce.wasm"
           test -s "$GITHUB_WORKSPACE/site/demo/python/pounce.wasm"
+          # The emscripten wheel is committed rather than built here; if it
+          # ever stops being staged, `import pounce` on the live demo fails
+          # and only a visitor would find out.
+          test -s "$GITHUB_WORKSPACE/site/demo/python/wheels/pounce-wheel.json"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

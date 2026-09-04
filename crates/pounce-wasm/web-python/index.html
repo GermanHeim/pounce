@@ -3,7 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>POUNCE + Pyomo in the browser</title>
+<title>POUNCE in the browser</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<script>
+  // Resolve the theme before first paint, so a dark-mode reload does not flash
+  // the light palette. "auto" is resolved here rather than in a media query so
+  // the CSS below needs exactly one dark block: everything downstream — the
+  // palette, the token colours, which logo is visible — keys off data-theme,
+  // which is always explicitly light or dark. app.js re-resolves on change.
+  (function () {
+    var pref = 'auto';
+    try { pref = localStorage.getItem('pounce-theme') || 'auto'; } catch (e) {}
+    var dark = pref === 'dark' ||
+      (pref === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
 <style>
   :root {
     --bg: #fbfaf8; --panel: #ffffff; --ink: #1b1a18; --muted: #6b6660;
@@ -11,12 +26,10 @@
     --ok: #1f7a4d; --bad: #a32020;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16150f; --panel: #1f1e18; --ink: #efe9df; --muted: #a29a8c;
-      --line: #35322a; --accent: #f0913f; --accent-soft: #2a2118;
-      --ok: #6ec894; --bad: #ef8080;
-    }
+  :root[data-theme="dark"] {
+    --bg: #16150f; --panel: #1f1e18; --ink: #efe9df; --muted: #a29a8c;
+    --line: #35322a; --accent: #f0913f; --accent-soft: #2a2118;
+    --ok: #6ec894; --bad: #ef8080;
   }
   * { box-sizing: border-box; }
   body {
@@ -24,7 +37,20 @@
     font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   main { max-width: 62rem; margin: 0 auto; }
-  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .masthead { display: flex; align-items: center; justify-content: space-between;
+              gap: 1rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  h1 { font-size: 1.6rem; margin: 0; letter-spacing: -.01em;
+       display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+  /* The mark supplies the word POUNCE, so the heading beside it does not
+     repeat it — the alt text does, and reads as one line to a screen reader.
+     Its viewBox is cropped to the ink, so the height below is the wordmark's
+     own height rather than the height of the artboard it was drawn on. */
+  h1 img { height: 2.6rem; width: auto; display: block; }
+  :root[data-theme="dark"] .logo-light,
+  :root:not([data-theme="dark"]) .logo-dark { display: none; }
+  .theme { color: var(--muted); font-size: .85rem;
+           display: flex; align-items: center; gap: .4rem; }
+  .theme select { font-size: 13px; padding: .3rem .4rem; }
   h2 { font-size: 1rem; margin: 0 0 .75rem; text-transform: uppercase;
        letter-spacing: .08em; color: var(--muted); }
   .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 46rem; }
@@ -72,15 +98,13 @@
   .tok-def      { color: #1a6fa8; font-weight: 600; }
   .tok-decorator{ color: #8a6a12; }
   .tok-op       { color: #7a736a; }
-  @media (prefers-color-scheme: dark) {
-    .tok-keyword  { color: #e08ae8; }
-    .tok-builtin  { color: #7cc4f0; }
-    .tok-string   { color: #8fd6a8; }
-    .tok-number   { color: #f0913f; }
-    .tok-def      { color: #7cc4f0; }
-    .tok-decorator{ color: #d8bf6a; }
-    .tok-op       { color: #9a9188; }
-  }
+  :root[data-theme="dark"] .tok-keyword  { color: #e08ae8; }
+  :root[data-theme="dark"] .tok-builtin  { color: #7cc4f0; }
+  :root[data-theme="dark"] .tok-string   { color: #8fd6a8; }
+  :root[data-theme="dark"] .tok-number   { color: #f0913f; }
+  :root[data-theme="dark"] .tok-def      { color: #7cc4f0; }
+  :root[data-theme="dark"] .tok-decorator{ color: #d8bf6a; }
+  :root[data-theme="dark"] .tok-op       { color: #9a9188; }
   select {
     font: 14px system-ui, sans-serif; padding: .5rem .6rem; color: var(--ink);
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -92,10 +116,22 @@
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: transparent; color: var(--accent);
                  border: 1px solid var(--accent); padding: .5rem 1rem; font-size: 14px; }
+  /* The console keeps its terminal colours in both themes — it is showing solver
+     output, not page content. The border is what separates it from the page in
+     dark mode, where its ground and the page's are a shade apart. */
   pre#out {
     margin: 0; padding: .9rem 1rem; min-height: 8rem; max-height: 30rem; overflow: auto;
     background: #14130f; color: #e6ded0; border-radius: 10px;
+    border: 1px solid var(--line);
     font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word;
+  }
+  /* A figure PNG is drawn on matplotlib's own white ground, so it stays white
+     in dark mode — inverting a plot's colours is the script's call, not the
+     page's. The white card needs the border to sit on the dark page. */
+  #figures { display: grid; gap: 1rem; }
+  #figures img {
+    display: block; max-width: 100%; height: auto;
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
   }
   .status { color: var(--muted); font-size: .9rem; }
   .status.err { color: var(--bad); }
@@ -106,19 +142,40 @@
 </head>
 <body>
 <main>
-  <h1>POUNCE + Pyomo in the browser</h1>
+  <header class="masthead">
+    <h1>
+      <img class="logo-light" src="./pounce-logo.svg" alt="POUNCE" width="1408" height="765">
+      <img class="logo-dark" src="./pounce-logo-dark.svg" alt="POUNCE" width="1408" height="765">
+      <span>in the browser</span>
+    </h1>
+    <label class="theme">
+      Theme
+      <select id="theme">
+        <option value="auto">Auto</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  </header>
   <p class="lede">
-    Write a Pyomo model in Python, solve it with POUNCE — both running in this tab.
-    <a href="https://pyodide.org">Pyodide</a> supplies CPython and Pyomo compiled to
-    WebAssembly; Pyomo writes the AMPL <code>.nl</code>, the POUNCE wasm module solves
-    it, and the <code>.sol</code> is loaded back so <code>x.value</code> and
-    <code>model.dual[c]</code> read as they would after any local solve. No server, no
-    install, nothing uploaded.
+    Write Python, solve it with POUNCE — both running in this tab.
+    <a href="https://pyodide.org">Pyodide</a> supplies CPython compiled to WebAssembly,
+    and there are two ways to reach the solver from it. <code>import pounce</code> gets
+    the <a href="https://pypi.org/project/pounce-solver/"><code>pounce-solver</code></a>
+    package itself, built for emscripten: <code>minimize</code>, <code>curve_fit</code>,
+    the <code>Problem</code> class and numpy arrays, the same API as a local install.
+    <code>import pounce_browser</code> takes the Pyomo route instead — Pyomo writes the
+    AMPL <code>.nl</code>, a standalone POUNCE wasm module solves it, and the
+    <code>.sol</code> is loaded back so <code>x.value</code> and
+    <code>model.dual[c]</code> read as they would after any local solve. Whichever a
+    script imports is what gets downloaded, on the first run that needs it. No server,
+    no install, nothing uploaded.
   </p>
 
   <div class="row">
     <select id="example" aria-label="Example model"></select>
     <button id="run" disabled>Run</button>
+    <button id="cancel" class="ghost" disabled>Cancel</button>
     <button id="dl-code" class="ghost">Download script</button>
     <span id="status" class="status">starting…</span>
   </div>
@@ -127,14 +184,24 @@
     <h2>Script</h2>
     <textarea id="code" spellcheck="false"></textarea>
     <p class="note">
-      <code>pounce_browser.solve(model, options=…)</code> takes <code>ipopt.opt</code>-format
-      options — the same names the POUNCE CLI and Python API use. Ctrl/⌘-Enter runs.
+      Edit freely — the worker installs what your script imports, so
+      <code>import pounce</code> and <code>import pounce_browser</code> both work from a
+      blank editor. On the Pyomo route,
+      <code>pounce_browser.solve(model, options=…)</code> takes
+      <code>ipopt.opt</code>-format options — the same names the POUNCE CLI and Python
+      API use. <code>import matplotlib</code> works as well —
+      <code>plt.show()</code> renders the figure below the output. Ctrl/⌘-Enter runs.
     </p>
   </section>
 
   <section>
     <h2>Output</h2>
     <pre id="out"></pre>
+  </section>
+
+  <section id="figures-panel" hidden>
+    <h2>Figures</h2>
+    <div id="figures"></div>
   </section>
 
   <footer>
