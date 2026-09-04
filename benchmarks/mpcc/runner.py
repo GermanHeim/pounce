@@ -470,10 +470,22 @@ def run_cell(
         )
         # Report the lowering the answer actually came from, which after
         # a degrees-of-freedom fallback is not `route.finish`.
+        #
+        # Read straight off the stage, with no `or route.finish` guard
+        # behind it. The guard was there and it was a liability: it
+        # depended on `StageRecord.lowering` defaulting to `""`, so a
+        # future non-empty sentinel default would have made this report
+        # the route's *nominal* finish for a solve that actually used the
+        # fallback -- the exact misreport this field exists to prevent,
+        # and silently. It was also dead: `lowering_here` above is always
+        # one of `route.finish`, `route.lowering` or
+        # `route.finish_fallback`, and the single `StageRecord(...)` in
+        # this module sets `lowering=` from it unconditionally, so the
+        # empty string cannot reach here. If it ever does, that is a bug
+        # in the stage constructor and should surface as one rather than
+        # be papered over with a plausible-looking default.
         rec.lowering = (
-            finish_stage.lowering or route.finish
-            if finish_stage is not None
-            else route.lowering
+            finish_stage.lowering if finish_stage is not None else route.lowering
         )
     rec.accepted_stages = sum(1 for s in stages if s.accepted)
     rec.rejected_stages = sum(1 for s in stages if not s.accepted)
