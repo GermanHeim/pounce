@@ -5,6 +5,12 @@
 #   crates/pounce-wasm/build.sh --serve  # ...and serve web/ on :8000
 #
 # Requires the wasm target once:  rustup target add wasm32-wasip1
+#
+# This builds the standalone `wasm32-wasip1` module — the `.nl` page, and the
+# Python page's `import pounce_browser` route. It does NOT build the
+# `pounce-solver` wheel the Python page's `import pounce` route installs:
+# that is a `wasm32-unknown-emscripten` build with its own pinned toolchain,
+# and it lives in `crates/pounce-wasm/build-wheel.sh`.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

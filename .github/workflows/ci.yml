@@ -147,6 +147,18 @@ jobs:
       - name: Solve a model in wasm
         run: node crates/pounce-wasm/tests/smoke.mjs
 
+      # The emscripten `pounce-solver` wheel the Python page installs for
+      # `import pounce` is committed, not built here: it needs a pinned
+      # pyodide-build xbuildenv, a patched emsdk and a Rust nightly with a
+      # wasm-EH sysroot — minutes of download for an artifact that only
+      # changes when the version or the Pyodide pin does. What CI can do
+      # cheaply is enforce the three things that make it stale: the wheel
+      # exists, its Pyodide version matches `worker.js`'s pin, and its
+      # version matches `python/pyproject.toml`. A version bump that forgets
+      # the rebuild fails here rather than at a visitor's `import pounce`.
+      - name: Staged emscripten wheel matches the page and the version
+        run: crates/pounce-wasm/build-wheel.sh --check
+
       # The Python-page highlighter is one regex with alternation — the kind
       # of code that breaks quietly (a mis-numbered backreference once made
       # every string containing an escape fall apart, and the page still
