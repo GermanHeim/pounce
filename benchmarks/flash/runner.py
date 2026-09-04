@@ -287,6 +287,24 @@ def solve_route(
                 # -- so without this the composition is its continuation
                 # half wearing the composition's name. See
                 # `routes.Route.finish_fallback`.
+                #
+                # `nlp.n` is the *total* variable count, while the gate
+                # this predicts (`application.rs`, mirroring
+                # `IpOrigIpoptNLP.cpp:299`) tests the *free* count
+                # `n_x_var < n_c`, which under the default
+                # `make_parameter` excludes fixed variables. Those differ
+                # whenever a variable is fixed, and the natural reading
+                # is that this predicate is therefore too weak -- that a
+                # model with fixed variables could trip the gate without
+                # the fallback firing, silently degrading the route
+                # again. It cannot: `tnlp_adapter.rs` mirrors
+                # `IpTNLPAdapter.cpp:623-633` and auto-switches to
+                # `relax_bounds` exactly when dropping fixed variables
+                # would leave `n_x_var < n_c`, which puts them back and
+                # collapses the free count to the total. Equality
+                # classification is exact `lo == hi` on both sides. So
+                # the two predicates agree on every input that can fire,
+                # and `nlp.n` is the right quantity here.
                 n_eq = int(np.sum(nlp.cl == nlp.cu))
                 if nlp.n < n_eq:
                     finish_lowering = route.finish_fallback

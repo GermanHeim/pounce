@@ -73,11 +73,32 @@ def solved(case):
     return out
 
 
+#: The source-level verdicts `validate.validate` is required to return.
+#:
+#: Asserted as a set before the values are read, because the check below
+#: is a filter: it collects the `_ok` keys that came back *false*. An
+#: empty `validation`, or a rename that broke the `_ok` convention in a
+#: refactor, makes that filter empty too, and the test quietly degrades
+#: to `assert rec.ok` -- passing while checking nothing. Naming the keys
+#: turns that silent degradation into a failure.
+EXPECTED_OK_KEYS = frozenset({
+    "balance_ok",
+    "isofugacity_ok",
+    "regime_matches_oracle_ok",
+    "beta_matches_oracle_ok",
+    "phase_sums_match_oracle_ok",
+    "root_is_gibbs_optimal_ok",
+    "not_trivial_ok",
+})
+
+
 @pytest.mark.parametrize("temperature_k", flash_run.SMOKE_TEMPERATURES)
 def test_solver_reaches_the_flash(solved, temperature_k):
     """Status, then every source-level check the harness defines."""
     rec, ref = solved[temperature_k]
     assert rec.ok, f"{rec.status_msg} at {temperature_k} K"
+    missing = EXPECTED_OK_KEYS - set(rec.validation)
+    assert not missing, f"validation stopped reporting {sorted(missing)}"
     failed = [
         k
         for k, v in rec.validation.items()
@@ -99,6 +120,38 @@ def test_regime_and_vapor_fraction_match_the_oracle(solved, temperature_k):
     assert rec.beta == pytest.approx(ref.beta, abs=1e-6)
     assert rec.sum_x == pytest.approx(ref.sum_x, abs=1e-6)
     assert rec.sum_y == pytest.approx(ref.sum_y, abs=1e-6)
+
+
+@pytest.mark.parametrize("temperature_k", flash_run.SMOKE_TEMPERATURES)
+def test_the_finishing_solve_actually_runs(solved, temperature_k):
+    """The supported route ran *both* halves, on the lowering it had to use.
+
+    This is the one assertion that pins the degrees-of-freedom fallback,
+    and without it the defect that motivated the fallback is invisible to
+    this file. Measured, on a tree with the fallback removed: every other
+    test here still passes, because the continuation alone already lands
+    three orders inside `ORACLE_TOL` (`8.4e-10` against `1e-6`) and eight
+    inside `CORNER_TOL` (`1.8e-12` against `1e-4`). The regression would
+    show up only as two rows of a benchmark table quietly becoming equal
+    again -- which is the same detection mechanism that missed it the
+    first time.
+
+    Both halves of the assertion earn their place. `finish_applied` alone
+    stays true if the gate stops firing and the *equality* finish starts
+    running, which is a real change worth failing on rather than
+    absorbing: it would mean either the model stopped being square or the
+    solver's degrees-of-freedom gate moved.
+    """
+    rec, _ = solved[temperature_k]
+    assert rec.finish_applied, (
+        f"the finishing solve did not run at {temperature_k} K: "
+        f"{rec.finish_status_msg}"
+    )
+    assert rec.finish_lowering == "prod_ineq", (
+        f"finished on {rec.finish_lowering!r} at {temperature_k} K; a square "
+        "flash cannot run the equality finish, so this means the fallback "
+        "stopped firing"
+    )
 
 
 def test_the_path_crosses_all_three_regimes(solved):
