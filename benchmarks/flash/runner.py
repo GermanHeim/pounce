@@ -26,9 +26,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from pounce.examples.flash_mpcc import FlashCase, LoweredFlash, lower
+
 from . import routes as R
-from .lowering import LoweredFlash, lower
-from .spec import FlashCase
 
 
 @dataclasses.dataclass
@@ -338,10 +338,10 @@ def cold_start(case: FlashCase, temperature_k: float) -> np.ndarray:
     move the answer; it can and does move the iteration count, which is
     why it is here rather than in the solver's options.
     """
-    from . import oracle, thermo
+    from pounce.examples.flash_mpcc import rachford_rice, wilson_k
 
-    k = thermo.wilson_k(temperature_k, case.pressure_pa, case.mixture)
-    beta = oracle.rachford_rice(case.z, k)
+    k = wilson_k(temperature_k, case.pressure_pa, case.mixture)
+    beta = rachford_rice(case.z, k)
     beta = float(np.clip(beta, 1e-3, 1.0 - 1e-3))
     x = case.z / (1.0 + beta * (k - 1.0))
     y = k * x

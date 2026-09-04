@@ -56,8 +56,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from . import routes as R
+from pounce.examples.flash_mpcc import FlashCase
+
 from .runner import SolveRecord, cold_start, solve_route
-from .spec import FlashCase
 
 #: The four legs, as ``(direction, start mode)``.
 LEGS: Tuple[Tuple[str, str], ...] = (

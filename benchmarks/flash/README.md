@@ -13,6 +13,22 @@ was that no flash, tray or column work began from it. This is that work,
 and it stops at one flash. Nothing here is a tray, and nothing here
 should grow into one.
 
+## Where things live
+
+**The model is not in this directory.** The flash, its complementarity
+pairs, the lowerings and the independent oracle are
+`pounce.examples.flash_mpcc`, so that the wheel ships them and the
+tutorial can import them the way the other three application notebooks
+import theirs. This directory is the *evidence apparatus* around that
+model — routes, the measurement protocol, the traversal, provenance and
+the report — and keeping the two apart is what stops the harness from
+becoming a second, subtly different copy of the physics, which is the
+failure mode the cross-check exists to catch.
+
+The narrative walk-through, with figures, is
+[`python/notebooks/38_phase_changing_flash_mpcc.ipynb`](../../python/notebooks/38_phase_changing_flash_mpcc.ipynb);
+the user-facing page is [`docs/src/flash-mpcc.md`](../../docs/src/flash-mpcc.md).
+
 ## Running it
 
 Needs the built Python extension (`make python-ext` from the repo root),
@@ -56,7 +72,8 @@ cannot coexist. At `beta = 0` the balance forces `x = z`, the
 isofugacity rows collapse to Michelsen's tangent-plane stationarity for
 the trial vapor, and `Sy <= 1` is exactly `TPD >= 0`. The
 complementarity is not an encoding trick: it *is* the stability test.
-`spec.py` derives this at length, including where the normalization goes
+`pounce.examples.flash_mpcc` derives this at length, including where the
+normalization goes
 and what happens when it goes in the wrong place.
 
 The two regime switches are the two biactive points: at the bubble point
@@ -66,7 +83,8 @@ this way.
 
 ## What is checked, and against what
 
-`oracle.py` is a second calculation of the same flash: Michelsen
+The oracle in `pounce.examples.flash_mpcc` is a second calculation of the
+same flash: Michelsen
 tangent-plane stability with a multistart, per phase label, then
 Rachford--Rice with a Newton polish. It shares exactly one thing with
 the model — `phase_envelope.log_fugacity_coefficients` and the cubic
@@ -168,7 +186,7 @@ and *converged answers* were all right: the full traversal agreed with
 the oracle to 1e-11 at all 34 temperatures **with the wrong Hessian**.
 It costs iterations and robustness at the one place the fixture exists
 to test, and nothing reports it. The measurement table is in
-`lowering.py`.
+`pounce.examples.flash_mpcc`.
 
 **A present phase must sit at its lower-Gibbs cubic root; an incipient
 one need not.** The first draft asserted the root guard of both phases

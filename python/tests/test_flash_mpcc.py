@@ -12,7 +12,7 @@ What a failure here means
 
 These are *source-level* assertions: the phase regime, the vapor
 fraction and the two phase sums are compared against
-`benchmarks/flash/oracle.py`, an independent Michelsen stability plus
+`pounce.examples.flash_mpcc`, an independent Michelsen stability plus
 Rachford--Rice calculation that shares only the Peng--Robinson fugacity
 primitive with the model. So a red test is not "the NLP did not
 converge" -- it is "the solver's answer is not the flash", which is a
@@ -39,14 +39,20 @@ pytest.importorskip("scipy")
 if str(_BENCH) not in sys.path:
     sys.path.insert(0, str(_BENCH))
 
-flash = pytest.importorskip("flash")
-from flash import oracle, routes, run as flash_run, spec  # noqa: E402
+pytest.importorskip("flash")
+from flash import routes, run as flash_run  # noqa: E402
 from flash.runner import cold_start, solve_route  # noqa: E402
+from pounce.examples.flash_mpcc import (  # noqa: E402
+    GATE1_FLASH,
+    CORNER_TOL,
+    flash,
+    lower,
+)
 
 
 @pytest.fixture(scope="module")
 def case():
-    return spec.GATE1_FLASH
+    return GATE1_FLASH
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +68,7 @@ def solved(case):
     out = {}
     for t in flash_run.SMOKE_TEMPERATURES:
         rec = solve_route(case, t, route, cold_start(case, t))
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
+        ref = flash(t, case.pressure_pa, case.mixture)
         out[t] = (rec, ref)
     return out
 
@@ -117,7 +123,7 @@ def test_complementarity_is_reported_in_source_terms(solved, temperature_k):
     resolution rather than phase physics.
     """
     rec, _ = solved[temperature_k]
-    assert rec.source["compl_max"] <= spec.CORNER_TOL
+    assert rec.source["compl_max"] <= CORNER_TOL
     assert rec.source["balance_viol"] <= 1e-7
     assert rec.source["isofugacity_viol"] <= 1e-7
     assert rec.source["sign_viol"] <= 1e-9
@@ -143,7 +149,7 @@ def test_the_oracle_answer_solves_the_model(case):
     """The cross-check itself, with no solver in it.
 
     This is the assertion that caught the normalization defect recorded
-    in `flash/spec.py` -- and it caught it *only* at the single-phase
+    in `pounce.examples.flash_mpcc` -- and it caught it *only* at the single-phase
     temperatures, because the offending term is identically zero in the
     two-phase region. It is cheap and it is the reason the rest of this
     file means anything, so it runs on every temperature rather than on
@@ -151,13 +157,11 @@ def test_the_oracle_answer_solves_the_model(case):
     """
     import numpy as np
 
-    from flash import lowering
-
     worst, worst_t = 0.0, None
     for t in case.temperatures_k:
         t = float(t)
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
-        nlp = lowering.lower(case, t, "prod_eq")
+        ref = flash(t, case.pressure_pa, case.mixture)
+        nlp = lower(case, t, "prod_eq")
         c = nlp.constraints(case.pack(ref.beta, ref.x, ref.y))
         viol = float(np.max(np.maximum(np.maximum(nlp.cl - c, c - nlp.cu), 0.0)))
         if viol > worst:

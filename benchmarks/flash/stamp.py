@@ -30,14 +30,18 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 #: Files whose content defines the fixture. A change to any of them
 #: changes the model-data revision, and two result files whose
 #: revisions differ are two different benchmarks.
-_MODEL_FILES = ("spec.py", "thermo.py", "lowering.py", "oracle.py")
-
-#: The upstream module the thermodynamics is taken from. It is not in
-#: this directory, so it is hashed by path rather than by name -- a
-#: change to the Peng--Robinson layer changes this fixture's answers
-#: and must change its revision.
-_UPSTREAM = os.path.normpath(
-    os.path.join(_HERE, "..", "..", "python", "pounce", "examples", "phase_envelope.py")
+#:
+#: All of them live *outside* this directory: the model and its oracle
+#: are `pounce.examples.flash_mpcc`, so that the wheel ships them and
+#: notebook 38 can import them, and the Peng--Robinson layer under both
+#: is `pounce.examples.phase_envelope`. This harness is the evidence
+#: apparatus around that model, not a second copy of it -- so the
+#: revision is a hash of the model's files, not of the harness's.
+_MODEL_FILES = tuple(
+    os.path.normpath(
+        os.path.join(_HERE, "..", "..", "python", "pounce", "examples", name)
+    )
+    for name in ("flash_mpcc.py", "phase_envelope.py")
 )
 
 
@@ -52,7 +56,7 @@ def _git(*args: str) -> str:
 
 def model_data_revision() -> str:
     h = hashlib.sha256()
-    for path in [os.path.join(_HERE, n) for n in _MODEL_FILES] + [_UPSTREAM]:
+    for path in _MODEL_FILES:
         try:
             with open(path, "rb") as fh:
                 h.update(fh.read())

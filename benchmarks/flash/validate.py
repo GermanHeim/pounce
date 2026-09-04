@@ -61,9 +61,15 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from . import oracle as O
-from . import thermo
-from .spec import FlashCase
+from pounce.examples.flash_mpcc import (
+    FlashCase,
+    FlashResult,
+    flash,
+    is_trivial,
+    reduced_temperatures,
+    root_diagnostics,
+    supercritical_components,
+)
 
 #: Source-residual tolerance. Looser than the solver's ``tol`` on
 #: purpose: these are residuals of the *source* model at a point
@@ -78,15 +84,15 @@ SOURCE_TOL = 1e-7
 ORACLE_TOL = 1e-6
 
 
-def _oracle_at(case: FlashCase, temperature_k: float) -> O.FlashResult:
-    return O.flash(temperature_k, case.pressure_pa, case.mixture, case.z)
+def _oracle_at(case: FlashCase, temperature_k: float) -> FlashResult:
+    return flash(temperature_k, case.pressure_pa, case.mixture, case.z)
 
 
 def validate(
     case: FlashCase,
     v,
     temperature_k: float,
-    reference: Optional[O.FlashResult] = None,
+    reference: Optional[FlashResult] = None,
 ) -> Dict[str, object]:
     """Every source-level check at ``v``, with the numbers behind them."""
     v = np.asarray(v, dtype=float)
@@ -113,10 +119,10 @@ def validate(
 
     # -- the cubic-root guard, at both phase compositions -----------
     xn, yn = x / np.sum(x), y / np.sum(y)
-    rd_l = thermo.root_diagnostics(
+    rd_l = root_diagnostics(
         xn, temperature_k, case.pressure_pa, case.mixture, largest=False
     )
-    rd_v = thermo.root_diagnostics(
+    rd_v = root_diagnostics(
         yn, temperature_k, case.pressure_pa, case.mixture, largest=True
     )
     # Judged for the phases that are actually *present*, and merely
@@ -141,13 +147,13 @@ def validate(
     # -- the trivial solution ---------------------------------------
     k = case.k_values(v)
     out["max_abs_ln_k"] = float(np.max(np.abs(np.log(k))))
-    out["not_trivial_ok"] = bool(not thermo.is_trivial(k))
+    out["not_trivial_ok"] = bool(not is_trivial(k))
 
     # -- the supercritical record (recorded, not judged) ------------
-    out["supercritical_components"] = thermo.supercritical_components(
+    out["supercritical_components"] = supercritical_components(
         temperature_k, case.mixture
     )
-    out["reduced_temperatures"] = thermo.reduced_temperatures(temperature_k, case.mixture)
+    out["reduced_temperatures"] = reduced_temperatures(temperature_k, case.mixture)
     return out
 
 

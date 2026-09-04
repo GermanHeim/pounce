@@ -9,23 +9,28 @@ to exactly one: a single flash whose temperature path crosses
 single-liquid, two-phase and single-vapor, validated against an
 independent flash and stability calculation.
 
+Where the model lives
+---------------------
+
+**Not here.** The flash, its complementarity pairs, the lowerings and
+the independent oracle are `pounce.examples.flash_mpcc`, so that the
+wheel ships them and notebook 38 can import them the way the other three
+application tutorials import theirs. This directory is the *evidence
+apparatus* around that model, and keeping the two apart is what stops
+the harness from becoming a second, subtly different copy of the physics
+-- which is the failure mode the whole cross-check exists to catch.
+
 Layout
 ------
 
-``thermo``    Peng--Robinson layer over `pounce.examples.phase_envelope`,
-              plus the cubic-root, trivial-solution and supercritical
-              guards.
-``spec``      the flash as an MPCC: variables, rows, the two
-              complementarity pairs and what each branch means, and the
-              source-level residuals.
-``oracle``    the independent calculation: Michelsen tangent-plane
-              stability with a multistart, Rachford--Rice with a Newton
-              polish, and the switch-point bisection.
-``lowering``  MPCC -> smooth NLP, with exact JAX derivatives.
 ``routes``    the Gate 0 supported route, plus the arms Gate 1 compares
-              against it.
+              against it, and the kill-switch controls.
+``runner``    the measurement protocol for one solve, including the
+              continuation restart ladder.
 ``path``      the temperature traversal: both directions, cold and warm.
 ``validate``  source-level checks at a returned point.
-``run``       the CLI.
+``stamp``     provenance, including the explicit record that no DiscOpt
+              comparison was run and why.
+``run``       the CLI and the markdown report.
 ``selftest``  everything checkable without the solver.
 """

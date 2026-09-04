@@ -51,7 +51,16 @@ from typing import Callable, List, Tuple
 
 import numpy as np
 
-from . import lowering, oracle, spec, thermo
+from pounce.examples.flash_mpcc import (
+    GATE1_FLASH,
+    FlashCase,
+    bubble_and_dew,
+    fd_check,
+    flash,
+    is_trivial,
+    lower,
+    root_diagnostics,
+)
 
 #: Central-difference truncation floor at ``h = 1e-6`` on rows carrying
 #: a cubic root and a logarithm. Measured across the path rather than
@@ -70,33 +79,33 @@ def _check(name: str, ok: bool, detail: str = "") -> None:
         _FAILURES.append(name)
 
 
-def check_derivatives(case: spec.FlashCase) -> None:
+def check_derivatives(case: FlashCase) -> None:
     print("derivatives (JAX vs central differences)")
     worst_j = worst_h = 0.0
     for t in (230.0, 250.0, 268.0, 300.0, 324.0, 340.0, 360.0):
-        nlp = lowering.lower(case, t, "prod_eq")
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
+        nlp = lower(case, t, "prod_eq")
+        ref = flash(t, case.pressure_pa, case.mixture)
         points = [
             case.pack(ref.beta, ref.x, ref.y),
             case.pack(0.5, case.z.copy(), case.z.copy()),
         ]
         for v in points:
-            errs = lowering.fd_check(nlp, v)
+            errs = fd_check(nlp, v)
             worst_j = max(worst_j, errs["jac"])
             worst_h = max(worst_h, errs["hess"])
     _check("jacobian", worst_j <= JAC_TOL, f"worst {worst_j:.2e} <= {JAC_TOL:.0e}")
     _check("lagrangian hessian", worst_h <= HESS_TOL, f"worst {worst_h:.2e} <= {HESS_TOL:.0e}")
 
 
-def check_oracle_solves_the_mpcc(case: spec.FlashCase) -> None:
+def check_oracle_solves_the_mpcc(case: FlashCase) -> None:
     print("the oracle's answer satisfies the model's own rows")
     worst = 0.0
     worst_t = None
     for t in case.temperatures_k:
         t = float(t)
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
+        ref = flash(t, case.pressure_pa, case.mixture)
         v = case.pack(ref.beta, ref.x, ref.y)
-        nlp = lowering.lower(case, t, "prod_eq")
+        nlp = lower(case, t, "prod_eq")
         c = nlp.constraints(v)
         viol = float(np.max(np.maximum(np.maximum(nlp.cl - c, c - nlp.cu), 0.0)))
         if viol > worst:
@@ -108,10 +117,10 @@ def check_oracle_solves_the_mpcc(case: spec.FlashCase) -> None:
     )
 
 
-def check_regime_coverage(case: spec.FlashCase) -> None:
+def check_regime_coverage(case: FlashCase) -> None:
     print("the path crosses all three regimes")
     regimes = [
-        oracle.flash(float(t), case.pressure_pa, case.mixture).regime
+        flash(float(t), case.pressure_pa, case.mixture).regime
         for t in case.temperatures_k
     ]
     seen = set(regimes)
@@ -134,9 +143,9 @@ def check_regime_coverage(case: spec.FlashCase) -> None:
     )
 
 
-def check_switch_points(case: spec.FlashCase) -> None:
+def check_switch_points(case: FlashCase) -> None:
     print("the switch points")
-    sw = oracle.bubble_and_dew(case)
+    sw = bubble_and_dew(case)
     have = "bubble_k" in sw and "dew_k" in sw
     _check("both located", have, str({k: round(v, 6) for k, v in sw.items()}))
     if not have:
@@ -150,15 +159,15 @@ def check_switch_points(case: spec.FlashCase) -> None:
     )
 
 
-def check_no_trivial_solutions(case: spec.FlashCase) -> None:
+def check_no_trivial_solutions(case: FlashCase) -> None:
     print("guards: trivial solution, incipient phase, cubic root")
     trivial: List[float] = []
     no_incipient: List[float] = []
     bad_root: List[float] = []
     for t in case.temperatures_k:
         t = float(t)
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
-        if ref.trivial or thermo.is_trivial(ref.k):
+        ref = flash(t, case.pressure_pa, case.mixture)
+        if ref.trivial or is_trivial(ref.k):
             trivial.append(t)
         if ref.no_incipient_phase:
             no_incipient.append(t)
@@ -181,7 +190,7 @@ def check_no_trivial_solutions(case: spec.FlashCase) -> None:
         if ref.regime in ("vapor", "two_phase"):
             present.append((y / np.sum(y), True))
         for w, largest in present:
-            d = thermo.root_diagnostics(w, t, case.pressure_pa, case.mixture, largest=largest)
+            d = root_diagnostics(w, t, case.pressure_pa, case.mixture, largest=largest)
             if d["root_is_gibbs_optimal"] is False:
                 bad_root.append(t)
     _check("no trivial K = 1 point on the path", not trivial, f"{trivial}")
@@ -193,7 +202,7 @@ def check_no_trivial_solutions(case: spec.FlashCase) -> None:
     )
 
 
-def check_pairs_are_the_documented_ones(case: spec.FlashCase) -> None:
+def check_pairs_are_the_documented_ones(case: FlashCase) -> None:
     """The guardrail check: the pairs are amount-vs-slack, not L vs V.
 
     gh#776 states the rule and this asserts the model obeys it, at a
@@ -204,7 +213,7 @@ def check_pairs_are_the_documented_ones(case: spec.FlashCase) -> None:
     """
     print("the complementarity pairs are amount vs stability slack")
     t = 300.0
-    ref = oracle.flash(t, case.pressure_pa, case.mixture)
+    ref = flash(t, case.pressure_pa, case.mixture)
     v = case.pack(ref.beta, ref.x, ref.y)
     g, h = case.pair_values(v)
     both_phases = 1e-3 < ref.beta < 1.0 - 1e-3
@@ -221,7 +230,7 @@ def check_pairs_are_the_documented_ones(case: spec.FlashCase) -> None:
     )
 
 
-CHECKS: Tuple[Callable[[spec.FlashCase], None], ...] = (
+CHECKS: Tuple[Callable[[FlashCase], None], ...] = (
     check_derivatives,
     check_oracle_solves_the_mpcc,
     check_regime_coverage,
@@ -232,7 +241,7 @@ CHECKS: Tuple[Callable[[spec.FlashCase], None], ...] = (
 
 
 def main(argv=None) -> int:
-    case = spec.GATE1_FLASH
+    case = GATE1_FLASH
     print(f"flash selftest: {case.name} at {case.pressure_pa / 1e5:.1f} bar, "
           f"{len(case.temperatures_k)} temperatures, no solver required\n")
     for fn in CHECKS:

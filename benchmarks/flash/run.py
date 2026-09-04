@@ -37,7 +37,9 @@ from typing import Dict, List
 
 import numpy as np
 
-from . import oracle, path, routes as R, spec, stamp
+from pounce.examples.flash_mpcc import GATE1_FLASH, FlashCase, bubble_and_dew, flash
+
+from . import path, routes as R, stamp
 from .runner import SolveRecord, cold_start, solve_route
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,8 +75,8 @@ def _jsonable(obj):
     return obj
 
 
-def _oracle_row(case: spec.FlashCase, t: float) -> Dict[str, object]:
-    ref = oracle.flash(t, case.pressure_pa, case.mixture)
+def _oracle_row(case: FlashCase, t: float) -> Dict[str, object]:
+    ref = flash(t, case.pressure_pa, case.mixture)
     return {
         "temperature_k": t,
         "regime": ref.regime,
@@ -102,7 +104,7 @@ def _all_ok(rec: SolveRecord) -> bool:
     )
 
 
-def run_smoke(case: spec.FlashCase, verbose: bool = True) -> int:
+def run_smoke(case: FlashCase, verbose: bool = True) -> int:
     """The asserted subset. Returns a process exit code."""
     route = R.ROUTES[R.SUPPORTED_ROUTE]
     failures: List[str] = []
@@ -112,7 +114,7 @@ def run_smoke(case: spec.FlashCase, verbose: bool = True) -> int:
     )
     for t in SMOKE_TEMPERATURES:
         rec = solve_route(case, t, route, cold_start(case, t))
-        ref = oracle.flash(t, case.pressure_pa, case.mixture)
+        ref = flash(t, case.pressure_pa, case.mixture)
         ok = _all_ok(rec)
         if not ok:
             bad = [
@@ -138,7 +140,7 @@ def run_smoke(case: spec.FlashCase, verbose: bool = True) -> int:
     return 0
 
 
-def run_full(case: spec.FlashCase, verbose: bool = False) -> Dict[str, object]:
+def run_full(case: FlashCase, verbose: bool = False) -> Dict[str, object]:
     """Every leg for the supported route, plus every route on one leg."""
     started = time.time()
     legs: List[path.Leg] = []
@@ -181,7 +183,7 @@ def run_full(case: spec.FlashCase, verbose: bool = False) -> Dict[str, object]:
         )
 
     oracle_rows = [_oracle_row(case, float(t)) for t in case.temperatures_k]
-    switches = oracle.bubble_and_dew(case)
+    switches = bubble_and_dew(case)
 
     return {
         "schema": SCHEMA_ID,
@@ -351,7 +353,7 @@ def main(argv=None) -> int:
     p.add_argument("-o", "--output", default=None, help="result file (default beside this module)")
     args = p.parse_args(argv)
 
-    case = spec.GATE1_FLASH
+    case = GATE1_FLASH
     if args.smoke:
         return run_smoke(case, verbose=True)
 
