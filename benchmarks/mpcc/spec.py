@@ -439,6 +439,13 @@ class StageRecord:
     nlp: Dict[str, float] = dataclasses.field(default_factory=dict)
     restoration: Dict[str, int] = dataclasses.field(default_factory=dict)
     regime: Optional[List[str]] = None
+    #: The lowering this stage was actually built from. Equal to the
+    #: route's own lowering everywhere except a finishing stage, and
+    #: there it can differ from `route.finish` -- a square model takes
+    #: the degrees-of-freedom fallback (`Route.finish_fallback`), and a
+    #: record that named the route's nominal finish would be reporting a
+    #: solve that never happened.
+    lowering: str = ""
 
 
 @dataclasses.dataclass

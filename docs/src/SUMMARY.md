@@ -37,6 +37,7 @@
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
 - [Catalyst-Pellet Inverse Design](catalyst-pellet.md)
+- [Phase-Changing Flash as an MPCC](flash-mpcc.md)
 - [ODE / DAE Initial Value Problems](ode.md)
 - [Implicit DAEs](dae.md)
 - [Glass Box / Black Box Optimization](trf.md)

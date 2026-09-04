@@ -88,6 +88,33 @@ class Route:
     warm: str
     continuation: bool
     why: str
+    #: Lowering substituted for `finish` when `finish` would leave the
+    #: model with more equality rows than free variables.
+    #:
+    #: `application.rs` refuses such a model with
+    #: `Not_Enough_Degrees_Of_Freedom` before iteration zero, mirroring
+    #: upstream Ipopt (`IpOrigIpoptNLP.cpp:299`). That gate is right and
+    #: is not to be worked around; what it means for a *composition* is
+    #: that its finishing solve is unavailable on a square source model
+    #: -- and every equilibrium-stage process model is square. gh#776's
+    #: Gate 1 flash is refused at all 34 of its temperatures, so
+    #: `scholtes_then_ncp` runs only its continuation half there.
+    #:
+    #: `prod_ineq` has the identical feasible set (`G, H >= 0` makes
+    #: `G*H <= 0` active only at `G*H = 0`) and adds an inequality
+    #: instead of an equality, so it does not count against the gate.
+    #:
+    #: **It is a fallback, not a replacement, and that is measured.**
+    #: Run unconditionally as `scholtes_then_ineq` over this corpus it
+    #: ties `scholtes_then_ncp` on solved (60) and at-f* (57) and beats
+    #: it on complementarity (1.8e-12 against 4.9e-11) -- but returns
+    #: **3 cells below f\*** where the equality finish returns none, all
+    #: three `scholtes4` on the `skew` leg at -2.7e-06. Gate 0 chose the
+    #: equality finish precisely because it never returns a point below
+    #: the MPCC's optimum, so the inequality form is used only where the
+    #: equality form cannot run at all.
+    finish_fallback: Optional[str] = None
+
     #: Optional lowering for one final solve after the schedule runs
     #: out, warm-started from the last accepted stage. This is what
     #: turns a continuation's `tau`-feasible answer into an
@@ -189,6 +216,33 @@ ROUTES: Dict[str, Route] = {
     # a cold start on the cases where a pair is biactive. Run in
     # sequence they cover each other, which is a measurement (see the
     # route summary) rather than a hope.
+    # The same composition finishing on `G*H <= 0` instead of `G*H = 0`.
+    # The two lowerings have **identical feasible sets** -- with
+    # `G, H >= 0` the inequality is active only at `G*H = 0` -- so this
+    # is not a weaker finish; it is the same finish stated without
+    # adding an equality row. That distinction is invisible on this
+    # corpus and decisive off it: an equality row counts against the
+    # `n_x_var < n_c` degrees-of-freedom gate that
+    # `application.rs` mirrors from upstream Ipopt
+    # (`IpOrigIpoptNLP.cpp:299`), and a *square* source model -- which
+    # every equilibrium-stage process model is -- has no slack to spare.
+    # gh#776's Gate 1 flash is refused by that gate at every one of its
+    # 34 temperatures, so `scholtes_then_ncp` runs only its continuation
+    # half there. This arm exists to measure whether the inequality
+    # finish can simply replace the equality one.
+    "scholtes_then_ineq": Route(
+        name="scholtes_then_ineq",
+        lowering="scholtes",
+        options={},
+        warm="full",
+        continuation=True,
+        why=(
+            "Scholtes continuation with full warm starts, then one direct "
+            "G*H <= 0 solve seeded from it. Same feasible set as the NCP "
+            "equality finish, without adding an equality row."
+        ),
+        finish="prod_ineq",
+    ),
     "scholtes_then_ncp": Route(
         name="scholtes_then_ncp",
         lowering="scholtes",
@@ -200,6 +254,7 @@ ROUTES: Dict[str, Route] = {
             "then one exact-product NCP-equality solve seeded from it."
         ),
         finish="prod_eq",
+        finish_fallback="prod_ineq",
     ),
 }
 

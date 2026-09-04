@@ -11,6 +11,50 @@ changes.
 
 ### Added
 
+- **A phase-changing flash as a complementarity problem
+  (`pounce.examples.flash_mpcc`, notebook 38).** A single vapour–liquid
+  equilibrium stage solved across a temperature path that crosses
+  single-liquid, two-phase and single-vapour, with the number of variables and
+  equations fixed at every point and the phase logic carried by two
+  complementarity conditions. Peng–Robinson thermodynamics, reusing the
+  fugacity layer that shipped with the phase-envelope example.
+
+  The pairs are phase *amount* against phase *stability slack*, not liquid
+  against vapour — the two phases coexist, so `L ⟂ V` would encode the wrong
+  physics. At zero vapour fraction the isofugacity rows collapse to Michelsen's
+  tangent-plane stationarity and the slack condition is exactly `TPD >= 0`, so
+  the complementarity *is* the stability test rather than an encoding of it.
+  The bubble and dew points are the two biactive points.
+
+  Every answer is checked against an independent Michelsen-stability plus
+  Rachford–Rice calculation that shares only the fugacity primitive: across 34
+  temperatures and four traversal legs the phase regime always agrees, the
+  vapour fraction and both phase sums to ~1e-10, and no leg is path-dependent.
+  Notebook 38 measures the honest comparison first and reports that ordinary
+  successive substitution beats the complementarity form by an order of
+  magnitude on *one* flash — the formulation buys composability into a larger
+  simultaneous problem, not speed.
+
+  Book page: `docs/src/flash-mpcc.md`.
+
+- **Two findings from that model, for anyone writing a square complementarity
+  problem.**
+
+  A **square** model — no objective, no slack, which is what every
+  equilibrium-stage process model is — cannot use an exact-product (`G*H = 0`)
+  complementarity lowering: both product rows become equalities, leaving more
+  equality rows than free variables, and POUNCE refuses that before iteration
+  zero with `Not_Enough_Degrees_Of_Freedom` (mirroring upstream Ipopt). Use
+  `G*H <= 0` instead, whose feasible set is identical when `G, H >= 0`. This is
+  a modelling note, not a solver change: the gate is behaving correctly.
+
+  And when differentiating a cubic equation of state under `jax.jit`, prefer
+  `jacfwd(jacfwd(·))` to `jax.hessian`. Reverse mode loses the Lagrangian
+  Hessian by O(20) where the cubic approaches a double root — on this model, in
+  a band around the bubble point and nowhere else. Gradients are unaffected in
+  every mode, so converged answers stay right while the Hessian is wrong, and
+  nothing reports it.
+
 - **`import pounce` works in the browser demo — the real `pounce-solver`
   package, not a shim.** The Pyodide page at `<site>/demo/python/` could only
   reach the solver through Pyomo: a model was written to an AMPL `.nl`, handed

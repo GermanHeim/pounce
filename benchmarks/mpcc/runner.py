@@ -318,6 +318,20 @@ def run_cell(
                 else route.lowering
             )
             nlp = lower(case, lowering_here, tau)
+            if tau is None and route.finish_fallback is not None:
+                # The degrees-of-freedom fallback. `application.rs`
+                # refuses a model with more equality rows than free
+                # variables before iteration zero (upstream Ipopt
+                # `IpOrigIpoptNLP.cpp:299`), so on a square source model
+                # the equality finish never runs and the composition
+                # silently degrades to its continuation half. Substitute
+                # the identical-feasible-set inequality form there, and
+                # only there -- see `Route.finish_fallback` for why it is
+                # not the default.
+                n_eq = int(np.sum(nlp.cl == nlp.cu))
+                if nlp.n < n_eq:
+                    lowering_here = route.finish_fallback
+                    nlp = lower(case, lowering_here, tau)
             accepted = False
             for restart_level, warm_level in _ladder_levels(route.warm):
                 if restart_level == "cold_x0":
@@ -371,6 +385,7 @@ def run_cell(
                         index=idx,
                         tau=tau,
                         tau_reason=tau_reason,
+                        lowering=lowering_here,
                         status=int(info["status"]),
                         status_msg=str(info["status_msg"]),
                         accepted=ok,
@@ -450,9 +465,28 @@ def run_cell(
         # record said `scholtes` would invite the reader to apply the
         # relaxation-limit reading to a point that is exactly
         # complementary.
-        rec.lowering = route.finish if any(
-            s.tau is None and s.accepted for s in stages
-        ) else route.lowering
+        finish_stage = next(
+            (s for s in stages if s.tau is None and s.accepted), None
+        )
+        # Report the lowering the answer actually came from, which after
+        # a degrees-of-freedom fallback is not `route.finish`.
+        #
+        # Read straight off the stage, with no `or route.finish` guard
+        # behind it. The guard was there and it was a liability: it
+        # depended on `StageRecord.lowering` defaulting to `""`, so a
+        # future non-empty sentinel default would have made this report
+        # the route's *nominal* finish for a solve that actually used the
+        # fallback -- the exact misreport this field exists to prevent,
+        # and silently. It was also dead: `lowering_here` above is always
+        # one of `route.finish`, `route.lowering` or
+        # `route.finish_fallback`, and the single `StageRecord(...)` in
+        # this module sets `lowering=` from it unconditionally, so the
+        # empty string cannot reach here. If it ever does, that is a bug
+        # in the stage constructor and should surface as one rather than
+        # be papered over with a plausible-looking default.
+        rec.lowering = (
+            finish_stage.lowering if finish_stage is not None else route.lowering
+        )
     rec.accepted_stages = sum(1 for s in stages if s.accepted)
     rec.rejected_stages = sum(1 for s in stages if not s.accepted)
     rec.restarts = sum(1 for s in stages if s.restart_level != "route")

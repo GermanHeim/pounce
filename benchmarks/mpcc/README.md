@@ -12,6 +12,17 @@ tray, or a column model.** gh#794's last acceptance criterion is that no
 such work begins from this issue. Nothing here is a process model and
 nothing here should become one.
 
+The supported route carries one conditional, added by Gate 1 and
+measured back over this corpus: where the exact-product finish would
+leave more equality rows than free variables — which is every *square*
+model, and this corpus contains none — it falls back to `G*H <= 0`,
+whose feasible set is identical. `scholtes_then_ineq` is the arm that
+takes that fallback unconditionally, and it is *not* the supported
+route: over this corpus it ties on solved and at-`f*` and beats the
+equality finish on complementarity, while returning 3 cells below `f*`
+where the equality finish returns none. With the conditional in place
+every row here is unchanged.
+
 The gate decision itself is written up in
 [`dev-notes/mpcc-gate0-report.md`](../../dev-notes/mpcc-gate0-report.md).
 
@@ -58,7 +69,8 @@ one solver mechanism. One cell of the matrix is
 | `scholtes_cold` | `G*H <= tau` | continuation, independent cold solves |
 | `scholtes_warm_primal` | `G*H <= tau` | continuation, primal-only warm starts |
 | `scholtes_warm_full` | `G*H <= tau` | continuation, full primal/dual/barrier warm starts |
-| **`scholtes_then_ncp`** | `G*H <= tau`, then `G*H = 0` | **the supported route**: continuation to locate the branch, then one exact-product solve seeded from it |
+| `scholtes_then_ineq` | `G*H <= tau` | + one direct `G*H <= 0` finish (the unconditional inequality arm) |
+| **`scholtes_then_ncp`** | `G*H <= tau`, then `G*H = 0` | **the supported route**: continuation to locate the branch, then one exact-product solve seeded from it — falling back to `G*H <= 0` where the equality form would over-determine the model |
 
 Controls: `no_acceptable` (`acceptable_iter=0`), `no_scaling`
 (`nlp_scaling_method=none`), `upstream_heuristics` (the three POUNCE-only

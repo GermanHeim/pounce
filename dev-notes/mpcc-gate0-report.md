@@ -20,7 +20,7 @@
 | pounce version | 0.10.0 (Python extension, release build) |
 | discopt | absent — a cross-repository *design* dependency of gh#776, not a runtime dependency of this harness. No DiscOpt comparison was run. |
 | CCOpt | absent. Optional per gh#794; the pin a comparison would have used is `ccopt==0.4.1`. |
-| matrix | 11 cases × 2 scaling legs × 3 starts × 9 routes × 5 controls = 2880 records, 244 s |
+| matrix | 11 cases × 2 scaling legs × 3 starts × 9 routes × 5 controls = 2880 records, 244 s. **Re-run for the Gate 1 amendment** with a tenth route (`scholtes_then_ineq`) and the `finish_fallback` rule: 3300 records; the nine original routes' rows are unchanged. |
 | pinned options | `tol=1e-8`, `max_iter=300`, `bound_relax_factor=0`, `honor_original_bounds=yes` |
 | linear algebra | identical across all nine routes — one POUNCE build, one process, the default linear solver, no per-route backend selection. No comparison below crosses a linear-algebra boundary. |
 | relaxation schedule | `tau = 1e0 … 1e-8`, ×0.1, one bisection allowed after a rejected stage |
@@ -52,6 +52,46 @@ Run in sequence they cover each other. That is a measurement, not a
 hope: the composition clears all eight cells that P2 breaks, and returns
 complementarity at `1.9e-12` on `qpec_small/origin` and `5.7e-28` on
 `ralph1` where the continuation alone leaves `1e-08`.
+
+### Amendment (Gate 1): the finishing solve needs a fallback on a square model
+
+Gate 1 (gh#776, `benchmarks/flash/`) found the one shape of model on
+which the route above silently runs only its first half. The
+exact-product finish makes **both** product rows equalities, and a
+*square* source model — no objective, no slack, which is what every
+equilibrium-stage process model is — then has more equality rows than
+free variables: the Gate 1 flash has 5 and 6. `application.rs` refuses
+that before iteration zero with `Not_Enough_Degrees_Of_Freedom`,
+mirroring upstream Ipopt (`IpOrigIpoptNLP.cpp:299`). The flash is
+refused at **all 34 of its temperatures**, so `scholtes_then_ncp` and
+`scholtes_warm_full` returned identical numbers there — the composition
+was its continuation half wearing the composition's name.
+
+That gate is not a defect and is not worked around. The fix is in the
+route: `Route.finish_fallback` substitutes `prod_ineq` for the finish
+**only where the equality form cannot run at all**. The two lowerings
+have identical feasible sets — with `G, H >= 0` the inequality `G*H <= 0`
+is active only at `G*H = 0` — but an inequality does not count against
+the gate.
+
+**It is a fallback and not a replacement, and that distinction is the
+measurement.** `scholtes_then_ineq` in the table below is the same
+composition finishing unconditionally on the inequality. Over this
+corpus it ties on solved (60) and at-`f*` (57) and beats the equality
+finish on complementarity by 27× (`1.8e-12` against `4.9e-11`) — and
+returns **3 cells below `f*` where the equality finish returns none**:
+`scholtes4` on the `skew` leg, all three starts, `-2.7e-06` against
+`f* = 0`, at complementarity `1.8e-12`. Identical feasible sets do not
+imply identical converged points, and the axis it loses on is the one
+this route was chosen for.
+
+Re-measured with the fallback in place, this corpus is **unchanged**:
+`scholtes_then_ncp` is bit-identical at 60 / 57 / 0 / 55 median iters /
+`4.874e-11` / 8 restarts, every solvable case still finishes on
+`prod_eq` (the fallback fires on none of them), and `infeasible_pair`
+still reports `Infeasible_Problem_Detected` on all four cells, so
+finding 8 below still holds. The fallback buys Gate 1 its finishing
+solve and costs Gate 0 nothing — which is why it is conditional.
 
 ### Route comparison
 
@@ -151,6 +191,17 @@ solution — cannot be quoted tighter than `sqrt(tol)` without tightening
 
 2. **Below `tau = 1e-8` is untested**, and so is any schedule shape
    other than the geometric one here.
+
+2a. **Every case in this corpus has an objective and slack, so none of
+   them exercises the degrees-of-freedom gate on the finishing solve.**
+   That is a uniformity, and Gate 1 walked straight into it: a square
+   model — no objective, no free direction — makes the exact-product
+   finish over-determined and it is refused before iteration zero. The
+   corpus reports "the supported route solves every cell" and is silent
+   about a class of model on which half the route cannot execute. See
+   the Gate 1 amendment above; the fallback is measured, and the reason
+   it is conditional is that the unconditional form loses 3 cells to
+   `below f*` on `scholtes4/skew`.
 
 3. **Where no S-stationary point exists, no route can certify one.** On
    `ralph1` MPCC-LICQ fails and the multiplier system admits no

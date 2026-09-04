@@ -98,6 +98,15 @@
 !/benchmarks/mpcc/schema.json
 /benchmarks/mpcc/results-*.json
 /benchmarks/mpcc/results-*.md
+# The Gate 1 flash fixture (gh#776) is the same shape: sources and the
+# result schema tracked, per-run outputs regenerated and ignored. It has
+# no manifest -- its expected values are recomputed by the oracle on every
+# run rather than committed, because a committed expectation for a
+# thermodynamic model is a number nobody can check by reading it.
+!/benchmarks/flash/*.py
+!/benchmarks/flash/schema.json
+/benchmarks/flash/results-*.json
+/benchmarks/flash/results-*.md
 # The cblib suite is the conic (exp/power cone) tier: CBLIB .cbf instances
 # solved through the pounce_cblib binary. Track its runner (README via the
 # per-suite rule above); the per-run pounce.json stays ignored like every

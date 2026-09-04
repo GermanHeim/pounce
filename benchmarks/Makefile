@@ -61,6 +61,7 @@ export IPOPT_LINEAR_SOLVER
 	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
 	warmstart-ipopt warmstart-transfer warmstart-composite warmstart-all \
 	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
+	flash-selftest flash-smoke flash-run \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
 	pounce-bin
 
@@ -108,6 +109,9 @@ help:
 	@echo "  mpcc-run                   MPCC suite: the full gh#794 configuration, writes results-full.{json,md}"
 	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
 	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
+	@echo "  flash-selftest             Gate 1 flash: derivatives, oracle cross-check, regime coverage (no solver)"
+	@echo "  flash-smoke                Gate 1 flash: asserted subset (~15 s, needs the built Python ext)"
+	@echo "  flash-run                  Gate 1 flash: full gh#776 configuration, writes flash/results-full.{json,md}"
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
@@ -416,6 +420,27 @@ mpcc-report:
 
 mpcc-manifest:
 	cd $(CURDIR) && $(PYTHON) -m mpcc.run --write-manifest
+
+# ---- Gate 1 flash fixture (gh#776) ---------------------------------------
+# The phase-changing model Gate 0 gated. `flash-selftest` needs no solver
+# and is the gate on the others: it finite-difference-checks the declared
+# derivatives, asserts the path still crosses all three phase regimes with
+# both switch points interior, and -- the load-bearing one -- substitutes
+# the independent oracle's answer into the model's own rows and requires
+# it to satisfy them.
+#
+# The smoke subset also runs in CI as python/tests/test_flash_mpcc.py.
+# Outputs (flash/results-*.json, flash/results-*.md) are regenerated per
+# run and gitignored; flash/schema.json is tracked.
+
+flash-selftest:
+	cd $(CURDIR) && $(PYTHON) -m flash.selftest
+
+flash-smoke: flash-selftest
+	cd $(CURDIR) && $(PYTHON) -m flash.run --smoke
+
+flash-run: flash-selftest
+	cd $(CURDIR) && $(PYTHON) -m flash.run --full -v
 
 # pounce#611. The external arm needs cyipopt, which has no PyPI wheel:
 #   apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev
