@@ -71,6 +71,25 @@ from pounce.examples.flash_mpcc import (
     supercritical_components,
 )
 
+#: The source-level verdicts `validate` is required to return.
+#:
+#: Authoritative here rather than in the test file, because two callers
+#: enforce it -- `run.run_smoke` and `python/tests/test_flash_mpcc.py` --
+#: and a contract that lives in only one of them is how those two drift
+#: apart. Both check *membership* before reading values: every consumer
+#: filters for `_ok` keys that came back false, and an empty
+#: `validation` makes that filter empty too, so the check passes while
+#: verifying nothing.
+EXPECTED_OK_KEYS = frozenset({
+    "balance_ok",
+    "isofugacity_ok",
+    "regime_matches_oracle_ok",
+    "beta_matches_oracle_ok",
+    "phase_sums_match_oracle_ok",
+    "root_is_gibbs_optimal_ok",
+    "not_trivial_ok",
+})
+
 #: Source-residual tolerance. Looser than the solver's ``tol`` on
 #: purpose: these are residuals of the *source* model at a point
 #: converged for a *lowered* one, and the two differ by the

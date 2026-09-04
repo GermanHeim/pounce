@@ -40,8 +40,9 @@ if str(_BENCH) not in sys.path:
     sys.path.insert(0, str(_BENCH))
 
 pytest.importorskip("flash")
-from flash import routes, run as flash_run  # noqa: E402
+from flash import path as flash_path, routes, run as flash_run  # noqa: E402
 from flash.runner import cold_start, solve_route  # noqa: E402
+from flash.validate import EXPECTED_OK_KEYS  # noqa: E402
 from pounce.examples.flash_mpcc import (  # noqa: E402
     GATE1_FLASH,
     CORNER_TOL,
@@ -71,25 +72,6 @@ def solved(case):
         ref = flash(t, case.pressure_pa, case.mixture)
         out[t] = (rec, ref)
     return out
-
-
-#: The source-level verdicts `validate.validate` is required to return.
-#:
-#: Asserted as a set before the values are read, because the check below
-#: is a filter: it collects the `_ok` keys that came back *false*. An
-#: empty `validation`, or a rename that broke the `_ok` convention in a
-#: refactor, makes that filter empty too, and the test quietly degrades
-#: to `assert rec.ok` -- passing while checking nothing. Naming the keys
-#: turns that silent degradation into a failure.
-EXPECTED_OK_KEYS = frozenset({
-    "balance_ok",
-    "isofugacity_ok",
-    "regime_matches_oracle_ok",
-    "beta_matches_oracle_ok",
-    "phase_sums_match_oracle_ok",
-    "root_is_gibbs_optimal_ok",
-    "not_trivial_ok",
-})
 
 
 @pytest.mark.parametrize("temperature_k", flash_run.SMOKE_TEMPERATURES)
@@ -220,3 +202,71 @@ def test_the_oracle_answer_solves_the_model(case):
         if viol > worst:
             worst, worst_t = viol, t
     assert worst <= 1e-10, f"worst {worst:.2e} at {worst_t} K"
+
+
+def test_the_smoke_cli_enforces_the_same_contract(case):
+    """The advertised entry point must be able to fail.
+
+    `python -m flash.run --smoke` is what the README and the Makefile
+    tell people to run, and it is asserted rather than reported -- so a
+    version of it that cannot fail is worse than none. It was: the first
+    implementation filtered `validation` for false `_ok` keys and called
+    an empty filter a pass. On a tree with `finish_fallback` removed,
+    pytest failed at all five temperatures while this exited 0 and
+    printed `smoke passed`; replacing `validation` with `{}` also exited
+    0.
+
+    Running `run_smoke` itself, rather than reimplementing its checks
+    here, is the point: the CLI and this suite are two entry points onto
+    one claim, and they already drifted once.
+    """
+    assert flash_run.run_smoke(case, verbose=False) == 0
+
+
+def test_the_smoke_contract_rejects_a_record_that_skipped_the_finish(case, solved):
+    """...and the contract function fails on the shapes that fooled it.
+
+    Exercised against doctored copies of a real record rather than a
+    reverted tree, so the failure modes stay pinned without the suite
+    needing to mutate the source. Both shapes below exited 0 before
+    `smoke_contract_failures` existed.
+    """
+    import dataclasses
+
+    route = routes.ROUTES[routes.SUPPORTED_ROUTE]
+    good, _ = solved[300.0]
+    assert not flash_run.smoke_contract_failures(good, route)
+
+    no_finish = dataclasses.replace(
+        good, finish_applied=False, finish_status_msg="Not_Enough_Degrees_Of_Freedom"
+    )
+    assert flash_run.smoke_contract_failures(no_finish, route)
+
+    empty_validation = dataclasses.replace(good, validation={})
+    assert flash_run.smoke_contract_failures(empty_validation, route)
+
+    wrong_finish = dataclasses.replace(good, finish_lowering="prod_eq")
+    assert flash_run.smoke_contract_failures(wrong_finish, route)
+
+
+def test_the_inter_temperature_start_is_labelled_primal(case):
+    """The warm leg carries a primal point, and says so.
+
+    gh#776 asks this benchmark to compare warm-start behaviour across
+    the switching points, so the label on an iteration count is part of
+    the measurement. `path.traverse` deliberately carries only the
+    previous temperature's primal point -- the multipliers and barrier
+    parameter belong to a different problem -- and an earlier version
+    recorded that seeded stage as `full` anyway, filing a primal-only
+    count under a full-state label.
+    """
+    route = routes.ROUTES[routes.SUPPORTED_ROUTE]
+    leg = flash_path.traverse(
+        case, route, direction="up", start_mode="warm", temperatures=[300.0, 310.0]
+    )
+    first, second = sorted(leg.records, key=lambda r: r.temperature_k)
+    assert first.stages[0].warm_level == "none", "the first temperature is a cold start"
+    assert second.stages[0].warm_level == "primal", (
+        "the inter-temperature start carries only x, so the stage must not "
+        f"claim a full-state warm start (got {second.stages[0].warm_level!r})"
+    )

@@ -29,7 +29,7 @@
       },
       "discopt": {
        "type": "object",
-       "description": "Whether a DiscOpt comparison was run. `comparison_run` is false in every file produced so far: the reduced GDP/SOS1 cross-validation gh#776 asks for is blocked on jkitchin/discopt#1123. `reason` says so in words.",
+       "description": "Whether a DiscOpt comparison was run. `comparison_run` is false in every file produced so far: the reduced GDP/SOS1 cross-validation gh#776 asks for is blocked on jkitchin/discopt#1147 then #1148 (#1123 is closed and is the design record). `reason` says so in words.",
        "required": ["present", "comparison_run", "reason"],
        "properties": {
         "present": {"type": "boolean"},

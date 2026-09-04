@@ -172,6 +172,28 @@ def _warm_from(x: np.ndarray, info: dict) -> dict:
     }
 
 
+def _effective_warm(route_warm: str, state: Optional[dict]) -> str:
+    """The warm level the *supplied* state can actually support.
+
+    A route's `warm` is what it would like; this is what it gets. The
+    inter-temperature start in `path.traverse` carries the previous
+    temperature's primal point and nothing else -- deliberately, since
+    the multipliers and barrier parameter belong to a different problem
+    -- so seeding a `full` route with it would hand `pounce.WarmStart`
+    a `lagrange=None` and still record the stage as `warm_level="full"`.
+
+    That mislabel is not cosmetic here. gh#776 asks this benchmark to
+    compare warm-start behaviour across the switching points, so an
+    iteration count filed under `full` that was actually primal-only is
+    the measurement being wrong, not just its name.
+    """
+    if state is None:
+        return "none"
+    if route_warm == "full" and "mult_g" not in state:
+        return "primal"
+    return route_warm
+
+
 def _ladder(route_warm: str) -> List[Tuple[str, str]]:
     """``(restart level, warm level)`` in ladder order.
 
@@ -239,7 +261,8 @@ def solve_route(
         for idx, tau in enumerate(schedule):
             nlp = lower(case, temperature_k, route.lowering, tau)
             solved = False
-            for restart, warm in _ladder(route.warm if idx or state is not None else "none"):
+            requested = route.warm if idx or state is not None else "none"
+            for restart, warm in _ladder(_effective_warm(requested, state)):
                 seed = x_prev if restart != "cold_x0" else np.asarray(x0, dtype=float)
                 x, info, wall = solve_once(
                     nlp, opts, seed, state if warm != "none" else None, warm

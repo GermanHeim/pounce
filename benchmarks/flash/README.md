@@ -224,11 +224,16 @@ records the incipient one.
   bounds a tray, a column, or a dynamic transcription. gh#776 gates
   those on this result; this result does not reach them.
 - **The DiscOpt half of Gate 1.** The reduced GDP/SOS1 regime
-  cross-validation gh#776 asks for is blocked on
-  [jkitchin/discopt#1123](https://github.com/jkitchin/discopt/issues/1123)
-  (first-class complementarity provenance, and the local-versus-certified
-  result contract). Every result file records that it was not run, and
-  why, rather than omitting the field.
+  cross-validation gh#776 asks for is blocked on the two live DiscOpt
+  slices — [#1147](https://github.com/jkitchin/discopt/issues/1147)
+  (first-class complementarity/MCP relation with durable source
+  provenance) then
+  [#1148](https://github.com/jkitchin/discopt/issues/1148) (source
+  complementarity residuals and the local-versus-certified result
+  contract). [#1123](https://github.com/jkitchin/discopt/issues/1123) is
+  closed and remains the design record, not the blocker. Every result
+  file records that the comparison was not run, and why, rather than
+  omitting the field.
 - **Supercritical mixture states.** The path stays far from the mixture
   critical point. Ethane is above its own `Tc` over the top third of it,
   which is ordinary and is not the same thing; the record carries the

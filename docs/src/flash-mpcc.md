@@ -130,9 +130,12 @@ correct while the Hessian was not.
 - One equilibrium stage, two components, one operating parameter. Nothing
   here bounds a tray, a column, or a dynamic transcription.
 - The reduced DiscOpt GDP/SOS1 regime cross-validation that gh#776 also asks
-  of Gate 1 is blocked on
-  [jkitchin/discopt#1123](https://github.com/jkitchin/discopt/issues/1123)
-  and was not run; every result file records that explicitly.
+  of Gate 1 is blocked on the live DiscOpt
+  slices [#1147](https://github.com/jkitchin/discopt/issues/1147) then
+  [#1148](https://github.com/jkitchin/discopt/issues/1148) and was not run;
+  every result file records that explicitly.
+  [#1123](https://github.com/jkitchin/discopt/issues/1123) is closed and is
+  the design record, not the blocker.
 - The path stays far from the mixture critical point. Ethane is above its
   own `Tc` over the top third of it, which is ordinary and is not a
   supercritical *mixture* state.

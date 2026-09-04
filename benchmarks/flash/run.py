@@ -40,6 +40,7 @@ import numpy as np
 from pounce.examples.flash_mpcc import GATE1_FLASH, FlashCase, bubble_and_dew, flash
 
 from . import path, routes as R, stamp
+from .validate import EXPECTED_OK_KEYS
 from .runner import SolveRecord, cold_start, solve_route
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -95,13 +96,59 @@ def _oracle_row(case: FlashCase, t: float) -> Dict[str, object]:
     }
 
 
-def _all_ok(rec: SolveRecord) -> bool:
-    """Every ``_ok`` key in the record's validation block, plus the status."""
+def smoke_contract_failures(rec: SolveRecord, route: R.Route) -> List[str]:
+    """Everything the asserted subset requires of one record, as reasons.
+
+    Empty means the record satisfies the contract. This exists as a
+    function, and is exercised by `test_flash_mpcc.py` through
+    `run_smoke` itself, because the CLI and the pytest suite are two
+    entry points onto one claim and they drifted: the first version of
+    this file filtered `validation` for false `_ok` keys and called that
+    a pass. Measured on a tree with `finish_fallback` removed, pytest
+    failed at all five temperatures while `python -m flash.run --smoke`
+    printed `smoke passed` and exited 0; replacing `validation` with
+    `{}` also exited 0, because `all(...)` over an empty filter is
+    vacuously true. An advertised asserted entry point that cannot fail
+    is worse than no entry point.
+
+    Three requirements, and the second and third are the ones the old
+    version was missing:
+
+    1. every expected `_ok` key is **present** and none is false --
+       membership first, so an empty or renamed block fails loudly;
+    2. the finishing solve **ran** (`finish_applied`), for a route that
+       defines one;
+    3. it ran on the lowering a square model forces
+       (`finish_lowering`), so the fallback silently ceasing to fire, or
+       the equality finish silently starting to work, both fail here.
+    """
     if not rec.ok:
-        return False
-    return all(
-        v for k, v in rec.validation.items() if k.endswith("_ok") and v is not None
-    )
+        return [f"solve failed: {rec.status_msg or 'no status'}"]
+
+    reasons: List[str] = []
+    missing = EXPECTED_OK_KEYS - set(rec.validation)
+    if missing:
+        reasons.append(f"validation did not report {sorted(missing)}")
+    bad = [
+        k
+        for k, v in rec.validation.items()
+        if k.endswith("_ok") and v is not None and not v
+    ]
+    if bad:
+        reasons.append(f"failed source checks {bad}")
+
+    if route.finish is not None:
+        if not rec.finish_applied:
+            reasons.append(
+                f"the finishing solve did not run: {rec.finish_status_msg}"
+            )
+        expected_finish = route.finish_fallback or route.finish
+        if rec.finish_lowering != expected_finish:
+            reasons.append(
+                f"finished on {rec.finish_lowering!r}, expected "
+                f"{expected_finish!r}"
+            )
+    return reasons
 
 
 def run_smoke(case: FlashCase, verbose: bool = True) -> int:
@@ -115,14 +162,10 @@ def run_smoke(case: FlashCase, verbose: bool = True) -> int:
     for t in SMOKE_TEMPERATURES:
         rec = solve_route(case, t, route, cold_start(case, t))
         ref = flash(t, case.pressure_pa, case.mixture)
-        ok = _all_ok(rec)
-        if not ok:
-            bad = [
-                k
-                for k, v in rec.validation.items()
-                if k.endswith("_ok") and v is not None and not v
-            ]
-            failures.append(f"T={t}: {rec.status_msg or 'failed'} {bad}")
+        reasons = smoke_contract_failures(rec, route)
+        ok = not reasons
+        if reasons:
+            failures.append(f"T={t}: " + "; ".join(reasons))
         if verbose:
             print(
                 f"  [{'ok  ' if ok else 'FAIL'}] T={t:6.1f} K  "
@@ -325,7 +368,8 @@ def render(result: Dict[str, object]) -> str:
       "dynamic transcription; gh#776 gates those on this result and not "
       "the other way round.")
     a("- **The DiscOpt half of Gate 1.** The reduced GDP/SOS1 regime "
-      "cross-validation is blocked on jkitchin/discopt#1123 and was not run.")
+      "cross-validation is blocked on jkitchin/discopt#1147 then #1148, and "
+      "was not run. #1123 is closed and is the design record, not the blocker.")
     a("- **Supercritical mixture states.** The path stays far from the "
       "mixture critical point. Ethane is above its own `Tc` over the top "
       "third of it, which is ordinary and is not the same thing.")
@@ -336,11 +380,19 @@ def render(result: Dict[str, object]) -> str:
 
 
 def _record_all_ok(rec: dict) -> bool:
+    """The rendered report's per-record verdict, read back from JSON.
+
+    Membership before values, for the same reason
+    `smoke_contract_failures` checks it: a record whose `validation`
+    block is empty would otherwise render as passing every check.
+    """
     if not rec.get("ok"):
         return False
+    validation = rec.get("validation") or {}
+    if EXPECTED_OK_KEYS - set(validation):
+        return False
     return all(
-        v for k, v in (rec.get("validation") or {}).items()
-        if k.endswith("_ok") and v is not None
+        v for k, v in validation.items() if k.endswith("_ok") and v is not None
     )
 
 

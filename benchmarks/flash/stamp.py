@@ -7,13 +7,19 @@ computed rather than typed.
 
 The DiscOpt entry is the one to read carefully. Gate 1's fixture is
 meant to carry a reduced DiscOpt GDP/SOS1 comparison, and that
-comparison is *blocked* on DiscOpt's first-class complementarity
-provenance and its local-versus-certified result contract
-(jkitchin/discopt#1123). Until those land there is no comparison to
-stamp, and the field says so explicitly instead of being absent --
+comparison is *blocked*. Until it is unblocked there is no comparison
+to stamp, and the field says so explicitly instead of being absent --
 "no DiscOpt comparison was run" and "a DiscOpt comparison was run and
 its commit was not recorded" are different claims, and a result file
 that cannot distinguish them is not evidence.
+
+**Name the live prerequisites, not the design record.** The blocker was
+first written here as jkitchin/discopt#1123, which is now closed; it
+stays the authoritative RFC, but the two slices Gate 1 actually waits on
+are tracked separately (gh#776, 2026-09-03):
+jkitchin/discopt#1147 -> jkitchin/discopt#1148 -> Gate 1. A generated
+result file naming a closed issue as its blocker sends the next reader
+to a thread that says the work is done.
 """
 
 from __future__ import annotations
@@ -42,6 +48,17 @@ _MODEL_FILES = tuple(
         os.path.join(_HERE, "..", "..", "python", "pounce", "examples", name)
     )
     for name in ("flash_mpcc.py", "phase_envelope.py")
+)
+
+
+#: The live DiscOpt prerequisites, in one place so the two branches of
+#: `repositories()` cannot drift apart or go stale independently.
+_BLOCKED_ON = (
+    "the reduced GDP/SOS1 comparison gh#776 asks of Gate 1 is blocked on "
+    "jkitchin/discopt#1147 (first-class complementarity/MCP relation with durable "
+    "source provenance), then jkitchin/discopt#1148 (source complementarity "
+    "residuals and the local-versus-certified result contract); "
+    "jkitchin/discopt#1123 is closed and is the design record, not the blocker"
 )
 
 
@@ -82,10 +99,7 @@ def repositories() -> Dict[str, object]:
             "commit": "unknown (installed package, not a checkout)",
             "comparison_run": False,
             "reason": (
-                "discopt is importable, but the reduced GDP/SOS1 comparison "
-                "gh#776 asks for is blocked on jkitchin/discopt#1123 (first-class "
-                "complementarity provenance and the local-versus-certified result "
-                "contract). Nothing was compared."
+                "discopt is importable, but " + _BLOCKED_ON + ". Nothing was compared."
             ),
         }
     except Exception as exc:
@@ -94,9 +108,8 @@ def repositories() -> Dict[str, object]:
             "commit": None,
             "comparison_run": False,
             "reason": (
-                f"discopt not importable ({type(exc).__name__}); the reduced "
-                "GDP/SOS1 comparison is blocked on jkitchin/discopt#1123 and no "
-                "comparison was run"
+                f"discopt not importable ({type(exc).__name__}); " + _BLOCKED_ON
+                + "; no comparison was run"
             ),
         }
     return {"pounce": pounce, "discopt": disc}

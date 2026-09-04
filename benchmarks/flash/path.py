@@ -27,10 +27,21 @@ The four legs
     harness, not a physical result, and `hysteresis` reports it as such.
 
 ``up_warm`` / ``down_warm``
-    Each temperature warm-started from the previous one's converged
-    point, multipliers and barrier parameter included. These are the
-    legs that can differ from each other and from the cold legs, and
-    where they do, the difference *is* the measurement.
+    Each temperature started from the previous one's converged
+    **primal point** -- and only that. The multipliers and barrier
+    parameter are *not* carried: they belong to a different problem, a
+    different temperature with different rows, and Gate 0 measured the
+    full-state warm start where it is defined, which is between the
+    stages of one continuation. These are the legs that can differ from
+    each other and from the cold legs, and where they do, the
+    difference *is* the measurement.
+
+    The stages record `warm_level="primal"` for that first seeded solve
+    accordingly (`runner._effective_warm`). An earlier version carried
+    the same primal-only state but recorded it as `full`, which filed a
+    primal-only iteration count under a full-state label -- and
+    comparing warm-start behaviour across the switching points is
+    precisely what gh#776 asks this leg set for.
 
 The cold legs are therefore the control and the warm legs are the
 treatment, which is why all four run rather than the two that would
@@ -127,10 +138,12 @@ def traverse(
     """Walk the temperature path once.
 
     ``start_mode="warm"`` carries the previous temperature's converged
-    state -- primal, all three multiplier blocks and ``mu`` -- into the
-    next solve. It is *not* carried across a failure: a failed solve has
-    no state worth propagating, and propagating it anyway would turn one
-    bad point into a bad tail and hide where the trouble started.
+    **primal point** into the next solve, and nothing else -- see the
+    module docstring for why the multipliers and barrier parameter stay
+    behind, and `runner._effective_warm` for how the stage is labelled
+    as a result. It is *not* carried across a failure: a failed solve
+    has no state worth propagating, and propagating it anyway would turn
+    one bad point into a bad tail and hide where the trouble started.
     """
     if direction not in ("up", "down"):
         raise ValueError(f"direction must be 'up' or 'down', got {direction!r}")
