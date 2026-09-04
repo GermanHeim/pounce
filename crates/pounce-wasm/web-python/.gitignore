@@ -1,3 +1,10 @@
 # Build artifacts staged by build.sh — rebuild them, do not commit them.
 pounce.wasm
 wasi.js
+
+# wheels/ is NOT ignored, on purpose. The emscripten pounce-solver build is a
+# release artifact pinned to one Pyodide version, not a per-commit product:
+# rebuilding it needs a pyodide-build xbuildenv, a patched emsdk and a Rust
+# nightly with a wasm-EH sysroot, so no CI job reproduces it from source the
+# way build.sh reproduces pounce.wasm. It ships with the page, and
+# `build-wheel.sh --check` runs in CI to catch it going stale.

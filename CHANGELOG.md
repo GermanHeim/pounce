@@ -9,6 +9,58 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`import pounce` works in the browser demo — the real `pounce-solver`
+  package, not a shim.** The Pyodide page at `<site>/demo/python/` could only
+  reach the solver through Pyomo: a model was written to an AMPL `.nl`, handed
+  to a separate `wasm32-wasip1` module, and the `.sol` read back. That is
+  Pyomo's modelling layer, and a model crossing as a file has no Python
+  callbacks mid-solve — so `Problem`, `curve_fit`, `pounce.sensitivity` and
+  numpy arrays were all out of reach.
+
+  `crates/pounce-py` now builds for `wasm32-unknown-emscripten` via
+  `crates/pounce-wasm/build-wheel.sh`, and the extension module runs inside
+  Pyodide's own wasm instance. `import pounce` in the page is the same API as
+  a local install, callbacks included. The Pyomo route is unchanged and still
+  the one that works with no wheel deployed; a script picks by what it
+  imports, and the worker installs only what the first run asks for.
+
+  The build recipe is pinned end to end — Pyodide 0.28.3, pyodide-build 0.39.0,
+  emscripten 4.0.9, `nightly-2025-06-27`, and the matching
+  wasm-exception-handling sysroot — and it refuses to run against an emsdk that
+  is not the one `pyodide xbuildenv install-emscripten` produces. That last
+  guard is load-bearing rather than fussy: Pyodide patches emscripten's
+  side-module export check, and a stock emsdk cannot link **any** Rust side
+  module, reproducible with a twelve-line crate that calls
+  `format!("{}", 1.5f64)` — the offending symbol comes out of precompiled
+  `std`, so nothing about the crate being built changes it. Without the guard
+  that surfaces as `emcc: error: invalid export name: _ZN4core3fmt…`, which
+  reads like an LTO or visibility problem and is not one.
+
+  The wheel is committed rather than rebuilt in CI, because reproducing it
+  needs that whole toolchain for an artifact that changes only when the
+  version or the Pyodide pin moves. `build-wheel.sh --check` runs on every PR
+  instead and fails if the staged wheel is missing, targets a different
+  Pyodide than `worker.js` pins, or lags `python/pyproject.toml`'s version.
+
+- **The browser demo has a Python editor, a Cancel button, and a theme.**
+  `editor.js` is a ~150-line editor — highlighting, line numbers, Tab/Shift-Tab
+  block indent, indentation carried across Enter — built as a highlighted
+  `<pre>` under a transparent `<textarea>`, so caret, selection, undo, IME and
+  screen-reader behaviour stay the browser's. No CDN editor library: that
+  dependency would be missing in exactly the offline setup `?pyodide=` exists
+  to serve. Its tokenizer has its own tests in CI.
+
+  A solve runs synchronously inside the worker, so nothing short of killing the
+  thread can interrupt one — **Cancel** terminates the worker and spawns a
+  replacement. The theme picker is auto/light/dark, resolved before first paint
+  so a dark-mode reload does not flash the light palette.
+
+  Seven examples ship with the page, four on the Pyomo route and three on the
+  new one, covering duals, `curve_fit` confidence intervals, and a
+  2,000-variable model.
+
 
 ## [0.11.0] - 2026-09-03
 

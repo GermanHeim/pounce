@@ -74,9 +74,30 @@ heap carries from one file into the next.
 
 ## The Python page
 
-Pyodide supplies CPython compiled to WebAssembly; `micropip` installs Pyomo
-(a `py3-none-any` wheel — nothing to build). You write an ordinary Pyomo
-model, and:
+Pyodide supplies CPython compiled to WebAssembly, and there are two ways to
+reach the solver from it. A script picks one by what it imports; neither is
+installed until a run asks for it.
+
+`import pounce` is the `pounce-solver` package itself, built for emscripten
+and installed by `micropip` — the same API as a local install, running inside
+Pyodide's own wasm instance, so callbacks are called during the solve rather
+than marshalled through a file:
+
+```python
+import numpy as np
+import pounce
+
+res = pounce.minimize(
+    lambda x: (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2,
+    np.array([-1.2, 1.0]),
+    constraints=[{"type": "ineq", "fun": lambda x: 1.0 - x @ x}],
+)
+print(res.message, res.x)
+```
+
+`import pounce_browser` takes the Pyomo route instead: `micropip` installs
+Pyomo (a `py3-none-any` wheel — nothing to build), you write an ordinary
+Pyomo model, and:
 
 ```python
 from pyomo.environ import *
@@ -111,14 +132,28 @@ Two wasm runtimes are in play — Pyodide's CPython and POUNCE — with separate
 memories; all that crosses between them is `.nl` text one way and JSON plus
 `.sol` text the other.
 
-This is Pyomo's modelling layer, not POUNCE's own Python API: the model
+The Pyomo route is the one that stays available with no wheel deployed, and
+it is how a Pyomo model reaches POUNCE without a translation layer — but it
+is Pyomo's modelling surface, not POUNCE's own Python API, and the model
 reaches the solver as a file, so there are no Python callbacks mid-solve.
-Running the real `pounce-solver` package in a browser would mean building
-the compiled extension for Pyodide (emscripten), which this does not do.
+That is what `import pounce` is for.
 
-The page needs the network for its first load — Pyodide from a CDN, Pyomo
-from PyPI, about 15 MB, cached afterwards. Self-host both and pass
-`?pyodide=…&pyomo=…` to avoid it entirely; see
+The emscripten wheel is built by `crates/pounce-wasm/build-wheel.sh` and
+staged into `web-python/wheels/` beside a manifest naming it and recording
+the Pyodide and emscripten versions it was compiled against. A wheel is valid
+for exactly one Pyodide build: the worker compares the manifest against its
+own pin and says so in those words, rather than letting `micropip` report the
+skew as a missing package. The script pins Pyodide, pyodide-build,
+emscripten, the Rust nightly, and the wasm-exception-handling sysroot
+together, and refuses to run against an emsdk that is not the one
+`pyodide xbuildenv install-emscripten` produces — Pyodide patches
+emscripten's side-module export check, and without that patch emscripten
+cannot link any Rust side module at all. Rebuild the wheel whenever the
+Pyodide pin moves; `build-wheel.sh --check` verifies a staged one.
+
+The page needs the network for its first load — Pyodide from a CDN, about
+13 MB with a route installed, cached afterwards. Self-host everything and
+pass `?pyodide=…&pyomo=…&pounce=…` to avoid it entirely; see
 `crates/pounce-wasm/web-python/README.md`. The solve itself is local either
 way.
 
@@ -159,7 +194,8 @@ factorization, where the gap narrows. Nothing here is tuned — no SIMD, no
 | --- | --- |
 | `crates/pounce-wasm` | C-ABI entry points (`pounce_load`, `pounce_solve`, the exporters), bytes in / JSON out |
 | `crates/pounce-wasm/web` | the `.nl` page: `index.html`, `app.js`, `worker.js`, `wasi.js` |
-| `crates/pounce-wasm/web-python` | the Pyodide page, plus `pounce_browser.py` — the Pyomo ↔ POUNCE shim |
+| `crates/pounce-wasm/web-python` | the Pyodide page: the editor, plus `pounce_browser.py` — the Pyomo ↔ POUNCE shim — and `wheels/`, the emscripten `pounce-solver` build |
+| `crates/pounce-wasm/build-wheel.sh` | builds `pounce-solver` for emscripten and stages it into `web-python/wheels/` |
 | `crates/pounce-wasm/build.sh` | builds the module and stages it into both pages |
 
 The target is `wasm32-wasip1`, not `wasm32-unknown-unknown`. WASI gives the

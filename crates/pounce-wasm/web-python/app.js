@@ -1,5 +1,11 @@
 // Page logic: pick an example, run it in the Pyodide worker, show what it
 // printed. The worker owns both wasm instances; this side is a console.
+//
+// Examples come in two groups because there are two ways to reach POUNCE from
+// Python here — `import pounce`, the real package built for emscripten, and
+// `import pounce_browser`, Pyomo writing an `.nl` for the standalone wasm
+// module. The worker installs whichever one a script imports, so the groups
+// are a labelling convention, not a mode switch.
 
 import { attachEditor } from './editor.js';
 
@@ -7,10 +13,85 @@ const $ = (id) => document.getElementById(id);
 const codeBox = $('code');
 const outBox = $('out');
 const runButton = $('run');
+const cancelButton = $('cancel');
 const statusLine = $('status');
 
+const GROUPS = {
+  pounce: 'pounce-solver (the package)',
+  pyomo: 'Pyomo + .nl',
+};
+
 const EXAMPLES = {
-  'Constrained NLP': `# Minimize x1 on the unit circle, above the line x1 + x2 = 0.
+  'Constrained Rosenbrock': { group: 'pounce', code: `# scipy-style: pounce.minimize, on the Rosenbrock function
+# restricted to the unit disk. The constraint is active at the optimum.
+import numpy as np
+import pounce
+
+def f(x):
+    return (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
+
+# scipy's dict form: 'ineq' means fun(x) >= 0, so this is |x| <= 1.
+disk = {"type": "ineq", "fun": lambda x: 1.0 - x @ x}
+
+res = pounce.minimize(f, np.array([-1.2, 1.0]), constraints=[disk], print_level=5)
+
+print(res.message)
+print("x* =", res.x)
+print("f* =", res.fun)
+print("|x*| =", np.linalg.norm(res.x), "(the disk boundary)")
+` },
+
+  'HS071 (pounce.minimize)': { group: 'pounce', code: `# The same model as the Pyomo HS071 example, written against the
+# pounce-solver package instead — no Pyomo, no .nl file in between.
+import numpy as np
+import pounce
+
+def f(x):
+    return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
+
+cons = [
+    {"type": "ineq", "fun": lambda x: x[0] * x[1] * x[2] * x[3] - 25.0},
+    {"type": "eq", "fun": lambda x: x @ x - 40.0},
+]
+
+res = pounce.minimize(
+    f,
+    np.array([1.0, 5.0, 5.0, 1.0]),
+    bounds=[(1, 5)] * 4,
+    constraints=cons,
+    tol=1e-8,
+    print_level=5,
+)
+
+print(res.message)
+print("x* =", np.round(res.x, 9))
+print("f* =", res.fun)
+print("known optimum: 17.0140173")
+` },
+
+  'Curve fit with error bars': { group: 'pounce', code: `# pounce.curve_fit is scipy's curve_fit plus what you actually wanted
+# from it: standard errors, confidence intervals, goodness of fit.
+import numpy as np
+from pounce import curve_fit
+
+A_true, k_true = 2.5, 0.8
+t = np.linspace(0.0, 4.0, 40)
+rng = np.random.default_rng(0)
+y = A_true * np.exp(-k_true * t) + rng.normal(0.0, 0.02, t.size)
+
+def model(t, A, k):
+    return A * np.exp(-k * t)
+
+fit = curve_fit(model, t, y, p0=[1.0, 0.1])
+
+for name, true, p, se, (lo, hi) in zip(["A", "k"], [A_true, k_true],
+                                       fit.popt, fit.perr, fit.ci):
+    print(f"{name} = {p:.6f} +/- {se:.6f}   95% CI [{lo:.6f}, {hi:.6f}]   true {true}")
+
+print(f"R^2 = {fit.r_squared:.6f}   RMSE = {fit.rmse:.3e}   dof = {fit.dof}")
+` },
+
+  'Constrained NLP': { group: 'pyomo', code: `# Minimize x1 on the unit circle, above the line x1 + x2 = 0.
 from pyomo.environ import *
 import pounce_browser
 
@@ -29,9 +110,10 @@ print(f"x1 = {value(m.x1):.9f}   (exact: {-2**-0.5:.9f})")
 print(f"x2 = {value(m.x2):.9f}")
 print(f"dual[circle]    = {m.dual[m.circle]:.9f}")
 print(f"dual[halfspace] = {m.dual[m.halfspace]:.9f}")
-`,
+` },
 
-  'HS071': `# Hock-Schittkowski 71 — the classic Ipopt example.
+
+  'HS071 (Pyomo)': { group: 'pyomo', code: `# Hock-Schittkowski 71 — the classic Ipopt example.
 from pyomo.environ import *
 import pounce_browser
 
@@ -47,9 +129,10 @@ res = pounce_browser.solve(m, options="print_level 5\\ntol 1e-8")
 print(res)
 print("x* =", [round(value(m.x[i]), 9) for i in m.I])
 print("known optimum: 17.0140173")
-`,
+` },
 
-  'Parameter estimation': `# Least-squares fit of a kinetic rate law to noisy data.
+
+  'Parameter estimation': { group: 'pyomo', code: `# Least-squares fit of a kinetic rate law to noisy data.
 from pyomo.environ import *
 import math, pounce_browser
 
@@ -71,9 +154,10 @@ res = pounce_browser.solve(m, options="print_level 0")
 print(res)
 print(f"A = {value(m.A):.6f}  (true {A_true})")
 print(f"k = {value(m.k):.6f}  (true {k_true})")
-`,
+` },
 
-  'Larger: 2,000 variables': `# A separable NLP big enough to feel the solver work.
+
+  'Larger: 2,000 variables': { group: 'pyomo', code: `# A separable NLP big enough to feel the solver work.
 from pyomo.environ import *
 import pounce_browser
 
@@ -90,55 +174,81 @@ res = pounce_browser.solve(m, options="print_level 5")
 print(res)
 print(f"x[1] = {value(m.x[1]):.6f}, y[1] = {value(m.y[1]):.6f}")
 print("each pair solves x^2 + 0.5/x^2 -> x = (0.5)**0.25 =", 0.5 ** 0.25)
-`,
+` },
 };
 
 const select = $('example');
-for (const name of Object.keys(EXAMPLES)) {
-  const option = document.createElement('option');
-  option.value = name;
-  option.textContent = name;
-  select.append(option);
+for (const [key, label] of Object.entries(GROUPS)) {
+  const group = document.createElement('optgroup');
+  group.label = label;
+  for (const [name, example] of Object.entries(EXAMPLES)) {
+    if (example.group !== key) continue;
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    group.append(option);
+  }
+  select.append(group);
 }
 // The editor wraps the textarea rather than replacing it, so `codeBox.value`
 // stays the single source of truth and the page still works if this module
 // fails to load.
 const editor = attachEditor(codeBox);
-select.addEventListener('change', () => editor.set(EXAMPLES[select.value]));
-editor.set(EXAMPLES[select.value]);
+select.addEventListener('change', () => editor.set(EXAMPLES[select.value].code));
+editor.set(EXAMPLES[select.value].code);
 
 // --- worker ----------------------------------------------------------------
 
-// The worker inherits this page's query string, so ?pyodide= / ?pyomo=
-// overrides for a self-hosted deployment reach it.
-const worker = new Worker(`./worker.js${self.location.search}`, { type: 'module' });
-
+// A solve runs synchronously inside the worker, so nothing short of killing the
+// thread can interrupt one — Cancel terminates the worker and starts a fresh
+// one. That is a real reset: the replacement has to re-download Pyodide (from
+// cache) and re-install whichever route the next script imports.
+let worker = null;
 let ready = false;
 
-worker.onmessage = ({ data }) => {
+function spawnWorker() {
+  if (worker) worker.terminate();
+  ready = false;
+  runButton.disabled = true;
+  cancelButton.disabled = true;
+  // The worker inherits this page's query string, so ?pyodide= / ?pyomo= /
+  // ?pounce= overrides for a self-hosted deployment reach it.
+  worker = new Worker(`./worker.js${self.location.search}`, { type: 'module' });
+  worker.onmessage = onWorkerMessage;
+}
+
+function onWorkerMessage({ data }) {
   if (data.type === 'status') {
     setStatus(data.text);
   } else if (data.type === 'ready') {
     ready = true;
     runButton.disabled = false;
-    setStatus('ready — Python and POUNCE are loaded');
+    // Neither solver route is installed yet — the first Run pulls whichever
+    // one the script imports, and says so on this line while it does.
+    setStatus('ready — Python is loaded');
   } else if (data.type === 'stdout') {
     append(data.text);
   } else if (data.type === 'running') {
     outBox.textContent = '';
+    cancelButton.disabled = false;
     setStatus('running…');
   } else if (data.type === 'done') {
     runButton.disabled = false;
+    cancelButton.disabled = true;
     setStatus(`done in ${(data.ms / 1000).toFixed(2)} s`);
   } else if (data.type === 'error') {
     runButton.disabled = false;
+    cancelButton.disabled = true;
     append(`\n${data.message}\n`);
     setStatus('the script raised an exception', true);
   } else if (data.type === 'fatal') {
     runButton.disabled = true;
+    cancelButton.disabled = true;
     setStatus(data.message, true);
   }
-};
+}
+
+spawnWorker();
 
 function setStatus(text, isError = false) {
   statusLine.textContent = text;
@@ -157,6 +267,11 @@ function run() {
 }
 
 runButton.addEventListener('click', run);
+cancelButton.addEventListener('click', () => {
+  append('\n^C  cancelled — restarting Python\n');
+  setStatus('cancelled — reloading Python…');
+  spawnWorker();
+});
 codeBox.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
     e.preventDefault();
@@ -172,3 +287,35 @@ $('dl-code').addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 });
+
+// --- theme -----------------------------------------------------------------
+
+// The inline script in index.html has already resolved "auto" into an explicit
+// data-theme so the first paint is right; this re-resolves it on a change to
+// the OS setting, which only matters while the preference *is* "auto".
+const themeSelect = $('theme');
+const systemDark = matchMedia('(prefers-color-scheme: dark)');
+
+function readTheme() {
+  try {
+    return localStorage.getItem('pounce-theme') || 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function applyTheme(pref) {
+  const dark = pref === 'dark' || (pref === 'auto' && systemDark.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+}
+
+themeSelect.value = readTheme();
+themeSelect.addEventListener('change', () => {
+  try {
+    localStorage.setItem('pounce-theme', themeSelect.value);
+  } catch {
+    // A blocked store is not a reason to refuse the change for this page view.
+  }
+  applyTheme(themeSelect.value);
+});
+systemDark.addEventListener('change', () => applyTheme(readTheme()));
