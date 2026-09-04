@@ -270,3 +270,78 @@ def test_the_inter_temperature_start_is_labelled_primal(case):
         "the inter-temperature start carries only x, so the stage must not "
         f"claim a full-state warm start (got {second.stages[0].warm_level!r})"
     )
+
+
+#: The doctored shapes the *CLI* has to reject, each with a substring
+#: its output must name. Every field here is one the contract reads and
+#: nothing else in `run_smoke` does, so a row that passes is evidence
+#: about the CLI-to-contract binding rather than about the solve.
+_SMOKE_CLI_REJECTS = (
+    (
+        "skipped_finish",
+        {
+            "finish_applied": False,
+            "finish_status_msg": "Not_Enough_Degrees_Of_Freedom",
+        },
+        "the finishing solve did not run",
+    ),
+    ("empty_validation", {"validation": {}}, "validation did not report"),
+    ("wrong_finish_lowering", {"finish_lowering": "prod_eq"}, "finished on 'prod_eq'"),
+)
+
+
+@pytest.mark.parametrize(
+    "fields,expected_text",
+    [pytest.param(f, t, id=n) for n, f, t in _SMOKE_CLI_REJECTS],
+)
+def test_the_smoke_cli_rejects_a_bad_record(
+    case, solved, monkeypatch, capsys, fields, expected_text
+):
+    """The CLI must *act* on the contract, not merely be able to call it.
+
+    The two tests above leave a gap between them that neither can see.
+    One runs `run_smoke` and asserts it exits 0; the other asserts
+    `smoke_contract_failures` rejects the three shapes that once slipped
+    through. Nothing joins them: replace `reasons =
+    smoke_contract_failures(rec, route)` in `run_smoke` with `reasons =
+    []` and the whole suite stays green, because the positive test still
+    passes and the negative one never goes through the CLI. That is the
+    same shape as the defect this fixture exists to pin -- a check that
+    is present, correct, and not wired to the thing that reports.
+
+    So this drives the real `run_smoke` and stubs only `solve_route`,
+    the expensive boundary. One temperature returns a doctored copy of a
+    genuinely solved record; the other four return the real one. Exit 1
+    and the reason text are then attributable to *that* record, which
+    also shows the good ones still pass -- a `run_smoke` that failed
+    everything would satisfy an exit-code assertion just as well.
+    """
+    import dataclasses
+
+    good, _ = solved[300.0]
+    assert not flash_run.smoke_contract_failures(
+        good, routes.ROUTES[routes.SUPPORTED_ROUTE]
+    ), "the undoctored record must pass, or this test proves nothing"
+    doctored = dataclasses.replace(good, **fields)
+    seen = []
+
+    def fake_solve_route(case_, temperature_k, route_, x0, **kwargs):
+        seen.append(temperature_k)
+        base = doctored if temperature_k == 300.0 else good
+        return dataclasses.replace(base, temperature_k=temperature_k)
+
+    monkeypatch.setattr(flash_run, "solve_route", fake_solve_route)
+    code = flash_run.run_smoke(case, verbose=False)
+    out = capsys.readouterr().out
+
+    assert seen == list(flash_run.SMOKE_TEMPERATURES), (
+        "run_smoke must reach solve_route once per smoke temperature "
+        f"(got {seen})"
+    )
+    assert code == 1, f"the CLI returned {code} on a record that violates the contract"
+    assert expected_text in out, f"the CLI did not say why; it printed:\n{out}"
+    failed_lines = [ln for ln in out.splitlines() if ln.strip().startswith("T=")]
+    assert failed_lines == [ln for ln in failed_lines if "T=300.0" in ln], (
+        "only the doctored temperature should be reported as failing; got "
+        f"{failed_lines}"
+    )
