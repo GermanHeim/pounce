@@ -19,6 +19,9 @@ Neither is installed up front — both are large and a script needs at most one.
 The worker gets CPython running, then installs whichever route the first run
 asks for and caches it. The example dropdown offers both.
 
+`import matplotlib` is a third on-demand install, orthogonal to the two routes
+— see [Figures](#figures) below.
+
 ### `import pounce` — the real package
 
 `crates/pounce-py` compiled for `wasm32-unknown-emscripten` and installed by
@@ -123,6 +126,31 @@ reinstalls whichever route the next script imports. The theme picker is
 auto / light / dark, resolved before first paint and remembered in
 `localStorage`.
 
+## Figures
+
+`import matplotlib` (or `pylab`, or `mpl_toolkits`) installs matplotlib on the
+first run that asks for it, and `plt.show()` renders the figure on the page.
+
+The worker has no DOM, so Pyodide's interactive backends — which draw into a
+canvas element — cannot run here at all: they fail at import, before a script
+gets to say anything about what it wants. `MPLBACKEND=AGG` is set as soon as
+CPython starts, so matplotlib renders to a buffer instead, and `plt.show()` is
+replaced by a function that saves every open figure to a PNG and posts it to
+the page. Agg's own `show()` is a no-op that warns, so without the
+substitution a script written for a desktop would print a warning and produce
+nothing.
+
+The end of a run flushes whatever figures are still open, on the exception
+path too: a script that plots its data and then fails should still show the
+plot, which is usually the thing that explains the failure. Figures are
+cleared when the next run starts, so a re-run that plots nothing does not
+leave the previous one on screen looking current.
+
+The transport is a base64 PNG on the worker's message channel and an `<img>`
+on the other side — no canvas, no proxy object whose lifetime the page has to
+manage. The cost is that figures are not interactive: no pan, no zoom, no
+`%matplotlib widget`.
+
 ## What it loads, and from where
 
 | Piece | Source | Size | When |
@@ -131,6 +159,7 @@ auto / light / dark, resolved before first paint and remembered in
 | `pounce-solver` | `./wheels/`, same origin | 3.4 MB | first `import pounce` |
 | POUNCE (`.nl` route) | `./pounce.wasm`, same origin | 2.4 MB | first `import pounce_browser` |
 | Pyomo | PyPI, via `micropip` (`py3-none-any` wheel) | ~4 MB | first `import pounce_browser` |
+| matplotlib | Pyodide's own package repository | ~9.5 MB | first `import matplotlib` |
 
 The solve itself is entirely local — the CDN and PyPI fetches are the Python
 runtime arriving, not your model leaving. They are also the only reason this

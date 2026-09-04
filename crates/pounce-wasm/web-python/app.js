@@ -1,5 +1,6 @@
 // Page logic: pick an example, run it in the Pyodide worker, show what it
-// printed. The worker owns both wasm instances; this side is a console.
+// printed and whatever it plotted. The worker owns both wasm instances; this
+// side is a console and an <img> holder.
 //
 // Examples come in two groups because there are two ways to reach POUNCE from
 // Python here — `import pounce`, the real package built for emscripten, and
@@ -15,6 +16,8 @@ const outBox = $('out');
 const runButton = $('run');
 const cancelButton = $('cancel');
 const statusLine = $('status');
+const figuresPanel = $('figures-panel');
+const figuresBox = $('figures');
 
 const GROUPS = {
   pounce: 'pounce-solver (the package)',
@@ -69,15 +72,15 @@ print("f* =", res.fun)
 print("known optimum: 17.0140173")
 ` },
 
-  'Curve fit with error bars': { group: 'pounce', code: `# pounce.curve_fit is scipy's curve_fit plus what you actually wanted
+  'Curve fit + confidence band': { group: 'pounce', code: `# pounce.curve_fit is scipy's curve_fit plus what you actually wanted
 # from it: standard errors, confidence intervals, goodness of fit.
 import numpy as np
 from pounce import curve_fit
 
 A_true, k_true = 2.5, 0.8
-t = np.linspace(0.0, 4.0, 40)
+t = np.linspace(0.0, 4.0, 30)
 rng = np.random.default_rng(0)
-y = A_true * np.exp(-k_true * t) + rng.normal(0.0, 0.02, t.size)
+y = A_true * np.exp(-k_true * t) + rng.normal(0.0, 0.08, t.size)
 
 def model(t, A, k):
     return A * np.exp(-k * t)
@@ -89,6 +92,30 @@ for name, true, p, se, (lo, hi) in zip(["A", "k"], [A_true, k_true],
     print(f"{name} = {p:.6f} +/- {se:.6f}   95% CI [{lo:.6f}, {hi:.6f}]   true {true}")
 
 print(f"R^2 = {fit.r_squared:.6f}   RMSE = {fit.rmse:.3e}   dof = {fit.dof}")
+
+# matplotlib works here too, on the Agg backend: plt.show() sends the figure
+# to the page as a PNG. Both bands are delta-method; they answer different
+# questions. The confidence band is "where is the true curve?" and is narrow
+# — most data points fall outside it, and it shrinks as data is added. The
+# prediction band adds the observation noise, so it is where the *next*
+# measurement lands, and it stays about as wide however much data you take.
+import matplotlib.pyplot as plt
+
+grid = np.linspace(t[0], t[-1], 200)
+yhat, c_lo, c_hi = fit.confidence_band(grid)
+_, p_lo, p_hi = fit.confidence_band(grid, kind="prediction")
+
+fig, ax = plt.subplots(figsize=(6.5, 4.0))
+ax.fill_between(grid, p_lo, p_hi, color="#f0913f", alpha=0.15, lw=0, label="95% prediction")
+ax.fill_between(grid, c_lo, c_hi, color="#f0913f", alpha=0.55, lw=0, label="95% confidence")
+ax.plot(grid, yhat, "-", lw=2, color="#c96a12", label="fit")
+ax.plot(t, y, "o", ms=4, color="#333", label="data")
+ax.set_xlabel("t")
+ax.set_ylabel("y")
+ax.set_title(f"A = {fit.popt[0]:.3f} +/- {fit.perr[0]:.3f},  "
+             f"k = {fit.popt[1]:.3f} +/- {fit.perr[1]:.3f}")
+ax.legend()
+plt.show()
 ` },
 
   'Constrained NLP': { group: 'pyomo', code: `# Minimize x1 on the unit circle, above the line x1 + x2 = 0.
@@ -228,8 +255,20 @@ function onWorkerMessage({ data }) {
     setStatus('ready — Python is loaded');
   } else if (data.type === 'stdout') {
     append(data.text);
+  } else if (data.type === 'figure') {
+    // `plt.show()` in the worker sends a PNG per open figure. Appending
+    // rather than replacing: a script may plot several.
+    const img = document.createElement('img');
+    img.src = `data:image/png;base64,${data.png}`;
+    img.alt = `Figure ${figuresBox.childElementCount + 1}`;
+    figuresBox.append(img);
+    figuresPanel.hidden = false;
   } else if (data.type === 'running') {
     outBox.textContent = '';
+    // Figures belong to the run that produced them; a re-run that plots
+    // nothing must not leave the last one on screen looking current.
+    figuresBox.replaceChildren();
+    figuresPanel.hidden = true;
     cancelButton.disabled = false;
     setStatus('running…');
   } else if (data.type === 'done') {

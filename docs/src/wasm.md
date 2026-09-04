@@ -122,6 +122,14 @@ from the file it just wrote — `crates/pounce-wasm/tests/pyomo_roundtrip.py`
 pins that with a model whose optimum and multipliers are known in closed
 form, and CI runs it on every PR with Node standing in for the browser.
 
+`import matplotlib` is a third on-demand install, orthogonal to both routes:
+the worker sets `MPLBACKEND=AGG` before anything imports matplotlib, since
+Pyodide's interactive backends draw into the DOM and a worker has none, and
+replaces `plt.show()` with a function that saves every open figure to a PNG
+and posts it to the page. Figures still open when a script ends are flushed
+too, including when it ends by raising. They arrive as `<img>` elements below
+the output, so they are pictures rather than interactive canvases.
+
 The script box is a small editor — Python highlighting, line numbers,
 Tab/Shift-Tab indent, indentation carried across Enter — built from a
 highlighted `<pre>` behind a transparent `<textarea>` so the caret and undo
@@ -152,7 +160,8 @@ cannot link any Rust side module at all. Rebuild the wheel whenever the
 Pyodide pin moves; `build-wheel.sh --check` verifies a staged one.
 
 The page needs the network for its first load — Pyodide from a CDN, about
-13 MB with a route installed, cached afterwards. Self-host everything and
+13 MB with a route installed, another ~9.5 MB if a script plots, cached
+afterwards. Self-host everything and
 pass `?pyodide=…&pyomo=…&pounce=…` to avoid it entirely; see
 `crates/pounce-wasm/web-python/README.md`. The solve itself is local either
 way.

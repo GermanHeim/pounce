@@ -13,11 +13,13 @@
 //                              back onto the Pyomo model. Nothing crosses but
 //                              text.
 //
-// Neither is installed up front: both are large, and a script needs at most
-// one of them. `ready` gets CPython running; `ensure()` installs the rest on
-// the first run that asks for it, and caches the promise.
+// A third on-demand install, matplotlib, is orthogonal to both: whichever
+// route a script takes, `plt.show()` sends a PNG to the page.
+//
+// None of the three is installed up front: they are large, and a script needs
+// at most some of them. `ready` gets CPython running; `ensure()` installs the
+// rest on the first run that asks for it, and caches the promise.
 
-import { createWasi } from './wasi.js';
 
 // Pinned so a Pyodide release cannot change what this page runs. Override
 // with ?pyodide=<base-url> to serve Pyodide yourself (offline, or behind a
@@ -65,12 +67,32 @@ let solverLog = '';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const wasi = createWasi((text) => {
-  solverLog += text;
-  out(text);
-});
+// `wasi.js` is staged beside this file by `crates/pounce-wasm/build.sh`, next
+// to the `pounce.wasm` it shims — both are build artifacts, neither is
+// tracked. A static `import` of it would fail the whole worker module in a
+// checkout that has not been built, and a worker that fails to load reports
+// nothing: the page sits on "starting…" forever. Only the Pyomo route needs
+// it, so it is imported where that route loads the module, and a missing
+// build costs that one route an error message instead of costing the page
+// everything.
+let wasi = null;
 
 async function loadSolver() {
+  let createWasi;
+  try {
+    ({ createWasi } = await import('./wasi.js'));
+  } catch {
+    // Both this and `pounce.wasm` come from the same build step, so a missing
+    // shim means a missing module: report the cause rather than the symptom.
+    throw new Error(
+      'the standalone POUNCE wasm module is not deployed here — run ' +
+        'crates/pounce-wasm/build.sh. The `import pounce` examples work without it.',
+    );
+  }
+  wasi = createWasi((text) => {
+    solverLog += text;
+    out(text);
+  });
   let instance;
   try {
     ({ instance } = await WebAssembly.instantiateStreaming(fetch('./pounce.wasm'), wasi.imports));
@@ -146,6 +168,13 @@ const ready = (async () => {
   });
   await pyodide.loadPackage('micropip');
   micropip = pyodide.pyimport('micropip');
+  // Pyodide's interactive matplotlib backends draw into the DOM, and a worker
+  // has no DOM — they fail at import, before a script gets to say anything
+  // about what it wants. Agg renders to a buffer instead, which is what
+  // `installMatplotlib` below turns into a PNG. Set here rather than at
+  // install time because matplotlib reads it once, when it is first imported,
+  // and a script's own `import matplotlib` may well come first.
+  await pyodide.runPythonAsync('import os\nos.environ["MPLBACKEND"] = "AGG"\n');
   say('ready');
   self.postMessage({ type: 'ready' });
 })().catch((err) => {
@@ -159,6 +188,10 @@ const ready = (async () => {
 // negative lookahead, which is the difference between the two routes here.
 const WANTS_POUNCE = /^[ \t]*(?:import|from)[ \t]+pounce(?![\w])/m;
 const WANTS_PYOMO = /^[ \t]*(?:import|from)[ \t]+(?:pyomo|pounce_browser)(?![\w])/m;
+// `pylab` and `mpl_toolkits` are matplotlib too, and a script that reaches for
+// either without naming matplotlib is otherwise indistinguishable from one
+// that does not plot at all.
+const WANTS_MPL = /^[ \t]*(?:import|from)[ \t]+(?:matplotlib|pylab|mpl_toolkits)(?![\w])/m;
 
 const installs = {};
 // A failed install must not be cached as done: drop the rejected promise so
@@ -176,6 +209,34 @@ async function installPounceSolver() {
   const wheel = await pounceWheelUrl();
   await pyodide.loadPackage(['numpy', 'scipy']);
   await micropip.install(wheel);
+  say('ready');
+}
+
+// Figures leave Python as base64 PNGs on the message channel. That is the
+// whole transport: no canvas, no proxy object whose lifetime the page has to
+// manage, and the main thread does nothing but set an <img> src.
+async function installMatplotlib() {
+  say('installing matplotlib (~9 MB)…');
+  await pyodide.loadPackage('matplotlib');
+  self.pounceEmitFigure = (png) => self.postMessage({ type: 'figure', png });
+  await pyodide.runPythonAsync(`
+import base64, io, js
+import matplotlib.pyplot as plt
+
+
+# What plt.show() becomes here: emit every open figure as a PNG, then close
+# them. Agg's own show() is a no-op that warns, so a script written for a
+# desktop would otherwise print a warning and produce nothing.
+def _pounce_flush_figures():
+    for num in plt.get_fignums():
+        buf = io.BytesIO()
+        plt.figure(num).savefig(buf, format="png", dpi=110, bbox_inches="tight")
+        js.pounceEmitFigure(base64.b64encode(buf.getvalue()).decode())
+    plt.close("all")
+
+
+plt.show = lambda *args, **kwargs: _pounce_flush_figures()
+`);
   say('ready');
 }
 
@@ -214,9 +275,20 @@ self.onmessage = async (event) => {
     // solve time, and reporting it as such would be a lie about the solver.
     if (WANTS_POUNCE.test(code)) await ensure('pounce', installPounceSolver);
     if (WANTS_PYOMO.test(code)) await ensure('pyomo', installPyomoRoute);
+    const plots = WANTS_MPL.test(code);
+    if (plots) await ensure('matplotlib', installMatplotlib);
     self.postMessage({ type: 'running' });
     const started = performance.now();
-    await pyodide.runPythonAsync(code);
+    try {
+      await pyodide.runPythonAsync(code);
+    } finally {
+      // A script that builds a figure and never calls `plt.show()` is correct
+      // in a notebook and silent here, so the end of the run flushes whatever
+      // is still open. It runs on the exception path too: a script that
+      // plotted its data and then failed should still show the plot, which is
+      // usually the thing that explains the failure.
+      if (plots) await pyodide.runPythonAsync('_pounce_flush_figures()');
+    }
     self.postMessage({ type: 'done', ms: performance.now() - started });
   } catch (err) {
     // A Python exception arrives with its traceback in `message`; show it as

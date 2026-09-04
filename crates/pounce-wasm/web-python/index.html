@@ -125,6 +125,14 @@
     border: 1px solid var(--line);
     font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word;
   }
+  /* A figure PNG is drawn on matplotlib's own white ground, so it stays white
+     in dark mode — inverting a plot's colours is the script's call, not the
+     page's. The white card needs the border to sit on the dark page. */
+  #figures { display: grid; gap: 1rem; }
+  #figures img {
+    display: block; max-width: 100%; height: auto;
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  }
   .status { color: var(--muted); font-size: .9rem; }
   .status.err { color: var(--bad); }
   .note { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
@@ -181,13 +189,19 @@
       blank editor. On the Pyomo route,
       <code>pounce_browser.solve(model, options=…)</code> takes
       <code>ipopt.opt</code>-format options — the same names the POUNCE CLI and Python
-      API use. Ctrl/⌘-Enter runs.
+      API use. <code>import matplotlib</code> works as well —
+      <code>plt.show()</code> renders the figure below the output. Ctrl/⌘-Enter runs.
     </p>
   </section>
 
   <section>
     <h2>Output</h2>
     <pre id="out"></pre>
+  </section>
+
+  <section id="figures-panel" hidden>
+    <h2>Figures</h2>
+    <div id="figures"></div>
   </section>
 
   <footer>

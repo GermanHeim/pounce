@@ -61,6 +61,31 @@ changes.
   new one, covering duals, `curve_fit` confidence intervals, and a
   2,000-variable model.
 
+- **`plt.show()` in the browser demo draws a figure.** `import matplotlib` is a
+  third on-demand install, orthogonal to both solver routes. The worker has no
+  DOM, so Pyodide's interactive backends cannot run there at all — they fail at
+  import, before a script gets to say what it wants — and `MPLBACKEND=AGG` is
+  therefore set as soon as CPython starts. Agg's own `show()` is a warning and
+  no picture, so it is replaced by a function that saves every open figure to a
+  PNG and posts it to the page, which renders it as an `<img>`. Figures still
+  open when a script ends are flushed too, on the exception path included: a
+  script that plots its data and then fails should still show the plot, which
+  is usually what explains the failure. The `curve_fit` example now plots its
+  data, fit, and both the confidence and prediction bands.
+
+### Fixed
+
+- **The browser demo booted only from a built tree.** `web-python/worker.js`
+  had a top-level `import` of `./wasi.js`, which `crates/pounce-wasm/build.sh`
+  stages and `.gitignore` excludes. In a checkout that had not been built —
+  serving the tracked files, which include the `pounce-solver` wheel — the
+  worker module failed to load outright, and a worker that fails to load
+  reports nothing: the page sat on `starting…` with no error, and no route
+  worked, including the one that needs no build at all. The shim is now
+  imported where the Pyomo route loads the module, so `import pounce` works
+  from a bare checkout and a missing build costs that one route a sentence
+  saying which script to run.
+
 
 ## [0.11.0] - 2026-09-03
 
