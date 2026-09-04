@@ -112,27 +112,40 @@ two-phase → vapor with both switches interior (bubble 268.8896 K, dew
 323.3849 K, located by bisecting the stability boundary). On
 `scholtes_then_ncp`:
 
-- all 34 points solve, in all four legs (up/down × cold/warm) — with
-  the qualification in the next section about *which half* of the route
-  actually ran;
+- all 34 points solve, in all four legs (up/down × cold/warm), and the
+  finishing solve now runs at every one of them — 34 accepted, 0
+  rejected, per leg (see the next section for what that took);
 - every regime label matches the oracle;
-- `beta` and both phase sums agree to ~1e-11, complementarity products
-  land at 1e-12 to 1e-18;
+- `beta` and both phase sums agree to ~1e-10 or better, and the source
+  complementarity products land at 1e-12 to 1e-18;
 - the cold legs agree exactly with each other, and no leg is
   path-dependent: no hysteresis, no branch artifact.
+
+Total interior-point iterations per leg: 4105 cold, 3616 warm. The
+finishing solve costs about 12% over the continuation alone, which is
+what buys the MPCC-feasibility guarantee the continuation cannot give.
 
 ## The route comparison, and the finding in it
 
 Every route runs on the ascending cold leg. On this fixture:
 
-| route | solved | all source checks pass | worst `|beta - beta_oracle|` |
-|---|---:|---:|---:|
-| `scholtes_then_ncp` (supported) | 34/34 | 34/34 | 8.4e-10 |
-| `scholtes_warm_full` | 34/34 | 34/34 | 8.4e-10 |
-| `direct` | 34/34 | 34/34 | **1.0e-13** |
-| `ncp_eq` | **0/34** | 0/34 | - |
-| `ncp_eq_l1` | 34/34 | 33/34 | 1.3e-06 |
-| `ncp_eq_l1_fallback` | 34/34 | 33/34 | 1.3e-06 |
+| route | solved | all source checks pass | worst `|beta - beta_oracle|` | worst `|G*H|` |
+|---|---:|---:|---:|---:|
+| `scholtes_then_ncp` (supported) | 34/34 | 34/34 | 5.1e-10 | 1.1e-12 |
+| `scholtes_then_ineq` | 34/34 | 34/34 | 5.1e-10 | 1.1e-12 |
+| `scholtes_warm_full` | 34/34 | 34/34 | 8.4e-10 | 1.8e-12 |
+| `direct` | 34/34 | 34/34 | **1.0e-13** | **8.5e-14** |
+| `ncp_eq` | **0/34** | 0/34 | - | - |
+| `ncp_eq_l1` | 34/34 | 33/34 | 1.3e-06 | 9.0e-09 |
+| `ncp_eq_l1_fallback` | 34/34 | 33/34 | 1.3e-06 | 9.0e-09 |
+
+The first three rows are the finding and its fix in one place.
+`scholtes_then_ncp` and `scholtes_then_ineq` now agree exactly, because
+on a square model the conditional makes them the same route. And both
+are now *better* than `scholtes_warm_full` — the bare continuation —
+which is the evidence that the finishing solve is running: before the
+fallback, the supported route and the bare continuation reported
+identical numbers, because they were the same computation.
 
 **Gate 0's supported route ran only its continuation half here, at every
 single temperature — until Gate 1 gave it a fallback.**
