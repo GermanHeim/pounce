@@ -42,6 +42,22 @@ class Route:
     continuation: bool
     why: str
     finish: Optional[str] = None
+    #: Lowering substituted for `finish` when `finish` would leave more
+    #: equality rows than free variables. See `mpcc/routes.py` for the
+    #: full rationale and the measurement behind it; the short version is
+    #: that `application.rs` refuses such a model with
+    #: `Not_Enough_Degrees_Of_Freedom` before iteration zero (upstream
+    #: Ipopt `IpOrigIpoptNLP.cpp:299`), which on a square model -- every
+    #: equilibrium-stage model, this flash included -- means the
+    #: composition silently runs only its continuation half.
+    #:
+    #: `prod_ineq` has the identical feasible set and adds an inequality
+    #: rather than an equality, so the gate does not fire. It is a
+    #: fallback and not a replacement: run unconditionally over the Gate
+    #: 0 corpus it returns 3 cells below the MPCC optimum where the
+    #: equality finish returns none, which is the one axis Gate 0 chose
+    #: the equality finish for.
+    finish_fallback: Optional[str] = None
 
 
 ROUTES: Dict[str, Route] = {
@@ -117,6 +133,7 @@ ROUTES: Dict[str, Route] = {
             "solve seeded from it."
         ),
         finish="prod_eq",
+        finish_fallback="prod_ineq",
     ),
 }
 

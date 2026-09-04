@@ -134,38 +134,44 @@ Every route runs on the ascending cold leg. On this fixture:
 | `ncp_eq_l1` | 34/34 | 33/34 | 1.3e-06 |
 | `ncp_eq_l1_fallback` | 34/34 | 33/34 | 1.3e-06 |
 
-**Gate 0's supported route runs only its continuation half here, at
-every single temperature.** `scholtes_then_ncp` is defined as a Scholtes
-continuation followed by one exact-product NCP-equality solve seeded
-from it — and that finishing solve is rejected structurally, with
-`Not_Enough_Degrees_Of_Freedom` after zero iterations, at all 34 points.
-The reason is not numerical: a square flash has no objective and no
-slack, so making both product rows equalities gives **six equality rows
-against five variables**. Gate 0's corpus had an objective and free
-variables and never met this; every equilibrium-stage model does, by
-construction.
+**Gate 0's supported route ran only its continuation half here, at every
+single temperature — until Gate 1 gave it a fallback.**
+`scholtes_then_ncp` is defined as a Scholtes continuation followed by
+one exact-product NCP-equality solve seeded from it, and that finishing
+solve is refused structurally, with `Not_Enough_Degrees_Of_Freedom`
+after zero iterations, at all 34 points. The reason is not numerical: a
+square flash has no objective and no slack, so making both product rows
+equalities gives **six equality rows against five variables**, and
+`application.rs` refuses that before iteration zero, mirroring upstream
+Ipopt (`IpOrigIpoptNLP.cpp:299`). Gate 0's corpus had an objective and
+free variables and never met it; every equilibrium-stage model meets it
+by construction.
 
-The identical numbers for `scholtes_then_ncp` and `scholtes_warm_full`
-in the table above are that finding restated: on this fixture they are
-the same route. The answers are still right — the continuation reaches
-`tau = 1e-8` and the source complementarity products land at 1e-12,
-four orders inside the `sqrt(tol)` floor — but the half of the route
-that exists to *guarantee* MPCC-feasibility never ran, and a report that
-said "the supported route works on a phase-change model" without this
-paragraph would be false in the way that matters.
+That gate is correct and is not worked around. The fix is in the route:
+`Route.finish_fallback` substitutes `prod_ineq` where the equality form
+cannot run. The two have identical feasible sets — with `G, H >= 0` the
+inequality `G*H <= 0` is active only at `G*H = 0` — but an inequality
+does not count against the gate. Records carry `finish_lowering`, so a
+fallback is never invisible.
 
-`ncp_eq` fails for exactly the same structural reason, which is why it
-is 0/34 rather than 34/34 with bad answers: the model is rejected before
-the first iteration.
+**It is a fallback and not a replacement, and that is measured.** The
+`scholtes_then_ineq` arm is the same composition finishing on the
+inequality unconditionally. Over *Gate 0's* corpus it ties on solved
+(60) and at-`f*` (57) and beats the equality finish on complementarity
+by 27× — and returns **3 cells below the MPCC optimum where the equality
+finish returns none** (`scholtes4`, `skew` leg, all three starts,
+`-2.7e-06`). Identical feasible sets do not imply identical converged
+points, and that is the one axis Gate 0 picked the equality finish for.
+So the inequality form is used only where the equality form cannot run
+at all — and re-measured with the conditional in place, Gate 0's corpus
+is bit-identical.
 
-**What to use instead, measured:** `direct` — the `G*H <= 0` lowering,
-which adds inequalities rather than equalities and so does not
-over-determine the square system. It solves all 34 points on its own,
-with the best agreement in the table (1e-13, three orders better than
-the continuation routes) and without a continuation at all. That is a
-concrete recommendation for the next model up rather than a preference:
-on a square complementarity flash, the direct lowering is the one that
-fits.
+`ncp_eq` on its own is 0/34 here for the same structural reason, and
+`direct` — the `G*H <= 0` lowering with no continuation at all — solves
+all 34 points with the best agreement in the table. On a square
+complementarity flash the direct lowering fits; that is a measurement
+about *this* model class, not a general recommendation, and the Gate 0
+numbers above are why the distinction matters.
 
 The single `ncp_eq_l1` miss is at 269.0 K, the path point nearest the
 bubble at 268.89 K: `beta` off by 1.3e-6 against a 1e-6 threshold, with

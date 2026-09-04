@@ -88,6 +88,33 @@ class Route:
     warm: str
     continuation: bool
     why: str
+    #: Lowering substituted for `finish` when `finish` would leave the
+    #: model with more equality rows than free variables.
+    #:
+    #: `application.rs` refuses such a model with
+    #: `Not_Enough_Degrees_Of_Freedom` before iteration zero, mirroring
+    #: upstream Ipopt (`IpOrigIpoptNLP.cpp:299`). That gate is right and
+    #: is not to be worked around; what it means for a *composition* is
+    #: that its finishing solve is unavailable on a square source model
+    #: -- and every equilibrium-stage process model is square. gh#776's
+    #: Gate 1 flash is refused at all 34 of its temperatures, so
+    #: `scholtes_then_ncp` runs only its continuation half there.
+    #:
+    #: `prod_ineq` has the identical feasible set (`G, H >= 0` makes
+    #: `G*H <= 0` active only at `G*H = 0`) and adds an inequality
+    #: instead of an equality, so it does not count against the gate.
+    #:
+    #: **It is a fallback, not a replacement, and that is measured.**
+    #: Run unconditionally as `scholtes_then_ineq` over this corpus it
+    #: ties `scholtes_then_ncp` on solved (60) and at-f* (57) and beats
+    #: it on complementarity (1.8e-12 against 4.9e-11) -- but returns
+    #: **3 cells below f\*** where the equality finish returns none, all
+    #: three `scholtes4` on the `skew` leg at -2.7e-06. Gate 0 chose the
+    #: equality finish precisely because it never returns a point below
+    #: the MPCC's optimum, so the inequality form is used only where the
+    #: equality form cannot run at all.
+    finish_fallback: Optional[str] = None
+
     #: Optional lowering for one final solve after the schedule runs
     #: out, warm-started from the last accepted stage. This is what
     #: turns a continuation's `tau`-feasible answer into an
@@ -227,6 +254,7 @@ ROUTES: Dict[str, Route] = {
             "then one exact-product NCP-equality solve seeded from it."
         ),
         finish="prod_eq",
+        finish_fallback="prod_ineq",
     ),
 }
 

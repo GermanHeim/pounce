@@ -93,15 +93,27 @@ reproduces that defect side by side with the correct row.
 
 ## Two findings
 
-**The supported route's second half does not apply to a square flash.**
+**The supported route's second half needs a fallback on a square flash.**
 Gate 0's `scholtes_then_ncp` finishes with one exact-product (`prod_eq`)
-solve. Here that solve is rejected with `Not_Enough_Degrees_Of_Freedom`
+solve. Here that solve is refused with `Not_Enough_Degrees_Of_Freedom`
 after zero iterations at every temperature: a square flash has no objective
 and no slack, so making both product rows equalities gives six equality rows
-against five variables. Gate 0's corpus had an objective and never met this;
-every equilibrium-stage model meets it by construction. The direct
-`G*H <= 0` lowering adds inequalities instead and solves the whole path on
-its own, with the best agreement of any route.
+against five variables, and POUNCE refuses that before iteration zero,
+mirroring upstream Ipopt. Gate 0's corpus had an objective and never met
+this; every equilibrium-stage model meets it by construction.
+
+The gate is correct and is not worked around — the fix is in the route.
+`Route.finish_fallback` substitutes the direct `G*H <= 0` lowering where
+the equality form cannot run; the two have identical feasible sets (with
+`G, H >= 0` the inequality is active only at `G*H = 0`) but an inequality
+does not count against the gate. It is a **fallback and not a
+replacement**, and that is measured: run unconditionally over Gate 0's
+corpus the inequality finish ties on cells solved and cells at the known
+optimum, beats the equality finish on complementarity by 27×, and returns
+three cells *below* the MPCC optimum where the equality finish returns
+none — the one axis Gate 0 chose that finish for. Re-measured with the
+conditional in place, Gate 0's corpus is bit-identical, so the fallback
+buys Gate 1 its finishing solve at no cost to Gate 0.
 
 **Reverse-mode autodiff loses the Hessian at the bubble point.** Under
 `jax.jit`, `jax.hessian` — which is `jacfwd(jacrev(·))` — is wrong by O(20)

@@ -87,6 +87,9 @@ class SolveRecord:
     #: gets said when what works is its continuation.
     finish_applied: Optional[bool] = None
     finish_status_msg: Optional[str] = None
+    #: The lowering the finishing solve actually used, which after a
+    #: degrees-of-freedom fallback is not `route.finish`.
+    finish_lowering: Optional[str] = None
 
 
 def _build_problem(nlp: LoweredFlash, opts: Dict[str, object]):
@@ -275,7 +278,19 @@ def solve_route(
         # is feasible for `G*H <= 1e-8`, which on this model is a vapor
         # fraction off the branch by `sqrt(1e-8)`.
         if route.finish is not None and last_x is not None:
-            nlp = lower(case, temperature_k, route.finish)
+            finish_lowering = route.finish
+            nlp = lower(case, temperature_k, finish_lowering)
+            if route.finish_fallback is not None:
+                # The degrees-of-freedom fallback. On this model the
+                # equality finish is refused before iteration zero at
+                # every temperature -- 5 free variables, 6 equality rows
+                # -- so without this the composition is its continuation
+                # half wearing the composition's name. See
+                # `routes.Route.finish_fallback`.
+                n_eq = int(np.sum(nlp.cl == nlp.cu))
+                if nlp.n < n_eq:
+                    finish_lowering = route.finish_fallback
+                    nlp = lower(case, temperature_k, finish_lowering)
             x, info, wall = solve_once(nlp, opts, last_x, state, "full")
             status = int(info.get("status", -99))
             rec.stages.append(
@@ -289,16 +304,17 @@ def solve_route(
                     restart_level="finish",
                     iters=int(info.get("iter_count", info.get("iterations", 0)) or 0),
                     wall_s=wall,
-                    lowering=route.finish,
+                    lowering=finish_lowering,
                 )
             )
             rec.iters += rec.stages[-1].iters
             rec.outer_stages += 1
             rec.finish_applied = status in R.OK_STATUS
             rec.finish_status_msg = str(info.get("status_msg", ""))
+            rec.finish_lowering = finish_lowering
             if status in R.OK_STATUS:
                 last_x, last_info = x, info
-                rec.lowering = route.finish
+                rec.lowering = finish_lowering
     except Exception as exc:  # pragma: no cover - solver-level failure
         rec.error = f"{type(exc).__name__}: {exc}"
 
