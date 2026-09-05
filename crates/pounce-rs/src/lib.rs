@@ -210,14 +210,20 @@ pub use pounce_algorithm::application::IpoptApplication;
 
 // --- presolve ---------------------------------------------------------------
 pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
-pub use pounce_presolve::fbbt::FbbtReport;
+pub use pounce_presolve::{
+    AuxiliaryPreprocessingDiagnostics, CachedBounds, LicqVerdict, TightenReport, fbbt::FbbtReport,
+};
 
 /// Low-level presolve APIs for callers that drive a [`TNLP`] directly.
 pub mod presolve {
     pub use pounce_nlp::expression_provider::ExpressionProvider;
     pub use pounce_presolve::{
-        PresolveError, PresolveOptions, PresolveTnlp, wrap_with_presolve_provider,
+        AuxiliaryPreprocessingDiagnostics, CachedBounds, LicqVerdict, PresolveError,
+        PresolveOptions, PresolveTnlp, TightenReport, wrap_from_options, wrap_with_presolve,
+        wrap_with_presolve_provider,
     };
+
+    pub use pounce_presolve;
 }
 
 /// Second-opinion recovery for callers that manage the low-level solve loop.
@@ -225,6 +231,8 @@ pub mod restoration {
     pub use pounce_restoration::second_opinion_driver::{
         SecondOpinionOutcome, run_second_opinion_ladder,
     };
+
+    pub use pounce_restoration;
 }
 
 // --- iteration capture & observability --------------------------------------
@@ -241,6 +249,8 @@ pub use pounce_algorithm;
 pub use pounce_common;
 pub use pounce_nlp;
 pub use pounce_observability;
+pub use pounce_presolve;
+pub use pounce_restoration;
 
 // --- ergonomic builder API (argmin-style small trait + builder; #168) -------
 pub mod builder;
