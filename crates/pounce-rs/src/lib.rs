@@ -215,6 +215,10 @@ pub use pounce_presolve::{
 };
 
 /// Low-level presolve APIs for callers that drive a [`TNLP`] directly.
+/// [`IpoptApplication::optimize_tnlp`] applies `wrap_from_options` itself when
+/// `presolve=yes`; after wrapping manually, call
+/// [`IpoptApplication::set_presolve_already_applied`] with `true` to avoid a
+/// second wrapper.
 pub mod presolve {
     pub use pounce_nlp::expression_provider::ExpressionProvider;
     pub use pounce_presolve::{
