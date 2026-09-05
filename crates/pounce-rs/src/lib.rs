@@ -212,6 +212,21 @@ pub use pounce_algorithm::application::IpoptApplication;
 pub use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 pub use pounce_presolve::fbbt::FbbtReport;
 
+/// Low-level presolve APIs for callers that drive a [`TNLP`] directly.
+pub mod presolve {
+    pub use pounce_nlp::expression_provider::ExpressionProvider;
+    pub use pounce_presolve::{
+        PresolveError, PresolveOptions, PresolveTnlp, wrap_with_presolve_provider,
+    };
+}
+
+/// Second-opinion recovery for callers that manage the low-level solve loop.
+pub mod restoration {
+    pub use pounce_restoration::second_opinion_driver::{
+        SecondOpinionOutcome, run_second_opinion_ladder,
+    };
+}
+
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
