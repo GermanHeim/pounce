@@ -79,6 +79,7 @@ pub mod options;
 pub mod reduction_frame;
 pub mod redundant;
 pub mod trivial_elim;
+pub mod warm;
 
 pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
@@ -99,6 +100,10 @@ pub use linear_eq_plan::{
 pub use options::{AuxiliaryCouplingPolicy, LicqAction, PresolveOptions, register_options};
 pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
+pub use warm::{
+    PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport,
+    compute_fingerprint, project_warm_point,
+};
 
 /// Errors that can arise while building a presolved TNLP.
 #[derive(Debug)]
@@ -815,6 +820,44 @@ impl PresolveTnlp {
             .as_ref()
             .map(|s| s.aux_diagnostics.clone())
             .unwrap_or_default()
+    }
+
+    /// Snapshot the transformation for warm-start mapping. Runs init first.
+    /// `None` when init fails. See [`warm`] for the contract.
+    pub fn transformation(&mut self) -> Option<PresolveMap> {
+        let s = self.ensure_init()?;
+        let mut fixed: std::collections::BTreeMap<usize, Number> =
+            std::collections::BTreeMap::new();
+        for frame in s.reduction_stack.iter_bottom_up() {
+            for (k, &i) in frame.fixed_vars.iter().enumerate() {
+                if let Some(&v) = frame.fixed_values.get(k) {
+                    fixed.insert(i, v);
+                }
+            }
+        }
+        let (fixed_vars, fixed_values): (Vec<usize>, Vec<Number>) = fixed.into_iter().unzip();
+        Some(PresolveMap {
+            n_inner: s.info_inner.n.max(0) as usize,
+            m_inner: s.info_inner.m.max(0) as usize,
+            m_outer: s.info_outer.m.max(0) as usize,
+            rows_kept: s.rows_kept.clone(),
+            x_l: s.bounds.x_l.clone(),
+            x_u: s.bounds.x_u.clone(),
+            fixed_vars,
+            fixed_values,
+        })
+    }
+
+    /// Fingerprint what this transformation was computed from. A session
+    /// rebuilds the wrapper when this moves. `None` means "always rebuild".
+    pub fn fingerprint(&mut self) -> Option<PresolveFingerprint> {
+        crate::warm::compute_fingerprint(&self.inner, &self.opts)
+    }
+
+    /// Drop the cached transformation, the next query recomputes it. Needed
+    /// after fingerprint-invisible changes (FBBT tapes).
+    pub fn invalidate(&mut self) {
+        self.state = None;
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,

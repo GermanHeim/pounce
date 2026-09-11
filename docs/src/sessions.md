@@ -24,6 +24,8 @@ rebuilding it on every call. The same machinery serves two workloads:
 | The same, from Rust                                                  | `pounce_rs::sensitivity::Solver`          |
 | Just a sparse symmetric factor — no IPM involved                     | `pounce_rs::linsol::Factorization`        |
 | A one-shot sensitivity computation with a fluent builder             | `pounce_rs::sensitivity::SensSolve` (Rust) or `Problem.solve_with_sens` (Python) |
+| Re-solving an NLP family with presolve *and* warm starts (MPC, oximo) | `pounce_rs::session::TnlpPresolveSession` (Rust) |
+| Re-solving a convex QP family with presolve *and* warm starts         | `pounce_convex::ConvexPresolveSession` (Rust; `pounce_rs::convex` with `convex`) |
 
 The session API does **not** rebuild the IPM. Each `solve()` call runs
 the full barrier method from scratch. What it reuses is the **factor
@@ -164,6 +166,56 @@ of its callers. See
 * **Numeric factor.** Reused on every back-solve until you refactor.
 * **The converged primal-dual state** (`x*`, multipliers, `g(x*)`,
   iteration stats).
+
+## Re-solving families: warm starts through presolve
+
+The sessions above hold a *factor* across queries. A different persistence
+need is re-solving a *family* of nearby problems — MPC steps, parametric
+sweeps, oximo's persistent IPM — seeding each solve from the last solution.
+That seed lives in original space, but `presolve=yes` solves a reduced
+problem (tightened bounds, dropped rows, eliminated variables), so embedders
+previously had to pick presolve **or** warm starts. The presolve sessions
+retain the transformation across solves and map every original-space warm
+point into the reduced space the solver sees:
+
+```rust
+use std::cell::RefCell;
+use std::rc::Rc;
+use pounce_rs::prelude::*;
+use pounce_rs::session::TnlpPresolveSession;
+
+// `inner` is your TNLP, mutated in place between solves.
+let mut session = TnlpPresolveSession::new(inner)?;
+session.set_option_str("presolve", "yes")?;
+
+let first = session.solve_cold()?;
+assert!(first.success);
+
+// Move a bound, shift a parameter — then re-solve warm through presolve.
+let second = session.solve_warm_last()?;
+assert!(second.success);
+assert!(second.presolve_reused); // identical data reuses the transform
+```
+
+Cache + validate: before each solve the session fingerprints what the
+transformation was computed from (dims, Jacobian structure + linear-row
+values, linearity tags, bounds, presolve options). A match reuses the
+wrapper; anything else rebuilds it and maps the warm point through the fresh
+transform. Either way the solve is warm *and* presolved. Dropped-row dual
+mass is reported on `SessionSolution::warm_report` (redundant rows carry 0
+at the optimum; aux-eliminated rows are re-derived from KKT stationarity at
+postsolve), and `SessionSolution::warm_point()` threads `final_mu` into the
+next `mu_init`.
+
+Two changes are invisible to the fingerprint and need `invalidate()`: FBBT
+expression-tape swaps, and nonlinear data changes under
+`presolve_auxiliary=yes`.
+
+The convex counterpart keeps a retained `Presolve` over the IPM instead of
+an application: `ConvexPresolveSession::solve` fingerprints the `QpProblem`,
+skips the recompute on a match, projects the `QpWarmStart` through
+`Presolve::project_warm`, and postsolves back (threading `obj_offset()`
+into `obj_constant` as the CLI does).
 
 ## What's not preserved across `solve()` calls
 

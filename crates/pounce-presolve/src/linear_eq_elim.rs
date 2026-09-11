@@ -301,6 +301,16 @@ impl LinearEqElimTnlp {
         self.finalized.as_ref()
     }
 
+    /// Clone of the elimination plan, if init has run.
+    pub fn elimination_plan(&mut self) -> Option<EliminationPlan> {
+        self.ensure_init().map(|s| s.plan.clone())
+    }
+
+    /// Drop the cached plan. The next query recomputes it.
+    pub fn invalidate(&mut self) {
+        self.state = None;
+    }
+
     fn ensure_init(&mut self) -> Option<&ElimState> {
         if self.state.is_some() {
             return self.state.as_ref();
