@@ -127,19 +127,33 @@ pub struct SensResult {
     /// (unscaled) units (pounce#128); note upstream sIPOPT reports the
     /// scaled-space step when NLP scaling is active.
     pub dx_full: Option<Vec<Number>>,
-    /// Reduced Hessian `H_R`, length `n_params²`, column-major, in
+    /// Reduced Hessian, length `n_params²`, column-major, in
     /// **natural (unscaled) units** — any NLP scaling baked into the
-    /// converged KKT factor is undone, so `−inv(H_R)` is directly the
-    /// parameter covariance of an estimation problem regardless of
-    /// `nlp_scaling_method` (pounce#128). Only present when
-    /// [`SensSolve::with_reduced_hessian`] was called and the solve
-    /// converged.
+    /// converged KKT factor is undone, so `−inv` of this matrix is
+    /// directly the parameter covariance of an estimation problem
+    /// regardless of `nlp_scaling_method` (pounce#128). Only present
+    /// when [`SensSolve::with_reduced_hessian`] was called and the
+    /// solve converged.
+    ///
+    /// **Sign convention: this is `−H_R`, not `H_R`** (gh#937). Over
+    /// pin rows `B K⁻¹ Bᵀ` is the multiplier sensitivity
+    /// `∂λ/∂p = −∂²f*/∂p²`, which is why the covariance recipe above
+    /// negates and why a well-posed minimum reports an all-negative
+    /// spectrum in [`Self::reduced_hessian_eigenvalues`]. Negate to
+    /// read curvature. Full account on
+    /// [`crate::Solver::compute_reduced_hessian`].
     pub reduced_hessian: Option<Vec<Number>>,
     /// The reduced Hessian as the solver's internal scaled space sees
     /// it — `H̃_ij = (df / (dc_i·dc_j)) · H_ij` with `df =`
     /// [`Self::obj_scaling_factor`] and `dc =` [`Self::pin_g_scaling`].
     /// This is the value pounce returned before #128; kept for callers
     /// that calibrated against it. Present iff `reduced_hessian` is.
+    ///
+    /// Its **sign is not fixed**: it is `reduced_hessian` multiplied
+    /// through by `df / (dc_i·dc_j)`, and `df` is negative under
+    /// `obj_scaling_factor = −1` (a declared maximization), which flips
+    /// it back to `+H̃_R`. Only the natural-units value is reliably
+    /// `−H_R` (gh#937).
     pub reduced_hessian_scaled: Option<Vec<Number>>,
     /// Effective objective scaling factor `df` the IPM applied
     /// (`nlp_scaling_method` / `obj_scaling_factor`; 1.0 ⇔ none).
@@ -157,12 +171,21 @@ pub struct SensResult {
     /// `-inv(reduced_hessian)` as a covariance on ill-conditioned
     /// problems. Present whenever the solve converged.
     pub kkt_perturbations: Option<[Number; 4]>,
-    /// Eigenvalues of `H_R` in ascending order, length `n_params`.
-    /// Present only when [`SensSolve::with_reduced_hessian_eigen`] was
-    /// called and the solve converged.
+    /// Eigenvalues of [`Self::reduced_hessian`] in ascending order,
+    /// length `n_params`. Present only when
+    /// [`SensSolve::with_reduced_hessian_eigen`] was called and the
+    /// solve converged.
+    ///
+    /// That matrix is `−H_R` (gh#937), so these are **all negative at a
+    /// well-posed minimum** and ascending order runs **stiffest mode
+    /// first, softest last** — the reverse of what an identifiability
+    /// read wants. Negate and reverse, or take the *trailing* entries
+    /// as the soft directions.
     pub reduced_hessian_eigenvalues: Option<Vec<Number>>,
-    /// Eigenvectors of `H_R`, length `n_params²`, column-major (column
-    /// `j` is the eigenvector for `reduced_hessian_eigenvalues[j]`).
+    /// Eigenvectors of [`Self::reduced_hessian`], length `n_params²`,
+    /// column-major (column `j` is the eigenvector for
+    /// `reduced_hessian_eigenvalues[j]`, so the *leading* columns are
+    /// the stiff directions — see that field).
     /// Sign-pinned by [`pounce_linalg::symmetric_eigen`]: the
     /// largest-magnitude component of each column is positive, so a
     /// column read as a direction reproduces across builds.
@@ -226,7 +249,7 @@ impl SensSolve {
         self
     }
 
-    /// Request the reduced Hessian `H_R = B K⁻¹ Bᵀ` at the converged
+    /// Request the reduced Hessian `B K⁻¹ Bᵀ` at the converged
     /// solution, where `B` selects the parameter-pin rows and `K` is
     /// the **natural-units** (unscaled) KKT matrix — any active NLP
     /// scaling is undone by the backsolver (pounce#128). The
@@ -234,6 +257,9 @@ impl SensSolve {
     /// alongside in [`SensResult::reduced_hessian_scaled`] /
     /// [`SensResult::obj_scaling_factor`] /
     /// [`SensResult::pin_g_scaling`].
+    ///
+    /// Over pin rows that quantity is `−H_R`, not `H_R`; see
+    /// [`SensResult::reduced_hessian`] (gh#937).
     pub fn with_reduced_hessian(mut self) -> Self {
         self.compute_reduced_hessian = true;
         self
@@ -243,6 +269,10 @@ impl SensSolve {
     /// eigendecomposition (ascending eigenvalues, column-major
     /// eigenvectors). Implies [`Self::with_reduced_hessian`].
     /// Mirrors upstream `rh_eigendecomp`.
+    ///
+    /// The decomposed matrix is `−H_R`, so ascending order runs
+    /// stiffest-first — see
+    /// [`SensResult::reduced_hessian_eigenvalues`] (gh#937).
     pub fn with_reduced_hessian_eigen(mut self) -> Self {
         self.compute_reduced_hessian = true;
         self.rh_eigendecomp = true;

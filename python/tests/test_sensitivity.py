@@ -510,3 +510,115 @@ def test_solve_with_sens_boundcheck_releases_a_bound_the_step_leaves():
     assert dx[0] == pytest.approx(5.0 / 3.0, abs=1e-5)
     # y = 2x + 1 still holds at the refined point.
     assert dx[1] == pytest.approx(2 * dx[0], abs=1e-6)
+
+
+class PinnedQuadraticNLP:
+    """`min x0² + x1² + x0·x1` with both variables pinned by equalities.
+
+    The smallest model that tells the three candidate reduced-Hessian
+    conventions apart. Every variable is pinned, so the null space of
+    the active constraints is `{0}` and the reduced Hessian is the
+    objective Hessian `H = [[2, 1], [1, 2]]` itself — no projection to
+    get wrong. `+H`, `-H` and `inv(H)` then differ in **magnitude** as
+    well as sign (`H`'s entries are 2 and 1; `inv(H)`'s are 2/3 and
+    1/3), so an assertion a negation satisfies cannot be satisfied by
+    an inversion.
+    """
+
+    def objective(self, x):
+        return x[0] ** 2 + x[1] ** 2 + x[0] * x[1]
+
+    def gradient(self, x):
+        return np.array([2 * x[0] + x[1], 2 * x[1] + x[0]])
+
+    def constraints(self, x):
+        return np.array([x[0], x[1]])
+
+    def jacobianstructure(self):
+        return (np.array([0, 1], dtype=np.int64),
+                np.array([0, 1], dtype=np.int64))
+
+    def jacobian(self, x):
+        return np.array([1.0, 1.0])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 1], dtype=np.int64),
+                np.array([0, 0, 1], dtype=np.int64))
+
+    def hessian(self, x, lagrange, obj_factor):
+        return np.array([2.0 * obj_factor, obj_factor, 2.0 * obj_factor])
+
+
+def _make_pinned_quadratic(p0=1.0, p1=2.0):
+    p = pounce.Problem(
+        n=2, m=2, problem_obj=PinnedQuadraticNLP(),
+        lb=[-1e19, -1e19], ub=[1e19, 1e19],
+        cl=[p0, p1], cu=[p0, p1],
+    )
+    p.add_option("print_level", 0)
+    p.add_option("sb", "yes")
+    return p
+
+
+def test_reduced_hessian_is_negated_gh937():
+    """gh #937: the pin path reports `-H_R`, not `H_R`.
+
+    Deliberate — pin indices land in the `y_c` multiplier block, over
+    which `B K^-1 B^T` is the multiplier sensitivity `dlambda/dp =
+    -d2f*/dp2`, which is the same minus that makes
+    `-inv(reduced_hessian)` the covariance. But it used to be recorded
+    only in two Rust crossover tests, so a caller had to read the test
+    suite to learn it. Rust mirror:
+    `crates/pounce-sensitivity/tests/issue_937_reduced_hessian_sign.rs`.
+    """
+    H = np.array([[2.0, 1.0], [1.0, 2.0]])
+    solver = pounce.Solver(_make_pinned_quadratic())
+    _, info = solver.solve(x0=np.array([1.0, 2.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+
+    hr = solver.reduced_hessian([0, 1]).reshape((2, 2), order="F")
+    np.testing.assert_allclose(hr, -H, atol=1e-7)
+    # Spelled out so a failure names the convention that was substituted.
+    assert np.abs(hr - H).max() > 1.0, "returned +H_R; the convention is -H_R"
+    assert np.abs(hr - np.linalg.inv(H)).max() > 1.0, (
+        "returned H_R^-1; the pin rows select the y_c block, whose diagonal "
+        "block of K^-1 is -(A H^-1 A^T)^-1 — an inverse of an inverse"
+    )
+    # Negating recovers the curvature, and inverting that the covariance.
+    np.testing.assert_allclose(np.linalg.inv(-hr), np.linalg.inv(H), atol=1e-7)
+
+
+def test_rh_eigendecomp_ascending_runs_stiffest_first_gh937():
+    """The gh #937 foot-gun as an assertion.
+
+    `H = [[2, 1], [1, 2]]` has curvature 3 along `[1, 1]` and 1 along
+    `[1, -1]`. The eigenvalues come back ascending on `-H_R`, so the
+    LEADING column is the stiff direction and the trailing one the
+    soft direction — the reverse of what "smallest eigenvalue first"
+    suggests to an identifiability read, and silent because the
+    vectors are unit-norm, sign-pinned and entirely plausible.
+    """
+    _, info = _make_pinned_quadratic().solve_with_sens(
+        x0=np.array([1.0, 2.0]),
+        pin_constraint_indices=[0, 1],
+        rh_eigendecomp=True,
+    )
+    assert info["status_msg"] == "Solve_Succeeded"
+
+    eigvals = info["reduced_hessian_eigenvalues"]
+    V = info["reduced_hessian_eigenvectors"].reshape((2, 2), order="F")
+    np.testing.assert_allclose(eigvals, [-3.0, -1.0], atol=1e-7)
+
+    # Leading column: the curvature-3 STIFF direction +-[1, 1]/sqrt(2).
+    s = 1.0 / np.sqrt(2.0)
+    np.testing.assert_allclose(np.abs(V[:, 0]), [s, s], atol=1e-7)
+    assert V[0, 0] * V[1, 0] > 0.0
+    # Trailing column: the soft +-[1, -1]/sqrt(2).
+    assert V[0, 1] * V[1, 1] < 0.0
+
+    # The identifiability read, done right: negate, and the ascending
+    # order of `-H_R`'s spectrum is soft-first as expected.
+    w, W = np.linalg.eigh(-info["reduced_hessian"].reshape((2, 2), order="F"))
+    np.testing.assert_allclose(w, [1.0, 3.0], atol=1e-7)
+    # ...and now the LEADING column is the soft +-[1, -1]/sqrt(2).
+    assert W[0, 0] * W[1, 0] < 0.0

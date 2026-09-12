@@ -35,7 +35,9 @@
 //!   [`SensApplication::compute_reduced_hessian_eigen`],
 //!   [`SensSolve::with_reduced_hessian_eigen`], the `pounce_sens
 //!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
-//!   kwarg.
+//!   kwarg. Over **parameter-pin rows** the decomposed matrix is `−H_R`,
+//!   so its ascending spectrum runs stiffest-first (gh#937); see
+//!   [`Solver::compute_reduced_hessian`].
 //! * **`sens_boundcheck` bound refinement** ✔ —
 //!   [`boundcheck::refine_step_onto_bounds`] repairs the active set the
 //!   step implies, both halves of upstream's fix-relax: a coordinate

@@ -3213,7 +3213,18 @@ impl QpSensitivity {
     /// rather than rows of `G`. "Active G rows" was never true there.
     ///
     /// This mirrors the NLP `Solver.reduced_hessian` /
-    /// `solve_with_sens(compute_reduced_hessian=True)`.
+    /// `solve_with_sens(compute_reduced_hessian=True)` in purpose, but
+    /// **not in sign**: the NLP pin path reports `−H_R` (gh#937,
+    /// `pounce_sensitivity::Solver::compute_reduced_hessian`) because its
+    /// rows land in the `y_c` multiplier block, while this one is the
+    /// projection itself and is positive definite at a strict second-order
+    /// minimizer. Its ascending eigenvalues therefore run soft-mode-first,
+    /// the NLP arm's stiff-mode-first. Do not carry a sign across.
+    ///
+    /// Measured on the same matrix, `P = [[2, 1], [1, 2]]` with no active
+    /// row: this reports `[[2, 1], [1, 2]]` with eigenvalues `[1, 3]`,
+    /// while the NLP arm over two pin rows reports `[[−2, −1], [−1, −2]]`
+    /// with `[−3, −1]`.
     ///
     /// The basis `Z` is the null space of `B`, obtained from the
     /// eigenvectors of `BᵀB` whose eigenvalue is below `rank_tol · λ_max`
