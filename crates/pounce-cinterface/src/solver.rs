@@ -457,15 +457,19 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
     })
 }
 
-/// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned rows.
+/// Reduced Hessian `obj_scal · B K⁻¹ Bᵀ` over the pinned rows.
 /// `hr_out` receives an `n_pins²`-long column-major dense matrix.
 ///
-/// `H_R` is in **natural (unscaled) units**: any NLP scaling the IPM
-/// applied (`nlp_scaling_method`) is undone before the value is
-/// reported, so `-inv(H_R)` is directly the parameter covariance of
-/// an estimation problem (pounce#128). `obj_scal` is a plain extra
+/// The value is in **natural (unscaled) units**: any NLP scaling the
+/// IPM applied (`nlp_scaling_method`) is undone before it is reported,
+/// so `-inv(...)` of it is directly the parameter covariance of an
+/// estimation problem (pounce#128). `obj_scal` is a plain extra
 /// multiplier (pass 1.0); it is no longer needed to undo pounce's own
 /// scaling.
+///
+/// **Sign convention: this writes `−H_R`, not `H_R`** (gh#937) — see
+/// [`pounce_sensitivity::Solver::compute_reduced_hessian`], which it
+/// forwards to. Negate `hr_out` to read curvature.
 ///
 /// Returns `TRUE` on success, `FALSE` otherwise.
 ///

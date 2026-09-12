@@ -18,7 +18,28 @@
 //! by `-obj_scal` to produce the unscaled reduced Hessian.
 //!
 //! In pounce we default `obj_scal = 1.0` so the operation reduces to
-//! `H_R = -S = B K⁻¹ Bᵀ`. Unlike upstream, no NLP-side scaling needs
+//! `H_R = -S = B K⁻¹ Bᵀ`.
+//!
+//! # `B K⁻¹ Bᵀ` is `H_R` or `−H_R` depending on which rows `B` picks
+//!
+//! This function is agnostic about that; a caller must not be
+//! (gh#937). Upstream — and pounce's CLI `red_hessian` suffix path,
+//! which mirrors it — selects **free-variable (x-block) rows**, where
+//! the corresponding block of `K⁻¹` is itself an inverse. The
+//! `pounce-sensitivity` pin path instead selects **`y_c` multiplier
+//! rows**, and for `K = [[H, Aᵀ], [A, 0]]` that block of `K⁻¹` is
+//! `−(A H⁻¹ Aᵀ)⁻¹` — an inverse of an inverse, so the result is
+//! `±H_R` itself rather than a submatrix of `K⁻¹`, and the `-S` above
+//! leaves it at `−H_R`.
+//!
+//! The two blocks sit on opposite sides of one inversion, so the unit
+//! test below — which feeds a synthetic dense `K` and selects two of
+//! its rows — looks like it generalizes to the pin path and does not.
+//! `pounce-sensitivity/tests/issue_937_reduced_hessian_sign.rs` pins
+//! the pin path's orientation at the public API, on a model where
+//! `±H_R` and `H_R⁻¹` differ in magnitude as well as sign.
+//!
+//! Unlike upstream, no NLP-side scaling needs
 //! folding in here: since pounce#128 the live-factor backsolver
 //! (`PdSensBacksolver`, in `pounce-sensitivity` — a downstream crate, so not
 //! linkable from here) conjugates every back-solve by the
@@ -109,7 +130,8 @@ pub fn compute_reduced_hessian<P: PCalculator>(
         return false;
     }
     // Step 2: H_R = -obj_scal · S. Pounce default obj_scal = 1.0
-    // yields H_R = B K⁻¹ Bᵀ.
+    // yields H_R = B K⁻¹ Bᵀ — whose own sign depends on which rows
+    // `hess_data` selects; see the module header (gh#937).
     let factor = -obj_scal;
     for v in out.iter_mut() {
         *v *= factor;

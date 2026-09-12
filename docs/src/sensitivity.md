@@ -95,6 +95,69 @@ let result = SensSolve::new(vec![2, 3])
 `with_boundcheck(eps)` enables the bound refinement described under
 [Bending the estimate around a bound](#bending-the-estimate-around-a-bound-modefix_relax).
 
+### The reduced Hessian comes back negated
+
+**Every pin-row reduced Hessian POUNCE reports is `−H_R`, not `H_R`**
+(gh#937) — `result.reduced_hessian` here, `info["reduced_hessian"]`
+from `solve_with_sens`, `Solver.reduced_hessian(pins)` in Python,
+`Solver::compute_reduced_hessian` in Rust, and
+`IpoptSolverReducedHessian` over the C ABI. On `f = x₀² + x₁² + x₀x₁`
+with both variables pinned, so that the reduced Hessian is the
+objective Hessian `[[2, 1], [1, 2]]` itself:
+
+```text
+reduced_hessian(pins=[0, 1]) = [[-2, -1], [-1, -2]]
+  eigenvalues (ascending)    = [-3, -1]
+```
+
+The convention is deliberate. Pin indices select rows of the `y_c`
+multiplier block, and for `K = [[H, Aᵀ], [A, 0]]` the `(y_c, y_c)`
+block of `K⁻¹` is `−(A H⁻¹ Aᵀ)⁻¹` — so over pin rows `B K⁻¹ Bᵀ` is the
+multiplier sensitivity `∂λ/∂p = −∂²f*/∂p²`. That is the same minus
+that makes `−inv(reduced_hessian)` the parameter covariance in the
+[covariance recipe](#parameter-covariance-and-identifiability); it is
+not an indefiniteness or convergence bug, even though a well-posed
+minimum reports an all-negative spectrum.
+
+Two consequences worth having in front of you:
+
+- **Negate to read curvature.** `−reduced_hessian` is `H_R`;
+  `−inv(reduced_hessian)` is the covariance.
+- **The ascending spectrum runs stiffest-first.** Eigenvalues come
+  back ascending, and ascending on `−H_R` means most-negative first.
+  Above, `−3` is the *stiff* mode (curvature 3) and `−1` the soft one.
+  So taking the leading columns as the least-identifiable directions
+  returns the best-identified ones — and nothing looks wrong, because
+  the vectors are unit-norm, sign-pinned and entirely plausible. Read
+  the *trailing* columns as the soft modes, or decompose `−H_R`
+  yourself and read the leading ones.
+
+The **solver-space** variants — `reduced_hessian(pins, scaled=True)`,
+`info["reduced_hessian_scaled"]`, `compute_reduced_hessian_scaled` —
+are the exception, and it is worth knowing which way round it goes.
+They are the value above multiplied through by `df / (dc_i·dc_j)` (see
+[Units and NLP scaling](#units-and-nlp-scaling)), so their orientation
+follows that factor rather than the convention: on the same fully
+pinned model they read `[[−2, −1], [−1, −2]]` by default but `[[2, 1],
+[1, 2]]` under `obj_scaling_factor = −1`, where `df` carries the minus
+that turns a declared maximization into a minimization. Only the
+natural-units value is reliably `−H_R`.
+
+`crates/pounce-sensitivity/examples/rh_orientation_check.rs` prints
+the matrix and scores it against all three candidate conventions
+(`+H_R`, `−H_R`, `H_R⁻¹`):
+
+```text
+cargo run --release -p pounce-sensitivity --example rh_orientation_check
+```
+
+`QpSensitivity.reduced_hessian` on [the convex
+arm](#the-convex-arm-qpsensitivity) does **not** share the convention:
+it is a different computation behind the same word — a null-space
+projection `Zᵀ(P + C)Z`, not this Schur route — and it reports `+H_R`,
+positive definite at a strict second-order minimizer. Do not carry a
+sign from one arm to the other.
+
 ### Eigenvector sign convention
 
 Every eigendecomposition POUNCE hands back — the reduced Hessian's
@@ -1206,7 +1269,10 @@ What stays NLP-only, and why each is a capability rather than an oversight:
 - **The reduced Hessian.** Both arms have one, and they are *different
   computations behind one word*: sIPOPT's Schur route here, a null-space
   projection there. They are deliberately not unified, and the CLI routes a
-  `--compute-red-hessian` request to this arm for exactly that reason.
+  `--compute-red-hessian` request to this arm for exactly that reason. They
+  also differ in **sign** — this arm reports `−H_R` over pin rows, the convex
+  arm `+H_R`; see [The reduced Hessian comes back
+  negated](#the-reduced-hessian-comes-back-negated).
 
 The gh#763 rule holds on both arms, and it is the thing to know before reading
 any status either produces: **`AMBIGUOUS` is not "probably not a kink."** A
@@ -1777,9 +1843,12 @@ as `multiplier_rows` has always been required for the `y_c` block.
 In particular, for a parameter-estimation NLP with the parameters
 pinned by equality constraints, `-inv(info["reduced_hessian"])` is
 directly the parameter covariance — no per-problem scale factor, no
-need to set `nlp_scaling_method = "none"`. (Sign convention: over pin
-*constraint* rows, `B K⁻¹ Bᵀ` equals the multiplier sensitivity
-`∂λ/∂p = −∂²f*/∂p²`, hence the minus in the covariance recipe.)
+need to set `nlp_scaling_method = "none"`. (The minus is the sign
+convention, not a step in the scaling correction: over pin
+*constraint* rows `B K⁻¹ Bᵀ` equals the multiplier sensitivity
+`∂λ/∂p = −∂²f*/∂p²`, so what POUNCE reports is `−H_R`. See [The
+reduced Hessian comes back
+negated](#the-reduced-hessian-comes-back-negated).)
 
 For callers that calibrated against the pre-#128 behavior, the
 solver-space value and the factors that relate the two are exposed:
