@@ -779,7 +779,7 @@ Bool IpoptSolverParametricStep(
  *
  * SIGN CONVENTION: this writes `-H_R`, not `H_R` (gh#937). Pin rows
  * select the `y_c` multiplier block, over which `B K^-1 B^T` is the
- * multiplier sensitivity `dlambda/dp = -d2f*/dp2` — which is why the
+ * multiplier sensitivity `dlambda/dp = -d2(f*)/dp2` — which is why the
  * covariance recipe above negates. A well-posed minimum therefore
  * reports an all-negative spectrum; negate `hr_out` to read
  * curvature.
