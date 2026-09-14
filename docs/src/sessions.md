@@ -199,13 +199,17 @@ assert!(second.presolve_reused); // identical data reuses the transform
 
 Cache + validate: before each solve the session fingerprints what the
 transformation was computed from (dims, Jacobian structure + linear-row
-values, linearity tags, bounds, presolve options). A match reuses the
-wrapper; anything else rebuilds it and maps the warm point through the fresh
-transform. Either way the solve is warm *and* presolved. Dropped-row dual
-mass is reported on `SessionSolution::warm_report` (redundant rows carry 0
-at the optimum; aux-eliminated rows are re-derived from KKT stationarity at
-postsolve), and `SessionSolution::warm_point()` threads `final_mu` into the
-next `mu_init`.
+values, constraint and variable linearity tags, bounds, presolve options).
+A match reuses the wrapper; anything else rebuilds it and maps the warm point
+through the fresh transform. Either way the solve is warm *and* presolved.
+Objective values are deliberately *not* fingerprinted — outside auxiliary
+Phase 0 the transform is constraint-derived, so a pure cost change reuses
+the wrapper instead of rebuilding it. Dropped-row dual
+mass is reported on `SessionSolution::warm_report`, folded through the
+linear-eq elimination as well as presolve (redundant rows carry 0
+at the optimum; aux-eliminated and elimination-consumed rows are re-derived
+from KKT stationarity at postsolve), and `SessionSolution::warm_point()`
+threads `final_mu` into the next `mu_init`.
 
 Two changes are invisible to the fingerprint and need `invalidate()`: FBBT
 expression-tape swaps, and nonlinear data changes under
