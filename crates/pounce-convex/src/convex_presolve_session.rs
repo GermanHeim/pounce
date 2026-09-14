@@ -75,12 +75,18 @@ impl ConvexPresolveSession {
     /// whose reduction is unstable across members.
     #[must_use]
     pub fn with_presolve(mut self, on: bool) -> Self {
+        self.set_presolve(on);
+        self
+    }
+
+    /// Toggle presolve on a live session (the [`Self::with_presolve`]
+    /// form consumes, so it cannot flip a session mid-sweep). Turning it
+    /// off drops the retained transform, like [`Self::reset`].
+    pub fn set_presolve(&mut self, on: bool) {
         self.presolve = on;
         if !on {
-            self.retained = None;
-            self.retained_fp = None;
+            self.reset();
         }
-        self
     }
 
     /// Drop the retained transform, the next solve runs presolve fresh.
