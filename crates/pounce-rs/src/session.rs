@@ -723,6 +723,90 @@ mod tests {
         fn finalize_solution(&mut self, _s: TnlpSolution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
+    /// Two independent equality blocks. Auxiliary Phase 0 uniquely solves
+    /// `(x0, x1)`, then the stacked linear-equality wrapper eliminates one
+    /// variable from the surviving `(x2, x3)` block.
+    struct StackedReductions;
+
+    impl TNLP for StackedReductions {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 4,
+                m: 3,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.fill(0.0);
+            b.x_u.fill(5.0);
+            b.g_l.copy_from_slice(&[3.0, 1.0, 3.0]);
+            b.g_u.copy_from_slice(&[3.0, 1.0, 3.0]);
+            true
+        }
+
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x.fill(0.0);
+            }
+            true
+        }
+
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some((x[2] - 2.0).powi(2))
+        }
+
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad.fill(0.0);
+            grad[2] = 2.0 * (x[2] - 2.0);
+            true
+        }
+
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            g[2] = x[2] + x[3];
+            true
+        }
+
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1, 2, 2]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1, 2, 3]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.fill(Linearity::Linear);
+            true
+        }
+
+        fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.copy_from_slice(&[
+                Linearity::Linear,
+                Linearity::Linear,
+                Linearity::NonLinear,
+                Linearity::Linear,
+            ]);
+            true
+        }
+
+        fn finalize_solution(&mut self, _s: TnlpSolution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
     fn mini_session(presolve: bool) -> (TnlpPresolveSession, Rc<StdRefCell<Params>>) {
         let params = Rc::new(StdRefCell::new(Params {
             x_l: vec![0.0, 0.0],
@@ -765,6 +849,12 @@ mod tests {
         let rep = second.warm_report.expect("warm report");
         // Dropped y<=10 row shows up as dropped dual mass.
         assert_eq!(rep.n_dropped_rows, 1, "report = {rep:?}");
+        assert!(
+            second.stats.iteration_count < first.stats.iteration_count,
+            "warm solve must improve the trajectory: cold={} warm={}",
+            first.stats.iteration_count,
+            second.stats.iteration_count
+        );
     }
 
     #[test]
@@ -801,6 +891,68 @@ mod tests {
         assert_eq!(report.n_dropped_rows, 2, "report = {report:?}");
         assert!(
             (report.dropped_dual_l1 - 5.0).abs() < 1e-12,
+            "report = {report:?}"
+        );
+    }
+
+    #[test]
+    fn warm_start_crosses_live_auxiliary_and_linear_elimination_layers() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(StackedReductions));
+        let mut s = TnlpPresolveSession::new(inner).expect("session");
+        s.set_option_str("presolve", "yes").expect("presolve");
+        s.set_option_str("presolve_auxiliary", "yes")
+            .expect("auxiliary Phase 0");
+        s.set_option_str("presolve_linear_eq_reduction", "yes")
+            .expect("linear elimination");
+        s.set_option_str("hessian_approximation", "limited-memory")
+            .expect("limited memory");
+        s.set_option_int("print_level", 0).expect("quiet test");
+
+        let first = s.solve_cold().expect("cold solve");
+        assert!(first.success, "status = {:?}", first.status);
+        assert_eq!(first.x.len(), 4);
+        assert!((first.x[0] - 2.0).abs() < 1e-8, "x = {:?}", first.x);
+        assert!((first.x[1] - 1.0).abs() < 1e-8, "x = {:?}", first.x);
+        assert!((first.x[2] - 2.0).abs() < 1e-6, "x = {:?}", first.x);
+        assert!((first.x[3] - 1.0).abs() < 1e-6, "x = {:?}", first.x);
+
+        let map = s
+            .presolve
+            .as_ref()
+            .expect("live presolve wrapper")
+            .borrow_mut()
+            .transformation()
+            .expect("initialized map");
+        assert_eq!(map.fixed_vars, vec![0, 1]);
+        assert_eq!(map.fixed_values, vec![2.0, 1.0]);
+        let plan = s
+            .elim
+            .as_ref()
+            .expect("live linear-elimination wrapper")
+            .borrow_mut()
+            .elimination_plan()
+            .expect("initialized elimination plan");
+        assert_eq!(plan.m_full, 1);
+        assert_eq!(plan.rows_kept.len(), 0);
+        assert_eq!(plan.vars_kept, vec![3]);
+
+        let mut warm = first.warm_point();
+        warm.x[0] = 0.0;
+        warm.x[1] = 0.0;
+        warm.lambda = vec![1.0, 2.0, 3.0];
+        let second = s.solve_warm(&warm).expect("stacked warm solve");
+        assert!(second.success, "status = {:?}", second.status);
+        assert_eq!(second.x.len(), 4);
+        assert!((second.x[0] - 2.0).abs() < 1e-8, "x = {:?}", second.x);
+        assert!((second.x[1] - 1.0).abs() < 1e-8, "x = {:?}", second.x);
+        assert!((second.x[2] - 2.0).abs() < 1e-6, "x = {:?}", second.x);
+        assert!((second.x[3] - 1.0).abs() < 1e-6, "x = {:?}", second.x);
+
+        let report = second.warm_report.expect("stacked warm report");
+        assert_eq!(report.x_fixed_overridden_count, 2, "report = {report:?}");
+        assert_eq!(report.n_dropped_rows, 3, "report = {report:?}");
+        assert!(
+            (report.dropped_dual_l1 - 6.0).abs() < 1e-12,
             "report = {report:?}"
         );
     }
