@@ -10,7 +10,7 @@
 //! # use pounce_convex::{ConvexPresolveSession, QpOptions, QpProblem};
 //! # use pounce_convex::ipm::QpWarmStart;
 //! # fn demo(
-//! #     backend: impl FnMut() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> + 'static,
+//! #     mut backend: impl FnMut() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> + 'static,
 //! #     problems: Vec<QpProblem>,
 //! # ) {
 //! let mut session = ConvexPresolveSession::new();
