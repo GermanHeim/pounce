@@ -101,8 +101,8 @@ pub use options::{AuxiliaryCouplingPolicy, LicqAction, PresolveOptions, register
 pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
 pub use warm::{
-    PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport,
-    clamp_seed, compute_fingerprint, project_warm_point, project_warm_point_full,
+    PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport, clamp_seed,
+    compute_fingerprint, project_warm_point, project_warm_point_full,
 };
 
 /// Errors that can arise while building a presolved TNLP.
@@ -1759,17 +1759,13 @@ impl TNLP for PresolveTnlp {
         if sp.init_x {
             for frame in s.reduction_stack.iter_bottom_up() {
                 for (k, &i) in frame.fixed_vars.iter().enumerate() {
-                    if let (Some(dst), Some(&v)) =
-                        (sp.x.get_mut(i), frame.fixed_values.get(k))
-                    {
+                    if let (Some(dst), Some(&v)) = (sp.x.get_mut(i), frame.fixed_values.get(k)) {
                         *dst = v;
                     }
                 }
             }
             for (i, v) in sp.x.iter_mut().enumerate() {
-                if let (Some(&lo), Some(&hi)) =
-                    (s.bounds.x_l.get(i), s.bounds.x_u.get(i))
-                {
+                if let (Some(&lo), Some(&hi)) = (s.bounds.x_l.get(i), s.bounds.x_u.get(i)) {
                     if let Some(c) = crate::warm::clamp_seed(*v, lo, hi) {
                         *v = c;
                     }

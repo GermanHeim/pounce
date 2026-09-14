@@ -49,11 +49,7 @@ pub fn clamp_seed(v: Number, lo: Number, hi: Number) -> Option<Number> {
         return None;
     }
     let c = v.clamp(lo, hi);
-    if c == v {
-        None
-    } else {
-        Some(c)
-    }
+    if c == v { None } else { Some(c) }
 }
 
 // Original-space seed (`x`/`z_l`/`z_u` length `n`, `lambda` length `m`).
@@ -442,7 +438,10 @@ pub fn compute_fingerprint(
             } else {
                 -1 as Index
             };
-            let linear = have_lin && row >= 0 && (row as usize) < m && lin[row as usize] == Linearity::Linear;
+            let linear = have_lin
+                && row >= 0
+                && (row as usize) < m
+                && lin[row as usize] == Linearity::Linear;
             if linear || !have_lin || row < 0 {
                 h = hash_f64(h, *v);
             }
