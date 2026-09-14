@@ -378,6 +378,7 @@ pub struct TnlpPresolveSession {
     outer: Rc<RefCell<dyn TNLP>>,
     fingerprint: Option<PresolveFingerprint>,
     last: Option<SessionSolution>,
+    own_mu_init: Option<Number>,
     /// Held guard keeping iteration capture live once enabled.
     #[allow(dead_code)]
     iter_scope: Option<pounce_observability::CollectorScope>,
@@ -410,6 +411,7 @@ impl TnlpPresolveSession {
             outer,
             fingerprint: None,
             last: None,
+            own_mu_init: None,
             iter_scope: None,
         })
     }
@@ -544,10 +546,10 @@ impl TnlpPresolveSession {
 
         // Explicit caller `mu` wins, else the last `final_mu`, clamped —
         // unless the caller set `mu_init` explicitly (the `batch.rs` rule).
-        let user_set_mu = matches!(
-            self.app.options().get_numeric_value("mu_init", ""),
-            Ok((_, true))
-        );
+        let user_set_mu = match self.app.options().get_numeric_value("mu_init", "") {
+            Ok((v, true)) => self.own_mu_init.map(|o| o != v).unwrap_or(true),
+            _ => false,
+        };
         if !user_set_mu {
             if let Some(w) = &warm {
                 let mu =
@@ -560,6 +562,7 @@ impl TnlpPresolveSession {
                     .set_numeric_value("mu_init", mu, true, false)
                     .is_ok();
                 debug_assert!(ok, "mu_init rejected by the option registry");
+                self.own_mu_init = Some(mu);
             } else {
                 let ok = self
                     .app
@@ -567,6 +570,7 @@ impl TnlpPresolveSession {
                     .set_numeric_value("mu_init", WARM_MU_CEILING, true, false)
                     .is_ok();
                 debug_assert!(ok, "mu_init rejected by the option registry");
+                self.own_mu_init = Some(WARM_MU_CEILING);
             }
         }
 
@@ -801,5 +805,49 @@ mod tests {
         let (mut s, _params) = mini_session(true);
         let sol = s.solve_cold().expect("cold");
         assert_eq!(sol.x.len() as Index, want);
+    }
+
+    #[test]
+    fn mu_init_threads_past_first_solve() {
+        let (mut s, _params) = mini_session(false);
+        let first = s.solve_cold().expect("cold");
+        assert_optimum(&first);
+        let (mu0, present0) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        assert!(present0, "cold solve stages a mu_init");
+        assert!((mu0 - WARM_MU_CEILING).abs() < 1e-15, "mu_init = {mu0}");
+
+        let expect1 = first.stats.final_mu.clamp(WARM_MU_FLOOR, WARM_MU_CEILING);
+        let second = s.solve_warm_last().expect("warm1");
+        assert_optimum(&second);
+        let (mu1, present1) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        assert!(present1);
+        assert!(
+            (mu1 - expect1).abs() < 1e-15,
+            "warm1 threads first final_mu {} clamped to {expect1}, got {mu1}",
+            first.stats.final_mu
+        );
+
+        let expect2 = second.stats.final_mu.clamp(WARM_MU_FLOOR, WARM_MU_CEILING);
+        let third = s.solve_warm_last().expect("warm2");
+        assert_optimum(&third);
+        let (mu2, present2) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        assert!(present2);
+        assert!(
+            (mu2 - expect2).abs() < 1e-15,
+            "warm2 threads second final_mu {} clamped to {expect2}, got {mu2}",
+            second.stats.final_mu
+        );
+    }
+
+    #[test]
+    fn explicit_mu_init_still_wins() {
+        let (mut s, _params) = mini_session(false);
+        let first = s.solve_cold().expect("cold");
+        assert_optimum(&first);
+        s.set_option_num("mu_init", 0.05).expect("user mu_init");
+        let second = s.solve_warm_last().expect("warm");
+        assert_optimum(&second);
+        let (mu, _) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        assert!((mu - 0.05).abs() < 1e-15, "user mu_init preserved, got {mu}");
     }
 }
