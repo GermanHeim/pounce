@@ -43,7 +43,10 @@
 //! [`compute_reduced_hessian`] gives the curvature on the null space of the
 //! active constraints directly, and
 //! [`SensSolve::with_reduced_hessian_eigen`] adds its eigendecomposition via
-//! the shared [`symmetric_eigen`].
+//! the shared [`symmetric_eigen`]. Over parameter-pin rows both report
+//! **`−H_R`**, not `H_R` — so the ascending spectrum runs stiffest-first, and
+//! an identifiability read has to negate. gh#937;
+//! [`SensResult::reduced_hessian`] carries the reasoning.
 //!
 //! For the long form — [`SensApplication`] driven by an explicit
 //! [`IndexSchurData`] / [`PdSensBacksolver`] / [`DenseGenSchurDriver`] stack —

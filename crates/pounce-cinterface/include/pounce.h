@@ -766,16 +766,23 @@ Bool IpoptSolverParametricStep(
 );
 
 /**
- * Reduced Hessian `H_R = obj_scal * B K^-1 B^T` over the pinned
+ * Reduced Hessian `obj_scal * B K^-1 B^T` over the pinned
  * equality-constraint rows in `pin_indices` (0-based indices into
  * g(x)). Writes a dense `n_pins x n_pins` matrix in column-major
  * order to `hr_out`.
  *
- * `H_R` is in natural (unscaled) units: any NLP scaling the IPM
- * applied (`nlp_scaling_method`) is undone before the value is
- * reported, so `-inv(H_R)` is directly the parameter covariance of
- * an estimation problem (pounce#128). `obj_scal` is a plain extra
+ * The value is in natural (unscaled) units: any NLP scaling the IPM
+ * applied (`nlp_scaling_method`) is undone before it is reported, so
+ * `-inv(...)` of it is directly the parameter covariance of an
+ * estimation problem (pounce#128). `obj_scal` is a plain extra
  * multiplier (pass 1.0).
+ *
+ * SIGN CONVENTION: this writes `-H_R`, not `H_R` (gh#937). Pin rows
+ * select the `y_c` multiplier block, over which `B K^-1 B^T` is the
+ * multiplier sensitivity `dlambda/dp = -d2(f*)/dp2` — which is why the
+ * covariance recipe above negates. A well-posed minimum therefore
+ * reports an all-negative spectrum; negate `hr_out` to read
+ * curvature.
  */
 Bool IpoptSolverReducedHessian(
     IpoptSolver    solver,

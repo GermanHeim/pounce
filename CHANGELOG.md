@@ -509,6 +509,67 @@ changes.
 
 ### Fixed
 
+- **The reduced Hessian's sign convention is documented on the public API
+  ([#937](https://github.com/jkitchin/pounce/issues/937)).** Over
+  parameter-pin rows `Solver::compute_reduced_hessian` /
+  `compute_reduced_hessian_eigen`, `SensSolve::with_reduced_hessian`,
+  `Solver.reduced_hessian` and
+  `solve_with_sens(compute_reduced_hessian=True)` in Python, and
+  `IpoptSolverReducedHessian` over the C ABI all return **`−H_R`**. The
+  convention is deliberate — pin indices map to the `y_c` multiplier block,
+  whose diagonal block of `K⁻¹` is `−(A H⁻¹ Aᵀ)⁻¹`, so `B K⁻¹ Bᵀ` there is
+  the multiplier sensitivity `∂λ/∂p = −∂²f*/∂p²`, which is the same minus
+  that makes `−inv(...)` the parameter covariance — but it was recorded only
+  inside `crossover_sigma_downstream.rs` and `crossover_sigma_frame.rs`,
+  where it is incidental to what those files test. No doc comment on any of
+  the entry points above mentioned it.
+
+  The way it bites is silent. The doc on `compute_reduced_hessian_eigen`
+  says its spectrum answers "is this parameter identifiable, and along which
+  direction", and the eigenvalues come back **ascending** — which on `−H_R`
+  runs *stiffest* mode first, softest last. A caller taking the leading
+  columns as the least-identifiable directions gets the best-identified
+  ones, from vectors that are unit-norm, sign-pinned and entirely plausible.
+  Measured on `f = x₀² + x₁² + x₀x₁` with both variables pinned (so the
+  reduced Hessian is `H = [[2, 1], [1, 2]]` itself):
+  `compute_reduced_hessian([0, 1]) = [[−2, −1], [−1, −2]]`, eigenvalues
+  `[−3, −1]`, leading eigenvector the curvature-3 *stiff* direction. The
+  second-order confusion is that an all-negative spectrum at a well-posed
+  minimum reads like an indefiniteness bug, sending the reader into the IPM.
+
+  Every surface now says `−H_R` and states the stiffest-first corollary on
+  the eigen entry points, and `docs/src/sensitivity.md` gains "The reduced
+  Hessian comes back negated" with the derivation and the two corollaries.
+  `pounce-convex`'s `QpSensitivity::reduced_hessian` — a null-space
+  projection, positive definite at a strict second-order minimizer — said it
+  "mirrors the NLP `Solver.reduced_hessian`"; it now says it does so in
+  purpose but not in sign, so the two arms' conventions are not carried
+  across. Measured on the same matrix `[[2, 1], [1, 2]]`: the convex arm
+  reports it as `[[2, 1], [1, 2]]` with eigenvalues `[1, 3]` (soft-first),
+  the NLP arm as `[[−2, −1], [−1, −2]]` with `[−3, −1]` (stiff-first). `pounce-sens-core`'s `compute_reduced_hessian` is agnostic about
+  which rows `B` picks, and its module header now says so: the `y_c` block
+  and the x block sit on opposite sides of one inversion, which is why that
+  module's own unit test — a synthetic dense `K` with two of its rows
+  selected — looks like it generalizes to the pin path and does not.
+
+  The solver-space variant is the exception, and it is now documented as one:
+  `compute_reduced_hessian_scaled` / `reduced_hessian(scaled=True)` /
+  `info["reduced_hessian_scaled"]` multiply the above through by `df /
+  (dc_i·dc_j)`, so their orientation is **not** fixed. Measured on the same
+  fully pinned `[[2, 1], [1, 2]]`: `[[−2, −1], [−1, −2]]` by default, but
+  `[[2, 1], [1, 2]]` under `obj_scaling_factor = −1`, where `df` carries the
+  minus that turns a declared maximization into a minimization. Only the
+  natural-units value is reliably `−H_R`.
+
+  Behaviour is unchanged. The convention is now pinned at the public API by
+  `crates/pounce-sensitivity/tests/issue_937_reduced_hessian_sign.rs`, on a
+  fixture where the three candidates (`+H_R`, `−H_R`, `H_R⁻¹`) differ in
+  **magnitude** as well as sign, so an assertion a negation satisfies cannot
+  be satisfied by an inversion; mutation-checked by dropping the `−` from
+  `pounce-sens-core`'s `factor`, which turns four of the five tests red.
+  `crates/pounce-sensitivity/examples/rh_orientation_check.rs` is the
+  one-command demonstration.
+
 - **`solve_qp`'s PSD pre-check no longer masks the `P` non-finite guard
   ([#932](https://github.com/jkitchin/pounce/issues/932)).** Sibling of
   gh #862 — same ordering, different trigger. With a `NaN`/`Inf` anywhere in

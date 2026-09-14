@@ -48,6 +48,7 @@ assert solver.converged
 dx = solver.parametric_step([2, 3], [-0.5, 0.0])
 
 # Reduced Hessian B K⁻¹ Bᵀ over the same pinned-row set.
+# NOTE: over pin rows this is −H_R, not H_R — negate to read curvature.
 hr = solver.reduced_hessian([2, 3])
 
 # Raw KKT back-solve, useful for custom workflows.
@@ -71,6 +72,14 @@ The KKT compound vector is laid out as
 `parametric_step` / `reduced_hessian` are 0-based row indices into
 `g(x)`; they are mapped internally to the matching y_c rows (through
 the equality/inequality split, so inequalities may precede the pins).
+That mapping is also why `reduced_hessian` /
+`compute_reduced_hessian` report **`−H_R`** rather than `H_R`: over
+`y_c` rows `B K⁻¹ Bᵀ` is the multiplier sensitivity `∂λ/∂p`, which is
+the same minus that makes `−inv(hr)` the parameter covariance. An
+all-negative spectrum here is the convention, not indefiniteness, and
+the ascending eigenvalues run stiffest-first — see [The reduced
+Hessian comes back
+negated](sensitivity.md#the-reduced-hessian-comes-back-negated).
 
 All back-solves are in **natural (unscaled) units** — any NLP scaling
 the IPM applied internally is undone, so results are independent of
@@ -110,7 +119,7 @@ double dx[n];
 IpoptSolverParametricStep(sol, 2, pins, deltas, dx);
 
 double hr[2 * 2];                           /* column-major dense   */
-IpoptSolverReducedHessian(sol, 2, pins, 1.0, hr);
+IpoptSolverReducedHessian(sol, 2, pins, 1.0, hr);   /* writes -H_R */
 
 IpoptFreeSolver(sol);
 ```
@@ -132,7 +141,7 @@ solver.solve();
 assert!(solver.converged().is_some());
 
 let dx = solver.parametric_step(&[2, 3], &[-0.5, 0.0])?;
-let hr = solver.compute_reduced_hessian(&[2, 3], 1.0)?;
+let hr = solver.compute_reduced_hessian(&[2, 3], 1.0)?;  // −H_R, see above
 
 let mut lhs = vec![0.0; solver.kkt_dim().unwrap()];
 solver.kkt_solve(&rhs, &mut lhs)?;

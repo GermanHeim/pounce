@@ -10,7 +10,7 @@
 //! solver = pounce.Solver(problem)
 //! x, info = solver.solve(x0=x0)
 //! dx = solver.parametric_step([2, 3], [-0.5, 0.0])
-//! H_R = solver.reduced_hessian([2, 3])
+//! neg_H_R = solver.reduced_hessian([2, 3])   # NOTE: -H_R (gh#937)
 //! ```
 //!
 //! Each `solve()` call rebuilds the underlying [`pounce_algorithm::IpoptApplication`]
@@ -827,16 +827,40 @@ impl PySolver {
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 
-    /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
-    /// rows, in **natural (unscaled) units**: any NLP scaling baked
-    /// into the converged factor is undone, so `-inv(H_R)` is directly
-    /// the parameter covariance of an estimation problem regardless of
-    /// `nlp_scaling_method` (pounce#128). Pass `scaled=True` for the
-    /// solver-space value pounce returned before #128. `obj_scal`
-    /// survives as a plain extra multiplier (default 1.0); it is no
-    /// longer needed to undo pounce's own scaling. Returned as a
-    /// `n²`-long column-major flat array
+    /// Reduced Hessian `obj_scal · B K⁻¹ Bᵀ` over the pinned rows, in
+    /// **natural (unscaled) units**: any NLP scaling baked into the
+    /// converged factor is undone, so `-inv(...)` of the returned
+    /// matrix is directly the parameter covariance of an estimation
+    /// problem regardless of `nlp_scaling_method` (pounce#128). Pass
+    /// `scaled=True` for the solver-space value pounce returned before
+    /// #128. `obj_scal` survives as a plain extra multiplier (default
+    /// 1.0); it is no longer needed to undo pounce's own scaling.
+    /// Returned as a `n²`-long column-major flat array
     /// (`n = pin_constraint_indices.len()`).
+    ///
+    /// **Sign convention: this returns `-H_R`, not `H_R`** (gh#937).
+    /// Over pin rows the quantity above is the multiplier sensitivity
+    /// `dlambda/dp = -d2f*/dp2`, which is why the covariance recipe
+    /// negates. On `H = [[2, 1], [1, 2]]` with both variables pinned
+    /// it returns `[[-2, -1], [-1, -2]]`, so a well-posed minimum
+    /// reports an all-negative spectrum — that is the convention, not
+    /// an indefiniteness bug. Negate to read curvature:
+    ///
+    /// ```python
+    /// import numpy as np
+    /// n = len(pins)
+    /// H_R = -solver.reduced_hessian(pins).reshape(n, n, order="F")
+    /// w, V = np.linalg.eigh(H_R)   # ascending: SOFT modes first
+    /// cov = np.linalg.inv(H_R)     # == -inv(solver.reduced_hessian(...))
+    /// ```
+    ///
+    /// The eigendecomposition matters because of the ordering: the
+    /// eigenvalues POUNCE reports for this matrix (through
+    /// `solve_with_sens(rh_eigendecomp=True)`) are ascending on
+    /// `-H_R`, i.e. **stiffest mode first**. Taking the leading
+    /// columns as the least-identifiable directions returns the
+    /// best-identified ones, from vectors that look entirely
+    /// plausible.
     #[pyo3(signature = (pin_constraint_indices, obj_scal = 1.0, scaled = false))]
     fn reduced_hessian<'py>(
         &self,

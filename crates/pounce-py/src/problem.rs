@@ -762,6 +762,20 @@ impl PyProblem {
     /// (pin_g_scaling[i]*pin_g_scaling[j]) * H[i,j]`. `obj_scal`
     /// survives as a plain extra multiplier on both (default 1.0).
     ///
+    /// **Sign convention: `reduced_hessian` is `-H_R`, not `H_R`**
+    /// (gh#937). Over pin rows the quantity is the multiplier
+    /// sensitivity `dlambda/dp = -d2f*/dp2`, which is why the
+    /// covariance recipe above negates, and why a well-posed minimum
+    /// reports an all-negative spectrum rather than signalling
+    /// indefiniteness. `-info["reduced_hessian"]` reshaped
+    /// column-major is the curvature.
+    ///
+    /// `reduced_hessian_scaled` does *not* inherit that orientation:
+    /// it is the above times `obj_scaling_factor /
+    /// (pin_g_scaling[i]*pin_g_scaling[j])`, and `obj_scaling_factor`
+    /// is negative for a declared maximization
+    /// (`obj_scaling_factor = -1`), which flips it back to `+H_R`.
+    ///
     /// `pin_constraint_indices` are 0-based indices into `g(x)`
     /// identifying the parameter-pin equalities `g_i(x) = p_i`. The
     /// caller must have declared these as exact equalities in the
@@ -769,11 +783,18 @@ impl PyProblem {
     ///
     /// Passing `rh_eigendecomp=True` implies `compute_reduced_hessian=True`
     /// and additionally returns the ascending eigenvalues plus the
-    /// column-major eigenvector matrix of `H_R` (mirrors upstream
-    /// sIPOPT's `rh_eigendecomp` option). Each eigenvector column's
-    /// sign is pinned (largest-magnitude component positive), so a
-    /// column read as a direction reproduces across builds; a repeated
-    /// eigenvalue still leaves the basis within its eigenspace free.
+    /// column-major eigenvector matrix of `info["reduced_hessian"]`
+    /// (mirrors upstream sIPOPT's `rh_eigendecomp` option). Each
+    /// eigenvector column's sign is pinned (largest-magnitude component
+    /// positive), so a column read as a direction reproduces across
+    /// builds; a repeated eigenvalue still leaves the basis within its
+    /// eigenspace free.
+    ///
+    /// Because the decomposed matrix is `-H_R`, ascending order runs
+    /// **stiffest mode first and softest last** — the reverse of what
+    /// an identifiability read wants. Take the *trailing* columns as
+    /// the least-identifiable directions, or decompose `-H_R` yourself
+    /// (`numpy.linalg.eigh`) and read the leading ones.
     ///
     /// The second-opinion ladder does **not** run here, unlike
     /// `solve`: a displaced start can converge to a different local

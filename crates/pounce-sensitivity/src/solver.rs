@@ -43,9 +43,10 @@
 //! - **In**: `solve()`, `converged()`, `kkt_solve()`, `parametric_step()`,
 //!   `block_dims()` / `kkt_dim()`.
 //! - **Deferred to Phase 3b**: `resolve()` (warm-start that reuses the
-//!   linear backend pool), `compute_reduced_hessian()` on the Solver
-//!   (currently only available through [`crate::SensSolve`]), and the
-//!   `parametric_mpc` / `sensitivity_session` example binaries.
+//!   linear backend pool) and the `parametric_mpc` /
+//!   `sensitivity_session` example binaries.
+//!   ([`Solver::compute_reduced_hessian`] has since landed on the Solver
+//!   and is no longer `SensSolve`-only.)
 
 use std::cell::{Ref, RefCell};
 use std::rc::Rc;
@@ -2206,16 +2207,41 @@ impl Solver {
         Ok(state.backsolver.n_full_g() as usize)
     }
 
-    /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
-    /// equality-constraint rows, where `B` selects the
+    /// Reduced Hessian over the pinned equality-constraint rows:
+    /// `obj_scal · B K⁻¹ Bᵀ`, where `B` selects the
     /// `pin_constraint_indices` rows of the y_c block and `K` is the
     /// **natural-units** (unscaled) KKT matrix — active NLP scaling
-    /// is undone by the backsolver, so `−inv(H_R)` is directly the
-    /// parameter covariance regardless of `nlp_scaling_method`
-    /// (pounce#128). `obj_scal` survives as a plain extra multiplier
-    /// (default 1.0); it is no longer needed to recover natural units.
-    /// Returns the `n²`-long column-major dense matrix
-    /// (`n = pin_constraint_indices.len()`).
+    /// is undone by the backsolver, so `−inv` of the returned matrix
+    /// is directly the parameter covariance regardless of
+    /// `nlp_scaling_method` (pounce#128). `obj_scal` survives as a
+    /// plain extra multiplier (default 1.0); it is no longer needed to
+    /// recover natural units. Returns the `n²`-long column-major dense
+    /// matrix (`n = pin_constraint_indices.len()`).
+    ///
+    /// # Sign convention: this returns `−H_R`, not `H_R` (gh#937)
+    ///
+    /// The matrix is the **negated** reduced Hessian. On a model whose
+    /// objective Hessian is `[[2, 1], [1, 2]]` with both variables
+    /// pinned, this returns `[[−2, −1], [−1, −2]]`. So a well-posed
+    /// minimum reports an all-*negative* spectrum; that is the
+    /// convention, not an indefiniteness or convergence bug.
+    ///
+    /// The minus is the augmented system's, and it is why the
+    /// covariance recipe above negates: pin indices map to the `y_c`
+    /// multiplier block, and for `K = [[H, Aᵀ], [A, 0]]` the
+    /// `(y_c, y_c)` block of `K⁻¹` is `−(A H⁻¹ Aᵀ)⁻¹` — so over pin
+    /// rows `B K⁻¹ Bᵀ` is the multiplier sensitivity
+    /// `∂λ/∂p = −∂²f*/∂p²`, i.e. `±H_R` itself and not a submatrix of
+    /// an inverse. (The `x` block of `K⁻¹` *is* an inverse. The two
+    /// blocks sit on opposite sides of one inversion, which is what
+    /// makes the CLI's `red_hessian` suffix path — upstream sIPOPT's,
+    /// selecting x rows — a different quantity rather than the same
+    /// one with a different sign.)
+    ///
+    /// Negate to read curvature: `−hr` is `H_R`, and `−inv(hr)` is the
+    /// covariance. Pinned by
+    /// `tests/issue_937_reduced_hessian_sign.rs`; demonstrated by
+    /// `examples/rh_orientation_check.rs`.
     ///
     /// Equivalent to [`crate::SensSolve::with_reduced_hessian`] but
     /// usable post-hoc on a held `Solver`. For the solver-space
@@ -2268,6 +2294,24 @@ impl Solver {
     /// Eigenvectors are column-major, length `n²`, column `j` belonging to
     /// eigenvalue `j`, and sign-pinned by `symmetric_eigen` so a column read
     /// as a direction reproduces across builds.
+    ///
+    /// # This is the spectrum of `−H_R`, so ascending runs stiffest first
+    ///
+    /// [`Self::compute_reduced_hessian`] returns the **negated** reduced
+    /// Hessian (gh#937, and see its docs for why). The eigenvalues here are
+    /// that matrix's, in ascending order — which on `−H_R` runs from most
+    /// negative to least, i.e. **stiffest mode first and softest last**, the
+    /// reverse of what the identifiability reading wants. On `H = [[2, 1],
+    /// [1, 2]]` fully pinned they come back `[−3, −1]`: the leading column is
+    /// the curvature-3 stiff direction, the trailing one the curvature-1 soft
+    /// direction.
+    ///
+    /// So a caller taking the leading columns as the least-identifiable
+    /// directions gets the best-identified ones, and nothing looks wrong —
+    /// the vectors are unit-norm, sign-pinned and entirely plausible. Either
+    /// negate the eigenvalues and reverse the order, or read the *trailing*
+    /// columns as the soft modes. Pinned by
+    /// `tests/issue_937_reduced_hessian_sign.rs`.
     pub fn compute_reduced_hessian_eigen(
         &self,
         pin_constraint_indices: &[Index],
@@ -2290,6 +2334,17 @@ impl Solver {
     /// before pounce#128: `H̃_ij = (df / (dc_i·dc_j)) · H_ij`.
     /// Identical to `compute_reduced_hessian` when no NLP scaling is
     /// active.
+    ///
+    /// Sign: this is [`Self::compute_reduced_hessian`]'s `−H_R`
+    /// multiplied through by `df / (dc_i·dc_j)` (gh#937), so unlike the
+    /// natural-units value its orientation is **not** fixed. Measured on
+    /// a fully pinned `[[2, 1], [1, 2]]`: `[[−2, −1], [−1, −2]]` by
+    /// default, but `[[2, 1], [1, 2]]` under `obj_scaling_factor = −1`,
+    /// where `df` carries the minus that makes a maximization a
+    /// minimization. Read the sign off the reported factors
+    /// ([`Self::nlp_scaling`], [`Self::pin_g_scaling`]) rather than
+    /// assuming it, or use the natural-units value, whose `−H_R` holds
+    /// whatever the scaling.
     pub fn compute_reduced_hessian_scaled(
         &self,
         pin_constraint_indices: &[Index],
