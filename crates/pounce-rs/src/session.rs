@@ -51,10 +51,10 @@
 //! The injector serves the staged warm point from `get_starting_point`
 //! (falling back on length mismatch) and records the `finalize_solution`
 //! payload — forwarded in original space — as the next seed. Both wrappers
-//! project what the injector serves into the box they actually solve
-//! (presolve clamps into the tightened box and overrides aux-fixed
-//! variables; the elimination gathers survivors), so the seed the solver
-//! consumes and the [`SessionSolution::warm_report`] describing it agree.
+//! record the projection work they actually perform while serving that point;
+//! the session folds those layer records into [`SessionSolution::warm_report`].
+//! The report therefore follows the same code path as the seed instead of
+//! independently replaying the transformation from a snapshot.
 //!
 //! ## Cache + validate
 //!
@@ -88,7 +88,6 @@ use pounce_nlp::tnlp::{
 };
 use pounce_presolve::warm::{
     PresolveFingerprint, WarmPoint, WarmProjectionReport, compute_fingerprint,
-    project_warm_point_full,
 };
 use pounce_presolve::{LinearEqElimTnlp, PresolveOptions, PresolveTnlp};
 
@@ -154,8 +153,7 @@ pub struct SessionSolution {
     /// Whether the retained transformation was reused (`false` = rebuilt;
     /// always `false` with `presolve=no`).
     pub presolve_reused: bool,
-    /// What the warm-point projection did, when a seed was staged and a
-    /// presolve map was live to describe it.
+    /// What the live wrappers did while serving a staged warm point.
     pub warm_report: Option<WarmProjectionReport>,
 }
 
@@ -196,15 +194,21 @@ struct WarmInjector {
     inner: Rc<RefCell<dyn TNLP>>,
     warm: Option<WarmPoint>,
     captured: Option<CapturedSolution>,
+    served_warm: bool,
 }
 
 impl WarmInjector {
     fn set_warm(&mut self, warm: Option<WarmPoint>) {
         self.warm = warm;
+        self.served_warm = false;
     }
 
     fn take_capture(&mut self) -> Option<CapturedSolution> {
         self.captured.take()
+    }
+
+    fn take_served_warm(&mut self) -> bool {
+        std::mem::take(&mut self.served_warm)
     }
 
     fn dims_ok(&self, sp: &StartingPoint<'_>) -> bool {
@@ -234,6 +238,7 @@ impl TNLP for WarmInjector {
             return self.inner.borrow_mut().get_starting_point(sp);
         }
         // `dims_ok` is false for `None`, so this is always `Some`.
+        self.served_warm = true;
         let warm = match &self.warm {
             Some(w) => w,
             None => return self.inner.borrow_mut().get_starting_point(sp),
@@ -400,6 +405,7 @@ impl TnlpPresolveSession {
             inner: Rc::clone(&inner),
             warm: None,
             captured: None,
+            served_warm: false,
         }));
         let outer = Rc::clone(&injector) as Rc<RefCell<dyn TNLP>>;
         Ok(Self {
@@ -574,10 +580,21 @@ impl TnlpPresolveSession {
             }
         }
 
-        self.injector.borrow_mut().set_warm(warm.clone());
+        if let Some(ps) = &self.presolve {
+            ps.borrow_mut().reset_starting_point_projection_report();
+        }
+        if let Some(elim) = &self.elim {
+            elim.borrow_mut().reset_starting_point_projection_report();
+        }
+        self.injector.borrow_mut().set_warm(warm);
         let status = self.app.optimize_tnlp(Rc::clone(&self.outer));
         let stats = self.app.statistics();
-        self.injector.borrow_mut().set_warm(None);
+        let served_warm = {
+            let mut injector = self.injector.borrow_mut();
+            let served = injector.take_served_warm();
+            injector.set_warm(None);
+            served
+        };
 
         let captured = self
             .injector
@@ -590,19 +607,20 @@ impl TnlpPresolveSession {
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         );
 
-        // Read the map after the solve so the report matches the transform.
-        let warm_report = match (&warm, &self.presolve) {
-            (Some(w), Some(ps)) => {
-                let mut ps = ps.borrow_mut();
-                let map = ps.transformation();
-                let elim_plan = self
-                    .elim
-                    .as_ref()
-                    .and_then(|e| e.borrow_mut().elimination_plan());
-                map.and_then(|m| project_warm_point_full(&m, elim_plan.as_ref(), w))
-                    .map(|p| p.report)
-            }
-            _ => None,
+        let warm_report = if served_warm {
+            self.presolve.as_ref().map(|ps| {
+                let mut report = ps.borrow().starting_point_projection_report();
+                if let Some(elim) = &self.elim {
+                    let layer = elim.borrow().starting_point_projection_report();
+                    report.n_dropped_rows += layer.n_dropped_rows;
+                    report.dropped_dual_l1 += layer.dropped_dual_l1;
+                    report.x_clamped_count += layer.x_clamped_count;
+                    report.x_fixed_overridden_count += layer.x_fixed_overridden_count;
+                }
+                report
+            })
+        } else {
+            None
         };
 
         let sol = SessionSolution {
@@ -750,6 +768,44 @@ mod tests {
     }
 
     #[test]
+    fn warm_report_comes_from_the_presolve_call_that_served_the_seed() {
+        let (mut s, _params) = mini_session(true);
+        let first = s.solve_cold().expect("cold");
+        assert_optimum(&first);
+
+        let mut warm = first.warm_point();
+        warm.lambda = vec![2.0, 3.0];
+        let second = s.solve_warm(&warm).expect("warm");
+        assert_optimum(&second);
+        let report = second.warm_report.expect("served warm report");
+        assert_eq!(report.n_dropped_rows, 1, "report = {report:?}");
+        assert!(
+            (report.dropped_dual_l1 - 3.0).abs() < 1e-12,
+            "report = {report:?}"
+        );
+    }
+
+    #[test]
+    fn warm_report_folds_the_live_linear_elimination_layer() {
+        let (mut s, _params) = mini_session(true);
+        s.set_option_str("presolve_linear_eq_reduction", "yes")
+            .expect("linear elimination option");
+        let first = s.solve_cold().expect("cold");
+        assert_optimum(&first);
+
+        let mut warm = first.warm_point();
+        warm.lambda = vec![2.0, 3.0];
+        let second = s.solve_warm(&warm).expect("warm");
+        assert_optimum(&second);
+        let report = second.warm_report.expect("served warm report");
+        assert_eq!(report.n_dropped_rows, 2, "report = {report:?}");
+        assert!(
+            (report.dropped_dual_l1 - 5.0).abs() < 1e-12,
+            "report = {report:?}"
+        );
+    }
+
+    #[test]
     fn bound_change_rebuilds_and_stays_warm() {
         let (mut s, params) = mini_session(true);
         let first = s.solve_cold().expect("cold");
@@ -812,14 +868,22 @@ mod tests {
         let (mut s, _params) = mini_session(false);
         let first = s.solve_cold().expect("cold");
         assert_optimum(&first);
-        let (mu0, present0) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        let (mu0, present0) = s
+            .app
+            .options()
+            .get_numeric_value("mu_init", "")
+            .expect("mu_init");
         assert!(present0, "cold solve stages a mu_init");
         assert!((mu0 - WARM_MU_CEILING).abs() < 1e-15, "mu_init = {mu0}");
 
         let expect1 = first.stats.final_mu.clamp(WARM_MU_FLOOR, WARM_MU_CEILING);
         let second = s.solve_warm_last().expect("warm1");
         assert_optimum(&second);
-        let (mu1, present1) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        let (mu1, present1) = s
+            .app
+            .options()
+            .get_numeric_value("mu_init", "")
+            .expect("mu_init");
         assert!(present1);
         assert!(
             (mu1 - expect1).abs() < 1e-15,
@@ -830,7 +894,11 @@ mod tests {
         let expect2 = second.stats.final_mu.clamp(WARM_MU_FLOOR, WARM_MU_CEILING);
         let third = s.solve_warm_last().expect("warm2");
         assert_optimum(&third);
-        let (mu2, present2) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
+        let (mu2, present2) = s
+            .app
+            .options()
+            .get_numeric_value("mu_init", "")
+            .expect("mu_init");
         assert!(present2);
         assert!(
             (mu2 - expect2).abs() < 1e-15,
@@ -847,7 +915,14 @@ mod tests {
         s.set_option_num("mu_init", 0.05).expect("user mu_init");
         let second = s.solve_warm_last().expect("warm");
         assert_optimum(&second);
-        let (mu, _) = s.app.options().get_numeric_value("mu_init", "").expect("mu_init");
-        assert!((mu - 0.05).abs() < 1e-15, "user mu_init preserved, got {mu}");
+        let (mu, _) = s
+            .app
+            .options()
+            .get_numeric_value("mu_init", "")
+            .expect("mu_init");
+        assert!(
+            (mu - 0.05).abs() < 1e-15,
+            "user mu_init preserved, got {mu}"
+        );
     }
 }

@@ -642,6 +642,11 @@ pub struct PresolveTnlp {
     /// regains the original constraint count: the kept-row-space lambda
     /// the solver produces otherwise mis-aligns against the `.nl`'s `m`.
     finalized_full_solution: Option<(Vec<Number>, Vec<Number>)>,
+
+    /// What the most recent starting-point calls actually changed while
+    /// projecting the inner seed into this wrapper's row space and box.
+    /// Reset by session callers before each solve.
+    starting_point_projection_report: WarmProjectionReport,
 }
 
 struct PresolveState {
@@ -710,6 +715,7 @@ impl PresolveTnlp {
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
 
@@ -746,6 +752,7 @@ impl PresolveTnlp {
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
 
@@ -789,6 +796,19 @@ impl PresolveTnlp {
     /// rather than the reduced kept-row count. See the field docs.
     pub fn finalized_full_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
         self.finalized_full_solution.clone()
+    }
+
+    /// Clear the record of transformations applied by
+    /// [`TNLP::get_starting_point`]. A persistent caller resets this before
+    /// each solve, then reads [`Self::starting_point_projection_report`].
+    pub fn reset_starting_point_projection_report(&mut self) {
+        self.starting_point_projection_report = WarmProjectionReport::default();
+    }
+
+    /// Projection effects observed while this wrapper actually served the
+    /// current solve's starting point.
+    pub fn starting_point_projection_report(&self) -> WarmProjectionReport {
+        self.starting_point_projection_report
     }
 
     /// Cached reduced bounds, if presolve has run.
@@ -858,6 +878,7 @@ impl PresolveTnlp {
     /// after fingerprint-invisible changes (FBBT tapes).
     pub fn invalidate(&mut self) {
         self.state = None;
+        self.reset_starting_point_projection_report();
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,
@@ -1754,23 +1775,33 @@ impl TNLP for PresolveTnlp {
         sp.z_l.copy_from_slice(&z_l_full);
         sp.z_u.copy_from_slice(&z_u_full);
         let s = self.state.as_ref().expect("inited");
+        let mut x_fixed_overridden_count = None;
+        let mut x_clamped_count = None;
         // Project the served primal into the reduced box the solver
         // sees, mirroring `warm::project_warm_point`.
         if sp.init_x {
+            let mut n_fixed = 0;
             for frame in s.reduction_stack.iter_bottom_up() {
                 for (k, &i) in frame.fixed_vars.iter().enumerate() {
                     if let (Some(dst), Some(&v)) = (sp.x.get_mut(i), frame.fixed_values.get(k)) {
+                        if *dst != v {
+                            n_fixed += 1;
+                        }
                         *dst = v;
                     }
                 }
             }
+            let mut n_clamped = 0;
             for (i, v) in sp.x.iter_mut().enumerate() {
-                if let (Some(&lo), Some(&hi)) = (s.bounds.x_l.get(i), s.bounds.x_u.get(i)) {
-                    if let Some(c) = crate::warm::clamp_seed(*v, lo, hi) {
-                        *v = c;
-                    }
+                if let (Some(&lo), Some(&hi)) = (s.bounds.x_l.get(i), s.bounds.x_u.get(i))
+                    && let Some(c) = crate::warm::clamp_seed(*v, lo, hi)
+                {
+                    *v = c;
+                    n_clamped += 1;
                 }
             }
+            x_fixed_overridden_count = Some(n_fixed);
+            x_clamped_count = Some(n_clamped);
         }
         // Phase 4: overlay presolve hints onto any zero/unset
         // entries. User-supplied warm-start values always win.
@@ -1788,6 +1819,32 @@ impl TNLP for PresolveTnlp {
         }
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
             sp.lambda[outer] = lambda_full[i_inner];
+        }
+        let n_dropped_rows = m_in.saturating_sub(s.rows_kept.len());
+        let dropped_dual_l1 = sp.init_lambda.then(|| {
+            let mut kept = vec![false; m_in];
+            for &inner in &s.rows_kept {
+                if inner < kept.len() {
+                    kept[inner] = true;
+                }
+            }
+            lambda_full
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !kept[*i])
+                .map(|(_, value)| value.abs())
+                .sum()
+        });
+        self.starting_point_projection_report.n_dropped_rows = n_dropped_rows;
+        if let Some(value) = dropped_dual_l1 {
+            self.starting_point_projection_report.dropped_dual_l1 = value;
+        }
+        if let Some(value) = x_fixed_overridden_count {
+            self.starting_point_projection_report
+                .x_fixed_overridden_count = value;
+        }
+        if let Some(value) = x_clamped_count {
+            self.starting_point_projection_report.x_clamped_count = value;
         }
         true
     }
@@ -2902,6 +2959,27 @@ mod tests {
         assert_eq!(info.n, 2, "variable count unchanged (clamp, not reduce)");
         assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
 
+        let (mut x0, mut z_l0, mut z_u0) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
+        let mut lambda0 = Vec::new();
+        wrapped.reset_starting_point_projection_report();
+        assert!(wrapped.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x0,
+            init_z: false,
+            z_l: &mut z_l0,
+            z_u: &mut z_u0,
+            init_lambda: true,
+            lambda: &mut lambda0,
+        }));
+        assert_eq!(x0, vec![2.0, 1.0], "wrapper serves aux-fixed values");
+        let start_report = wrapped.starting_point_projection_report();
+        assert_eq!(
+            start_report.x_fixed_overridden_count, 2,
+            "report = {start_report:?}"
+        );
+        assert_eq!(start_report.x_clamped_count, 0, "report = {start_report:?}");
+        assert_eq!(start_report.n_dropped_rows, 2, "report = {start_report:?}");
+
         // The reduced solve returns the clamped point (2, 1); the IPM places
         // large bound multipliers on the now-fixed variables, and the reduced
         // problem has no rows (so empty g / lambda).
@@ -3001,9 +3079,9 @@ mod tests {
         fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
-    /// The seed the solver consumes must be the projected one.
+    /// The report is recorded by the same call that projects the served seed.
     #[test]
-    fn served_warm_primal_matches_reported_projection() {
+    fn served_warm_primal_records_its_projection() {
         let inner: Rc<RefCell<dyn TNLP>> =
             Rc::new(RefCell::new(TightenSeed { x0: vec![5.0, 5.0] }));
         let opts = PresolveOptions {
@@ -3039,20 +3117,9 @@ mod tests {
             "served seed must be clamped into the tightened box"
         );
 
-        let map = wrapped.transformation().expect("map after init");
-        let report = crate::warm::project_warm_point(
-            &map,
-            &crate::warm::WarmPoint {
-                x: vec![5.0, 5.0],
-                lambda: vec![0.0],
-                z_l: vec![0.0, 0.0],
-                z_u: vec![0.0, 0.0],
-                mu: None,
-            },
-        )
-        .expect("shaped")
-        .report;
+        let report = wrapped.starting_point_projection_report();
         assert_eq!(report.x_clamped_count, 2, "report = {report:?}");
+        assert_eq!(report.x_fixed_overridden_count, 0, "report = {report:?}");
     }
 
     /// Same model as [`RecordingTwoVar`] but (a) records the `g` vector that
