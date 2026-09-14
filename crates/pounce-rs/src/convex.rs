@@ -156,7 +156,7 @@
 //! let warm = QpWarmStart::from_solution(&cold);
 //! let second = session.solve(&prob, Some(&warm), &QpOptions::default(), backend);
 //! assert_eq!(second.status, QpStatus::Optimal);
-//! assert!(session.last_reused_shape());
+//! assert!(session.last_reused_transform());
 //! ```
 //!
 //! A frontend driving the engine directly instead of through a session gets

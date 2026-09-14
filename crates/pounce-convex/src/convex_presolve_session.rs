@@ -2,9 +2,10 @@
 //! families solved with warm starts.
 //!
 //! The IPM takes an original-space [`QpWarmStart`] but presolve solves the
-//! reduced problem. This session retains the [`Presolve`] transformation
-//! and maps every seed into reduced space before solving, then postsolves
-//! back.
+//! reduced problem. This session maps every seed into reduced space before
+//! solving, then postsolves back. It retains [`Presolve`] only while the
+//! complete numeric [`QpProblem`] is unchanged; changing a cost, RHS, bound,
+//! or matrix value rebuilds presolve but still uses the supplied warm point.
 //!
 //! ```no_run
 //! # use pounce_convex::{ConvexPresolveSession, QpOptions, QpProblem};
@@ -24,10 +25,13 @@
 //!
 //! # Cache + validate
 //!
-//! Each solve fingerprints the problem data
-//! ([`convex_presolve_fingerprint`]): match reuses the retained `Presolve`
-//! and skips the recompute, mismatch runs presolve fresh and maps the seed
-//! through the new transform.
+//! Each solve fingerprints every number in the problem data
+//! ([`convex_presolve_fingerprint`]): an exact match reuses the retained
+//! `Presolve` and skips the recompute; any mismatch runs presolve fresh and
+//! maps the seed through the new transform. This is intentionally stricter
+//! than `TnlpPresolveSession`'s objective-only policy: convex presolve owns the
+//! reduced objective and the original numeric problem used for postsolve,
+//! rather than delegating those evaluations to a live TNLP.
 
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -100,8 +104,9 @@ impl ConvexPresolveSession {
         self.solves
     }
 
-    /// Whether the last solve reused the retained transform.
-    pub fn last_reused_shape(&self) -> bool {
+    /// Whether the last solve reused an exact-numeric-match transform.
+    /// Equal sparsity with changed coefficients is a rebuild, not reuse.
+    pub fn last_reused_transform(&self) -> bool {
         self.last_reused
     }
 
@@ -292,13 +297,13 @@ mod tests {
         assert_eq!(cold.status, QpStatus::Optimal);
         assert!((cold.x[0] - 0.5).abs() < 1e-6, "x = {:?}", cold.x);
         assert!((cold.x[1] - 0.5).abs() < 1e-6, "x = {:?}", cold.x);
-        assert!(!session.last_reused_shape(), "first solve builds");
+        assert!(!session.last_reused_transform(), "first solve builds");
 
         // Identical data reuses the retained transform.
         let warm = QpWarmStart::from_solution(&cold);
         let second = session.solve(&prob, Some(&warm), &opts, backend);
         assert_eq!(second.status, QpStatus::Optimal);
-        assert!(session.last_reused_shape(), "identical data reuses");
+        assert!(session.last_reused_transform(), "identical data reuses");
         assert!(
             session.last_report().layers >= 1,
             "report = {:?}",
@@ -308,12 +313,13 @@ mod tests {
         assert!((second.x[1] - 0.5).abs() < 1e-6);
         assert_eq!(session.solves(), 2);
 
-        // Moved costs: rebuild, still warm, new optimum.
+        // Convex presolve owns a numeric QP snapshot, so even a pure cost
+        // change rebuilds the transform while still serving the warm point.
         let mut prob2 = fixed_var_qp();
         prob2.c = vec![-1.0, 0.0];
         let third = session.solve(&prob2, Some(&warm), &opts, backend);
         assert_eq!(third.status, QpStatus::Optimal);
-        assert!(!session.last_reused_shape(), "moved data rebuilds");
+        assert!(!session.last_reused_transform(), "moved data rebuilds");
         // min x0^2 + x1^2 - x0  s.t.  x0 = 0.5, x0 + x1 = 1 → (0.5, 0.5).
         assert!((third.x[0] - 0.5).abs() < 1e-6, "x = {:?}", third.x);
         assert!((third.x[1] - 0.5).abs() < 1e-6, "x = {:?}", third.x);
@@ -329,6 +335,6 @@ mod tests {
         let warm = QpWarmStart::from_solution(&cold);
         let second = session.solve(&prob, Some(&warm), &opts, backend);
         assert_eq!(second.status, QpStatus::Optimal);
-        assert!(!session.last_reused_shape());
+        assert!(!session.last_reused_transform());
     }
 }

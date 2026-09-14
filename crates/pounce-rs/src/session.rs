@@ -1,8 +1,8 @@
 //! Warm-start-aware presolve sessions: use presolve *and* warm starts.
 //!
-//! A session retains the presolve transformation across re-solves and maps
-//! every original-space warm point into the reduced space the solver sees,
-//! so persistent callers (oximo, MPC loops) no longer pick one or the other.
+//! A session maps every original-space warm point into the reduced space the
+//! solver sees. It also retains the presolve transformation when the inputs
+//! presolve depends on are unchanged.
 //!
 //! ```
 //! use std::cell::RefCell;
@@ -150,8 +150,8 @@ pub struct SessionSolution {
     pub z_u: Vec<Number>,
     /// Per-solve statistics (wall time, iterations, `final_mu`, …).
     pub stats: SolveStatistics,
-    /// Whether the retained transformation was reused (`false` = rebuilt;
-    /// always `false` with `presolve=no`).
+    /// Whether the exact retained transformation was reused (`false` =
+    /// rebuilt). RHS, bound, and linear constraint-coefficient changes rebuild it.
     pub presolve_reused: bool,
     /// What the live wrappers did while serving a staged warm point.
     pub warm_report: Option<WarmProjectionReport>,
@@ -657,6 +657,7 @@ mod tests {
         x_l: Vec<f64>,
         x_u: Vec<f64>,
         x0: Vec<f64>,
+        objective_target: f64,
     }
 
     struct Mini {
@@ -687,10 +688,10 @@ mod tests {
             true
         }
         fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
-            Some((x[0] - 2.0).powi(2))
+            Some((x[0] - self.params.borrow().objective_target).powi(2))
         }
         fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-            g[0] = 2.0 * (x[0] - 2.0);
+            g[0] = 2.0 * (x[0] - self.params.borrow().objective_target);
             g[1] = 0.0;
             true
         }
@@ -812,6 +813,7 @@ mod tests {
             x_l: vec![0.0, 0.0],
             x_u: vec![5.0, 5.0],
             x0: vec![0.0, 0.0],
+            objective_target: 2.0,
         }));
         let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Mini {
             params: Rc::clone(&params),
@@ -972,6 +974,19 @@ mod tests {
             "a bound change rebuilds the transformation"
         );
         assert!(second.warm_report.is_some());
+    }
+
+    #[test]
+    fn objective_only_change_reuses_nlp_transform() {
+        let (mut s, params) = mini_session(true);
+        let first = s.solve_cold().expect("cold");
+        assert_optimum(&first);
+        params.borrow_mut().objective_target = 1.5;
+        let second = s.solve_warm_last().expect("objective-changed warm solve");
+        assert!(second.success, "status = {:?}", second.status);
+        assert!(second.presolve_reused, "pure NLP cost change should reuse");
+        assert!((second.x[0] - 1.5).abs() < 1e-4, "x = {:?}", second.x);
+        assert!((second.x[1] - 1.5).abs() < 1e-4, "x = {:?}", second.x);
     }
 
     #[test]

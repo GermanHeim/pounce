@@ -183,9 +183,11 @@ need is re-solving a *family* of nearby problems — MPC steps, parametric
 sweeps, oximo's persistent IPM — seeding each solve from the last solution.
 That seed lives in original space, but `presolve=yes` solves a reduced
 problem (tightened bounds, dropped rows, eliminated variables), so embedders
-previously had to pick presolve **or** warm starts. The presolve sessions
-retain the transformation across solves and map every original-space warm
-point into the reduced space the solver sees:
+previously had to pick presolve **or** warm starts. The presolve sessions map
+every original-space warm point into the reduced space the solver sees. They
+reuse a retained transformation only when its fingerprint matches; otherwise
+they run presolve again and map the same warm point through the fresh
+transformation:
 
 ```rust
 use std::cell::RefCell;
@@ -200,10 +202,10 @@ session.set_option_str("presolve", "yes")?;
 let first = session.solve_cold()?;
 assert!(first.success);
 
-// Move a bound, shift a parameter — then re-solve warm through presolve.
+// Re-solve the unchanged model warm through the retained transform.
 let second = session.solve_warm_last()?;
 assert!(second.success);
-assert!(second.presolve_reused); // identical data reuses the transform
+assert!(second.presolve_reused);
 ```
 
 Cache + validate: before each solve the session fingerprints what the
@@ -211,22 +213,40 @@ transformation was computed from (dims, Jacobian structure + linear-row
 values, constraint and variable linearity tags, bounds, presolve options).
 A match reuses the wrapper; anything else rebuilds it and maps the warm point
 through the fresh transform. Either way the solve is warm *and* presolved.
-Objective values are deliberately *not* fingerprinted — outside auxiliary
-Phase 0 the transform is constraint-derived, so a pure cost change reuses
-the wrapper instead of rebuilding it. Dropped-row dual
+For an MPC loop that changes at least one hashed RHS or bound every step, this
+means the warm-start projection engages but the transformation reuse rate is
+0% after the initial build.
+
+The two sessions deliberately have different objective policies:
+
+| Change between solves | TNLP session | Convex-QP session |
+|---|---|---|
+| No fingerprinted data changes | Reuse | Reuse |
+| Objective only | Reuse when auxiliary Phase 0 is off | Rebuild |
+| RHS, bounds, or linear constraint coefficients | Rebuild | Rebuild |
+| Any other numeric QP matrix value | Not applicable | Rebuild |
+
+The TNLP wrappers keep calling the live problem for objective evaluations, so
+outside auxiliary Phase 0 the transform is constraint-derived and a pure cost
+change is safe to reuse. Convex `Presolve`, by contrast, owns a reduced numeric
+`QpProblem` and retains the original numbers needed by postsolve, so its
+fingerprint includes `c`, `P`, and every other numeric field. Reusing convex
+presolve across changing numerical data would require a separate plan-refresh
+API; the current session does not provide one. Dropped-row dual
 mass is reported on `SessionSolution::warm_report`, folded through the
 linear-eq elimination as well as presolve (redundant rows carry 0
 at the optimum; aux-eliminated and elimination-consumed rows are re-derived
 from KKT stationarity at postsolve), and `SessionSolution::warm_point()`
 threads `final_mu` into the next `mu_init`.
 
-Two changes are invisible to the fingerprint and need `invalidate()`: FBBT
-expression-tape swaps, and nonlinear data changes under
-`presolve_auxiliary=yes`.
+Two classes of TNLP changes are invisible to the fingerprint and need
+`invalidate()`: FBBT expression-tape swaps, and objective or nonlinear data
+changes that can affect `presolve_auxiliary=yes` decisions.
 
 The convex counterpart keeps a retained `Presolve` over the IPM instead of
-an application: `ConvexPresolveSession::solve` fingerprints the `QpProblem`,
-skips the recompute on a match, projects the `QpWarmStart` through
+an application: `ConvexPresolveSession::solve` fingerprints every numeric
+field of the `QpProblem`, skips the recompute only on an exact match, projects
+the `QpWarmStart` through
 `Presolve::project_warm`, and postsolves back (threading `obj_offset()`
 into `obj_constant` as the CLI does).
 

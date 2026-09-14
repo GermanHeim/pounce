@@ -17,7 +17,10 @@ changes.
   `pounce_convex::ConvexPresolveSession` retain a presolve transformation while
   the problem fingerprint matches, rebuild it when relevant model data changes,
   project original-space seeds into the reduced problem, and postsolve results
-  back into the caller's coordinates.
+  back into the caller's coordinates. RHS and bound changes rebuild both
+  transforms; objective-only changes can reuse the live TNLP transform when
+  auxiliary Phase 0 is off, while convex-QP objective changes rebuild because
+  convex presolve retains a complete numeric problem snapshot.
 
 - **`pounce_rs::presolve` and `pounce_rs::restoration`
   ([#905](https://github.com/jkitchin/pounce/pull/905)).** Two surfaces the
