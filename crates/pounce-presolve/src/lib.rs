@@ -102,7 +102,7 @@ pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
 pub use warm::{
     PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport,
-    compute_fingerprint, project_warm_point,
+    clamp_seed, compute_fingerprint, project_warm_point, project_warm_point_full,
 };
 
 /// Errors that can arise while building a presolved TNLP.
@@ -1754,6 +1754,28 @@ impl TNLP for PresolveTnlp {
         sp.z_l.copy_from_slice(&z_l_full);
         sp.z_u.copy_from_slice(&z_u_full);
         let s = self.state.as_ref().expect("inited");
+        // Project the served primal into the reduced box the solver
+        // sees, mirroring `warm::project_warm_point`.
+        if sp.init_x {
+            for frame in s.reduction_stack.iter_bottom_up() {
+                for (k, &i) in frame.fixed_vars.iter().enumerate() {
+                    if let (Some(dst), Some(&v)) =
+                        (sp.x.get_mut(i), frame.fixed_values.get(k))
+                    {
+                        *dst = v;
+                    }
+                }
+            }
+            for (i, v) in sp.x.iter_mut().enumerate() {
+                if let (Some(&lo), Some(&hi)) =
+                    (s.bounds.x_l.get(i), s.bounds.x_u.get(i))
+                {
+                    if let Some(c) = crate::warm::clamp_seed(*v, lo, hi) {
+                        *v = c;
+                    }
+                }
+            }
+        }
         // Phase 4: overlay presolve hints onto any zero/unset
         // entries. User-supplied warm-start values always win.
         if sp.init_z && self.opts.warm_z_bounds {
@@ -2916,6 +2938,125 @@ mod tests {
             vec![0.0, 0.0],
             "z_u must be zeroed at aux-fixed vars (H10)"
         );
+    }
+
+    /// min x^2 s.t. x + y = 3, x/y in [0, 5]. The row tightens both
+    /// upper bounds 5 -> 3; the seed sits at the stale corner [5, 5].
+    struct TightenSeed {
+        x0: Vec<Number>,
+    }
+
+    impl TNLP for TightenSeed {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[0.0, 0.0]);
+            b.x_u.copy_from_slice(&[5.0, 5.0]);
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x.copy_from_slice(&self.x0);
+            }
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 2.0 * x[0];
+            g[1] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.fill(Linearity::Linear);
+            true
+        }
+        fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// The seed the solver consumes must be the projected one.
+    #[test]
+    fn served_warm_primal_matches_reported_projection() {
+        let inner: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(TightenSeed { x0: vec![5.0, 5.0] }));
+        let opts = PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+
+        let (mut x_l, mut x_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let (mut g_l, mut g_u) = (vec![0.0; 1], vec![0.0; 1]);
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        assert_eq!(x_u, vec![3.0, 3.0], "row x + y = 3 tightens x_u to 3");
+
+        let (mut x, mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
+        let mut lambda = vec![0.0; 1];
+        assert!(wrapped.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: false,
+            lambda: &mut lambda,
+        }));
+        assert_eq!(
+            x,
+            vec![3.0, 3.0],
+            "served seed must be clamped into the tightened box"
+        );
+
+        let map = wrapped.transformation().expect("map after init");
+        let report = crate::warm::project_warm_point(
+            &map,
+            &crate::warm::WarmPoint {
+                x: vec![5.0, 5.0],
+                lambda: vec![0.0],
+                z_l: vec![0.0, 0.0],
+                z_u: vec![0.0, 0.0],
+                mu: None,
+            },
+        )
+        .expect("shaped")
+        .report;
+        assert_eq!(report.x_clamped_count, 2, "report = {report:?}");
     }
 
     /// Same model as [`RecordingTwoVar`] but (a) records the `g` vector that

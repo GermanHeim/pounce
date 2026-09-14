@@ -20,8 +20,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pounce_common::types::{Index, Number};
-use pounce_nlp::tnlp::{BoundsInfo, Linearity, SparsityRequest, TNLP};
+use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, Linearity, SparsityRequest, TNLP};
 
+use crate::linear_eq_plan::EliminationPlan;
 use crate::options::PresolveOptions;
 
 // FNV-1a over bit patterns: change detection, not a hash table.
@@ -38,6 +39,21 @@ fn hash_f64(h: u64, v: Number) -> u64 {
     // -0.0 and 0.0 hash alike; NaNs hash by payload.
     let bits = if v == 0.0 { 0u64 } else { v.to_bits() };
     mix(h, bits)
+}
+
+/// Clamp `v` into `[lo, hi]`, returning the clamped value, or `None`
+/// when there is nothing valid to do: `v` already inside, any of
+/// `v`/`lo`/`hi` NaN, or the box inverted (`lo > hi`).
+pub fn clamp_seed(v: Number, lo: Number, hi: Number) -> Option<Number> {
+    if v.is_nan() || lo.is_nan() || hi.is_nan() || lo > hi {
+        return None;
+    }
+    let c = v.clamp(lo, hi);
+    if c == v {
+        None
+    } else {
+        Some(c)
+    }
 }
 
 // Original-space seed (`x`/`z_l`/`z_u` length `n`, `lambda` length `m`).
@@ -128,7 +144,9 @@ pub struct WarmProjectionReport {
 // Reduced-space seed: what the solver consumes.
 #[derive(Debug, Clone)]
 pub struct ProjectedWarm {
-    /// Primal in reduced space (length `n_inner`; Phases 0–5 keep `n`).
+    /// Primal in reduced space (length `n_inner` from
+    /// [`project_warm_point`]; shorter after
+    /// [`project_warm_point_full`] gathers elimination survivors).
     pub x: Vec<Number>,
     /// Multipliers on kept rows (length `m_outer`).
     pub lambda: Vec<Number>,
@@ -143,6 +161,9 @@ pub struct ProjectedWarm {
 /// Map `warm` (original space) through `map` into reduced space.
 ///
 /// Returns `None` on a shape mismatch — the caller falls back to cold.
+/// This is the presolve layer only; when a linear-eq elimination is
+/// stacked outside presolve, use [`project_warm_point_full`] so the
+/// report describes the whole chain the solver consumes.
 pub fn project_warm_point(map: &PresolveMap, warm: &WarmPoint) -> Option<ProjectedWarm> {
     if !warm.is_shaped(map.n_inner, map.m_inner) {
         return None;
@@ -150,7 +171,7 @@ pub fn project_warm_point(map: &PresolveMap, warm: &WarmPoint) -> Option<Project
     let n = map.n_inner;
     let mut x = warm.x.clone();
     let mut report = WarmProjectionReport {
-        n_dropped_rows: map.m_inner - map.m_outer,
+        n_dropped_rows: map.m_inner.saturating_sub(map.m_outer),
         ..WarmProjectionReport::default()
     };
     // Aux-fixed variables are clamped in the reduced problem; the warm
@@ -166,10 +187,9 @@ pub fn project_warm_point(map: &PresolveMap, warm: &WarmPoint) -> Option<Project
     // Clamp into the tightened box.
     for (i, v) in x.iter_mut().enumerate().take(n) {
         if i < map.x_l.len() && i < map.x_u.len() {
-            let clamped = (*v).clamp(map.x_l[i], map.x_u[i]);
-            if clamped != *v {
+            if let Some(c) = clamp_seed(*v, map.x_l[i], map.x_u[i]) {
                 report.x_clamped_count += 1;
-                *v = clamped;
+                *v = c;
             }
         }
     }
@@ -202,6 +222,57 @@ pub fn project_warm_point(map: &PresolveMap, warm: &WarmPoint) -> Option<Project
         z_u: warm.z_u.clone(),
         report,
     })
+}
+
+/// Map `warm` through the presolve layer and the linear-eq
+/// elimination stacked outside it, mirroring what the solver
+/// consumes.
+pub fn project_warm_point_full(
+    map: &PresolveMap,
+    elim: Option<&EliminationPlan>,
+    warm: &WarmPoint,
+) -> Option<ProjectedWarm> {
+    let mut proj = project_warm_point(map, warm)?;
+    let plan = match elim {
+        None => return Some(proj),
+        Some(p) => p,
+    };
+    if proj.x.len() != plan.n_full || proj.lambda.len() != plan.m_full {
+        return None;
+    }
+    let mut x = vec![0.0; plan.vars_kept.len()];
+    let mut z_l = vec![0.0; plan.vars_kept.len()];
+    let mut z_u = vec![0.0; plan.vars_kept.len()];
+    for (red, &full) in plan.vars_kept.iter().enumerate() {
+        if full < proj.x.len() && red < x.len() {
+            x[red] = proj.x[full];
+            z_l[red] = proj.z_l[full];
+            z_u[red] = proj.z_u[full];
+        }
+    }
+    let mut lambda = vec![0.0; plan.rows_kept.len()];
+    for (red, &full) in plan.rows_kept.iter().enumerate() {
+        if full < proj.lambda.len() && red < lambda.len() {
+            lambda[red] = proj.lambda[full];
+        }
+    }
+    let mut kept = vec![false; plan.m_full];
+    for &f in &plan.rows_kept {
+        if f < kept.len() {
+            kept[f] = true;
+        }
+    }
+    for (i, &is_kept) in kept.iter().enumerate() {
+        if !is_kept {
+            proj.report.n_dropped_rows += 1;
+            proj.report.dropped_dual_l1 += proj.lambda[i].abs();
+        }
+    }
+    proj.x = x;
+    proj.lambda = lambda;
+    proj.z_l = z_l;
+    proj.z_u = z_u;
+    Some(proj)
 }
 
 // What the transformation was computed from. The session rebuilds the
@@ -267,6 +338,50 @@ pub fn compute_fingerprint(
         h = hash_f64(h, *v);
     }
 
+    // Linearity tags gate every phase's row eligibility.
+    let mut lin = vec![Linearity::NonLinear; m];
+    let have_lin = if m > 0 {
+        inner.borrow_mut().get_constraints_linearity(&mut lin)
+    } else {
+        true
+    };
+    if m > 0 {
+        if have_lin {
+            for t in &lin {
+                h = hash_usize(
+                    h,
+                    match t {
+                        Linearity::Linear => 1,
+                        Linearity::NonLinear => 2,
+                    },
+                );
+            }
+        } else {
+            h = hash_usize(h, 0);
+        }
+    }
+
+    if n > 0 {
+        let mut var_lin = vec![Linearity::NonLinear; n];
+        let have_var_lin = {
+            let mut inner = inner.borrow_mut();
+            inner.get_objective_variables_linearity(&mut var_lin)
+                || inner.get_variables_linearity(&mut var_lin)
+        };
+        h = hash_usize(h, have_var_lin as usize);
+        if have_var_lin {
+            for t in &var_lin {
+                h = hash_usize(
+                    h,
+                    match t {
+                        Linearity::Linear => 1,
+                        Linearity::NonLinear => 2,
+                    },
+                );
+            }
+        }
+    }
+
     // Jacobian structure + values at the probe. Linear rows are constant,
     // so any accepted probe gives the exact coefficients presolve uses.
     let mut irow = vec![0 as Index; nnz];
@@ -316,26 +431,21 @@ pub fn compute_fingerprint(
         ) {
             return None;
         }
-        for v in &values {
-            h = hash_f64(h, *v);
-        }
-    }
-
-    // Linearity tags gate every phase's row eligibility.
-    if m > 0 {
-        let mut lin = vec![Linearity::NonLinear; m];
-        if inner.borrow_mut().get_constraints_linearity(&mut lin) {
-            for t in &lin {
-                h = hash_usize(
-                    h,
-                    match t {
-                        Linearity::Linear => 1,
-                        Linearity::NonLinear => 2,
-                    },
-                );
+        let base = match info.index_style {
+            IndexStyle::C => 0 as Index,
+            IndexStyle::Fortran => 1 as Index,
+        };
+        for (k, v) in values.iter().enumerate() {
+            // Row of entry `k`, converted out of the TNLP's index style.
+            let row = if k < irow.len() {
+                irow[k] - base
+            } else {
+                -1 as Index
+            };
+            let linear = have_lin && row >= 0 && (row as usize) < m && lin[row as usize] == Linearity::Linear;
+            if linear || !have_lin || row < 0 {
+                h = hash_f64(h, *v);
             }
-        } else {
-            h = hash_usize(h, 0);
         }
     }
 
@@ -574,5 +684,142 @@ mod tests {
         opts.redundant_constraint_removal = false;
         let b = compute_fingerprint(&inner, &opts).expect("fingerprint");
         assert_ne!(a, b);
+    }
+
+    /// One linear row (`lin_coef * x == 1`), one nonlinear row (`x^2 <= h`)
+    /// whose Jacobian value moves with the starting point.
+    struct NonlinMini {
+        x0: f64,
+        lin_coef: f64,
+    }
+
+    impl TNLP for NonlinMini {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 2,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -10.0;
+            b.x_u[0] = 10.0;
+            b.g_l[0] = 1.0;
+            b.g_u[0] = 1.0;
+            b.g_l[1] = -1e19;
+            b.g_u[1] = 100.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = self.x0;
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+            Some(x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+            g[0] = 2.0 * x[0];
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+            g[0] = self.lin_coef * x[0];
+            g[1] = x[0] * x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            _n: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    let at = x.map(|v| v[0]).unwrap_or(self.x0);
+                    values.copy_from_slice(&[self.lin_coef, 2.0 * at]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::NonLinear;
+            true
+        }
+        fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn fingerprint_ignores_nonlinear_operating_point() {
+        let opts = PresolveOptions::defaults();
+        let mk = |x0: f64, lin_coef: f64| -> Rc<RefCell<dyn TNLP>> {
+            Rc::new(RefCell::new(NonlinMini { x0, lin_coef })) as Rc<RefCell<dyn TNLP>>
+        };
+        let a = compute_fingerprint(&mk(0.0, 1.0), &opts).expect("fingerprint");
+        // Same linear data, new operating point (nonlinear Jacobian value
+        // 0.0 -> 10.0): must reuse, not rebuild.
+        let b = compute_fingerprint(&mk(5.0, 1.0), &opts).expect("fingerprint");
+        assert_eq!(a, b, "nonlinear operating point must not rebuild");
+        // Same operating point, moved linear coefficient: must rebuild.
+        let c = compute_fingerprint(&mk(0.0, 2.0), &opts).expect("fingerprint");
+        assert_ne!(a, c, "linear coefficient change must rebuild");
+    }
+
+    #[test]
+    fn full_projection_folds_elim_gather() {
+        use crate::linear_eq_plan::EliminationPlan;
+
+        let map = PresolveMap {
+            n_inner: 2,
+            m_inner: 2,
+            m_outer: 2,
+            rows_kept: vec![0, 1],
+            x_l: vec![-10.0, -10.0],
+            x_u: vec![10.0, 10.0],
+            fixed_vars: vec![],
+            fixed_values: vec![],
+        };
+        let warm = WarmPoint {
+            x: vec![1.0, 2.0],
+            lambda: vec![3.0, 4.0],
+            z_l: vec![0.5, 0.25],
+            z_u: vec![0.0, 0.0],
+            mu: None,
+        };
+        let mut plan = EliminationPlan::identity(2, 2, &[-10.0, -10.0], &[10.0, 10.0]);
+        plan.vars_kept = vec![1];
+        plan.rows_kept = vec![1];
+        let proj = project_warm_point_full(&map, Some(&plan), &warm).expect("shaped");
+        assert_eq!(proj.x, vec![2.0]);
+        assert_eq!(proj.lambda, vec![4.0]);
+        assert_eq!(proj.z_l, vec![0.25]);
+        assert_eq!(proj.report.n_dropped_rows, 1);
+        assert!((proj.report.dropped_dual_l1 - 3.0).abs() < 1e-12);
+        let single = project_warm_point(&map, &warm).expect("shaped");
+        let passthrough = project_warm_point_full(&map, None, &warm).expect("shaped");
+        assert_eq!(passthrough.x, single.x);
+        assert_eq!(passthrough.lambda, single.lambda);
+        assert_eq!(passthrough.report, single.report);
+    }
+
+    #[test]
+    fn full_projection_rejects_elim_shape_mismatch() {
+        use crate::linear_eq_plan::EliminationPlan;
+
+        let map = PresolveMap::identity(2, 1, vec![-10.0, -10.0], vec![10.0, 10.0]);
+        let warm = WarmPoint {
+            x: vec![0.0, 0.0],
+            lambda: vec![0.0],
+            z_l: vec![0.0, 0.0],
+            z_u: vec![0.0, 0.0],
+            mu: None,
+        };
+        let plan = EliminationPlan::identity(3, 1, &[-10.0, -10.0, -10.0], &[10.0, 10.0, 10.0]);
+        assert!(project_warm_point_full(&map, Some(&plan), &warm).is_none());
     }
 }

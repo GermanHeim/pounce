@@ -2642,8 +2642,9 @@ impl Presolve {
         }
         let mut x_clamped = 0usize;
         for (i, v) in x.iter_mut().enumerate() {
-            let c = (*v).clamp(self.reduced.lb_of(i), self.reduced.ub_of(i));
-            if c != *v {
+            if let Some(c) =
+                pounce_presolve::clamp_seed(*v, self.reduced.lb_of(i), self.reduced.ub_of(i))
+            {
                 x_clamped += 1;
                 *v = c;
             }
