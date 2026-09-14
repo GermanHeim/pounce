@@ -51,8 +51,10 @@
 //! The injector serves the staged warm point from `get_starting_point`
 //! (falling back on length mismatch) and records the `finalize_solution`
 //! payload — forwarded in original space — as the next seed. Both wrappers
-//! already project what the injector serves, so the seed flows through
-//! whatever reduction is live.
+//! project what the injector serves into the box they actually solve
+//! (presolve clamps into the tightened box and overrides aux-fixed
+//! variables; the elimination gathers survivors), so the seed the solver
+//! consumes and the [`SessionSolution::warm_report`] describing it agree.
 //!
 //! ## Cache + validate
 //!
@@ -85,7 +87,8 @@ use pounce_nlp::tnlp::{
     Solution as TnlpSolution, SparsityRequest, StartingPoint, TNLP,
 };
 use pounce_presolve::warm::{
-    PresolveFingerprint, WarmPoint, WarmProjectionReport, compute_fingerprint, project_warm_point,
+    PresolveFingerprint, WarmPoint, WarmProjectionReport, compute_fingerprint,
+    project_warm_point_full,
 };
 use pounce_presolve::{LinearEqElimTnlp, PresolveOptions, PresolveTnlp};
 
@@ -551,17 +554,19 @@ impl TnlpPresolveSession {
                     w.mu.or_else(|| self.last.as_ref().map(|l| l.stats.final_mu))
                         .unwrap_or(WARM_MU_CEILING)
                         .clamp(WARM_MU_FLOOR, WARM_MU_CEILING);
-                let _ = self
+                let ok = self
                     .app
                     .options_mut()
-                    .set_numeric_value("mu_init", mu, true, false);
+                    .set_numeric_value("mu_init", mu, true, false)
+                    .is_ok();
+                debug_assert!(ok, "mu_init rejected by the option registry");
             } else {
-                let _ = self.app.options_mut().set_numeric_value(
-                    "mu_init",
-                    WARM_MU_CEILING,
-                    true,
-                    false,
-                );
+                let ok = self
+                    .app
+                    .options_mut()
+                    .set_numeric_value("mu_init", WARM_MU_CEILING, true, false)
+                    .is_ok();
+                debug_assert!(ok, "mu_init rejected by the option registry");
             }
         }
 
@@ -585,9 +590,12 @@ impl TnlpPresolveSession {
         let warm_report = match (&warm, &self.presolve) {
             (Some(w), Some(ps)) => {
                 let mut ps = ps.borrow_mut();
-                ps.transformation()
+                let map = ps.transformation();
+                let elim_plan = self
+                    .elim
                     .as_ref()
-                    .and_then(|map| project_warm_point(map, w))
+                    .and_then(|e| e.borrow_mut().elimination_plan());
+                map.and_then(|m| project_warm_point_full(&m, elim_plan.as_ref(), w))
                     .map(|p| p.report)
             }
             _ => None,
