@@ -622,6 +622,11 @@ pub struct PresolveTnlp {
     expr_provider: Option<Rc<RefCell<dyn ExpressionProvider>>>,
     opts: PresolveOptions,
 
+    /// Project served primal seeds into the presolved box. Enabled only by
+    /// `TnlpPresolveSession`. Direct wrapper users retain non-projecting
+    /// behavior.
+    project_seed: bool,
+
     /// Which accepting test the final witness-refutation gate uses. Left at
     /// [`WitnessRule::SolverAcceptance`] for every wrapper that is actually
     /// solved through; raised to [`WitnessRule::DeclaredRowRelative`] only by
@@ -712,6 +717,7 @@ impl PresolveTnlp {
             inner,
             expr_provider: None,
             opts,
+            project_seed: false,
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
@@ -734,6 +740,11 @@ impl PresolveTnlp {
         self
     }
 
+    /// Enable projection of served warm-start primals into the presolved box.
+    pub fn set_project_seed(&mut self, project_seed: bool) {
+        self.project_seed = project_seed;
+    }
+
     /// Build a presolve wrapper with an `ExpressionProvider` handle on
     /// the same inner TNLP. The two handles should reference the
     /// *same* object (typical pattern: clone an `Rc<RefCell<NlTnlp>>`
@@ -749,6 +760,7 @@ impl PresolveTnlp {
             inner,
             expr_provider: Some(expr_provider),
             opts,
+            project_seed: false,
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
@@ -1779,7 +1791,7 @@ impl TNLP for PresolveTnlp {
         let mut x_clamped_count = None;
         // Project the served primal into the reduced box the solver
         // sees, mirroring `warm::project_warm_point`.
-        if sp.init_x {
+        if self.project_seed && sp.init_x {
             let mut n_fixed = 0;
             for frame in s.reduction_stack.iter_bottom_up() {
                 for (k, &i) in frame.fixed_vars.iter().enumerate() {
@@ -2647,6 +2659,7 @@ mod tests {
             ..PresolveOptions::defaults()
         };
         let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
         let info = wrapped.get_nlp_info().expect("init ok");
         // Variable count unchanged (clamp, not reduce).
         assert_eq!(info.n, 2);
@@ -2955,6 +2968,7 @@ mod tests {
             ..PresolveOptions::defaults()
         };
         let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
         let info = wrapped.get_nlp_info().expect("init ok");
         assert_eq!(info.n, 2, "variable count unchanged (clamp, not reduce)");
         assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
@@ -3089,6 +3103,7 @@ mod tests {
             ..PresolveOptions::defaults()
         };
         let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
 
         let (mut x_l, mut x_u) = (vec![0.0; 2], vec![0.0; 2]);
         let (mut g_l, mut g_u) = (vec![0.0; 1], vec![0.0; 1]);

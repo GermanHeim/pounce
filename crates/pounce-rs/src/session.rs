@@ -384,6 +384,7 @@ pub struct TnlpPresolveSession {
     fingerprint: Option<PresolveFingerprint>,
     last: Option<SessionSolution>,
     own_mu_init: Option<Number>,
+    explicit_mu_init: bool,
     /// Held guard keeping iteration capture live once enabled.
     #[allow(dead_code)]
     iter_scope: Option<pounce_observability::CollectorScope>,
@@ -418,6 +419,7 @@ impl TnlpPresolveSession {
             fingerprint: None,
             last: None,
             own_mu_init: None,
+            explicit_mu_init: false,
             iter_scope: None,
         })
     }
@@ -447,6 +449,9 @@ impl TnlpPresolveSession {
                 value: value.to_string(),
                 reason: e.message,
             })?;
+        if tag == "mu_init" {
+            self.explicit_mu_init = true;
+        }
         Ok(())
     }
 
@@ -526,6 +531,7 @@ impl TnlpPresolveSession {
         if !reuse {
             let dyn_injector = Rc::clone(&self.injector) as Rc<RefCell<dyn TNLP>>;
             let ps = Rc::new(RefCell::new(PresolveTnlp::new(dyn_injector, *opts)));
+            ps.borrow_mut().set_project_seed(true);
             let outer: Rc<RefCell<dyn TNLP>> = if opts.linear_eq_reduction {
                 let elim = Rc::new(RefCell::new(LinearEqElimTnlp::new(
                     Rc::clone(&ps) as Rc<RefCell<dyn TNLP>>,
@@ -552,10 +558,7 @@ impl TnlpPresolveSession {
 
         // Explicit caller `mu` wins, else the last `final_mu`, clamped —
         // unless the caller set `mu_init` explicitly (the `batch.rs` rule).
-        let user_set_mu = match self.app.options().get_numeric_value("mu_init", "") {
-            Ok((v, true)) => self.own_mu_init.map(|o| o != v).unwrap_or(true),
-            _ => false,
-        };
+        let user_set_mu = self.explicit_mu_init;
         if !user_set_mu {
             if let Some(w) = &warm {
                 let mu =
@@ -1079,7 +1082,8 @@ mod tests {
         let (mut s, _params) = mini_session(false);
         let first = s.solve_cold().expect("cold");
         assert_optimum(&first);
-        s.set_option_num("mu_init", 0.05).expect("user mu_init");
+        s.set_option_num("mu_init", WARM_MU_CEILING)
+            .expect("user mu_init");
         let second = s.solve_warm_last().expect("warm");
         assert_optimum(&second);
         let (mu, _) = s
@@ -1088,7 +1092,7 @@ mod tests {
             .get_numeric_value("mu_init", "")
             .expect("mu_init");
         assert!(
-            (mu - 0.05).abs() < 1e-15,
+            (mu - WARM_MU_CEILING).abs() < 1e-15,
             "user mu_init preserved, got {mu}"
         );
     }
