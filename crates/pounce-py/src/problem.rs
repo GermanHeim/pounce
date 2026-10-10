@@ -1504,6 +1504,7 @@ pub(crate) fn set_decision_items(
     let os = PyDict::new_bound(py);
     let opt = |v: f64| if v.is_finite() { Some(v) } else { None };
     os.set_item("factor", opt(stats.final_obj_scaling_factor))?;
+    os.set_item("total_factor", opt(stats.final_total_obj_scaling_factor))?;
     os.set_item("start_gradient_max", opt(stats.start_obj_grad_max))?;
     os.set_item("certificate_refused", stats.obj_scale_certificate_refused)?;
     os.set_item(

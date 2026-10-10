@@ -116,7 +116,10 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   report. Test `info["derivative_check"]["clean"]` in a notebook instead of
   scraping stderr.
 - `objective_scaling` — the objective-scaling decision: `factor` (the
-  gradient-based factor the returned run ended with), `start_gradient_max`,
+  gradient-based factor the returned run ended with), `total_factor` (the
+  whole multiplier on `f`: your `obj_scaling_factor` × `factor` × any
+  solve-quality audit upscale; iteration `mu` is in units of
+  `total_factor · f`), `start_gradient_max`,
   and `certificate_refused` / `acceptable_certificate_refused` (some attempt
   refused a termination certificate the scaling masked and kept iterating —
   the INFO line on stderr). Also `statistics.objective_scaling` in the report.

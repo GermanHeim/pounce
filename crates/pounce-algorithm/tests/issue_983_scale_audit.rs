@@ -323,3 +323,62 @@ fn a_well_scaled_model_is_not_audited() {
     assert_eq!(on.num_obj_evals, off.num_obj_evals);
     assert!(on.warnings.is_empty(), "{:?}", on.warnings);
 }
+
+// ------------------------------------------------- gh#1001 item 3 ----
+
+/// The IPM minimized `total · f`, so `final_scaled_objective / final_objective`
+/// must equal the reported total factor. That ratio is what a report reader
+/// needs to put an iteration's `mu` in the same units as `f`.
+fn assert_total_is_the_applied_multiplier(st: &SolveStatistics) {
+    let ratio = (st.final_scaled_objective / st.final_objective).abs();
+    let total = st.final_total_obj_scaling_factor;
+    assert!(
+        (ratio - total).abs() <= 1e-12 * total,
+        "total factor {total:e} vs scaled/unscaled objective {ratio:e}"
+    );
+}
+
+/// The small LP takes the audit's upscale branch. `factor` (the
+/// gradient-based part) stays 1 and does not record the upscale, but the
+/// total must: the returned run minimized `1e6 · f`, and its `mu` is in those
+/// units.
+#[test]
+fn the_total_factor_carries_the_audit_upscale() {
+    let fs = 1e-6;
+    let (_, st) = solve(Rc::new(RefCell::new(SmallLp { fs })), &[]);
+    assert_total_is_the_applied_multiplier(&st);
+    assert!(
+        st.final_total_obj_scaling_factor > 1e4,
+        "the audit re-solve was not upscaled: total {:e}, factor {:e}",
+        st.final_total_obj_scaling_factor,
+        st.final_obj_scaling_factor
+    );
+    assert!(
+        st.final_total_obj_scaling_factor > 1e3 * st.final_obj_scaling_factor,
+        "factor {:e} already carries the upscale; the new field is redundant",
+        st.final_obj_scaling_factor
+    );
+}
+
+/// The caller's own `obj_scaling_factor` is in the total too, and with the
+/// audit off it is the whole difference between the two fields.
+#[test]
+fn the_total_factor_carries_the_callers_factor() {
+    let mut app = IpoptApplication::new();
+    let o = app.options_mut();
+    o.set_integer_value("print_level", 0, true, false).unwrap();
+    o.set_numeric_value("obj_scaling_factor", 250.0, true, false)
+        .unwrap();
+    o.set_string_value("solve_quality_audit", "no", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    app.optimize_tnlp(Rc::new(RefCell::new(SmallLp { fs: 1.0 })));
+    let st = app.statistics();
+    assert_total_is_the_applied_multiplier(&st);
+    let want = 250.0 * st.final_obj_scaling_factor;
+    assert!(
+        (st.final_total_obj_scaling_factor - want).abs() <= 1e-12 * want,
+        "total {:e}, want {want:e}",
+        st.final_total_obj_scaling_factor
+    );
+}

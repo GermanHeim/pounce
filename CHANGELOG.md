@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`objective_scaling.total_factor`: the whole objective multiplier of the
+  returned run (gh#1001 item 3).** `objective_scaling.factor` is the
+  gradient-based part only. It leaves out the caller's `obj_scaling_factor`
+  and the gh#983 audit's re-solve upscale. So a reader comparing an
+  iteration's `mu` with `|f|` had no way to put the two in the same units.
+  On a reactor model whose objective is `1e-6` in its own units, the audit
+  re-solves at a total of about `1e5`. `factor` still reads `1`, and a final
+  `mu` of `2.5e-9` looks like `5e-4·|f|`, a scaling defect, while the problem
+  the IPM solved had it at `5e-9`. The new field is the magnitude of the
+  product. It is in the JSON report (`statistics.objective_scaling.total_factor`),
+  Python's `info["objective_scaling"]["total_factor"]` and
+  `SolveStatistics::final_total_obj_scaling_factor`. It equals
+  `|final_scaled_objective / final_objective|`. The schema now says iteration
+  `mu` is in scaled units. `factor` is unchanged.
 - **`pounce.qp.solve_qp` takes the convex engine's CLI options (gh#990,
   discopt#1615).** `qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and
   `qp_crossover` were reachable only from the CLI, so a Python caller could not
