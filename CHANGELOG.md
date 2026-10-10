@@ -72,6 +72,149 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
+  MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
+  I.D and I.8).**
+  * **Battery MPC (I.D).** Every step that drove the battery to a bound
+    returned `optimal_inaccurate`. The internal slack converged, but the true
+    slack `h − Gx` sat a regularization-sized distance off it, against a
+    multiplier of ~72. The (z,z) regularization floor was sized by `tol`
+    rather than the gap tolerance. It now uses `min(tol, tol_gap)`. The loop's
+    complementarity test also reads the true-slack product, against the
+    verdict's own threshold, so the loop no longer stops where the verdict will
+    refuse.
+  * **Refinery blend LP (I.8).** With the objective scaled by `10^k`, `k ≤ −5`
+    hit the iteration cap or ended `optimal_inaccurate`. Two causes:
+    1. The in-loop dual test was a scalar that the verdict's per-column floor
+       did not agree with. It is now the same per-column excess.
+    2. The gap test's noise floor did not count the size of the terms being
+       cancelled.
+    The true-slack resolvability floor now counts `|G||x|`, so a row with
+    `h = 0` whose `Gx` cancels to round-off is not mistaken for an unresolved
+    product.
+  * **Measured.**
+    * All 10 battery-MPC QPs are `optimal` at `tol` 1e-6 and 1e-8. On main, all
+      were `optimal_inaccurate` at 1e-8. At 1e-10, 6 of the 10 still end
+      `optimal_inaccurate`.
+    * Every blend cell, `k = −6…6` and `tol` up to 1e-10, ends `optimal`, with
+      the objective within 3.5e-10 relative.
+  * **Maros–Mészáros (137 problems; BOYD2 excluded, the baseline exceeded the
+    300 s cap).** All optimal on both binaries. Iterations total 5096 → 2998,
+    and objectives agree to 2.5e-11 relative.
+    * POWELL20 2090 → 121, QPCBOEI2 133 → 29, STADAT1 53 → 35.
+    * Worst regression: CVXQP1_L 18 → 28.
+  * **Fixture sweep, both legs.**
+    * `feasible_x0_wide_scale` 81 → 26.
+    * `scaled_feasible_a` now certifies on the convex arm instead of being
+      handed to the NLP arm. Its point checks out: objective 7e-21, scaled
+      KKT 1.2e-16.
+  * **`qp-ipm` on `scaled_feasible_a`.** Under `solver_selection=qp-ipm` it
+    now reports success at 200 iterations: the gh#293 equilibrated retry
+    reaches the true optimum and passes the gh#712 genuineness check.
+    `issue_689`'s test now asserts that a success there is genuine, instead of
+    asserting there is no success.
+  * Tests: `python/tests/test_gh1000_convex_endgame.py`.
+
+
+- **`trf_minimize` takes a restoration step on an incompatible subproblem at
+  an infeasible iterate (gh#1000).** With `basis="zero"`, the sintering
+  exercise from the optimization book stalled at an infeasible point
+  (θ ≈ 9e-3, f = 0.814 against a true optimum of 1.2958). The filter rejected
+  a 0.642 step and contracted the radius to 0.321. At that radius the two
+  nearly parallel linearized constraints had no intersection, and the
+  incompatible-subproblem rule expanded the radius back to exactly 0.642. That
+  re-posed the rejected subproblem with the same base point, surrogate and
+  filter, so the run cycled until the stall detector fired. gh#989's (correct)
+  addition of the current point to the filter test exposed this; before it, a
+  θ-increasing step was accepted. An incompatible subproblem at θ >
+  `feasibility_tol` now minimizes the surrogate mismatch ½‖y − r(w)‖² inside
+  the same box. The current pair enters the filter first, and the step is
+  logged as `restoration`. The example converges in 12 iterations and 35
+  truth evaluations. The expand-the-radius rule is kept for a feasible iterate,
+  where the radius is simply too small (Eason's example 1 is unchanged).
+
+- **`trf_minimize` with the quadratic basis uses a central-difference
+  first-order correction (gh#1000).** The quadratic design already samples
+  ±σ along every axis, but the correction recomputed the slope by forward
+  differences, overwriting the basis's second-order slope with a first-order
+  one. The evaluations are memoized, so the central difference costs no truth
+  call: on the book's PFR flowsheet the run goes from 11 iterations / 67
+  evaluations to 7 / 43, and the sintering model from 8 / 49 to 7 / 43.
+- **An infeasible square model is diagnosed in hundreds of iterations, not
+  `max_iter`, and the restoration verdict no longer depends on where
+  `max_iter` falls (gh#1000, I.20).** Three changes:
+  1. Restoration's inner IPM used a hard-coded cap of 3000 against an
+     absolute counter. It now inherits `max_iter`, as upstream does, so
+     `max_iter=3500` no longer stops at 3000 and a smaller cap is no longer
+     overrun.
+  2. A restoration that the cap cut off is reported as
+     `Maximum_Iterations_Exceeded`, not `Restoration_Failed`. Two gates no
+     longer read such a cut-off as evidence of infeasibility:
+     - the stall gate, which now counts the sub-solve's own length rather
+       than the absolute counter;
+     - the alt gate, which no longer accepts a cut-off at the solve's
+       `max_iter`.
+  3. On a square problem, the locally-infeasible certificate that is
+     withheld to give the main phase extra shots is now honoured once the
+     same point has been certified 20 times in a row.
+     `SQUARE_CERTIFICATE_REPEATS` records the feasible control that sets the
+     lower bound: it repeats 10 times before escaping.
+
+  On the optimization book's circle–parabola model at `t = 1.5`:
+  - the primary solve goes from 3000 iterations to 594;
+  - the whole run, including the second-opinion ladder, goes from about
+    10.9k iterations to about 4.8k;
+  - the verdict is `Infeasible_Problem_Detected` at every `max_iter` from
+    1000 up. Before, it was `Maximum_Iterations_Exceeded` at 500, 1000 and
+    2000.
+
+  The feasible `t = 0.5` control is unchanged. On 27 restoration-heavy
+  Vanderbei/Mittelmann models, britgas moves from `Restoration_Failed` to
+  `Optimal`, because a second-opinion rung now gets to run. Everything else
+  is unchanged, and the fixture sweep diff is empty.
+- **The warm-start slack-closing cap no longer depends on how the row is
+  written (gh#1000, I.25).** gh#988's repair closes a relaxed active row's
+  slack when the move is small, and "small" was `0.5·max(1, |s|)` — the row's
+  own value, which a translation or rescaling of the row changes freely. A
+  modeling layer that passes `body − K ≤ 0` (|s| ≈ 0, as discopt does) was
+  refused the repair and took 42–49 iterations against 7 cold on the gh#988
+  pricing model, while the same model written `body ≤ K` took 4. The cap now
+  measures the primal move the closing implies, `slack / ‖∇d_j‖∞`, against
+  `max(1, ‖x‖∞)`, which neither a shift nor a scale of the row moves. On the
+  pricing model the plain form makes the same decisions as before (closed at
+  K ≤ 20, refused from K = 25); five forms of the row — shifted by 14 and
+  −1000, scaled by 1e-3 and 1e3 — now agree with it at every K tested and
+  are never slower than their own cold solve.
+- **A residual at the roundoff floor of its own terms no longer costs a run
+  its success verdict (gh#1000, II.22).** gh#983's final audit reports a
+  `Solve_Succeeded` that showed the gh#884 runaway-multiplier signature as
+  `Solved_To_Acceptable_Level` when the unscaled dual infeasibility is above
+  `max(acceptable_tol, 1e-3)`. Under `bound_relax_factor=0` an active bound and
+  a row can be linearly dependent and the multipliers drift along the ray of
+  valid ones: the book's pump-network NLP ended with multipliers near `1e13`, a
+  residual of `5.5e-3` (1.6 ulps of its terms) and an objective right to `5e-9`
+  relative, and was downgraded on that residual alone. A residual within
+  64 ulps of the terms it is assembled from now keeps the success verdict;
+  `large_dual_scale` still flags the run. The downgrades that are right sit
+  well above that line (Haverly at `2e-13` of its scale, the process network's
+  zero-flow subproblem at `6.6e-13`, the gh#983 cusp at `4e-11`) and are
+  unchanged; `crates/pounce-cli/tests/issue_1000_roundoff_floor_downgrade.rs`
+  pins one of each side. This reverses one gh#983 verdict: the toll-pricing
+  MPCC at `bound_relax_factor=0` (`3.3e-2` against terms of `3e14`, `1.1e-16`
+  of its scale) now returns `Solve_Succeeded`. Its objective agrees with the
+  default-options solve to `9e-10`, and both warnings still attach;
+  `test_gh983_solve_quality.py` now pins that.
+
+- **`large_dual_scale` names `bound_relax_factor = 0` when it is set (gh#1000,
+  II.23, I.15).** The downgrades that stay — Haverly multistart trials 3
+  and 39 at `99.99999`, the process network's zero-flow subproblems — are
+  right: Ipopt 3.14 follows the identical trajectory on each (61, 43, 116
+  and 48 iterations) and reports "Optimal Solution Found" on Haverly with an
+  unscaled dual infeasibility of `9.2e-3`. Every one of them was solved at
+  `bound_relax_factor=0`, where an active bound that coincides with a
+  dependent row has no interior. At the default `1e-8` all five book models
+  end `Solve_Succeeded` in 23–37 iterations. The warning now says so when
+  the option is `0`, so a caller sees the cause next to the downgrade.
 
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking

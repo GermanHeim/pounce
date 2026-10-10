@@ -131,7 +131,8 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   look; by themselves they do not change `status` (the one status change the
   audit makes -- `Solve_Succeeded` reported as `Solved_To_Acceptable_Level` on a
   run that showed the gh#884 runaway signature and still carries an unscaled
-  dual infeasibility above `max(acceptable_tol, 1e-3)` -- is announced by
+  dual infeasibility above `max(acceptable_tol, 1e-3)`, unless that residual is
+  within 64 ulps of its own terms -- is announced by
   `unscaled_dual_inf_above_acceptable`). An objective whose gradient is tiny
   (profit in M$/L) or a start whose gradient is huge (`3e8`) is re-solved once
   automatically from the returned point (`solve_quality_audit`); the warning

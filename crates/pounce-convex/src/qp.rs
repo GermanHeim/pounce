@@ -577,7 +577,7 @@ pub(crate) fn objective_units(prob: &QpProblem) -> (f64, f64) {
 
 /// The units [`QpSolution::kkt_residuals_above_floor`] divides stationarity
 /// and complementarity by: the objective's unit, up as well as down.
-fn report_units(prob: &QpProblem) -> (f64, f64) {
+pub(crate) fn report_units(prob: &QpProblem) -> (f64, f64) {
     let u = cost_unit(prob);
     if u > 0.0 {
         let g = u.max(COST_UNIT_FLOOR);

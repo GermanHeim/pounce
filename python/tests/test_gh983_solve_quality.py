@@ -178,16 +178,24 @@ def _toll(**opts):
     return x, info, json.load(open(path))
 
 
-def test_toll_mpcc_is_not_a_strict_success_at_unscaled_dual_3e_minus_2():
+def test_toll_mpcc_residual_at_its_roundoff_floor_keeps_success_with_caveats():
+    # gh#983 demoted this run; gh#1000 (II.22) keeps it. The residual 3.3e-2
+    # is assembled from terms of 3e14 -- half an ulp of them -- and the
+    # answer agrees with the default-options solve to 9e-10 relative, so the
+    # 3.3e-2 is roundoff, not a miss. Both caveats still attach.
     x, info, rep = _toll(bound_relax_factor=0.0)
     assert info["final_unscaled_dual_inf"] > 1e-3  # the premise: the retry was accepted
-    assert info["status_msg"] == "Solved_To_Acceptable_Level"
+    assert info["status_msg"] == "Solve_Succeeded"
     codes = [w.split(":")[0] for w in info["warnings"]]
+    assert "large_dual_scale" in codes, info["warnings"]
     assert "unscaled_dual_inf_above_acceptable" in codes, info["warnings"]
+    assert not any("status is downgraded" in w for w in info["warnings"]), info["warnings"]
+    _, ref, _ = _toll()
+    assert info["obj_val"] == pytest.approx(ref["obj_val"], rel=1e-8)
     # the report describes the run that produced the returned point
     assert rep["statistics"]["iteration_count"] == info["iter_count"]
     assert rep["statistics"]["warnings"] == info["warnings"]
-    assert rep["solution"]["status_upstream"] == "Solved_To_Acceptable_Level"
+    assert rep["solution"]["status_upstream"] == "Solve_Succeeded"
 
 
 def test_toll_mpcc_default_options_stay_strict():

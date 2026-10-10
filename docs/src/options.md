@@ -1368,7 +1368,11 @@ verdict only, after every retry has decided: a `Solve_Succeeded` from a run
 that itself showed the gh#884 signature (a settled primal with a runaway
 multiplier) and still carries an unscaled dual infeasibility above
 `max(acceptable_tol, 1e-3)` is reported as `Solved_To_Acceptable_Level`, with
-`unscaled_dual_inf_above_acceptable` saying so.
+`unscaled_dual_inf_above_acceptable` saying so. A residual within 64 ulps of the
+terms it is assembled from (`64·ε·dual_scale`) is roundoff, not a miss, and
+keeps the success verdict (gh#1000): with multipliers near `1e13` a residual of
+`5e-3` is all floating point can resolve. `large_dual_scale` still flags such a
+run.
 
 **Why the scale-relative floor is not capped.** An explicitly set
 `dual_inf_tol` is honoured (see `dual_inf_scale_kappa` above). For a caller
@@ -1380,6 +1384,14 @@ scale `1.6e10`, stationary to nine digits relative to its scale). A cap
 cannot separate them by magnitude alone. Instead such a point carries the
 `large_dual_scale` warning, which is the symptom of the failed constraint
 qualification that produced the multipliers.
+
+A common way to cause that failure is `bound_relax_factor=0`. It gives an
+active bound that coincides with a dependent row no interior, and the
+multipliers drift along the ray of valid ones. When the option is `0`, the
+warning says so. On the optimization book's models from gh#1000 (Haverly
+multistart, the process-network zero-flow subproblems, the pump network),
+the default `1e-8` ends `Solve_Succeeded` every time, and Ipopt at `0`
+follows the same trajectory pounce does.
 
 ## Objective sense and `obj_scaling_factor`
 
@@ -1421,11 +1433,14 @@ coherent with the primal point (a corrupted `y`) are still refused by the
 gh#617 test and keep the barrier-sized fill, and the gate never touches
 variable-bound multipliers.
 
-The move is capped (gh#988 review): a slack is closed only when it is at most
-`0.5·max(1, |s|)` wide. Past that the bound has moved too far for "still
-active" to be the likely reading — capacity 14 → 100 would have closed an
-86-wide slack and started the solve 86 infeasible — and the capped split is
-used instead. `info["warm_start"]["primal_residual"]` is measured on the point
+The move is capped (gh#988 review): a slack is closed only when the primal
+move that repairs it, `slack / ‖∇d_j‖∞`, is at most `0.5·max(1, ‖x‖∞)`. Past
+that the bound has moved too far for "still active" to be the likely reading —
+capacity 14 → 100 would have closed an 86-wide slack and started the solve 86
+infeasible — and the capped split is used instead. The cap is read in primal
+units so that it does not depend on how the row is written (gh#1000): it was
+once `0.5·max(1, |s|)`, which refused the repair to `body - K <= 0` (where
+`|s| ≈ 0`) and granted it to the identical `body <= K`. `info["warm_start"]["primal_residual"]` is measured on the point
 the solve actually starts from (after the move), and `slacks_closed` /
 `slack_close_reverted` report what the move did. A row the carried point
 *violates* (a capacity tightened 14 → 12) is active by construction, so its

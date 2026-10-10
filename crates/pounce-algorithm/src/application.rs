@@ -350,6 +350,11 @@ fn scale_audit_warning(
 ///   caller finds out. It is not capped, because the cap that rejects the
 ///   cusp (`~0.1`) also rejects Vanderbei's `orthrds2` (`89.7` at scale
 ///   `1.6e10`), which is stationary to nine digits relative to its scale.
+///   Under `bound_relax_factor = 0` it names that option: every model of
+///   gh#1000 items II.22, II.23 and I.15 that carried it (pump network,
+///   process-network superstructure, Haverly multistart) had an active
+///   bound coinciding with a dependent row, and each ends `Solve_Succeeded`
+///   at the default relaxation. Ipopt follows the same trajectory at `0`.
 /// * `unscaled_stationarity_above_tol`: the unscaled residual sits above
 ///   `1e-3` while the strict gate, which tolerates up to `dual_inf_tol`
 ///   (`1` by default), passed it.
@@ -359,6 +364,7 @@ fn quality_warnings(
     dual_scale: Number,
     dual_inf_tol: Number,
     acceptable_tol: Number,
+    bound_relax_off: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
     if !matches!(
@@ -378,7 +384,14 @@ fn quality_warnings(
         out.push(format!(
             "large_dual_scale: the stationarity residual is assembled from terms of size {dual_scale:.2e} \
              (multipliers or gradients this large usually mean a failed constraint qualification), \
-             so the unscaled dual infeasibility {unscaled_dual_inf:.2e} was judged relative to that scale"
+             so the unscaled dual infeasibility {unscaled_dual_inf:.2e} was judged relative to that scale{}",
+            if bound_relax_off {
+                ". bound_relax_factor = 0 is set: an active bound that coincides with a \
+                 dependent row has no interior there, and the default relaxation (1e-8) \
+                 usually removes this"
+            } else {
+                ""
+            }
         ));
     }
     if unscaled_dual_inf.is_finite()
@@ -405,12 +418,52 @@ fn quality_warnings(
 /// (`mpcc_qpec_small_biactive`) and `3.6e-6` (`deb7`) -- the largest two and a
 /// half orders below the bar. The runs the bar exists for sit above it: the
 /// cusp with the floor opted back in at `1.44e-1`, and the first pass's
-/// toll-pricing report at `3.3e-2`. So the threshold falls in an empty band of
+/// toll-pricing report at `3.3e-2` (since gh#1000 exempt as roundoff, see
+/// [`UNSCALED_DUAL_ROUNDOFF_ULPS`]). So the threshold falls in an empty band of
 /// the measured population; nothing between `3.6e-6` and `3.3e-2` was observed,
 /// and the corpus says nothing about how dense that band is elsewhere (the
 /// 400-model QPEC family of `dev-notes/mpcc-biactive-dual-divergence.md` was
 /// not re-measured for this).
 const UNSCALED_DUAL_WARN: Number = 1e-3;
+
+/// gh#1000 (II.22): how many ulps of its own terms an unscaled stationarity
+/// residual may read and still be roundoff rather than a measured miss.
+///
+/// The residual `∇f + Jᵀλ + z` is assembled from terms of size
+/// `final_unscaled_dual_scale`, so in floating point it cannot read much below
+/// `ε·scale` however exact the point is. Under `bound_relax_factor = 0` an
+/// active bound and a row can be linearly dependent, the multipliers drift
+/// along the unbounded ray of valid ones, and the scale follows them: the
+/// pump-network NLP of the issue ends with multipliers near `1e13`, a residual
+/// of `5.5e-3` -- 1.6 ulps of its terms -- and an objective right to `5e-9`
+/// relative, and was downgraded on that `5.5e-3` alone. The measured
+/// population on either side, as `residual / scale`: that run at `3.5e-16`
+/// (`2.8e-16` on the Python path), and gh#983's toll-pricing MPCC at
+/// `bound_relax_factor = 0` at `1.1e-16` (`3.3e-2` against `3e14`, objective
+/// `9e-10` from the default-options solve), which gh#983 had pinned as a
+/// downgrade and which this exempts too; the downgrades that are correct --
+/// Haverly at `2e-13` (objective `7e-8` off, complementarity `1.8e-6`), the
+/// process network's all-zero-flow subproblem at `6.6e-13` (`6e-7` off) --
+/// and the cusp the downgrade was built for at `4e-11`. 64 ulps (`1.4e-14`)
+/// sits forty times above the first and fourteen times below the nearest
+/// correct downgrade.
+///
+/// What this cannot see: on a model with no finite multiplier (the cusp) the
+/// residual falls as the multipliers grow and the floor rises with them, so a
+/// run that drove them far enough would cross it. None measured has; the
+/// cusp sits more than three orders above. The `large_dual_scale` caveat
+/// still attaches to every run this exempts.
+const UNSCALED_DUAL_ROUNDOFF_ULPS: Number = 64.0;
+
+/// Is `du` within [`UNSCALED_DUAL_ROUNDOFF_ULPS`] of the rounding error of
+/// the terms it was assembled from? `false` whenever either input is not
+/// finite, so a path that does not measure the scale keeps the downgrade.
+fn unscaled_dual_inf_is_roundoff(du: Number, scale: Number) -> bool {
+    du.is_finite()
+        && scale.is_finite()
+        && scale > 0.0
+        && du <= UNSCALED_DUAL_ROUNDOFF_ULPS * Number::EPSILON * scale
+}
 
 /// The code of a structured warning: the text before the first `:`.
 fn warning_code(w: &str) -> &str {
@@ -4869,16 +4922,23 @@ impl IpoptApplication {
         let acceptable_tol = self.dual_divergence_retry_accept_tol();
         let mut status = status;
         if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
-            let (sig, du) = {
+            let (sig, du, du_scale) = {
                 let st = self.statistics.borrow();
                 (
                     st.returned_run_dual_divergence_signature,
                     st.final_unscaled_dual_inf,
+                    st.final_unscaled_dual_scale,
                 )
             };
             // gh#983 item 5. `1e-3` is `UNSCALED_DUAL_WARN`; the measured
-            // population behind it is in that constant's doc.
-            if sig && du.is_finite() && du > acceptable_tol.max(UNSCALED_DUAL_WARN) {
+            // population behind it is in that constant's doc. A residual at
+            // the rounding floor of its own terms is not evidence of a miss
+            // (gh#1000, II.22): see `UNSCALED_DUAL_ROUNDOFF_ULPS`.
+            if sig
+                && du.is_finite()
+                && du > acceptable_tol.max(UNSCALED_DUAL_WARN)
+                && !unscaled_dual_inf_is_roundoff(du, du_scale)
+            {
                 status = ApplicationReturnStatus::SolvedToAcceptableLevel;
                 push_warning_once(
                     &mut self.statistics.borrow_mut().warnings,
@@ -4902,6 +4962,9 @@ impl IpoptApplication {
                 .map(|(v, _)| v)
                 .unwrap_or(1.0),
             acceptable_tol,
+            self.options
+                .get_numeric_value("bound_relax_factor", "")
+                .is_ok_and(|(v, _)| v == 0.0),
         );
         let mut sm = self.statistics.borrow_mut();
         for w in extra {
@@ -10809,6 +10872,27 @@ mod tests {
         }
     }
 
+    /// gh#1000 (II.22): the roundoff exemption, on the measured population
+    /// named in `UNSCALED_DUAL_ROUNDOFF_ULPS`'s doc.
+    #[test]
+    fn a_residual_at_the_roundoff_floor_of_its_terms_is_not_a_miss() {
+        // Pump network at H0_max 148: 1.6 ulps of its terms.
+        assert!(unscaled_dual_inf_is_roundoff(5.54e-3, 1.57e13));
+        assert!(unscaled_dual_inf_is_roundoff(7.39e-3, 2.66e13));
+        // The downgrades that are right keep it: Haverly, the process
+        // network's T2 and S2+T2 subproblems, the eps-perspective root, and
+        // the gh#983 cusp.
+        assert!(!unscaled_dual_inf_is_roundoff(1.33e-2, 6.6e10));
+        assert!(!unscaled_dual_inf_is_roundoff(0.5, 7.55e11));
+        assert!(!unscaled_dual_inf_is_roundoff(6.25e-2, 3.21e11));
+        assert!(!unscaled_dual_inf_is_roundoff(3.92e-3, 5.03e9));
+        assert!(!unscaled_dual_inf_is_roundoff(0.144, 3.55e9));
+        // No scale measured: keep the downgrade.
+        assert!(!unscaled_dual_inf_is_roundoff(5.54e-3, f64::NAN));
+        assert!(!unscaled_dual_inf_is_roundoff(5.54e-3, 0.0));
+        assert!(!unscaled_dual_inf_is_roundoff(f64::NAN, 1e13));
+    }
+
     /// gh#983 review item 7: one warning per code.
     #[test]
     fn a_warning_code_is_attached_at_most_once() {
@@ -10827,7 +10911,7 @@ mod tests {
     fn quality_warnings_carry_a_code_and_only_on_success_verdicts() {
         use ApplicationReturnStatus::*;
         // The cusp: multipliers 3.5e9, residual 0.144.
-        let w = quality_warnings(SolveSucceeded, 0.144, 3.55e9, 1.0, 1e-6);
+        let w = quality_warnings(SolveSucceeded, 0.144, 3.55e9, 1.0, 1e-6, false);
         assert!(
             w.iter().any(|m| m.starts_with("large_dual_scale:")),
             "{w:?}"
@@ -10840,17 +10924,25 @@ mod tests {
         // orthrds2-like: scale 1.6e10, residual 89.7 -> only the scale caveat
         // and the absolute one; never a status change (the function returns
         // text, not a verdict).
-        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6);
+        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6, false);
         assert!(w.iter().any(|m| m.starts_with("large_dual_scale:")));
+        assert!(!w.iter().any(|m| m.contains("bound_relax_factor")), "{w:?}");
+        // gh#1000: under bound_relax_factor = 0 the caveat names the option.
+        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6, true);
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with("large_dual_scale:") && m.contains("bound_relax_factor = 0")),
+            "{w:?}"
+        );
         // A clean point has none.
-        assert!(quality_warnings(SolveSucceeded, 1e-9, 5.0, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 1e-9, 5.0, 1.0, 1e-6, false).is_empty());
         // A large objective with a stationary residual is not a failed CQ.
-        assert!(quality_warnings(SolveSucceeded, 2.9e-7, 1.46e9, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 2.9e-7, 1.46e9, 1.0, 1e-6, false).is_empty());
         // 5e-4 is below the warning bar even though it exceeds acceptable_tol.
-        assert!(quality_warnings(SolveSucceeded, 5e-4, 5.0, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 5e-4, 5.0, 1.0, 1e-6, false).is_empty());
         // Failures carry no success caveat.
-        assert!(quality_warnings(RestorationFailed, 0.144, 3.55e9, 1.0, 1e-6).is_empty());
-        assert!(quality_warnings(SolveSucceeded, f64::NAN, f64::NAN, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(RestorationFailed, 0.144, 3.55e9, 1.0, 1e-6, false).is_empty());
+        assert!(quality_warnings(SolveSucceeded, f64::NAN, f64::NAN, 1.0, 1e-6, false).is_empty());
     }
 
     /// gh#983 item 5: flooring an attempt must floor everything a solve

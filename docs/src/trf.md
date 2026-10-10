@@ -236,21 +236,34 @@ Bayesian optimization.
 **Local.** Converges to a *local* KKT point. Pair it with
 [`find_minima`](find-minima.md) for a multistart sweep.
 
-**No restoration phase.** The published algorithm calls a restoration procedure
-in two situations; this implementation approximates one and detects the other.
+**Restoration is partial.** The published algorithm calls a restoration
+procedure in two situations; this implementation handles one and detects the
+other.
 
 *Incompatible subproblem.* The glass-box constraints may have no solution inside
-the current trust region — common on the first iteration, when the default
-radius is simply too small for the constraints to be satisfiable. Contracting
-would be exactly backwards, so `trf_minimize` **expands** the radius and retries,
-logging the iteration as `incompatible`. On Eason's example 1 this fires three
-times before the first real step:
+the current trust region. What `trf_minimize` does depends on the iterate:
+
+- **Infeasible iterate (θ > `feasibility_tol`).** It takes a restoration step:
+  the point inside the same box that minimizes the surrogate mismatch
+  ½‖y − r(w)‖² subject to the glass-box constraints (always feasible — the
+  current point satisfies them). The current pair enters the filter first, so
+  the restored point must improve on it; the step is logged as `restoration`
+  and the radius follows the θ-ratio test. Without it, a linear surrogate whose
+  linearized constraints are nearly parallel can cycle: the step that reaches
+  their intersection is rejected by the filter, the radius contracts to half of
+  it, the subproblem is incompatible, and expanding the radius re-poses exactly
+  the rejected subproblem (gh#1000, `basis="zero"` on a sintering model).
+- **Feasible iterate (θ ≈ 0).** There is nothing to restore — the radius is
+  simply too small for the constraints, common on the first iteration.
+  Contracting would be exactly backwards, so `trf_minimize` **expands** the
+  radius and retries, logging the iteration as `incompatible`. On Eason's
+  example 1 this fires three times before the first real step:
 
 ```text
    0  incompatible (Infeasible_Problem_Detected); Delta -> 2.000e-01
    1  incompatible (Infeasible_Problem_Detected); Delta -> 4.000e-01
    2  incompatible (Infeasible_Problem_Detected); Delta -> 8.000e-01
-   3  f= 0.2748077559  theta=4.513e-02  Delta=2.677e+00  f-step
+   3  f= 0.2748077559  theta=4.513e-02  Delta=1.427e+00  |s|=7.134e-01  f-step
 ```
 
 If the radius reaches `trust_radius_max` and the subproblem is still

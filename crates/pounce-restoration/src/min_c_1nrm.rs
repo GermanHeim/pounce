@@ -102,6 +102,13 @@ pub struct RestoSolveResult {
     /// than on the verdict Ipopt gives, `Feasible point for square
     /// problem found`.
     pub feasible_point_found: bool,
+    /// `true` when the original NLP is square and the sub-solve reached the
+    /// point `strict` certifies as locally infeasible — converged
+    /// stationarity, a significant violation, every admissibility guard
+    /// passed — and the verdict was withheld only because the problem is
+    /// square (the PFIT3/PFIT4 "extra shots" carve-out). The driver counts
+    /// these against [`SQUARE_CERTIFICATE_REPEATS`] (gh#1000).
+    pub square_certificate_suppressed: bool,
 }
 
 /// What one restoration sub-solve cost, and — when it produced one — what
@@ -209,7 +216,41 @@ pub struct MinC1NormRestoration {
     /// fires during restoration too (gh#645). `None` when the caller
     /// installed no callback.
     pub(crate) intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
+    /// The point the most recent suppressed square-problem certificate
+    /// was issued at, and how many times in a row that same point has been
+    /// certified since. See [`SQUARE_CERTIFICATE_REPEATS`]. Lives for the
+    /// whole solve, like the driver, and is deliberately *not* reset by
+    /// accepted main-phase steps: that reset is what left gh#1000's loop
+    /// bounded only by `max_iter`.
+    pub(crate) square_certificate: Option<(Vec<Number>, Index)>,
 }
+
+/// How many times the same point may be re-certified locally infeasible on
+/// a square problem, with the verdict withheld each time, before it is
+/// honoured (gh#1000).
+///
+/// Square problems are exempt from the `strict` certificate so the outer
+/// gets the extra shots PFIT3/PFIT4 need (see `strict_locally_infeasible`
+/// in `resto_inner_solver`). Nothing bounded the exemption: every accepted
+/// main-phase step resets the outer cycle detectors, so a period-2 orbit —
+/// restoration settles at the certificate, an f-type step leaves it, the
+/// main phase creeps back and fails its line search — ran to `max_iter`.
+/// On the book's circle–parabola model at `t = 1.5` (infeasible, least ℓ1
+/// violation 0.5 at `(0, 1)`) restoration certified that point 124 times
+/// in a 3000-iteration solve, every one suppressed.
+///
+/// A repeat is the same `x` to `1e-8` relative; a different point restarts
+/// the count. The lower bound is the same model's feasible control at
+/// `t = 0.5`, which certifies the spurious `(0, -1)` eleven times in a row
+/// (10 repeats) before the main phase escapes to the solution — no local
+/// signal distinguishes it from `t = 1.5`, so any budget below 10 turns a
+/// solvable square model into `Infeasible_Problem_Detected`, Ipopt's wrong
+/// answer on it. 20 is twice that measured count.
+pub const SQUARE_CERTIFICATE_REPEATS: Index = 20;
+
+/// Relative max-norm distance under which two certified points count as
+/// the same point for [`SQUARE_CERTIFICATE_REPEATS`].
+const SQUARE_CERTIFICATE_SAME_POINT_RTOL: Number = 1e-8;
 
 impl Default for MinC1NormRestoration {
     fn default() -> Self {
@@ -229,6 +270,7 @@ impl Default for MinC1NormRestoration {
             print_iter_output: true,
             debug_hook: None,
             intermediate_tnlp: None,
+            square_certificate: None,
         }
     }
 }
@@ -254,6 +296,31 @@ impl MinC1NormRestoration {
     /// ```
     pub fn should_reset_bound_mults(&self, bound_mult_max: Number) -> bool {
         bound_mult_max > self.bound_mult_reset_threshold
+    }
+
+    /// Record a suppressed square-problem certificate at `x` and return
+    /// whether it has now been repeated [`SQUARE_CERTIFICATE_REPEATS`]
+    /// times, i.e. whether the verdict should be honoured.
+    pub(crate) fn note_square_certificate(&mut self, x: &[Number]) -> bool {
+        let same = self.square_certificate.as_ref().is_some_and(|(prev, _)| {
+            prev.len() == x.len() && {
+                let scale = prev.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+                prev.iter()
+                    .zip(x)
+                    .all(|(a, b)| (a - b).abs() <= SQUARE_CERTIFICATE_SAME_POINT_RTOL * scale)
+            }
+        });
+        let repeats = match (&mut self.square_certificate, same) {
+            (Some((_, n)), true) => {
+                *n += 1;
+                *n
+            }
+            _ => {
+                self.square_certificate = Some((x.to_vec(), 0));
+                0
+            }
+        };
+        repeats >= SQUARE_CERTIFICATE_REPEATS
     }
 }
 
@@ -399,7 +466,16 @@ impl RestorationPhase for MinC1NormRestoration {
         // feasible-point branch above does) when it is no more infeasible
         // than `curr` on the original NLP; otherwise `curr` stays, so the
         // reported point is never a worse one.
-        if result.locally_infeasible {
+        // gh#1000: a square problem's withheld certificate, honoured once
+        // the same point has been certified often enough to rule out the
+        // extra shots the carve-out exists for.
+        let square_certificate_honoured = result.square_certificate_suppressed
+            && result
+                .trial_x
+                .as_any()
+                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                .is_some_and(|x| self.note_square_certificate(&x.expanded_values()));
+        if result.locally_infeasible || square_certificate_honoured {
             let curr_snapshot = data.borrow().curr.clone();
             if let Some(curr) = curr_snapshot {
                 let recovered = IteratesVector::new(
@@ -748,6 +824,30 @@ mod tests {
     use super::*;
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 
+    /// gh#1000: the withheld square certificate is honoured on the
+    /// `SQUARE_CERTIFICATE_REPEATS`-th repeat of the same point, and a
+    /// different point restarts the count rather than adding to it.
+    #[test]
+    fn a_square_certificate_is_honoured_after_its_repeat_budget() {
+        let mut r = MinC1NormRestoration::new();
+        let p = [0.0, 1.0];
+        assert!(!r.note_square_certificate(&p), "first certificate");
+        for k in 1..SQUARE_CERTIFICATE_REPEATS {
+            assert!(!r.note_square_certificate(&p), "repeat {k}");
+        }
+        // A different point restarts the count...
+        assert!(!r.note_square_certificate(&[0.0, -1.0]));
+        assert!(!r.note_square_certificate(&p));
+        // ...so the old repeats bought nothing.
+        for _ in 1..SQUARE_CERTIFICATE_REPEATS {
+            assert!(!r.note_square_certificate(&[0.0, 1.0 + 1e-12]));
+        }
+        assert!(
+            r.note_square_certificate(&p),
+            "the budget-th repeat of one point is honoured"
+        );
+    }
+
     fn dv(values: &[f64]) -> DenseVector {
         let mut v = DenseVectorSpace::new(values.len() as i32).make_new_dense();
         v.values_mut().copy_from_slice(values);
@@ -1091,6 +1191,7 @@ mod tests {
                 iters_since_header: 0,
                 last_output: 0.0,
                 locally_infeasible: false,
+                square_certificate_suppressed: false,
                 user_requested_stop: false,
                 feasible_point_found: false,
             }),

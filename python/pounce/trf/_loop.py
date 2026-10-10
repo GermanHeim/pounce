@@ -144,7 +144,7 @@ class TRFIterate:
     trust_radius: float
     sampling_radius: float
     step_norm: float  # inf-norm of the dof-block step (the region is a box)
-    kind: str  # f-step | theta-step | rejected | incompatible | subproblem-failed
+    kind: str  # f-step | theta-step | restoration | rejected | incompatible | subproblem-failed
 
 
 @dataclass
@@ -221,6 +221,41 @@ def _as_bounds_array(bounds, n: int) -> tuple[np.ndarray, np.ndarray]:
         if bu is not None:
             hi[i] = bu
     return lo, hi
+
+
+def _restoration_step(x, r_k, w_index, y_index, lo, hi, user_cons, solver_options):
+    """Point of least surrogate mismatch inside the box: the restoration step.
+
+    Solves ``min 0.5 ||y - r_k(w)||^2`` over the glass-box constraints and the
+    trust box. This is always feasible -- the current ``x`` is the previous
+    subproblem's solution, so it satisfies both -- which is what the TRSP, with
+    ``y = r_k(w)`` as a hard constraint, is not when it is incompatible.
+    Returns ``None`` if the solve fails.
+    """
+    n = x.size
+
+    def phi(xv):
+        e = xv[y_index] - r_k.predict(xv[w_index])
+        return 0.5 * float(e @ e)
+
+    def dphi(xv):
+        e = xv[y_index] - r_k.predict(xv[w_index])
+        g = np.zeros(n)
+        g[y_index] += e
+        g[w_index] -= r_k.jacobian(xv[w_index]).T @ e
+        return g
+
+    res = minimize(
+        phi,
+        x,
+        jac=dphi,
+        bounds=list(zip(lo, hi)),
+        constraints=user_cons,
+        **(solver_options or {}),
+    )
+    if _subproblem_status(res) != "ok":
+        return None
+    return np.asarray(res.x, dtype=float).ravel()
 
 
 def trf_minimize(
@@ -383,7 +418,15 @@ def trf_minimize(
             basis_obj.fit(design, Y)
 
         d_k = truth(w_k)
-        Jd_k = truth.jacobian(w_k, sigma, cfg.central_differences)
+        # A quadratic design already contains the +-sigma stencil, so the
+        # central difference costs no extra truth call (the evaluations are
+        # memoized bitwise). The forward one would overwrite the basis's
+        # second-order slope with a first-order one in the correction
+        # (gh#1000: flowsheet 11 -> 7 iterations, 67 -> 43 evaluations).
+        central = cfg.central_differences or (
+            needs_samples and isinstance(basis_obj, QuadraticBasis)
+        )
+        Jd_k = truth.jacobian(w_k, sigma, central)
         r_k = CorrectedSurrogate(basis_obj, w_k, d_k, Jd_k)
 
         # ---- 2. solve the trust-region subproblem ------------------------
@@ -427,33 +470,47 @@ def trf_minimize(
 
         # A failed subproblem returns whatever iterate the solver stopped on,
         # which is not a point we may trust or evaluate the filter against.
-        # Treat it the way the published algorithm treats an incompatible
-        # subproblem: shrink the trust region and try again. (The real fix is a
-        # restoration phase, which this implementation does not have -- if the
-        # region keeps shrinking, the trust_radius_min exit below reports it.)
         outcome = _subproblem_status(res)
         if outcome != "ok":
-            # An *incompatible* subproblem is the case the published algorithm
-            # handles with a restoration phase: the glass-box constraints have
-            # no solution inside the current trust region. Contracting is
-            # exactly backwards -- a tighter box is even less likely to contain
-            # a feasible point -- so expand instead, up to trust_radius_max.
-            # This is a poor substitute for real restoration (it cannot help
-            # when the constraints are infeasible for reasons unrelated to the
-            # trust region) but it resolves the common case where the initial
-            # radius is simply too small, and it degrades to a clear error
-            # rather than a wrong answer when it cannot.
+            # Restoration (Eason & Biegler 2016): an incompatible TRSP at an
+            # infeasible iterate means the linearized truth model cannot reach
+            # the glass-box feasible set inside the box. Expanding the box is
+            # not a substitute: when the step that reaches it is rejected by
+            # the filter, the rejection contracts delta to gamma_c*|s| and the
+            # expansion here restores exactly |s|, so the same subproblem is
+            # re-solved with the same base point, surrogate and filter -- a
+            # deterministic 2-cycle until the stall detector fires (gh#1000).
+            # Instead, minimize the surrogate mismatch in the same box.
+            #
+            # Expansion (up to trust_radius_max) remains the fallback when
+            # restoration cannot reduce theta -- theta already ~0, so the
+            # radius is simply too small for the glass-box constraints.
+            # Contracting would be exactly backwards there: a tighter box is
+            # even less likely to contain a feasible point.
             #
             # Any *other* failure is a genuine numerical breakdown, where
             # shrinking is the right response.
-            if outcome == "incompatible":
+            restored = None
+            if outcome == "incompatible" and theta_cur > cfg.feasibility_tol:
+                restored = _restoration_step(
+                    x, r_k, w_index, y_index, sub_lo, sub_hi, user_cons, solver_options
+                )
+                if restored is not None:
+                    pred = float(
+                        np.linalg.norm(
+                            restored[y_index] - r_k.predict(restored[w_index])
+                        )
+                    )
+                    if pred >= (1.0 - cfg.gamma_theta) * theta_cur:
+                        restored = None  # no predicted progress
+            if restored is not None:
+                outcome = "restoration"
+            elif outcome == "incompatible":
                 if delta >= cfg.trust_radius_max:
                     message = (
                         "Trust-region subproblem is incompatible at the maximum "
                         "trust radius: the glass-box constraints appear "
-                        "infeasible independently of the trust region. A "
-                        "restoration phase would be needed here, and is not "
-                        "implemented."
+                        "infeasible independently of the trust region."
                     )
                     break
                 delta = min(delta / cfg.gamma_contract, cfg.trust_radius_max)
@@ -463,6 +520,7 @@ def trf_minimize(
                 sigma = min(sigma, delta)
                 label = "subproblem-failed"
 
+        if outcome not in ("ok", "restoration"):
             history.append(
                 TRFIterate(k, f_cur, theta_cur, delta, sigma, step_norm, label)
             )
@@ -478,6 +536,14 @@ def trf_minimize(
                 break
             continue
 
+        if outcome == "restoration":
+            # The current pair enters the filter on entry to restoration, so
+            # the restored point must beat it on theta (or f) by the margins.
+            filt.add(FilterPoint(theta_cur, f_cur))
+            x_trial = restored
+            step = x_trial - x
+            step_norm = float(np.max(np.abs(step[dof]))) if dof.size else 0.0
+
         # ---- 3. evaluate the truth model at the trial point --------------
         f_trial = float(fun(x_trial))
         theta_trial = theta_of(x_trial)
@@ -488,6 +554,17 @@ def trf_minimize(
             kind = "rejected"
             delta = cfg.gamma_contract * (step_norm if step_norm > 0 else delta)
             sigma = min(sigma, delta)
+        elif outcome == "restoration":
+            kind = "restoration"
+            rho = 1.0 - theta_trial / theta_cur
+            if rho < cfg.eta1:
+                delta = cfg.gamma_contract * step_norm
+            elif rho > cfg.eta2:
+                delta = min(
+                    max(cfg.gamma_expand * step_norm, delta), cfg.trust_radius_max
+                )
+            sigma = min(sigma, delta)
+            x, f_cur, theta_cur = x_trial, f_trial, theta_trial
         else:
             switching = (
                 f_cur - f_trial >= cfg.kappa_theta * theta_cur**cfg.gamma_s
