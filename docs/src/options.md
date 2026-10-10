@@ -1368,7 +1368,11 @@ verdict only, after every retry has decided: a `Solve_Succeeded` from a run
 that itself showed the gh#884 signature (a settled primal with a runaway
 multiplier) and still carries an unscaled dual infeasibility above
 `max(acceptable_tol, 1e-3)` is reported as `Solved_To_Acceptable_Level`, with
-`unscaled_dual_inf_above_acceptable` saying so.
+`unscaled_dual_inf_above_acceptable` saying so. A residual within 64 ulps of the
+terms it is assembled from (`64·ε·dual_scale`) is roundoff, not a miss, and
+keeps the success verdict (gh#1000): with multipliers near `1e13` a residual of
+`5e-3` is all floating point can resolve. `large_dual_scale` still flags such a
+run.
 
 **Why the scale-relative floor is not capped.** An explicitly set
 `dual_inf_tol` is honoured (see `dual_inf_scale_kappa` above). For a caller

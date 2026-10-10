@@ -142,6 +142,21 @@ changes.
   K ≤ 20, refused from K = 25); five forms of the row — shifted by 14 and
   −1000, scaled by 1e-3 and 1e3 — now agree with it at every K tested and
   are never slower than their own cold solve.
+- **A residual at the roundoff floor of its own terms no longer costs a run
+  its success verdict (gh#1000, II.22).** gh#983's final audit reports a
+  `Solve_Succeeded` that showed the gh#884 runaway-multiplier signature as
+  `Solved_To_Acceptable_Level` when the unscaled dual infeasibility is above
+  `max(acceptable_tol, 1e-3)`. Under `bound_relax_factor=0` an active bound and
+  a row can be linearly dependent and the multipliers drift along the ray of
+  valid ones: the book's pump-network NLP ended with multipliers near `1e13`, a
+  residual of `5.5e-3` (1.6 ulps of its terms) and an objective right to `5e-9`
+  relative, and was downgraded on that residual alone. A residual within
+  64 ulps of the terms it is assembled from now keeps the success verdict;
+  `large_dual_scale` still flags the run. The downgrades that are right sit
+  well above that line (Haverly at `2e-13` of its scale, the process network's
+  zero-flow subproblem at `6.6e-13`, the gh#983 cusp at `4e-11`) and are
+  unchanged; `crates/pounce-cli/tests/issue_1000_roundoff_floor_downgrade.rs`
+  pins one of each side.
 
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking

@@ -412,6 +412,42 @@ fn quality_warnings(
 /// not re-measured for this).
 const UNSCALED_DUAL_WARN: Number = 1e-3;
 
+/// gh#1000 (II.22): how many ulps of its own terms an unscaled stationarity
+/// residual may read and still be roundoff rather than a measured miss.
+///
+/// The residual `∇f + Jᵀλ + z` is assembled from terms of size
+/// `final_unscaled_dual_scale`, so in floating point it cannot read much below
+/// `ε·scale` however exact the point is. Under `bound_relax_factor = 0` an
+/// active bound and a row can be linearly dependent, the multipliers drift
+/// along the unbounded ray of valid ones, and the scale follows them: the
+/// pump-network NLP of the issue ends with multipliers near `1e13`, a residual
+/// of `5.5e-3` -- 1.6 ulps of its terms -- and an objective right to `5e-9`
+/// relative, and was downgraded on that `5.5e-3` alone. The measured
+/// population on either side, as `residual / scale`: that run at `3.5e-16`
+/// (`2.8e-16` on the Python path); the downgrades that are correct --
+/// Haverly at `2e-13` (objective `7e-8` off, complementarity `1.8e-6`), the
+/// process network's all-zero-flow subproblem at `6.6e-13` (`6e-7` off) --
+/// and the cusp the downgrade was built for at `4e-11`. 64 ulps (`1.4e-14`)
+/// sits forty times above the first and fourteen times below the nearest
+/// correct downgrade.
+///
+/// What this cannot see: on a model with no finite multiplier (the cusp) the
+/// residual falls as the multipliers grow and the floor rises with them, so a
+/// run that drove them far enough would cross it. None measured has; the
+/// cusp sits more than three orders above. The `large_dual_scale` caveat
+/// still attaches to every run this exempts.
+const UNSCALED_DUAL_ROUNDOFF_ULPS: Number = 64.0;
+
+/// Is `du` within [`UNSCALED_DUAL_ROUNDOFF_ULPS`] of the rounding error of
+/// the terms it was assembled from? `false` whenever either input is not
+/// finite, so a path that does not measure the scale keeps the downgrade.
+fn unscaled_dual_inf_is_roundoff(du: Number, scale: Number) -> bool {
+    du.is_finite()
+        && scale.is_finite()
+        && scale > 0.0
+        && du <= UNSCALED_DUAL_ROUNDOFF_ULPS * Number::EPSILON * scale
+}
+
 /// The code of a structured warning: the text before the first `:`.
 fn warning_code(w: &str) -> &str {
     w.split(':').next().unwrap_or(w)
@@ -4869,16 +4905,23 @@ impl IpoptApplication {
         let acceptable_tol = self.dual_divergence_retry_accept_tol();
         let mut status = status;
         if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
-            let (sig, du) = {
+            let (sig, du, du_scale) = {
                 let st = self.statistics.borrow();
                 (
                     st.returned_run_dual_divergence_signature,
                     st.final_unscaled_dual_inf,
+                    st.final_unscaled_dual_scale,
                 )
             };
             // gh#983 item 5. `1e-3` is `UNSCALED_DUAL_WARN`; the measured
-            // population behind it is in that constant's doc.
-            if sig && du.is_finite() && du > acceptable_tol.max(UNSCALED_DUAL_WARN) {
+            // population behind it is in that constant's doc. A residual at
+            // the rounding floor of its own terms is not evidence of a miss
+            // (gh#1000, II.22): see `UNSCALED_DUAL_ROUNDOFF_ULPS`.
+            if sig
+                && du.is_finite()
+                && du > acceptable_tol.max(UNSCALED_DUAL_WARN)
+                && !unscaled_dual_inf_is_roundoff(du, du_scale)
+            {
                 status = ApplicationReturnStatus::SolvedToAcceptableLevel;
                 push_warning_once(
                     &mut self.statistics.borrow_mut().warnings,
@@ -10807,6 +10850,27 @@ mod tests {
             Some(ScaleAudit::Upscale(k)) => assert_eq!(k, SCALE_AUDIT_MAX_UPSCALE),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// gh#1000 (II.22): the roundoff exemption, on the measured population
+    /// named in `UNSCALED_DUAL_ROUNDOFF_ULPS`'s doc.
+    #[test]
+    fn a_residual_at_the_roundoff_floor_of_its_terms_is_not_a_miss() {
+        // Pump network at H0_max 148: 1.6 ulps of its terms.
+        assert!(unscaled_dual_inf_is_roundoff(5.54e-3, 1.57e13));
+        assert!(unscaled_dual_inf_is_roundoff(7.39e-3, 2.66e13));
+        // The downgrades that are right keep it: Haverly, the process
+        // network's T2 and S2+T2 subproblems, the eps-perspective root, and
+        // the gh#983 cusp.
+        assert!(!unscaled_dual_inf_is_roundoff(1.33e-2, 6.6e10));
+        assert!(!unscaled_dual_inf_is_roundoff(0.5, 7.55e11));
+        assert!(!unscaled_dual_inf_is_roundoff(6.25e-2, 3.21e11));
+        assert!(!unscaled_dual_inf_is_roundoff(3.92e-3, 5.03e9));
+        assert!(!unscaled_dual_inf_is_roundoff(0.144, 3.55e9));
+        // No scale measured: keep the downgrade.
+        assert!(!unscaled_dual_inf_is_roundoff(5.54e-3, f64::NAN));
+        assert!(!unscaled_dual_inf_is_roundoff(5.54e-3, 0.0));
+        assert!(!unscaled_dual_inf_is_roundoff(f64::NAN, 1e13));
     }
 
     /// gh#983 review item 7: one warning per code.
