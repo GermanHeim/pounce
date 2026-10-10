@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`objective_scaling.total_factor`: the whole objective multiplier of the
+  returned run (gh#1001 item 3).** `objective_scaling.factor` is the
+  gradient-based part only. It leaves out the caller's `obj_scaling_factor`
+  and the gh#983 audit's re-solve upscale. So a reader comparing an
+  iteration's `mu` with `|f|` had no way to put the two in the same units.
+  On a reactor model whose objective is `1e-6` in its own units, the audit
+  re-solves at a total of about `1e5`. `factor` still reads `1`, and a final
+  `mu` of `2.5e-9` looks like `5e-4·|f|`, a scaling defect, while the problem
+  the IPM solved had it at `5e-9`. The new field is the magnitude of the
+  product. It is in the JSON report (`statistics.objective_scaling.total_factor`),
+  Python's `info["objective_scaling"]["total_factor"]` and
+  `SolveStatistics::final_total_obj_scaling_factor`. It equals
+  `|final_scaled_objective / final_objective|`. The schema now says iteration
+  `mu` is in scaled units. `factor` is unchanged.
 - **`pounce.qp.solve_qp` takes the convex engine's CLI options (gh#990,
   discopt#1615).** `qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and
   `qp_crossover` were reachable only from the CLI, so a Python caller could not
@@ -72,6 +86,24 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **An infinite objective gradient at the start no longer freezes the
+  objective scale at `1e-8` (gh#1001 item 4).** Gradient-based scaling samples
+  `max|grad f|` at `x0`. For `x ln x` at `x0 = 0` (Gibbs minimization from the
+  origin) the derivative is `-inf`, and `100/inf` was floored at
+  `nlp_scaling_min_value`. The run then needed 16 iterations under the masked
+  scale plus an 8-iteration audit re-solve, 35 in total with L-BFGS. A
+  non-finite start gradient now counts as a failed evaluation and leaves the
+  objective unscaled, which is upstream's branch and what Ipopt under ASL does
+  on the same `.nl`. The run becomes one solve of 10 iterations (11 with
+  L-BFGS), matching Ipopt's iteration count and complementarity, with
+  `|G - G*| = 3e-16`. The fixture sweep is identical on all 206 existing legs,
+  because none of them has a non-finite start gradient. The new
+  `gibbs_xlogx_origin` fixture moves `8 → 10` (exact) and `13 → 11` (L-BFGS).
+  The baseline count leaves out the discarded first solve, so total work drops
+  `24 → 10` and `35 → 11`. The same issue's toy model
+  (`min 1e8·x + x²/2, x ≥ 0`) is unchanged and correct: its `-0.99999` comes
+  from the default `bound_relax_factor`, not from scaling. See
+  `docs/src/options.md`.
 - **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
   MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
   I.D and I.8).**
