@@ -147,9 +147,12 @@ fn direct_driver_solves_the_scaled_feasible_pair() {
 /// gh #293 equilibrated retry's `Optimal`, reported at 123 iterations on a
 /// point whose absolute KKT error is `2.3e3` — certified because the *second*
 /// objective-magnitude normalizer, in `equilibrated_kkt_rel_parts`, had not had
-/// the same correction (gh #712). So the default budget is asserted here for
-/// what it is: an honest non-convergence, with the optimum reachable as soon as
-/// the budget allows it.
+/// the same correction (gh #712). The default budget used to be asserted as an
+/// honest non-convergence. Since gh #1000 (I.8, I.D) the gh #293 retry instead
+/// reaches the true optimum by the cap (objective `7e-21`, unscaled NLP error
+/// `1.2e-10`) and passes the gh #712 `optimum_is_genuine` check. So the
+/// assertion is now the property that check enforces: a success here must
+/// carry a point that is one.
 ///
 /// Kept separate from the `qp_hsde=no` test above because the two are fixed by
 /// different changes and can regress independently.
@@ -177,29 +180,33 @@ fn the_default_route_reaches_the_same_optimum() {
         report.solution.status,
     );
 
-    // `a` does not converge on the CONVEX arm within the default budget — the
-    // ~3596 iterations measured below — and must say so rather than certify
-    // the retry's point. Pinned on the convex arm by name, because at
-    // `solver_selection=auto` an uncertified convex solve is now handed to the
-    // NLP arm (gh #535 extended to convex QP), which solves this model in ~20
-    // iterations. That hand-off is the right answer for a caller and the wrong
-    // instrument for this assertion, which is about what the convex driver
-    // does on its own.
+    // `a` on the CONVEX arm alone, pinned by name: at `solver_selection=auto`
+    // an uncertified convex solve is handed to the NLP arm (gh #535 extended
+    // to convex QP), the wrong instrument for an assertion about what the
+    // convex driver does. The cold HSDE solve needs ~3596 iterations; the
+    // gh #293 equilibrated retry used to certify the gh #712 point (absolute
+    // KKT error 2.3e3) inside the budget. Since gh #1000 (I.8, I.D) the retry
+    // reaches the real optimum by the cap: measured, `SolveSucceeded`,
+    // objective 7e-21, unscaled error 1.2e-10. Main reports
+    // `MaximumIterationsExceeded`. Either verdict is honest. A success that
+    // carries anything but the optimum is not.
     let report = solve(
         "scaled_feasible_a.nl",
         &[EXACT_DECLARED_BOUNDS, "solver_selection=qp-ipm"],
     );
     let code = report.solution.solve_result_num;
-    assert!(
-        !(0..100).contains(&code),
-        "scaled_feasible_a.nl as declared: solve_result_num={code} (status {:?}) \
-         after {} iterations at final_kkt_error {:e}. This model needs ~3596 \
-         iterations; a success verdict inside a 200-iteration budget is the \
-         gh #712 false optimum, whose absolute KKT error is 2.3e3.",
-        report.solution.status,
-        report.statistics.iteration_count,
-        report.statistics.final_kkt_error,
-    );
+    if (0..100).contains(&code) {
+        assert!(
+            report.statistics.final_kkt_error <= 1e-6
+                && report.solution.objective.abs() <= OPTIMUM_TOL,
+            "scaled_feasible_a.nl as declared (qp-ipm): reports success after {} \
+             iterations at final_kkt_error {:e}, objective {:e}. This is the \
+             gh #712 false optimum, whose absolute KKT error is 2.3e3.",
+            report.statistics.iteration_count,
+            report.statistics.final_kkt_error,
+            report.solution.objective,
+        );
+    }
 
     // At the default routing `a` now reports success — reached by the NLP arm
     // after the convex driver declines (gh #535, extended to convex QP). That

@@ -72,6 +72,49 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
+  MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
+  I.D and I.8).**
+  * **Battery MPC (I.D).** Every step that drove the battery to a bound
+    returned `optimal_inaccurate`. The internal slack converged, but the true
+    slack `h − Gx` sat a regularization-sized distance off it, against a
+    multiplier of ~72. The (z,z) regularization floor was sized by `tol`
+    rather than the gap tolerance. It now uses `min(tol, tol_gap)`. The loop's
+    complementarity test also reads the true-slack product, against the
+    verdict's own threshold, so the loop no longer stops where the verdict will
+    refuse.
+  * **Refinery blend LP (I.8).** With the objective scaled by `10^k`, `k ≤ −5`
+    hit the iteration cap or ended `optimal_inaccurate`. Two causes:
+    1. The in-loop dual test was a scalar that the verdict's per-column floor
+       did not agree with. It is now the same per-column excess.
+    2. The gap test's noise floor did not count the size of the terms being
+       cancelled.
+    The true-slack resolvability floor now counts `|G||x|`, so a row with
+    `h = 0` whose `Gx` cancels to round-off is not mistaken for an unresolved
+    product.
+  * **Measured.**
+    * All 10 battery-MPC QPs are `optimal` at `tol` 1e-6 and 1e-8. On main, all
+      were `optimal_inaccurate` at 1e-8. At 1e-10, 6 of the 10 still end
+      `optimal_inaccurate`.
+    * Every blend cell, `k = −6…6` and `tol` up to 1e-10, ends `optimal`, with
+      the objective within 3.5e-10 relative.
+  * **Maros–Mészáros (137 problems; BOYD2 excluded, the baseline exceeded the
+    300 s cap).** All optimal on both binaries. Iterations total 5096 → 2998,
+    and objectives agree to 2.5e-11 relative.
+    * POWELL20 2090 → 121, QPCBOEI2 133 → 29, STADAT1 53 → 35.
+    * Worst regression: CVXQP1_L 18 → 28.
+  * **Fixture sweep, both legs.**
+    * `feasible_x0_wide_scale` 81 → 26.
+    * `scaled_feasible_a` now certifies on the convex arm instead of being
+      handed to the NLP arm. Its point checks out: objective 7e-21, scaled
+      KKT 1.2e-16.
+  * **`qp-ipm` on `scaled_feasible_a`.** Under `solver_selection=qp-ipm` it
+    now reports success at 200 iterations: the gh#293 equilibrated retry
+    reaches the true optimum and passes the gh#712 genuineness check.
+    `issue_689`'s test now asserts that a success there is genuine, instead of
+    asserting there is no success.
+  * Tests: `python/tests/test_gh1000_convex_endgame.py`.
+
 
 - **`trf_minimize` takes a restoration step on an incompatible subproblem at
   an infeasible iterate (gh#1000).** With `basis="zero"`, the sintering

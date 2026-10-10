@@ -206,19 +206,67 @@ pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 /// product `5.0e-3`). A slack inside its own rounding quantum is not counted,
 /// for the reason `ipm::resolvable_complementarity` gives: there the product
 /// measures the quantum, not a violation (the gh#984 item-3 `1e9` shift).
-pub(crate) fn true_slack_complementarity(h: &[f64], gx: &[f64], z: &[f64], tau: f64) -> f64 {
+///
+/// `gabs` is `|G||x|`, the row's term magnitudes, and sets the quantum: a row
+/// written `body ≤ 0` has `h = 0` and `Gx ≈ 0` by cancellation of terms that
+/// need not be small (gh#1000, I.8: the blend LP at costs `1e4` read a
+/// `2e-13` slack, rounding of `1e3`-sized terms, times `ẑ = 1.6e6` as a
+/// `3e-7` violation, and ground on for 90 iterations).
+pub(crate) fn true_slack_complementarity(
+    h: &[f64],
+    gx: &[f64],
+    gabs: &[f64],
+    z: &[f64],
+    tau: f64,
+) -> f64 {
     if !(tau > 0.0) {
         return f64::INFINITY;
     }
     let mut worst = 0.0_f64;
-    for ((&hi, &gxi), &zi) in h.iter().zip(gx).zip(z) {
+    for (((&hi, &gxi), &gai), &zi) in h.iter().zip(gx).zip(gabs).zip(z) {
         let gxh = gxi / tau;
         let slack = hi - gxh;
-        if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gxh.abs()) {
+        if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gai / tau) {
             worst = worst.max((slack * zi / tau).abs());
         }
     }
     worst
+}
+
+/// The un-homogenized stationarity residual `ρ_x/τ` above its own rounding
+/// noise, per column: `max_j (|ρ_x,j|/τ − REL_FLOOR_KAPPA·ε·t_j)⁺` with
+/// `t_j = (|P||x| + |A|ᵀ|y| + |G|ᵀ|z|)_j/τ + |c_j|`, the magnitudes summed
+/// into entry `j` (gh#1000, I.8). Per column, as the verdict
+/// ([`crate::qp::QpSolution::kkt_residuals_above_floor`]) reads it: one large
+/// column's scale must not excuse another column's residual.
+fn dual_excess_above_floor(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    rho_x: &[f64],
+    tau: f64,
+) -> f64 {
+    let mut t = vec![0.0_f64; prob.n];
+    for e in &prob.p_lower {
+        t[e.row] += (e.val * x[e.col]).abs();
+        if e.row != e.col {
+            t[e.col] += (e.val * x[e.row]).abs();
+        }
+    }
+    for e in &prob.a {
+        t[e.col] += (e.val * y[e.row]).abs();
+    }
+    for e in &prob.g {
+        t[e.col] += (e.val * z[e.row]).abs();
+    }
+    let k = REL_FLOOR_KAPPA * f64::EPSILON;
+    t.iter()
+        .zip(&prob.c)
+        .zip(rho_x)
+        .fold(0.0_f64, |m, ((&tj, &cj), &rj)| {
+            m.max((rj.abs() / tau - k * (tj / tau + cj.abs())).max(0.0))
+        })
 }
 
 /// A relatively-converged iterate set aside while the loop tries to do better.
@@ -499,6 +547,7 @@ where
     let mut nrm_gtz = vec![0.0; n];
     let mut nrm_ax = vec![0.0; m_eq];
     let mut nrm_gx = vec![0.0; m_ineq];
+    let mut nrm_gabs = vec![0.0; m_ineq];
     let norm_b = inf_norm(&prob.b);
     let norm_h = inf_norm(&prob.h);
     let norm_c = inf_norm(&prob.c);
@@ -513,6 +562,7 @@ where
     let (unit_d, unit_g) = crate::qp::objective_units(prob);
     let tol_cost = opts.tol * unit_d;
     let tol_gap = opts.tol * unit_g;
+    let tol_true_comp = opts.tol * crate::qp::report_units(prob).1;
     // The relative arm's stash: the first iterate to satisfy it without being
     // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
     let mut rel_candidate: Option<RelCandidate> = None;
@@ -641,6 +691,10 @@ where
             *v = 0.0;
         }
         prob.g_mul(&x, &mut nrm_gx);
+        nrm_gabs.iter_mut().for_each(|v| *v = 0.0);
+        for e in &prob.g {
+            nrm_gabs[e.row] += (e.val * x[e.col]).abs();
+        }
         let scale_d = (inf_norm(&px_vec)
             .max(inf_norm(&nrm_aty))
             .max(inf_norm(&nrm_gtz))
@@ -778,6 +832,36 @@ where
         let cap_d = (REL_FLOOR_KAPPA * f64::EPSILON * scale_d).max(opts.tol);
         let cap_g_floor = REL_FLOOR_KAPPA * f64::EPSILON * scale_g_raw;
         let cap_g = cap_g_floor.max(opts.tol);
+        // gh#1000 (I.8): the gap's rounding noise is set by the terms it sums,
+        // not by their sum. `scale_g_raw` is the objective, and the two part
+        // company when the optimal duals are unbounded: the book's blend LP
+        // with a contract row that removes the strict interior carries
+        // `|hᵀẑ| ~ 1e8` against an objective of `0.56` (costs scaled by
+        // `1e-6`), so its gap floors at `~2e-8` while `cap_g_floor` allowed
+        // `8e-15` -- and the loop, unable to stop, divided `μ` by ten per
+        // full step to `1e-199` at `max_iter`. Used only to *excuse* the gap
+        // below, which still needs the cancellation-free complementarity.
+        let gap_terms = (xpx.abs() / tau
+            + prob
+                .c
+                .iter()
+                .zip(&x)
+                .map(|(a, b)| (a * b).abs())
+                .sum::<f64>()
+            + prob
+                .b
+                .iter()
+                .zip(&y)
+                .map(|(a, b)| (a * b).abs())
+                .sum::<f64>()
+            + prob
+                .h
+                .iter()
+                .zip(&z)
+                .map(|(a, b)| (a * b).abs())
+                .sum::<f64>())
+            / tau;
+        let gap_noise = REL_FLOOR_KAPPA * f64::EPSILON * gap_terms.max(scale_g_raw);
         let rel_ok =
             large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol;
         // gh#984 item 4: the gap is a *sum* of objective-sized terms, so its
@@ -807,10 +891,25 @@ where
         // is within `tol_gap` too ([`true_slack_complementarity`]).
         let gap_strict = gap < tol_gap;
         let gap_excused = !gap_strict
-            && gap < cap_g_floor
+            && gap < gap_noise
             && orthant_only
-            && true_slack_complementarity(&prob.h, &nrm_gx, &z, tau) <= tol_gap;
-        let abs_ok = pres < opts.tol && dres < tol_cost && (gap_strict || gap_excused);
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau) <= tol_gap;
+        // gh#1000 (I.8): the dual residual likewise cannot be asked to read
+        // below the rounding noise of its own terms. `tol_cost` shrinks with
+        // the cost unit and that noise does not -- the blend LP at costs
+        // `1e-6`, `tol = 1e-9`, holds `dres` at `7e-13` against `7.7e-14` --
+        // while `large_scale` compares against the raw `tol` and stays shut.
+        // Excused under the same `orthant_only` and true-slack
+        // complementarity conditions as the gap, never for `pres`.
+        // The scale is the terms' (`dual_excess_above_floor`), not `scale_d`:
+        // that is the norm of `Gᵀẑ` *after* cancellation, which at a
+        // stationary point is `~‖c‖` however large the terms are.
+        let dres_excused = dres >= tol_cost
+            && orthant_only
+            && dual_excess_above_floor(prob, &x, &y, &z, &rho_x, tau) < tol_cost
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau) <= tol_gap;
+        let abs_ok =
+            pres < opts.tol && (dres < tol_cost || dres_excused) && (gap_strict || gap_excused);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
         // gh#984 item 3: the duality gap is a *difference* of objective-sized
         // sums, so on a large (or large-offset) objective it carries
@@ -830,14 +929,31 @@ where
         } else {
             0.0
         };
-        let comp_ok = comp_max <= tol_gap;
+        // gh#1000 (I.D): `s·z` reads the internal slack, which the gh#689
+        // decoupling lets drift from the row's true slack `h − Gx`. A stop on
+        // the internal product alone accepted an iterate whose true product
+        // the verdict ([`crate::qp::QpSolution::kkt_residuals_above_floor`])
+        // then read above `tol`, ending `optimal_inaccurate` at the default
+        // `tol`. So the true product must clear the *verdict's* threshold too:
+        // `tol` in the objective's unit, up as well as down. Not `tol_gap`,
+        // which stays absolute for a large unit (gh#846): at costs `1e6` the
+        // multipliers are `1e8` and a residual-sized `4e-13` slack can never
+        // read below `1e-7`, so the loop ran to 196 iterations on a point the
+        // verdict accepts.
+        let true_comp = if orthant_only {
+            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau)
+        } else {
+            0.0
+        };
+        let comp_ok = comp_max <= tol_gap && true_comp <= tol_true_comp;
         let loose_ok = rel_ok || abs_ok;
         let converged = (abs_ok || rel_in_floor) && comp_ok;
         if !converged {
             let worst = (pres / cap_p)
                 .max(dres / cap_d)
                 .max(gap / cap_g)
-                .max(comp_max / tol_gap);
+                .max(comp_max / tol_gap)
+                .max(true_comp / tol_true_comp);
             let stash = |c: &mut Option<RelCandidate>| {
                 *c = Some(RelCandidate {
                     x: x.clone(),
@@ -932,8 +1048,18 @@ where
         // (keeps the reduced KKT quasi-definite). Well-scaled problems
         // (‖iterate‖ ~ 1) are untouched: `tol/scale ≥ opts.reg`, so the `min`
         // keeps the configured δ.
+        //
+        // gh#1000 (I.D): the floor is sized by the smaller of `tol` and
+        // `tol_gap`. The slack-block δ also decouples the internal slack from
+        // the row's true slack `h − Gx` by `~δ`, and that error times `ẑ` is
+        // complementarity, judged against `tol_gap` (objective units), not
+        // `tol`. The battery QP (`‖x̂‖ = 190`, `ẑ = 72`, `tol_gap = tol/16`)
+        // held a `5.3e-11` δ, a true product of `1.4e-9`, and ended
+        // `optimal_inaccurate` at the default `tol`.
         let iterate_scale = (inf_norm(&x).max(inf_norm(&y)).max(inf_norm(&z)) / tau).max(1.0);
-        let base_reg = (opts.tol / iterate_scale).min(opts.reg).max(REG_MIN);
+        let base_reg = (opts.tol.min(tol_gap) / iterate_scale)
+            .min(opts.reg)
+            .max(REG_MIN);
 
         // --- refactor M with the current cone scaling + dynamic regularization ---
         // Factor at the small static δ; if the factorization is singular, or
@@ -1571,13 +1697,24 @@ mod tests {
         let h = [1e5, 1e9];
         let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
         let z = [1.0 * tau, 1e3 * tau];
-        let c = true_slack_complementarity(&h, &gx, &z, tau);
+        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau);
         assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
         // Both inside the quantum: nothing to count.
         let gx_tight = [1e5 * tau, 1e9 * tau];
-        assert_eq!(true_slack_complementarity(&h, &gx_tight, &z, tau), 0.0);
+        assert_eq!(
+            true_slack_complementarity(&h, &gx_tight, &gx_tight, &z, tau),
+            0.0
+        );
         // A collapsed tau cannot certify anything.
-        assert!(true_slack_complementarity(&h, &gx, &z, 0.0).is_infinite());
+        assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0).is_infinite());
+        // gh#1000 (I.8): `h = 0`, `Gx` a cancellation of `1e3`-sized terms
+        // that left `2e-13`. The terms, not `|Gx|`, set the quantum.
+        let (h0, gx0, z0) = ([0.0], [-2e-13 * tau], [1.6e6 * tau]);
+        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau) > 0.0);
+        assert_eq!(
+            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &z0, tau),
+            0.0
+        );
     }
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
