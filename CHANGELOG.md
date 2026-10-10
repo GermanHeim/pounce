@@ -86,6 +86,24 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **An infinite objective gradient at the start no longer freezes the
+  objective scale at `1e-8` (gh#1001 item 4).** Gradient-based scaling samples
+  `max|grad f|` at `x0`. For `x ln x` at `x0 = 0` (Gibbs minimization from the
+  origin) the derivative is `-inf`, and `100/inf` was floored at
+  `nlp_scaling_min_value`. The run then needed 16 iterations under the masked
+  scale plus an 8-iteration audit re-solve, 35 in total with L-BFGS. A
+  non-finite start gradient now counts as a failed evaluation and leaves the
+  objective unscaled, which is upstream's branch and what Ipopt under ASL does
+  on the same `.nl`. The run becomes one solve of 10 iterations (11 with
+  L-BFGS), matching Ipopt's iteration count and complementarity, with
+  `|G - G*| = 3e-16`. The fixture sweep is identical on all 206 existing legs,
+  because none of them has a non-finite start gradient. The new
+  `gibbs_xlogx_origin` fixture moves `8 → 10` (exact) and `13 → 11` (L-BFGS).
+  The baseline count leaves out the discarded first solve, so total work drops
+  `24 → 10` and `35 → 11`. The same issue's toy model
+  (`min 1e8·x + x²/2, x ≥ 0`) is unchanged and correct: its `-0.99999` comes
+  from the default `bound_relax_factor`, not from scaling. See
+  `docs/src/options.md`.
 - **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
   MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
   I.D and I.8).**

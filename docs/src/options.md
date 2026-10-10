@@ -1357,6 +1357,26 @@ restored. `equilibration-based` scaling, which pounce currently runs as
 gradient-based, is audited as gradient-based. Cost: one extra solve, from a
 converged point, on a run that shows a signature.
 
+A non-finite gradient at the start carries no scale. `x ln x` sampled at
+`x0 = 0` has an infinite derivative, which `100/inf` would have floored at
+`nlp_scaling_min_value` (`1e-8`). On a model whose gradient is `O(1)`
+everywhere the iterates go, that cost a 16-iteration solve plus an 8-iteration
+audit re-solve. Pounce now treats it as a failed gradient evaluation and
+leaves the objective unscaled (`df = 1`), as upstream does when its gradient
+evaluation fails, and as Ipopt under ASL does on the same `.nl`, since ASL
+rejects `log(0)`. Gibbs minimization from the origin then takes one 10-iteration
+solve, the same as Ipopt (gh#1001).
+
+The audit does **not** fire when the large gradient is real.
+`min 1e8·x + x²/2, x ≥ 0` has a gradient of `1e8` at the start and at the
+answer, so a re-scale would freeze the same factor and re-trace the same path.
+It ends at `f ≈ -1` against `f* = 0`. That error is not a scaling error: the
+default `bound_relax_factor = 1e-8` moves the bound to `x ≥ -1e-8`, and
+`1e8 · 1e-8 = 1`, so pounce solved the relaxed problem correctly. The
+complementarity floor's share is `9e-6`, `9e-14` of the gradient. A model
+whose objective is that steep in a bounded variable needs
+`bound_relax_factor=0` (Ipopt 3.14 returns the same `-0.99999`).
+
 Whatever happens, the run carries **structured warnings**
 (`info["warnings"]`, the JSON report's `statistics.warnings`, `WARNING:`
 console lines): `objective_scale_small`, `unscaled_stationarity_above_tol`,
