@@ -97,6 +97,38 @@ changes.
   one. The evaluations are memoized, so the central difference costs no truth
   call: on the book's PFR flowsheet the run goes from 11 iterations / 67
   evaluations to 7 / 43, and the sintering model from 8 / 49 to 7 / 43.
+- **An infeasible square model is diagnosed in hundreds of iterations, not
+  `max_iter`, and the restoration verdict no longer depends on where
+  `max_iter` falls (gh#1000, I.20).** Three changes:
+  1. Restoration's inner IPM used a hard-coded cap of 3000 against an
+     absolute counter. It now inherits `max_iter`, as upstream does, so
+     `max_iter=3500` no longer stops at 3000 and a smaller cap is no longer
+     overrun.
+  2. A restoration that the cap cut off is reported as
+     `Maximum_Iterations_Exceeded`, not `Restoration_Failed`. Two gates no
+     longer read such a cut-off as evidence of infeasibility:
+     - the stall gate, which now counts the sub-solve's own length rather
+       than the absolute counter;
+     - the alt gate, which no longer accepts a cut-off at the solve's
+       `max_iter`.
+  3. On a square problem, the locally-infeasible certificate that is
+     withheld to give the main phase extra shots is now honoured once the
+     same point has been certified 20 times in a row.
+     `SQUARE_CERTIFICATE_REPEATS` records the feasible control that sets the
+     lower bound: it repeats 10 times before escaping.
+
+  On the optimization book's circle–parabola model at `t = 1.5`:
+  - the primary solve goes from 3000 iterations to 594;
+  - the whole run, including the second-opinion ladder, goes from about
+    10.9k iterations to about 4.8k;
+  - the verdict is `Infeasible_Problem_Detected` at every `max_iter` from
+    1000 up. Before, it was `Maximum_Iterations_Exceeded` at 500, 1000 and
+    2000.
+
+  The feasible `t = 0.5` control is unchanged. On 27 restoration-heavy
+  Vanderbei/Mittelmann models, britgas moves from `Restoration_Failed` to
+  `Optimal`, because a second-opinion rung now gets to run. Everything else
+  is unchanged, and the fixture sweep diff is empty.
 
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking

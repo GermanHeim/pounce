@@ -4293,7 +4293,19 @@ impl IpoptAlgorithm {
                 // blown past the absolute runaway backstop; otherwise the
                 // failure is a plain `RestorationFailure`, never a spurious
                 // `Unbounded`.
-                if self.restore_acceptable_point() {
+                //
+                // gh#1000: a restoration that failed because the inner
+                // counter — seeded from the outer one, so absolute — ran
+                // into `max_iter` did not fail; it ran out of budget.
+                // Upstream throws `RESTORATION_MAXITER_EXCEEDED`
+                // (`IpRestoMinC_1Nrm.cpp`) and `IpIpoptAlg` reports
+                // `MAXITER_EXCEEDED`, past the line search's
+                // acceptable-point fallback. Reporting it as
+                // `Restoration_Failed` told the caller the model defeated
+                // the algorithm when it was the cap that stopped it.
+                if inner_final_iter >= self.max_iter {
+                    IterateOutcome::Terminate(SolverReturn::MaxiterExceeded)
+                } else if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
                 } else {
                     let diverging = {

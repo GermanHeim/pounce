@@ -63,12 +63,6 @@ use std::rc::Rc;
 /// trigger).
 pub type InnerBackendFactoryFactory = Box<dyn FnMut() -> LinearBackendFactory>;
 
-/// Per-call iteration cap on the restoration sub-IPM
-/// (`IpRestoConvCheck.cpp:137` `maximum_iters`). Resto-phase-specific,
-/// distinct from the user's outer `max_iter` — the restoration phase is
-/// a feasibility-recovery side-solve and gets its own generous budget.
-const RESTO_INNER_MAX_ITERS: i32 = 3000;
-
 // The cap on *successive* restoration iterations
 // (`IpRestoConvCheck.cpp:144` `maximum_resto_iters`) used to be a second
 // constant here. It is now the `max_resto_iter` option, carried on
@@ -228,8 +222,15 @@ fn worse_than_demonstrated_feasibility(orig_inf_pr_scaled: f64, outer_inf_pr_flo
 /// [`pounce_algorithm::alg_builder::RestoOptions::max_resto_iter`], the cap
 /// on successive restoration iterations. It arrives from the user's
 /// `max_resto_iter` option (#551 / #677) and defaults to the 3000 this
-/// function used to hard-code. The per-call inner-IPM iteration budget
-/// stays a resto-phase constant.
+/// function used to hard-code.
+///
+/// The inner IPM's `maximum_iters` is the user's `max_iter`, as upstream
+/// (`IpRestoConvCheck.cpp:137` reads `max_iter` through the cloned
+/// options). The inner counter is seeded from the outer one, so this is
+/// the *solve's* budget, not a fresh one per entry. It used to be a
+/// resto-phase constant of 3000, which made `max_iter` above 3000 stop
+/// at 3000 whenever restoration was running and `max_iter` below it
+/// overrun by up to the difference (gh#1000).
 fn build_resto_conv_check_adapter(
     conv: &pounce_algorithm::alg_builder::ConvCheckOptions,
     max_resto_iter: i32,
@@ -238,7 +239,7 @@ fn build_resto_conv_check_adapter(
         conv.tol,
         conv.acceptable_tol,
         conv.acceptable_iter,
-        RESTO_INNER_MAX_ITERS,
+        conv.max_iter,
         max_resto_iter,
     )
 }
@@ -605,6 +606,7 @@ fn run_inner_resto_impl(
     // default `tol` was correctly diagnosed. Same defect, and the same repair,
     // as the outer cycle exit in `ipopt_alg`.
     let outer_constr_viol_tol = inner_alg_builder.conv_check.constr_viol_tol;
+    let solve_max_iter = inner_alg_builder.conv_check.max_iter;
     let mut adapter = build_resto_conv_check_adapter(
         &inner_alg_builder.conv_check,
         inner_alg_builder.resto.max_resto_iter,
@@ -731,6 +733,9 @@ fn run_inner_resto_impl(
         Rc::clone(&resto_nlp_rc),
     )));
 
+    // The inner counter's value on entry: `inner_iter_count` minus this is
+    // the sub-solve's own length.
+    let inner_entry_iter: Index;
     // Seed inner iter_count = outer.iter_count + 1 to mirror upstream
     // `IpRestoMinC_1Nrm.cpp:181`. The outer transcription block in
     // `min_c_1nrm.rs` uses `result.iter_count - 1` to roll the outer
@@ -774,6 +779,7 @@ fn run_inner_resto_impl(
         };
         let mut inner = inner_data.borrow_mut();
         inner.iter_count = outer_iter + 1;
+        inner_entry_iter = inner.iter_count;
         inner.info_regu_x = outer_regu_x;
         inner.info_alpha_primal = outer_alpha_primal;
         inner.info_alpha_primal_char = outer_alpha_primal_char;
@@ -882,6 +888,7 @@ fn run_inner_resto_impl(
             iters_since_header,
             last_output,
             locally_infeasible: false,
+            square_certificate_suppressed: false,
             user_requested_stop: true,
             feasible_point_found: false,
         });
@@ -1066,12 +1073,25 @@ fn run_inner_resto_impl(
     // robust in the line search itself (365+ inner iters on PFIT2),
     // pounce currently can't reach that depth so we surface the
     // diagnosis on the failure exit instead.
+    //
+    // A `MaxiterExceeded` that is the *solve's* `max_iter` (the inner
+    // inherits it, gh#1000) is excluded: the inner did not stall, the
+    // budget ran out under it, and upstream reports that as
+    // `MAXITER_EXCEEDED`. Admitting it made the verdict depend on where
+    // the cap fell — on gh#1000's square circle-parabola model a
+    // restoration the cap cut off near its stationary point read as
+    // infeasible at `max_iter=500` and the same run ended
+    // `Maximum_Iterations_Exceeded` at 3000. A `max_resto_iter` exit is
+    // the inner's own budget and still counts.
+    let truncated_by_solve_cap =
+        matches!(status, SolverReturn::MaxiterExceeded) && inner_iter_count >= solve_max_iter;
     let alt_locally_infeasible = matches!(
         status,
         SolverReturn::RestorationFailure
             | SolverReturn::MaxiterExceeded
             | SolverReturn::ErrorInStepComputation
-    ) && inner_kkt_err <= 1e-2
+    ) && !truncated_by_solve_cap
+        && inner_kkt_err <= 1e-2
         && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && inner_iter_count >= 30;
 
@@ -1087,8 +1107,20 @@ fn run_inner_resto_impl(
     // `Restoration_Failed` once a generous iteration budget has been
     // burned with no exit. Conservative threshold to avoid
     // misclassifying genuinely under-resourced solves.
+    //
+    // The budget is the sub-solve's *own* length, not `inner_iter_count`:
+    // that counter is seeded from the outer's (see gh#664 on
+    // `diverged_from_restoration_entry`), and the inner's `MaxiterExceeded`
+    // is tested against the same absolute counter. So a restoration that
+    // the global iteration cap cut short after a handful of iterations
+    // read as thousands of iterations of stall evidence, and the verdict
+    // flipped on where `max_iter` happened to fall: gh#1000's square
+    // circle-parabola model ended `Infeasible_Problem_Detected` at the
+    // default cap, its 126th restoration having started at outer
+    // iteration 2987 and run 13 iterations, but `Maximum_Iterations_
+    // Exceeded` at `max_iter` 500, 1000 or 2000.
     let cycle_locally_infeasible = matches!(status, SolverReturn::MaxiterExceeded)
-        && inner_iter_count >= RESTO_STALL_EVIDENCE_ITERS
+        && inner_iter_count - inner_entry_iter >= RESTO_STALL_EVIDENCE_ITERS
         && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
 
@@ -1271,6 +1303,22 @@ fn run_inner_resto_impl(
     let locally_infeasible = !solver_would_call_it_feasible
         && (verdict_locally_infeasible || reconstructed_locally_infeasible);
 
+    // `strict`'s condition with the square carve-out lifted, under the same
+    // guards: the verdict this sub-solve earned and the carve-out withheld.
+    // The driver honours it once the same point has been certified
+    // [`crate::min_c_1nrm::SQUARE_CERTIFICATE_REPEATS`] times (gh#1000).
+    let square_certificate_suppressed = is_square_problem
+        && !locally_infeasible
+        && !solver_would_call_it_feasible
+        && !diverged_from_entry
+        && !worse_than_best_seen
+        && matches!(
+            status,
+            SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
+        )
+        && inner_stationarity_converged
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol);
+
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
             "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} entry_inf_pr={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} diverged_from_entry={} worse_than_best={} at_floor={} floor={:.6e} → loc_inf={}",
@@ -1315,6 +1363,7 @@ fn run_inner_resto_impl(
         last_output,
         locally_infeasible,
         user_requested_stop: false,
+        square_certificate_suppressed,
     })
 }
 
