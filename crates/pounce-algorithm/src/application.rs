@@ -418,7 +418,8 @@ fn quality_warnings(
 /// (`mpcc_qpec_small_biactive`) and `3.6e-6` (`deb7`) -- the largest two and a
 /// half orders below the bar. The runs the bar exists for sit above it: the
 /// cusp with the floor opted back in at `1.44e-1`, and the first pass's
-/// toll-pricing report at `3.3e-2`. So the threshold falls in an empty band of
+/// toll-pricing report at `3.3e-2` (since gh#1000 exempt as roundoff, see
+/// [`UNSCALED_DUAL_ROUNDOFF_ULPS`]). So the threshold falls in an empty band of
 /// the measured population; nothing between `3.6e-6` and `3.3e-2` was observed,
 /// and the corpus says nothing about how dense that band is elsewhere (the
 /// 400-model QPEC family of `dev-notes/mpcc-biactive-dual-divergence.md` was
@@ -437,7 +438,10 @@ const UNSCALED_DUAL_WARN: Number = 1e-3;
 /// of `5.5e-3` -- 1.6 ulps of its terms -- and an objective right to `5e-9`
 /// relative, and was downgraded on that `5.5e-3` alone. The measured
 /// population on either side, as `residual / scale`: that run at `3.5e-16`
-/// (`2.8e-16` on the Python path); the downgrades that are correct --
+/// (`2.8e-16` on the Python path), and gh#983's toll-pricing MPCC at
+/// `bound_relax_factor = 0` at `1.1e-16` (`3.3e-2` against `3e14`, objective
+/// `9e-10` from the default-options solve), which gh#983 had pinned as a
+/// downgrade and which this exempts too; the downgrades that are correct --
 /// Haverly at `2e-13` (objective `7e-8` off, complementarity `1.8e-6`), the
 /// process network's all-zero-flow subproblem at `6.6e-13` (`6e-7` off) --
 /// and the cusp the downgrade was built for at `4e-11`. 64 ulps (`1.4e-14`)

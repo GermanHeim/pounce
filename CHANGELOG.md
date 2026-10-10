@@ -199,7 +199,11 @@ changes.
   well above that line (Haverly at `2e-13` of its scale, the process network's
   zero-flow subproblem at `6.6e-13`, the gh#983 cusp at `4e-11`) and are
   unchanged; `crates/pounce-cli/tests/issue_1000_roundoff_floor_downgrade.rs`
-  pins one of each side.
+  pins one of each side. This reverses one gh#983 verdict: the toll-pricing
+  MPCC at `bound_relax_factor=0` (`3.3e-2` against terms of `3e14`, `1.1e-16`
+  of its scale) now returns `Solve_Succeeded`. Its objective agrees with the
+  default-options solve to `9e-10`, and both warnings still attach;
+  `test_gh983_solve_quality.py` now pins that.
 
 - **`large_dual_scale` names `bound_relax_factor = 0` when it is set (gh#1000,
   II.23, I.15).** The downgrades that stay — Haverly multistart trials 3
