@@ -14,22 +14,27 @@
 //! * `haverly_multistart_t3_brf0` (Haverly pooling, multistart trial 3): the
 //!   control. Residual `9.4e-3` against `6.6e10` (140 ulps), objective `7e-8`
 //!   off and complementarity `1.8e-6`; the downgrade is right and stays.
+//!   Ipopt 3.14 follows the same 61-iteration trajectory and reports it
+//!   optimal. The cause is the `bound_relax_factor = 0` the caller chose, so
+//!   the warning names it, and at the default relaxation the same model ends
+//!   `Solve_Succeeded` (items II.23 and I.15).
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn run(name: &str) -> String {
+    run_with(name, "0")
+}
+
+fn run_with(name: &str, bound_relax_factor: &str) -> String {
     let mut fx = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fx.push("tests");
     fx.push("fixtures");
     fx.push(name);
+    let brf = format!("bound_relax_factor={bound_relax_factor}");
     let out = Command::new(env!("CARGO_BIN_EXE_pounce"))
         .arg(fx)
-        .args([
-            "solver_selection=nlp",
-            "bound_relax_factor=0",
-            "constr_viol_tol=1e-8",
-        ])
+        .args(["solver_selection=nlp", brf.as_str(), "constr_viol_tol=1e-8"])
         .output()
         .expect("run pounce");
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -59,4 +64,17 @@ fn a_residual_above_the_floor_is_still_downgraded() {
         "{out}"
     );
     assert!(out.contains("status is downgraded"), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("WARNING: large_dual_scale:")
+                && l.contains("bound_relax_factor = 0 is set")),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_default_relaxation_certifies_the_same_model() {
+    let out = run_with("haverly_multistart_t3_brf0.nl", "1e-8");
+    assert_eq!(exit_line(&out), "EXIT: Optimal Solution Found.", "{out}");
+    assert!(!out.contains("bound_relax_factor = 0 is set"), "{out}");
 }

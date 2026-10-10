@@ -201,6 +201,17 @@ changes.
   unchanged; `crates/pounce-cli/tests/issue_1000_roundoff_floor_downgrade.rs`
   pins one of each side.
 
+- **`large_dual_scale` names `bound_relax_factor = 0` when it is set (gh#1000,
+  II.23, I.15).** The downgrades that stay — Haverly multistart trials 3
+  and 39 at `99.99999`, the process network's zero-flow subproblems — are
+  right: Ipopt 3.14 follows the identical trajectory on each (61, 43, 116
+  and 48 iterations) and reports "Optimal Solution Found" on Haverly with an
+  unscaled dual infeasibility of `9.2e-3`. Every one of them was solved at
+  `bound_relax_factor=0`, where an active bound that coincides with a
+  dependent row has no interior. At the default `1e-8` all five book models
+  end `Solve_Succeeded` in 23–37 iterations. The warning now says so when
+  the option is `0`, so a caller sees the cause next to the downgrade.
+
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking
   a negative-curvature direction to the boundary reached a better point, which

@@ -350,6 +350,11 @@ fn scale_audit_warning(
 ///   caller finds out. It is not capped, because the cap that rejects the
 ///   cusp (`~0.1`) also rejects Vanderbei's `orthrds2` (`89.7` at scale
 ///   `1.6e10`), which is stationary to nine digits relative to its scale.
+///   Under `bound_relax_factor = 0` it names that option: every model of
+///   gh#1000 items II.22, II.23 and I.15 that carried it (pump network,
+///   process-network superstructure, Haverly multistart) had an active
+///   bound coinciding with a dependent row, and each ends `Solve_Succeeded`
+///   at the default relaxation. Ipopt follows the same trajectory at `0`.
 /// * `unscaled_stationarity_above_tol`: the unscaled residual sits above
 ///   `1e-3` while the strict gate, which tolerates up to `dual_inf_tol`
 ///   (`1` by default), passed it.
@@ -359,6 +364,7 @@ fn quality_warnings(
     dual_scale: Number,
     dual_inf_tol: Number,
     acceptable_tol: Number,
+    bound_relax_off: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
     if !matches!(
@@ -378,7 +384,14 @@ fn quality_warnings(
         out.push(format!(
             "large_dual_scale: the stationarity residual is assembled from terms of size {dual_scale:.2e} \
              (multipliers or gradients this large usually mean a failed constraint qualification), \
-             so the unscaled dual infeasibility {unscaled_dual_inf:.2e} was judged relative to that scale"
+             so the unscaled dual infeasibility {unscaled_dual_inf:.2e} was judged relative to that scale{}",
+            if bound_relax_off {
+                ". bound_relax_factor = 0 is set: an active bound that coincides with a \
+                 dependent row has no interior there, and the default relaxation (1e-8) \
+                 usually removes this"
+            } else {
+                ""
+            }
         ));
     }
     if unscaled_dual_inf.is_finite()
@@ -4945,6 +4958,9 @@ impl IpoptApplication {
                 .map(|(v, _)| v)
                 .unwrap_or(1.0),
             acceptable_tol,
+            self.options
+                .get_numeric_value("bound_relax_factor", "")
+                .is_ok_and(|(v, _)| v == 0.0),
         );
         let mut sm = self.statistics.borrow_mut();
         for w in extra {
@@ -10891,7 +10907,7 @@ mod tests {
     fn quality_warnings_carry_a_code_and_only_on_success_verdicts() {
         use ApplicationReturnStatus::*;
         // The cusp: multipliers 3.5e9, residual 0.144.
-        let w = quality_warnings(SolveSucceeded, 0.144, 3.55e9, 1.0, 1e-6);
+        let w = quality_warnings(SolveSucceeded, 0.144, 3.55e9, 1.0, 1e-6, false);
         assert!(
             w.iter().any(|m| m.starts_with("large_dual_scale:")),
             "{w:?}"
@@ -10904,17 +10920,25 @@ mod tests {
         // orthrds2-like: scale 1.6e10, residual 89.7 -> only the scale caveat
         // and the absolute one; never a status change (the function returns
         // text, not a verdict).
-        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6);
+        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6, false);
         assert!(w.iter().any(|m| m.starts_with("large_dual_scale:")));
+        assert!(!w.iter().any(|m| m.contains("bound_relax_factor")), "{w:?}");
+        // gh#1000: under bound_relax_factor = 0 the caveat names the option.
+        let w = quality_warnings(SolveSucceeded, 89.7, 1.6e10, 1.0, 1e-6, true);
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with("large_dual_scale:") && m.contains("bound_relax_factor = 0")),
+            "{w:?}"
+        );
         // A clean point has none.
-        assert!(quality_warnings(SolveSucceeded, 1e-9, 5.0, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 1e-9, 5.0, 1.0, 1e-6, false).is_empty());
         // A large objective with a stationary residual is not a failed CQ.
-        assert!(quality_warnings(SolveSucceeded, 2.9e-7, 1.46e9, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 2.9e-7, 1.46e9, 1.0, 1e-6, false).is_empty());
         // 5e-4 is below the warning bar even though it exceeds acceptable_tol.
-        assert!(quality_warnings(SolveSucceeded, 5e-4, 5.0, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(SolveSucceeded, 5e-4, 5.0, 1.0, 1e-6, false).is_empty());
         // Failures carry no success caveat.
-        assert!(quality_warnings(RestorationFailed, 0.144, 3.55e9, 1.0, 1e-6).is_empty());
-        assert!(quality_warnings(SolveSucceeded, f64::NAN, f64::NAN, 1.0, 1e-6).is_empty());
+        assert!(quality_warnings(RestorationFailed, 0.144, 3.55e9, 1.0, 1e-6, false).is_empty());
+        assert!(quality_warnings(SolveSucceeded, f64::NAN, f64::NAN, 1.0, 1e-6, false).is_empty());
     }
 
     /// gh#983 item 5: flooring an attempt must floor everything a solve

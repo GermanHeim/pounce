@@ -1385,6 +1385,14 @@ cannot separate them by magnitude alone. Instead such a point carries the
 `large_dual_scale` warning, which is the symptom of the failed constraint
 qualification that produced the multipliers.
 
+A common way to cause that failure is `bound_relax_factor=0`. It gives an
+active bound that coincides with a dependent row no interior, and the
+multipliers drift along the ray of valid ones. When the option is `0`, the
+warning says so. On the optimization book's models from gh#1000 (Haverly
+multistart, the process-network zero-flow subproblems, the pump network),
+the default `1e-8` ends `Solve_Succeeded` every time, and Ipopt at `0`
+follows the same trajectory pounce does.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a
