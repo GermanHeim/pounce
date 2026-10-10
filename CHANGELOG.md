@@ -73,6 +73,31 @@ changes.
 
 ### Fixed
 
+- **`trf_minimize` takes a restoration step on an incompatible subproblem at
+  an infeasible iterate (gh#1000).** With `basis="zero"`, the sintering
+  exercise from the optimization book stalled at an infeasible point
+  (θ ≈ 9e-3, f = 0.814 against a true optimum of 1.2958). The filter rejected
+  a 0.642 step and contracted the radius to 0.321. At that radius the two
+  nearly parallel linearized constraints had no intersection, and the
+  incompatible-subproblem rule expanded the radius back to exactly 0.642. That
+  re-posed the rejected subproblem with the same base point, surrogate and
+  filter, so the run cycled until the stall detector fired. gh#989's (correct)
+  addition of the current point to the filter test exposed this; before it, a
+  θ-increasing step was accepted. An incompatible subproblem at θ >
+  `feasibility_tol` now minimizes the surrogate mismatch ½‖y − r(w)‖² inside
+  the same box. The current pair enters the filter first, and the step is
+  logged as `restoration`. The example converges in 12 iterations and 35
+  truth evaluations. The expand-the-radius rule is kept for a feasible iterate,
+  where the radius is simply too small (Eason's example 1 is unchanged).
+
+- **`trf_minimize` with the quadratic basis uses a central-difference
+  first-order correction (gh#1000).** The quadratic design already samples
+  ±σ along every axis, but the correction recomputed the slope by forward
+  differences, overwriting the basis's second-order slope with a first-order
+  one. The evaluations are memoized, so the central difference costs no truth
+  call: on the book's PFR flowsheet the run goes from 11 iterations / 67
+  evaluations to 7 / 43, and the sintering model from 8 / 49 to 7 / 43.
+
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking
   a negative-curvature direction to the boundary reached a better point, which

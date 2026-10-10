@@ -436,6 +436,7 @@ class TestTRFMinimize:
         assert {h.kind for h in res.history} <= {
             "f-step",
             "theta-step",
+            "restoration",
             "rejected",
             "incompatible",
             "subproblem-failed",
@@ -618,3 +619,98 @@ class TestStepNormOverDofBlock:
         # the stationary point of sum (w-1)^2 + (100 w^2)^2, per coordinate
         w = res.x[:nw]
         np.testing.assert_allclose(2 * (w - 1) + 4e4 * w**3, 0.0, atol=1e-4)
+
+
+def sintering_problem():
+    """Book exercise exi30-04 (jkitchin/optimization-book, chapter I.30).
+
+    Grain-growth/densification ODE as the black box: w = (T/100, t), y = (rho,
+    G). Minimize furnace cost subject to rho >= 0.95 and G <= 0.54. Near the
+    optimum the two linearized constraints are almost parallel, which is what
+    makes the zero-basis subproblem incompatible at an infeasible iterate.
+    """
+    from scipy.integrate import solve_ivp
+
+    Rg, A_, Qd, k0, Qg = 8.314, 4e4, 150e3, 3e5, 200e3
+
+    def sinter(w):
+        T, t = 100 * w[0], w[1]
+
+        def rhs(_, s):
+            rho, G = s
+            return [
+                A_ * np.exp(-Qd / (Rg * T)) * (1 - rho) / G**3,
+                k0 * np.exp(-Qg / (Rg * T)) / (2 * G),
+            ]
+
+        return solve_ivp(
+            rhs, (0, t), [0.6, 0.5], method="LSODA", rtol=1e-10, atol=1e-12
+        ).y[:, -1]
+
+    w0 = np.array([14.0, 5.0])
+    return dict(
+        fun=lambda x: x[1] * (100 * x[0] - 300) / 1000,
+        x0=np.r_[w0, sinter(w0)],
+        truth_model=sinter,
+        w_index=[0, 1],
+        y_index=[2, 3],
+        jac=lambda x: np.array([0.1 * x[1], (100 * x[0] - 300) / 1000, 0, 0]),
+        constraints=[
+            {
+                "type": "ineq",
+                "fun": lambda x: np.array([x[2] - 0.95, 0.54 - x[3]]),
+                "jac": lambda x: np.array([[0, 0, 1.0, 0], [0, 0, 0, -1.0]]),
+            }
+        ],
+        bounds=[(13, 16), (0.5, 10), (0, 1), (0, 10)],
+        trust_radius=0.5,
+        max_iterations=100,
+    )
+
+
+class TestRestoration:
+    """gh#1000: an incompatible subproblem at an infeasible iterate.
+
+    Before restoration, the zero basis on the sintering model reached an
+    infeasible iterate (theta ~ 9e-3) whose subproblem was incompatible at
+    Delta = 0.321. Expanding to 0.642 re-posed exactly the step the filter had
+    just rejected (contracting Delta to 0.321), so the run cycled
+    rejected/incompatible until the stall detector fired at f = 0.814 -- an
+    infeasible point, with the true optimum at 1.2958.
+    """
+
+    def test_zero_basis_converges_on_the_sintering_model(self):
+        res = trf_minimize(**sintering_problem(), basis="zero")
+        assert res.success, res.message
+        assert res.fun == pytest.approx(1.2957533, abs=1e-6)
+        assert res.theta < 1e-8
+        assert "restoration" in {h.kind for h in res.history}
+
+    def test_quadratic_basis_is_unaffected(self):
+        # The quadratic basis never meets an incompatible subproblem here;
+        # it pins that restoration is not taken when it is not needed.
+        res = trf_minimize(**sintering_problem(), basis="quadratic")
+        assert res.success, res.message
+        assert res.fun == pytest.approx(1.2957533, abs=1e-6)
+        assert "restoration" not in {h.kind for h in res.history}
+
+    def test_feasible_incompatible_start_still_expands(self):
+        # Eason's example 1 starts feasible (theta = 0): nothing to restore,
+        # so the radius-too-small fallback (expand) must still be taken.
+        res = trf_minimize(**eason_example1(), max_iterations=50)
+        kinds = [h.kind for h in res.history]
+        assert kinds[:3] == ["incompatible"] * 3
+        assert "restoration" not in kinds
+
+
+class TestQuadraticBasisCentralCorrection:
+    def test_quadratic_basis_correction_uses_the_sampled_stencil(self):
+        """The +-sigma points are in the quadratic design, so the first-order
+        correction must use them centrally at no extra truth-model cost.
+
+        Measured on the sintering model: forward 8 iterations / 49
+        evaluations, central 7 / 43 (gh#1000).
+        """
+        res = trf_minimize(**sintering_problem(), basis="quadratic")
+        assert res.success
+        assert res.n_truth_evals <= 43
