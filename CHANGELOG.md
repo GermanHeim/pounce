@@ -129,6 +129,19 @@ changes.
   Vanderbei/Mittelmann models, britgas moves from `Restoration_Failed` to
   `Optimal`, because a second-opinion rung now gets to run. Everything else
   is unchanged, and the fixture sweep diff is empty.
+- **The warm-start slack-closing cap no longer depends on how the row is
+  written (gh#1000, I.25).** gh#988's repair closes a relaxed active row's
+  slack when the move is small, and "small" was `0.5·max(1, |s|)` — the row's
+  own value, which a translation or rescaling of the row changes freely. A
+  modeling layer that passes `body − K ≤ 0` (|s| ≈ 0, as discopt does) was
+  refused the repair and took 42–49 iterations against 7 cold on the gh#988
+  pricing model, while the same model written `body ≤ K` took 4. The cap now
+  measures the primal move the closing implies, `slack / ‖∇d_j‖∞`, against
+  `max(1, ‖x‖∞)`, which neither a shift nor a scale of the row moves. On the
+  pricing model the plain form makes the same decisions as before (closed at
+  K ≤ 20, refused from K = 25); five forms of the row — shifted by 14 and
+  −1000, scaled by 1e-3 and 1e3 — now agree with it at every K tested and
+  are never slower than their own cold solve.
 
 - **`qp-active-set` no longer refuses a strict local minimum of an indefinite
   QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking

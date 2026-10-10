@@ -156,13 +156,16 @@ const MU_ESCALATION_TRIGGER: Number = 10.0;
 /// a primal point that is feasible to `1e-9`.
 const SEED_REJECTION_TRIGGER: Number = 10.0;
 
-/// Largest slack the gh#988 slack-closing move may close, as a multiple of
-/// `max(1, |s|)` at that entry (gh#988 review). Closing a slack costs a primal
-/// infeasibility of exactly its width; past this the bound has moved too far
-/// for "the same constraint, still active" to be the likely reading. Measured
-/// on the gh#988 pricing model (capacity 14 -> K, `|s| = 14`): K <= 20 closes
-/// (a 6-wide slack, 4-5 iterations against 7 cold), K >= 25 keeps the capped
-/// split (closing a 11..86-wide slack started the solve up to 86 infeasible).
+/// Largest slack the gh#988 slack-closing move may close, measured as the
+/// primal move that repairs it — `sl / ‖∇d_j‖∞` — and as a multiple of
+/// `max(1, ‖x‖∞)` (gh#988 review; gh#1000 I.25 for the units). Closing a
+/// slack costs a primal infeasibility of exactly its width; past this the
+/// bound has moved too far for "the same constraint, still active" to be the
+/// likely reading. Measured on the gh#988 pricing model (capacity 14 -> K,
+/// `‖∇d‖∞ = 1.86`, `‖x‖∞ = 10.8`): K <= 20 closes (a 6-wide slack, ratio
+/// 0.30, 4-5 iterations against 7 cold), K >= 25 keeps the capped split
+/// (ratio 0.55 and up; closing a 11..86-wide slack started the solve up to 86
+/// infeasible).
 const SLACK_CLOSE_CAP: Number = 0.5;
 
 /// What the recentering pass measured about the point as *supplied*,
@@ -949,6 +952,20 @@ fn refine_bound_duals_from_stationarity(
         return false;
     }
 
+    // `‖∇d_j‖∞` at each bounded slack entry: what converts the gh#988
+    // slack-closing move below from the row's units into the primal move
+    // it asks for (gh#1000, I.25). Evaluated before `nlp` is borrowed
+    // below: the Jacobian evaluation borrows it too.
+    let d_row_amax = {
+        let cq_ref = cq.borrow();
+        let jac_d = cq_ref.curr_jac_d();
+        let mut rows = curr.s.make_new();
+        rows.set(0.0);
+        if jac_d.n_rows() > 0 {
+            jac_d.compute_row_amax(&mut *rows, true);
+        }
+        rows
+    };
     let nlp_ref = nlp.borrow();
     // Rearranged, the two identities read `P_L z_L − P_U z_U = r_x`
     // and `P_L v_L − P_U v_U = r_s`, so each lower block takes `+Pᵀr`
@@ -960,13 +977,12 @@ fn refine_bound_duals_from_stationarity(
         project(&*r_s, &*nlp_ref.pd_l(), 1.0, &curr.v_l),
         project(&*r_s, &*nlp_ref.pd_u(), -1.0, &curr.v_u),
     ];
-    // `|s|` at each bounded slack entry, the scale the gh#988 slack-closing
-    // move below is capped against.
-    let s_mag: [Option<Vec<Number>>; 2] = [
-        project(&*curr.s, &*nlp_ref.pd_l(), 1.0, &curr.v_l),
-        project(&*curr.s, &*nlp_ref.pd_u(), 1.0, &curr.v_u),
+    let grad_d_amax: [Option<Vec<Number>>; 2] = [
+        project(&*d_row_amax, &*nlp_ref.pd_l(), 1.0, &curr.v_l),
+        project(&*d_row_amax, &*nlp_ref.pd_u(), 1.0, &curr.v_u),
     ];
     drop(nlp_ref);
+    let x_scale = curr.x.amax().max(1.0);
 
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
     let mut rebuilt: [Option<Rc<dyn Vector>>; 4] = [None, None, None, None];
@@ -1063,16 +1079,27 @@ fn refine_bound_duals_from_stationarity(
             // which the first Newton step removes along the active
             // constraint.
             //
-            // gh#988 (review): only when the move is *small against the
-            // constraint's own scale*. The move costs a primal infeasibility
-            // of exactly the slack it closes, and nothing bounded it: a
-            // capacity raised 14 -> 100 closed a slack of 86, so the solve
-            // started 86 infeasible (and was 11 iterations against 8 cold)
-            // while the diagnostics, measured before the move, said 0. A
-            // bound that moved by more than `SLACK_CLOSE_CAP · max(1, |s|)`
-            // is no longer "the same constraint, still active" with any
+            // gh#988 (review): only when the move is *small*. The move
+            // costs a primal infeasibility of exactly the slack it closes,
+            // and nothing bounded it: a capacity raised 14 -> 100 closed a
+            // slack of 86, so the solve started 86 infeasible (and was 11
+            // iterations against 8 cold) while the diagnostics, measured
+            // before the move, said 0. A bound that moved too far is no
+            // longer "the same constraint, still active" with any
             // confidence -- 14 -> 31 releases it entirely -- and keeps the
             // capped split.
+            //
+            // "Too far" is measured as the primal move that repairs it,
+            // `sl / ‖∇d_j‖∞`, against `max(1, ‖x‖∞)` (gh#1000, I.25). It
+            // was `max(1, |s|)`, the row's own value, which is not a
+            // property of the constraint but of how it was written: the
+            // same row as `body - K <= 0` (discopt's form) reads `|s| ≈ 0`,
+            // so a capacity 14 -> 16 was refused the repair and the warm
+            // start took 42-49 iterations against 7 cold -- and 4 when the
+            // identical model was written `body <= K`. Both a translation
+            // of the row and a rescaling of it leave the ratio unchanged.
+            // On the gh#988 pricing model it reads 0.30 at K = 20 and 0.55
+            // at K = 25, so the measured split there is kept.
             let capped_split = split.max(compl_floor).max(hard_floor).min(cap);
             if i >= 2
                 && target[k].is_finite()
@@ -1082,11 +1109,15 @@ fn refine_bound_duals_from_stationarity(
             {
                 let v = target[k].max(hard_floor).min(cap);
                 let new_slack = (mu_hat / v).min(sl[k]);
-                let scale = s_mag[i - 2]
+                let grad = grad_d_amax[i - 2]
                     .as_ref()
-                    .and_then(|m| m.get(k))
-                    .map_or(1.0, |m| m.abs().max(1.0));
-                if sl[k] - new_slack <= SLACK_CLOSE_CAP * scale {
+                    .and_then(|g| g.get(k))
+                    .copied()
+                    .unwrap_or(0.0);
+                if grad > 0.0
+                    && grad.is_finite()
+                    && (sl[k] - new_slack) / grad <= SLACK_CLOSE_CAP * x_scale
+                {
                     vals[k] = v;
                     let shift = s_shift[i - 2].get_or_insert_with(|| vec![0.0; vals.len()]);
                     shift[k] = sl[k] - new_slack;

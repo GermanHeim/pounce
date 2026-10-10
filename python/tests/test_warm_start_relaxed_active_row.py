@@ -21,6 +21,13 @@ CU = np.array([4.0, 3.0])
 
 
 class Pricing:
+    # The row is ``scale * (d1 + d2 - shift)``; ``shift = 0, scale = 1`` is
+    # the plain capacity row. gh#1000 (I.25) writes the same constraint
+    # other ways.
+    def __init__(self, shift=0.0, scale=1.0):
+        self.shift = shift
+        self.scale = scale
+
     def objective(self, p):
         return -np.sum((p - CU) * A * p ** (-EPS))
 
@@ -28,24 +35,32 @@ class Pricing:
         return -(A * p ** (-EPS) - (p - CU) * A * EPS * p ** (-EPS - 1))
 
     def constraints(self, p):
-        return np.array([np.sum(A * p ** (-EPS))])
+        return np.array([self.scale * (np.sum(A * p ** (-EPS)) - self.shift)])
 
     def jacobianstructure(self):
         return np.array([0, 0]), np.array([0, 1])
 
     def jacobian(self, p):
-        return -A * EPS * p ** (-EPS - 1)
+        return -self.scale * A * EPS * p ** (-EPS - 1)
 
     def hessianstructure(self):
         return np.array([0, 1]), np.array([0, 1])
 
     def hessian(self, p, lam, of):
         d2f = -(-2 * A * EPS * p ** (-EPS - 1) + (p - CU) * A * EPS * (EPS + 1) * p ** (-EPS - 2))
-        return of * d2f + lam[0] * A * EPS * (EPS + 1) * p ** (-EPS - 2)
+        return of * d2f + self.scale * lam[0] * A * EPS * (EPS + 1) * p ** (-EPS - 2)
 
 
-def _problem(k):
-    pr = pounce.Problem(n=2, m=1, problem_obj=Pricing(), lb=CU + 0.01, ub=[15.0, 15.0], cl=[-1e20], cu=[k])
+def _problem(k, shift=0.0, scale=1.0):
+    pr = pounce.Problem(
+        n=2,
+        m=1,
+        problem_obj=Pricing(shift, scale),
+        lb=CU + 0.01,
+        ub=[15.0, 15.0],
+        cl=[-1e20],
+        cu=[scale * (k - shift)],
+    )
     pr.add_option("print_level", 0)
     return pr
 
@@ -110,3 +125,43 @@ def test_user_set_recentering_wins_over_the_warm_start(ws14):
     # ...and without a user setting the WarmStart's own choice applies.
     _, info = _problem(16.0).solve(warm_start=ws14)
     assert info["warm_start"]["recentering_disabled"] is False
+
+
+# gh#1000 (I.25): the slack-closing cap must not depend on how the row is
+# written. It was ``0.5 * max(1, |s|)``, and ``|s|`` is the row's own value:
+# discopt passes ``body - K <= 0`` (``shift = K``, so ``|s| = 0``), which was
+# refused the repair and took 42-49 iterations against 7 cold, while the same
+# model as ``body <= K`` took 4. The cap is now the primal move
+# ``slack / |grad d|_inf`` against ``max(1, |x|_inf)``, which a translation or a
+# rescaling of the row leaves alone.
+FORMS = [(0.0, 1.0), (14.0, 1.0), (-1000.0, 1.0), (14.0, 1e-3), (0.0, 1e3)]
+
+
+@pytest.fixture(scope="module")
+def ws_by_form():
+    out = {}
+    for shift, scale in FORMS:
+        x, info = _problem(14.0, shift, scale).solve(x0=np.array([10.0, 10.0]))
+        assert info["status_msg"] == "Solve_Succeeded"
+        out[(shift, scale)] = pounce.WarmStart.from_info(x, info)
+    return out
+
+
+@pytest.mark.parametrize("k", [16.0, 20.0, 25.0, 31.0, 100.0])
+def test_the_slack_closing_decision_does_not_depend_on_how_the_row_is_written(ws_by_form, k):
+    closed = set()
+    for (shift, scale), ws in ws_by_form.items():
+        # Against a cold solve of the *same* form: the forms are not
+        # numerically identical (``shift = -1000`` puts a 1014-sized
+        # cancellation in the row, and a cold solve lands 1.3e-7 relative
+        # away from the plain form's), which is not what is under test.
+        _, ic = _problem(k, shift, scale).solve(x0=np.array([10.0, 10.0]))
+        _, iw = _problem(k, shift, scale).solve(warm_start=ws)
+        assert iw["status_msg"] == "Solve_Succeeded", (k, shift, scale)
+        assert iw["obj_val"] == pytest.approx(ic["obj_val"], rel=1e-8, abs=1e-8)
+        assert iw["iter_count"] <= ic["iter_count"], (k, shift, scale, iw["iter_count"], ic["iter_count"])
+        closed.add(iw["warm_start"]["slacks_closed"])
+    assert len(closed) == 1, (k, closed)
+    # Primal move / max(1, |x|_inf) reads 0.30 at K = 20 and 0.55 at K = 25,
+    # either side of the 0.5 cap -- the split gh#988 measured.
+    assert closed == ({1} if k <= 20.0 else {0}), (k, closed)
