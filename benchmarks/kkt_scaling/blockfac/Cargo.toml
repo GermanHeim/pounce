@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-feral = "0.18.0"
+feral = "0.19.0"
 rayon = "1"
 
 [profile.release]

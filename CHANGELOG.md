@@ -86,6 +86,21 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **FERAL 0.19.0: collocated DAEs no longer stall on spurious wrong-inertia
+  counts (gh#999, feral#213, feral#215).** On the integral form of a 25-element
+  two-column distillation model (75,796 variables), pounce held mu at 0.1 and
+  fell into restoration, while the algebraically equivalent derivative form
+  solved in 95 iterations. The cause was feral's delayed-pivot budget. It was
+  set by supernode width, so thin KKT supernodes overflowed it. Cascade-break
+  then accepted, and later floored, pivots that had failed the threshold test,
+  and the eigenvalue count came out wrong on non-singular matrices. Pounce's
+  gh#540 check then read the resulting tiny pivot as a rank-deficient Jacobian
+  and added δc at every iteration. feral 0.19.0 sizes the budget by front
+  growth instead, and the integral form now solves in 88 iterations to
+  208.8165525681396, matching the derivative form and Ipopt. The fixture sweep
+  is unchanged (0 of 214 lines move). The two forms still take slightly
+  different paths after iteration 36, because the gh#540 check compares an
+  absolute pivot size (gh#1003).
 - **The active-set engine no longer reads multipliers that fail their own
   stationarity rows.** A working set whose normals are linearly dependent
   makes the active-set KKT matrix singular. The rank repair pruned such a set

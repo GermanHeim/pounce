@@ -246,13 +246,32 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.12.0
 # `auto_race`, and that sent `laptime` to a false local-infeasibility exit;
 # the released set is `{Amd, MetisND}`, and `laptime` solves (349 it).
 #
-# 0.18.0 is the current pin. If you ever need to develop against an unreleased
+# 0.19.0 (feral#213, #215) fixes gh#999. A non-root supernode whose delayed-
+# pivot inflow overflowed its budget ran cascade-break, which accepted pivots
+# that failed the threshold test (0.18.0) or floored them to a sign that was
+# round-off (#213's fix). Either way the inertia came out wrong on non-singular
+# KKT matrices. The budget was `max(4·own_ncol, 16)`, set by supernode width;
+# it now bounds front growth (`3·nrow`, floor `4096 − nrow`), so
+# cascade-break is a memory backstop instead of the normal overflow path.
+# column25_integral (gh#999) goes from a stall at mu = 0.1 to
+# 88 iterations, 208.8165525681396, no restoration; the derivative form is
+# unchanged at 95. The fixture sweep, both legs, against 0.18.0 on `9a97f99`:
+# 0 of 214 lines move. feral's own kkt-mittelmann sweep (613 matrices)
+# reports identical inertia on all of them. The old budget engaged on only 6
+# of them. The costly one is qcqp1500-1nc, 2.36 s -> 10.6 s (nnz(L) 5.14M ->
+# 7.81M); the five marine_1600 matrices grow 0-3% in nnz(L). The
+# breaking API changes (`DELAY_CAPACITY_*` renamed, new pub fields on
+# `FactorStats`/`NodeFactors`/`FrontalFactors`) touch nothing in pounce. The
+# two forms still part at iteration 37, through pounce's own gh#540 check
+# (gh#1003).
+#
+# 0.19.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.18.0" }
+feral = { version = "0.19.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
