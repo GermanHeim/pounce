@@ -26,11 +26,20 @@
 //! and was removed.)
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const NL: &str = "g3 1 1 0\n 3 3 1 0 3\n 0 1\n 0 0\n 0 3 0\n 0 0 0 1 0\n 0 0 0 0 0\n 5 0\n 0 0\n 0 0 0 0 0\nC0\nn0\nC1\nn0\nC2\nn0\nO0 0\no54\n3\no2\nn0.0\no5\nv0\nn2\no2\nn1.0\no5\nv1\nn2\no2\nn1.0\no5\nv2\nn2\nr\n4 3.0\n4 6.0\n4 0.0\nb\n0 -10.0 10.0\n0 -10.0 10.0\n0 -10.0 10.0\nk2\n3\n4\nJ0 1\n0 1.0\nJ1 1\n0 2.0\nJ2 3\n0 -0.5\n1 1.0\n2 0.1\n";
 
 fn run(extra: &[&str]) -> String {
-    let dir = std::env::temp_dir().join(format!("gh986_dup_{}", std::process::id()));
+    // One directory per call, not per process: the tests run in parallel
+    // threads of one process, and a shared directory let one test's
+    // `remove_dir_all` delete the other's model before pounce read it.
+    static CALL: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "gh986_dup_{}_{}",
+        std::process::id(),
+        CALL.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dup.nl");
     std::fs::write(&path, NL).unwrap();
