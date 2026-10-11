@@ -778,7 +778,11 @@ singular to working precision its inertia count is meaningless, and
 `feral_inertia_pivot_floor` (default `n · eps` since
 [#592](https://github.com/jkitchin/pounce/issues/592), where `n` is the
 order of the factored KKT) routes that case to `δ_c` rather than
-answering an unmeasurable test with `δ_w`. The recipe below
+answering an unmeasurable test with `δ_w`. Since
+[#1003](https://github.com/jkitchin/pounce/issues/1003) it does so only
+when the count itself looks unreliable — too few negatives, a pivot feral
+had to floor, or a cluster of tiny pivots isolated from the rest — and
+leaves a surplus negative among graded small pivots to `δ_w`. The recipe below
 is for what remains — it attacks the same degeneracy higher up, capping
 the null-direction step outright, and on some models that is still
 markedly faster.

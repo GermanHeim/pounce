@@ -263,7 +263,10 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.12.0
 # breaking API changes (`DELAY_CAPACITY_*` renamed, new pub fields on
 # `FactorStats`/`NodeFactors`/`FrontalFactors`) touch nothing in pounce. The
 # two forms still part at iteration 37, through pounce's own gh#540 check
-# (gh#1003).
+# (gh#1003). That check reads the per-pivot data 0.19.0 also exposes:
+# `Solver::factors()` gives each supernode's `D` blocks, and `FactorStats`
+# carries `n_threshold_fail_accepts` and `n_cascade_break_nodes` beside
+# `n_tiny`.
 #
 # 0.19.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the

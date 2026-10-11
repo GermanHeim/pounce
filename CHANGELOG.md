@@ -141,6 +141,26 @@ changes.
   (`min 1e8·x + x²/2, x ≥ 0`) is unchanged and correct: its `-0.99999` comes
   from the default `bound_relax_factor`, not from scaling. See
   `docs/src/options.md`.
+- **Equivalent models no longer take different inertia corrections (gh#1003).**
+  The gh#540 check reported `Singular` (so the IPM adds `δ_c`) on any
+  inertia mismatch whose factor had a pivot under `n·eps`. The smallest pivot
+  depends on how the rows are combined, which diagonal equilibration does not
+  undo. So `column25_integral.nl` and `column25_derivative.nl`, one
+  collocation written two ways, took `δ_c` and `δ_x` on the same count at
+  iteration 37. The integral run then left the shared path (88 iterations
+  against 95). A sub-floor pivot is now necessary, not sufficient. The reroute
+  also needs one of: a count that is too low (`δ_c` can only add negatives);
+  a factor feral flagged (floored or threshold-failed pivots); or sub-floor
+  pivots isolated from the spectrum (none in `[floor, 100·floor)`, i.e.
+  numerical rank deficiency). A surplus negative on a clean factor whose small
+  pivots grade into the spectrum is now reported `WrongInertia`. Both column25
+  forms solve in 95 iterations to `208.81655256813`. eigena2, eigenb2 and
+  `pooling_rt2stp` are unchanged on both Hessian legs. The fixture sweep is
+  empty on both legs, because no corpus factor reaches the new branch: all 15
+  fixture-legs that reroute are deficits, flagged factors or isolated
+  clusters. `issue_1003_column25_equivalent_forms` (ignored; it needs the
+  gh#999 models) pins the column25 pair.
+
 - **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
   MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
   I.D and I.8).**

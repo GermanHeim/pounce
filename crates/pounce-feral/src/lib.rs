@@ -204,6 +204,91 @@ pub fn inertia_trust_floor(configured: Option<f64>, dim: usize) -> f64 {
     }
 }
 
+/// Whether an inertia mismatch on a factor whose smallest pivot sits
+/// under [`inertia_trust_floor`] should be read as noise (reported
+/// `Singular`, so the IPM reaches for `δ_c`) rather than as a count
+/// (reported `WrongInertia`, so it reaches for `δ_x`).
+///
+/// A sub-floor pivot alone used to settle it (gh#540), and that is
+/// what made two algebraically equivalent models take different
+/// perturbations (pounce gh#1003: `column25_integral` vs
+/// `column25_derivative`, same KKT up to rounding, one rerouted to
+/// `δ_c` at iteration 37 and diverged). The rule now needs evidence
+/// that the count, and not just the smallest pivot, is unreliable.
+/// Any one of these suffices:
+///
+/// * **Too few negatives** (`got < expected`). `δ_c` adds `-δ_c I` to
+///   the (2,2) block, which can only *raise* the negative count, so it
+///   is the right remedy for a deficit whether or not the count is
+///   noise. `pooling_rt2stp` (gh#592) is this case.
+/// * **feral flagged the factor**: a pivot was floored (`n_tiny`) or
+///   accepted after failing the threshold test
+///   (`n_threshold_fail_accepts`). Either one means the sign of some
+///   pivot is not a measurement.
+/// * **The sub-floor pivots are an isolated cluster**: none of the
+///   pivots lies in `[floor, 100·floor)`, so the small ones are
+///   separated from the rest of the spectrum by two orders. That is
+///   numerical rank deficiency — eigenb2 (gh#540) carries 36 of them
+///   and nothing above — and its signs are rounding.
+///
+/// What is left is an *excess* count (`got > expected`) on a clean
+/// factor whose small pivots grade continuously into the healthy
+/// spectrum. `δ_c` cannot remove a surplus negative, so rerouting it
+/// spends a persistent perturbation on a Jacobian that does not need
+/// it; `δ_x` is the remedy that can. On column25 that population was
+/// one surplus negative over 1–7 sub-floor pivots with 32–141 under
+/// `100·floor`. Measured: eigena2, eigenb2 and `pooling_rt2stp` take
+/// the same iterations on both Hessian legs as before, and the two
+/// column25 forms both solve in 95.
+pub fn sub_floor_count_is_noise(
+    got: Index,
+    expected: Index,
+    feral_flagged: bool,
+    below: usize,
+    below_100x: usize,
+) -> bool {
+    got < expected || feral_flagged || below == below_100x
+}
+
+/// Number of pivot eigenvalues of the last factor with magnitude under
+/// `floor` and under `100 · floor`, counting each eigenvalue of a 2×2
+/// block separately. Magnitudes are computed exactly as feral's
+/// `min_pivot_magnitude` computes them, so `below > 0` whenever that
+/// minimum is under `floor`. Only called on the mismatch path.
+fn sub_floor_pivot_counts(solver: &Solver, floor: f64) -> (usize, usize) {
+    let Some(factors) = solver.factors() else {
+        return (0, 0);
+    };
+    let (mut below, mut below_100x) = (0, 0);
+    let mut tally = |m: f64| {
+        below += usize::from(m < floor);
+        below_100x += usize::from(m < 100.0 * floor);
+    };
+    for nf in &factors.node_factors {
+        let ff = &nf.frontal_factors;
+        let mut k = 0;
+        while k < ff.nelim {
+            if k + 1 < ff.nelim && ff.d_subdiag[k] != 0.0 {
+                let (a, b, c) = (ff.d_diag[k], ff.d_subdiag[k], ff.d_diag[k + 1]);
+                let trace = a + c;
+                let det = a * c - b * b;
+                let larger = (trace.abs() + (trace * trace - 4.0 * det).max(0.0).sqrt()) * 0.5;
+                tally(larger);
+                tally(if larger > 0.0 {
+                    det.abs() / larger
+                } else {
+                    0.0
+                });
+                k += 2;
+            } else {
+                tally(ff.d_diag[k].abs());
+                k += 1;
+            }
+        }
+    }
+    (below, below_100x)
+}
+
 #[derive(Debug, Clone)]
 pub struct FeralConfig {
     /// Tri-state. `None` (the pounce default) inherits whatever FERAL's
@@ -500,6 +585,12 @@ pub struct FeralConfig {
     /// it only changes *which* perturbation is reached for first.
     /// Necessarily larger than [`Self::singular_pivot_floor`], which
     /// governs factors that are unusable outright.
+    ///
+    /// A sub-floor pivot is necessary, not sufficient (pounce gh#1003):
+    /// a *surplus* negative on a clean factor whose small pivots grade
+    /// into the rest of the spectrum is still reported `WrongInertia`,
+    /// because `δ_c` can only add negatives. See
+    /// [`sub_floor_count_is_noise`].
     ///
     /// `None` — the default — selects the dimension-aware floor
     /// `n * f64::EPSILON` computed by [`inertia_trust_floor`], where
@@ -1270,17 +1361,39 @@ impl FeralSolverInterface {
                     // `Singular` reaches for. Upstream's MA27/MA57/MUMPS
                     // interfaces likewise test singularity *before* comparing
                     // the count.
+                    //
+                    // A pivot under the floor is necessary but not sufficient
+                    // (pounce gh#1003): see [`sub_floor_count_is_noise`].
                     let floor = inertia_trust_floor(self.inertia_pivot_floor, self.dim as usize);
                     if floor > 0.0 {
                         if let Some(min_piv) = self.solver.min_pivot_magnitude() {
                             if min_piv < floor {
+                                let flagged = self.solver.last_factor_stats().is_some_and(|s| {
+                                    s.n_tiny > 0 || s.n_threshold_fail_accepts > 0
+                                });
+                                let (below, below_100x) =
+                                    sub_floor_pivot_counts(&self.solver, floor);
+                                if sub_floor_count_is_noise(
+                                    self.negevals,
+                                    number_of_neg_evals,
+                                    flagged,
+                                    below,
+                                    below_100x,
+                                ) {
+                                    tracing::debug!(
+                                        target: "pounce::linsol",
+                                        got_neg = self.negevals, expected = number_of_neg_evals,
+                                        min_piv, floor, flagged, below, below_100x, dim = self.dim,
+                                        "inertia untrustworthy; reporting singular"
+                                    );
+                                    return ESymSolverStatus::Singular;
+                                }
                                 tracing::debug!(
                                     target: "pounce::linsol",
                                     got_neg = self.negevals, expected = number_of_neg_evals,
-                                    min_piv, floor, dim = self.dim,
-                                    "inertia untrustworthy; reporting singular"
+                                    min_piv, floor, below, below_100x, dim = self.dim,
+                                    "inertia excess trusted despite sub-floor pivots"
                                 );
-                                return ESymSolverStatus::Singular;
                             }
                         }
                     }
@@ -2175,6 +2288,82 @@ mod tests {
     /// `WrongInertia`: the floor must not swallow the ordinary
     /// negative-curvature signal the `δ_w` ladder exists to answer.
     /// `[[2, 1], [1, 3]]` is SPD with pivots ≈ 2 and 2.5.
+    /// Factor two decoupled 2x2 blocks `[[1, 1], [1, 1 + t]]` — whose pivots
+    /// are `1` and `t` — against an expected count of zero negatives, with
+    /// the trust floor pinned at `1e-12`. Returns the verdict and the
+    /// sub-floor census of the factor it was read from.
+    fn verdict_on_two_blocks(t0: f64, t1: f64) -> (ESymSolverStatus, (usize, usize)) {
+        let irn: [Index; 6] = [1, 2, 2, 3, 4, 4];
+        let jcn: [Index; 6] = [1, 1, 2, 3, 3, 4];
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            inertia_pivot_floor: Some(1e-12),
+            ..FeralConfig::default()
+        });
+        assert_eq!(
+            s.initialize_structure(4, 6, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut()
+            .copy_from_slice(&[1.0, 1.0, 1.0 + t0, 1.0, 1.0, 1.0 + t1]);
+        let mut rhs = [1.0; 4];
+        let status = s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 0);
+        let stats = s.solver.last_factor_stats().expect("factored");
+        assert_eq!(
+            (stats.n_tiny, stats.n_threshold_fail_accepts),
+            (0, 0),
+            "fixture meant to be a clean factor was flagged by feral"
+        );
+        (status, sub_floor_pivot_counts(&s.solver, 1e-12))
+    }
+
+    /// gh#1003: one surplus negative pivot under the floor, with a second
+    /// small pivot just above it, is the column25 shape — an excess count
+    /// on a clean factor whose small pivots grade into the spectrum. `δ_c`
+    /// can only add negatives, so it cannot repair this; the verdict must
+    /// stay `WrongInertia`.
+    #[test]
+    fn a_graded_excess_count_is_trusted() {
+        let (status, census) = verdict_on_two_blocks(-1e-13, 5e-12);
+        assert_eq!(
+            census,
+            (1, 2),
+            "fixture no longer reaches the graded branch"
+        );
+        assert_eq!(
+            status,
+            ESymSolverStatus::WrongInertia,
+            "a surplus negative was rerouted to δ_c, which cannot remove it",
+        );
+    }
+
+    /// gh#540 / eigenb2: the same surplus negative, but nothing between the
+    /// floor and `100 · floor` — an isolated cluster, i.e. numerical rank
+    /// deficiency. Its sign is rounding and the count is noise.
+    #[test]
+    fn an_isolated_sub_floor_cluster_is_noise() {
+        let (status, census) = verdict_on_two_blocks(-1e-13, 1.0);
+        assert_eq!(
+            census,
+            (1, 1),
+            "fixture no longer reaches the isolated branch"
+        );
+        assert_eq!(status, ESymSolverStatus::Singular);
+    }
+
+    /// The branch table itself, including the feral-flagged branch that a
+    /// small hand-built matrix cannot be made to reach.
+    #[test]
+    fn sub_floor_count_is_noise_branches() {
+        // Deficit: δ_c raises the count, so it is the remedy regardless.
+        assert!(sub_floor_count_is_noise(1, 2, false, 1, 9));
+        // Flagged factor: some pivot's sign is not a measurement.
+        assert!(sub_floor_count_is_noise(3, 2, true, 1, 9));
+        // Isolated cluster.
+        assert!(sub_floor_count_is_noise(3, 2, false, 4, 4));
+        // Excess, clean, graded: the count is trusted.
+        assert!(!sub_floor_count_is_noise(3, 2, false, 1, 9));
+    }
+
     #[test]
     fn well_conditioned_inertia_mismatch_still_reports_wrong_inertia() {
         let mut s = FeralSolverInterface::new();
