@@ -6420,6 +6420,7 @@ impl IpoptApplication {
                 stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
                 stats.final_unscaled_dual_scale = cq.curr_unscaled_dual_infeasibility_scale_max();
                 stats.final_obj_scaling_factor = cq.computed_obj_scaling_factor();
+                stats.final_total_obj_scaling_factor = cq.obj_scaling_factor().abs();
                 stats.start_obj_grad_max = cq.start_obj_gradient_max();
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
                 // Record whether per-row scaling actually engaged, so a
@@ -8663,6 +8664,7 @@ struct SolutionCertificate {
     /// attempt. All three describe the *point being reported*.
     unscaled_dual_scale: Number,
     obj_scaling_factor: Number,
+    total_obj_scaling_factor: Number,
     start_obj_grad_max: Number,
     warnings: Vec<String>,
     /// gh#983 review item 3: the detector's verdict on this run alone.
@@ -8702,6 +8704,7 @@ impl SolutionCertificate {
             quality_escalations: s.quality_escalations,
             unscaled_dual_scale: s.final_unscaled_dual_scale,
             obj_scaling_factor: s.final_obj_scaling_factor,
+            total_obj_scaling_factor: s.final_total_obj_scaling_factor,
             start_obj_grad_max: s.start_obj_grad_max,
             warnings: s.warnings.clone(),
             returned_run_signature: s.returned_run_dual_divergence_signature,
@@ -8735,6 +8738,7 @@ impl SolutionCertificate {
         s.quality_escalations = self.quality_escalations;
         s.final_unscaled_dual_scale = self.unscaled_dual_scale;
         s.final_obj_scaling_factor = self.obj_scaling_factor;
+        s.final_total_obj_scaling_factor = self.total_obj_scaling_factor;
         s.start_obj_grad_max = self.start_obj_grad_max;
         s.warnings = self.warnings.clone();
         s.returned_run_dual_divergence_signature = self.returned_run_signature;

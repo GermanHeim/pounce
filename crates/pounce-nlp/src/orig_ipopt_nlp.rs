@@ -1211,7 +1211,16 @@ impl OrigIpoptNlp {
                 }
             }
             self.start_obj_grad_max.set(max_grad_f);
-            df = gradient_obj_scale(max_grad_f, max_gradient, min_value, obj_target_gradient);
+            // gh#1001 item 4: an infinite gradient at the start (`x ln x`
+            // sampled at a bound `x0 = 0`) carries no scale, and `100/inf`
+            // floored at `min_value` froze the factor at `1e-8` for a model
+            // whose gradient is O(1) everywhere the iterates go. Treat it as
+            // the failed evaluation it is -- upstream's "no scaling factor for
+            // objective function computed" branch (`df = 1`), which is also
+            // what Ipopt under ASL takes, since ASL rejects `log(0)`.
+            if max_grad_f.is_finite() {
+                df = gradient_obj_scale(max_grad_f, max_gradient, min_value, obj_target_gradient);
+            }
         }
         self.computed_obj_scale.set(df);
         self.obj_scale_factor.set(df * user_obj_factor);

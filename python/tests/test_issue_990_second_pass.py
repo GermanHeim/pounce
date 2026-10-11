@@ -102,6 +102,20 @@ def test_objective_scaling_decision_is_recorded(tmp_path):
     assert os_["start_gradient_max"] == pytest.approx(215.6)
     assert os_["certificate_refused"] is False
     assert rep["statistics"]["objective_scaling"]["factor"] == pytest.approx(os_["factor"])
+    # gh#1001: no caller factor and no audit upscale, so the total is `factor`.
+    assert os_["total_factor"] == pytest.approx(os_["factor"])
+    assert rep["statistics"]["objective_scaling"]["total_factor"] == pytest.approx(os_["factor"])
+
+
+def test_total_factor_includes_the_callers_obj_scaling_factor(tmp_path):
+    # gh#1001: `factor` is the gradient-based part only; the IPM minimized
+    # `total_factor * f`, so iteration `mu` is in those units.
+    _x, info, rep = _report(_problem(_Rosen(), obj_scaling_factor=250.0), tmp_path)
+    os_ = info["objective_scaling"]
+    assert os_["total_factor"] == pytest.approx(250.0 * os_["factor"], rel=1e-12)
+    assert rep["statistics"]["objective_scaling"]["total_factor"] == pytest.approx(
+        os_["total_factor"]
+    )
 
 
 def test_refused_certificate_is_recorded_even_when_a_resolve_is_returned(tmp_path):

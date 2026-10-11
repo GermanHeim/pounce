@@ -598,6 +598,14 @@ pub struct ObjectiveScalingInfo {
     /// applied.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub factor: Option<f64>,
+    /// gh#1001. `|obj_scaling_factor · factor · audit upscale|`: the whole
+    /// multiplier on the objective the returned run's IPM minimized, so
+    /// `statistics.final_scaled_objective` and each iteration's `mu` are in
+    /// units of `total_factor · f`. Differs from `factor` when the caller
+    /// set `obj_scaling_factor` or the gh#983 audit re-solved with the
+    /// objective scaled up.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_factor: Option<f64>,
     /// `max |grad f|` at the starting point, as gradient-based scaling
     /// measured it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -865,16 +873,19 @@ impl ReportBuilder {
             derivative_check: src.derivative_check.as_ref().map(DerivativeCheckInfo::from),
             objective_scaling: {
                 let fin = |v: f64| v.is_finite().then_some(v);
-                let (factor, start) = (
+                let (factor, total, start) = (
                     fin(src.final_obj_scaling_factor),
+                    fin(src.final_total_obj_scaling_factor),
                     fin(src.start_obj_grad_max),
                 );
                 (factor.is_some()
+                    || total.is_some()
                     || start.is_some()
                     || src.obj_scale_certificate_refused
                     || src.obj_scale_acceptable_refused)
                     .then_some(ObjectiveScalingInfo {
                         factor,
+                        total_factor: total,
                         start_gradient_max: start,
                         certificate_refused: src.obj_scale_certificate_refused,
                         acceptable_certificate_refused: src.obj_scale_acceptable_refused,

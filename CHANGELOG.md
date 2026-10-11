@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`objective_scaling.total_factor`: the whole objective multiplier of the
+  returned run (gh#1001 item 3).** `objective_scaling.factor` is the
+  gradient-based part only. It leaves out the caller's `obj_scaling_factor`
+  and the gh#983 audit's re-solve upscale. So a reader comparing an
+  iteration's `mu` with `|f|` had no way to put the two in the same units.
+  On a reactor model whose objective is `1e-6` in its own units, the audit
+  re-solves at a total of about `1e5`. `factor` still reads `1`, and a final
+  `mu` of `2.5e-9` looks like `5e-4·|f|`, a scaling defect, while the problem
+  the IPM solved had it at `5e-9`. The new field is the magnitude of the
+  product. It is in the JSON report (`statistics.objective_scaling.total_factor`),
+  Python's `info["objective_scaling"]["total_factor"]` and
+  `SolveStatistics::final_total_obj_scaling_factor`. It equals
+  `|final_scaled_objective / final_objective|`. The schema now says iteration
+  `mu` is in scaled units. `factor` is unchanged.
 - **`pounce.qp.solve_qp` takes the convex engine's CLI options (gh#990,
   discopt#1615).** `qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and
   `qp_crossover` were reachable only from the CLI, so a Python caller could not
@@ -87,6 +101,46 @@ changes.
   is unchanged (0 of 214 lines move). The two forms still take slightly
   different paths after iteration 36, because the gh#540 check compares an
   absolute pivot size (gh#1003).
+- **The active-set engine no longer reads multipliers that fail their own
+  stationarity rows.** A working set whose normals are linearly dependent
+  makes the active-set KKT matrix singular. The rank repair pruned such a set
+  only when the factorization *reported* it singular, and whether a pivot that
+  small gets reported depends on the backend, its version and the platform's
+  arithmetic. On Netlib `DEGEN2` under `solver_selection=qp-active-set`, a
+  473-slot set on 473 variables factored without complaint and came back with
+  `λ = 3.7e15` and a stationarity residual of 9.5. The drop test took that as
+  the most violated multiplier, dropped the row and re-added it at `α = 0`.
+  The cycle guard stopped the resulting two-cycle as `MaxIter`. The model
+  solved on x86 with feral 0.18 and failed on arm64 and with feral 0.19, which
+  is the CI failure blocking the feral bump. At a stationary point the engine
+  now checks `‖(H + δI) p + H x + g + Aᵀλ‖∞` against `√ε·(1 + ‖H x + g‖∞)`.
+  `δ` is the factor's inertia shift. When the check fails, the engine prunes
+  the dependent slots exactly as the factorization-failure path does. `DEGEN2`
+  now solves in 5–7 s on arm64, on x86 with feral 0.18 and on x86 with feral
+  0.19. The fixture sweep diff is empty on both legs. Across the 138
+  Maros-Meszaros QPs under `qp-active-set`, only `QGFRDXPN` moves: from a
+  120 s timeout to `MaxIter` in 68 s, so it fails both before and after. A
+  first draft that left `δ` out of the residual took `QSIERRA` from 1134 to
+  15017 QP iterations, because at `δ = 1e10` a `p` of `3e-12` read as a
+  residual of `3e-2`.
+- **An infinite objective gradient at the start no longer freezes the
+  objective scale at `1e-8` (gh#1001 item 4).** Gradient-based scaling samples
+  `max|grad f|` at `x0`. For `x ln x` at `x0 = 0` (Gibbs minimization from the
+  origin) the derivative is `-inf`, and `100/inf` was floored at
+  `nlp_scaling_min_value`. The run then needed 16 iterations under the masked
+  scale plus an 8-iteration audit re-solve, 35 in total with L-BFGS. A
+  non-finite start gradient now counts as a failed evaluation and leaves the
+  objective unscaled, which is upstream's branch and what Ipopt under ASL does
+  on the same `.nl`. The run becomes one solve of 10 iterations (11 with
+  L-BFGS), matching Ipopt's iteration count and complementarity, with
+  `|G - G*| = 3e-16`. The fixture sweep is identical on all 206 existing legs,
+  because none of them has a non-finite start gradient. The new
+  `gibbs_xlogx_origin` fixture moves `8 → 10` (exact) and `13 → 11` (L-BFGS).
+  The baseline count leaves out the discarded first solve, so total work drops
+  `24 → 10` and `35 → 11`. The same issue's toy model
+  (`min 1e8·x + x²/2, x ≥ 0`) is unchanged and correct: its `-0.99999` comes
+  from the default `bound_relax_factor`, not from scaling. See
+  `docs/src/options.md`.
 - **Convex QP/LP endgame: no more `optimal_inaccurate` on a bound-hitting
   MPC step, and no 200-iteration grind on small-objective LPs (gh#1000, items
   I.D and I.8).**

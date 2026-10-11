@@ -200,6 +200,13 @@ pub struct SolveStatistics {
     /// the run ended with, excluding the caller's own `obj_scaling_factor`;
     /// `1` when none was applied, `NaN` on a path that does not compute it.
     pub final_obj_scaling_factor: Number,
+    /// gh#1001. The magnitude of the whole objective multiplier the run
+    /// ended with: the caller's `obj_scaling_factor`, the gradient-based
+    /// factor, and the gh#983 audit's re-solve upscale, multiplied together.
+    /// The IPM minimized `total · f`, so `final_scaled_objective` and every
+    /// iteration's `mu` are in those units. `NaN` on a path that does not
+    /// compute it.
+    pub final_total_obj_scaling_factor: Number,
     /// gh#983. `max |grad f|` at the starting point (what gradient-based
     /// scaling measured); `NaN` when it did not run. The model's own gradient
     /// scale, used as the yardstick for the small-objective warning.
@@ -471,6 +478,7 @@ impl Default for SolveStatistics {
             final_unscaled_dual_inf: Number::NAN,
             final_unscaled_dual_scale: Number::NAN,
             final_obj_scaling_factor: Number::NAN,
+            final_total_obj_scaling_factor: Number::NAN,
             start_obj_grad_max: Number::NAN,
             warnings: Vec::new(),
             derivative_check: None,
