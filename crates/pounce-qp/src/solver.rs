@@ -3169,49 +3169,59 @@ impl ParametricActiveSetSolver {
                     if *budget == 0 {
                         return Err(e);
                     }
-                    let active_cons: Vec<usize> = (0..qp.m)
-                        .filter(|&i| working.constraints[i].is_active())
-                        .collect();
-                    let active_bounds: Vec<usize> = (0..qp.n)
-                        .filter(|&i| working.bounds[i].is_active())
-                        .collect();
-                    let (kc, kb) = independent_active_subset(
-                        &mut self.linsol,
-                        qp,
-                        &active_cons,
-                        &active_bounds,
-                    );
                     // Already full rank ⇒ the failure is not a rank deficiency
                     // this guard can repair; do not loop on it.
-                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                    if !self.prune_dependent_active(qp, working, n_changes) {
                         return Err(e);
                     }
                     *budget -= 1;
                     *pruned = true;
-                    let mut keep_c = vec![false; qp.m];
-                    for &i in &kc {
-                        keep_c[i] = true;
-                    }
-                    let mut keep_b = vec![false; qp.n];
-                    for &i in &kb {
-                        keep_b[i] = true;
-                    }
-                    for &i in &active_cons {
-                        if !keep_c[i] {
-                            working.constraints[i] = ConsStatus::Inactive;
-                            *n_changes += 1;
-                        }
-                    }
-                    for &i in &active_bounds {
-                        if !keep_b[i] {
-                            working.bounds[i] = BoundStatus::Inactive;
-                            *n_changes += 1;
-                        }
-                    }
                 }
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Drop the active rows and bounds whose normals depend on the others
+    /// (see [`independent_active_subset`]). Returns whether anything went.
+    fn prune_dependent_active(
+        &mut self,
+        qp: &QpProblem,
+        working: &mut WorkingSet,
+        n_changes: &mut u32,
+    ) -> bool {
+        let active_cons: Vec<usize> = (0..qp.m)
+            .filter(|&i| working.constraints[i].is_active())
+            .collect();
+        let active_bounds: Vec<usize> = (0..qp.n)
+            .filter(|&i| working.bounds[i].is_active())
+            .collect();
+        let (kc, kb) =
+            independent_active_subset(&mut self.linsol, qp, &active_cons, &active_bounds);
+        if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+            return false;
+        }
+        let mut keep_c = vec![false; qp.m];
+        for &i in &kc {
+            keep_c[i] = true;
+        }
+        let mut keep_b = vec![false; qp.n];
+        for &i in &kb {
+            keep_b[i] = true;
+        }
+        for &i in &active_cons {
+            if !keep_c[i] {
+                working.constraints[i] = ConsStatus::Inactive;
+                *n_changes += 1;
+            }
+        }
+        for &i in &active_bounds {
+            if !keep_b[i] {
+                working.bounds[i] = BoundStatus::Inactive;
+                *n_changes += 1;
+            }
+        }
+        true
     }
 
     /// [`Self::solve_general_schur_inner`], never returning worse than the
@@ -3552,6 +3562,48 @@ impl ParametricActiveSetSolver {
                 }
             }
             prev_p_inf = p_inf;
+
+            // Multipliers are only worth reading if they solve the system
+            // they came from. A working set whose normals are dependent
+            // makes the KKT matrix singular; when the factorization says so,
+            // the reset above prunes it, but whether a pivot this small is
+            // *reported* is the backend's call and moves with platform and
+            // version. On Netlib DEGEN2 a 473-slot set on 473 variables
+            // factored without complaint and returned `λ = 3.7e15` with a
+            // stationarity residual of 9.5; the drop test read that as the
+            // most violated multiplier, dropped the row, re-added it at
+            // `α = 0`, and two-cycled until the cycle guard stopped it. The
+            // same run solved on x86 with feral 0.18 and failed on arm64 and
+            // on feral 0.19 — the pivots, not the vertex, decided it.
+            if stationary
+                && rank_repair_budget > 0
+                && active_stationarity_residual(qp, &working, &x, &p, &rhs, schur.shift())
+                    > Number::EPSILON.sqrt()
+                        * (1.0 + rhs_backup[..n].iter().fold(0.0_f64, |a, v| a.max(v.abs())))
+                && self.prune_dependent_active(qp, &mut working, &mut n_changes)
+            {
+                if trace {
+                    eprintln!(
+                        "[qp] it={_iter} PRUNE multipliers fail stationarity nact={}",
+                        active_slot_count(&working)
+                    );
+                }
+                rank_repair_budget -= 1;
+                pruned = true;
+                self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                    &mut pruned,
+                )?;
+                n_refactor += 1;
+                prev_was_null_step = false;
+                floor_refactored = false;
+                continue;
+            }
 
             if stationary {
                 let mut worst: Option<(DropTarget, Number)> = None;
@@ -4090,6 +4142,41 @@ fn working_set_key(working: &WorkingSet) -> u64 {
 /// the surviving candidates). So the tabu suppresses a row only while
 /// its rate stays in this drift band; a genuine rate re-admits it.
 const TABU_DRIFT_REL: Number = 1e-7;
+
+/// `‖(H + δI) p + H x + g + A_Wᵀ λ_W + λ_B‖∞` for the solution `(p, λ)`
+/// stored in `rhs` as the Schur loop lays it out: how far the multipliers
+/// are from solving the stationarity rows they were solved from. `δ` is the
+/// inertia shift in the factor; leaving it out reads `δ·p` as error, and on
+/// Maros-Meszaros `QSIERRA` (`δ = 1e10`) a `p` of `3e-12` became a residual
+/// of `3e-2` that pruned hundreds of independent slots.
+fn active_stationarity_residual(
+    qp: &QpProblem,
+    working: &WorkingSet,
+    x: &[Number],
+    p: &[Number],
+    rhs: &[Number],
+    delta: Number,
+) -> Number {
+    let (n, m) = (qp.n, qp.m);
+    let hp = h_times_x(qp.h, p);
+    let hx = h_times_x(qp.h, x);
+    let mut r: Vec<Number> = (0..n)
+        .map(|i| hp[i] + delta * p[i] + hx[i] + qp.g[i])
+        .collect();
+    let (ir, jc, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+    for k in 0..ir.len() {
+        let i = (ir[k] - 1) as usize;
+        if working.constraints[i].is_active() {
+            r[(jc[k] - 1) as usize] += av[k] * rhs[n + i];
+        }
+    }
+    for j in 0..n {
+        if working.bounds[j].is_active() {
+            r[j] += rhs[n + m + j];
+        }
+    }
+    r.iter().fold(0.0, |a, v| a.max(v.abs()))
+}
 
 /// Equality rows the rank test found linearly dependent on the others, and
 /// the row maps that take a solution on the independent subset back to the

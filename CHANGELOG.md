@@ -86,6 +86,28 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **The active-set engine no longer reads multipliers that fail their own
+  stationarity rows.** A working set whose normals are linearly dependent
+  makes the active-set KKT matrix singular. The rank repair pruned such a set
+  only when the factorization *reported* it singular, and whether a pivot that
+  small gets reported depends on the backend, its version and the platform's
+  arithmetic. On Netlib `DEGEN2` under `solver_selection=qp-active-set`, a
+  473-slot set on 473 variables factored without complaint and came back with
+  `λ = 3.7e15` and a stationarity residual of 9.5. The drop test took that as
+  the most violated multiplier, dropped the row and re-added it at `α = 0`.
+  The cycle guard stopped the resulting two-cycle as `MaxIter`. The model
+  solved on x86 with feral 0.18 and failed on arm64 and with feral 0.19, which
+  is the CI failure blocking the feral bump. At a stationary point the engine
+  now checks `‖(H + δI) p + H x + g + Aᵀλ‖∞` against `√ε·(1 + ‖H x + g‖∞)`.
+  `δ` is the factor's inertia shift. When the check fails, the engine prunes
+  the dependent slots exactly as the factorization-failure path does. `DEGEN2`
+  now solves in 5–7 s on arm64, on x86 with feral 0.18 and on x86 with feral
+  0.19. The fixture sweep diff is empty on both legs. Across the 138
+  Maros-Meszaros QPs under `qp-active-set`, only `QGFRDXPN` moves: from a
+  120 s timeout to `MaxIter` in 68 s, so it fails both before and after. A
+  first draft that left `δ` out of the residual took `QSIERRA` from 1134 to
+  15017 QP iterations, because at `δ = 1e10` a `p` of `3e-12` read as a
+  residual of `3e-2`.
 - **An infinite objective gradient at the start no longer freezes the
   objective scale at `1e-8` (gh#1001 item 4).** Gradient-based scaling samples
   `max|grad f|` at `x0`. For `x ln x` at `x0 = 0` (Gibbs minimization from the
