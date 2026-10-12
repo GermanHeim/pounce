@@ -959,7 +959,7 @@ The `pounce.jax` subpackage provides five entry points:
 | Surface | Use it for |
 |---------|-----------|
 | `from_jax(f, g, …)` | Build a one-shot `pounce.Problem` from JAX-traced `f(x)` and `g(x)`. |
-| `solve(p, …)`       | `custom_vjp`-wrapped differentiable solve over a parameter `p`. |
+| `solve(p, …)`       | Differentiable solve over a parameter `p` (`custom_jvp`: composes with `jvp`/`jacfwd`, `grad`/`jacrev`, `hessian`, `vmap`). |
 | `solve_with_warm(p, …, warm_start=)` | `solve` + dual-triple (`x, λ, z`) warm-start hand-off across calls. |
 | `vmap_solve(p_batch, …)` / `vmap_solve_parallel(…)` | Batched solve over a leading axis of `p`; the `_parallel` variant uses a `ThreadPoolExecutor` and releases the GIL inside each solve. |
 | `JaxProblem(f, g, n, m, p_example=, …)` | Build-once / solve-many handle that caches JIT artefacts, the sparsity probe, and the underlying `pounce.Problem` across calls. |
@@ -1087,12 +1087,21 @@ probe can detect.
 
 ### Differentiable solve
 
-`pounce.jax.solve(p, f=, g=, …)` is a `custom_vjp`-wrapped solve that
-differentiates `x*(p)` through the implicit function theorem on the
-converged KKT system. Inequality rows that are *not* active at `x*`
-are dropped from the KKT block before the implicit-diff back-solve, so
-the gradient matches the analytic active-set sensitivity even on
-slack-inequality problems (pounce#73).
+`pounce.jax.solve(p, f=, g=, …)` differentiates `x*(p)` through the
+implicit function theorem on the converged KKT system. Inequality rows
+that are *not* active at `x*` are dropped from the KKT block before the
+implicit-diff solve, so the derivative matches the analytic active-set
+sensitivity even on slack-inequality problems (pounce#73).
+
+The solve is a `jax.custom_jvp` whose tangent rule is one KKT solve
+with right-hand side `-[∂ₚ∇ₓL·ṗ; ∂ₚg·ṗ]`, written in plain JAX. So it
+composes with every JAX transform (gh#1010): `jax.jvp` / `jax.jacfwd`
+directly, `jax.grad` / `jax.jacrev` by transposing that rule (the KKT
+matrix is symmetric, so this is the same back-solve the reverse-mode
+rule always did), `jax.hessian` and other higher orders by
+differentiating the rule again, and `jax.vmap`, which runs one host
+solve per batch element. `JaxProblem.solve` does the same, for either
+`factor_reuse` setting.
 
 ```python
 import jax, jax.numpy as jnp
@@ -1128,6 +1137,17 @@ merely stays slack keeps its correct gradient, and a fixed bound is
 unaffected whether or not it binds. If you need `dx*/d(bound)`, fold
 the bound into a constraint row of `g` instead, where the implicit-diff
 rule sees it.
+
+Forward mode applies the same rule a whole bound array at a time: a
+bound array JAX knows to be constant contributes nothing, but if *any*
+coordinate of a traced bound array depends on `p` and *any* of its
+coordinates is active, the whole `jvp` / `jacfwd` tangent is `NaN` —
+even when the active coordinate is itself a constant. A tangent that is
+numerically zero cannot be told apart from one that is structurally
+zero inside a linear rule. Reverse mode keeps the per-coordinate
+behaviour above. Build constant and `p`-derived bounds as separate
+arrays, or fold the `p`-derived one into `g`, if you need forward mode
+there.
 
 ### Warm-start across a parameter trajectory
 
@@ -1187,8 +1207,10 @@ X = vmap_solve_parallel(
 assert X.shape == (32, 2)
 ```
 
-Both batched surfaces are `custom_vjp`-wrapped, so a downstream
-`jax.grad`/`jax.jacobian` over a batched loss works end-to-end.
+Both batched surfaces are differentiable, so a downstream
+`jax.grad`/`jax.jacobian` over a batched loss works end-to-end. A plain
+`jax.vmap(lambda p: solve(p, …))` also works and is equivalent to
+`vmap_solve`: each batch element is one host solve, in order.
 
 ### Build once, solve many: `JaxProblem`
 
@@ -1248,11 +1270,17 @@ jp = JaxProblem(..., factor_reuse=True)   # default; reuse the IPM factor
 jp = JaxProblem(..., factor_reuse=False)  # dense JAX backward
 ```
 
-Pick `factor_reuse=False` when you want higher-order differentiation
-(`jax.grad(jax.grad(...))` through the solver) — the dense backward
-stays JAX-traced and is itself differentiable, the factor-reuse one
-crosses to the Rust host via `pure_callback` and is opaque to a
-second-order trace.
+On `JaxProblem.solve` both settings support every JAX transform,
+second order included (gh#1010). With `factor_reuse=True` the
+implicit-function solve is a `jax.lax.custom_linear_solve` whose
+`solve` is the held factor and whose `matvec` is the KKT operator
+applied matrix-free in JAX (one Hessian-vector product plus a JVP and a
+VJP of `g`): reverse mode transposes it into the same back-solve as
+before, and a second derivative differentiates the matvec and calls the
+held factor once more — no dense block is formed. `solve_with_warm`
+and the batched surfaces (`batched_solve`, `vmap_solve_parallel`, …)
+still use their reverse-only `custom_vjp` rules, so `jax.jvp` /
+`jax.jacfwd` of those still raise.
 
 #### When to pick which on `batched_solve` workloads (pounce#77)
 

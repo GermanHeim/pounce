@@ -258,6 +258,120 @@ def _kkt_implicit_backward(f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU,
     return dL_dp
 
 
+def _kkt_active_sets(m, cl, cu, lam, mult_xL, mult_xU):
+    """``(active_vars (n,), inactive_rows (m,))`` — the same rule as
+    :func:`_kkt_implicit_backward`: a variable is pinned when either bound
+    multiplier exceeds ``_ACTIVE_TOL``; a row drops out unless it is an
+    equality or its multiplier exceeds ``_ACTIVE_TOL``."""
+    active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
+    if m > 0:
+        cl_arr = jnp.asarray(cl, dtype=jnp.float64)
+        cu_arr = jnp.asarray(cu, dtype=jnp.float64)
+        cons_inactive = ~((cl_arr == cu_arr) | (jnp.abs(lam) > _ACTIVE_TOL))
+        cons_inactive = jnp.broadcast_to(cons_inactive, (m,))
+    else:
+        cons_inactive = jnp.zeros((0,), dtype=bool)
+    return active, cons_inactive
+
+
+def _kkt_param_rhs(f, g, m, p, x_star, lam, p_dot):
+    """``(∂_p ∇_x L · ṗ, ∂_p g · ṗ)`` at ``(x*, λ*)`` — one JVP each.
+
+    Linear in ``p_dot``, written in plain JAX, so JAX can transpose it
+    (reverse mode through a ``custom_jvp``) and differentiate it again
+    (second order: ``x*`` and ``λ*`` are themselves outputs of the
+    ``custom_jvp`` solve, so their tangents flow).
+    """
+    def lagrangian(x, p_):
+        base = f(x, p_)
+        if g is not None and m > 0:
+            base = base + jnp.dot(lam, g(x, p_))
+        return base
+
+    def grad_L_of_p(p_):
+        return jax.grad(lagrangian, argnums=0)(x_star, p_)
+
+    r_x = jax.jvp(grad_L_of_p, (p,), (p_dot,))[1]
+    if g is not None and m > 0:
+        r_g = jax.jvp(lambda p_: g(x_star, p_), (p,), (p_dot,))[1]
+    else:
+        r_g = jnp.zeros((0,), dtype=r_x.dtype)
+    return r_x, r_g
+
+
+def _kkt_implicit_tangent(
+    f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, p_dot,
+):
+    """Forward-mode twin of :func:`_kkt_implicit_backward` (gh#1010).
+
+    Differentiating the KKT conditions along ``ṗ`` gives
+
+        ⎡ H_xx   J_gxᵀ ⎤ ⎡ ẋ ⎤     ⎡ ∂_p ∇_x L · ṗ ⎤
+        ⎣ J_gx     0   ⎦ ⎣ λ̇ ⎦ = - ⎣ ∂_p g · ṗ     ⎦,
+
+    on the same active set and with the same identity-augment trick as
+    the backward: pinned variables read ``ẋ_i = 0`` and slack rows read
+    ``λ̇_i = 0``. Returns ``(ẋ (n,), λ̇ (m,))``.
+
+    The whole rule is plain JAX and linear in ``ṗ`` — the matrix is
+    symmetric, so its transpose is the backward's system — which is what
+    lets a ``custom_jvp`` built on it serve ``jvp`` / ``jacfwd``,
+    ``grad`` / ``jacrev`` (by transposition) and ``hessian`` (by
+    differentiating the rule) from one definition.
+    """
+    active, cons_inactive = _kkt_active_sets(m, cl, cu, lam, mult_xL, mult_xU)
+
+    def lagrangian(x, p_):
+        base = f(x, p_)
+        if g is not None and m > 0:
+            base = base + jnp.dot(lam, g(x, p_))
+        return base
+
+    H = jax.hessian(lagrangian, argnums=0)(x_star, p)
+    r_x, r_g = _kkt_param_rhs(f, g, m, p, x_star, lam, p_dot)
+
+    H_eff = (jnp.where(active[:, None] | active[None, :], 0.0, H)
+             + jnp.diag(active.astype(H.dtype)))
+    r_x = jnp.where(active, 0.0, r_x)
+    if m > 0:
+        J = jax.jacrev(g, argnums=0)(x_star, p)
+        J_eff = jnp.where(cons_inactive[:, None] | active[None, :], 0.0, J)
+        top = jnp.concatenate([H_eff, J_eff.T], axis=1)
+        bot = jnp.concatenate(
+            [J_eff, jnp.diag(cons_inactive.astype(H.dtype))], axis=1
+        )
+        K = jnp.concatenate([top, bot], axis=0)
+        r_g = jnp.where(cons_inactive, 0.0, r_g)
+        w = jnp.linalg.solve(K, -jnp.concatenate([r_x, r_g]))
+        return w[:n], w[n:]
+    return jnp.linalg.solve(H_eff, -r_x), jnp.zeros((0,), dtype=H.dtype)
+
+
+def _bound_tangent_poison(dyn_bounds, bounds_dot, g, m, cl, cu, p,
+                          x_star, lam, mult_xL, mult_xU):
+    """Forward-mode form of :func:`_bound_cotangents` (gh#1010).
+
+    Returns a scalar that is NaN when a *perturbed* traced bound is
+    active at ``x*`` and zero otherwise, as ``Σ ḃ · trip(b)``: linear in
+    the bound tangents, so it transposes to exactly the NaN-where-active
+    cotangent the ``custom_vjp`` handed back. Bounds JAX knows to be
+    constant arrive as ``SymbolicZero`` and contribute nothing, which is
+    what keeps the ordinary ``lb=jnp.full(n, -10.0)`` case clean.
+    """
+    from jax.custom_derivatives import SymbolicZero
+
+    live = {
+        k: t for k, t in bounds_dot.items() if not isinstance(t, SymbolicZero)
+    }
+    if not live:
+        return None
+    masks = _active_bound_masks(
+        live, g, m, cl, cu, p, x_star, lam, mult_xL, mult_xU
+    )
+    trips = _bound_cotangents({k: dyn_bounds[k] for k in live}, masks)
+    return sum(jnp.sum(live[k] * trips[k]) for k in live)
+
+
 # Ipopt-style statuses that count as a converged forward solve:
 # Solve_Succeeded, Solved_To_Acceptable_Level, Feasible_Point_Found.
 _OK_STATUSES = (0, 1, 6)
@@ -390,7 +504,7 @@ def _solve_once(
     return np.asarray(x_np), info
 
 
-def _make_solve_custom_vjp(
+def _make_solve_custom_jvp(
     f: Callable,
     g: Callable | None,
     n: int,
@@ -399,44 +513,62 @@ def _make_solve_custom_vjp(
     options: dict | None,
     extra: dict | None = None,
 ):
-    @jax.custom_vjp
-    def solve_fn(p, x0, dyn_bounds):
-        # Pure-callback to Python. The forward returns only x*; the
-        # backward needs (x*, λ*, mult_x_L, mult_x_U) so we re-pack
-        # them via the residual.
-        x_star, _info = _pure_callback_solve(
-            f, g, p, x0, n, m, static_bounds, dyn_bounds, options, extra
-        )
-        return x_star
+    """The solve as a ``jax.custom_jvp`` (gh#1010).
 
-    def fwd(p, x0, dyn_bounds):
+    It used to be a ``custom_vjp``, which JAX refuses to push a tangent
+    through: ``jvp`` / ``jacfwd`` / ``hessian`` of anything calling
+    :func:`solve` raised. The tangent rule here is
+    :func:`_kkt_implicit_tangent`, plain JAX and linear in ``ṗ``, so
+    one definition serves every transform — forward mode directly,
+    reverse mode by transposing the rule (the KKT matrix is symmetric,
+    so the transposed solve is the old backward's), and higher orders
+    by differentiating the rule. That last step needs ``λ*`` to carry a
+    tangent, because the Hessian of the Lagrangian depends on it, so
+    the primitive returns ``(x*, λ*, z_L, z_U)`` and the rule re-enters
+    it for the primal (the same construction as :func:`solve_bvp`'s
+    ``differentiable_to_second_order``). The bound multipliers only
+    select the active set, which is locally constant, so their tangent
+    is zero.
+    """
+    @jax.custom_jvp
+    def solve_full(p, x0, dyn_bounds):
         x_star, info = _pure_callback_solve(
             f, g, p, x0, n, m, static_bounds, dyn_bounds, options, extra
         )
-        lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
-        mult_xL = jnp.asarray(info["mult_x_L"])
-        mult_xU = jnp.asarray(info["mult_x_U"])
-        return x_star, (p, x_star, lam, mult_xL, mult_xU, dyn_bounds)
+        return x_star, info["mult_g"], info["mult_x_L"], info["mult_x_U"]
 
-    def bwd(residuals, cotangent_x):
-        p, x_star, lam, mult_xL, mult_xU, dyn_bounds = residuals
+    def solve_jvp(primals, tangents):
+        from jax.custom_derivatives import SymbolicZero
+
+        p, x0, dyn_bounds = primals
+        p_dot, _x0_dot, bounds_dot = tangents
+        out = solve_full(p, x0, dyn_bounds)
+        x_star, lam, mult_xL, mult_xU = out
         _lb, _ub, cl, cu = _merge_bounds(static_bounds, dyn_bounds)
-        dL_dp = _kkt_implicit_backward(
-            f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, cotangent_x
-        )
         # x0 has no sensitivity through x* (the solver is deterministic
-        # at the optimum), so its cotangent is an exact zero. The bounds
-        # are held constant — see :func:`_bound_cotangents`.
-        masks = _active_bound_masks(
-            dyn_bounds, g, m, cl, cu, p, x_star, lam, mult_xL, mult_xU
+        # at the optimum), so its tangent is dropped.
+        if isinstance(p_dot, SymbolicZero):
+            dx = jnp.zeros((n,), dtype=jnp.float64)
+            dlam = jnp.zeros((m,), dtype=jnp.float64)
+        else:
+            dx, dlam = _kkt_implicit_tangent(
+                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, p_dot,
+            )
+        # The bounds are held constant — see :func:`_bound_cotangents`.
+        poison = _bound_tangent_poison(
+            dyn_bounds, bounds_dot, g, m, cl, cu, p, x_star, lam,
+            mult_xL, mult_xU,
         )
-        return (
-            dL_dp,
-            jnp.zeros((n,), dtype=jnp.float64),
-            _bound_cotangents(dyn_bounds, masks),
-        )
+        if poison is not None:
+            dx = dx + poison
+            dlam = dlam + poison
+        return out, (dx, dlam, jnp.zeros_like(mult_xL), jnp.zeros_like(mult_xU))
 
-    solve_fn.defvjp(fwd, bwd)
+    solve_full.defjvp(solve_jvp, symbolic_zeros=True)
+
+    def solve_fn(p, x0, dyn_bounds):
+        return solve_full(p, x0, dyn_bounds)[0]
+
     return solve_fn
 
 
@@ -482,7 +614,12 @@ def _pure_callback_solve(
         }
         return np.asarray(x_np, dtype=np.float64), info_out
 
-    return jax.pure_callback(host_call, result_shapes, p, x0, dyn_bounds)
+    # ``sequential``: under ``jax.vmap`` each batch element is its own
+    # host solve (gh#1010). The solver is stateful and single-threaded,
+    # so a looped callback is the only batching rule that is correct.
+    return jax.pure_callback(
+        host_call, result_shapes, p, x0, dyn_bounds, vmap_method="sequential",
+    )
 
 
 def solve(
@@ -523,6 +660,14 @@ def solve(
 
     ``f`` and ``g`` must take ``(x, p)`` and be JAX-traceable.
 
+    The solve is a ``jax.custom_jvp`` (gh#1010), so it composes with every
+    JAX transform: ``jvp`` / ``jacfwd``, ``grad`` / ``jacrev`` (by
+    transposing the tangent rule), ``hessian`` and higher orders, ``jit``,
+    and ``vmap`` (one host solve per batch element, in order). In forward
+    mode the NaN rule above is applied per bound *array*: a traced bound
+    array with a ``p``-dependent coordinate makes the whole tangent NaN
+    if any of its coordinates is active.
+
     ``jac_pattern`` / ``hess_pattern`` : ``(rows, cols)`` or ``None``
         Known sparsity patterns, as in :func:`pounce.jax.from_jax`
         (Jacobian ``(m, n)``; lower triangle of the Lagrangian Hessian).
@@ -550,7 +695,7 @@ def solve(
     _check_on_failure(on_failure)
     extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
                  on_failure=on_failure)
-    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options, extra)
+    fn = _make_solve_custom_jvp(f, g, n, m, static_bounds, options, extra)
     return fn(p, x0, dyn_bounds)
 
 
@@ -841,11 +986,10 @@ def vmap_solve(
 ):
     """Batched solve over the leading axis of ``p_batch``.
 
-    The pounce solver is single-threaded and stateful, so a literal
-    ``jax.vmap`` of :func:`solve` would unsafely lift the pure_callback.
-    This helper instead loops in Python (or, when JAX provides a
-    sequential map primitive, dispatches to that), preserving
-    differentiability via :func:`solve`'s ``custom_vjp``.
+    Runs the solves one at a time with ``jax.lax.map``, preserving
+    differentiability via :func:`solve`'s ``custom_jvp``. Since gh#1010 a
+    plain ``jax.vmap`` of :func:`solve` does the same (its callback is
+    batched sequentially); this helper adds the aggregated failure report.
 
     ``on_failure`` behaves as in :func:`solve`, except that ``"warn"``
     emits **one** ``RuntimeWarning`` for the whole batch naming how many
@@ -858,7 +1002,7 @@ def vmap_solve(
     extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
                  on_failure=on_failure, _sink=sink)
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
-    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options, extra)
+    fn = _make_solve_custom_jvp(f, g, n, m, static_bounds, options, extra)
 
     def one(p_i):
         return fn(p_i, x0, dyn_bounds)

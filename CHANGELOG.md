@@ -86,6 +86,29 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **`pounce.jax.solve` and `JaxProblem.solve` compose with `jvp`, `jacfwd`,
+  `hessian` and `vmap` (gh#1010).** Both were `custom_vjp`s around a
+  `pure_callback` with no batching rule, so only `jit`, `grad` and `jacrev`
+  worked; forward mode, second order and `jax.vmap` of anything calling them
+  raised, even though `jvp_from_state` and `vmap_solve` showed the machinery
+  existed. Both are now `custom_jvp`s whose tangent rule is the implicit-function
+  KKT solve `K·[ẋ; λ̇] = −[∂ₚ∇ₓL·ṗ; ∂ₚg·ṗ]`, on the same active set as before.
+  Reverse mode is that rule transposed (`K` is symmetric, so it is the same
+  back-solve), second order differentiates it (the primitive also returns
+  `λ*`, whose tangent the Lagrangian Hessian needs), and the forward callback
+  is batched sequentially, one host solve per element. On `JaxProblem` with
+  `factor_reuse=True` the solve is a `lax.custom_linear_solve` whose `solve` is
+  the held IPM factor and whose `matvec` is the KKT operator applied
+  matrix-free in JAX, so all of this holds without forming a dense block; its
+  callback groups rows by solver id, since a `vmap` of solves holds one factor
+  per element. Checked against central finite differences of the solve on a
+  model with an equality, a binding and a slack inequality and an active bound:
+  Jacobians to ~1e-8 and Hessians to ~1e-5 on all three paths
+  (`tests/test_jax_transforms_gh1010.py`). The traced-bound NaN contract
+  (gh#740) is unchanged in reverse mode. In forward mode it applies per bound
+  array: a traced bound array with any `p`-dependent coordinate gives a NaN
+  tangent if any of its coordinates is active. `solve_with_warm` and the batched
+  surfaces keep their reverse-only rules.
 - **FERAL 0.19.0: collocated DAEs no longer stall on spurious wrong-inertia
   counts (gh#999, feral#213, feral#215).** On the integral form of a 25-element
   two-column distillation model (75,796 variables), pounce held mu at 0.1 and
