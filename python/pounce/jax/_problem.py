@@ -1027,6 +1027,179 @@ def _kkt_jvp_batched_pure_callback(
     )
 
 
+def _kkt_solve_pure_callback(
+    jp: "JaxProblem",
+    sid: jnp.ndarray,
+    rhs_x: jnp.ndarray,
+    rhs_g: jnp.ndarray,
+    n: int,
+    m: int,
+):
+    """``K⁻¹ [rhs_x; rhs_g]`` against a held single-solve factor (gh#1010).
+
+    The single-problem analogue of :func:`_kkt_jvp_batched_pure_callback`:
+    the x-block and the user-g-order constraint block go in, the same two
+    blocks of the solution come out. It is the ``solve`` of the
+    ``lax.custom_linear_solve`` in :meth:`JaxProblem._solve_fn`, so it is
+    called for tangents (forward mode) and, the factor being symmetric,
+    for cotangents (reverse mode) alike.
+
+    Under ``vmap_method="broadcast_all"`` every input gains the same
+    leading batch axes — one per enclosing ``vmap``, which includes the
+    one ``jacrev`` / ``jacfwd`` add. Unlike the reverse-only
+    :func:`_kkt_backsolve_pure_callback`, the solver id is **not**
+    assumed constant across the batch: ``jax.vmap`` of a solve yields
+    one factor per element, so the rows are grouped by id and each group
+    is one ``kkt_solve_many`` against its own factor.
+    """
+    result_shapes = (
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m,), jnp.float64),
+    )
+    is_eq = np.asarray(jp._cl_for_classify) == np.asarray(jp._cu_for_classify)
+    c_idx = np.flatnonzero(is_eq)
+    d_idx = np.flatnonzero(~is_eq)
+
+    def host_call(sid_h, rx_h, rg_h):
+        rx = np.asarray(rx_h, dtype=np.float64)
+        batch_shape = rx.shape[:-1]
+        rx = rx.reshape(-1, n)
+        rg = np.asarray(rg_h, dtype=np.float64).reshape(rx.shape[0], m)
+        sids = np.broadcast_to(
+            np.asarray(sid_h, dtype=np.int64), batch_shape
+        ).reshape(-1)
+        out_x = np.empty_like(rx)
+        out_g = np.empty_like(rg)
+        for sid_k in np.unique(sids):
+            rows = np.flatnonzero(sids == sid_k)
+            solver = jp._lookup_solver(int(sid_k))
+            if solver is None:
+                raise RuntimeError(
+                    f"pounce.jax: missing Solver for the implicit-function "
+                    f"solve (id={int(sid_k)}). The factor was evicted from the "
+                    "LRU registry — bump `_solver_registry_capacity` (or "
+                    "`_solver_registry_target`), differentiate closer to "
+                    "the forward solve, or use `factor_reuse=False`."
+                )
+
+            def _do_kkt(solver=solver, rows=rows):
+                dims = solver.block_dims
+                if dims is None:
+                    raise RuntimeError(
+                        "pounce.jax: factor-reuse differentiation requires a "
+                        "converged IPM factor, but the forward solve did not "
+                        "produce one. Tighten the solve (loosen `tol`, supply "
+                        "a better `x0`, rescale the problem), or build the "
+                        "`JaxProblem` with `factor_reuse=False` to use the "
+                        "dense JAX KKT solve, which does not need it."
+                    )
+                n_x, n_s, n_y_c, n_y_d = dims[0], dims[1], dims[2], dims[3]
+                if n_x != n:
+                    raise RuntimeError(
+                        f"pounce.jax: tangent length {n} != Solver n_x={n_x} "
+                        "(fixed-variable treatment is not supported on the "
+                        "JaxProblem factor-reuse path)."
+                    )
+                N = rows.size
+                kkt_dim = solver.kkt_dim
+                y_c_off = n_x + n_s
+                y_d_off = y_c_off + n_y_c
+                rhs = np.zeros((N, kkt_dim), dtype=np.float64)
+                rhs[:, :n_x] = rx[rows]
+                if c_idx.size:
+                    rhs[:, y_c_off:y_c_off + n_y_c] = rg[rows][:, c_idx]
+                if d_idx.size:
+                    rhs[:, y_d_off:y_d_off + n_y_d] = rg[rows][:, d_idx]
+                w = np.asarray(
+                    solver.kkt_solve_many(rhs.reshape(-1), N), dtype=np.float64,
+                ).reshape(N, kkt_dim)
+                w_g = np.zeros((N, m), dtype=np.float64)
+                if c_idx.size:
+                    w_g[:, c_idx] = w[:, y_c_off:y_c_off + n_y_c]
+                if d_idx.size:
+                    w_g[:, d_idx] = w[:, y_d_off:y_d_off + n_y_d]
+                return w[:, :n_x].copy(), w_g
+
+            out_x[rows], out_g[rows] = jp._run_pinned(_do_kkt)
+        return (
+            out_x.reshape(batch_shape + (n,)),
+            out_g.reshape(batch_shape + (m,)),
+        )
+
+    return jax.pure_callback(
+        host_call, result_shapes, sid, rhs_x, rhs_g, vmap_method="broadcast_all",
+    )
+
+
+def _kkt_tangent_factor_reuse(
+    f, g, n, m, cl, cu, jp, p, x_star, lam, mult_xL, mult_xU, sid, p_dot,
+):
+    """Forward-mode implicit-function rule against the held factor (gh#1010).
+
+    Same system as :func:`pounce.jax._diff._kkt_implicit_tangent`, but the
+    linear solve goes through ``jax.lax.custom_linear_solve`` with the
+    held IPM factor as its ``solve`` (:func:`_kkt_solve_pure_callback`),
+    so no dense ``(n+m)²`` block is ever formed. ``custom_linear_solve``
+    is what keeps the rule a first-class JAX citizen:
+
+    * it is linear in the right-hand side and declared ``symmetric``, so
+      reverse mode transposes it into the same back-solve the old
+      ``custom_vjp`` made;
+    * differentiating it with respect to ``(x*, λ*, p)`` — a second-order
+      transform — uses ``matvec``, which is matrix-free plain JAX (an HVP
+      and a JVP/VJP of ``g``), plus one more call to the held factor.
+
+    ``matvec`` is the masked KKT operator of the dense path. The held
+    factor is the IPM's compound block, which encodes the same active set
+    through its barrier rows, so the two agree to ``O(μ)`` at convergence
+    — the accuracy the reverse factor-reuse path has always had. Masking
+    the right-hand side keeps the pinned / slack rows exactly zero, as
+    the dense path does.
+    """
+    from ._diff import _kkt_active_sets, _kkt_param_rhs
+
+    active, cons_inactive = _kkt_active_sets(m, cl, cu, lam, mult_xL, mult_xU)
+
+    def lagrangian(x):
+        base = f(x, p)
+        if g is not None and m > 0:
+            base = base + jnp.dot(lam, g(x, p))
+        return base
+
+    grad_L = jax.grad(lagrangian)
+
+    # One flat ``[x; g]`` vector rather than a pytree: the transpose of
+    # ``custom_linear_solve`` needs every leaf of ``b`` to be linear in
+    # the tangent, and either half can be a symbolic zero (``∂_p ∇_x L``
+    # vanishes whenever ``p`` enters only ``g``, and linearly).
+    def matvec(w):
+        w_x, w_g = w[:n], w[n:]
+        w_x_eff = jnp.where(active, 0.0, w_x)
+        top = jax.jvp(grad_L, (x_star,), (w_x_eff,))[1]
+        if g is not None and m > 0:
+            w_g_eff = jnp.where(cons_inactive, 0.0, w_g)
+            g_of_x = lambda x: g(x, p)
+            _, g_vjp = jax.vjp(g_of_x, x_star)
+            top = top + g_vjp(w_g_eff)[0]
+            bot = jax.jvp(g_of_x, (x_star,), (w_x_eff,))[1]
+            bot = jnp.where(cons_inactive, w_g, bot)
+        else:
+            bot = w_g
+        return jnp.concatenate([jnp.where(active, w_x, top), bot])
+
+    def solve(_matvec, b):
+        w_x, w_g = _kkt_solve_pure_callback(jp, sid, b[:n], b[n:], n, m)
+        return jnp.concatenate([w_x, w_g])
+
+    r_x, r_g = _kkt_param_rhs(f, g, m, p, x_star, lam, p_dot)
+    b = -jnp.concatenate([
+        jnp.where(active, 0.0, r_x),
+        jnp.where(cons_inactive, 0.0, r_g),
+    ])
+    w = jax.lax.custom_linear_solve(matvec, b, solve, symmetric=True)
+    return w[:n], w[n:]
+
+
 def _bwd_single_kkt(
     f: Callable,
     g: Callable | None,
@@ -1298,9 +1471,13 @@ class JaxProblem:
         back-solve (k_aug-style; pounce#76) — drops the
         ``jnp.linalg.solve`` on a freshly assembled
         ``(n+m) × (n+m)`` block and avoids the explicit active-set
-        masking. Set ``False`` to fall back to the dense JAX path
-        (useful for higher-order differentiation, since the dense path
-        stays inside JAX and is itself differentiable).
+        masking. Set ``False`` to fall back to the dense JAX path.
+        On :meth:`solve` both settings compose with every JAX transform,
+        ``jvp`` / ``jacfwd`` / ``hessian`` / ``vmap`` included (gh#1010):
+        the reuse path wraps the held factor in
+        ``jax.lax.custom_linear_solve`` with a matrix-free JAX ``matvec``,
+        so it transposes and differentiates without a dense block. The
+        warm and batched surfaces keep reverse-only ``custom_vjp`` rules.
 
         **When to pick which (pounce#77 follow-up).** The right
         setting depends on two independent axes: the AD shape (how
@@ -1308,9 +1485,9 @@ class JaxProblem:
         per-block KKT size ``n+m``.
 
         ===============================  ==========================  ==========================
-        ``n+m``                          single cotangent            many cotangents
-                                         (``value_and_grad``, grad,  (``jacrev``, ``jacfwd``)
-                                          single ``jvp``/``vjp``)
+        ``n+m``                          single direction            many directions
+                                         (``value_and_grad``, grad,  (``jacrev``; ``jacfwd``
+                                          single ``jvp``/``vjp``)     on :meth:`solve`)
         ===============================  ==========================  ==========================
         ≲ 100                            either (≈ tie)              ``factor_reuse=False``
         ~100 – ~5000                     ``factor_reuse=True``       ``factor_reuse=False``
@@ -2528,7 +2705,11 @@ class JaxProblem:
     # ----- public: differentiable solve methods -----
 
     def solve(self, p, x0):
-        """Differentiable forward solve at parameter ``p``. Returns ``x*``."""
+        """Differentiable forward solve at parameter ``p``. Returns ``x*``.
+
+        A ``jax.custom_jvp`` (gh#1010): composes with ``jvp`` / ``jacfwd``,
+        ``grad`` / ``jacrev``, ``hessian`` and ``vmap`` under either
+        ``factor_reuse`` setting. ``x0`` carries no sensitivity."""
         return self._solve_fn()(jnp.asarray(p), jnp.asarray(x0))
 
     def solve_with_warm(self, p, x0, warm_start: tuple | None = None):
@@ -3345,37 +3526,61 @@ class JaxProblem:
     # ----- custom_vjp factories -----
 
     def _solve_fn(self, sink=None):
+        """``custom_jvp`` factory for :meth:`solve` / :meth:`vmap_solve`
+        (gh#1010).
+
+        A ``custom_vjp`` here rejected ``jvp`` / ``jacfwd`` / ``hessian``
+        outright. As in :func:`pounce.jax.solve`, the primitive returns
+        ``(x*, λ*, z_L, z_U, solver_id)`` and the tangent rule re-enters
+        it, so ``λ*`` carries the tangent second order needs. The rule
+        itself follows ``factor_reuse``:
+
+        * ``True`` — :func:`_kkt_tangent_factor_reuse`: one solve
+          against the held IPM factor, wrapped in
+          ``lax.custom_linear_solve`` so it transposes (reverse mode) and
+          differentiates (second order) without a dense block;
+        * ``False`` — :func:`pounce.jax._diff._kkt_implicit_tangent`, the
+          dense in-JAX KKT solve.
+        """
+        from ._diff import _kkt_implicit_tangent
+
         f, g, n, m = self._f, self._g, self._n, self._m
         cl, cu = self._cl, self._cu
         jp = self
         factor_reuse = self._factor_reuse
 
-        @jax.custom_vjp
-        def solve_fn(p, x0):
-            x_star, _ = _pure_callback_solve(jp, p, x0, sink)
-            return x_star
-
-        def fwd(p, x0):
+        @jax.custom_jvp
+        def solve_full(p, x0):
             x_star, info = _pure_callback_solve(jp, p, x0, sink)
-            lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
-            mult_xL = jnp.asarray(info["mult_x_L"])
-            mult_xU = jnp.asarray(info["mult_x_U"])
-            sid = jnp.asarray(info["solver_id"])
-            return x_star, (p, x_star, lam, mult_xL, mult_xU, sid)
+            return (
+                x_star, info["mult_g"], info["mult_x_L"], info["mult_x_U"],
+                info["solver_id"],
+            )
 
-        def bwd(residuals, v):
-            p, x_star, lam, mult_xL, mult_xU, sid = residuals
+        @solve_full.defjvp
+        def solve_jvp(primals, tangents):
+            p, x0 = primals
+            p_dot, _x0_dot = tangents  # x0 carries no sensitivity
+            out = solve_full(p, x0)
+            x_star, lam, mult_xL, mult_xU, sid = out
             if factor_reuse:
-                dL_dp = _bwd_single_factor_reuse(
-                    f, g, n, m, cl, cu, jp, p, x_star, lam, sid, v,
+                dx, dlam = _kkt_tangent_factor_reuse(
+                    f, g, n, m, cl, cu, jp, p, x_star, lam, mult_xL, mult_xU,
+                    sid, p_dot,
                 )
             else:
-                dL_dp = _bwd_single_kkt(
-                    f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
+                dx, dlam = _kkt_implicit_tangent(
+                    f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU,
+                    p_dot,
                 )
-            return dL_dp, jnp.zeros((n,), dtype=jnp.float64)
+            return out, (
+                dx, dlam, jnp.zeros_like(mult_xL), jnp.zeros_like(mult_xU),
+                np.zeros(jnp.shape(sid), dtype=jax.dtypes.float0),
+            )
 
-        solve_fn.defvjp(fwd, bwd)
+        def solve_fn(p, x0):
+            return solve_full(p, x0)[0]
+
         return solve_fn
 
     def _solve_with_warm_fn(self):
@@ -3643,7 +3848,12 @@ def _pure_callback_solve(jp: JaxProblem, p, x0, sink=None):
         }
         return np.asarray(x_np, dtype=np.float64), info_out
 
-    return jax.pure_callback(host_call, result_shapes, p, x0)
+    # ``sequential``: ``jax.vmap`` of a solve runs one host solve per
+    # element (gh#1010), each registering its own factor — which is why
+    # :func:`_kkt_solve_pure_callback` groups its rows by solver id.
+    return jax.pure_callback(
+        host_call, result_shapes, p, x0, vmap_method="sequential",
+    )
 
 
 def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm):
