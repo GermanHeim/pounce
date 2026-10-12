@@ -109,6 +109,15 @@ changes.
   array: a traced bound array with any `p`-dependent coordinate gives a NaN
   tangent if any of its coordinates is active. `solve_with_warm` and the batched
   surfaces keep their reverse-only rules.
+- **`--debug*` on the active-set SQP solver now says the debugger does not
+  engage (gh#1009).** With `algorithm=active-set-sqp`, `--debug`,
+  `--debug-script` and `--debug-on-error` printed the "debugger enabled"
+  banner, then ran to completion with no pause and no explanation. A failing
+  SQP solve under `--debug-on-error` never broke in, and nothing said why. The
+  debug hook is consumed only by the interior-point loop. The SQP route now
+  prints an IPM-only note, as the active-set QP engine already did.
+  `docs/src/debugger.md` no longer says the debugger spans "every" solver; it
+  lists the two active-set engines it does not attach to.
 - **FERAL 0.19.0: collocated DAEs no longer stall on spurious wrong-inertia
   counts (gh#999, feral#213, feral#215).** On the integral form of a 25-element
   two-column distillation model (75,796 variables), pounce held mu at 0.1 and

@@ -1826,6 +1826,26 @@ fn real_main() -> ExitCode {
     // there is exactly one release below. Deferring per pass left the
     // counter at 1 after a resolve, so the run printed no verdict at all.
     app.defer_end_verdict();
+    // gh#1009: the active-set SQP outer loop (`optimize_sqp_tnlp`) never
+    // installs the debug hook — only the filter-IPM consumes it — so
+    // `--debug*` here would print the "debugger enabled" banner and then run
+    // to completion without a pause, and `--debug-on-error` would never break
+    // in. Say so, as the active-set QP engine's dispatch does. That note and
+    // this one cannot both fire: with a debugger attached the convex route
+    // never falls through to here (`lp_nlp_fallback` requires no hook).
+    // `is_sqp_algorithm_selected` is the predicate `optimize_tnlp` dispatches
+    // on, so it is also true for `solver_selection=qp-active-set` on a QP
+    // whose convex route was declined (a post-optimal request, #196); the
+    // note names both selectors.
+    if debug_hook.is_some() && app.is_sqp_algorithm_selected() {
+        eprintln!(
+            "pounce: note: the interactive debugger is IPM-only and does not \
+             engage on the active-set SQP solver (algorithm=active-set-sqp or \
+             solver_selection=qp-active-set); the solve runs without pausing. \
+             Drop that option to debug this model on the interior-point \
+             solver."
+        );
+    }
     let mut status = loop {
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();

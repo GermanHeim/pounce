@@ -19,9 +19,11 @@ It has two front ends sharing one command engine:
 No production NLP solver ships anything like this; if you have used
 `ipopt` you have had `print_level` and a log. This is a live debugger.
 
-The same debugger spans **every** POUNCE solver — the NLP filter-IPM and the
-convex / conic interior-point solver share one command engine and one REPL.
-See [Beyond the interior-point loop](#beyond-the-interior-point-loop) for the
+The same debugger spans every POUNCE **interior-point** solver — the NLP
+filter-IPM and the convex / conic interior-point solver share one command
+engine and one REPL. The two active-set engines are the exception: see
+[Engines it does not attach to](#engines-it-does-not-attach-to). See
+[Beyond the interior-point loop](#beyond-the-interior-point-loop) for the
 small set of commands whose availability is backend-conditional.
 
 > The debugger has **zero effect on the solve when it is not attached**.
@@ -1432,6 +1434,33 @@ emitted set to that single advertised vocabulary so it can't drift.
 
 > A third backend — an interactive **branch-and-bound tree debugger** for a
 > spatial global solver — is not part of this release.
+
+### Engines it does not attach to
+
+The debugger's checkpoints live in the interior-point iterations (μ, the
+search direction, the fraction-to-the-boundary step). The two active-set
+engines are different algorithms and have none of them:
+
+| engine | selected by | what `--debug*` does |
+|---|---|---|
+| active-set SQP (pounce-qp subproblems) | `algorithm=active-set-sqp` on an NLP | prints a note; the solve runs without pausing |
+| active-set QP (pounce-qp) | `solver_selection=qp-active-set` on an LP or QP | prints a note; the solve runs without pausing |
+
+In both cases the run says so on stderr, after the "debugger enabled" banner:
+
+```
+pounce: note: the interactive debugger is IPM-only and does not engage on the
+active-set SQP solver (algorithm=active-set-sqp or solver_selection=qp-active-set);
+the solve runs without pausing. Drop that option to debug this model on the
+interior-point solver.
+```
+
+That applies to `--debug-on-error` as well: a failing active-set solve does
+not break into the debugger. To debug the model, drop the option and let it
+run on the interior-point solver. The `Selected solver:` line names the
+engine that actually ran. `algorithm=active-set-sqp` on an LP, for example, is
+routed to the convex IPM under `solver_selection=auto`, and the debugger does
+engage there (gh#1009).
 
 ---
 
