@@ -9019,13 +9019,6 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
     }
 }
 
-/// SQP-side analog of [`finalize_via_orig_nlp`]. Hands the SQP
-/// solution iterate to the user TNLP via the standard
-/// `finalize_solution` callback. Multiplier lifting goes through
-/// the same OrigIpoptNlp hooks so the user sees the same shape
-/// regardless of which algorithm produced the iterate.
-///
-/// Returns the user-space objective value on success.
 /// The SQP iterate in the user's index spaces, for the live-inspector window
 /// (gh#1015). Same conversions as [`finalize_via_sqp`] — `λ_x` is packed
 /// signed (`z_L − z_U`) and is split by sign — minus the user-callback
@@ -9088,6 +9081,13 @@ fn sqp_user_iterate(
     }
 }
 
+/// SQP-side analog of [`finalize_via_orig_nlp`]. Hands the SQP
+/// solution iterate to the user TNLP via the standard
+/// `finalize_solution` callback. Multiplier lifting goes through
+/// the same OrigIpoptNlp hooks so the user sees the same shape
+/// regardless of which algorithm produced the iterate.
+///
+/// Returns the user-space objective value on success.
 fn finalize_via_sqp(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     res: &crate::sqp::SqpResult,
