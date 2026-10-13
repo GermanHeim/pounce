@@ -10,6 +10,16 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`intermediate_callback` and `GetIpoptCurrentIterate` on the active-set SQP
+  arm (gh#1015).** `algorithm = active-set-sqp` never invoked the user's
+  intermediate callback, so a C-API caller supplying the Lagrangian Hessian
+  from the current primals and duals had nothing to read. The callback now
+  fires once per iteration (iteration 0 and the converged iterate included,
+  as on the interior-point arm), `GetIpoptCurrentIterate` returns that
+  iterate's `x`, `z_L`, `z_U`, `g` and `lambda` in the user's index spaces,
+  and returning `false` ends the solve with `User_Requested_Stop`.
+  `GetIpoptCurrentViolations` is not served on this arm and returns `FALSE`.
+  The hook only observes the iterate, so no trajectory moves.
 - **`objective_scaling.total_factor`: the whole objective multiplier of the
   returned run (gh#1001 item 3).** `objective_scaling.factor` is the
   gradient-based part only. It leaves out the caller's `obj_scaling_factor`

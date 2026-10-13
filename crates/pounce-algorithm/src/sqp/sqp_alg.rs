@@ -94,8 +94,33 @@ fn format_sqp_row(
     }
 }
 
+/// What the per-iteration hook sees: the iterate `x_k` and the residuals
+/// measured **at** it (the same numbers the `sqp_print_level >= 1` row
+/// prints), plus the step that arrived there.
+pub struct SqpIterationInfo<'a> {
+    pub iter: u32,
+    pub obj: Number,
+    pub inf_pr: Number,
+    pub inf_du: Number,
+    /// `‖p‖_inf` of the accepted step into this iterate (0 on iteration 0).
+    pub p_inf: Number,
+    /// Line-search step length of that step (0 on iteration 0).
+    pub alpha: Number,
+    pub x: &'a [Number],
+    /// `[λ_c; λ_d]` in algorithm space.
+    pub lambda_g: &'a [Number],
+    /// Signed bound multiplier `z_L - z_U` per variable.
+    pub lambda_x: &'a [Number],
+    /// `[c(x); d(x)]` in algorithm space.
+    pub c_vals: &'a [Number],
+}
+
+/// Per-iteration hook. Returning `false` stops the solve.
+pub type SqpIterationHook = Box<dyn FnMut(&SqpIterationInfo<'_>) -> bool>;
+
 /// SQP-side algorithm driver.
 pub struct SqpAlgorithm {
+    iteration_hook: Option<SqpIterationHook>,
     qp_solver: ParametricActiveSetSolver,
     qp_opts: QpOptions,
     opts: SqpOptions,
@@ -114,7 +139,16 @@ impl SqpAlgorithm {
             opts,
             iterates: None,
             filter: SqpFilter::new(),
+            iteration_hook: None,
         }
+    }
+
+    /// Install a hook fired once per iteration, at the iterate the loop is
+    /// about to test for convergence (iteration 0 and the final iterate
+    /// included, as on the interior-point arm). Returning `false` ends the
+    /// solve with [`SqpStatus::UserRequestedStop`].
+    pub fn set_iteration_hook(&mut self, hook: SqpIterationHook) {
+        self.iteration_hook = Some(hook);
     }
 
     /// Override the per-call QP-solver options. Defaults are
@@ -355,6 +389,52 @@ impl SqpAlgorithm {
             let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
             let f_curr = f_cached.take().unwrap_or_else(|| nlp.eval_f(&iter.x));
             let jac_c = nlp.eval_jac_c(&iter.x);
+            // KKT check uses the current iterate's evaluations.
+            let kkt = check_kkt(
+                n, m, &iter, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, &jac_c,
+            );
+            final_stationarity = kkt.stationarity;
+            final_constr_viol = kkt.constr_viol;
+
+            // Fired BEFORE this iteration's Lagrangian Hessian is evaluated, as
+            // on the interior-point arm (callback after acceptance, before the
+            // next Hessian): a caller that builds `eval_h` from the iterate it
+            // read in the callback (gh#1015) must see THIS iterate, not the
+            // previous one.
+            if let Some(hook) = self.iteration_hook.as_mut() {
+                let (p_inf, alpha) = prev_step
+                    .as_ref()
+                    .map_or((0.0, 0.0), |s| (s.p_inf, s.alpha));
+                let keep_going = hook(&SqpIterationInfo {
+                    iter: outer,
+                    obj: f_curr,
+                    inf_pr: kkt.constr_viol,
+                    inf_du: kkt.stationarity,
+                    p_inf,
+                    alpha,
+                    x: &iter.x,
+                    lambda_g: &iter.lambda_g,
+                    lambda_x: &iter.lambda_x,
+                    c_vals: &c_vals,
+                });
+                if !keep_going {
+                    self.iterates = Some(iter.clone());
+                    return Ok(SqpResult {
+                        x: iter.x,
+                        lambda_g: iter.lambda_g,
+                        lambda_x: iter.lambda_x,
+                        obj: f_curr,
+                        status: SqpStatus::UserRequestedStop,
+                        n_iter: outer,
+                        n_qp_solves,
+                        n_qp_working_set_changes,
+                        final_stationarity,
+                        final_constr_viol,
+                        working_set: iter.working,
+                    });
+                }
+            }
+
             let hess_lag = match self.opts.hessian {
                 SqpHessianSource::Exact => nlp.eval_hess_lag(&iter.x, &iter.lambda_g),
                 SqpHessianSource::DampedBfgs => {
@@ -381,13 +461,6 @@ impl SqpAlgorithm {
             // iteration can build its curvature pair at a fixed
             // multiplier. See `curvature_pair`.
             prev_point = Some((iter.x.clone(), grad_f.clone(), jac_c.clone()));
-
-            // KKT check uses the current iterate's evaluations.
-            let kkt = check_kkt(
-                n, m, &iter, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, &jac_c,
-            );
-            final_stationarity = kkt.stationarity;
-            final_constr_viol = kkt.constr_viol;
 
             // Non-finite residuals mean the iterate itself is garbage, and
             // every gate below this point — the convergence test, the
