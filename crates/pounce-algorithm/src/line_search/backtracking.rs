@@ -133,6 +133,23 @@ use std::rc::Rc;
 /// one more number with no population behind it.
 const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 
+/// gh#1016 — the approximate-Wolfe test of Hager & Zhang (*SIAM J. Optim.*
+/// 16(1), 2005, eq. 4.1), used only once a solve has shown that the
+/// objective cannot resolve its own decrease (see
+/// [`BacktrackingLineSearch::objective_noise_limited`]).
+///
+/// `phi'(alpha)` must satisfy `WOLFE_SIGMA * phi'(0) <= phi'(alpha) <=
+/// (2 * WOLFE_DELTA - 1) * phi'(0)`: the slope at the trial point has fallen
+/// to within `1 - SIGMA` of flat but not overshot to more than `1 - 2*DELTA`
+/// of the starting slope the other way. Both are the paper's values.
+const WOLFE_DELTA: Number = 0.1;
+const WOLFE_SIGMA: Number = 0.9;
+/// The test only fires when `|phi(alpha) - phi|` is within `WOLFE_EPS * max(1,
+/// |phi|)` — the paper's `epsilon_k` (there `1e-6 * |f_k|`). The slope
+/// conditions are what keeps the tolerated increase small; this only rules
+/// out a step the objective itself says is a real ascent.
+const WOLFE_EPS: Number = 1e-6;
+
 /// Outcome of the backtracking line search. Mirrors the booleans
 /// upstream returns through `accept_` plus the `tiny_step_flag` on
 /// `IpoptData`.
@@ -233,6 +250,10 @@ pub struct BacktrackingLineSearch {
     /// a restoration phase that has nothing to minimize. `true` is the
     /// default; `false` restores the plain hand-off.
     pub filter_theta_roundoff_retry: bool,
+    /// `objective_noise_wolfe` (gh#1016) — whether [`Self::objective_noise_limited`]
+    /// can be entered at all. `true` is the default; `false` restores the
+    /// plain Armijo/filter test.
+    pub objective_noise_wolfe: bool,
     /// Maximum trial-iteration cap before declaring failure.
     pub max_trials: i32,
 
@@ -255,6 +276,19 @@ pub struct BacktrackingLineSearch {
     // the alpha-loop on the saved `delta` with `skip_first=true`.
     /// True iff currently inside a watchdog window.
     in_watchdog: bool,
+    /// gh#1016: this solve has accepted a step that did not move the iterate
+    /// in floating point — the objective's evaluation noise exceeds any
+    /// decrease the step could deliver, so the Armijo comparison on `phi` can
+    /// no longer tell a good step from a bad one. Sticky for the rest of the
+    /// solve; from then on a trial the Armijo/filter test rejects is also
+    /// accepted if the *slope* of `phi` along the step at the trial point
+    /// passes [`WOLFE_SIGMA`]/[`WOLFE_DELTA`] (the gradient carries no such
+    /// noise floor). Never set on a solve whose line searches behave.
+    objective_noise_limited: bool,
+    /// Set by the α-loop, instead of accepting, when the step it was about to
+    /// accept was a numerical null step on a model with no constraint rows;
+    /// read by [`Self::run_alpha_loop`], which then re-runs the loop.
+    noise_limit_detected: bool,
     /// Snapshot of the iterate at watchdog activation.
     watchdog_iterate: Option<IteratesVector>,
     /// Snapshot of the search direction at watchdog activation.
@@ -376,8 +410,11 @@ impl BacktrackingLineSearch {
             watchdog_trial_iter_max: 3,
             alpha_min: 1e-12,
             filter_theta_roundoff_retry: true,
+            objective_noise_wolfe: true,
             max_trials: 50,
             in_watchdog: false,
+            objective_noise_limited: false,
+            noise_limit_detected: false,
             watchdog_iterate: None,
             watchdog_delta: None,
             watchdog_trial_iter: 0,
@@ -1149,11 +1186,95 @@ impl BacktrackingLineSearch {
         // acceptor's `make_orig_progress_check` snapshot among them — always
         // see zero.
         self.acceptor.set_theta_roundoff_floor(theta_floor);
-        let result = self.run_alpha_loop_inner(
-            data, cq, delta, alpha_init, alpha_dual, nlp, search_dir, theta, phi, d_phi, skip_first,
+        self.noise_limit_detected = false;
+        let mut search_dir = search_dir;
+        let mut result = self.run_alpha_loop_inner(
+            data,
+            cq,
+            delta,
+            alpha_init,
+            alpha_dual,
+            nlp,
+            search_dir.as_deref_mut(),
+            theta,
+            phi,
+            d_phi,
+            skip_first,
         );
+        // gh#1016: the loop was about to accept a step too small to move the
+        // iterate (and declined to, before touching the acceptor). That is
+        // not progress, it is the objective's noise floor swallowing the
+        // whole backtracking sweep (each halving changes `phi` by round-off,
+        // none of it a decrease). Say so and run the loop once more, now
+        // allowed to judge a trial by the slope of `phi` instead of its
+        // value. Once per solve: after the flag is set a null step is just a
+        // step.
+        if self.noise_limit_detected {
+            self.objective_noise_limited = true;
+            tracing::info!(
+                phi,
+                d_phi,
+                "line search was about to accept a step too small to move the iterate: the \
+                 objective's evaluation noise exceeds the decrease it can resolve; judging further trials \
+                 by the slope of the barrier objective as well (gh#1016)"
+            );
+            self.noise_limit_detected = false;
+            result = self.run_alpha_loop_inner(
+                data,
+                cq,
+                delta,
+                alpha_init,
+                alpha_dual,
+                nlp,
+                search_dir.as_deref_mut(),
+                theta,
+                phi,
+                d_phi,
+                skip_first,
+            );
+        }
         self.acceptor.set_theta_roundoff_floor(0.0);
         result
+    }
+
+    /// True iff a step of length `alpha` along `delta` is smaller than the
+    /// resolution of the iterate it is added to — `alpha * ||dx||_inf` at or
+    /// below a few ulps of `||x||_inf`, so `x + alpha*dx` rounds back to `x`
+    /// in the coordinate that moves most.
+    fn is_null_step(curr: &IteratesVector, delta: &IteratesVector, alpha: Number) -> bool {
+        let moved = alpha * delta.x.amax().max(delta.s.amax());
+        let scale = curr.x.amax().max(curr.s.amax());
+        scale > 0.0 && moved <= 4.0 * Number::EPSILON * scale
+    }
+
+    /// gh#1016: the approximate-Wolfe override. See
+    /// [`Self::objective_noise_limited`]. The trial has been staged in
+    /// `data.trial`; costs one objective-gradient evaluation.
+    fn passes_noise_limited_wolfe(
+        &self,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+        theta: Number,
+        theta_trial: Number,
+        phi: Number,
+        d_phi: Number,
+        phi_trial: Number,
+    ) -> bool {
+        let band = 10.0 * Number::EPSILON;
+        if !self.objective_noise_limited
+            || self.in_watchdog
+            || !(d_phi < 0.0)
+            || theta.max(theta_trial) > band
+            || (phi_trial - phi).abs() > WOLFE_EPS * phi.abs().max(1.0)
+        {
+            return false;
+        }
+        let cq_ref = cq.borrow();
+        let d_phi_trial = cq_ref.trial_grad_barrier_obj_x().dot(&*delta.x)
+            + cq_ref.trial_grad_barrier_obj_s().dot(&*delta.s);
+        d_phi_trial.is_finite()
+            && d_phi_trial >= WOLFE_SIGMA * d_phi
+            && d_phi_trial <= (2.0 * WOLFE_DELTA - 1.0) * d_phi
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1291,7 +1412,7 @@ impl BacktrackingLineSearch {
             // branch and the acceptor decides as before.
             let force_accept =
                 self.accept_after_max_steps >= 0 && trial >= self.accept_after_max_steps;
-            let decision = if force_accept {
+            let mut decision = if force_accept {
                 self.in_soft_resto_phase = false;
                 self.soft_resto_counter = 0;
                 self.acceptor.reset();
@@ -1300,6 +1421,42 @@ impl BacktrackingLineSearch {
                 self.acceptor
                     .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial)
             };
+            if decision == AcceptDecision::Reject
+                && self.passes_noise_limited_wolfe(
+                    cq,
+                    delta,
+                    theta,
+                    theta_trial,
+                    phi,
+                    d_phi,
+                    phi_trial,
+                )
+            {
+                decision = AcceptDecision::Accept;
+            }
+            // gh#1016: a null step is not an acceptance. Checked before the
+            // acceptor hears about the step, so the re-run in
+            // `run_alpha_loop` starts from an untouched filter. Models with
+            // constraint rows are excluded: the slope test reads `phi` alone,
+            // and with constraints the multiplier estimate the step leaves
+            // behind is not what the slope vouches for (the L-BFGS leg of
+            // `eigena2` ends `Solved_To_Acceptable_Level` with an unscaled
+            // dual residual of 25 against `dual_inf_tol = 1`).
+            if decision == AcceptDecision::Accept
+                && self.objective_noise_wolfe
+                && !self.objective_noise_limited
+                && !self.in_watchdog
+                && d_phi < 0.0
+                && Self::is_null_step(&curr, delta, alpha)
+                && cq.borrow().constraint_violation_rows() == 0
+            {
+                self.noise_limit_detected = true;
+                return AlphaResult::Failed {
+                    n_steps: trial,
+                    last_alpha: alpha,
+                    evaluation_error,
+                };
+            }
             if decision == AcceptDecision::Accept {
                 let mode = self
                     .acceptor

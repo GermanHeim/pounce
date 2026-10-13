@@ -949,6 +949,11 @@ pub struct LineSearchOptions {
     /// see `BacktrackingLineSearch::run_filter_line_search` and
     /// `IpoptCq::theta_evaluation_noise_floor`.
     pub filter_theta_roundoff_retry: bool,
+    /// `objective_noise_wolfe` (gh#1016) — whether a solve whose line search
+    /// has accepted a numerical null step also accepts trials by the
+    /// approximate-Wolfe slope test. **On by default**; see
+    /// `BacktrackingLineSearch::objective_noise_wolfe`.
+    pub objective_noise_wolfe: bool,
 
     // Penalty-acceptor constants baked onto the assembled
     // [`crate::line_search::penalty_acceptor::PenaltyLsAcceptor`] (only
@@ -1006,6 +1011,7 @@ impl Default for LineSearchOptions {
             max_filter_resets: 5,
             filter_reset_trigger: 5,
             filter_theta_roundoff_retry: true,
+            objective_noise_wolfe: true,
             nu_init: 1e-6,
             nu_inc: 1e-4,
             rho: 0.1,
@@ -1610,6 +1616,7 @@ impl AlgorithmBuilder {
         let mut line_search = BacktrackingLineSearch::new(acceptor);
         line_search.alpha_red_factor = self.line_search.alpha_red_factor;
         line_search.filter_theta_roundoff_retry = self.line_search.filter_theta_roundoff_retry;
+        line_search.objective_noise_wolfe = self.line_search.objective_noise_wolfe;
         // Resolve `None` against the Hessian mode; see the field's doc
         // for the measurement behind the split (gh#818).
         line_search.alpha_red_factor_min =

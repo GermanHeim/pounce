@@ -448,3 +448,27 @@ fn issue_945_the_primal_point_matches_the_closed_form() {
          reported 3.6e-5 at the Error_In_Step_Computation exit"
     );
 }
+
+/// gh#1016's noise-limited fallback is scoped to models with no constraint
+/// rows. This model has one, so `objective_noise_wolfe` must change nothing
+/// here — same verdict, same iteration count. The review of that fix found
+/// the fallback turning `eigena2` (L-BFGS leg, equality constrained) into an
+/// acceptable-level exit with an unscaled dual residual of 25.
+#[test]
+fn issue_1016_fallback_does_not_reach_a_constrained_model() {
+    let n = 10;
+    let cond = 3.1622776601683795e3;
+    let run = |wolfe: &str| {
+        let p = EqualityConstrainedQp::new(n, cond);
+        let sol = Nlp::new(EqualityConstrainedQp::new(n, cond))
+            .x0(&vec![0.0; n])
+            .constraint_bounds(&[p.s], &[p.s])
+            .option_int("max_iter", 1000)
+            .option_int("print_level", 0)
+            .option_str("hessian_approximation", "limited-memory")
+            .option_str("objective_noise_wolfe", wolfe)
+            .solve();
+        (sol.success, sol.stats.iteration_count)
+    };
+    assert_eq!(run("yes"), run("no"));
+}

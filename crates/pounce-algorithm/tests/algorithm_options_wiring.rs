@@ -229,6 +229,26 @@ fn the_gh945_roundoff_retry_reaches_the_assembled_line_search() {
     );
 }
 
+/// gh#1016's approximate-Wolfe fallback: registered default `yes`, and the
+/// switch has to reach the assembled line search, which is what reads it.
+#[test]
+fn the_gh1016_objective_noise_wolfe_switch_reaches_the_assembled_line_search() {
+    assert!(builder_from(|_| {}).line_search.objective_noise_wolfe);
+    let off = builder_from(|app| {
+        app.options_mut()
+            .set_string_value("objective_noise_wolfe", "no", true, false)
+            .unwrap();
+    });
+    assert!(!off.line_search.objective_noise_wolfe);
+    assert!(!off.build().line_search.objective_noise_wolfe);
+    assert!(
+        AlgorithmBuilder::new()
+            .build()
+            .line_search
+            .objective_noise_wolfe
+    );
+}
+
 #[test]
 fn refinement_constants_default_match_registered() {
     let r = builder_from(|_| {}).refinement;

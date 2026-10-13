@@ -96,6 +96,26 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
+  (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
+  `n = 10…40` ran 3000 iterations and, at `n = 40`, returned
+  `Maximum_Iterations_Exceeded`; the exact-Hessian arm solves it in one. The
+  objective's evaluation noise there (about `5e-12`, from cancelling terms of
+  order `1e3`) is seven orders above the `10·eps·|f|` slack of the Armijo test,
+  so once the true decrease per step fell below it no trial passed until
+  `alpha` was small enough that `x + alpha·d == x`. That null step produced no
+  curvature pair, the L-BFGS history was discarded, and the next direction was
+  `-g` against a stiff `Q` again. The line search now recognises a null step it is
+  about to accept, sets a per-solve flag, and re-runs that search with the
+  Hager–Zhang approximate-Wolfe test as an extra way to accept a trial (slope
+  of `phi` along the step at the trial point, from the gradient, which has no
+  such noise floor). The three cases now end `Solve_Succeeded` in 86 / 390 /
+  479 iterations. Only models with no constraint rows are eligible: with
+  constraints the slope test does not vouch for the multipliers (see the PR
+  review: `eigena2` on the L-BFGS leg reached an acceptable-level exit with an
+  unscaled dual residual of 25). Pinned by
+  `pounce-algorithm/tests/issue_1016_lbfgs_dense_quadratic.rs`. New option
+  `objective_noise_wolfe` (default `yes`) switches the fallback off.
 - **`pounce.jax.solve` and `JaxProblem.solve` compose with `jvp`, `jacfwd`,
   `hessian` and `vmap` (gh#1010).** Both were `custom_vjp`s around a
   `pure_callback` with no batching rule, so only `jit`, `grad` and `jacrev`
