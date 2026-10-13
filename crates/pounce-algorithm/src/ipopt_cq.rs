@@ -1816,6 +1816,70 @@ impl IpoptCalculatedQuantities {
         rc_from(tmp)
     }
 
+    /// [`Self::curr_grad_barrier_obj_x`] at the **trial** iterate. One
+    /// objective-gradient evaluation. Used only by the line search's
+    /// noise-limited acceptance test (gh#1016), which needs the slope of
+    /// `phi` along the step at the trial point.
+    pub fn trial_grad_barrier_obj_x(&self) -> Rc<dyn Vector> {
+        let iv = self.trial_iv();
+        let mu = self.data.borrow().curr_mu;
+        let s_l = self.trial_slack_x_l();
+        let s_u = self.trial_slack_x_u();
+
+        let mut inv_s_l = s_l.make_new();
+        inv_s_l.copy(&*s_l);
+        inv_s_l.element_wise_reciprocal();
+        let mut inv_s_u = s_u.make_new();
+        inv_s_u.copy(&*s_u);
+        inv_s_u.element_wise_reciprocal();
+
+        let grad_f = self.trial_grad_f();
+        let mut tmp = iv.x.make_new();
+        tmp.copy(&*grad_f);
+        let nlp = self.nlp.borrow();
+        nlp.px_l().mult_vector(-mu, &*inv_s_l, 1.0, &mut *tmp);
+        nlp.px_u().mult_vector(mu, &*inv_s_u, 1.0, &mut *tmp);
+
+        if self.kappa_d > 0.0 {
+            let di = self.damping_indicators();
+            nlp.px_l()
+                .mult_vector(self.kappa_d * mu, &*di.x_l, 1.0, &mut *tmp);
+            nlp.px_u()
+                .mult_vector(-self.kappa_d * mu, &*di.x_u, 1.0, &mut *tmp);
+        }
+        rc_from(tmp)
+    }
+
+    /// [`Self::curr_grad_barrier_obj_s`] at the **trial** iterate.
+    pub fn trial_grad_barrier_obj_s(&self) -> Rc<dyn Vector> {
+        let iv = self.trial_iv();
+        let mu = self.data.borrow().curr_mu;
+        let s_l = self.trial_slack_s_l();
+        let s_u = self.trial_slack_s_u();
+
+        let mut inv_s_l = s_l.make_new();
+        inv_s_l.copy(&*s_l);
+        inv_s_l.element_wise_reciprocal();
+        let mut inv_s_u = s_u.make_new();
+        inv_s_u.copy(&*s_u);
+        inv_s_u.element_wise_reciprocal();
+
+        let mut tmp = iv.s.make_new();
+        tmp.set(0.0);
+        let nlp = self.nlp.borrow();
+        nlp.pd_l().mult_vector(-mu, &*inv_s_l, 1.0, &mut *tmp);
+        nlp.pd_u().mult_vector(mu, &*inv_s_u, 1.0, &mut *tmp);
+
+        if self.kappa_d > 0.0 {
+            let di = self.damping_indicators();
+            nlp.pd_l()
+                .mult_vector(self.kappa_d * mu, &*di.s_l, 1.0, &mut *tmp);
+            nlp.pd_u()
+                .mult_vector(-self.kappa_d * mu, &*di.s_u, 1.0, &mut *tmp);
+        }
+        rc_from(tmp)
+    }
+
     /// Gradient of the barrier objective wrt `s`:
     ///   ∇_s φ = − μ · [P_L · (1/s_s_L) − P_U · (1/s_s_U)] + damping
     pub fn curr_grad_barrier_obj_s(&self) -> Rc<dyn Vector> {

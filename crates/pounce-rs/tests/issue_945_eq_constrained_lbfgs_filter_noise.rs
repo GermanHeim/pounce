@@ -180,6 +180,12 @@ fn solve_with(n: usize, cond: f64, max_iter: i32, retry: Option<&str>) -> Outcom
         .option_str("hessian_approximation", "limited-memory");
     if let Some(r) = retry {
         nlp = nlp.option_str("filter_theta_roundoff_retry", r);
+        // gh#1016's approximate-Wolfe fallback is a second mechanism that
+        // also repairs this model; "the retry off" has to mean the pre-fix
+        // behaviour of both, or these tests stop isolating the retry.
+        if r == "no" {
+            nlp = nlp.option_str("objective_noise_wolfe", "no");
+        }
     }
     let sol = nlp.solve();
     Outcome {
@@ -366,6 +372,9 @@ fn issue_945_the_failure_rate_falls_across_the_family() {
                 .option_int("print_level", 0)
                 .option_str("hessian_approximation", "limited-memory")
                 .option_str("filter_theta_roundoff_retry", retry)
+                // gh#1016's fallback also repairs these; hold it off in both
+                // arms so the count isolates the gh#945 retry.
+                .option_str("objective_noise_wolfe", "no")
                 .solve()
                 .success
             })

@@ -7504,6 +7504,10 @@ impl IpoptApplication {
         {
             builder.line_search.filter_theta_roundoff_retry = v;
         }
+        // `objective_noise_wolfe` (gh#1016).
+        if let Ok((v, true)) = self.options.get_bool_value("objective_noise_wolfe", "") {
+            builder.line_search.objective_noise_wolfe = v;
+        }
         // Penalty line-search constants (#551), consumed by
         // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
         // / `cg-penalty` paths). The acceptor implements ν and the
