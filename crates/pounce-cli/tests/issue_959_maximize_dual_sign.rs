@@ -383,3 +383,18 @@ fn the_nlp_and_convex_arms_agree_on_one_file() {
         assert_close(&nlp.json, &auto.json, &format!("{fx}: nlp vs auto lambda"));
     }
 }
+
+/// gh#1014 — the same defect reported from the other side: two maximized
+/// models with one row, `x + y == 4`, take different arms under `auto` (the
+/// concave quadratic goes to the convex QP arm, the power objective to the NLP
+/// arm) and the 0.12.0 `.sol` carried opposite signs for them. Ipopt 3.14.19
+/// writes `-lambda` for both, with `lambda = -0.4 (y/x)^0.6` for the power model
+/// and `+2.5` for the quadratic: marginals `+0.5101698` and `-2.5`. Values are
+/// the analytic ones from the issue, not pounce's own output.
+#[test]
+fn a_maximized_power_and_quadratic_objective_share_one_sign_rule() {
+    let power = solve("max_power_eq.nl", "auto", "i1014_power");
+    assert_close(&power.sol, &[0.5101698], "power .sol marginal");
+    let quad = solve("max_quadratic_eq.nl", "auto", "i1014_quad");
+    assert_close(&quad.sol, &[-2.5], "quadratic .sol marginal");
+}
