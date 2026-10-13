@@ -285,9 +285,10 @@ pub struct BacktrackingLineSearch {
     /// passes [`WOLFE_SIGMA`]/[`WOLFE_DELTA`] (the gradient carries no such
     /// noise floor). Never set on a solve whose line searches behave.
     objective_noise_limited: bool,
-    /// Set by the α-loop when the step it just accepted was a numerical null
-    /// step; read by [`Self::run_alpha_loop`].
-    last_accept_was_null_step: bool,
+    /// Set by the α-loop, instead of accepting, when the step it was about to
+    /// accept was a numerical null step on a model with no constraint rows;
+    /// read by [`Self::run_alpha_loop`], which then re-runs the loop.
+    noise_limit_detected: bool,
     /// Snapshot of the iterate at watchdog activation.
     watchdog_iterate: Option<IteratesVector>,
     /// Snapshot of the search direction at watchdog activation.
@@ -413,7 +414,7 @@ impl BacktrackingLineSearch {
             max_trials: 50,
             in_watchdog: false,
             objective_noise_limited: false,
-            last_accept_was_null_step: false,
+            noise_limit_detected: false,
             watchdog_iterate: None,
             watchdog_delta: None,
             watchdog_trial_iter: 0,
@@ -1185,8 +1186,7 @@ impl BacktrackingLineSearch {
         // acceptor's `make_orig_progress_check` snapshot among them — always
         // see zero.
         self.acceptor.set_theta_roundoff_floor(theta_floor);
-        self.last_accept_was_null_step = false;
-        let noise_limited_before = self.objective_noise_limited;
+        self.noise_limit_detected = false;
         let mut search_dir = search_dir;
         let mut result = self.run_alpha_loop_inner(
             data,
@@ -1201,30 +1201,24 @@ impl BacktrackingLineSearch {
             d_phi,
             skip_first,
         );
-        // gh#1016: the loop "accepted" a step too small to move the iterate.
-        // That is not progress, it is the objective's noise floor swallowing
-        // the whole backtracking sweep (each halving changes `phi` by
-        // round-off, none of it a decrease). Say so and run the loop once
-        // more, now allowed to judge a trial by the slope of `phi` instead of
-        // its value. Once per solve: after the flag is set a null step is
-        // just a step.
-        if self.last_accept_was_null_step
-            && self.objective_noise_wolfe
-            && !noise_limited_before
-            && !self.objective_noise_limited
-            && !self.in_watchdog
-            && d_phi < 0.0
-            && matches!(result, AlphaResult::Accepted { .. })
-        {
+        // gh#1016: the loop was about to accept a step too small to move the
+        // iterate (and declined to, before touching the acceptor). That is
+        // not progress, it is the objective's noise floor swallowing the
+        // whole backtracking sweep (each halving changes `phi` by round-off,
+        // none of it a decrease). Say so and run the loop once more, now
+        // allowed to judge a trial by the slope of `phi` instead of its
+        // value. Once per solve: after the flag is set a null step is just a
+        // step.
+        if self.noise_limit_detected {
             self.objective_noise_limited = true;
             tracing::info!(
                 phi,
                 d_phi,
-                "line search accepted a step too small to move the iterate: the objective's \
-                 evaluation noise exceeds the decrease it can resolve; judging further trials \
+                "line search was about to accept a step too small to move the iterate: the \
+                 objective's evaluation noise exceeds the decrease it can resolve; judging further trials \
                  by the slope of the barrier objective as well (gh#1016)"
             );
-            self.last_accept_was_null_step = false;
+            self.noise_limit_detected = false;
             result = self.run_alpha_loop_inner(
                 data,
                 cq,
@@ -1440,8 +1434,30 @@ impl BacktrackingLineSearch {
             {
                 decision = AcceptDecision::Accept;
             }
+            // gh#1016: a null step is not an acceptance. Checked before the
+            // acceptor hears about the step, so the re-run in
+            // `run_alpha_loop` starts from an untouched filter. Models with
+            // constraint rows are excluded: the slope test reads `phi` alone,
+            // and with constraints the multiplier estimate the step leaves
+            // behind is not what the slope vouches for (the L-BFGS leg of
+            // `eigena2` ends `Solved_To_Acceptable_Level` with an unscaled
+            // dual residual of 25 against `dual_inf_tol = 1`).
+            if decision == AcceptDecision::Accept
+                && self.objective_noise_wolfe
+                && !self.objective_noise_limited
+                && !self.in_watchdog
+                && d_phi < 0.0
+                && Self::is_null_step(&curr, delta, alpha)
+                && cq.borrow().constraint_violation_rows() == 0
+            {
+                self.noise_limit_detected = true;
+                return AlphaResult::Failed {
+                    n_steps: trial,
+                    last_alpha: alpha,
+                    evaluation_error,
+                };
+            }
             if decision == AcceptDecision::Accept {
-                self.last_accept_was_null_step = Self::is_null_step(&curr, delta, alpha);
                 let mode = self
                     .acceptor
                     .update_for_next_iteration(alpha, theta, phi, d_phi, phi_trial);

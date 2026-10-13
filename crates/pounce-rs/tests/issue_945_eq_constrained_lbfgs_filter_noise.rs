@@ -180,12 +180,6 @@ fn solve_with(n: usize, cond: f64, max_iter: i32, retry: Option<&str>) -> Outcom
         .option_str("hessian_approximation", "limited-memory");
     if let Some(r) = retry {
         nlp = nlp.option_str("filter_theta_roundoff_retry", r);
-        // gh#1016's approximate-Wolfe fallback is a second mechanism that
-        // also repairs this model; "the retry off" has to mean the pre-fix
-        // behaviour of both, or these tests stop isolating the retry.
-        if r == "no" {
-            nlp = nlp.option_str("objective_noise_wolfe", "no");
-        }
     }
     let sol = nlp.solve();
     Outcome {
@@ -372,9 +366,6 @@ fn issue_945_the_failure_rate_falls_across_the_family() {
                 .option_int("print_level", 0)
                 .option_str("hessian_approximation", "limited-memory")
                 .option_str("filter_theta_roundoff_retry", retry)
-                // gh#1016's fallback also repairs these; hold it off in both
-                // arms so the count isolates the gh#945 retry.
-                .option_str("objective_noise_wolfe", "no")
                 .solve()
                 .success
             })
@@ -456,4 +447,28 @@ fn issue_945_the_primal_point_matches_the_closed_form() {
         "missed the closed-form optimum by {rel:.3e} relative; gh#945 \
          reported 3.6e-5 at the Error_In_Step_Computation exit"
     );
+}
+
+/// gh#1016's noise-limited fallback is scoped to models with no constraint
+/// rows. This model has one, so `objective_noise_wolfe` must change nothing
+/// here — same verdict, same iteration count. The review of that fix found
+/// the fallback turning `eigena2` (L-BFGS leg, equality constrained) into an
+/// acceptable-level exit with an unscaled dual residual of 25.
+#[test]
+fn issue_1016_fallback_does_not_reach_a_constrained_model() {
+    let n = 10;
+    let cond = 3.1622776601683795e3;
+    let run = |wolfe: &str| {
+        let p = EqualityConstrainedQp::new(n, cond);
+        let sol = Nlp::new(EqualityConstrainedQp::new(n, cond))
+            .x0(&vec![0.0; n])
+            .constraint_bounds(&[p.s], &[p.s])
+            .option_int("max_iter", 1000)
+            .option_int("print_level", 0)
+            .option_str("hessian_approximation", "limited-memory")
+            .option_str("objective_noise_wolfe", wolfe)
+            .solve();
+        (sol.success, sol.stats.iteration_count)
+    };
+    assert_eq!(run("yes"), run("no"));
 }
