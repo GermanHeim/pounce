@@ -389,6 +389,52 @@ impl SqpAlgorithm {
             let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
             let f_curr = f_cached.take().unwrap_or_else(|| nlp.eval_f(&iter.x));
             let jac_c = nlp.eval_jac_c(&iter.x);
+            // KKT check uses the current iterate's evaluations.
+            let kkt = check_kkt(
+                n, m, &iter, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, &jac_c,
+            );
+            final_stationarity = kkt.stationarity;
+            final_constr_viol = kkt.constr_viol;
+
+            // Fired BEFORE this iteration's Lagrangian Hessian is evaluated, as
+            // on the interior-point arm (callback after acceptance, before the
+            // next Hessian): a caller that builds `eval_h` from the iterate it
+            // read in the callback (gh#1015) must see THIS iterate, not the
+            // previous one.
+            if let Some(hook) = self.iteration_hook.as_mut() {
+                let (p_inf, alpha) = prev_step
+                    .as_ref()
+                    .map_or((0.0, 0.0), |s| (s.p_inf, s.alpha));
+                let keep_going = hook(&SqpIterationInfo {
+                    iter: outer,
+                    obj: f_curr,
+                    inf_pr: kkt.constr_viol,
+                    inf_du: kkt.stationarity,
+                    p_inf,
+                    alpha,
+                    x: &iter.x,
+                    lambda_g: &iter.lambda_g,
+                    lambda_x: &iter.lambda_x,
+                    c_vals: &c_vals,
+                });
+                if !keep_going {
+                    self.iterates = Some(iter.clone());
+                    return Ok(SqpResult {
+                        x: iter.x,
+                        lambda_g: iter.lambda_g,
+                        lambda_x: iter.lambda_x,
+                        obj: f_curr,
+                        status: SqpStatus::UserRequestedStop,
+                        n_iter: outer,
+                        n_qp_solves,
+                        n_qp_working_set_changes,
+                        final_stationarity,
+                        final_constr_viol,
+                        working_set: iter.working,
+                    });
+                }
+            }
+
             let hess_lag = match self.opts.hessian {
                 SqpHessianSource::Exact => nlp.eval_hess_lag(&iter.x, &iter.lambda_g),
                 SqpHessianSource::DampedBfgs => {
@@ -415,13 +461,6 @@ impl SqpAlgorithm {
             // iteration can build its curvature pair at a fixed
             // multiplier. See `curvature_pair`.
             prev_point = Some((iter.x.clone(), grad_f.clone(), jac_c.clone()));
-
-            // KKT check uses the current iterate's evaluations.
-            let kkt = check_kkt(
-                n, m, &iter, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, &jac_c,
-            );
-            final_stationarity = kkt.stationarity;
-            final_constr_viol = kkt.constr_viol;
 
             // Non-finite residuals mean the iterate itself is garbage, and
             // every gate below this point — the convergence test, the
@@ -494,40 +533,6 @@ impl SqpAlgorithm {
                     iter.x.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
                     nu,
                 );
-            }
-
-            if let Some(hook) = self.iteration_hook.as_mut() {
-                let (p_inf, alpha) = prev_step
-                    .as_ref()
-                    .map_or((0.0, 0.0), |s| (s.p_inf, s.alpha));
-                let keep_going = hook(&SqpIterationInfo {
-                    iter: outer,
-                    obj: f_curr,
-                    inf_pr: kkt.constr_viol,
-                    inf_du: kkt.stationarity,
-                    p_inf,
-                    alpha,
-                    x: &iter.x,
-                    lambda_g: &iter.lambda_g,
-                    lambda_x: &iter.lambda_x,
-                    c_vals: &c_vals,
-                });
-                if !keep_going {
-                    self.iterates = Some(iter.clone());
-                    return Ok(SqpResult {
-                        x: iter.x,
-                        lambda_g: iter.lambda_g,
-                        lambda_x: iter.lambda_x,
-                        obj: f_curr,
-                        status: SqpStatus::UserRequestedStop,
-                        n_iter: outer,
-                        n_qp_solves,
-                        n_qp_working_set_changes,
-                        final_stationarity,
-                        final_constr_viol,
-                        working_set: iter.working,
-                    });
-                }
             }
 
             // `sqp_tol` and `sqp_dual_inf_tol` are both registered and both

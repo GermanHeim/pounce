@@ -31,6 +31,8 @@ struct Fire {
 
 thread_local! {
     static FIRES: RefCell<Vec<Fire>> = const { RefCell::new(Vec::new()) };
+    /// `(fires seen so far, x handed to eval_h)` at each Hessian evaluation.
+    static HESS_CALLS: RefCell<Vec<(usize, [Number; N])>> = const { RefCell::new(Vec::new()) };
     static STOP_AT: RefCell<Option<Index>> = const { RefCell::new(None) };
 }
 
@@ -112,6 +114,44 @@ unsafe extern "C" fn ev_jac_g(
     }
 }
 
+/// Exact Lagrangian Hessian of the Rosenbrock + circle problem; records the
+/// callback state it was called under.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn ev_h(
+    _n: Index,
+    x: *const Number,
+    _new_x: Bool,
+    obj_factor: Number,
+    _m: Index,
+    lambda: *const Number,
+    _new_lambda: Bool,
+    _nele_hess: Index,
+    i_row: *mut Index,
+    j_col: *mut Index,
+    values: *mut Number,
+    _u: *mut c_void,
+) -> Bool {
+    unsafe {
+        if values.is_null() {
+            let r = std::slice::from_raw_parts_mut(i_row, 3);
+            let c = std::slice::from_raw_parts_mut(j_col, 3);
+            (r[0], c[0]) = (0, 0);
+            (r[1], c[1]) = (1, 0);
+            (r[2], c[2]) = (1, 1);
+            return 1;
+        }
+        let x = std::slice::from_raw_parts(x, N);
+        let lam = *lambda;
+        let v = std::slice::from_raw_parts_mut(values, 3);
+        v[0] = obj_factor * (2.0 - 400.0 * (x[1] - 3.0 * x[0] * x[0])) + 2.0 * lam;
+        v[1] = obj_factor * (-400.0 * x[0]);
+        v[2] = obj_factor * 200.0 + 2.0 * lam;
+        let fires = FIRES.with(|f| f.borrow().len());
+        HESS_CALLS.with(|h| h.borrow_mut().push((fires, [x[0], x[1]])));
+        1
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn on_iter(
     _alg_mod: Index,
@@ -165,7 +205,12 @@ struct Outcome {
 }
 
 fn solve(x_l: [Number; N], x_u: [Number; N], stop_at: Option<Index>) -> Outcome {
+    solve_with(x_l, x_u, stop_at, false)
+}
+
+fn solve_with(x_l: [Number; N], x_u: [Number; N], stop_at: Option<Index>, exact: bool) -> Outcome {
     FIRES.with(|v| v.borrow_mut().clear());
+    HESS_CALLS.with(|v| v.borrow_mut().clear());
     STOP_AT.with(|s| *s.borrow_mut() = stop_at);
     unsafe {
         let g_l = [-2.0e19 as Number];
@@ -178,13 +223,13 @@ fn solve(x_l: [Number; N], x_u: [Number; N], stop_at: Option<Index>) -> Outcome 
             g_l.as_ptr(),
             g_u.as_ptr(),
             N as Index,
-            0,
+            if exact { 3 } else { 0 },
             0,
             Some(ev_f),
             Some(ev_g),
             Some(ev_grad_f),
             Some(ev_jac_g),
-            None,
+            if exact { Some(ev_h) } else { None },
         );
         assert!(!prob.is_null(), "CreateIpoptProblem returned NULL");
         let s = |k: &str, v: &str| {
@@ -196,7 +241,9 @@ fn solve(x_l: [Number; N], x_u: [Number; N], stop_at: Option<Index>) -> Outcome 
             );
         };
         s("algorithm", "active-set-sqp");
-        s("hessian_approximation", "limited-memory");
+        if !exact {
+            s("hessian_approximation", "limited-memory");
+        }
         let k = CString::new("print_level").unwrap();
         assert_ne!(AddIpoptIntOption(prob, k.as_ptr() as *mut _, 0), 0);
         assert_ne!(SetIntermediateCallback(prob, Some(on_iter)), 0);
@@ -299,4 +346,26 @@ fn false_from_the_callback_stops_the_sqp_solve() {
 fn no_iterate_outside_the_callback() {
     let _ = solve([-5.0; N], [0.5, 5.0], None);
     assert!(!pounce_algorithm::intermediate::is_active());
+}
+
+/// The point of the feature (gh#1015): a caller builds the Lagrangian Hessian
+/// from the iterate it read in the callback. So the callback for iteration `k`
+/// must have fired BEFORE `eval_h` is asked for iteration `k` — otherwise the
+/// stashed duals are a step stale. Every `eval_h` at the iterate the most
+/// recent fire reported must see that fire already recorded.
+#[test]
+fn the_callback_fires_before_the_hessian_of_the_same_iterate() {
+    let o = solve_with([-5.0; N], [0.5, 5.0], None, true);
+    assert_eq!(o.status, 0, "expected Solve_Succeeded");
+    let calls = HESS_CALLS.with(|h| h.borrow().clone());
+    assert!(!calls.is_empty(), "eval_h never called");
+    for (fires_before, x) in calls {
+        assert!(fires_before > 0, "eval_h ran before the first callback");
+        let last = &o.fires[fires_before - 1];
+        assert_eq!(
+            last.x, x,
+            "eval_h at {x:?} but the latest callback reported {:?}",
+            last.x
+        );
+    }
 }
