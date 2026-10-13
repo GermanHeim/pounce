@@ -3354,6 +3354,46 @@ impl IpoptApplication {
             }
         }
         let warm_working_set_applied = warm.as_ref().is_some_and(|w| w.working.is_some());
+        // gh#1015: the user's `intermediate_callback`, once per iteration,
+        // with `GetIpoptCurrentIterate` answering from the SQP iterate. The
+        // snapshot is built before the callback runs because the callback
+        // holds the TNLP; nothing in it may call back into the user's
+        // `eval_*`.
+        {
+            let hook_nlp = Rc::clone(&nlp_rc);
+            let hook_tnlp = Rc::clone(&tnlp);
+            let fixed_var_duals = self.reports_fixed_var_duals();
+            alg.set_iteration_hook(Box::new(move |info| {
+                let snapshot = sqp_user_iterate(
+                    &hook_nlp,
+                    info.x,
+                    info.lambda_g,
+                    info.lambda_x,
+                    info.c_vals,
+                    fixed_var_duals,
+                );
+                let _guard = crate::intermediate::UserIterateGuard::install(snapshot);
+                let stats = pounce_nlp::tnlp::IterStats {
+                    mode: pounce_nlp::return_codes::AlgorithmMode::RegularMode,
+                    iter: info.iter as Index,
+                    obj_value: info.obj,
+                    inf_pr: info.inf_pr,
+                    inf_du: info.inf_du,
+                    // No barrier, no regularisation, no dual step length.
+                    mu: 0.0,
+                    d_norm: info.p_inf,
+                    regularization_size: 0.0,
+                    alpha_du: 0.0,
+                    alpha_pr: info.alpha,
+                    ls_trials: 0,
+                };
+                hook_tnlp.borrow_mut().intermediate_callback(
+                    stats,
+                    &pounce_nlp::tnlp::IpoptData::default(),
+                    &pounce_nlp::tnlp::IpoptCq::default(),
+                )
+            }));
+        }
         let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
             Err(e) => {
@@ -3523,6 +3563,10 @@ impl IpoptApplication {
             crate::sqp::SqpStatus::InvalidNumber => (
                 ApplicationReturnStatus::InvalidNumberDetected,
                 pounce_nlp::SolverReturn::InvalidNumberDetected,
+            ),
+            crate::sqp::SqpStatus::UserRequestedStop => (
+                ApplicationReturnStatus::UserRequestedStop,
+                pounce_nlp::SolverReturn::UserRequestedStop,
             ),
         };
 
@@ -8982,6 +9026,68 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
 /// regardless of which algorithm produced the iterate.
 ///
 /// Returns the user-space objective value on success.
+/// The SQP iterate in the user's index spaces, for the live-inspector window
+/// (gh#1015). Same conversions as [`finalize_via_sqp`] — `λ_x` is packed
+/// signed (`z_L − z_U`) and is split by sign — minus the user-callback
+/// evaluations: `g` comes from the loop's own `[c; d]` values.
+fn sqp_user_iterate(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    x: &[Number],
+    lambda_g: &[Number],
+    lambda_x: &[Number],
+    c_vals: &[Number],
+    fixed_var_duals: bool,
+) -> crate::intermediate::UserIterate {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    let nlp = nlp.borrow();
+    let n_alg = nlp.n() as usize;
+    let m_eq = nlp.m_eq() as usize;
+    let m_ineq = nlp.m_ineq() as usize;
+    let n_user = nlp.n_full_x() as usize;
+    let m_user = nlp.n_full_g() as usize;
+
+    let x_space = DenseVectorSpace::new(n_alg as Index);
+    let c_space = DenseVectorSpace::new(m_eq as Index);
+    let d_space = DenseVectorSpace::new(m_ineq as Index);
+    let dv = |space: &Rc<DenseVectorSpace>, v: &[Number]| {
+        let mut d = space.make_new_dense();
+        if !v.is_empty() {
+            d.set_values(v);
+        }
+        d
+    };
+
+    let x_full = nlp.finalize_solution_x(&dv(&x_space, x));
+    let zl: Vec<Number> = lambda_x.iter().map(|v| v.max(0.0)).collect();
+    let zu: Vec<Number> = lambda_x.iter().map(|v| (-v).max(0.0)).collect();
+    let mut z_l = nlp.finalize_solution_z_l(&dv(&x_space, &zl));
+    if z_l.is_empty() {
+        z_l = vec![0.0; n_user];
+    }
+    let mut z_u = nlp.finalize_solution_z_u(&dv(&x_space, &zu));
+    if z_u.is_empty() {
+        z_u = vec![0.0; n_user];
+    }
+    let (y_c, y_d) = lambda_g.split_at(m_eq.min(lambda_g.len()));
+    let mut lambda = nlp.finalize_solution_lambda(&dv(&c_space, y_c), &dv(&d_space, y_d));
+    if lambda.is_empty() {
+        lambda = vec![0.0; m_user];
+    }
+    if fixed_var_duals {
+        nlp.complete_fixed_var_bound_multipliers(&x_full, &lambda, &mut z_l, &mut z_u);
+    }
+    let (c, d) = c_vals.split_at(m_eq.min(c_vals.len()));
+    let g = nlp.pack_g_for_user(&dv(&c_space, c), &dv(&d_space, d));
+    crate::intermediate::UserIterate {
+        x: x_full,
+        z_l,
+        z_u,
+        g,
+        lambda,
+    }
+}
+
 fn finalize_via_sqp(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     res: &crate::sqp::SqpResult,

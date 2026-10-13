@@ -69,6 +69,9 @@ pub enum SqpStatus {
     /// the condition is what stops it being reported as a *budget* problem
     /// the user could fix by raising `max_iter`.
     InvalidNumber,
+    /// The per-iteration hook (the user's `intermediate_callback`) returned
+    /// `false`. Maps to `User_Requested_Stop`.
+    UserRequestedStop,
 }
 
 impl fmt::Display for SqpStatus {
@@ -82,6 +85,7 @@ impl fmt::Display for SqpStatus {
             SqpStatus::QpIterationLimit => write!(f, "qp-iteration-limit"),
             SqpStatus::Unbounded => write!(f, "unbounded"),
             SqpStatus::InvalidNumber => write!(f, "invalid-number"),
+            SqpStatus::UserRequestedStop => write!(f, "user-requested-stop"),
         }
     }
 }

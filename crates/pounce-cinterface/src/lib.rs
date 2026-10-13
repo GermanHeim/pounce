@@ -883,6 +883,29 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
         if n != info.n || m != info.m {
             return FALSE;
         }
+        // Active-set SQP arm (gh#1015): no `IpoptData`/`IpoptCq`, so the
+        // callback window carries a materialised user-space iterate instead.
+        if let Some(r) = ip_intermediate::with_current_user_iterate(|it| {
+            let n_us = n as usize;
+            let m_us = m as usize;
+            let copy = |src: &[Number], dst: *mut Number, len: usize| -> bool {
+                if dst.is_null() || len == 0 {
+                    return true;
+                }
+                if src.len() != len {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
+                true
+            };
+            copy(&it.x, x, n_us)
+                && copy(&it.z_l, z_l, n_us)
+                && copy(&it.z_u, z_u, n_us)
+                && copy(&it.g, g, m_us)
+                && copy(&it.lambda, lambda, m_us)
+        }) {
+            return if r { TRUE } else { FALSE };
+        }
         let result = ip_intermediate::with_current(|ctx| {
             // Snapshot the iterate handles and release the `data` borrow
             // before touching `cq`: several `IpoptCq` accessors
