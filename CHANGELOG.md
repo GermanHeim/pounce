@@ -1122,6 +1122,14 @@ changes.
 
 ### Documentation
 
+- **`trf_minimize` does not require derivatives.** `jac` and `truth_jac` were
+  always optional (both are finite-differenced when omitted), but every
+  example passed both, and users read that as a requirement. The trust-region
+  filter quick start now solves the same problem both ways with
+  `basis="zero"`, says where finite differences are used, and gives the cost:
+  13 truth-model calls without derivatives against 8 with them, 7 iterations
+  each.
+
 - **`bound_relax_factor` × a large objective coefficient, and what
   `Solve_Succeeded` guarantees (gh#967).** `min C·x + y/C` over `x + y ≥ 1`,
   `x, y ∈ [0,1]` has optimum `1/C` at every `C`, and the NLP arm returns
