@@ -37,6 +37,13 @@ correction is still valid.
 
 ## Quick start
 
+**No derivatives are required.** `jac` (the glass-box gradient) and
+`truth_jac` (the black-box Jacobian) are both optional; leave either out and it
+is approximated by finite differences. The two examples below solve the same
+problem both ways.
+
+### Without derivatives (finite differences)
+
 ```python
 import numpy as np
 import pounce
@@ -50,11 +57,57 @@ res = pounce.trf_minimize(
     truth_model=lambda w: np.sin(w),
     w_index=[0],
     y_index=[1],
+    basis="zero",
+)
+print(res.x, res.fun, res.n_truth_evals)
+# [0.4787 0.4606] 0.52008 13
+```
+
+All you supply is the objective and something you can call. Finite
+differences are used in two places:
+
+- **The truth model.** With no `truth_jac`, \\(J_d(w_k)\\) is finite-differenced
+  at the sampling radius, which costs up to \\(n_w\\) extra truth-model calls
+  per iteration. That is why this run needs 13 evaluations instead of 8.
+- **The glass box.** With no `jac`, each subproblem goes to `pounce.minimize`
+  without a gradient, so `pounce.minimize` finite-differences `fun` (and any
+  `constraints` given without a `jac`). This costs only cheap glass-box calls,
+  not truth-model calls. `pounce.minimize` emits a one-time `UserWarning`
+  saying so; that warning is advice, not an error.
+
+`basis="zero"` (the default, written out here for clarity) makes the
+surrogate a plain linearization of the truth model, so it needs no extra
+sampling of its own. That makes it the right partner for a derivative-free
+call: the only per-iteration truth-model cost is the base point plus the
+finite-difference stencil.
+
+### With derivatives
+
+```python
+res = pounce.trf_minimize(
+    fun=lambda v: (v[1] - 1.0) ** 2 + v[0] ** 2,
+    x0=[0.5, 0.0],
+    truth_model=lambda w: np.sin(w),
+    w_index=[0],
+    y_index=[1],
+    basis="zero",
     jac=lambda v: np.array([2 * v[0], 2 * (v[1] - 1.0)]),
     truth_jac=lambda w: np.cos(w).reshape(1, 1),
 )
 print(res.x, res.fun, res.n_truth_evals)
+# [0.4787 0.4606] 0.52008 8
 ```
+
+Both runs take 7 iterations and reach the same point. The analytic run needs
+8 truth-model calls against 13. You can also mix the two: supply `jac` for the
+algebra you wrote yourself and omit `truth_jac` for a simulator that
+has no sensitivities. See
+[Supply `truth_jac` if you possibly can](#supply-truth_jac-if-you-possibly-can)
+for when supplying it pays off.
+
+The method still needs the black box to be smooth enough to *have* a
+derivative. Finite differences estimate the Jacobian; they do not remove the
+need for one. For a noisy truth model, see [Limitations](#limitations).
 
 You do **not** write the relationship `y = d(w)` into `constraints` yourself —
 `w_index` and `y_index` tell the method which variables they are, and it

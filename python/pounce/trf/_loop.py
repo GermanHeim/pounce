@@ -282,6 +282,10 @@ def trf_minimize(
     ----------
     fun, jac:
         Objective ``f(x)`` and its gradient, over the *full* variable vector.
+        ``jac`` is optional: when omitted, :func:`pounce.minimize`
+        finite-differences ``fun`` inside each subproblem. Neither ``jac`` nor
+        ``truth_jac`` is required, so the method runs on a black box with no
+        derivatives at all.
     x0:
         Starting point. Must include entries for both ``w`` and ``y``.
     truth_model:
@@ -293,7 +297,9 @@ def trf_minimize(
         subproblem; you should *not* include that relationship in
         ``constraints`` yourself.
     truth_jac:
-        Optional analytic ``J_d(w)`` of shape ``(n_y, n_w)``. Supplying it is
+        Optional analytic ``J_d(w)`` of shape ``(n_y, n_w)``. When omitted,
+        ``J_d`` is finite-differenced at the sampling radius, at a cost of
+        up to ``n_w`` extra truth-model calls per iteration. Supplying it is
         the single highest-value optimization available: it removes ``n_w``
         truth-model calls per iteration and makes the corrected surrogate
         exactly first-order accurate rather than accurate to the
