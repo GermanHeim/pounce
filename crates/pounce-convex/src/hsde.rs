@@ -213,15 +213,14 @@ pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 /// `2e-13` slack, rounding of `1e3`-sized terms, times `ẑ = 1.6e6` as a
 /// `3e-7` violation, and ground on for 90 iterations).
 ///
-/// `conflict` is [`crate::qp::parallel_row_conflict`]: the slack a row keeps
-/// at every point because a duplicate of it carries a conflicting right-hand
-/// side. That much of each product is excused, as the verdict excuses it
-/// (gh#1023).
+/// `z` is the multiplier each product is read with,
+/// [`crate::qp::ParallelRows::complementarity_multipliers`], as the verdict
+/// reads it: rows that repeat one another up to sign and round-off at their
+/// summed multiplier, an equality among them not at all (gh#1023, gh#1026).
 pub(crate) fn true_slack_complementarity(
     h: &[f64],
     gx: &[f64],
     gabs: &[f64],
-    conflict: &[f64],
     z: &[f64],
     tau: f64,
 ) -> f64 {
@@ -229,12 +228,11 @@ pub(crate) fn true_slack_complementarity(
         return f64::INFINITY;
     }
     let mut worst = 0.0_f64;
-    for ((((&hi, &gxi), &gai), &wi), &zi) in h.iter().zip(gx).zip(gabs).zip(conflict).zip(z) {
+    for (((&hi, &gxi), &gai), &zi) in h.iter().zip(gx).zip(gabs).zip(z) {
         let gxh = gxi / tau;
         let slack = hi - gxh;
         if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gai / tau) {
-            let zh = (zi / tau).abs();
-            worst = worst.max((slack.abs() - wi).max(0.0) * zh);
+            worst = worst.max((slack * zi / tau).abs());
         }
     }
     worst
@@ -570,7 +568,9 @@ where
     let tol_cost = opts.tol * unit_d;
     let tol_gap = opts.tol * unit_g;
     let tol_true_comp = opts.tol * crate::qp::report_units(prob).1;
-    let row_conflict = crate::qp::parallel_row_conflict(prob);
+    let parallel_rows = crate::qp::ParallelRows::new(prob);
+    let mut row_slack = vec![0.0; prob.h.len()];
+    let mut row_mag = vec![0.0; prob.h.len()];
     // The relative arm's stash: the first iterate to satisfy it without being
     // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
     let mut rel_candidate: Option<RelCandidate> = None;
@@ -897,12 +897,24 @@ where
         // `Optimal` and the solve ended `NumericalFailure`. So a gap above
         // `tol_gap` is excused only when every *resolvable* true-slack product
         // is within `tol_gap` too ([`true_slack_complementarity`]).
+        // The products below read rows that repeat one another up to round-off
+        // at their summed multiplier (gh#1026): a split along the dual ray --
+        // a duplicated cut, a pinned column's two bound rows -- is not a
+        // complementarity error.
+        let z_comp = if orthant_only {
+            for i in 0..prob.h.len() {
+                row_slack[i] = prob.h[i] - nrm_gx[i] / tau;
+                row_mag[i] = prob.h[i].abs().max(nrm_gabs[i] / tau);
+            }
+            parallel_rows.complementarity_multipliers(&prob.h, &z, &row_slack, &row_mag)
+        } else {
+            Vec::new()
+        };
         let gap_strict = gap < tol_gap;
         let gap_excused = !gap_strict
             && gap < gap_noise
             && orthant_only
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
-                <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau) <= tol_gap;
         // gh#1000 (I.8): the dual residual likewise cannot be asked to read
         // below the rounding noise of its own terms. `tol_cost` shrinks with
         // the cost unit and that noise does not -- the blend LP at costs
@@ -916,8 +928,7 @@ where
         let dres_excused = dres >= tol_cost
             && orthant_only
             && dual_excess_above_floor(prob, &x, &y, &z, &rho_x, tau) < tol_cost
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
-                <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau) <= tol_gap;
         let abs_ok =
             pres < opts.tol && (dres < tol_cost || dres_excused) && (gap_strict || gap_excused);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
@@ -951,7 +962,7 @@ where
         // read below `1e-7`, so the loop ran to 196 iterations on a point the
         // verdict accepts.
         let true_comp = if orthant_only {
-            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
+            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau)
         } else {
             0.0
         };
@@ -1707,44 +1718,37 @@ mod tests {
         let h = [1e5, 1e9];
         let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
         let z = [1.0 * tau, 1e3 * tau];
-        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &[0.0; 2], &z, tau);
+        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau);
         assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
         // Both inside the quantum: nothing to count.
         let gx_tight = [1e5 * tau, 1e9 * tau];
         assert_eq!(
-            true_slack_complementarity(&h, &gx_tight, &gx_tight, &[0.0; 2], &z, tau),
+            true_slack_complementarity(&h, &gx_tight, &gx_tight, &z, tau),
             0.0
         );
         // A collapsed tau cannot certify anything.
-        assert!(true_slack_complementarity(&h, &gx, &gx, &[0.0; 2], &z, 0.0).is_infinite());
+        assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0).is_infinite());
         // gh#1000 (I.8): `h = 0`, `Gx` a cancellation of `1e3`-sized terms
         // that left `2e-13`. The terms, not `|Gx|`, set the quantum.
         let (h0, gx0, z0) = ([0.0], [-2e-13 * tau], [1.6e6 * tau]);
-        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &[0.0], &z0, tau) > 0.0);
+        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau) > 0.0);
         assert_eq!(
-            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &[0.0], &z0, tau),
+            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &z0, tau),
             0.0
         );
-        // gh#1023: a slack the data forces (a duplicate row's conflicting
-        // right-hand side) is excused up to the conflict's width, no further.
-        let (h1, gx1, z1) = ([4.9e-15], [-1.6e-16 * tau], [7.4e7 * tau]);
-        let gabs1 = [5e-16 * tau];
-        assert!(true_slack_complementarity(&h1, &gx1, &gabs1, &[0.0], &z1, tau) > 3e-7);
-        assert_eq!(
-            true_slack_complementarity(&h1, &gx1, &gabs1, &[5.1e-15], &z1, tau),
-            0.0
-        );
-        let part = true_slack_complementarity(&h1, &gx1, &gabs1, &[4.0e-15], &z1, tau);
-        assert!((part - 1.06e-15 * 7.4e7).abs() < 1e-9, "{part:e}");
     }
 
+    /// gh#1023 / gh#1026: rows repeating one another up to sign and
+    /// round-off are read at their summed multiplier, an equality among them
+    /// not at all -- and rows that do not coincide, each with its own `z`.
     #[test]
-    fn parallel_row_conflict_reads_duplicated_rows_only() {
-        use crate::qp::{Triplet, parallel_row_conflict};
+    fn parallel_rows_merge_coincident_rows_only() {
+        use crate::qp::{ParallelRows, Triplet};
         // Rows 0..3 share `x0 + 2 x1` up to sign: `≤ 1e-15`, `≥ 4e-15`
-        // (written `−x0 − 2x1 ≤ −4e-15`), `≤ 3e-15`. Width `4e-15 − 1e-15`.
+        // (written `−x0 − 2x1 ≤ −4e-15`), `≤ 3e-15` -- a conflict, `L > U`.
         // Row 3 is parallel but scaled (`2x0 + 4x1`), row 4 a different row:
-        // neither is in the class.
+        // neither is in the class. Rows 5, 6 are `x1 ≤ 0`, `−x1 ≤ 0`: a
+        // column pinned at zero, as the loop sees one.
         let t = |row, col, val| Triplet { row, col, val };
         let prob = QpProblem {
             n: 2,
@@ -1762,20 +1766,45 @@ mod tests {
                 t(3, 0, 2.0),
                 t(3, 1, 4.0),
                 t(4, 0, 1.0),
+                t(5, 1, 1.0),
+                t(6, 1, -1.0),
             ],
-            h: vec![1e-15, -4e-15, 3e-15, -1.0, 0.0],
+            h: vec![1e-15, -4e-15, 3e-15, -1.0, 0.0, 0.0, 0.0],
             lb: vec![],
             ub: vec![],
         };
-        let w = parallel_row_conflict(&prob);
-        assert!((w[0] - 3e-15).abs() < 1e-30, "{w:?}");
-        assert_eq!(w[0], w[1]);
-        assert_eq!(w[0], w[2]);
-        assert_eq!(&w[3..], &[0.0, 0.0]);
-        // A consistent class (`≥` below `≤`) has no conflict.
-        let mut ok = prob.clone();
-        ok.h[1] = -0.5e-15;
-        assert!(parallel_row_conflict(&ok).iter().all(|&v| v == 0.0));
+        let z = [3.0, 1.0, 2.0, 5.0, 7.0, 9e8, 8e8];
+        let slack = [2e-16, -1e-16, 1e-16, 1.0, 0.5, 1.6e-17, -1.6e-17];
+        // Terms of size 1: round-off is `~6e-14`, so rows 0..3 coincide.
+        let mag = [1.0; 7];
+        let read = |p: &QpProblem, mag: &[f64]| {
+            ParallelRows::new(p).complementarity_multipliers(&p.h, &z, &slack, mag)
+        };
+        // Both classes are equalities: nothing to read. Rows 3, 4 keep `z`.
+        assert_eq!(read(&prob, &mag), [0.0, 0.0, 0.0, 5.0, 7.0, 0.0, 0.0]);
+        // A conflict holds at any term size: row 2 sits inside `[U, L] =
+        // [1e-15, 4e-15]`, where the best point leaves every row.
+        assert_eq!(
+            read(&prob, &[1e-17; 7]),
+            [0.0, 0.0, 0.0, 5.0, 7.0, 0.0, 0.0]
+        );
+        // A consistent equality (`L == U`) is one too.
+        let mut eq = prob.clone();
+        eq.h[1] = -1e-15;
+        assert_eq!(&read(&eq, &mag)[..3], &[0.0; 3]);
+        // A range of real width (`g·x ∈ [−0.5, 1e-15]`): its split is
+        // determined, so the `≥` row keeps its own `z`; the two coincident
+        // `≤` rows are read at `3 + 2` on the one with least `|slack|`.
+        let mut range = prob.clone();
+        range.h[1] = 0.5;
+        assert_eq!(&read(&range, &mag)[..3], &[0.0, 1.0, 5.0]);
+        // A duplicate that does not coincide (`≤ 1`) is a row of its own.
+        let mut loose = range.clone();
+        loose.h[2] = 1.0;
+        assert_eq!(&read(&loose, &mag)[..3], &[3.0, 1.0, 2.0]);
+        // Coincidence is relative to the terms: at `1e-17` a `2e-15` spread
+        // is not round-off, and the rows are read one by one.
+        assert_eq!(&read(&range, &[1e-17; 7])[..3], &[3.0, 1.0, 2.0]);
     }
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {

@@ -587,76 +587,156 @@ pub(crate) fn report_units(prob: &QpProblem) -> (f64, f64) {
     }
 }
 
-/// Per inequality row, how far the data itself keeps the row's slack from
-/// zero: the conflict among the right-hand sides of rows that share its
-/// coefficients up to sign (gh#1023).
+/// How far apart, in units of the row's term magnitude, two right-hand sides
+/// of a [`ParallelRows`] class may sit and still be read as one: the
+/// verdict's own round-off floor (`REPORT_FLOOR_FACTOR · REL_FLOOR_KAPPA ·
+/// ε`), so the loop and the verdict group a class identically.
+pub(crate) const PARALLEL_ROW_COINCIDENCE: f64 =
+    REPORT_FLOOR_FACTOR * crate::hsde::REL_FLOOR_KAPPA * f64::EPSILON;
+
+/// The inequality rows that share their coefficients up to sign, grouped
+/// into classes (gh#1023, gh#1026).
 ///
-/// Rows `g·x ≤ uₖ` and `−g·x ≤ −lₖ` bound one quantity, `g·x ∈ [max lₖ, min
-/// uₖ]`. When `max lₖ > min uₖ` no point meets all of them, and at the best
-/// point some row of the class keeps a slack of up to the width `max lₖ −
-/// min uₖ`. A cutting-plane caller writes an equality as two opposed rows and
-/// repeats a cut with a right-hand side that differs by round-off: the
-/// discopt LP in gh#1023 holds 42 such classes, conflicting by up to
-/// `9e-15`, while their paired multipliers grow toward `7e7` without
-/// cancelling. `slack·z` there reads `3.5e-7` -- a product of an
-/// irreducible slack and an unbounded multiplier, not a complementarity
-/// error -- and the true-slack stop (gh#1000 I.D) ran to `max_iter`.
+/// Rows `g·x ≤ uₖ` and `−g·x ≤ −lₖ` bound one quantity, and a cutting-plane
+/// caller writes them freely: an equality as two opposed rows, a cut
+/// repeated with a right-hand side that differs by round-off. Members whose
+/// right-hand sides **coincide** -- agree to within the round-off of the
+/// row's own terms ([`PARALLEL_ROW_COINCIDENCE`]) -- are one row written
+/// twice: only their summed multiplier is determined, the split is a dual
+/// ray the interior point drifts along, and the products `slack·z` read that
+/// drift as a complementarity error. Two shapes:
 ///
-/// Zero for a row in no conflicting class, so a model without repeated
-/// rows is read exactly as before. Exact coefficient match only: a class is
-/// formed by a caller duplicating a row, not by rows that happen to be
-/// parallel.
-pub(crate) fn parallel_row_conflict(prob: &QpProblem) -> Vec<f64> {
-    let m = prob.m_ineq();
-    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for t in &prob.g {
-        if t.val != 0.0 {
-            rows[t.row].push((t.col, t.val));
-        }
-    }
-    let mut classes: std::collections::HashMap<Vec<(usize, u64)>, Vec<(usize, bool)>> =
-        std::collections::HashMap::new();
-    for (i, r) in rows.iter_mut().enumerate() {
-        r.sort_by_key(|&(c, _)| c);
-        // Duplicate triplets sum, as in every product with `G`.
-        let mut merged: Vec<(usize, f64)> = Vec::with_capacity(r.len());
-        for &(c, v) in r.iter() {
-            match merged.last_mut() {
-                Some(last) if last.0 == c => last.1 += v,
-                _ => merged.push((c, v)),
+/// * **An equality**: the tightest rows of both sides coincide, or conflict
+///   (`L ≥ U` up to round-off, `L = max lₖ`, `U = min uₖ`). There is no
+///   complementarity condition to meet: a point off `g·x = U` violates one
+///   row by exactly the slack it leaves on the other, which is a primal
+///   residual and is read as one. This is the verdict's pinned-column rule
+///   (`lb == ub`), and a pinned column the loop reads as two bound rows is
+///   this case. The discopt LP in gh#1023 holds 42 such classes conflicting
+///   by up to `9e-15`, multipliers toward `7e7`, and `slack·z` read
+///   `3.5e-7`; the gh#1026 node LPs carry `9e8` on a column pinned at `0`
+///   whose `1.6e-17` drift read `1.4e-8` against `tol = 1e-8` for 170
+///   iterations.
+/// * **Otherwise**, per side: the coincident members are read at their sum,
+///   placed on the tightest one (least `|slack|`).
+///
+/// A member that does not coincide with its side's tightest row is read with
+/// its own `zᵢ`, and so are both sides of a range of real width: moving `t`
+/// onto both rows of `g·x ∈ [L, U]` changes the dual objective by
+/// `t·(U − L)`, so that split is determined, and netting it hid a
+/// complementarity error of `1.4e2` on `scaled_feasible_a`'s `1e6`-wide
+/// boxes. A row in no class is read as before. Exact coefficient match
+/// only: a class is formed by a caller duplicating a row, not by rows that
+/// happen to be parallel.
+pub(crate) struct ParallelRows {
+    /// Classes of two or more rows, `(row, sign is +)`.
+    classes: Vec<Vec<(usize, bool)>>,
+}
+
+impl ParallelRows {
+    pub(crate) fn new(prob: &QpProblem) -> Self {
+        let m = prob.m_ineq();
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for t in &prob.g {
+            if t.val != 0.0 {
+                rows[t.row].push((t.col, t.val));
             }
         }
-        merged.retain(|&(_, v)| v != 0.0);
-        let Some(&(_, first)) = merged.first() else {
-            continue;
+        let mut by_key: std::collections::HashMap<Vec<(usize, u64)>, Vec<(usize, bool)>> =
+            std::collections::HashMap::new();
+        for (i, r) in rows.iter_mut().enumerate() {
+            r.sort_by_key(|&(c, _)| c);
+            // Duplicate triplets sum, as in every product with `G`.
+            let mut merged: Vec<(usize, f64)> = Vec::with_capacity(r.len());
+            for &(c, v) in r.iter() {
+                match merged.last_mut() {
+                    Some(last) if last.0 == c => last.1 += v,
+                    _ => merged.push((c, v)),
+                }
+            }
+            merged.retain(|&(_, v)| v != 0.0);
+            let Some(&(_, first)) = merged.first() else {
+                continue;
+            };
+            let positive = first > 0.0;
+            let key = merged
+                .iter()
+                .map(|&(c, v)| (c, if positive { v } else { -v }.to_bits()))
+                .collect();
+            by_key.entry(key).or_default().push((i, positive));
+        }
+        let mut classes: Vec<Vec<(usize, bool)>> =
+            by_key.into_values().filter(|c| c.len() > 1).collect();
+        // Deterministic order: the map's iteration order is seeded.
+        classes.sort_unstable_by_key(|c| c[0].0);
+        Self { classes }
+    }
+
+    /// The multiplier each row's complementarity product is read with, given
+    /// the problem's `h`, the rows' slacks and their term magnitudes `mag`
+    /// (`≥ |hᵢ|`): `0` on the coincident rows of an equality class, which in
+    /// a conflict are those inside the band `[U, L]`; the sum
+    /// of a side's coincident members on its tightest one and `0` on the
+    /// others; `zᵢ` everywhere else.
+    pub(crate) fn complementarity_multipliers(
+        &self,
+        h: &[f64],
+        z: &[f64],
+        slack: &[f64],
+        mag: &[f64],
+    ) -> Vec<f64> {
+        let k = PARALLEL_ROW_COINCIDENCE;
+        let mut out = z.to_vec();
+        // `p`'s side in the orientation `±g·x ≤ ±h`: its tightest member and
+        // that member's bound on `g·x`.
+        let tightest = |members: &[(usize, bool)], p: bool| {
+            members
+                .iter()
+                .filter(|&&(_, q)| q == p)
+                .map(|&(i, _)| i)
+                .min_by(|&a, &b| h[a].total_cmp(&h[b]))
         };
-        let positive = first > 0.0;
-        let key = merged
-            .iter()
-            .map(|&(c, v)| (c, if positive { v } else { -v }.to_bits()))
-            .collect();
-        classes.entry(key).or_default().push((i, positive));
-    }
-    let mut width = vec![0.0; m];
-    for members in classes.values() {
-        let upper = members
-            .iter()
-            .filter(|&&(_, p)| p)
-            .map(|&(i, _)| prob.h[i])
-            .fold(f64::INFINITY, f64::min);
-        let lower = members
-            .iter()
-            .filter(|&&(_, p)| !p)
-            .map(|&(i, _)| -prob.h[i])
-            .fold(f64::NEG_INFINITY, f64::max);
-        let w = lower - upper;
-        if w > 0.0 && w.is_finite() {
-            for &(i, _) in members {
-                width[i] = w;
+        let coincide = |i: usize, j: usize, d: f64| d <= k * mag[i].max(mag[j]);
+        for members in &self.classes {
+            let ends = [tightest(members, true), tightest(members, false)];
+            // `U − L` between the tightest rows: `h₊ − (−h₋)`.
+            let equality = match ends {
+                [Some(u), Some(l)] => coincide(u, l, h[u] + h[l]),
+                _ => false,
+            };
+            for (side, end) in [true, false].into_iter().zip(ends) {
+                let Some(end) = end else { continue };
+                // How far past its tightest row a member may sit: round-off,
+                // and in a conflict also the band `[U, L]` the best point
+                // leaves every row inside.
+                let reach = match ends {
+                    [Some(u), Some(l)] if equality => {
+                        let other = if side { l } else { u };
+                        h[end].max(-h[other])
+                    }
+                    _ => h[end],
+                };
+                let group: Vec<usize> = members
+                    .iter()
+                    .filter(|&&(i, q)| q == side && coincide(i, end, h[i] - reach))
+                    .map(|&(i, _)| i)
+                    .collect();
+                let sum: f64 = group.iter().map(|&i| z[i]).sum();
+                for &i in &group {
+                    out[i] = 0.0;
+                }
+                if !equality {
+                    let at = group
+                        .iter()
+                        .copied()
+                        .min_by(|&a, &b| slack[a].abs().total_cmp(&slack[b].abs()))
+                        .unwrap_or(end);
+                    out[at] = sum;
+                }
             }
         }
+        out
     }
-    width
 }
 
 /// A tiny-curvature warning fires when `‖P‖∞` is more than this many orders of
@@ -866,17 +946,17 @@ impl QpSolution {
         // `k` times the duality-gap scale `|cᵀx| + |hᵀz| + ...`, which let one
         // large term excuse every product in the model.
         //
-        // A row whose right-hand side conflicts with a duplicate of itself
-        // cannot reach zero slack at any point, so the conflict's width is
-        // excused too, per row (gh#1023, [`parallel_row_conflict`]).
-        let conflict = parallel_row_conflict(prob);
+        // Rows that repeat one another up to sign and round-off are read at
+        // their summed multiplier, and not at all when they form an
+        // equality: their split along the dual ray is not a complementarity
+        // error, and a point off the equality is a primal residual (gh#1023,
+        // gh#1026, [`ParallelRows`]).
+        let slack: Vec<f64> = prob.h.iter().zip(&gx).map(|(h, g)| h - g).collect();
+        let z_comp =
+            ParallelRows::new(prob).complementarity_multipliers(&prob.h, &self.z, &slack, &row_mag);
         let mut comp = 0.0_f64;
-        for (i, &zi) in self.z.iter().enumerate() {
-            let slack = prob.h[i] - gx[i];
-            comp = comp.max(excess(
-                (zi * slack).abs() - zi.abs() * conflict[i],
-                zi.abs() * row_mag[i],
-            ));
+        for (i, &zi) in z_comp.iter().enumerate() {
+            comp = comp.max(excess((zi * slack[i]).abs(), zi.abs() * row_mag[i]));
         }
         for i in 0..n {
             let (lb, ub, xi) = (prob.lb_of(i), prob.ub_of(i), x[i]);
